@@ -225,7 +225,7 @@ pub fn date_from_unix(secs: i64) -> String {
 
 /// The directory components between the library root containing `path` and
 /// the file itself. `None` when the path is under no configured root.
-fn relative_dirs(library: &Library, path: &Path) -> Option<Vec<String>> {
+pub(crate) fn relative_dirs(library: &Library, path: &Path) -> Option<Vec<String>> {
     let parent = path.parent()?;
     // Match against the resolved root as well as the configured one. The
     // TARGETED scan canonicalizes the file path on purpose (see `scan_path` —
@@ -261,7 +261,7 @@ fn relative_dirs(library: &Library, path: &Path) -> Option<Vec<String>> {
 
 /// Folder identity is (library, parent, kind, name). Multiple roots therefore
 /// merge at the top level by folder name — the same rule shows already use.
-async fn find_or_create_folder(
+pub(crate) async fn find_or_create_folder(
     store: &PublicationStore<'_>,
     library: &Library,
     parent: Option<i64>,

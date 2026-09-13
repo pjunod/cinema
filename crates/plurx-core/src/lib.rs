@@ -11,6 +11,7 @@ pub mod auth;
 pub mod cluster;
 pub mod config;
 pub mod domain;
+pub mod dvr;
 pub mod error;
 pub mod fmp4;
 #[cfg(unix)]

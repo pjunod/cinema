@@ -154,6 +154,55 @@ pub struct SqliteTransactionSite {
 /// boundaries here makes their port shape reviewable beside the CAS primitive.
 pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "put_dvr_rule",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "reorder_dvr_rules",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadExpandWrite,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "insert_dvr_airing_if_absent",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "request_dvr_stop",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "repoint_dvr_rule_rows",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::VerbatimBatch,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "put_dvr_reminder",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "transition_dvr_reminders",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadExpandWrite,
+    },
+    SqliteTransactionSite {
         module: "library_channels.rs",
         method: "create_library_channel",
         is_async: true,
@@ -865,6 +914,7 @@ mod tests {
             "fragment_index_cluster.rs",
             include_str!("sqlite/fragment_index_cluster.rs"),
         ),
+        ("dvr.rs", include_str!("sqlite/dvr.rs")),
         ("library.rs", include_str!("sqlite/library.rs")),
         (
             "library_channels.rs",
@@ -987,10 +1037,24 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        // 80 on the merge. Both parents moved this counter from a shared 66
-        // and neither parent's total describes the merged tree, so it is read
-        // off the merge rather than added up — but every boundary each of them
-        // classified is retained, and the arithmetic happens to agree:
+        // 87 on the DVR merge: 80 from the merge described below, plus the
+        // seven `dvr.rs` boundaries this effort adds. Each of those seven is a
+        // read-then-write that a second writer between the two halves would
+        // corrupt: `put_dvr_rule` and `put_dvr_reminder` (upsert),
+        // `reorder_dvr_rules` (every row's position moves together),
+        // `insert_dvr_airing_if_absent` (the whole point is that exactly one
+        // of two racing expansions wins), `request_dvr_stop` and
+        // `repoint_dvr_rule_rows` (a state change conditional on the state
+        // just read), and `transition_dvr_reminders` (arm-to-fired for a
+        // window, where a half-applied sweep fires some reminders twice). The
+        // list's other DVR methods open none: the plain reads, and the single
+        // conditional `UPDATE`s whose condition is in the statement.
+        //
+        // 80 came from the merge before this one. Both of those parents moved
+        // the counter from a shared 66 and neither parent's total described
+        // the merged tree, so it was read off the merge rather than added up —
+        // but every boundary each of them classified was retained, and the
+        // arithmetic happened to agree:
         //
         // * main reached 69 — 67 after `put_settings_if_generation`'s
         //   generation-fenced write, plus the two `users.rs` boundaries that
@@ -1010,7 +1074,7 @@ mod tests {
         // transaction boundary has to be a deliberate edit here. That is the
         // point of the assertion: two of the sites above reached main without
         // one.
-        assert_eq!(methods.len(), 80);
+        assert_eq!(methods.len(), 87);
     }
 
     #[test]

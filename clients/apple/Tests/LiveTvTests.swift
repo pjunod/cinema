@@ -2075,6 +2075,151 @@ final class LiveTvTests: XCTestCase {
         XCTAssertTrue(source.contains("private func movePagingFocus"))
         XCTAssertTrue(source.contains("channelHeader: false, paging: index"))
     }
+
+    /// A server-shaped recording row, built as JSON rather than through the
+    /// memberwise initialiser so the test also proves the wire names map.
+    private func dvrRecordingJSON(
+        channel: String, start: Int, state: String, ruleId: String? = nil,
+        captureStart: Int? = nil, captureEnd: Int? = nil
+    ) -> [String: Any] {
+        var row: [String: Any] = [
+            "id": "\(channel)@\(start)",
+            "origin": ruleId == nil ? "manual" : "rule",
+            "rule_id": NSNull(),
+            "requested_by_user_id": 1,
+            "channel_id": channel,
+            "guide_number": channel,
+            "channel_name": "WTEST",
+            "airing_start": start,
+            "airing_end": start + 1_800,
+            "capture_start": captureStart ?? start - 60,
+            "capture_end": captureEnd ?? start + 1_920,
+            "title": "Kitchen Table",
+            "episode_title": NSNull(),
+            "episode": NSNull(),
+            "synopsis": NSNull(),
+            "image_url": NSNull(),
+            "original_air_date": NSNull(),
+            "series_id": NSNull(),
+            "programme_id": NSNull(),
+            "state": state,
+            "state_reason": NSNull(),
+            "attempt": 0,
+            "gap_s": 0,
+            "late_start_s": 0,
+            "tuner_owner_node_id": NSNull(),
+            "path": NSNull(),
+            "bytes": 0,
+            "last_progress_ms": NSNull(),
+            "stop_requested_at_ms": NSNull(),
+            "stop_requested_by_user_id": NSNull(),
+            "item_id": NSNull(),
+            "file_id": NSNull(),
+            "started_at_ms": NSNull(),
+            "finished_at_ms": NSNull(),
+            "stopped_by_user_id": NSNull(),
+            "created_at_ms": 0,
+            "updated_at_ms": 0,
+        ]
+        if let ruleId { row["rule_id"] = ruleId }
+        return row
+    }
+
+    private func dvrReminderJSON(
+        id: String, channel: String, start: Int, state: String, leadS: Int = 300
+    ) -> [String: Any] {
+        [
+            "id": id,
+            "user_id": 1,
+            "channel_id": channel,
+            "guide_number": channel,
+            "airing_start": start,
+            "airing_end": start + 1_800,
+            "title": "Kitchen Table",
+            "lead_s": leadS,
+            "state": state,
+            "fired_at_ms": NSNull(),
+            "acked_at_ms": NSNull(),
+            "created_at_ms": 0,
+            "updated_at_ms": 0,
+            "covered_by_recording": false,
+        ]
+    }
+
+    private func dvrDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
+    }
+
+    func testGuideMarksRankARecordingAboveAReminderAndIgnoreASkippedAiring() throws {
+        let decoder = dvrDecoder()
+        let schedule = try decoder.decode([DvrRecording].self, from: JSONSerialization.data(
+            withJSONObject: [
+                dvrRecordingJSON(channel: "7.1", start: 1_000, state: "scheduled"),
+                dvrRecordingJSON(channel: "7.1", start: 3_000, state: "scheduled", ruleId: "rule-1"),
+                dvrRecordingJSON(channel: "5.1", start: 1_000, state: "conflict"),
+                dvrRecordingJSON(channel: "5.1", start: 3_000, state: "withdrawn"),
+                dvrRecordingJSON(channel: "9.1", start: 1_000, state: "cancelled"),
+                dvrRecordingJSON(channel: "9.1", start: 3_000, state: "recording",
+                                 captureStart: 2_940, captureEnd: 4_920),
+            ]))
+        let reminders = try decoder.decode([DvrReminder].self, from: JSONSerialization.data(
+            withJSONObject: [
+                dvrReminderJSON(id: "r1", channel: "3.1", start: 5_000, state: "armed"),
+                // The same airing as the running capture.
+                dvrReminderJSON(id: "r2", channel: "9.1", start: 3_000, state: "armed"),
+            ]))
+
+        let marks = DvrMarks(schedule: schedule, reminders: reminders)
+        XCTAssertEqual(marks.mark(channelId: "7.1", airingStart: 1_000), .scheduled(series: false))
+        XCTAssertEqual(marks.mark(channelId: "7.1", airingStart: 3_000), .scheduled(series: true),
+                       "a rule row is two dots, not one")
+        XCTAssertEqual(marks.mark(channelId: "5.1", airingStart: 1_000), .conflict)
+        XCTAssertEqual(marks.mark(channelId: "5.1", airingStart: 3_000), .lapsed)
+        XCTAssertNil(marks.mark(channelId: "9.1", airingStart: 1_000),
+                     "a skipped airing is a decision already taken, not a mark")
+        XCTAssertEqual(marks.mark(channelId: "9.1", airingStart: 3_000),
+                       .recording(captureStart: 2_940, captureEnd: 4_920),
+                       "a recording is the stronger promise, so it outranks the reminder")
+        XCTAssertEqual(marks.mark(channelId: "3.1", airingStart: 5_000), .reminder)
+        XCTAssertNil(marks.mark(channelId: "3.1", airingStart: 1_000))
+    }
+
+    #if os(iOS)
+    /// The mirror is a reconciliation. A reminder that moved loses the
+    /// notification it had, one that is already right is left alone, and a
+    /// pending request this app did not write is never touched.
+    func testLocalRemindersReconcileRatherThanAppend() throws {
+        let reminders = try dvrDecoder().decode([DvrReminder].self, from: JSONSerialization.data(
+            withJSONObject: [
+                dvrReminderJSON(id: "keep", channel: "7.1", start: 1_000, state: "armed"),
+                dvrReminderJSON(id: "moved", channel: "5.1", start: 4_000, state: "armed"),
+                dvrReminderJSON(id: "past", channel: "9.1", start: 100, state: "armed"),
+                dvrReminderJSON(id: "acked", channel: "3.1", start: 9_000, state: "acked"),
+            ]))
+        let wanted = LocalReminderPlan.requests(for: reminders, now: 0)
+        XCTAssertEqual(wanted.map(\.reminderId), ["keep", "moved"],
+                       "only an armed reminder that has not yet fired is mirrored")
+        XCTAssertEqual(wanted.map(\.fireAt), [700, 3_700], "the lead is subtracted, once")
+
+        let plan = LocalReminderPlan.reconcile(
+            pending: [
+                LocalReminderPlan.identifier(reminderId: "keep", fireAt: 700),
+                // The same reminder at the time it used to start.
+                LocalReminderPlan.identifier(reminderId: "moved", fireAt: 2_500),
+                LocalReminderPlan.identifier(reminderId: "gone", fireAt: 8_000),
+                "somebody.elses.request",
+            ],
+            wanted: wanted)
+        XCTAssertEqual(plan.cancel, [
+            LocalReminderPlan.identifier(reminderId: "moved", fireAt: 2_500),
+            LocalReminderPlan.identifier(reminderId: "gone", fireAt: 8_000),
+        ], "a moved or deleted reminder loses its pending request; a stranger's does not")
+        XCTAssertEqual(plan.schedule.map(\.reminderId), ["moved"],
+                       "the one already scheduled at the right instant is left alone")
+    }
+    #endif
 }
 
 /// Counts what actually reached the server. The coalescing test asserted a

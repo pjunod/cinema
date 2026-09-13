@@ -42,6 +42,7 @@ const STORE_SOURCES: &[(&str, &str)] = &[
         "hiqlite_dv_conversion.rs",
         include_str!("hiqlite_dv_conversion.rs"),
     ),
+    ("hiqlite_dvr.rs", include_str!("hiqlite_dvr.rs")),
     (
         "hiqlite_fragment_index_cluster.rs",
         include_str!("hiqlite_fragment_index_cluster.rs"),

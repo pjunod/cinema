@@ -4455,6 +4455,14 @@ impl JobManager {
         // Books currently keep file-derived identity and embedded media facts;
         // there is no provider to call. Anime uses AniList; movie/show
         // libraries use TMDB when a key is configured.
+        // Recordings have a provider that already answered: the guide, at the
+        // moment the capture was scheduled, written into the sidecar the scan
+        // reads. Falling through this chain would reach TMDB, and a local
+        // bulletin called *Eyewitness News* matches a dozen things there and
+        // is none of them.
+        if library.kind == LibraryKind::Recordings {
+            return outcome;
+        }
         if library.kind == LibraryKind::Home {
             outcome.local_art = Some(
                 metadata::local::enrich_home_library_with_publication(
@@ -4669,6 +4677,11 @@ impl JobManager {
                 .await
             }
             LibraryKind::Books => Ok(None),
+            // A recording's artwork would be the guide's programme image,
+            // whose host is not on the approved artwork allowlist. Widening
+            // that list is an SSRF decision of its own, not a side effect of
+            // adding a library kind.
+            LibraryKind::Recordings => Ok(None),
             LibraryKind::Movies | LibraryKind::Shows => Ok(None),
         }
     }

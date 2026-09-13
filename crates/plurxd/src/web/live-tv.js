@@ -482,6 +482,179 @@
     return window && end >= window.end ? null : end;
   }
 
+  // ---- recording: the pure half -------------------------------------------
+  // The DVR answers a guide page with three documents — a schedule, the
+  // caller's reminders and a status — read once per guide load and again after
+  // every mutation, never polled. Everything below turns those three into the
+  // marks, sentences and countdowns the renderers print, so a test can ask for
+  // each answer without a DOM and without a server.
+
+  /// An airing with less than this left is not worth a tuner, a file and a
+  /// library item. `plurx_core::dvr::DVR_MIN_USEFUL_S`, and the reason the
+  /// routes answer `airing_past`: an action that can only be refused is worse
+  /// than an absent one, so the cell does not offer it.
+  const DVR_MIN_USEFUL_S = 60;
+
+  // An airing is `(channel_id, airing_start)` for its whole life — one unique
+  // index covers every state — so that pair, and never the row id, is what a
+  // guide cell looks itself up by.
+  function dvrAiringKey(channelId, airingStart) {
+    return `${channelId} ${airingStart}`;
+  }
+
+  // One lookup for the whole grid, built once per render. A fortnight of rules
+  // against a full lineup is thousands of cells, and asking each of them to
+  // scan both arrays is the difference between a paint and a stall.
+  function dvrIndex(schedule, reminders) {
+    const rows = new Map(), bells = new Map();
+    for (const row of (schedule && schedule.rows) || []) {
+      if (!row || typeof row.airing_start !== "number") continue;
+      rows.set(dvrAiringKey(row.channel_id, row.airing_start), row);
+    }
+    for (const bell of reminders || []) {
+      // `acked`, `expired` and `moved` are history. Only a reminder that will
+      // still fire, or has just fired, earns a bell on the cell.
+      if (!bell || typeof bell.airing_start !== "number") continue;
+      if (bell.state !== "armed" && bell.state !== "fired") continue;
+      bells.set(dvrAiringKey(bell.channel_id, bell.airing_start), bell);
+    }
+    return {
+      row: (channelId, start) => rows.get(dvrAiringKey(channelId, start)) || null,
+      reminder: (channelId, start) => bells.get(dvrAiringKey(channelId, start)) || null,
+    };
+  }
+
+  // 0..1 through the capture, which is the padded span and not the airing:
+  // the progress underline has to reach its end when the file closes, not when
+  // the programme does.
+  function dvrCaptureProgress(row, now) {
+    if (!row) return 0;
+    const span = row.capture_end - row.capture_start;
+    if (!(span > 0)) return 0;
+    return Math.min(1, Math.max(0, (now - row.capture_start) / span));
+  }
+
+  // What one cell wears: at most two marks, because there are at most two
+  // facts — what the DVR will do with this airing, and whether the viewer
+  // asked to be told when it starts.
+  //
+  // A `cancelled` row earns no mark at all. `?cancelled=1` keeps those rows in
+  // the schedule so they can be restored from the Scheduled list, and an
+  // airing nobody is recording must not look scheduled in the guide.
+  function dvrMarks(row, reminder, now) {
+    const marks = [];
+    const state = row && row.state;
+    if (state === "recording") {
+      marks.push({ kind: "recording", shape: "rec", label: "Recording now",
+        progress: dvrCaptureProgress(row, now) });
+    } else if (state === "conflict") {
+      marks.push({ kind: "conflict", shape: "dot",
+        label: (row && row.state_reason) || "No tuner is free for this" });
+    } else if (state === "withdrawn" || state === "stale") {
+      marks.push({ kind: state, shape: "hollow",
+        label: state === "withdrawn" ? "No enabled rule matches this any more"
+          : "The programme moved or was renamed" });
+    } else if (state === "scheduled") {
+      // Two dots for a rule's episode, one for a person's decision: the two
+      // are taken away by different things, so they cannot look the same.
+      marks.push(row.rule_id
+        ? { kind: "series", shape: "dots", label: "Scheduled by a series rule" }
+        : { kind: "once", shape: "dot", label: "Scheduled" });
+    }
+    if (reminder) marks.push({ kind: "reminder", shape: "bell", label: "Reminder set" });
+    return marks;
+  }
+
+  // What a guide cell may offer, given when the programme is on and what the
+  // DVR already knows about it. Every "no" here is a request the server would
+  // refuse: `airing_past` for anything finished or already started, and a
+  // second Record for an airing that is already on the schedule.
+  function dvrAiringActions(programme, row, reminder, now) {
+    const start = programme && Number(programme.start);
+    const end = programme && Number(programme.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) {
+      return { watch: null, record: null, series: false, remind: null };
+    }
+    const onAir = start <= now && now < end;
+    const finished = end - now < DVR_MIN_USEFUL_S;
+    const state = row && row.state;
+    const pending = state === "scheduled" || state === "conflict"
+      || state === "withdrawn" || state === "stale";
+    return {
+      // A future cell cannot be tuned, so Watch becomes the promise to be
+      // shown it at its start — a reminder with no lead at all.
+      watch: finished ? null : onAir ? "now" : "at",
+      record: finished ? null : state === "recording" ? "stop" : pending ? "skip" : "record",
+      series: !finished && !!(programme && programme.title),
+      // A reminder for a programme that has already started is a reminder
+      // about the past; the route answers `airing_past`.
+      remind: finished || onAir ? null : reminder ? "clear" : "set",
+    };
+  }
+
+  // "2 of 4 tuners · 1 reserved for viewing".
+  //
+  // Counted from the schedule rather than from `slots.recording` because the
+  // schedule is refetched after every mutation and the status is not: a viewer
+  // who has just pressed Stop must not read a sentence that still describes
+  // the tuners before they pressed it.
+  function dvrTunerLine(status, schedule) {
+    const slots = (status && status.slots) || null;
+    const max = Number(slots && slots.max) || 0;
+    if (!(max > 0)) return "";
+    const rows = schedule && Array.isArray(schedule.rows) ? schedule.rows : null;
+    const busy = rows
+      ? rows.filter(row => row && row.state === "recording").length
+      : Number(slots.recording) || 0;
+    const reserve = Math.max(0, Number(slots.reserve) || 0);
+    const head = `${busy} of ${max} tuner${max === 1 ? "" : "s"}`;
+    return reserve ? `${head} · ${reserve} reserved for viewing` : head;
+  }
+
+  // How long until an airing starts, in the words the reminder overlay uses.
+  //
+  // Deliberately coarse above a minute: the overlay repaints on the same 30 s
+  // tick that asks for due reminders, and a seconds counter that only moves
+  // twice a minute reads as broken rather than as precise.
+  function dvrCountdown(seconds) {
+    const left = Math.round(Number(seconds) || 0);
+    if (left <= 0) return "now";
+    if (left < 60) return `in ${left}s`;
+    if (left < 3600) return `in ${Math.floor(left / 60)} min`;
+    const hours = Math.floor(left / 3600), minutes = Math.floor((left % 3600) / 60);
+    return minutes ? `in ${hours}h ${minutes}m` : `in ${hours}h`;
+  }
+
+  // The overlay's own window. A reminder fires `lead_s` before the start, so
+  // the bar drains across exactly that span and the overlay retires itself at
+  // zero rather than waiting for a poll to tell it the moment passed.
+  function dvrReminderCountdown(reminder, now) {
+    const start = Number(reminder && reminder.airing_start) || 0;
+    // Zero lead is legal — "Watch at 8:00" sets one — and would divide by it.
+    const lead = Math.max(1, Number(reminder && reminder.lead_s) || 0);
+    const left = start - now;
+    return {
+      seconds: left,
+      label: dvrCountdown(left),
+      // 1 at the instant it fired, 0 at the start.
+      fraction: Math.min(1, Math.max(0, left / lead)),
+      expired: left <= 0,
+    };
+  }
+
+  // One running capture, for the row beside Activity's Stop. The pill at the
+  // top of every page prints the server's own sentence from `/activity`; this
+  // sentence exists because that list carries no recording id, so the page has
+  // to read the rows themselves to be able to stop one.
+  function dvrRecordingDetail(row, now) {
+    if (!row) return "";
+    const parts = [`${row.guide_number} ${row.channel_name}`.trim()];
+    const left = Math.max(0, Math.round((Number(row.capture_end) - now) / 60));
+    parts.push(`${left} min left`);
+    if (Number(row.bytes) > 0) parts.push(`${(Number(row.bytes) / 1e9).toFixed(1)} GB`);
+    return parts.join(" · ");
+  }
+
   return Object.freeze({
     Lease,
     StartHints,
@@ -498,5 +671,14 @@
     guideEnds,
     filterChannels,
     adjacentChannel,
+    dvrAiringKey,
+    dvrIndex,
+    dvrMarks,
+    dvrCaptureProgress,
+    dvrAiringActions,
+    dvrTunerLine,
+    dvrCountdown,
+    dvrReminderCountdown,
+    dvrRecordingDetail,
   });
 });

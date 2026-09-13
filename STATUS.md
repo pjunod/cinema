@@ -81,6 +81,50 @@ pre-existing corrective commits already red on this exact `main`; this lane's
 four corrections have their own `live-tv.integration` evidence mapping. No
 timeout, signed request, route, client input contract, or feature gate moved.
 
+## plurx records now, and tells you before a programme starts
+
+**[#294](http://192.168.4.7:3000/noirr/plurx/pulls/294), titled `WIP:`.**
+Built on `effort/live-tv-dvr` as one PR to `main`, mine to merge once the
+qualification run on the merged tree is green. Executes
+[LIVE-TV-DVR-IMPLEMENTATION.md](docs/features/LIVE-TV-DVR-IMPLEMENTATION.md)
+v2 — the plan Astra reviewed on 2026-09-13, eleven findings, all folded in.
+Status and evidence:
+[LIVE-TV-DVR-STATUS.md](docs/features/LIVE-TV-DVR-STATUS.md).
+
+Every guide cell on every client now offers **Record · Record series ·
+Remind me** beside Watch. The owner writes the tuner's bytes straight to a
+`.ts` under the DVR root with a sidecar of guide metadata; the file becomes an
+item in a `recordings` library that any node serves through the ordinary VOD
+path. A reminder reaches an overlay on every open client, a local notification
+on a phone, and one webhook POST.
+
+Four things carry the design, and each was a defect in the plan's first draft:
+
+- **An airing is `(channel, start)` for its whole life.** Expansion runs every
+  fifteen seconds, so insert-if-absent over an index covering *every* state is
+  what stops a rule resurrecting a recording the viewer skipped.
+- **One channel is one tuner.** Back-to-back airings share a single tuner GET
+  and produce two files, with the overlapping padding written to both.
+- **An attempt is its own file.** A capture that loses its worker resumes into
+  `.a2.part`, so a fenced predecessor still draining cannot corrupt it; the
+  gap is recorded and the recording finishes `partial`, never silently `done`.
+- **A viewer refused a tuner is told what holds it.** `tuner_capacity` carries
+  the recordings by channel and offers to stop one — and their own idle
+  session is evicted first, so they are never told a recording took a tuner
+  they were holding themselves.
+
+The plan pins on two things — a guide that survives a restart, and the owner
+evicting a viewer's own stray before answering a capacity refusal — that were
+not on `main` when this branch started, so it built both, and only those two.
+The reliability effort (#281) has since merged its own versions, so the merge
+into `main` keeps **its** implementations and this branch keeps only what is
+genuinely DVR: the fortnight horizon the recording rules need, the programme
+identity they match on, and the tuner accounting that lets a recording hold a
+transport.
+
+Nothing is gated — `dvr.enabled` is a plain setting, and the Developer tab's
+six rows are advisory. Nothing has touched the tuner yet: the hardware pass is
+the only unproved step, and §8 of the plan carries its prompts.
 ## Apple's notice strip was a dead end, and two rows of the readiness card were false
 
 **[#297](http://192.168.4.7:3000/noirr/plurx/pulls/297), titled `WIP:`.**

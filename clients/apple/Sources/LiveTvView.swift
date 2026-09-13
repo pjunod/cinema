@@ -508,9 +508,16 @@ final class LiveTvPlayerController: ObservableObject {
 enum LiveTvBrowseView: String, CaseIterable, Identifiable {
     case list
     case guide
+    case recordings
 
     var id: Self { self }
-    var label: String { self == .list ? "On now" : "Guide" }
+    var label: String {
+        switch self {
+        case .list: return "On now"
+        case .guide: return "Guide"
+        case .recordings: return "Recordings"
+        }
+    }
 
     // `plurx.`-prefixed, like every other key in SettingsStore. (The plan
     // wrote this as a bare `liveTvView`; that would have been the only
@@ -1271,6 +1278,15 @@ struct LiveTvGuideGrid: View {
     let dimensions: LiveTvGridDimensions
     let slots: [Int]
     let playingChannelId: String?
+    /// What the DVR knows about each airing, from the one read of the schedule
+    /// and the reminders that each guide load makes. Empty while recording is
+    /// off or before that read lands, which draws exactly the grid that
+    /// existed before any of this — every mark is an overlay, so no row, slot
+    /// or type size moves to make room for one.
+    var marks = DvrMarks()
+    /// Only the running-capture underline uses it; nothing in the geometry
+    /// depends on the clock.
+    var now = 0
     let onAiring: (LiveTvChannel) -> Void
     let onFuture: (LiveTvChannel, LiveTvProgramme) -> Void
     let restoreChannelId: String?
@@ -1343,9 +1359,21 @@ struct LiveTvGuideGrid: View {
                             Color.clear.frame(width: layout.totalWidth,
                                               height: dimensions.rowHeight)
                             ForEach(row.cells, id: \.programme.id) { cell in
+                                let mark = marks.mark(channelId: row.channel.id,
+                                                      airingStart: cell.programme.start)
                                 Button {
+                                    #if os(iOS)
+                                    // On the phone a cell's actions live in
+                                    // the programme sheet, so every cell opens
+                                    // it — including the one on air, which is
+                                    // otherwise the only cell a viewer cannot
+                                    // record. The On now list keeps the
+                                    // one-tap path to the picture.
+                                    onFuture(row.channel, cell.programme)
+                                    #else
                                     if cell.airing { onAiring(row.channel) }
                                     else { onFuture(row.channel, cell.programme) }
+                                    #endif
                                 } label: {
                                     Text(cell.programme.title)
                                         .font(LiveTvType.cell).lineLimit(1)
@@ -1361,6 +1389,7 @@ struct LiveTvGuideGrid: View {
                                                 lineWidth: 1)
                                         )
                                         .clipShape(RoundedRectangle(cornerRadius: 6))
+                                        .dvrCellMark(mark, now: now)
                                 }
                                 #if os(tvOS)
                                 .buttonStyle(LiveTvGuideButtonStyle())
@@ -1379,7 +1408,8 @@ struct LiveTvGuideGrid: View {
                                 .offset(x: cell.left + 3, y: 5)
                                 .accessibilityLabel(
                                     "\(row.channel.title), \(cell.programme.title), "
-                                    + "\(liveTvTime(cell.programme.start)) to \(liveTvTime(cell.programme.end))")
+                                    + "\(liveTvTime(cell.programme.start)) to \(liveTvTime(cell.programme.end))"
+                                    + (mark.map { ", \($0.accessibilityDescription)" } ?? ""))
                             }
                             if row.cells.isEmpty {
                                 Button { onAiring(row.channel) } label: {
@@ -1651,6 +1681,9 @@ struct LiveTvView: View {
     @Environment(\.scenePhase) private var scenePhase
     let onLeave: () -> Void
     @ObservedObject private var live = LiveTvPlayerController.shared
+    /// Owned by the page rather than shared for the app's lifetime: it holds
+    /// no tuner and no file handle, so nothing is lost by rebuilding it.
+    @StateObject private var dvr = DvrController()
     @StateObject private var pictureInPicture = PictureInPictureController()
     @State private var query = ""
     @State private var fullscreen = false
@@ -1681,6 +1714,10 @@ struct LiveTvView: View {
     @State private var tvFocusedChannelId: String?
     @State private var overlayGeneration = 0
     @State private var onScreen = false
+    /// A channel a local reminder's *Watch* action named while the app was
+    /// elsewhere. Held until the lineup has loaded, because tuning a channel
+    /// the page has never heard of does nothing at all.
+    @State private var pendingReminderChannelId: String?
     #if os(iOS)
     @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
@@ -1689,7 +1726,9 @@ struct LiveTvView: View {
     /// The one focusable thing on the ten-foot surface while the overlay is
     /// hidden. Its only job is to exist, so the remote has somewhere to send
     /// a press that the routing table can then decide.
-    private enum FocusTarget: Hashable { case reveal, guide, channels, play, info, layout, more }
+    private enum FocusTarget: Hashable {
+        case reveal, guide, channels, recordings, play, info, layout, more
+    }
     @FocusState private var focusedControl: FocusTarget?
     @FocusState private var focusedChannelId: String?
     @State private var guideFocusRequest = 0
@@ -1839,6 +1878,7 @@ struct LiveTvView: View {
         // about it — the channel count — is in the toolbar now, and the rest
         // is one muted line along the bottom of the content it describes.
         .overlay(alignment: .bottom) { statusLine }
+        .overlay(alignment: .bottomLeading) { reminderOverlay }
         }
         .navigationTitle("Live TV")
         #if os(iOS)
@@ -1848,9 +1888,20 @@ struct LiveTvView: View {
         .background(Palette.bg)
 
         .task { await live.load(origin: model.origin, token: Session.shared.token) }
+        .task { await dvr.load(origin: model.origin, token: Session.shared.token) }
+        // One read of the schedule and the reminders per guide load, and none
+        // in between. A plan changes when somebody changes it — every mutation
+        // re-reads for itself — so a page that polled would spend a
+        // household's evening asking a question it already had the answer to.
+        .onChange(of: live.guide?.fetchedAt) { _, _ in
+            Task { await dvr.refresh() }
+        }
+        .onChange(of: browse) { _, _ in dvr.clearMessage() }
+        .onChange(of: detail) { _, _ in dvr.clearMessage() }
         .onReceive(tick) { _ in
             now = Int(Date().timeIntervalSince1970)
             live.expireSourceFormats(now: now)
+            Task { await dvr.refreshDue() }
         }
         .onDisappear {
             onScreen = false
@@ -1923,8 +1974,38 @@ struct LiveTvView: View {
             if target != nil { cancelBrowseFocusRestoration() }
         }
         #endif
-        .onAppear { onScreen = true }
+        #if os(iOS)
+        // A reminder's *Watch* action arrives while this page may not yet have
+        // a lineup, so the channel is held rather than tuned straight away.
+        .onReceive(NotificationCenter.default.publisher(for: .plurxReminderWatch)) { _ in
+            claimReminderChannel()
+        }
+        .onChange(of: live.channels.map(\.id)) { _, _ in tuneReminderChannel() }
+        .onChange(of: pendingReminderChannelId) { _, _ in tuneReminderChannel() }
+        #endif
+        .onAppear {
+            onScreen = true
+            #if os(iOS)
+            // The action may have arrived before this page existed to hear it.
+            claimReminderChannel()
+            #endif
+        }
     }
+
+    #if os(iOS)
+    private func claimReminderChannel() {
+        guard let channelId = ReminderWatchRequest.take() else { return }
+        pendingReminderChannelId = channelId
+    }
+
+    private func tuneReminderChannel() {
+        guard let wanted = pendingReminderChannelId,
+              let channel = live.channels.first(where: { $0.id == wanted })
+        else { return }
+        pendingReminderChannelId = nil
+        selectAiring(channel)
+    }
+    #endif
 
     private var liveInputState: LiveTvInputState {
         if temporaryGuide { return .temporaryGuide }
@@ -1943,10 +2024,14 @@ struct LiveTvView: View {
         message == "Playing live · no recording or rewind"
     }
 
+    /// Both lines when both are true. A recording refusal and an unconfirmed
+    /// tuner cleanup are different facts about different things, and hiding
+    /// either behind the other is how a viewer ends up acting on neither.
     private var statusText: String? {
-        let message = live.message
-        guard !message.isEmpty, !LiveTvView.isSteadyStateMessage(message) else { return nil }
-        return message
+        let tuner = live.message
+        let tunerText = tuner.isEmpty || LiveTvView.isSteadyStateMessage(tuner) ? nil : tuner
+        let parts = [dvr.message, tunerText].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     /// The phone's picture is full-bleed, so the page cannot own a horizontal
@@ -1958,6 +2043,35 @@ struct LiveTvView: View {
         #else
         return 0
         #endif
+    }
+
+    /// The due reminder, lower-left, on the page and on the fullscreen cover
+    /// alike. Only the buttons are interactive: it claims no key, so the
+    /// remote means exactly what the routing table says it means whether or
+    /// not a reminder happens to be showing.
+    @ViewBuilder private var reminderOverlay: some View {
+        if let reminder = dvr.current {
+            ReminderOverlay(
+                reminder: reminder,
+                now: now,
+                watch: {
+                    Task { await dvr.ack(reminder) }
+                    guard let channel = live.channels.first(where: { $0.id == reminder.channelId })
+                    else { return }
+                    selectAiring(channel)
+                },
+                record: {
+                    Task {
+                        await dvr.record(channelId: reminder.channelId,
+                                         airingStart: reminder.airingStart)
+                        await dvr.ack(reminder)
+                    }
+                },
+                dismiss: { Task { await dvr.ack(reminder) } },
+                expire: { dvr.silence(reminder) }
+            )
+            .padding(16)
+        }
     }
 
     @ViewBuilder private var statusLine: some View {
@@ -2096,6 +2210,8 @@ struct LiveTvView: View {
                     .focused($focusedControl, equals: .channels)
                 segment("Guide", active: browse == .guide) { requestGuideFocus() }
                     .focused($focusedControl, equals: .guide)
+                segment(recordingsLabel, active: browse == .recordings) { showRecordings() }
+                    .focused($focusedControl, equals: .recordings)
             }
             .overlay(RoundedRectangle(cornerRadius: 10).stroke(Palette.outline, lineWidth: 1))
             Text(toolbarSummary).font(LiveTvType.secondary).foregroundStyle(Palette.muted)
@@ -2138,6 +2254,7 @@ struct LiveTvView: View {
                     browse = .list
                     browse.persist()
                 }
+                segment(recordingsLabel, active: browse == .recordings) { showRecordings() }
             }
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(Palette.outline, lineWidth: 1))
             Spacer(minLength: 8)
@@ -2146,6 +2263,27 @@ struct LiveTvView: View {
         }
         .frame(height: 48)
         .padding(.horizontal, 12)
+    }
+
+    /// The conflict count rides on the chip. A viewer whose Thursday has two
+    /// programmes and one tuner should learn that from the toolbar, not from
+    /// an empty file the next morning.
+    private var recordingsLabel: String {
+        dvr.conflicts > 0 ? "Recordings · \(dvr.conflicts)" : "Recordings"
+    }
+
+    private func showRecordings() {
+        browse = .recordings
+        browse.persist()
+        #if os(tvOS)
+        // The grid and the list both restore focus when they believe they own
+        // it. Leaving either armed would take the focus straight back off the
+        // page that just opened.
+        guideFocusRequested = false
+        channelFocusRequested = false
+        channelFocusCoordinator.leave()
+        focusedChannelId = nil
+        #endif
     }
 
     private func segment(_ label: String, active: Bool, action: @escaping () -> Void) -> some View {
@@ -2278,6 +2416,9 @@ struct LiveTvView: View {
 
     @ViewBuilder private var browseContent: some View {
         switch browse {
+        case .recordings:
+            DvrRecordingsPanel(dvr: dvr, now: now)
+                .padding(.horizontal, 12)
         case .list:
             List(visibleChannels) { channel in
                 Button {
@@ -2323,6 +2464,8 @@ struct LiveTvView: View {
                     window: LiveTvGridMetrics.window(start: guideWindowStart),
                     slotSeconds: LiveTvGridMetrics.slotSeconds),
                 playingChannelId: live.watching?.id,
+                marks: dvr.marks,
+                now: now,
                 onAiring: selectAiring,
                 onFuture: { channel, programme in detailChannel = channel; detail = programme },
                 restoreChannelId: focusedGuideChannelId,
@@ -2369,9 +2512,12 @@ struct LiveTvView: View {
             }
             List(programmes) { programme in
                 Button {
+                    // The same rule as the grid: every row opens the sheet,
+                    // because the sheet is where a programme's actions live on
+                    // the phone and Watch is the first of them.
                     guard let channel else { return }
-                    if programme.start <= now && programme.end > now { selectAiring(channel) }
-                    else { detailChannel = channel; detail = programme }
+                    detailChannel = channel
+                    detail = programme
                 } label: {
                     HStack(spacing: 10) {
                         Text(liveTvTime(programme.start))
@@ -2379,6 +2525,11 @@ struct LiveTvView: View {
                             .frame(width: 62, alignment: .leading)
                         Text(programme.title).font(.system(size: 14)).lineLimit(1)
                         Spacer(minLength: 4)
+                        if let mark = channel.flatMap({
+                            dvr.marks.mark(channelId: $0.id, airingStart: programme.start)
+                        }) {
+                            DvrCellMarkView(mark: mark)
+                        }
                         if programme.start <= now && programme.end > now {
                             Text("NOW").font(.system(size: 10, weight: .bold))
                                 .foregroundStyle(Palette.accent)
@@ -2408,6 +2559,11 @@ struct LiveTvView: View {
         let contentWidth = max(640, Double(geometry.size.width) - 2 * Double(liveContentInset))
         let contentHeight = max(320, Double(geometry.size.height) - 48 - 20)
         switch tvLayout.presented {
+        case _ where browse == .recordings:
+            // Full width, and under the toolbar rather than beside a picture:
+            // a schedule is a list of rows with long titles and long reasons,
+            // and the 620 pt column the channel list wants would cut them.
+            DvrRecordingsPanel(dvr: dvr, now: now)
         case .guideOverlay:
             overPicturePanel(contentWidth: contentWidth, contentHeight: contentHeight, rows: 5)
         case .guidePreview, .channelBrowser:
@@ -2582,6 +2738,10 @@ struct LiveTvView: View {
                 Text(synopsis).font(LiveTvType.secondary).lineLimit(synopsisLines)
             }
             if let channel { LiveTvFormatBadges(channel: channel) }
+            // Reached the way anything above the grid is reached: up from the
+            // top row hands focus to the toolbar, and down from there walks
+            // back through these before entering the cells again.
+            if let channel, let programme { programmeActions(channel, programme) }
             if eyebrow, let footer = guideStageFooter {
                 Text(footer).font(LiveTvType.tertiary).foregroundStyle(Palette.muted).lineLimit(1)
             }
@@ -2620,6 +2780,8 @@ struct LiveTvView: View {
                     slotSeconds: LiveTvGridMetrics.slotSeconds
                 ),
                 playingChannelId: live.watching?.id,
+                marks: dvr.marks,
+                now: now,
                 onAiring: selectAiring,
                 onFuture: { channel, programme in detailChannel = channel; detail = programme },
                 restoreChannelId: focusedGuideChannelId,
@@ -2803,6 +2965,94 @@ struct LiveTvView: View {
         }
         let latest = max(available.start, available.end - guidePageSpan)
         guideWindowStart = min(max(current, available.start), latest)
+    }
+
+    /// Watch · Record · Record series · Remind me, for one guide cell.
+    ///
+    /// The same four wherever a programme can be acted on, so a viewer who
+    /// learns them from the sofa does not have to learn different ones on the
+    /// phone. Each of the last three reads the state the marks are already
+    /// drawn from, which is why Record can offer to take a scheduled airing
+    /// back off the plan without another read.
+    @ViewBuilder private func programmeActions(
+        _ channel: LiveTvChannel, _ programme: LiveTvProgramme
+    ) -> some View {
+        #if os(iOS)
+        // Two rows on the phone. Four controls and a "Watch at 10:30 PM" label
+        // do not fit one 320 pt line, and a row that overflows silently loses
+        // its last button off the edge of the sheet.
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                watchAction(channel, programme)
+                recordAction(channel, programme)
+            }
+            HStack(spacing: 8) {
+                recordSeriesAction(channel, programme)
+                remindAction(channel, programme)
+            }
+        }
+        #else
+        HStack(spacing: 8) {
+            watchAction(channel, programme)
+            recordAction(channel, programme)
+            recordSeriesAction(channel, programme)
+            remindAction(channel, programme)
+        }
+        #endif
+    }
+
+    private func watchAction(
+        _ channel: LiveTvChannel, _ programme: LiveTvProgramme
+    ) -> some View {
+        let future = programme.start > now
+        return DvrActionButton(
+            label: future ? "Watch at \(liveTvTime(programme.start))" : "Watch",
+            prominent: true
+        ) {
+            // Watching something that has not started is a promise to come
+            // back, and a promise to come back is exactly a reminder.
+            if future {
+                Task { await dvr.remind(channelId: channel.id, airingStart: programme.start) }
+            } else {
+                detail = nil
+                selectAiring(channel)
+            }
+        }
+        .disabled(!channel.watchable)
+    }
+
+    private func recordAction(
+        _ channel: LiveTvChannel, _ programme: LiveTvProgramme
+    ) -> some View {
+        let scheduled = dvr.recording(channelId: channel.id, airingStart: programme.start)
+        let planned = scheduled.map { $0.state.pending } ?? false
+        return DvrActionButton(label: planned ? "Don't record" : "Record") {
+            Task {
+                if let scheduled, planned { await dvr.delete(scheduled) }
+                else { await dvr.record(channelId: channel.id, airingStart: programme.start) }
+            }
+        }
+    }
+
+    private func recordSeriesAction(
+        _ channel: LiveTvChannel, _ programme: LiveTvProgramme
+    ) -> some View {
+        DvrActionButton(label: "Record series") {
+            Task { await dvr.recordSeries(channelId: channel.id, airingStart: programme.start) }
+        }
+    }
+
+    private func remindAction(
+        _ channel: LiveTvChannel, _ programme: LiveTvProgramme
+    ) -> some View {
+        let reminder = dvr.reminder(channelId: channel.id, airingStart: programme.start)
+        return DvrActionButton(label: reminder == nil ? "Remind me" : "Forget reminder") {
+            Task {
+                if let reminder { await dvr.forget(reminder) }
+                else { await dvr.remind(channelId: channel.id, airingStart: programme.start) }
+            }
+        }
+        .disabled(programme.start <= now)
     }
 
     private func selectAiring(_ channel: LiveTvChannel) {
@@ -3243,6 +3493,10 @@ struct LiveTvView: View {
                 temporaryGuide = false
             }
         }
+        // Outside the remote adapter on purpose: a press that lands on one of
+        // the reminder's buttons is the button's, and the routing table never
+        // sees it. Back and Menu still leave the cover through the platform.
+        .overlay(alignment: .bottomLeading) { reminderOverlay }
     }
 
     /// Every ten-foot press lands here, already decided by the shared table.
@@ -3289,9 +3543,10 @@ struct LiveTvView: View {
         }
     }
 
-    /// A future programme gets details and no actions. There is no DVR behind
-    /// this, so offering "record" would be offering something that does not
-    /// exist.
+    /// A programme, and what can be done about it. On the phone this is where
+    /// a guide cell's actions live, which is why the cell on air opens it too:
+    /// otherwise the one programme a viewer most wants to keep would be the
+    /// one cell with no way to record it.
     private func programmeDetail(_ programme: LiveTvProgramme) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(programme.title).font(LiveTvType.title)
@@ -3305,8 +3560,12 @@ struct LiveTvView: View {
             if let filters = programme.filters, !filters.isEmpty {
                 Text(filters.joined(separator: " · ")).font(.caption2).foregroundStyle(Palette.muted)
             }
-            Text("Live only — plurx does not record.")
-                .font(.caption2).foregroundStyle(Palette.muted)
+            if let channel = detailChannel {
+                programmeActions(channel, programme)
+            }
+            if let message = dvr.message {
+                Text(message).font(.caption2).foregroundStyle(Palette.muted).lineLimit(3)
+            }
             Spacer()
         }
         .padding()

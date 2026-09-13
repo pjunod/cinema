@@ -1554,7 +1554,15 @@ pub struct SettingsDto {
     pub live_tv_transition_drain_before: i64,
     pub live_tv_guide_source: String,
     pub live_tv_xmltv_url: String,
-    pub live_tv_guide_hours: u8,
+    pub live_tv_guide_hours: u16,
+    pub dvr_enabled: bool,
+    pub dvr_root: String,
+    pub dvr_free_floor_gb: i64,
+    pub dvr_tuner_reserve: u8,
+    pub dvr_pad_start_s: i64,
+    pub dvr_pad_end_s: i64,
+    pub dvr_reminder_lead_s: i64,
+    pub dvr_webhook_url: String,
     pub tmdb_configured: bool,
     /// The stored TMDB key itself. This endpoint is admin-only and the key is
     /// low-sensitivity (read-only metadata), so the admin who set it can see
@@ -1759,6 +1767,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     let decoder_health_requested =
         setting(keys::DECODER_HEALTH_QUALIFIED_ARTIFACTS).as_deref() == Some("1");
     let live_tv = crate::live_tv::LiveTvConfig::from_snapshot(&settings, &state.node_id);
+    let dvr = crate::live_tv::DvrConfig::from_snapshot(&settings);
     let server_name = setting(keys::SERVER_NAME).unwrap_or_else(|| state.server_name.clone());
     let tmdb_api_key = setting(keys::TMDB_API_KEY).unwrap_or_default();
     let omdb_api_key = setting(keys::OMDB_API_KEY).unwrap_or_default();
@@ -1939,6 +1948,14 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         live_tv_guide_source: live_tv.guide_source.as_str().to_owned(),
         live_tv_xmltv_url: live_tv.xmltv_url,
         live_tv_guide_hours: live_tv.guide_hours,
+        dvr_enabled: dvr.enabled,
+        dvr_root: dvr.root,
+        dvr_free_floor_gb: dvr.free_floor_gb,
+        dvr_tuner_reserve: dvr.tuner_reserve,
+        dvr_pad_start_s: dvr.pad_start_s,
+        dvr_pad_end_s: dvr.pad_end_s,
+        dvr_reminder_lead_s: dvr.reminder_lead_s,
+        dvr_webhook_url: dvr.webhook_url,
         tmdb_configured: !tmdb_api_key.is_empty(),
         tmdb_api_key,
         omdb_configured: !omdb_api_key.is_empty(),
@@ -2169,7 +2186,20 @@ pub struct UpdateSettings {
     /// enabled, because turning a read-only feed on must not drain viewers.
     pub live_tv_guide_source: Option<String>,
     pub live_tv_xmltv_url: Option<String>,
-    pub live_tv_guide_hours: Option<u8>,
+    pub live_tv_guide_hours: Option<u16>,
+    /// Recording. Plain settings, deliberately outside the Live TV generation
+    /// CAS: none of them changes a tuner tuple, and riding that CAS would make
+    /// an operator disable Live TV — draining every viewer — to change a
+    /// padding default.
+    pub dvr_enabled: Option<bool>,
+    pub dvr_root: Option<String>,
+    pub dvr_free_floor_gb: Option<i64>,
+    pub dvr_tuner_reserve: Option<u8>,
+    pub dvr_pad_start_s: Option<i64>,
+    pub dvr_pad_end_s: Option<i64>,
+    pub dvr_reminder_lead_s: Option<i64>,
+    /// Empty string clears it, as the other outbound-endpoint settings do.
+    pub dvr_webhook_url: Option<String>,
     /// Explicit admin attestation, never an automatic timeout override.
     pub live_tv_fenced_owner: Option<LiveTvFencedOwner>,
     /// Set the TMDB API key. Empty string clears it. Absent leaves it as-is.
@@ -2387,6 +2417,17 @@ impl UpdateSettings {
             || self.dv_disk_keep_original.is_some()
             || self.dv_disk_convert_parallel.is_some()
             || self.genre_backfill.is_some()
+            // The DVR settings are their own transaction boundary for the same
+            // reason the Live TV tuple is: mixing them would let one commit
+            // while the other's CAS reports 409.
+            || self.dvr_enabled.is_some()
+            || self.dvr_root.is_some()
+            || self.dvr_free_floor_gb.is_some()
+            || self.dvr_tuner_reserve.is_some()
+            || self.dvr_pad_start_s.is_some()
+            || self.dvr_pad_end_s.is_some()
+            || self.dvr_reminder_lead_s.is_some()
+            || self.dvr_webhook_url.is_some()
     }
 }
 
@@ -3166,6 +3207,67 @@ pub async fn update_settings(
             .put_setting(keys::VOD_PRESENTATION, if on { "1" } else { "0" })
             .await?;
     }
+    // Deliberately no readiness lookup for any of these. The Developer card
+    // is advice; an administrator's explicit choice is the authority, and a
+    // switch that consulted readiness would be a gate wearing a card's
+    // clothes.
+    if let Some(on) = req.dvr_enabled {
+        state
+            .store
+            .put_setting(keys::DVR_ENABLED, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(root) = &req.dvr_root {
+        state.store.put_setting(keys::DVR_ROOT, root.trim()).await?;
+    }
+    if let Some(value) = req.dvr_free_floor_gb {
+        state
+            .store
+            .put_setting(
+                keys::DVR_FREE_FLOOR_GB,
+                &value.clamp(0, 1_000_000).to_string(),
+            )
+            .await?;
+    }
+    if let Some(value) = req.dvr_tuner_reserve {
+        state
+            .store
+            .put_setting(keys::DVR_TUNER_RESERVE, &value.min(4).to_string())
+            .await?;
+    }
+    if let Some(value) = req.dvr_pad_start_s {
+        state
+            .store
+            .put_setting(
+                keys::DVR_PAD_START_S,
+                &value.clamp(0, plurx_core::dvr::DVR_PAD_MAX_S).to_string(),
+            )
+            .await?;
+    }
+    if let Some(value) = req.dvr_pad_end_s {
+        state
+            .store
+            .put_setting(
+                keys::DVR_PAD_END_S,
+                &value.clamp(0, plurx_core::dvr::DVR_PAD_MAX_S).to_string(),
+            )
+            .await?;
+    }
+    if let Some(value) = req.dvr_reminder_lead_s {
+        state
+            .store
+            .put_setting(
+                keys::DVR_REMINDER_LEAD_S,
+                &value.clamp(0, plurx_core::dvr::DVR_LEAD_MAX_S).to_string(),
+            )
+            .await?;
+    }
+    if let Some(url) = &req.dvr_webhook_url {
+        state
+            .store
+            .put_setting(keys::DVR_WEBHOOK_URL, url.trim())
+            .await?;
+    }
     if let Some(on) = req.library_channels_enabled {
         // Deliberately no readiness lookup here. The Developer card is advice;
         // an administrator's explicit choice is the authority.
@@ -3902,8 +4004,42 @@ pub async fn activity(
     Ok(Json(activities))
 }
 
+/// One capture, in the words an operator needs: which channel, why it is
+/// running, how much longer, how big it has got, and where it is going.
+fn dvr_activity_detail(recording: &crate::live_tv::dvr::DvrActivity) -> String {
+    let mut parts = vec![format!(
+        "{} {}",
+        recording.channel_number, recording.channel_name
+    )];
+    if let Some(rule) = &recording.rule_name {
+        parts.push(format!("rule \"{rule}\""));
+    }
+    parts.push(format!("tuner held on {}", recording.owner_node_id));
+    parts.push(format!("{} min left", recording.seconds_left / 60));
+    parts.push(format!(
+        "{:.1} GB",
+        recording.bytes as f64 / 1_000_000_000.0
+    ));
+    if let Some(path) = &recording.path {
+        parts.push(format!("→ {path}"));
+    }
+    parts.join(" · ")
+}
+
 async fn local_activity(state: &AppState) -> Result<Vec<Activity>, ApiError> {
     let mut activities = Vec::new();
+
+    // Anything holding a tuner and writing to a disk has to be attributable
+    // from inside the product: what it is, why it chose that work, and a way
+    // to stop it.
+    for recording in state.live_tv.recording_activities() {
+        activities.push(Activity {
+            kind: "record",
+            label: format!("Recording {}", recording.title),
+            detail: Some(dvr_activity_detail(&recording)),
+            percent: recording.percent,
+        });
+    }
 
     let live_tv = state.live_tv.activities();
     if !live_tv.is_empty() {

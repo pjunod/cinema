@@ -1715,3 +1715,147 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "present(.presenting(false, attached: attached))"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testOnlyTheEvidenceSamplerEverFeedsAPresentingEvent"
+
+[[fixes]]
+# main's #291 landed these seven client commits without anchor rows, and
+# `make history-check` bills whoever merges next. These seven rows are that
+# debt paid from this branch, the same way b7aaaa28 paid #290's. Each names
+# the shipped line a revert would delete and the case that goes red when it
+# does; where the coverage is thin, the row says so rather than implying a
+# test exists.
+#
+# Two things decided what covered the picture: `isChangingStream` drew one
+# overlay and `isPlaybackWaiting` drew a second underneath it, which is the
+# defect the surface contract exists to kill, and it left `buffering` with no
+# way to be drawn on Apple at all. The fix makes both faults — a wait after
+# start is row 12, a wait before the first frame is the staged start it
+# actually is (row 10), a wait during a change raises nothing because the
+# change's overlay is already up — and collapses `PlayerView` onto one
+# progress surface. The anchor is `progressRender`, the single owner: delete
+# it and `testTheSpinnerPixelHasExactlyOneOwner` reads two owners.
+id = "apple.one-owner-for-the-progress-pixel"
+commits = ["1ed58d8d"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func raiseStreamChangePreparing() {"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testAWaitBecomesTheRowItsContextDeclares"
+
+[[fixes]]
+# Contract §3.3 row 14 names `retryAfterReadinessTimeout` outright, and the
+# row had no raise site: the readiness deadline borrowed the ladder's
+# `owner_recovery_step`, so the ledger recorded a deadline as an ordinary
+# fallback step and row 14 was unreachable. Nothing about the pixel or the
+# rung changes — only which row the ledger names. The anchor is the `source`
+# parameter that carries it; drop it back to a constant and the case below
+# reads `owner_recovery_step` where it requires the deadline's own row.
+id = "apple.readiness-deadline-raises-row-fourteen"
+commits = ["59536c22"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "source: \"readiness_deadline_rungs_left\""
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testTheReadinessDeadlineRaisesRowFourteenWhileARungRemains"
+
+[[fixes]]
+# `failureActions` strips `keep_waiting` whenever `retry` is present — on
+# Apple they are the same primitive, and §3.1 says so — and every blocking
+# class's defaults offer `retry`, so the "Keep Waiting" label was one no
+# viewer could reach. The behaviour is unchanged; the dead label goes. The
+# `case .keepWaiting` arm stays and is now pinned, so a fault offering only
+# Keep waiting is still drawn, as Try Again.
+id = "apple.no-keep-waiting-beside-try-again"
+commits = ["c9593542"]
+source = "clients/apple/Sources/PlayerView.swift"
+source_anchor = "Button(\"Try Again\") {"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testAppleNeverDrawsKeepWaitingBesideTryAgain"
+
+[[fixes]]
+# §3.1's `banner` is "a notice strip with the fault's actions; the picture is
+# untouched", and `failureView` drew the strip with no actions at all — a
+# surface that tells the viewer something and gives them nothing to do about
+# it, which is the class of defect this contract exists to stop. The anchor is
+# the message projection the strip now renders from; without it the banner has
+# no text to carry its actions beside.
+id = "apple.the-notice-strip-draws-the-faults-actions"
+commits = ["46e7224b"]
+source = "clients/apple/Sources/PlayerView.swift"
+source_anchor = "static func bannerMessage(for surface: PlaybackSurface) -> String? {"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testARefusedBannerOffersTheActionThatReIssuesTheChange"
+
+[[fixes]]
+# The two review findings on #291. An `indicator` was reachable by the
+# blocking box's own draw path, and the owner stopped the player in more than
+# one place, which is what lets a blocking surface be drawn over a player
+# nobody stopped. `progressRender` is the single decision for the first and
+# `stopForBlockingSurface` the single site for the second; the ownership case
+# below counts the stop sites and fails outright if a second one appears.
+id = "apple.one-progress-decision-and-one-stop-site"
+commits = ["71ad835f"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "nonisolated static func progressRender(for surface: PlaybackSurface) -> ProgressRender? {"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testTheOwnerStopsThePlayerInExactlyOnePlace"
+
+[[fixes]]
+# The pause ruling and the segment-503 codes existed in the fixture and on the
+# web but had never been ported into the Swift, so Apple's model answered a
+# viewer pause differently from every other client's. `playbackNotRequested`
+# is the retirement reason the ruling turns on: it retires `buffering` and
+# nothing else, so a spinner over a paused still frame clears and a prompt
+# under a pause survives with its actions.
+id = "apple.pause-ruling-and-segment-503-codes"
+commits = ["f9750c2a"]
+source = "clients/apple/Sources/PlaybackSurfaceModel.swift"
+source_anchor = "case playbackNotRequested = \"playback_not_requested\""
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testOnlyBufferingIsRetiredByTheViewerNoLongerWantingPlayback"
+
+[[fixes]]
+# A seek and a node failover each opened a window where the Android player was
+# waiting with nothing drawn over the picture, because the wait had no source
+# unless playback was already established. `mediaWaitSource` is the whole fix:
+# a wait with established playback is row 12, a wait without it is the staged
+# start (row 10), and a player that is not waiting owes nothing. Delete it and
+# all five cases in the test class below go red.
+id = "android.a-seek-and-a-failover-draw-something"
+commits = ["aa89864d"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurfaceOwner.kt"
+source_anchor = "internal fun mediaWaitSource(waiting: Boolean, establishedPlayback: Boolean): String? = when {"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackSurfaceOwnerTest.kt"
+test_anchor = "aSeekWindowIsTheClientPreparingRow"
+
+[[fixes]]
+# This branch's own merge hand-edited the Apple build number into three
+# documents and the Android one into two, which is precisely what main's #509
+# generator work exists to stop. The correction reverts the hand edits and
+# re-claims through `validation/apple_build`, so every Apple copy is generated
+# from `project.yml` and this effort's claim lands in its own note fragment
+# rather than in main's #278 one. The pinning is the claim sweep rather than a
+# client unit test — there is no Swift or Kotlin behaviour here, only counters
+# — and that sweep is what went red before the fix: hand-edit any generated
+# copy again, or leave the two sides disagreeing, and the case named below
+# fails with the file and both numbers in its message.
+id = "clients.build-counters-claimed-by-their-generators"
+commits = ["0f68b0a1"]
+source = "clients/apple/project.yml"
+source_anchor = "CURRENT_PROJECT_VERSION: \"153\""
+test = "tests/operations/test_apple_build_claims.py"
+test_anchor = "def test_a_generated_next_build_satisfies_the_document_claim_sweep"
+
+[[fixes]]
+# The first Android compile this branch has ever had found exactly one error,
+# and it was a real one: `add(id)` inside `putJsonArray` takes a `JsonElement`,
+# not a `String`, so `reorderRules` — the admin call that decides which rule
+# gets a tuner when two want one — could not compile. Nothing caught it because
+# no Kotlin on this branch had been compiled until the fast lane ran it.
+#
+# The body is now built by a pure `dvrReorderBody`, so the shape is asserted
+# without a socket: the ids are JSON strings, and they keep the order the
+# caller gave, because the order is the entire request.
+id = "android.dvr-reorder-body-carries-json-strings"
+commits = ["775db1a4"]
+source = "clients/android/app/src/main/java/tv/plurx/app/livetv/DvrApi.kt"
+source_anchor = "internal fun dvrReorderBody(ids: List<String>): JsonObject ="
+test = "clients/android/app/src/test/java/tv/plurx/app/livetv/DvrUiTest.kt"
+test_anchor = "theReorderBodyCarriesTheIdsAsJsonStringsInOrder"
