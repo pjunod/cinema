@@ -405,7 +405,7 @@ disambiguate are *context* (start · attached playback · pending change) and
 | 3 | 401 / 403 on any playback request | `stopped` | `sign_in` action; keeps the status-based auth match the app has (`AppModel.swift:288`) |
 | 4 | 409 `vod_source_rescan_required`, 422 `vod_source_unsupported` / unsupported tracks, 501 `vod_transcode_unavailable` / `vod_subtitle_burn_unavailable` (start) | `stopped` | server sentence; no retry |
 | 5 | 503 `vod_disabled` (start) | `stopped` | server sentence; no retry — service is off, not building |
-| 6 | 503 `startup_timeout` / `media_owner_transition` / `vod_index_pending` / `vod_engine_unattested` on create (start) | `preparing` | "still building"; retry is the owner's (M5) — until M5 the owner's outcome is `stopped` with the server sentence |
+| 6 | 503 `startup_timeout` / `media_owner_transition` / `vod_index_pending` / `vod_engine_unattested` on create (start) | `preparing` | "still building"; the owner retries the same request identity on 1 s · 2 s · 4 s inside an absolute 60 s deadline and then raises `exhausted` (M5, landed) |
 | 7 | Any create failure, decision timeout or cancelled request during a **pending change** (predecessor still attached) | `refused` | `intent` = the change; actions `retry` (re-issue the change); the predecessor keeps its own faults |
 | 8 | Playlist/segment 503 with a "not yet" code, attached playback | `recovering` | hls.js keeps `stopLoad()`; the owner's existing reopen is the recovery; natives see only the status code (§2.2) and take failover/HDR retry first |
 | 9 | 410 `media_owner_lost` | `recovering` while buffered media plays out, then `stopped` when the owner stops | D1's shape; `position_ms` from the body (web) or the last observed position (natives); Try again reopens there |
@@ -473,10 +473,18 @@ refusal behind it, and the only row that produced `preparing` was the create
 is that the ledger can name the ordinary case instead of borrowing
 `owner_recovery_step` and calling a cold start a recovery.
 
-Rows 6, 8 and the `BEHIND_LIVE_WINDOW` clause of 13 name recovery steps the
-clients do not all perform today; those are **M5**, their own PR (ruled), and
-until M5 lands each client's owner produces whatever outcome it produces now
-and the presenter classifies *that*.
+Rows 6, 8 and the `BEHIND_LIVE_WINDOW` clause of 13 named recovery steps the
+clients did not all perform; those are **M5**, their own PR (ruled), and it has
+landed. Row 6 is now reachable on all three clients: the owner re-posts the same
+create identity on 1 s · 2 s · 4 s inside an absolute 60 s deadline, releases a
+success that arrives after it, and raises `exhausted` when the ladder or the
+deadline is spent — in the `start` context only, because a create refused over a
+predecessor is row 7. Row 8 gains the web's one bounded `hls.startLoad(position)`
+two seconds after the refusal, sharing a single per-attach budget with the
+network-class fatal. Row 13's `BEHIND_LIVE_WINDOW` clause is Android's
+`seekTo(lastRealPosition)` + `prepare()`, once per attach, on FINITE timelines
+only — Media3's `seekToDefaultPosition()` is a live-edge policy and is not used,
+and a live item keeps today's `Fail`.
 
 ### 3.4 Evidence — the player's own proof of presentation, not a clock
 
@@ -790,7 +798,7 @@ change what the player does.
 | M2 | Apple adapter (`PlurxAPI.check` `.refused` + `.http` kept) + `PlaybackSurfaceModel` + `fail()` stops on the readiness-exhausted path + lock-screen disagreement + PiP + black-frame exhaustion surfaced | `AppleClientTests` runs `cases`; `make apple-test` on `mba`; a fresh VOD transcode whose item never readies walks the ladder, then shows `exhausted` with `rate == 0`; lock-screen play under it → banner + `surface_disagreement` |
 | M3 | Android adapter (bodies read) + `PlaybackSurface` `StateFlow` + `playWhenReady = false` at the three exhausted sites + opaque `PlaybackFailed` + ledger | `testDebugUnitTest` runs `cases`; a test pins that each exhausted `onError` site leaves `playWhenReady == false` and that a later `realPosition()` advance on the same epoch (not `onIsPlayingChanged`) yields `surface_disagreement` |
 | M4 | Physical verification (Apple TV, iPhone, Android TV): the three recipes below, each with the ledger's `surface_history` captured | recorded in a `PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-<date>.md` beside this page; allowed outcomes are enumerated per recipe in the implementation doc, and a `surface_disagreement` is a pass only if its ledger row names a documented exception |
-| M5 | The three recovery additions, one PR, with the §7 constraints | a `cases` row per addition; mutation removing any one retry fails; hls.js retry-once pinned |
+| M5 | The three recovery additions, one PR, with the §7 constraints — **landed** (`playback/recovery-additions`) | a `cases` row per addition; mutation removing any one retry fails; hls.js retry-once pinned |
 | M6 | Android progressive-remux landing, **after** the device measurement in recipe (c) shows achieved origin ≠ requested by > 250 ms | `PlaybackIntentTest` keyframe-origin case; recipe (c) passes |
 
 Reproduction recipes (today's behaviour first, then M4): (a) play a 4K remux,

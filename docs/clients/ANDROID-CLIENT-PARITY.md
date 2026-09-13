@@ -4,6 +4,24 @@ The Android client is the native plurx **viewer** for phones, foldables,
 tablets, Android TV, and Google TV. This page records what “web parity” means
 for that viewer and keeps server administration out of the comparison.
 
+> Status (2026-09-13): source is v0.3.0, Android build 91. The two bounded
+> recovery steps this client owns under the playback surface contract are in
+> ([PLAYBACK-SURFACE-CONTRACT.md](PLAYBACK-SURFACE-CONTRACT.md), M5). A session
+> create refused with `startup_timeout`, `media_owner_transition`,
+> `vod_index_pending` or `vod_engine_unattested` is re-posted under the SAME
+> `request_id` after 1 s, 2 s and 4 s, bounded by an absolute sixty seconds from
+> the first attempt; while it runs the surface is `preparing` with the server's
+> own sentence, when it is spent the owner stops the player and raises
+> `exhausted`, and a session that arrives after the deadline is released rather
+> than attached. `BEHIND_LIVE_WINDOW` (1002) on a finite timeline seeks back to
+> the last real position and prepares again, once per attach; a live item keeps
+> today's failure, and Media3's `seekToDefaultPosition()` — a live-edge policy
+> that skips content on a finite timeline — is deliberately not used. Neither
+> the compatibility ladder nor any budget, threshold or detector changed.
+> **Unrun:** there is no Android toolchain on the machine this was written on,
+> so `CreateRetryTest`, the new `PlaybackPolicyTest` cases and the
+> `MediaOriginTest` round-trip have never been compiled.
+
 > Status (2026-09-13): source is v0.3.0, Android build 90. The playback failure
 > surface is a projection of the player rather than a message channel
 > ([PLAYBACK-SURFACE-CONTRACT.md](PLAYBACK-SURFACE-CONTRACT.md), M3): a pure

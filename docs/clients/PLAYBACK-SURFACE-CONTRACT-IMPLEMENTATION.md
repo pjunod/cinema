@@ -726,6 +726,46 @@ Acceptance: a fixture case per addition (`m5_create_retry_deadline`,
 client it applies to; a mutation removing any one retry fails its case; the
 web test pins `startLoad` called at most once per attach.
 
+#### What landed, and the two readings it had to settle
+
+**Landed** in `playback/recovery-additions`. Three decisions the text above
+left open, recorded here rather than resolved silently:
+
+1. **"Backoff 1 s · 2 s · 4 s" is a CLOSED list**, not a ramp that then holds at
+   4 s. Three retries, four attempts; the ladder is spent after the third and
+   the owner raises `exhausted` with the reason `ladder_spent`. The absolute
+   deadline is the other termination, with the reason `deadline`, and it is
+   what bounds a SLOW server rather than a refusing one — which is the case the
+   review named. Read the other way the sequence would be about fourteen
+   retries, and nothing in the review or the contract asks for that.
+2. **The absolute deadline runs on a watchdog, not between attempts.** Checking
+   elapsed time only at rung boundaries turns an absolute bound back into a
+   per-attempt one the moment the server holds a create: Apple's create session
+   has a 180 s request timeout, so a boundary-checked "60 s" could surface at
+   three minutes. All three clients arm a timer at the first attempt; when it
+   fires the owner stops the player and raises `exhausted` immediately, and the
+   create still in flight is awaited only so its session can be RELEASED.
+3. **The web's 60 s is bounded by an older 20 s.** `beginPlaybackPreparation`
+   (`index.html`) gives every open a 20 s absolute preparation deadline,
+   measured from before the decision call. The M5 sequence runs inside it, so on
+   the web the effective bound is `min(60 s, whatever the preparation owner has
+   left)`. That is a **conflict between this plan and the code**, not a
+   resolution: implementing a true 60 s on the web means raising or restructuring
+   a pre-existing threshold, which §6 forbids in this PR. In practice a "not
+   yet" 503 returns immediately and the whole ladder finishes inside 7 s, so the
+   two bounds only disagree when the server also holds each create — the case
+   the deadline exists for. Flagged for the reviewer; it wants a ruling, not a
+   quiet threshold change.
+
+Scope notes worth keeping: the create retry runs in the `start` context only on
+every client (a create refused over an attached predecessor is row 7, and a
+stall reopen is neither), `startCopyHls` keeps answering `vod_index_pending`
+with its existing progressive-remux fallback rather than waiting seven seconds
+for a stream it can already play, and Apple's `refusalSurfaceOutcome` still
+declines to classify `create_503_not_yet` — that function feeds a raise that
+only happens after the owner's stop, where a progress class would be a spinner
+over a stopped player.
+
 ### 4.7 M6 — Android progressive-remux landing (`android/remux-seek-origin`)
 
 Gated on a measurement, not a reading. First, on an Android TV with a
