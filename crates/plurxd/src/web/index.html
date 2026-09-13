@@ -6739,9 +6739,13 @@ function showSessionOpenFailure(error,context){
   const explained=currentStreamFailureOverlay();
   if(!explained) return false;
   const where=context||playbackSurfaceContext(PLAYER);
+  // A refusal no row claims is still a refusal the server explained, and the
+  // sentence is the whole reason this function exists. It falls to the row its
+  // context makes true — the owner having nothing left, or a change that was
+  // refused — rather than back to the caller's generic "could not prepare".
   const source=PlaybackPolicy.classifyStreamFailure({
-    status:failure.status,code:failure.code,context:where});
-  if(!source) return false;
+    status:failure.status,code:failure.code,context:where})
+    ||(where==="change"?"change_failed":"owner_stopped");
   if(PLAYER) clientLog(Object.assign({level:"error",event:"stream_refused",
     detail:failure.code||String(failure.status), message:explained.detail},
     playbackContext()));
@@ -10608,8 +10612,10 @@ function beginPlaybackMediaAttachment(p){
   const token={};
   p.mediaAttachment=token;
   // Where this attempt's generation takes the picture: every attach on every
-  // route runs through here. Faults about any other generation are dropped,
-  // which is what replaces the 90 s `FAILURE_FRESH_MS` window with identity.
+  // route runs through here, and faults about any other generation are dropped.
+  // That is what bounds a fault's life — identity, not a clock. (`STREAM_FAILURE`
+  // keeps its own `FAILURE_FRESH_MS` freshness check, which decides whether a
+  // refusal still has a sentence worth repeating; it is a different question.)
   playbackSurfaceStep({attach:playbackSurfaceGeneration(p)});
   return {current:()=>PLAYER===p&&p.mediaAttachment===token};
 }
@@ -12399,9 +12405,13 @@ async function handleEnded(fileId){
     clientLog({level:"warn",event:"truncated_stream",detail:"terminal:"+verdict.code,
       message:`server verdict ended this recipe — ${controlVerdictText(verdict.message)}`,
       control_trigger:controlTrigger});
-    // `ended` is the element having stopped on its own, so the player this is
-    // drawn over is already stopped — which is what §3.2 asks of a blocking
-    // surface, and the only reason this site does not have to stop it.
+    // `ended` already means the element stopped on its own, but `player_stopped`
+    // is a claim the owner makes rather than one the presenter should have to
+    // infer from an event: this branch returns with nothing left to try, so it
+    // stops like every other exhaustion site (§3.4) and the claim is true by
+    // construction. The ask above can have taken seconds, and a viewer who
+    // pressed play in them is exactly the disagreement §3.2 is written for.
+    stopPlayerForExhaustion();
     raisePlaybackSurface("owner_stopped",{context:"attached",player_stopped:true,
       title:controlVerdictText(verdict.message),
       detail:"It ended "+clockFromSec(total-pos)+" short of the runtime. Your place is saved.",
@@ -12437,8 +12447,8 @@ async function handleEnded(fileId){
       (answered?` deferred:${verdict.type}`:(hopeless?" giving-up":" resuming")),
     control_trigger:controlTrigger});
   if(hopeless){
-    // Same reason as the terminal branch above: the element has ended, so the
-    // player is stopped before this is drawn over it.
+    // Same as the terminal branch above: the owner is giving up, so it stops.
+    stopPlayerForExhaustion();
     raisePlaybackSurface("repeated_early_end",{context:"attached",player_stopped:true,
       title:"The stream stopped before the end.",
       detail:"It ended "+clockFromSec(total-pos)+" short of the runtime. Your place is saved, so resuming picks up here.",

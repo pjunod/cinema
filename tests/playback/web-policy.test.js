@@ -2861,6 +2861,53 @@ test("the shipped glue resolves a disagreement in favour of the picture", () => 
   );
 });
 
+
+// The table does not have a row for every sentence the server can send, and a
+// refusal it does not claim is still a refusal the viewer should read. This is
+// the seam where "Playback failed to start. / the server's encoder exited…"
+// could silently become the caller's generic "Playback could not prepare."
+test("a refusal no source row claims still reaches the surface as the server's sentence", () => {
+  const raised = [];
+  const toasts = [];
+  const build = new Function(
+    "PLAYER", "PlaybackPolicy", "STREAM_FAILURE", "currentStreamFailureOverlay",
+    "playbackSurfaceContext", "playbackSurfaceIntent", "raisePlaybackSurfaceRefusal",
+    "clientLog", "playbackContext", "toast",
+    [shippedSource("showSessionOpenFailure"), "return showSessionOpenFailure;"].join("\n"),
+  );
+  const run = (status, code, message, context) => {
+    raised.length = 0;
+    const failure = policy.parseStreamFailure({ status, body: JSON.stringify({ code, message }) });
+    const overlay = policy.streamFailureOverlay(failure);
+    return [
+      build(
+        { fileId: 1 }, policy, null, () => overlay, () => context, () => 3,
+        (source, where, fault) => raised.push({ source, where, fault }),
+        () => {}, () => ({}), (text) => toasts.push(text),
+      )({ streamFailure: failure }, context),
+      raised[0],
+    ];
+  };
+
+  // No row: a 502 the encoder died on, at start. The owner has nothing left,
+  // so it is `owner_stopped` — carrying the sentence, not losing it.
+  const [handled, terminal] = run(502, "producer_failed", "the encoder exited before it produced video", "start");
+  assert.equal(handled, true, "the caller must not fall back to its own generic sentence");
+  assert.equal(terminal.source, "owner_stopped");
+  assert.equal(terminal.fault.title, "Playback failed to start.");
+  assert.equal(terminal.fault.detail, "the encoder exited before it produced video");
+
+  // The same body during a pending change is the predecessor's business, not
+  // its execution: a notice, and the intent it belongs to.
+  const [, refused] = run(502, "producer_failed", "the encoder exited before it produced video", "change");
+  assert.equal(refused.source, "change_failed");
+  assert.equal(refused.fault.intent, 3);
+
+  // A row that DOES claim it still wins, and carries its position.
+  const [, lost] = run(410, "media_owner_lost", "the node serving this media session is gone", "attached");
+  assert.equal(lost.source, "media_owner_lost_410");
+});
+
 test("playback-info row builders follow the shared web field list in fixture order", () => {
   const rows = new Function(
     [
