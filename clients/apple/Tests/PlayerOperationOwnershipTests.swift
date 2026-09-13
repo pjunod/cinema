@@ -235,6 +235,196 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         await load.value
     }
 
+    // MARK: - M5: the create "not yet" retry sequence
+
+    /// The create endpoint, scripted. Each attempt takes the next answer; a
+    /// `nil` answer holds the create open until the test resolves it, which is
+    /// how a server that never finishes is expressed.
+    private final class Creates {
+        struct Attempt {
+            let file: Int
+            let body: CreateSessionRequest
+            var continuation: CheckedContinuation<HlsStart, Error>?
+        }
+        var attempts: [Attempt] = []
+        var answers: [Result<HlsStart, Error>?] = []
+
+        func request(file: Int, body: CreateSessionRequest) async throws -> HlsStart {
+            let index = attempts.count
+            let answer = index < answers.count ? answers[index] : answers.last ?? nil
+            if let answer {
+                attempts.append(Attempt(file: file, body: body, continuation: nil))
+                return try answer.get()
+            }
+            return try await withCheckedThrowingContinuation {
+                attempts.append(Attempt(file: file, body: body, continuation: $0))
+            }
+        }
+
+        func resolve(_ index: Int, with result: Result<HlsStart, Error>) {
+            let continuation = attempts[index].continuation
+            attempts[index].continuation = nil
+            continuation?.resume(with: result)
+        }
+
+        func cancelAll() {
+            for index in attempts.indices { resolve(index, with: .failure(CancellationError())) }
+        }
+    }
+
+    /// M5's one clock. Every wait the sequence takes arrives here with the
+    /// milliseconds it asked for, and the test decides when it returns — so a
+    /// sixty-second absolute deadline costs the suite nothing.
+    private final class RetryWaits {
+        struct Wait {
+            let ms: Int
+            var continuation: CheckedContinuation<Void, Error>?
+        }
+        var waits: [Wait] = []
+
+        func wait(_ ms: Int) async throws {
+            try await withCheckedThrowingContinuation { waits.append(Wait(ms: ms, continuation: $0)) }
+        }
+
+        func fire(_ index: Int) {
+            let continuation = waits[index].continuation
+            waits[index].continuation = nil
+            continuation?.resume()
+        }
+
+        func cancelAll() {
+            for index in waits.indices {
+                let continuation = waits[index].continuation
+                waits[index].continuation = nil
+                continuation?.resume(throwing: CancellationError())
+            }
+        }
+    }
+
+    private func stillBuilding(_ code: String = "startup_timeout") -> Error {
+        APIError.refused(status: 503, code: code, message: "the transcoder is still starting", positionMs: nil)
+    }
+
+    private func hlsStart(_ id: String) throws -> HlsStart {
+        try JSONDecoder().decode(HlsStart.self, from: Data("""
+        {"sessionId":"\(id)","playlistUrl":"/hls/\(id)/index.m3u8"}
+        """.utf8))
+    }
+
+    /// The property with a leaked transcode on the other side of it: a session
+    /// the server produces AFTER the absolute deadline belongs to nobody, and
+    /// an encoder nobody is watching is a hardware slot held for nobody.
+    func testACreateThatLandsAfterTheDeadlineIsReleasedAndNeverAttached() async throws {
+        let decisions = Decisions()
+        let creates = Creates()
+        let waits = RetryWaits()
+        var released: [String] = []
+        creates.answers = [nil]
+        let controller = PlayerController(
+            requestPlaybackDecision: { _, file, selection, quality in
+                try await decisions.request(file: file, selection: selection, quality: quality)
+            },
+            waitCreateRetry: { ms in try await waits.wait(ms) },
+            releaseHlsSession: { _, sessionId in released.append(sessionId) },
+            requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
+        )
+        let model = AppModel()
+        defer { controller.stop(); decisions.cancelAll(); creates.cancelAll(); waits.cancelAll() }
+        start(controller, model: model)
+        try await waitUntil("initial decision") { decisions.requests.count == 1 }
+        decisions.resolve(0, with: .success((try coldDecision(), caps)))
+        try await waitUntil("the create is issued") { creates.attempts.count == 1 }
+        // Exactly one wait is armed, and it is the ABSOLUTE deadline: the
+        // backoff is only asked for after an attempt has failed.
+        try await waitUntil("the deadline watchdog is armed") { waits.waits.count == 1 }
+        XCTAssertEqual(waits.waits[0].ms, PlaybackCreateRetry.deadlineMs)
+        XCTAssertTrue(released.isEmpty, "nothing is released before the deadline")
+        waits.fire(0)
+        try await waitUntil("the owner raises its prompt on the clock") {
+            controller.surface.surface.cls == .exhausted
+        }
+        XCTAssertTrue(
+            controller.surface.surface.playerStopped,
+            "the owner stops the player before it raises a blocking fault"
+        )
+        XCTAssertEqual(controller.player.rate, 0)
+        XCTAssertTrue(released.isEmpty, "the create is still in flight")
+        // …and now the server finally answers.
+        creates.resolve(0, with: .success(try hlsStart("late")))
+        try await waitUntil("the late session is released") { released == ["late"] }
+        XCTAssertNil(controller.player.currentItem, "a released session is never attached")
+        XCTAssertEqual(
+            controller.surface.surface.cls,
+            .exhausted,
+            "releasing it does not raise a second fault"
+        )
+    }
+
+    /// The ladder, through the shipped `open()`: the same identity on every
+    /// rung, the review's three delays, and the prompt when it is spent.
+    func testTheCreateLadderReplaysOneIdentityAndThenRaisesExhausted() async throws {
+        let decisions = Decisions()
+        let creates = Creates()
+        let waits = RetryWaits()
+        creates.answers = [.failure(stillBuilding())]
+        let controller = PlayerController(
+            requestPlaybackDecision: { _, file, selection, quality in
+                try await decisions.request(file: file, selection: selection, quality: quality)
+            },
+            waitCreateRetry: { ms in try await waits.wait(ms) },
+            requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
+        )
+        let model = AppModel()
+        defer { controller.stop(); decisions.cancelAll(); creates.cancelAll(); waits.cancelAll() }
+        start(controller, model: model)
+        try await waitUntil("initial decision") { decisions.requests.count == 1 }
+        decisions.resolve(0, with: .success((try coldDecision(), caps)))
+        try await waitUntil("the first attempt") { creates.attempts.count == 1 }
+        for (rung, delay) in [1_000, 2_000, 4_000].enumerated() {
+            try await waitUntil("the backoff for rung \(rung)") { waits.waits.count == rung + 2 }
+            XCTAssertEqual(waits.waits[rung + 1].ms, delay, "rung \(rung) of the ladder")
+            waits.fire(rung + 1)
+            try await waitUntil("attempt \(rung + 2)") { creates.attempts.count == rung + 2 }
+        }
+        try await waitUntil("the ladder is spent") { controller.surface.surface.cls == .exhausted }
+        XCTAssertEqual(creates.attempts.count, 4, "three retries, and then the owner gives up")
+        let identities = Set(creates.attempts.compactMap { $0.body.requestId })
+        XCTAssertEqual(identities.count, 1, "every rung replays ONE request identity")
+        XCTAssertTrue(controller.surface.surface.playerStopped)
+    }
+
+    /// Row 6 is the `start` context. A create refused over a picture the viewer
+    /// is watching is a refused CHANGE, and the sequence must not run there at
+    /// all — no ladder, and no sixty-second watchdog stopping that player.
+    func testAChangeContextCreateIsNotRetriedAndArmsNoDeadline() async throws {
+        let decisions = Decisions()
+        let creates = Creates()
+        let waits = RetryWaits()
+        creates.answers = [.success(try hlsStart("first")), .failure(stillBuilding())]
+        let controller = PlayerController(
+            requestPlaybackDecision: { _, file, selection, quality in
+                try await decisions.request(file: file, selection: selection, quality: quality)
+            },
+            waitCreateRetry: { ms in try await waits.wait(ms) },
+            requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
+        )
+        let model = AppModel()
+        defer { controller.stop(); decisions.cancelAll(); creates.cancelAll(); waits.cancelAll() }
+        start(controller, model: model)
+        try await waitUntil("initial decision") { decisions.requests.count == 1 }
+        decisions.resolve(0, with: .success((try coldDecision(), caps)))
+        try await waitUntil("the first session") { creates.attempts.count == 1 }
+        XCTAssertEqual(waits.waits.count, 1, "the cold start armed its deadline")
+        controller.selectQuality(720)
+        try await waitUntil("the quality decision") { decisions.requests.count == 2 }
+        decisions.resolve(1, with: .success((try coldDecision(), caps)))
+        try await waitUntil("the change's create") { creates.attempts.count == 2 }
+        // Nothing new is armed, and nothing is retried: the change keeps its
+        // banner and the picture behind it keeps playing.
+        XCTAssertEqual(waits.waits.count, 1, "a change context arms no deadline watchdog")
+        XCTAssertNotEqual(controller.surface.surface.cls, .exhausted)
+    }
+
     private final class Decisions {
         struct Request {
             let file: Int

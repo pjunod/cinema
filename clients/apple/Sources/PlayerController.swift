@@ -1677,6 +1677,15 @@ final class PlayerController: ObservableObject {
     private let itemPreparation: ItemPreparation
     private let canPlayOffline: (AVURLAsset) -> Bool
     private let waitInitialDecisionDeadline: @MainActor () async throws -> Void
+    /// M5's only clock. It is both the backoff between rungs and the absolute
+    /// deadline, so a test can drive a sixty-second bound without spending a
+    /// minute — the same reason `waitInitialDecisionDeadline` exists.
+    private let waitCreateRetry: @MainActor (Int) async throws -> Void
+    /// Retiring a session nobody is going to attach. Injected because "a create
+    /// that lands after the deadline is RELEASED, never attached" is M5's one
+    /// property with a leaked transcode on the other side of it, and a test
+    /// that cannot see the release cannot pin it.
+    private let releaseHlsSession: @MainActor (AppModel, String) async -> Void
 
     init(
         requestPlaybackDecision: @escaping @MainActor (AppModel, Int, PrePlaySelection, PlaybackQuality) async throws -> (decision: Decision, caps: DeviceCaps) = {
@@ -1687,6 +1696,12 @@ final class PlayerController: ObservableObject {
         canPlayOffline: @escaping (AVURLAsset) -> Bool = { $0.assetCache?.isPlayableOffline == true },
         waitInitialDecisionDeadline: @escaping @MainActor () async throws -> Void = {
             try await Task.sleep(for: .seconds(20))
+        },
+        waitCreateRetry: @escaping @MainActor (Int) async throws -> Void = {
+            try await Task.sleep(for: .milliseconds($0))
+        },
+        releaseHlsSession: @escaping @MainActor (AppModel, String) async -> Void = {
+            await $0.endHlsSession($1)
         },
         requestHlsSession: @escaping @MainActor (AppModel, Int, CreateSessionRequest) async throws -> HlsStart = {
             try await $0.createHlsSession(fileId: $1, body: $2)
@@ -1700,6 +1715,8 @@ final class PlayerController: ObservableObject {
         self.itemPreparation = itemPreparation
         self.canPlayOffline = canPlayOffline
         self.waitInitialDecisionDeadline = waitInitialDecisionDeadline
+        self.waitCreateRetry = waitCreateRetry
+        self.releaseHlsSession = releaseHlsSession
         self.requestHlsSession = requestHlsSession
         self.readControlSequence = readControlSequence
     }
@@ -1997,11 +2014,19 @@ final class PlayerController: ObservableObject {
     /// The last position the surface's evidence sampler saw, so "the clock
     /// moved" is a delta rather than a guess.
     private var lastSurfaceSampleMs: Int?
-    /// The create-retry sequence in flight (M5), and whether its absolute
-    /// deadline has passed. The epoch is what stops a watchdog armed by an
-    /// abandoned sequence from expiring the one that replaced it.
+    /// The create-retry sequence in flight (M5). `createRetryEpoch` names it;
+    /// `createRetryExpiredEpoch` is the epoch whose absolute deadline has
+    /// passed, rather than a shared flag two sequences could write.
+    ///
+    /// Both halves are keyed on the epoch because they have to be. Two
+    /// sequences overlap by the obvious route — the watchdog raises
+    /// `exhausted` at sixty seconds, the viewer taps Try again, and the new
+    /// open starts while the old create is still in flight — and a
+    /// controller-wide `Bool` let the newer one clear the older one's expiry,
+    /// while an unconditional retirement of the counter let the older one's
+    /// exit leave the newer one with no watchdog at all.
     private var createRetryEpoch = 0
-    private var createRetryExpired = false
+    private var createRetryExpiredEpoch: Int?
     /// Whether this playback has ever presented. It is the whole of the
     /// difference between the `start` and `attached` contexts.
     private var surfaceHasPresented = false
@@ -3800,11 +3825,11 @@ final class PlayerController: ObservableObject {
                 throw error
             }
             guard !isSuperseded(generation) else {
-                await model.endHlsSession(hls.sessionId)
+                await release(session: hls.sessionId)
                 return
             }
             guard started else {
-                await model.endHlsSession(hls.sessionId)
+                await release(session: hls.sessionId)
                 isChangingStream = false
                 return
             }
@@ -4024,8 +4049,8 @@ final class PlayerController: ObservableObject {
 
     /// Retire a superseded HLS session, best effort.
     private func release(session id: String?) async {
-        guard let id else { return }
-        await model?.endHlsSession(id)
+        guard let id, let model else { return }
+        await releaseHlsSession(model, id)
     }
 
     /// Put back everything `open` disturbed before it discovered it could not
@@ -5161,25 +5186,32 @@ final class PlayerController: ObservableObject {
         // answer under `request_id`, so replaying one recovers the session it
         // already made instead of spawning a second encoder — which is what
         // makes retrying a create safe at all.
-        var request = body
-        if request.requestId == nil { request.requestId = UUID().uuidString }
+        // `CreateSessionRequest.requestId` already defaults to a fresh UUID
+        // (`Models.swift`), and `applyOpenIntent` only ever replaces it with a
+        // ticket's. There is nothing to mint here; what matters is that the
+        // SAME body — and so the same identity — is posted on every rung.
+        let request = body
         let began = ContinuousClock.now
         createRetryEpoch &+= 1
         let epoch = createRetryEpoch
-        createRetryExpired = false
         let watchdog = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(PlaybackCreateRetry.deadlineMs))
             guard let self else { return }
+            // Same shape as `initialDecisionDeadlineTask`: a cancelled wait
+            // throws, and a cancelled watchdog expires nothing.
+            do { try await self.waitCreateRetry(PlaybackCreateRetry.deadlineMs) } catch { return }
             self.expireCreateRetry(epoch: epoch, lifecycle: lifecycle, generation: generation)
         }
         // Cancelling the watchdog is not quite enough: a sleep that has already
         // elapsed cannot be cancelled out of its own continuation, and a
         // sequence that settled on the deadline's own millisecond must not be
         // answered with a full-screen prompt over the session it just attached.
-        // Retiring the epoch is what makes `expireCreateRetry` a no-op there.
+        // Retiring the epoch is what makes `expireCreateRetry` a no-op there —
+        // and it is retired ONLY while this sequence still owns the counter,
+        // because a sequence that was superseded must not retire the epoch of
+        // the one that replaced it and leave that one unwatched.
         defer {
             watchdog.cancel()
-            createRetryEpoch &+= 1
+            if createRetryEpoch == epoch { createRetryEpoch &+= 1 }
         }
         var attempt = 0
         while true {
@@ -5192,7 +5224,7 @@ final class PlayerController: ObservableObject {
                   !isSuperseded(generation),
                   createRetryEpoch == epoch
             else { throw CancellationError() }
-            if createRetryExpired {
+            if createRetryExpiredEpoch == epoch {
                 throw PlaybackCreateRetryError.exhausted(reason: "deadline")
             }
             do {
@@ -5200,7 +5232,7 @@ final class PlayerController: ObservableObject {
                 // running" flag, and shadowing it inside a recovery sequence is
                 // the kind of thing a reader has to stop and check.
                 let opened = try await requestHlsSession(model, file, request)
-                guard !createRetryExpired || createRetryEpoch != epoch else {
+                guard createRetryExpiredEpoch != epoch else {
                     await release(session: opened.sessionId)
                     throw PlaybackCreateRetryError.exhausted(reason: "deadline")
                 }
@@ -5215,7 +5247,7 @@ final class PlayerController: ObservableObject {
                       !isSuperseded(generation),
                       createRetryEpoch == epoch
                 else { throw error }
-                if createRetryExpired {
+                if createRetryExpiredEpoch == epoch {
                     throw PlaybackCreateRetryError.exhausted(reason: "deadline")
                 }
                 let elapsedMs = Self.milliseconds(began.duration(to: ContinuousClock.now))
@@ -5243,7 +5275,7 @@ final class PlayerController: ObservableObject {
                                 ?? error.localizedDescription
                         )
                     }
-                    try await Task.sleep(for: .milliseconds(delayMs))
+                    try await waitCreateRetry(delayMs)
                     attempt += 1
                 }
             }
@@ -5255,9 +5287,12 @@ final class PlayerController: ObservableObject {
     /// flight is deliberately NOT cancelled: it is still awaited, so that
     /// whatever it produces can be released rather than leaked.
     private func expireCreateRetry(epoch: Int, lifecycle: Int, generation: Int) {
-        guard createRetryEpoch == epoch, !createRetryExpired else { return }
+        // `createRetryEpoch == epoch` is both "this sequence is still the
+        // current one" and "this sequence has not settled": its `defer`
+        // retires the counter on the way out.
+        guard createRetryEpoch == epoch, createRetryExpiredEpoch != epoch else { return }
         guard isCurrentLifecycle(lifecycle), !isSuperseded(generation) else { return }
-        createRetryExpired = true
+        createRetryExpiredEpoch = epoch
         raiseCreateRetryExhausted()
     }
 
