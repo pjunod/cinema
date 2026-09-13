@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 191
+One binary serves everything on one port (`:32400` by default). plurx has 192
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -2573,7 +2573,7 @@ streaming, and refuses a response signed for the wrong node or nonce.
 | POST | `/_internal/v1/live-tv/start`, `/_internal/v2/live-tv/start`, `/_internal/v1/live-tv/activate` | 16 KiB | Starts and activates a tuner session on the owner; v2 carries the exact signed live playback envelope |
 | POST | `/_internal/v1/live-tv/resource` | 16 KiB | Fetches a playlist, segment or status for an owned capability |
 | POST | `/_internal/v1/live-tv/stop`, `/_internal/v1/live-tv/drain` | 16 KiB | Releases a capability; drains below a generation |
-| POST | `/_internal/v1/live-tv/retire`, `/_internal/v1/live-tv/resume` | 1 KiB | Retires a viewer's public start id on the owner, or hands back the session it still owns. New paths rather than new fields on the signed start bodies: an owner that predates them answers 404, which an ingress renders as a typed answer that proves nothing about the tuner |
+| POST | `/_internal/v1/live-tv/retire`, `/_internal/v1/live-tv/resume`, `/_internal/v1/live-tv/start-state` | 1 KiB | Retires a viewer's public start id on the owner, hands back the session it still owns, or reports what became of it. Three paths rather than one with a mode flag: `resume` selects a session, cancels the others and fences an id it has never seen, and a status read may do none of that. New paths rather than new fields on the signed start bodies: an owner that predates them answers 404, which an ingress renders as a typed answer that proves nothing about the tuner |
 | POST | `/internal/cluster/media/sessions/start`, `/internal/cluster/media/sessions/activate` | 96 / 128 KiB | Starts and confirms a remote media session |
 | POST | `/internal/cluster/media/sessions/prepare` | 96 KiB | Validates an already-reserved successor identity, primes its durable recipe on the target owner, and returns only after the existing actor slot accepts it |
 | POST | `/internal/cluster/media/sessions/abort`, `/internal/cluster/media/sessions/relay` | 96 KiB | Settles an abort; relays one owned HLS resource |
