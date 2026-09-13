@@ -4,6 +4,42 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The Apple playback surface is one projection of the player (M2)
+
+**Built 2026-09-13 on `apple/playback-surface`, Apple build 147, WIP PR open,
+unrun: this machine has no Xcode, so every Swift test in it is written and
+none has been compiled.** `failed`, `playbackError`, `playbackFailureTitle`
+and `playbackNotice` are deleted from `PlayerController` and replaced by one
+`@Published private(set) var surface = PlaybackSurfaceModel()` —
+`clients/apple/Sources/PlaybackSurfaceModel.swift`, a pure reducer over typed
+faults, evidence and identities, with the fixture's eight classes, 21 sources
+and five timings transcribed the way `PlayerInputRouting` transcribes the
+input contract. `AppleClientTests` runs all 54 of
+`tests/playback/playback-surface-contract.json`'s ordered-event cases against
+it; no case is skipped, and the two shapes Apple cannot express verbatim —
+named generations and the web's inert-event spellings — are mapped with the
+mapping commented beside it. `scripts/playback-surface-fence` now budgets
+`PlayerController.swift` at zero and its entry is gone.
+
+What a viewer can see change: a readiness deadline with a rung left is a
+refusal banner over a predecessor that keeps playing instead of a full screen
+over a moving picture; with no rung left, `fail()` stops the player and *then*
+raises `exhausted`. The pre-start black-frame ladder stops the player and says
+so instead of exhausting in silence over audio. `PlurxAPI.check` keeps every
+`{code, message}` refusal body as `APIError.refused`, so a 503
+`startup_timeout` reads as the server's sentence rather than "Server returned
+503" — 401/403 stay status-shaped and 409 stays `.conflict`, each pinned by a
+test. Playback debug gains the SURFACE section and the last sixteen faults,
+and the four `surface_*` events go to the client log.
+
+Behaviour-neutral otherwise: no threshold, budget, detector, ladder or
+control-plane verdict semantic moved, and the presenter has no side effects.
+Three deviations are stated in the PR rather than hidden — a subtitle notice
+that used to vanish the instant the viewer chose again now expires on its own
+five-second clock, a full-screen progress fault draws the existing
+stream-change spinner rather than new staged-text UI, and Apple does not raise
+`create_503_not_yet` until M5 gives its owner a create retry to make the
+`preparing` spinner honest.
 ## The web player's overlay is a projection now (M1)
 
 **Built 2026-09-13 on `web/playback-surface`, WIP PR #277 against `main`,
