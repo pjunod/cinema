@@ -48,6 +48,7 @@ import androidx.media3.common.TrackGroup
 import androidx.media3.common.TrackSelectionOverride
 import androidx.media3.common.Tracks
 import androidx.media3.common.util.UnstableApi
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
@@ -59,6 +60,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import tv.plurx.app.data.Caps
 import tv.plurx.app.data.HlsStart
@@ -69,6 +73,8 @@ import tv.plurx.app.data.AudioTrack
 import tv.plurx.app.data.SubTrack
 import tv.plurx.app.data.SubtitleReadiness
 import tv.plurx.app.data.Net
+import tv.plurx.app.data.RefusalException
+import tv.plurx.app.data.refusalStatusOf
 import tv.plurx.app.data.PlaybackSessionStatus
 import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.Session
@@ -80,7 +86,6 @@ import tv.plurx.app.ui.components.RequestInitialFocus
 import java.util.Locale
 import java.util.UUID
 
-import retrofit2.HttpException
 /**
  * A subtitle selection the viewer actually made, where `null` inside means
  * "Off". Distinct from no wrapper at all, which means nobody has chosen yet
@@ -127,7 +132,6 @@ class Controller(
     initialAudioOffsetMs: Long = 0,
     retainedAudio: Long? = null,
     retainedSubtitle: SubtitleChoice? = null,
-    private val onError: (String) -> Unit = {},
 ) {
     /**
      * The authoritative player — the one on the surface, with the volume up.
@@ -206,9 +210,6 @@ class Controller(
     }
         private set
 
-    var playbackNotice: String? by mutableStateOf(null)
-        private set
-
     internal var pgsOverlayFrame: PGSOverlayFrame? by mutableStateOf(null)
         private set
 
@@ -247,7 +248,10 @@ class Controller(
      */
     private val sessionCreateCoordinator = SessionCreateCoordinator(
         createSession = { body -> vm.createHlsSession(plan.fileId, body) },
-        isBadRequest = { failure -> failure is HttpException && failure.code() == 400 },
+        // A refusal the server explained now arrives as RefusalException,
+        // so "is this a 400" has to ask for the status rather than for one of
+        // the two exception types that can carry it.
+        isBadRequest = { failure -> refusalStatusOf(failure) == 400 },
         freshRequestId = { UUID.randomUUID().toString() },
         releaseSession = vm::endHlsSession,
     )
@@ -442,6 +446,66 @@ class Controller(
     private val targetPresentationOwner = targetPresentationDeadline.claimOwner(monotonicNowMs())
     private var presentationForeground = true
     private var mediaMutationEpoch = 0L
+
+    // ------------------------------------------------ the playback surface
+    //
+    // What the viewer is shown when playback is not simply playing, as a
+    // projection of this player rather than a string pushed at a view:
+    // docs/clients/PLAYBACK-SURFACE-CONTRACT.md. The reducer in
+    // `PlaybackSurface.kt` is pure; this controller is the recovery owner, and
+    // `PlaybackSurfaceOwner` is the one place its new obligation — stop the
+    // player, then raise a blocking fault — is discharged.
+    private val _surface = MutableStateFlow<PlaybackSurface>(PlaybackSurface.None)
+
+    /** The only playback surface. Rendered from; never written to from a view. */
+    internal val surface: StateFlow<PlaybackSurface> = _surface.asStateFlow()
+
+    /**
+     * Moves on every ledger change, including ones the drawn surface cannot
+     * show — a fault cleared underneath the one on screen changes the history
+     * and nothing else. Compose state, so Playback debug recomposes on it.
+     */
+    internal var surfaceRevision by mutableIntStateOf(0)
+        private set
+
+    private val surfaceOwner = PlaybackSurfaceOwner(
+        player = object : SurfaceOwnerPlayer {
+            // Read through `player` rather than captured: a committed prepared
+            // replacement swaps the instance, and the owner must stop the one
+            // on the surface now.
+            override var playbackRequested: Boolean
+                get() = player.playWhenReady
+                set(value) {
+                    player.playWhenReady = value
+                }
+            override val positionMs: Long get() = realPosition()
+            // `playbackParameters.speed` is the requested SETTING and stays
+            // 1.0 while the player is stopped — it is not Apple's
+            // `AVPlayer.rate`. The ledger's `rate` has to be able to read zero,
+            // because "exhausted with rate 0" is what M4 measures.
+            override val rate: Float
+                get() = if (player.isPlaying) player.playbackParameters.speed else 0f
+        },
+        nowMs = { monotonicNowMs() },
+        publish = { value ->
+            // playback-surface-publish:begin
+            _surface.value = value
+            // playback-surface-publish:end
+        },
+        emit = { entry ->
+            surfaceRevision += 1
+            reportSurfaceLog(entry)
+        },
+    )
+
+    /** Last `realPosition()` the surface sampled, or null after a generation change. */
+    private var surfaceEvidencePositionMs: Long? = null
+    private var surfaceEvidenceSampledAtMs: Long? = null
+    private var surfaceIntentSequence: Long? = null
+
+    /** Last 16 faults, for the ledger's SURFACE section. */
+    internal val surfaceHistory: List<SurfaceLedgerRow> get() = surfaceOwner.history
+
     private var statusPollingJob: Job? = null
     var playbackStallCount by mutableIntStateOf(0)
         private set
@@ -533,7 +597,7 @@ class Controller(
         playbackSpeed = { player.playbackParameters.speed },
         onFrame = { pgsOverlayFrame = it },
         onStatus = { pgsOverlayStatus = it },
-        onFailure = { playbackNotice = it },
+        onFailure = { message -> raiseDegradedNotice(message) },
     )
 
     private val listener = object : Player.Listener {
@@ -557,7 +621,13 @@ class Controller(
                 ),
                 render = RenderState.FAILED,
             )
-            if (isTransportPlaybackError(error.errorCode) && retryMediaOnNextNode(error)) return
+            // The surface adapter runs AFTER the ladder, on its outcome:
+            // `playbackErrorAction` is untouched (contract §3.5).
+            val refusal = mediaRefusal(error)
+            if (isTransportPlaybackError(error.errorCode) && retryMediaOnNextNode(error)) {
+                raiseRecoveryStep(refusal, "Reconnecting on another server address.")
+                return
+            }
             val action = playbackErrorAction(
                 deliveryMode = deliveryMode,
                 preservesDolbyVision = plan.preserveDolbyVision,
@@ -626,8 +696,11 @@ class Controller(
                             detail = "skipped=retry_same_hdr delivery=$deliveryMode " +
                                 "verdict=${armed.type}",
                         )
-                        onError(
-                            armed.message
+                        // The armed verdict skipped the one rung that retries
+                        // this source unchanged, so the ladder is spent here.
+                        stopAndRaisePlaybackFailure(
+                            refusal = refusal,
+                            sentence = armed.message
                                 ?: error.errorCodeName.let { "Playback stopped ($it)." },
                         )
                         return
@@ -635,6 +708,7 @@ class Controller(
                     val position = realPosition()
                     sameHdrRetryUsed = true
                     restartAt(position, "fallback")
+                    raiseRecoveryStep(refusal, "Retrying this stream.")
                 }
                 PlaybackErrorAction.RetryAsDolbyVisionRemux -> {
                     val position = realPosition()
@@ -643,6 +717,7 @@ class Controller(
                     subtitleDelivery =
                         routeSubtitle(trackFor(selectedSubtitle), subtitleDelivery).delivery
                     restartAt(position, "fallback")
+                    raiseRecoveryStep(refusal, "Switching to a compatible copy.")
                 }
                 PlaybackErrorAction.RetryAsCompatibilityTranscode -> {
                     // Read the position before the mode moves: which timeline
@@ -656,13 +731,15 @@ class Controller(
                     subtitleDelivery =
                         routeSubtitle(trackFor(selectedSubtitle), subtitleDelivery).delivery
                     restartAt(position, "fallback")
+                    raiseRecoveryStep(refusal, "Switching to a compatible stream.")
                 }
-                PlaybackErrorAction.Fail -> onError(
+                PlaybackErrorAction.Fail -> stopAndRaisePlaybackFailure(
+                    refusal = refusal,
                     // A verdict says production stopped for a reason retrying
                     // cannot change. A dropped link is a different cause with
                     // a different answer, so a transport failure keeps the
                     // client's own words rather than borrowing the server's.
-                    (if (isTransportPlaybackError(error.errorCode)) null
+                    sentence = (if (isTransportPlaybackError(error.errorCode)) null
                     else playbackControl.terminalVerdict?.message)
                         ?: error.errorCodeName.let { "Playback stopped ($it)." },
                 )
@@ -674,7 +751,12 @@ class Controller(
             establishedPlayback = true
             openStallTracker.reset()
             lastTimeToFirstFrameMs = playbackTelemetry.firstFrame(monotonicNowMs())?.elapsedMs
-            playbackNotice = null
+            // The client's own presentation proof: an actual frame on the
+            // surface, on the generation that is attached, foreground, with
+            // playback requested (contract §3.4).
+            if (player.playWhenReady && presentationForeground) {
+                surfaceOwner.presenting(true, mediaMutationEpoch)
+            }
             // A commit outstanding here is the successor's very first frame on
             // the surface, which is exactly what `first_frame_unix_ms` means.
             settleCommitOnFirstFrame(System.currentTimeMillis())
@@ -700,6 +782,9 @@ class Controller(
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
+            // Inert by contract: a state flag is not proof that a picture is
+            // moving, and it never moves a surface on its own.
+            surfaceOwner.inert("isPlayingChanged")
             settleAudioPlaybackIntentIfPresented()
             if (isPlaying && plan.videoCodec == null) {
                 establishedPlayback = true
@@ -814,9 +899,11 @@ class Controller(
         player.playWhenReady = playbackIntent.playbackRequested
         player.addListener(listener)
         pgsOverlay.select(selectedSubtitle.takeIf { subtitleDelivery == SubtitleDelivery.BitmapOverlay })
+        attachSurfaceGeneration()
         targetPresentationWatchdogJob = scope.launch {
             while (isActive) {
                 sampleTargetPresentationDeadline()
+                sampleSurface(realPosition(), monotonicNowMs())
                 delay(targetPresentationDeadline.nextSampleDelayMs(monotonicNowMs()))
             }
         }
@@ -828,14 +915,19 @@ class Controller(
                 // Retrospective telemetry still records the final interruption
                 // duration, but recovery is owned by the open deadline below.
                 playbackTelemetry.sampleStall(establishedPlayback, observedAtMs)
+                val mediaPositionMs = realPosition()
                 val openStall = openStallTracker.sample(
                     playbackRequested = player.playWhenReady && presentationForeground &&
                         playbackIntent.pendingSeek == null,
                     playbackEnded = player.playbackState == Player.STATE_ENDED,
                     establishedPlayback = establishedPlayback,
-                    positionMs = realPosition(),
+                    positionMs = mediaPositionMs,
                     observedAtMs = observedAtMs,
                 )
+                // The surface's presentation evidence is this same film-clock
+                // sample (contract §3.4): no second detector and no second
+                // timer, just the reading the stall tracker already took.
+                sampleSurface(mediaPositionMs, observedAtMs)
                 if (openStall != null) {
                     if (openStall.controlMayDefer) {
                         playbackStallCount += 1
@@ -873,6 +965,9 @@ class Controller(
         )
     }
 
+    /** A refusal Media3 carried, classified. */
+    private data class MediaRefusal(val source: String, val message: String?, val positionMs: Long?)
+
     /** The viewer's newest film target, even while the predecessor still renders. */
     fun positionForPlaybackIntent(): Long =
         playbackIntent.positionForPlaybackIntent(realPosition())
@@ -880,6 +975,13 @@ class Controller(
     /** An explicit Retry is a new viewer command, unlike an automatic reopen. */
     fun prepareViewerRetry(): Long {
         val target = positionForPlaybackIntent()
+        // The owner's stop-before-raise set `playWhenReady = false`, which
+        // Media3 reports as a USER_REQUEST and which therefore cleared the
+        // viewer's transport intent. That intent outlives this controller — it
+        // belongs to the playback, not the plan — so without this the
+        // replacement Retry builds would attach paused behind a picture the
+        // viewer just asked to see again.
+        playbackIntent.setPlaybackRequested(true)
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
         playbackIntent.beginSeek(target, realPosition())
@@ -952,6 +1054,7 @@ class Controller(
         // successor was primed to — so it abandons the preparation too.
         abandonPreparedReplacement(failed = false)
         mediaMutationEpoch += 1
+        attachSurfaceGeneration()
         if (planReplacement.route(playbackIntent)) return
         val recipe = currentRecipe()
         if (recipeOwnership.needsMediaReplacement(recipe)) {
@@ -1069,6 +1172,7 @@ class Controller(
         controlEvidencePositionMs = null
         sessionId = null
 
+        surfaceOwner.retire(mediaMutationEpoch)
         player.removeListener(listener)
         disarmVideoPresentation()
         mediaSession.release()
@@ -1106,10 +1210,9 @@ class Controller(
         // here means guessing "burn". Ignore it instead.
         if (index != null && track == null) return false
         if (subtitleBurnWouldDiscardHdr(track, deliveredRange)) {
-            playbackNotice = HDR_SUBTITLE_NOTICE
+            raiseDegradedNotice(HDR_SUBTITLE_NOTICE)
             return false
         }
-        playbackNotice = null
         // Keep an executed seek's optimistic film target even while the
         // predecessor item still exposes its old clock.
         val position = positionForPlaybackIntent()
@@ -1143,13 +1246,9 @@ class Controller(
         return true
     }
 
-    fun clearPlaybackNotice() {
-        playbackNotice = null
-    }
-
     fun allowsPictureInPictureCommand(): Boolean {
         if (!pgsOverlayIsActive) return true
-        playbackNotice = PGS_OVERLAY_PIP_NOTICE
+        raiseDegradedNotice(PGS_OVERLAY_PIP_NOTICE)
         return false
     }
 
@@ -1181,6 +1280,7 @@ class Controller(
     ) {
         if (!playbackControlBootstrapFence.isActive()) return
         mediaMutationEpoch += 1
+        attachSurfaceGeneration()
         if (planReplacement.route(playbackIntent, retry = reason == "presentation-recovery")) return
         // A user-initiated restart (seek, quality switch, track change) resets
         // the stall reopen budget and invalidates any in-flight stall.
@@ -1276,7 +1376,7 @@ class Controller(
                             event = "playback_error",
                             level = "error",
                             message = "session create failed before Media3 started",
-                            code = (error as? HttpException)?.code(),
+                            code = refusalStatusOf(error),
                             detail = redactedFailureDetail("session_create", error),
                             attempt = attempt,
                         )
@@ -1285,7 +1385,14 @@ class Controller(
                             "PlurxPlayback",
                             "session create failed ${redactedFailureDetail("session_create", error)}",
                         )
-                        onError("The server couldn't start this stream.")
+                        raiseSessionCreateFailure(
+                            error,
+                            "The server couldn't start this stream.",
+                            // Sound here: on a cold start nothing was ever set
+                            // on the player, so there is genuinely nothing
+                            // behind this failure.
+                            predecessor = predecessorAttached(),
+                        )
                     }
                     return@launch
                 }
@@ -1304,6 +1411,9 @@ class Controller(
                     adoptSessionDelivery(hls)
                     // A cached session is the whole stream on disk: its timeline
                     // starts at zero and the player seeks, exactly like direct play.
+                    // The owner reporting that its recovery produced this
+                    // generation; `recovering` faults are retired by it.
+                    surfaceOwner.ownerSuccess(mediaMutationEpoch)
                     val timeline = sessionPlaybackTimeline(hls, requestedStartMs = ms)
                     baseMs = timeline.baseMs
                     activeMediaPath = relativeMediaPath(hls.playlist_url)
@@ -1338,10 +1448,27 @@ class Controller(
         event: OpenPlaybackStallTracker.Event,
     ): Boolean = when (verdict.type) {
         "terminal" -> {
-            // Ruling D1: the verdict is armed, not executed. This player is
-            // stalled with nothing left to render, so the only thing the
-            // verdict changes is whose words the viewer reads.
-            onError(verdict.message ?: "Playback stopped.")
+            // Ruling D1 keeps the verdict from tearing anything down: returning
+            // true here is what stops a reopen from starting and a budget from
+            // being spent, and that is unchanged.
+            //
+            // But the owner has nothing left to try either, and nothing else
+            // will speak for it: this branch returns before
+            // `openStallTracker.reset()`, so the tracker stays latched with
+            // `fired = true` on a playhead that will never move; `playWhenReady`
+            // is still true so the tracker's own escape never fires;
+            // `sampleTargetPresentationDeadline` needs a `pendingSeek` a
+            // mid-film stall does not have; and `onPlayerError` never comes,
+            // because ExoPlayer is buffering rather than failing. There is no
+            // later `stopped` to consume the wording. So the owner stops the
+            // player and says so, in the server's words — see the amendment to
+            // §3.4's Android row in
+            // docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md.
+            surfaceOwner.stoppedAfterControlVerdict(
+                attached = mediaMutationEpoch,
+                positionMs = event.positionMs,
+                detail = verdict.message ?: "Playback stopped.",
+            )
             true
         }
         "hold", "retry_resource" -> {
@@ -1356,11 +1483,14 @@ class Controller(
             if (!event.controlMayDefer || !openStallTracker.defer(monotonicNowMs())) {
                 false
             } else {
-                playbackNotice = if (verdict.type == "hold") {
-                    "Waiting briefly for the server. Your place is saved."
-                } else {
-                    "The server asked playback to retry shortly. Your place is saved."
-                }
+                surfaceOwner.controlHold(
+                    mediaMutationEpoch,
+                    if (verdict.type == "hold") {
+                        "Waiting briefly for the server. Your place is saved."
+                    } else {
+                        "The server asked playback to retry shortly. Your place is saved."
+                    },
+                )
                 true
             }
         }
@@ -1448,7 +1578,12 @@ class Controller(
         openStallTracker.reset()
         if (session == null) {
             if (sessionlessStallRecoveryUsed) {
-                onError("Playback stopped responding after retrying this stream.")
+                // The owner's obligation: stop the player, THEN say so.
+                // `playWhenReady = false` also resets the open-stall tracker
+                // (PlaybackTelemetry.kt), which is what closes the
+                // restart-under-overlay path. `stallWatchdogJob` stays: it is
+                // this owner's detector, and Keep waiting needs it.
+                surfaceOwner.exhaustedAfterSessionlessStall(mediaMutationEpoch, positionMs)
                 return
             }
             sessionlessStallRecoveryUsed = true
@@ -1461,10 +1596,11 @@ class Controller(
         // The server cannot step further down, so this is a visible terminal
         // failure with a retry affordance rather than silent infinite wait.
         if (!stallReopenBudget.canReopen()) {
-            onError("Playback stopped responding after exhausting recovery attempts.")
+            surfaceOwner.exhaustedAfterReopenBudget(mediaMutationEpoch, positionMs)
             return
         }
         val reason = "stall"
+        raiseRecoveryStep(null, "Reconnecting to the stream.")
         val attempt = beginPlaybackAttempt(reason, observedAtMs)
         val recipe = currentRecipe()
         val requestVersion = stallGuard.beginRequest()
@@ -1539,7 +1675,7 @@ class Controller(
                             event = "playback_error",
                             level = "error",
                             message = "session reopen failed before Media3 started",
-                            code = (error as? HttpException)?.code(),
+                            code = refusalStatusOf(error),
                             detail = redactedFailureDetail("session_reopen", error),
                             attempt = attempt,
                         )
@@ -1548,9 +1684,20 @@ class Controller(
                             "PlurxPlayback",
                             "session reopen failed ${redactedFailureDetail("session_reopen", error)}",
                         )
-                        onError(
+                        raiseSessionCreateFailure(
+                            error,
                             playbackControl.terminalVerdict?.message
                                 ?: "The stream stalled and recovery failed.",
+                            // S5: a stalled player still holds its item and sits
+                            // in STATE_BUFFERING, so "an item is attached" is not
+                            // the question here — "is there a picture behind this
+                            // failure" is. Without the presentation test a frozen
+                            // stream got a passive banner with `intent = null`,
+                            // which `intent_superseded` can never match and which
+                            // ten seconds of continuous presentation will never
+                            // reach. See the amendment to §3.4's row for the
+                            // stall-reopen site.
+                            predecessor = predecessorAttached() && surfaceOwner.isPresenting,
                         )
                     }
                     return@launch
@@ -1564,6 +1711,7 @@ class Controller(
                     // saying "this session is already at its answer" without a rung
                     // the client can compare.
                     stallReopenBudget.record(hls.height)
+                    surfaceOwner.ownerSuccess(mediaMutationEpoch)
                     sessionId = hls.session_id
                     beginPlaybackControl(hls)
                     startStatusPolling(hls.session_id)
@@ -2153,6 +2301,8 @@ class Controller(
         if (!playbackControlBootstrapFence.isActive()) return
         if (presentationForeground != foreground) stallGuard.invalidateObservation()
         presentationForeground = foreground
+        // Android has no hidden page; this is the contract's `hidden`.
+        surfaceOwner.hidden(!foreground)
         sampleTargetPresentationDeadline()
     }
 
@@ -2171,6 +2321,7 @@ class Controller(
         // timeline cannot cancel it, and a control hold cannot extend it.
         seekJob?.cancel()
         mediaMutationEpoch += 1
+        attachSurfaceGeneration()
         stallGuard.invalidateForPlaybackAttempt()
         reportControlEvidence(
             ClientObservation(decoderState = DecoderState.STARVED),
@@ -2183,10 +2334,318 @@ class Controller(
             detail = "target_ms=${event.targetMs} terminal=${event.terminal}",
         )
         if (event.terminal) {
-            onError("Playback couldn't reach the requested position after retrying. Your place is saved.")
+            surfaceOwner.exhaustedAfterTargetDeadline(mediaMutationEpoch, event.targetMs)
         } else if (targetPresentationDeadline.recover(event, now, expectedOwner = targetPresentationOwner)) {
             restartAt(event.targetMs, "presentation-recovery", now)
+            // §3.3 row 14: a readiness deadline that fires with a rung left is
+            // its own source, so the ledger names what actually happened. It is
+            // about the generation the restart just produced.
+            surfaceOwner.recoveringReadinessDeadline(
+                mediaMutationEpoch,
+                surfaceContext(),
+                "Getting back to the requested position.",
+            )
         }
+    }
+
+    // ------------------------------------------------ surface, owner side
+
+    /**
+     * Which context a fault raised right now belongs to (contract §3.3).
+     *
+     * `start` until this playback has presented a picture, `attached` after.
+     * `change` is decided at the two sites that know a viewer-requested
+     * replacement is pending over a predecessor that is still attached.
+     */
+    private fun surfaceContext(): SurfaceContext =
+        if (establishedPlayback) SurfaceContext.Attached else SurfaceContext.Start
+
+    /**
+     * True while an item the failed replacement was going to replace is still
+     * attached and playing out of its buffer.
+     *
+     * `establishedPlayback` cannot answer this: `beginPlaybackAttempt` clears
+     * it before the create is even issued, which is exactly the window this
+     * question is asked in. The player's own item is what survives that.
+     */
+    private fun predecessorAttached(): Boolean =
+        player.currentMediaItem != null && player.playbackState != Player.STATE_IDLE
+
+    /** A generation change: the faults about the old one stop being about anything. */
+    private fun attachSurfaceGeneration() {
+        surfaceEvidencePositionMs = null
+        surfaceEvidenceSampledAtMs = null
+        surfaceOwner.attach(mediaMutationEpoch)
+    }
+
+    /**
+     * Feed the presenter this player's own presentation proof (contract §3.4).
+     *
+     * No new detector and no new timer: [realPosition] is the sample the stall
+     * watchdog already takes, and foreground plus `playWhenReady` are the gates
+     * the contract names. A clock that has not moved between two samples is not
+     * a presenting picture, whatever the player's state flags say.
+     */
+    private fun sampleSurfacePresentation(positionMs: Long, observedAtMs: Long) {
+        val previousAt = surfaceEvidenceSampledAtMs
+        if (previousAt != null && observedAtMs - previousAt < SURFACE_EVIDENCE_INTERVAL_MS) return
+        val previous = surfaceEvidencePositionMs
+        surfaceEvidencePositionMs = positionMs
+        surfaceEvidenceSampledAtMs = observedAtMs
+        surfaceOwner.presenting(
+            presentationEvidence(
+                previousPositionMs = previous,
+                positionMs = positionMs,
+                playbackRequested = player.playWhenReady,
+                foreground = presentationForeground,
+            ),
+            mediaMutationEpoch,
+        )
+    }
+
+    /** A destination that landed settles its faults; one replaced supersedes them. */
+    private fun sampleSurfaceIntent() {
+        val current = playbackIntent.pendingSeek?.sequence
+        val previous = surfaceIntentSequence
+        surfaceIntentSequence = current
+        if (previous == null || previous == current) return
+        if (current == null) surfaceOwner.intentSettled(previous) else surfaceOwner.intentSuperseded(previous)
+    }
+
+    /**
+     * One pass of the presenter's inputs, on a loop that already runs.
+     *
+     * Called from both watchdogs: the stall sampler is where §3.4 puts the
+     * evidence, and the target-deadline sampler keeps the timed notices moving
+     * while the stall sampler is inside a bounded control ask.
+     */
+    private fun sampleSurface(positionMs: Long, observedAtMs: Long) {
+        surfaceOwner.hidden(!presentationForeground)
+        sampleSurfacePresentation(positionMs, observedAtMs)
+        sampleSurfaceIntent()
+        surfaceOwner.tick()
+    }
+
+    /** The contract's client-log events (§3.6), on the reporter that already exists. */
+    private fun reportSurfaceLog(entry: SurfaceLog) {
+        val level = when (entry.event) {
+            SurfaceLogEvents.RAISED, SurfaceLogEvents.DISAGREEMENT -> "warn"
+            SurfaceLogEvents.ERROR -> "error"
+            else -> "info"
+        }
+        val detail = buildString {
+            entry.cls?.let { append("class=").append(it.wire).append(' ') }
+            append("source=").append(entry.source)
+            append(" attached=").append(entry.attached)
+            entry.intent?.let { append(" intent=").append(it) }
+            entry.positionMs?.let { append(" position_ms=").append(it) }
+            if (entry.actions.isNotEmpty()) {
+                append(" actions=").append(entry.actions.joinToString(",") { action -> action.wire })
+            }
+            append(" player_stopped=").append(entry.playerStopped)
+            append(" presenting=").append(surfaceOwner.isPresenting)
+            append(" rate=").append(player.playbackParameters.speed)
+            entry.by?.let { append(" by=").append(it) }
+            entry.action?.let { append(" action=").append(it.wire) }
+            entry.error?.let { append(" error=").append(it) }
+            entry.context?.let { append(" context=").append(it) }
+        }
+        playbackTelemetry.report(
+            event = entry.event,
+            level = level,
+            message = entry.cls?.wire ?: entry.source ?: entry.event,
+            detail = detail,
+        )
+    }
+
+    /**
+     * A playlist or segment refusal Media3 wrapped, as a contract source id.
+     *
+     * The plan names `error.cause`; Media3 wraps the loader exception a level
+     * or two deeper on some paths, so the chain is walked to a small bounded
+     * depth rather than only its first link. Classification is by status, as
+     * §3.5 gives it — the body only supplies the sentence and the position, and
+     * a body that is not a legible refusal supplies neither.
+     */
+    private fun mediaRefusal(error: PlaybackException): MediaRefusal? {
+        var cause: Throwable? = error.cause
+        var depth = 0
+        while (cause != null && cause !is HttpDataSource.InvalidResponseCodeException && depth < 4) {
+            cause = cause.cause
+            depth += 1
+        }
+        val response = cause as? HttpDataSource.InvalidResponseCodeException ?: return null
+        val source = when (response.responseCode) {
+            503 -> SurfaceSources.SEGMENT_503_NOT_YET
+            410 -> SurfaceSources.MEDIA_OWNER_LOST_410
+            401, 403 -> SurfaceSources.AUTH_401_403
+            else -> return null
+        }
+        val body = try {
+            String(response.responseBody, Charsets.UTF_8)
+        } catch (_: Exception) {
+            null
+        }
+        val refusal = tv.plurx.app.data.parseRefusal(response.responseCode, body)
+        return MediaRefusal(source, refusal?.message, refusal?.positionMs)
+    }
+
+    /**
+     * A notice beside the picture: an automatic downshift, an HDR-subtitle
+     * refusal, a PGS or PiP failure (§3.3 row 17). Banner, timed, no stop.
+     */
+    private fun raiseDegradedNotice(message: String) {
+        surfaceOwner.degradedNotice(mediaMutationEpoch, surfaceContext(), message)
+    }
+
+    /**
+     * The owner started a recovery step (§3.3 rows 8, 12 and 13): a node
+     * failover, a compatibility rung, a reopen. A progress fault, no stop.
+     */
+    private fun raiseRecoveryStep(refusal: MediaRefusal?, reason: String) {
+        val context = surfaceContext()
+        val detail = refusal?.message ?: reason
+        when {
+            // `segment_503_not_yet` is an attached-context row; before the
+            // first frame the same failure is the owner's own recovery step and
+            // nothing more specific is true. A 410 is `any` context since
+            // upstream 97231607, because it is an answer on a create too.
+            refusal?.source == SurfaceSources.SEGMENT_503_NOT_YET &&
+                context == SurfaceContext.Attached ->
+                surfaceOwner.recoveringSegmentRefusal(mediaMutationEpoch, refusal.positionMs, detail)
+            refusal?.source == SurfaceSources.MEDIA_OWNER_LOST_410 ->
+                surfaceOwner.recoveringMediaOwnerLost(
+                    mediaMutationEpoch,
+                    context,
+                    refusal.positionMs,
+                    detail,
+                )
+            else -> surfaceOwner.recoveringOwnerStep(mediaMutationEpoch, context, detail)
+        }
+    }
+
+    /**
+     * `onPlayerError` reached the end of the ladder: stop, then raise (§3.4).
+     *
+     * A 410 names the place the viewer should be put back at, so it is raised
+     * first as its own `recovering` fault and this owner's own stop promotes it
+     * (contract row 12) — which is what carries the position and its Try again
+     * into the terminal. A 401/403 keeps its own row so the prompt keeps its
+     * Sign in. Anything else is the owner's `stopped` with today's sentence.
+     */
+    private fun stopAndRaisePlaybackFailure(refusal: MediaRefusal?, sentence: String) {
+        val attached = mediaMutationEpoch
+        if (refusal != null && refusal.source == SurfaceSources.MEDIA_OWNER_LOST_410) {
+            surfaceOwner.recoveringMediaOwnerLost(
+                attached = attached,
+                context = surfaceContext(),
+                positionMs = refusal.positionMs ?: realPosition(),
+                detail = refusal.message ?: sentence,
+                actions = listOf(SurfaceAction.Retry, SurfaceAction.Close),
+            )
+        }
+        surfaceOwner.stoppedAfterPlaybackError(
+            attached = attached,
+            source = if (refusal?.source == SurfaceSources.AUTH_401_403) {
+                SurfaceSources.AUTH_401_403
+            } else {
+                SurfaceSources.OWNER_STOPPED
+            },
+            positionMs = refusal?.positionMs,
+            detail = refusal?.message ?: sentence,
+        )
+    }
+
+    /**
+     * A session create this playback was waiting on failed (§3.4).
+     *
+     * With no predecessor attached there is nothing behind the failure, so the
+     * owner stops and raises a terminal. With one attached — a quality change,
+     * a seek that reopens, a stall reopen — the picture the viewer is watching
+     * is not the one that failed: context `change`, a banner with Try again,
+     * and NO stop.
+     */
+    private fun raiseSessionCreateFailure(
+        error: Throwable,
+        sentence: String,
+        predecessor: Boolean,
+    ) {
+        val status = refusalStatusOf(error)
+        val refusal = error as? RefusalException
+        val attached = mediaMutationEpoch
+        val message = refusal?.message ?: sentence
+        // R1: 401/403 beats context, everywhere. §3.3's table is first-match and
+        // the `auth_401_403` row (context `any`) sits above `change_failed`
+        // precisely so a pending change cannot demote a refused credential into
+        // a banner the viewer can ignore. It maps to a blocking class, so the
+        // owner stops the player first.
+        if (status == 401 || status == 403) {
+            surfaceOwner.stoppedAfterSessionCreate(
+                attached = attached,
+                source = SurfaceSources.AUTH_401_403,
+                positionMs = refusal?.positionMs,
+                detail = message,
+            )
+            return
+        }
+        if (predecessor) {
+            surfaceOwner.refusedChange(
+                attached = attached,
+                intent = playbackIntent.pendingSeek?.sequence,
+                positionMs = refusal?.positionMs,
+                detail = message,
+            )
+            return
+        }
+        surfaceOwner.stoppedAfterSessionCreate(
+            attached = attached,
+            source = createFailureSource(refusal),
+            positionMs = refusal?.positionMs,
+            detail = message,
+        )
+    }
+
+    /**
+     * A create refusal as a contract source id.
+     *
+     * The VOD refusals have their own terminal rows, and 401/403 keeps its Sign
+     * in whether or not the body was legible. A "not yet" 503 stays the owner's
+     * `stopped` with the server's sentence: the create retry that would make it
+     * a `preparing` is M5, and this change is behaviour-neutral (§3.3 row 9).
+     */
+    private fun createFailureSource(refusal: RefusalException?): String = when {
+        refusal == null -> SurfaceSources.OWNER_STOPPED
+        refusal.code == "vod_source_rescan_required" -> SurfaceSources.VOD_SOURCE_RESCAN_REQUIRED
+        refusal.code == "vod_source_unsupported" -> SurfaceSources.VOD_SOURCE_UNSUPPORTED
+        refusal.code == "vod_transcode_unavailable" -> SurfaceSources.VOD_TRANSCODE_UNAVAILABLE
+        refusal.code == "vod_subtitle_burn_unavailable" -> SurfaceSources.VOD_SUBTITLE_BURN_UNAVAILABLE
+        refusal.code == "vod_disabled" -> SurfaceSources.VOD_DISABLED
+        else -> SurfaceSources.OWNER_STOPPED
+    }
+
+    /**
+     * The `exhausted` prompt's Keep waiting (§3.1): one more bounded attempt on
+     * the ladder that already exists. The reopen budget and the sessionless
+     * recovery are reset and the transport is asked for again; no budget,
+     * threshold or detector changes.
+     */
+    fun keepWaiting() {
+        if (!playbackControlBootstrapFence.isActive()) return
+        stallReopenBudget.reset()
+        sessionlessStallRecoveryUsed = false
+        sessionlessStallRecoveryPositionMs = null
+        stallGuard.invalidateForUserAction()
+        playbackControl.clearVerdict()
+        stallGuard.setPlaybackRequested(playbackIntent, true) { player.playWhenReady = it }
+        playbackControl.playerChanged()
+    }
+
+    /**
+     * The viewer answered the surface. The reducer clears the fault the action
+     * belonged to; the EFFECT of the action belongs to the owner and the screen.
+     */
+    internal fun surfaceAction(action: SurfaceAction) {
+        surfaceOwner.userAction(action)
     }
 
     private fun refreshControlWaiting() {
@@ -2764,6 +3223,19 @@ class Controller(
 internal const val CONTROL_ASK_MS = 1_500L
 internal const val CONTROL_ASK_CAP_MS = 3_000L
 internal const val SEEK_COALESCE_MS = 100L
+
+/**
+ * How far apart two `realPosition()` reads must be for "the film clock did not
+ * move" to be evidence of anything.
+ *
+ * Not a threshold and not a detector: both watchdog loops can come round a
+ * millisecond apart while a target deadline is pending, and a millisecond of
+ * film is below the player's own clock resolution — answering "not presenting"
+ * there would be inventing the answer, so a pass that arrives sooner takes no
+ * sample at all. One second is the cadence the stall sampler and the screen's
+ * position readout already run at.
+ */
+internal const val SURFACE_EVIDENCE_INTERVAL_MS = 1_000L
 
 /**
  * Whether this wait has crossed from supply into native presentation.

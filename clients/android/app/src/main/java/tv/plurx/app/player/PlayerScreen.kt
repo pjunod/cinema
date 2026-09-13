@@ -520,12 +520,15 @@ fun PlayerScreen(
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         when {
             failed -> PlaybackFailed(
-                message = "Couldn't start playback.",
-                onRetry = {
-                    startReason = "fallback"
-                    generation++
+                fault = preplayerStoppedFault("Couldn't start playback."),
+                onAction = { action ->
+                    if (action == SurfaceAction.Retry) {
+                        startReason = "fallback"
+                        generation++
+                    } else {
+                        onExit()
+                    }
                 },
-                onExit = onExit,
             )
             plan == null -> {
                 LoadingBox()
@@ -613,33 +616,84 @@ private fun ImmersivePlaybackEffect() {
 }
 
 /**
- * A real failure state. The rescue in [Controller] has already been spent by
- * the time this shows, so the viewer gets the reason and a way out — never a
- * frozen black surface with a stream that will not come back.
+ * A blocking surface the viewer has to answer: the `exhausted` prompt or a
+ * `stopped` terminal (PLAYBACK-SURFACE-CONTRACT.md §3.1).
+ *
+ * Opaque, because the player behind it is stopped by the time this is drawn —
+ * the recovery owner stops it before raising, and the presenter refuses to
+ * render the fault at all otherwise. The transparent version of this view over
+ * a stream that was still playing is the defect the contract exists to close.
  */
 @Composable
 private fun PlaybackFailed(
-    message: String,
-    onRetry: (() -> Unit)?,
-    onExit: () -> Unit,
+    fault: PlaybackFault,
+    onAction: (SurfaceAction) -> Unit,
 ) {
-    val retryFocusRequester = remember { FocusRequester() }
-    RequestInitialFocus(retryFocusRequester, enabled = onRetry != null)
+    val firstFocusRequester = remember { FocusRequester() }
+    // Force transcode is the web's diagnosed-stall affordance; no Android owner
+    // offers it, so it is dropped rather than drawn as a button that does
+    // nothing.
+    val actions = fault.actions.filter { it != SurfaceAction.ForceTranscode }
+    RequestInitialFocus(firstFocusRequester, enabled = actions.isNotEmpty())
     Column(
-        Modifier.fillMaxSize(),
+        Modifier.fillMaxSize().background(Color.Black),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(message, color = Color.White)
+        fault.title?.let { title ->
+            Text(title, color = Color.White, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.size(8.dp))
+        }
+        fault.detail?.let { detail -> Text(detail, color = Color.White) }
         Spacer(Modifier.size(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (onRetry != null) {
+            actions.forEachIndexed { index, action ->
                 TvButton(
-                    onClick = onRetry,
-                    modifier = Modifier.focusRequester(retryFocusRequester),
-                ) { Text("Retry") }
+                    onClick = { onAction(action) },
+                    modifier = if (index == 0) {
+                        Modifier.focusRequester(firstFocusRequester)
+                    } else {
+                        Modifier
+                    },
+                ) { Text(surfaceActionLabel(action)) }
             }
-            TvButton(onClick = onExit) { Text("Back") }
+        }
+    }
+}
+
+/** Today's words for each action, moved rather than rewritten. */
+private fun surfaceActionLabel(action: SurfaceAction): String = when (action) {
+    SurfaceAction.KeepWaiting -> "Keep waiting"
+    SurfaceAction.Retry -> "Retry"
+    SurfaceAction.Close -> "Back"
+    SurfaceAction.SignIn -> "Sign in"
+    SurfaceAction.ForceTranscode -> "Force transcode"
+}
+
+/** The ledger's `surface_kind`. */
+private fun surfaceKindLabel(surface: PlaybackSurface): String = when (surface) {
+    is PlaybackSurface.None -> "None"
+    is PlaybackSurface.Indicator -> "Indicator"
+    is PlaybackSurface.Banner -> "Banner"
+    is PlaybackSurface.Blocking -> "Blocking"
+}
+
+/**
+ * The ledger's `surface_history`: newest first, so "what was that overlay" is
+ * answered by the first entry.
+ */
+private fun surfaceHistoryLine(rows: List<SurfaceLedgerRow>): String? {
+    if (rows.isEmpty()) return null
+    return rows.asReversed().joinToString("  |  ") { row ->
+        buildString {
+            append(row.cls.wire).append(" · ").append(row.source)
+            append(" · raised ").append(row.raisedAtMs).append(" ms → ")
+            append(row.clearedAtMs?.let { "${it} ms (${row.clearedBy ?: "cleared"})" } ?: "open")
+            if (row.disagreed) append(" · disagreement")
+            append(" · rate ").append(row.playerAtRaise.rate)
+            append(", ").append(row.playerAtRaise.positionMs).append(" ms")
+            append(", presenting ").append(row.playerAtRaise.presenting)
+            append(", stopped_by_owner ").append(row.playerAtRaise.stoppedByOwner)
         }
     }
 }
@@ -671,7 +725,6 @@ private fun PlayerContent(
         context.packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
     val scope = rememberCoroutineScope()
     val preferences by vm.preferences.collectAsStateWithLifecycle()
-    var playFailure by remember { mutableStateOf<String?>(null) }
     val controller = remember(plan) {
         // The decision and its session body must describe the same quality,
         // even if the stored preference changes between request and compose.
@@ -688,8 +741,27 @@ private fun PlayerContent(
             initialAudioOffsetMs = audioOffsetMs,
             retainedAudio = retainedAudio,
             retainedSubtitle = retainedSubtitle,
-            onError = { playFailure = it },
         )
+    }
+    // The one surface, projected from the player by the presenter.
+    val collectedSurface by controller.surface.collectAsStateWithLifecycle()
+    // A plain local, because a delegated property cannot be smart-cast.
+    val surface: PlaybackSurface = collectedSurface
+    // The input contract's `failed` state: a blocking surface with an answer
+    // the viewer has to give. A full-screen progress surface covers pixels,
+    // not routing (PLAYBACK-SURFACE-CONTRACT.md §4).
+    val blockingFault = surface.fault?.takeIf { surface.entersFailedRouting }
+    val bannerFault = (surface as? PlaybackSurface.Banner)?.fault
+    // §3.1's progress rule: `preparing`/`buffering`/`recovering` are full-screen
+    // while the attached picture is not presenting and an in-chrome indicator
+    // while it is. Both halves are the waiting block below — the same spinner
+    // this screen already draws for `isPlaybackWaiting`, which is the in-chrome
+    // indicator by construction and covers the picture only because there is no
+    // picture to cover when nothing is presenting.
+    val progressFault = when (surface) {
+        is PlaybackSurface.Indicator -> surface.fault
+        is PlaybackSurface.Blocking -> surface.fault.takeUnless { surface.entersFailedRouting }
+        is PlaybackSurface.Banner, is PlaybackSurface.None -> null
     }
     val surfaceFocusRequester = remember { FocusRequester() }
     // Which grades this panel can show. Probed once per playback: it is a
@@ -786,8 +858,39 @@ private fun PlayerContent(
         controller.seekTo(targetMs)
     }
 
+    /**
+     * The viewer answered a surface.
+     *
+     * The reducer clears the fault the action belonged to; the EFFECT is the
+     * recovery owner's and this screen's. Shared by the blocking prompt and the
+     * banner, so one action cannot come to mean two things.
+     */
+    fun onSurfaceAction(action: SurfaceAction) {
+        controller.surfaceAction(action)
+        when (action) {
+            SurfaceAction.KeepWaiting -> controller.keepWaiting()
+            // Re-issuing a failed change and retrying a spent ladder are the
+            // same call: the reload carries the position and the quality the
+            // viewer asked for, which is what the change was.
+            SurfaceAction.Retry -> onReload(
+                controller.prepareViewerRetry(),
+                "fallback",
+                playbackIntent.desiredQuality,
+            )
+            SurfaceAction.Close -> onExit()
+            // The credential the server refused is the one this app is holding;
+            // dropping it lands on the sign-in screen.
+            SurfaceAction.SignIn -> {
+                vm.logout()
+                onExit()
+            }
+            // No Android owner offers it; both renders filter it out.
+            SurfaceAction.ForceTranscode -> Unit
+        }
+    }
+
     fun inputState(): PlayerInputState = when {
-        playFailure != null -> PlayerInputState.Failed
+        blockingFault != null -> PlayerInputState.Failed
         panel == PlayerPanel.Info && statsMode != PlaybackStatsMode.Mini -> PlayerInputState.Info
         panel != null && panel != PlayerPanel.Info -> PlayerInputState.Menu
         // Chrome-hidden outranks the timeline flag. `hide` removes Controls
@@ -1117,20 +1220,15 @@ private fun PlayerContent(
             delay(500)
         }
     }
-    LaunchedEffect(controller.playbackNotice) {
-        val notice = controller.playbackNotice ?: return@LaunchedEffect
-        delay(5_000)
-        if (controller.playbackNotice == notice) controller.clearPlaybackNotice()
-    }
     LaunchedEffect(controller) {
         while (true) {
             delay(10_000)
             if (isPlaying) vm.reportProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs)
         }
     }
-    LaunchedEffect(lastInteraction, isPlaying, panel, pendingMs, playFailure) {
+    LaunchedEffect(lastInteraction, isPlaying, panel, pendingMs, blockingFault) {
         val miniInfo = panel == PlayerPanel.Info && statsMode == PlaybackStatsMode.Mini
-        if (isPlaying && (panel == null || miniInfo) && pendingMs == null && playFailure == null) {
+        if (isPlaying && (panel == null || miniInfo) && pendingMs == null && blockingFault == null) {
             delay(PlayerInputPolicy.HIDE_AFTER_MS)
             applyOutcome(
                 PlayerInputPolicy.route(
@@ -1226,7 +1324,7 @@ private fun PlayerContent(
             )
         }
 
-        if (!isInPip && playFailure == null) {
+        if (!isInPip && blockingFault == null) {
             Box(
                 Modifier.fillMaxSize().focusProperties { canFocus = false }.clickable(
                     interactionSource = remember { MutableInteractionSource() },
@@ -1242,16 +1340,24 @@ private fun PlayerContent(
         }
 
         val playbackWaiting = controller.isPlaybackWaiting
-        if (!isInPip && (playbackWaiting || findingNext)) {
+        if (!isInPip && (playbackWaiting || findingNext || progressFault != null)) {
             val waiting = playbackWaitPresentation(
                 runwaySeconds = (controller.player.bufferedPosition - controller.player.currentPosition)
                     .coerceAtLeast(0) / 1_000.0,
                 httpWaitCount = controller.sessionStatus?.http_wait_count,
             )
+            // A typed fault says what the player is working on ("Reconnecting
+            // on another server address."); `playbackWaitPresentation` only
+            // knows that it is waiting. The fault wins when there is one.
+            val title = when {
+                findingNext -> "Up next…"
+                progressFault?.detail != null -> progressFault.detail
+                else -> waiting.title
+            }
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                 CircularProgressIndicator(color = Accent)
                 Text(
-                    if (findingNext) "Up next…" else waiting.title,
+                    title,
                     color = Color.White,
                     modifier = Modifier.padding(top = 12.dp),
                 )
@@ -1261,7 +1367,7 @@ private fun PlayerContent(
             }
         }
 
-        if (!isInPip && controlsVisible && playFailure == null && activeMarker != null && pendingMs == null &&
+        if (!isInPip && controlsVisible && blockingFault == null && activeMarker != null && pendingMs == null &&
             !(preferences.autoSkip && activeMarker.isAutoSkipEligible)
         ) {
             TvButton(
@@ -1283,7 +1389,7 @@ private fun PlayerContent(
         }
 
         val miniInfo = panel == PlayerPanel.Info && statsMode == PlaybackStatsMode.Mini
-        if (!isInPip && controlsVisible && (panel == null || miniInfo) && playFailure == null) {
+        if (!isInPip && controlsVisible && (panel == null || miniInfo) && blockingFault == null) {
             Controls(
                 title = plan.title,
                 subtitle = plan.subtitle,
@@ -1362,7 +1468,7 @@ private fun PlayerContent(
             )
         }
 
-        when (if (isInPip || playFailure != null) null else panel) {
+        when (if (isInPip || blockingFault != null) null else panel) {
             PlayerPanel.Tracks -> TrackMenu(
                 player = controller.player,
                 serverAudio = plan.audio,
@@ -1433,27 +1539,46 @@ private fun PlayerContent(
             null -> Unit
         }
 
-        playFailure?.let { message ->
-            PlaybackFailed(
-                message = message,
-                onRetry = {
-                    onReload(controller.prepareViewerRetry(), "fallback", playbackIntent.desiredQuality)
-                },
-                onExit = onExit,
-            )
+        blockingFault?.let { fault ->
+            PlaybackFailed(fault = fault, onAction = { action -> onSurfaceAction(action) })
         }
 
-        controller.playbackNotice?.let { notice ->
-            Text(
-                text = notice,
-                color = Color.White,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 24.dp, start = 40.dp, end = 40.dp)
-                    .background(Color.Black.copy(alpha = 0.82f), MaterialTheme.shapes.medium)
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-            )
+        bannerFault?.let { fault ->
+            // The title first, because the one fault that has both is a
+            // blocking surface the agreement rule demoted: "Playback recovered"
+            // is the news, and the sentence under it is about the failure that
+            // lost. The actions come with it — a failed change that offers no
+            // Retry is the dead end this contract exists to remove.
+            val notice = fault.title ?: fault.detail
+            val actions = fault.actions.filter { it != SurfaceAction.ForceTranscode }
+            if (notice != null || actions.isNotEmpty()) {
+                Column(
+                    Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 24.dp, start = 40.dp, end = 40.dp)
+                        .background(Color.Black.copy(alpha = 0.82f), MaterialTheme.shapes.medium)
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    if (notice != null) {
+                        Text(
+                            text = notice,
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    if (actions.isNotEmpty()) {
+                        Spacer(Modifier.size(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            actions.forEach { action ->
+                                TvButton(onClick = { onSurfaceAction(action) }) {
+                                    Text(surfaceActionLabel(action))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1859,6 +1984,15 @@ private fun PlayerInfo(
     onDismiss: () -> Unit,
 ) {
     val player = controller.player
+    // The ledger's SURFACE section.
+    val surface by controller.surface.collectAsStateWithLifecycle()
+    val surfaceFault = surface.fault
+    // `surfaceRevision` is Compose state and moves on every ring change, which
+    // the collected surface does not: a fault cleared underneath the one being
+    // drawn changes the history and nothing else, and Playback debug has to
+    // show that.
+    val surfaceRevision = controller.surfaceRevision
+    val surfaceHistory = remember(surfaceRevision) { controller.surfaceHistory }
     val selectedAudio = player.audioFormat?.let(::audioLabel)
         ?: plan.audio.firstOrNull { it.index == controller.selectedAudio }?.let(::serverAudioLabel)
         ?: plan.audio.firstOrNull { it.default }?.let(::serverAudioLabel)
@@ -1935,6 +2069,13 @@ private fun PlayerInfo(
             sessionStatus = controller.sessionStatus,
             playerState = playerStateLabel(player),
             control = controller.currentSessionId?.let { "Client reporting active" },
+            surfaceKind = surfaceKindLabel(surface),
+            surfaceClass = surfaceFault?.cls?.wire,
+            surfaceSource = surfaceFault?.source,
+            surfaceIds = surfaceFault?.let { fault ->
+                "${fault.attached} / ${fault.intent?.toString() ?: "—"}"
+            },
+            surfaceHistory = surfaceHistoryLine(surfaceHistory),
         ),
         reasons = plan.reasons,
         mode = mode,
@@ -1991,6 +2132,12 @@ internal data class PlaybackInfoDetails(
     val sessionStatus: PlaybackSessionStatus? = null,
     val playerState: String = "Unknown",
     val control: String? = null,
+    /** SURFACE: what is drawn over the picture, and why (contract §5). */
+    val surfaceKind: String = "None",
+    val surfaceClass: String? = null,
+    val surfaceSource: String? = null,
+    val surfaceIds: String? = null,
+    val surfaceHistory: String? = null,
 )
 
 internal data class PlaybackWaitPresentation(
@@ -2813,6 +2960,30 @@ internal fun playbackInfoRows(
         InfoRow("published_end", "Published end", "SERVER", setOf(PlaybackStatsMode.Debug), status?.published_end_ms?.let { "$it ms" }),
         InfoRow("fetched_end", "Fetched end", "SERVER", setOf(PlaybackStatsMode.Debug), status?.fetched_end_ms?.let { "$it ms" }),
         InfoRow("control", "Control", "SERVER", StandardAndDebug, details.control),
+        InfoRow("surface_kind", "Surface", "SURFACE", StandardAndDebug, details.surfaceKind),
+        InfoRow("surface_class", "Fault", "SURFACE", StandardAndDebug, details.surfaceClass),
+        InfoRow(
+            "surface_source",
+            "Source",
+            "SURFACE",
+            setOf(PlaybackStatsMode.Debug),
+            details.surfaceSource,
+        ),
+        InfoRow(
+            "surface_ids",
+            "Attached/intent",
+            "SURFACE",
+            setOf(PlaybackStatsMode.Debug),
+            details.surfaceIds,
+        ),
+        InfoRow(
+            "surface_history",
+            "History",
+            "SURFACE",
+            setOf(PlaybackStatsMode.Debug),
+            details.surfaceHistory,
+            placement = "notes",
+        ),
     )
 }
 
@@ -2822,7 +2993,15 @@ internal fun playbackInfoSections(
     mode: PlaybackStatsMode,
 ): List<PlaybackStatSection> {
     val rows = playbackInfoRows(details, reasons).filter { mode in it.modes && it.value != null }
-    return listOf("PLAYBACK", "SOURCE", "NOW DECODING", "BUFFERING / DELIVERY", "NETWORK", "SERVER").map { section ->
+    return listOf(
+        "PLAYBACK",
+        "SOURCE",
+        "NOW DECODING",
+        "BUFFERING / DELIVERY",
+        "NETWORK",
+        "SERVER",
+        "SURFACE",
+    ).map { section ->
         PlaybackStatSection(
             section,
             rows.filter { it.section == section }.flatMap { row ->

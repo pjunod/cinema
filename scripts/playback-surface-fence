@@ -87,10 +87,36 @@ PATTERNS = {
         ("published storage write", re.compile(r"\b_surface(?:History)?\s*(?:=|\+=)(?!=)")),
         ("surface ledger write", re.compile(r"(?<!var )(?<!let )(?<![=!<>])\bsurfaceHistory\s*(?:=(?!=)|\+=|\.\s*record\s*\()")),
     ),
+    # M3 deleted `onError`, `playFailure` and `playbackNotice`, so those three
+    # patterns now guard nothing that exists. What replaced them is what has to
+    # be guarded: the StateFlow the presenter publishes through, the surface
+    # types themselves, the owner's stop, and the shape of the imperative
+    # channel that was removed — a nullable String the screen holds and paints.
     "kotlin": (
         ("onError call", re.compile(r"\bonError\s*(?:\(|\.invoke\s*\()")),
         ("onError alias", re.compile(r"=\s*onError\s*(?:[;,)\]}]|$)")),
         ("failure field write", re.compile(r"(?<!var )(?<!val )(?<![=!<>])\b(?:playFailure|playbackNotice)\s*(?:=|\+=)(?!=)")),
+        # The publish itself. Only the one assignment inside the anchors is
+        # allowed, and the region is `required=True` so deleting the anchors
+        # fails rather than opening the file.
+        ("surface flow write", re.compile(
+            r"\b_surface\s*\.\s*(?:value\s*(?:=|\+=)(?!=)|tryEmit\s*\(|emit\s*\(|update\s*[({])")),
+        # A surface built anywhere but the presenter. The render reads
+        # `PlaybackSurface`; it never constructs one.
+        ("surface constructed", re.compile(
+            r"\bPlaybackSurface\s*\.\s*(?:Blocking|Banner|Indicator)\s*\(")),
+        # A fault built by hand instead of raised. `preplayerStoppedFault` is
+        # the presenter's own factory for the one playback that never got one.
+        ("fault constructed", re.compile(r"\bPlaybackFault\s*\(")),
+        # The generic raise. Every site in `Controller` goes through a named
+        # method on `PlaybackSurfaceOwner`, so a new site has to add itself
+        # where a test can name it.
+        ("generic surface raise", re.compile(
+            r"\bsurfaceOwner\s*\.\s*(?:raise|raiseNotice|raiseBlocking|stopAndRaise)\s*\(")),
+        # The imperative channel, in the shape it would come back in: a
+        # nullable message the screen holds and paints for itself.
+        ("screen-held failure string", re.compile(
+            r"\bmutableStateOf\s*<\s*String\s*\?\s*>\s*\(\s*null\s*\)")),
     ),
 }
 
@@ -105,6 +131,10 @@ SCANNED = {
     Path("clients/apple/Sources/PlayerSurface.swift"): "swift",
     Path("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"): "kotlin",
     Path("clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"): "kotlin",
+    # The recovery owner's surface arm: it stops the player and then raises,
+    # which is the one thing the presenter itself may never do. Scanned rather
+    # than allow-listed, so it can never grow a pre-contract write either.
+    Path("clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurfaceOwner.kt"): "kotlin",
 }
 
 # Named so a later reader can see the exclusion was a decision, not an
@@ -156,24 +186,27 @@ REGIONS = {
             "// playback-surface-publish:begin",
             "// playback-surface-publish:end",
             "The single assignment that publishes the presenter's surface.",
-            False,
+            # Required: M3 has landed, so deleting the anchors is not a file
+            # waiting for its milestone — it is the one write site going
+            # unfenced.
+            True,
         ),
     ),
 }
 
 # The migration budget: how many pre-contract write sites each file may still
 # have, and why. A milestone that lands drops its file's entry to zero and then
-# removes it. A NEW write site fails the fence today, which is the point.
-# Neither `index.html` nor `PlayerController.swift` is here any more: M1 and M2
-# landed, and a file with no entry is held at zero by
-# `MIGRATION_BUDGET.get(relative, (0, ""))` below — every web surface write is
-# inside the render anchors and every Apple one is inside the publish region.
+# removes it, and a file with no entry is held at zero by
+# `MIGRATION_BUDGET.get(relative, (0, ""))` below. A NEW write site fails the
+# fence either way, which is the point. All three client files have left:
+# `index.html` with M1 (every web surface write is inside the render anchors),
+# `PlayerController.swift` with M2 (every Apple one is inside the publish
+# region), and the two Android rows with M3 (`onError`, `playFailure` and
+# `playbackNotice` are gone).
 MIGRATION_BUDGET = {
     Path("crates/plurxd/src/web/playback-policy.js"): (0, "The policy module never touched the DOM; it stays at zero."),
     Path("clients/apple/Sources/PlayerView.swift"): (0, "The Apple view reads the model; it never wrote one."),
     Path("clients/apple/Sources/PlayerSurface.swift"): (0, "The Apple surface reads the model; it never wrote one."),
-    Path("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"): (15, "M3 removes these: onError is still a constructor callback."),
-    Path("clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"): (1, "M3 removes this: playFailure is still screen state."),
 }
 
 

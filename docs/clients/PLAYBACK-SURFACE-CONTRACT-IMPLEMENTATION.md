@@ -384,8 +384,35 @@ fault with `playerStopped = true`. Nothing else at the site changes.
 | Android | `onStall` budget exhausted (`~1457`) | same | `exhausted` |
 | Android | target-deadline `event.terminal` (`~2174`) | same | `exhausted` |
 | Android | `onPlayerError` → `Fail` (`~653`) | same | `stopped` (with the transport-class wording exception kept) |
-| Android | create failed at start (`~1281`, no predecessor) / stall reopen create failed (`~1544`) | same when no predecessor is attached; when a predecessor *is* attached this is context `change` → `refused`, no stop | `stopped` / `refused` |
-| Android | terminal verdict `applyStallVerdict` (`~1337`) | **no stop** — D1: the verdict arms wording | no fault; wording consumed by the later `stopped` |
+| Android | create failed at start (`~1281`, no predecessor) / stall reopen create failed (`~1544`) | same when no predecessor is **presenting**; when a predecessor is presenting this is context `change` → `refused`, no stop | `stopped` / `refused` |
+| Android | terminal verdict `applyStallVerdict` (`~1337`) | `player.playWhenReady = false`, and the branch still returns `true` so no reopen starts and no budget is spent | `stopped`, with the verdict's message |
+
+**Amended 2026-09-13, during M3, in Paul's absence.** Two of the Android rows
+above were wrong about the code, and both were found by the adversarial review
+of #279:
+
+1. **The terminal verdict row said "no stop, no fault; wording consumed by the
+   later `stopped`".** There is no later `stopped`. The `"terminal"` branch
+   returns before `openStallTracker.reset()`, so the tracker stays latched with
+   `fired = true` on a playhead that will never move; `playWhenReady` is still
+   true, so the tracker's own `!playbackRequested` escape never fires;
+   `sampleTargetPresentationDeadline` needs a `pendingSeek` that a mid-film
+   stall does not have; and `onPlayerError` never comes, because ExoPlayer is
+   buffering rather than failing. Followed literally the row produced a frozen
+   picture with **no surface at all**, where `main` gave the viewer a
+   full-screen overlay with Retry — a user-visible regression, not a latent
+   gap. The owner has nothing left to try at that point, so it stops and says
+   so in the server's words. D1 is untouched: the branch still returns `true`,
+   which is what keeps the verdict from spending a budget or starting a reopen.
+2. **The create-failure row said "when a predecessor *is* attached".** At the
+   stall-reopen site an attached item is exactly what a stalled player still
+   has — it holds its item and sits in `STATE_BUFFERING` — so "attached" made
+   "recovery failed" a passive banner over a **frozen** picture, with
+   `intent = null`, which `intent_superseded` can never match and which ten
+   seconds of continuous presentation will never reach. The question the row
+   means to ask is whether there is a *picture* behind the failure, and the
+   client's own presentation evidence already answers it. At the start site the
+   two readings agree, because nothing was ever set on the player.
 
 Setting `playWhenReady = false` on Android resets the open-stall tracker
 (`PlaybackTelemetry.kt:300-312`), which is what closes the
