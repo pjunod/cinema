@@ -8,8 +8,9 @@ first.
 
 **Diagnosis in [#273](http://192.168.4.7:3000/noirr/plurx/pulls/273); Paul
 ruled 2026-09-13 (doc §7): cache the guide, the client never guesses, and a
-possibly-held tuner is never a reason to refuse a viewer — build starting on
-`effort/live-tv-reliability`.** Both complaints trace to a client guessing at something
+possibly-held tuner is never a reason to refuse a viewer — Opus builds it from
+[docs/features/LIVE-TV-RELIABILITY-IMPLEMENTATION.md](docs/features/LIVE-TV-RELIABILITY-IMPLEMENTATION.md)
+once Astra has reviewed the plan; lane `effort/live-tv-reliability`.** Both complaints trace to a client guessing at something
 the owner knows. The guide is memory-only on the owner, its first refresh
 after a restart is a full 20 minutes away (the first loop tick runs before
 the serving fence admits the node, is *skipped*, and the skip path sleeps the
