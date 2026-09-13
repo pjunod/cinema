@@ -6,6 +6,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.decodeFromJsonElement
@@ -425,11 +426,7 @@ class DvrApi(origin: String, private val token: String) {
 
     /** Admin only: the order decides which rule gets a tuner when two want one. */
     suspend fun reorderRules(ids: List<String>): List<DvrRule> = Net.json.decodeFromString(
-        request(
-            url("rules", "order"),
-            "PUT",
-            buildJsonObject { putJsonArray("ids") { ids.forEach { id -> add(id) } } },
-        ).body,
+        request(url("rules", "order"), "PUT", dvrReorderBody(ids)).body,
     )
 
     suspend fun reminders(due: Boolean = false): List<DvrReminder> = Net.json.decodeFromString(
@@ -462,3 +459,15 @@ class DvrApi(origin: String, private val token: String) {
         request(url("reminders", id, "ack"), "POST")
     }
 }
+
+/**
+ * The body `PUT /dvr/rules/order` takes: the rule ids, in the order the owner
+ * should try them.
+ *
+ * Built here rather than inline in the suspending call so it can be asserted
+ * without a socket. It is also where this client's one compile error lived:
+ * `add(id)` on a `JsonArrayBuilder` takes a `JsonElement`, not a `String`, and
+ * nothing on this branch had ever compiled the Kotlin to say so.
+ */
+internal fun dvrReorderBody(ids: List<String>): JsonObject =
+    buildJsonObject { putJsonArray("ids") { ids.forEach { id -> add(JsonPrimitive(id)) } } }

@@ -1,5 +1,8 @@
 package tv.plurx.app.livetv
 
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -152,6 +155,20 @@ class DvrUiTest {
             setOf("any_channel"),
             DvrRuleChange.Channel(null).body().keys,
         )
+    }
+
+    @Test
+    fun theReorderBodyCarriesTheIdsAsJsonStringsInOrder() {
+        val body = dvrReorderBody(listOf("r-2", "r-1", "r-3"))
+        assertEquals(setOf("ids"), body.keys)
+        val ids = body["ids"] as JsonArray
+        assertEquals(
+            "the order is the request - a set would lose the whole point",
+            listOf("r-2", "r-1", "r-3"),
+            ids.map { it.jsonPrimitive.content },
+        )
+        assertTrue("every id is a JSON string", ids.all { it is JsonPrimitive && it.isString })
+        assertEquals("an empty reorder is still a well-formed body", 0, (dvrReorderBody(emptyList())["ids"] as JsonArray).size)
     }
 
     @Test
