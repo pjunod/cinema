@@ -5108,6 +5108,39 @@ test("the create-retry ladder is one set of numbers on all three clients", () =>
     "the web's create must go through the retry sequence",
   );
 
+  // Three properties whose only other test is Swift or Kotlin, and therefore
+  // unrun on this machine. Asserting the source shape is weaker than asserting
+  // the behaviour — it cannot tell a working sequence from a broken one — but
+  // it is not nothing: each of these survived its own mutation until it was
+  // written, and each is the line a refactor would quietly drop.
+  const androidCoordinator = fs.readFileSync(
+    path.join(__dirname, "../../clients/android/app/src/main/java/tv/plurx/app/player/StallReopen.kt"),
+    "utf8",
+  );
+  assert.match(
+    androidCoordinator,
+    /if \(!startContext\) return create\(body, isCurrent\)/,
+    "outside the start context the Android sequence must be the plain create — "
+      + "ladder AND deadline watchdog, not just the ladder",
+  );
+  assert.match(
+    androidCreate,
+    /startContext = startContext,/,
+    "…and the owner must actually pass its start-context decision in",
+  );
+  assert.match(
+    APPLE_PLAYER,
+    /if createRetryEpoch == epoch \{ createRetryEpoch &\+= 1 \}/,
+    "an abandoned Apple sequence must retire ONLY its own epoch: retiring the "
+      + "counter unconditionally leaves the sequence that replaced it unwatched",
+  );
+  assert.match(
+    APPLE_PLAYER,
+    /guard createRetryExpiredEpoch != epoch else \{\s*\n\s*await release\(session: opened\.sessionId\)/,
+    "a create that lands after Apple's deadline must be RELEASED — a session "
+      + "neither attached nor released is a leaked transcode",
+  );
+
   // …and the codes that qualify are the fixture's row, three times over.
   const row = JSON.parse(
     fs.readFileSync(path.join(__dirname, "playback-surface-contract.json"), "utf8"),
