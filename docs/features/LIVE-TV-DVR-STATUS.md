@@ -1,13 +1,15 @@
 # Recording and reminders — implementation status and evidence
 
-**Status:** built, reviewed, merged with `main`, qualified on the merge, ready
-to merge; nothing has touched a tuner yet ·
+**Status:** **merged to `main`** at `aba14096`; the whole fast lane green,
+including the first Apple and Android compiles this code has ever had. Nothing
+has touched a tuner yet — that pass is
+[DVR-HARDWARE-VERIFICATION-PROMPT.md](../clients/DVR-HARDWARE-VERIFICATION-PROMPT.md) ·
 **Branch:** `effort/live-tv-dvr` ·
-**Base:** Forgejo `main` at `65217e9f` (started at `75edcb44`; `main` moved 105
-commits under this branch and has been merged in) ·
+**Base:** Forgejo `main` at `a605d03c` (started at `75edcb44`; `main` moved 129
+commits under this branch, in two waves, and both are merged in) ·
 **PR:** [#294](http://192.168.4.7:3000/noirr/plurx/pulls/294) ·
 **Issue:** [#295](http://192.168.4.7:3000/noirr/plurx/issues/295) ·
-**Apple build 151 · Android versionCode 93** ·
+**Apple build 153 · Android versionCode 94** ·
 **Updated:** 2026-09-13
 
 Companion to

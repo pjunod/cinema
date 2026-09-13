@@ -266,6 +266,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [OFFLINE-VIEWING-PLAN.md](clients/OFFLINE-VIEWING-PLAN.md) · [review](clients/OFFLINE-VIEWING-REVIEW.md) | One-tap, app-managed downloads — the plan and its review. | built |
 | [EBOOK-READER-PLAN.md](clients/EBOOK-READER-PLAN.md) | plurx reads what Curator acquires. | open |
 | [CLIENT-DEPLOY-PROMPT.md](clients/CLIENT-DEPLOY-PROMPT.md) | Getting a merged build onto the phones and the Apple TVs. | live |
+| [DVR-HARDWARE-VERIFICATION-PROMPT.md](clients/DVR-HARDWARE-VERIFICATION-PROMPT.md) | Hand-off for the LAN: the guide tier, and the end-to-end recording pass no cloud session can run. | open |
 
 ---
 
