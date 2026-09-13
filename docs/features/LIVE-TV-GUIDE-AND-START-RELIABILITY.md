@@ -1,6 +1,6 @@
 # Live TV reliability — why the guide is empty and why it says "wait 90 seconds"
 
-**Status:** diagnosis complete, fix proposed, awaiting Paul's ruling on §7 ·
+**Status:** diagnosis complete, fix ruled on by Paul 2026-09-13 (§7), building on `effort/live-tv-reliability` ·
 **Written:** 2026-09-13 · **Against:** `main` at `a124876` · **Evidence:**
 nynuc's `/metrics` and container log, 2026-09-13 00:29 UTC (§10)
 
@@ -29,6 +29,9 @@ The tuner was never the constraint in either case.
 eight starts today (§10); every 90-second wait you have hit was decided on
 the client, and the one server answer that legitimately leaves the client
 unsure (§3.4) lasts under a second.
+
+Paul's rulings on the fix are in §7; the build is tracked in
+[STATUS.md](../../STATUS.md).
 
 ---
 
@@ -473,93 +476,86 @@ an old ingress or owner answers the retire route with the unrouted-API
 `404 {"error":"not found"}` (http/web.rs 279–286) — untyped, and treated as
 **no answer** below, never as "nothing to stop".
 
-### 6.3 The barrier asks, and waits only when it cannot
+### 6.3 The client never waits — it retires, starts, and lets the owner decide
 
-The persisted marker becomes `{request_id, touched_at}` (still nothing but
-a random identity and a time). The `Lease.start` on every client becomes:
+Paul's ruling (2026-09-13): a tuner that *might* still be held by a lost
+session is never a reason to refuse a viewer. There are four tuners; use
+another one and let the stray get reaped. The client side of the barrier
+is therefore deleted, not rewritten. What remains is a **retire hint** —
+the persisted `{request_id}` of the last start — and this `Lease.start`:
 
 ```
- for each persisted marker id owned by no live document (web: see below):
-     DELETE /live-tv/starts/{id}
-         typed 200 stopped/ended/retired ──▶ remove marker
-         typed refusal from the owner    ──▶ remove marker
-         anything else (transport error, untyped 404/5xx,
-           ingress-minted owner_unavailable/node_maintenance)
-                                         ──▶ keep marker; refuse this start with
-                                             start_outcome_unknown until
-                                             touched_at + UNRESOLVED_WAIT
- no marker left ──▶ write {new id, now}; POST with request_id
-     response parsed ──▶ acquired (marker stays until DELETE /sessions confirms)
-     transport failure / untyped ──▶ ONE immediate replay POST with the same id
+ press
+   ├─ (best effort, does not block) DELETE /live-tv/starts/{id} for every persisted
+   │    hint that no live document owns (web: see below) — frees the slot sooner
+   └─ POST /live-tv/channels/{ch}/sessions with a fresh request_id, persisted first
+         typed answer            ──▶ play, or show the error with its retry hint (§6.4)
+         transport failure       ──▶ ONE replay POST with the same id
                                      (joins the same session, or gets its tombstone)
-     still no typed answer ──▶ keep the marker; the next press resolves it above
+         still no answer         ──▶ show "the server did not answer", keep the hint;
+                                     the next press does all of this again
 ```
 
-Two rules the algorithm depends on:
+Nothing on the client refuses a start. `start_outcome_unknown`,
+`UNRESOLVED_WAIT` and the three barrier classes (live-tv.js 128–193,
+LiveTv.swift 629–676, LiveTvLease.kt 58–95) go, and with them the message
+in Paul's screenshot.
 
-- **Only a typed body counts.** An untyped 404 or 5xx, and any code the
-  ingress can mint without reaching the owner (`owner_unavailable`,
+The owner decides admission, and it now has one more rule than today's
+`sessions.len() >= max_sessions → tuner_capacity` (live_tv.rs 2201–2206):
+**a viewer's own stray is evicted before the viewer is refused.** When
+capacity is full and the requesting user owns a session whose `last_touch`
+is older than two keepalive intervals, or whose request id has just been
+retired, that session is cancelled and the new start admitted. The normal
+45 s idle reap (3939) handles the common case with no capacity pressure at
+all — the worst outcome of a lost start is one tuner wasted for under a
+minute, which is the trade Paul chose over any viewer ever waiting.
+
+Two rules the flow still depends on:
+
+- **Only a typed body counts as an answer.** An untyped 404 or 5xx, and any
+  code the ingress can mint without reaching the owner (`owner_unavailable`,
   `node_maintenance`, `node_removal_fenced`, `learner_route_ineligible`),
-  proves nothing about the tuner and keeps the marker. This is the rule
-  the web's untyped-4xx clearing at index.html 14866 gets wrong today.
-- **The web must not retire another tab's live session.** Web markers are
-  per-origin `localStorage`, and today tab B is refused while tab A watches
-  (HDHOMERUN-LIVE-TV-PLAN.md 296–297) — under this design tab B's resolve
-  step would stop A. So a web marker carries `touched_at`, the owning
-  document refreshes it on every keepalive (the `hold` at index.html 14884
-  becomes a touch, not a re-arm), and before retiring a marker the
-  resolving document posts `{who: id}` on a `BroadcastChannel`
-  (`plurx-live-tv`, works on private-LAN HTTP) and waits 250 ms for an
-  `alive` — a live owner answers and the marker is left alone with the
-  existing "another tab is watching" refusal; a marker with no answer *and*
-  `touched_at` older than 3 keepalive intervals is an orphan and is
-  retired. Apple and Android have one process per profile store and need
-  neither.
-
-`UNRESOLVED_WAIT` is not 90 hard-coded in three places. The server publishes
-it in the live contract table (`PlaybackPolicy.liveContractTiming`), derived
-at build from the constants with a test that fails if either moves: the
-longest a tuner can be held by a start the client has lost contact with,
-measured from the client's last contact, is
-`max(PROVISIONAL_TIMEOUT, CAPABILITY_IDLE_TIMEOUT) + control slop`
-= max(40, 45) + 10 = **55 s** today — there is no path on which a session
-is un-activated for 40 s *and then* idle for 45. It is reached only when
-the server cannot be asked, the one case where waiting is right because
-nobody can say what the tuner is doing; and it counts from `touched_at`,
-not from when Live TV was opened, so a marker from last night has already
-served its wait.
+  proves nothing about the tuner — those keep the retire hint so the next
+  press retires again. The web's untyped-4xx clearing at index.html 14866
+  gets this wrong today.
+- **The web must not retire another tab's live session.** Web hints are
+  per-origin `localStorage`; a retire from tab B would stop tab A. So the
+  owning document refreshes `touched_at` on every keepalive (the `hold` at
+  index.html 14884 becomes a touch), and before retiring, the pressing
+  document posts `{who: id}` on a `BroadcastChannel` (`plurx-live-tv`,
+  works on private-LAN HTTP; Web Locks does not) and waits 250 ms for an
+  `alive` — a live owner answers and its hint is left alone; a silent hint
+  older than three keepalive intervals is an orphan and is retired. Apple
+  and Android have one process per store and need neither.
 
 What this changes in practice:
 
 | Situation | Today | After |
 |---|---|---|
-| Apple TV Home while watching, app later killed | 90 s at next open | one retire at next press → `200 ended` (idle-reaped) → plays |
-| tab closed while watching | 90 s at next open | BroadcastChannel silent → retire → `200 ended` → plays |
-| deploy while watching | 90 s at next open | retire → the restarted owner has no such id → `200 retired`; FFmpeg was a `kill_on_drop` child of PID 1 (`tokio::process::Child` at live_tv.rs 1101–1106, `kill_on_drop(true)` at 4280/4497; `ENTRYPOINT ["plurxd"]`, Dockerfile 165) and the tuner's HTTP stream closed with it, so no orphan exists → plays |
+| Apple TV Home while watching, app later killed | 90 s at next open | press → retire (`200 ended`, idle-reaped) + start → plays |
+| tab closed while watching | 90 s at next open | press → BroadcastChannel silent → retire + start → plays |
+| deploy while watching | 90 s at next open | press → retire (`200 retired`: the restarted owner has no such id; FFmpeg was a `kill_on_drop` child of PID 1 — `tokio::process::Child` at live_tv.rs 1101–1106, `kill_on_drop(true)` at 4280/4497; `ENTRYPOINT ["plurxd"]`, Dockerfile 165 — and the tuner's HTTP stream closed with it) + start → plays |
 | POST response lost mid-flight | 90 s | one replay POST with the same id → joins the same session |
-| fence blip at the moment of pressing (ingress `owner_unavailable`) | 90 s | marker kept; the next press retires it in one round trip and starts |
-| server unreachable | 90 s | wait, ≤ 55 s from last contact, re-tried on the next press |
+| fence blip at the moment of pressing (ingress `owner_unavailable`) | 90 s | error shown with "press again"; the next press plays |
+| all four tuners busy and one is this viewer's stray | `tuner_capacity` | the stray is evicted, the start is admitted |
+| server unreachable | 90 s | the error says so; press again when it is back |
 
-### 6.4 One classification table, and the owner's answers are definitive
+### 6.4 One error table, owned by the server
 
-Move the definitive/ambiguous decision out of three client lists into the
-server's typed error envelope: `ApiError::typed` for Live TV gains
-`retry: "now" | "later" | "never"` and `owner_decided: bool`. A worker
-error is emitted only after the owner has closed the tuner path — the
-comment at index.html 14825 is already the invariant — so every error that
-*passed through the owner* carries `owner_decided: true` and a client that
-receives one confirms its marker. Errors the ingress mints on its own
-(§3.4: the fence refusal, invalid/mismatched owner responses, `peer_error`)
-carry `owner_decided: false` and keep the marker, which §6.3 resolves on the
-next press instead of waiting out. The three per-client sets (index.html
-14829, LiveTv.swift 746, LiveTvLease.kt 23–32) are deleted, and
-`tests/playback/live-tv-start-cases.json` carries the cases all three must
-answer identically, alongside `live-tv-guide-cases.json`.
+With no barrier to arm, the typed codes have one remaining job: what the
+client draws and whether it offers *Try again*. That decision moves out of
+three client lists into the server's typed error envelope — `ApiError::typed`
+for Live TV gains `retry: "now" | "later" | "never"` and
+`owner_decided: bool` (false for the codes the ingress mints on its own,
+§3.4, which is what keeps the retire hint per §6.3). The three per-client
+sets (index.html 14829, LiveTv.swift 746, LiveTvLease.kt 23–32) are
+deleted, and `tests/playback/live-tv-start-cases.json` carries the cases
+all three must render identically, alongside `live-tv-guide-cases.json`.
 
-`startup_timeout` stops punishing the viewer: it is the owner saying, after
-reaping, that this channel sent nothing in 15 s — `owner_decided: true`,
-`retry: "later"` for that channel (a signal fact of the moment, not of the
-channel), nothing at all for the others.
+`startup_timeout` is the owner saying, after reaping, that this channel
+sent nothing in 15 s — `retry: "later"` for that channel (a signal fact of
+the moment, not of the channel), and nothing at all for the others.
 
 ### 6.5 Session ends are logged and attributable
 
@@ -584,21 +580,27 @@ still joins the same session.
 
 ---
 
-## 7. Two guardrails on record are superseded — Paul to confirm
+## 7. Three rulings from Paul (2026-09-13) — what they supersede
 
-Both come from [LIVE-TV-GUIDE-AND-UI-PLAN.md §5](LIVE-TV-GUIDE-AND-UI-PLAN.md#5-non-goals--guardrails-for-this-effort)
-and were right for that effort's scope. This document proposes to change
-them, and the rule is that a conflicting directive is brought to Paul rather
-than resolved silently:
+The first two come from [LIVE-TV-GUIDE-AND-UI-PLAN.md §5](LIVE-TV-GUIDE-AND-UI-PLAN.md#5-non-goals--guardrails-for-this-effort)
+and were right for that effort's scope; the third overrides a review
+finding on record. Recorded here so nobody re-litigates them:
 
-1. **§5.5 "No durable guide cache."** Replaced by §5.1 above: durable, but
-   node-local under the cache root, owner-only, never the replicated
-   `settings` table. The reason behind §5.5 survives; the consequence ("a restart
-   refetches", twenty minutes later) does not.
+1. **§5.5 "No durable guide cache" — superseded.** The guide is cached
+   (§5.1): node-local under the cache root, owner-only, never the
+   replicated `settings` table. The reason behind §5.5 survives; the
+   consequence ("a restart refetches", twenty minutes later) does not.
 2. **§5.10 "No change to the lease, barrier, keepalive or status
-   semantics."** That fence protected the guide effort from touching the
-   tuner contract. §6 is *a change to the barrier*, on purpose, with the
-   server-side idempotency the contract already has as its basis.
+   semantics" — superseded.** "There is a whole client/server protocol, so
+   the client should never be guessing at something it could just ask."
+   The barrier's client half is removed (§6.3); the owner answers.
+3. **A possibly-held tuner is never a reason to refuse a viewer.** "There
+   are three other tuners doing nothing. Even if a stream was still there,
+   use another available tuner and let the other one get reaped." This
+   overrides the 2026-09-05 review rows in HDHOMERUN-LIVE-TV-STATUS.md
+   (146, 152) that rated "one viewer could hold two physical tuners" as
+   critical: the accepted worst case is one tuner idle for ≤ 45 s, and the
+   owner evicts the viewer's own stray first when capacity is actually full.
 
 Neither the `DeviceAuth` policy (§5.2) nor "no second tuner GET" (§5.4)
 changes. §5.3's bounded cold-lineup probe is a lineup read, not a stream.
@@ -642,20 +644,22 @@ touching Settings; `make web-check`, `make apple-test` on `mba`,
 
 ### 8.4 M3 — public `request_id`, the starts endpoints, session-end logging (server)
 
-§6.1, §6.2, §6.5, §6.6, plus the `docs/API.md` rows and route-count bump.
+§6.1, §6.2, §6.5, §6.6 and the same-viewer stray eviction from §6.3,
+plus the `docs/API.md` rows and route-count bump.
 **Accept:** registry unit cases for replay-joins, replay-conflict,
 retired-id 409, per-user retire cap, and retire on a
 live/tombstoned/unknown id; `test_api_doc_routes` green; `plurx_live_tv_starts_total{outcome="recovered"}`
 increments on a replayed public POST; ingress timeout stops the owner's
 provisional session.
 
-### 8.5 M4 — the barrier rewrite from one table (web · Apple · Android)
+### 8.5 M4 — the barrier removal, from one table (web · Apple · Android)
 
-§6.3 and §6.4. Delete the three classification sets. **Accept:** the
-`live-tv-start-cases.json` fixture passes on all three; a marker left by a
-killed process resolves with one DELETE and no wait in an instrumented test
-on each platform; kill the Apple TV app while watching, reopen, press a
-channel — it plays.
+§6.3 and §6.4. Delete the three barrier classes and the three
+classification sets; keep the retire hint. **Accept:** the
+`live-tv-start-cases.json` fixture passes on all three; a hint left by a
+killed process is retired in the background and the start is not delayed,
+in an instrumented test on each platform; kill the Apple TV app while
+watching, reopen, press a channel — it plays.
 
 ### 8.6 M5 — Developer card rows, status doc, deploy
 
@@ -672,8 +676,8 @@ verification prompt for the GPT session.
 - **No change to the 45 s idle reap or the 40 s provisional window.** They
   are the *reason* a lost start is safe to resolve by asking; shortening
   them buys nothing once the client asks.
-- **No barrier removal.** Uncertainty still exists when the server cannot be
-  reached; the barrier keeps that one job and loses the other nine.
+- **No client-side refusal of any kind.** The retire hint is a courtesy to
+  the tuner pool, never a gate; if it cannot be sent, the start goes ahead.
 - **No cluster-replicated guide.** The owner serves it; ingress nodes relay
   it. Replicating derived third-party data through raft is cost without a
   reader.

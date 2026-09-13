@@ -6,8 +6,10 @@ first.
 
 ## Live TV: the empty guide and the "wait 90 seconds" refusal, diagnosed
 
-**Proposal open as [#273](http://192.168.4.7:3000/noirr/plurx/pulls/273);
-nothing built yet.** Both complaints trace to a client guessing at something
+**Diagnosis in [#273](http://192.168.4.7:3000/noirr/plurx/pulls/273); Paul
+ruled 2026-09-13 (doc §7): cache the guide, the client never guesses, and a
+possibly-held tuner is never a reason to refuse a viewer — build starting on
+`effort/live-tv-reliability`.** Both complaints trace to a client guessing at something
 the owner knows. The guide is memory-only on the owner, its first refresh
 after a restart is a full 20 minutes away (the first loop tick runs before
 the serving fence admits the node, is *skipped*, and the skip path sleeps the
@@ -24,11 +26,11 @@ The fix in [docs/features/LIVE-TV-GUIDE-AND-START-RELIABILITY.md](docs/features/
 a durable owner-local guide under the cache root with an event-driven loop
 and a server-published `next_refresh_at` the clients poll on; and a public
 `request_id` (the marker the clients already persist) plus
-`DELETE /live-tv/starts/{id}`, so the barrier resolves a lost start with one
-round trip to the owner — which already keys and tombstones starts by
-request id on the internal leg — and waits only when the owner cannot be
-asked. Two guide-plan guardrails (§5.5 no durable cache, §5.10 no barrier
-change) are superseded and need Paul's ruling (doc §7).
+`DELETE /live-tv/starts/{id}`, so a press retires whatever the last start
+produced and starts afresh in one round trip to the owner — which already
+keys and tombstones starts by request id on the internal leg — with the
+owner evicting a viewer's own stray before ever answering `tuner_capacity`.
+The client-side barrier is deleted, not rewritten.
 
 ## Live TV gets the web page's proportions on Apple TV and iPhone
 
