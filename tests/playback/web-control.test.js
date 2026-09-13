@@ -2411,6 +2411,29 @@ async function main() {
     return { h, player };
   }
 
+  // §3.3 row 18: a refused control exchange — `session_gone` on a committed
+  // successor's first one is the row's named case — leaves the incumbent
+  // exactly where it was, because this reporter owns no recovery. It gets a
+  // ledger row and never a surface, and the row is the only trace there is.
+  {
+    const h = stallHarness({ answer: () => ({ type: "none" }) });
+    const player = stalledPlayer();
+    h.stub.attach(player, stalledVideo, bootstrap());
+    h.attached.push(player);
+    await flush();
+    h.holdWith(() => {
+      throw Object.assign(new Error("playback control session_gone"),
+        { status: 404, code: "session_gone" });
+    });
+    h.stub.probe(player, stalledVideo);
+    await settleExchange();
+    const raised = h.loading;
+    assert.deepEqual(raised.map((entry) => entry.source), ["log_only"],
+      "a failed exchange is log-only — nothing is drawn over a playing picture");
+    assert.equal(h.stops, 0, "and nothing about the player is stopped");
+    h.stub.detach(player);
+  }
+
   // An invocation scheduled on the absolute boundary has no remaining
   // control budget. It must recover without putting another request on the
   // wire or waiting through another ask window.
@@ -3301,6 +3324,11 @@ async function main() {
       [
         "let PLAYER=null;",
         "function playbackContext(){return {};}",
+        // §3.3 row 18: a staging nobody took up raises a log-only fault, and
+        // the seam records it so the assertions below can read it.
+        "const surfaceRaised=[];",
+        "function raisePlaybackSurface(source,fault){surfaceRaised.push({source,fault:fault||{}});return null;}",
+        "function playbackSurfaceGeneration(p){return (p&&p.attemptId)||null;}",
         "function tok(url){return url;}",
         "function preferNativeHls(){return nativeHls;}",
         "function bufferTargets(){return {fwd:20,back:10,budgeted:false};}",
@@ -3342,11 +3370,13 @@ async function main() {
         "return {set(p){PLAYER=p;return p;},current:()=>PLAYER,",
         " handle(action){return handlePreparedReplacementAction(PLAYER,action);},",
         " abandon(state,reason){return abandonPreparedReplacement(PLAYER,state,reason);},",
+        " failPrepared(detail){return failPreparedReplacement(PLAYER,preparedState(PLAYER),detail);},",
         " teardown(){return teardownHls();},",
         " cancelFrame(){return cancelPreparedFirstFrame(PLAYER);},",
         " pending(demand){return pendingPlaybackControlAcknowledgement(PLAYER,demand);},",
         " settle(request){return settlePlaybackControlAcknowledgement(PLAYER,request);},",
-        " origin:sessionMediaOriginMs, film:realMediaPositionMs, local:preparedLocalPositionMs};",
+        " origin:sessionMediaOriginMs, film:realMediaPositionMs, local:preparedLocalPositionMs,",
+        " surfaceRaised};",
       ].join("\n"),
     );
     const api = scope(
@@ -4285,6 +4315,28 @@ async function main() {
     assert.equal(latest(h).state, "aborted");
     assert.equal(h.handle(prepareAction()), null, "a settled staging is not rebuilt");
     assert.equal(h.instances.length, 1);
+    assert.equal(p.prepared, null);
+    // §3.3 row 18. The incumbent never moved — the viewer is watching the same
+    // picture they were — so the abandonment gets a ledger row and no surface.
+    assert.deepEqual(
+      h.surfaceRaised.map((entry) => entry.source),
+      ["log_only"],
+      "an abandoned successor is log-only, and it is not nothing",
+    );
+    assert.equal(h.surfaceRaised[0].fault.attached, p.attemptId ?? null,
+      "the row names the generation the incumbent is on");
+  }
+
+  {
+    // …and so is a successor that failed on its own: `playFailure`'s web twin
+    // would have been a full screen over a stream that never stopped.
+    const h = preparedHarness();
+    const p = h.set(preparedPlayer({ attemptId: "a4", hls: { bandwidthEstimate: 1, destroy() {} } }));
+    h.handle(prepareAction());
+    h.failPrepared("the successor element reported an error");
+    assert.equal(latest(h).state, "failed");
+    assert.deepEqual(h.surfaceRaised.map((entry) => entry.source), ["log_only"]);
+    assert.equal(h.surfaceRaised[0].fault.attached, "a4");
     assert.equal(p.prepared, null);
   }
 

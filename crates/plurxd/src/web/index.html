@@ -8003,6 +8003,9 @@ function failPreparedReplacement(p,state,detail){
   queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
   clientLog(Object.assign({level:"warn",event:"prepared_replacement",detail:"failed",
     message:`preparation of ${state.sessionId} failed: ${detail}`},playbackContext()));
+  // §3.3 row 18, the same reason as the abandonment above: the successor never
+  // took the picture, so nothing the viewer can see has changed.
+  raisePlaybackSurface("log_only",{attached:playbackSurfaceGeneration(p)});
   freePreparedReplacement(p,state);
 }
 // Settle and free. Every exit path runs through here — a new attach, a seek, a
@@ -8019,6 +8022,10 @@ function abandonPreparedReplacement(p,ackState,reason){
     clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:ackState||"aborted",
       message:`preparation of ${state.sessionId} abandoned: ${reason||"no reason given"}`},
       playbackContext()));
+    // §3.3 row 18. A staging nobody took up leaves the incumbent exactly where
+    // it was — the viewer is watching the same picture, and there is nothing to
+    // tell them — so the ledger row IS the trace, and the fence keeps it so.
+    raisePlaybackSurface("log_only",{attached:playbackSurfaceGeneration(p)});
   }
   freePreparedReplacement(p,state);
   return true;
@@ -8506,6 +8513,10 @@ function startPlaybackControl(v,p,bootstrap){
           p.controlLastError={at:now,message};
           if(!p.controlLastFailureLogAt||now-p.controlLastFailureLogAt>=60000){
             p.controlLastFailureLogAt=now;
+            // §3.3 row 18: the reporter owns no recovery, so a refused exchange
+            // — `session_gone` on a committed successor's first one included —
+            // changes nothing the viewer can see. The event is the only trace.
+            raisePlaybackSurface("log_only",{attached:playbackSurfaceGeneration(p)});
             clientLog({level:"warn",event:"playback_control",
               detail:String(error.code||error.name||"exchange_failed"),message});
           }
@@ -9536,7 +9547,6 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   // `PLAYER.burnedSub`.
   const applied=prePlayApplication(decision, selection);
   const wantSub=applied.subtitle, preBurn=applied.burnedSub;
-  if(applied.blockedByHdr) toast("That subtitle requires an SDR burn-in. HDR playback was kept unchanged.");
   PLAYER={fileId, timer:null, offset:0, hls:null, knownDur:knownDurMs||0,
     decodeRetest:retestDecodeLimit,
     durMs:(src.duration_ms||knownDurMs||0), method:decision.method, encoder:null,
@@ -9609,6 +9619,12 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   const openIsAttached=()=>openIsCurrent()&&PLAYER===openedPlayer
     &&PLAYER.openToken===openAttempt.token;
   newAttempt(requestedAttemptReason || (startSec>0?"resume":"cold-start"));
+  // §3.3 row 17: the picture the viewer is getting is not quite the one they
+  // asked for, and that is a notice beside it. Raised here rather than where
+  // the decision was read, because a fault is about a media generation and
+  // this is the line that mints the one this refusal belongs to.
+  if(applied.blockedByHdr) raisePlaybackSurface("degraded_notice",
+    {title:"That subtitle requires an SDR burn-in. HDR playback was kept unchanged."});
   if(PLAYER.curAudio<0) PLAYER.curAudio=0;
   const initialAudio=selectedAudioIndex(PLAYER);
   setupAirplay(video);
@@ -11142,7 +11158,8 @@ function maybeDecodeRescue(){
       : `this browser lost ${verdict.lost} frames in ${verdict.secs}s (${verdict.rate}/min) `+
         `playing ${decodeLimitLabel(p.source)||'this stream'} — switching to transcode`},
     playbackContext()));
-  toast("This browser can't hold Original smoothly — switching to optimized");
+  raisePlaybackSurface("degraded_notice",
+    {title:"This browser can't hold Original smoothly — switching to optimized"});
   startTranscodeFallback("decode-rescue")
     .finally(()=>releaseAutoFallback(p)).catch(()=>{});
 }
@@ -11175,7 +11192,8 @@ async function switchAutoRung(currentHeight,decision){
     const attached=await requestPlaybackMediaChange(p,{method:'transcode',copyHls:false,
       height:decision.height,reason:"auto-quality",automatic:true,
       from:currentHeight,switchReason:decision.reason});
-    if(attached) toast(`Quality → ${decision.height}p — ${decision.reason}`);
+    if(attached) raisePlaybackSurface("degraded_notice",
+      {title:`Quality → ${decision.height}p — ${decision.reason}`});
   } finally { releaseAutoFallback(p); }
 }
 async function rescueAutoSupply(){
@@ -11191,7 +11209,7 @@ async function rescueAutoSupply(){
   p.abr.supplyRescued=true;
   raisePlaybackSurface("owner_recovery_step",{title:"Adjusting quality…",
     detail:"repeated supply stalls — starting transcode Auto"});
-  toast("Quality → Auto transcode — supply stalls");
+  raisePlaybackSurface("degraded_notice",{title:"Quality → Auto transcode — supply stalls"});
   try{
     await startTranscodeFallback("auto-supply",
       "switched to transcode Auto after 3 supply stalls in 60 seconds");
@@ -12060,7 +12078,17 @@ function nudge(d){
   NUDGE_T=setTimeout(()=>{ if(PLAYER!==me) return; commitPendingSeek(); },
     PlaybackPolicy.contractTiming("desktop_hotkey_coalesce_ms"));
 }
-async function togglePip(){ const v=document.getElementById("video"); try{ if(document.pictureInPictureElement) await document.exitPictureInPicture(); else if(v) await v.requestPictureInPicture(); }catch(e){} }
+// §3.3 row 17's PiP failure. The browser refuses picture-in-picture for its own
+// reasons — no user gesture left, a disabled policy, an element it will not
+// detach — and this used to swallow the sentence it gives. Nothing about the
+// playback changed, so it is a notice beside the picture and never over it.
+async function togglePip(){
+  const v=document.getElementById("video");
+  try{ if(document.pictureInPictureElement) await document.exitPictureInPicture();
+       else if(v) await v.requestPictureInPicture(); }
+  catch(e){ raisePlaybackSurface("degraded_notice",
+    {title:"Picture-in-picture did not start.",detail:String(e&&e.message||e)}); }
+}
 // Is the player fullscreen by any of the three routes into it? The document
 // API doesn't know about the iOS one: `webkitEnterFullscreen` on the video
 // element opens a separate mode that `document.fullscreenElement` never
@@ -13060,7 +13088,8 @@ async function setSub(index){
     requiresBurn:index>=0&&subNeedsBurn(want), deliveredRange:me.deliveredRange
   });
   if(burnAction==="keep_hdr"){
-    toast("That subtitle requires an SDR burn-in. HDR playback was kept unchanged.");
+    raisePlaybackSurface("degraded_notice",
+      {title:"That subtitle requires an SDR burn-in. HDR playback was kept unchanged."});
     return false;   // nothing changed, so nothing to remember
   }
   const video=document.getElementById("video");
@@ -13631,7 +13660,15 @@ async function pollSessionHealth(force){
     // the vanishing-section problem this work exists to fix — so keep the last
     // numbers, which are the real final ones, and say that is what they are.
     if(!current()) return;
-    if(p.health && !p.health.final){ p.health.final=true; updateStats(); }
+    // §3.3 row 18: a stats poll that could not answer is a panel, not a
+    // playback — the picture is untouched and the numbers on screen are the
+    // real final ones. Raised on the transition only, so a poll that keeps
+    // failing every two seconds does not become a ring of its own.
+    if(p.health && !p.health.final){
+      p.health.final=true;
+      raisePlaybackSurface("log_only",{attached:playbackSurfaceGeneration(p)});
+      updateStats();
+    }
     else if(!p.health) p.health=null;
   }
 }

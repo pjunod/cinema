@@ -1680,6 +1680,9 @@ test("every shipped stall report carries the wait's start as its identity", () =
 // session-create POST.
 function autoRescueHarness(player, autoAbr = true) {
   const opened = [];
+  // Every fault the rescue owner raised, so the degraded notices §3.3 row 17
+  // moved off `toast` are read here rather than assumed.
+  const raises = [];
   let releaseOpen = null;
   let openFails = false;
   const video = { currentTime: 12, paused: false, videoHeight: 720 };
@@ -1751,7 +1754,7 @@ function autoRescueHarness(player, autoAbr = true) {
     noop,
     noop,
     () => ({}),
-    noop,
+    (source, fault) => raises.push({ source, fault: fault || {} }),
     noop,
     startTranscodeFallback,
     async () => {}, // the health poll resolves before the session-create request
@@ -1764,6 +1767,7 @@ function autoRescueHarness(player, autoAbr = true) {
   return {
     ...shipped,
     opened,
+    raises,
     video,
     failNextOpen() {
       openFails = true;
@@ -1986,6 +1990,122 @@ asyncTest("a failed automatic session-open releases the claim", async () => {
   const rescue = h.rescueAutoSupply();
   await h.settle();
   assert.deepEqual(h.opened, ["decode-rescue", "auto-supply"]);
+  await h.finishOpen();
+  await rescue;
+});
+
+// ---- §3.3 row 17: the automatic downshifts are notices, not toasts ----------
+//
+// The Auto rung switch, run shipped: the notice is raised only when the rung
+// actually attached, because a change that failed is the predecessor's
+// `refused` banner and not a second sentence claiming the quality moved.
+function autoRungHarness(attaches) {
+  const raises = [];
+  const player = { abr: { switching: false }, autoFallbackInFlight: false, started: true };
+  const build = new Function(
+    "PLAYER", "document", "raisePlaybackSurface",
+    "positionForPlaybackIntent", "beginPlaybackControlSeek", "requestPlaybackMediaChange",
+    [
+      shippedSource("hasPendingPlaybackOpen"),
+      shippedSource("playbackOwnsAttachedMedia"),
+      shippedSource("claimAutoFallback"),
+      shippedSource("releaseAutoFallback"),
+      shippedSource("switchAutoRung"),
+      "return {switchAutoRung};",
+    ].join("\n"),
+  );
+  const shipped = build(
+    player,
+    { getElementById: () => ({}) },
+    (source, fault) => raises.push({ source, fault: fault || {} }),
+    () => 120,
+    () => {},
+    async () => attaches,
+  );
+  return { ...shipped, raises, player };
+}
+
+asyncTest("an Auto rung that attached says so as a degraded fault", async () => {
+  const h = autoRungHarness(true);
+  await h.switchAutoRung(2160, { height: 1080, reason: "sustained supply pressure" });
+  assert.deepEqual(h.raises, [{
+    source: "degraded_notice",
+    fault: { title: "Quality → 1080p — sustained supply pressure" },
+  }]);
+  assert.equal(h.player.autoFallbackInFlight, false, "the claim is released either way");
+});
+
+asyncTest("an Auto rung that did not attach says nothing", async () => {
+  const h = autoRungHarness(false);
+  await h.switchAutoRung(2160, { height: 1080, reason: "sustained supply pressure" });
+  assert.deepEqual(h.raises, [], "a failed change is the change's own refusal, not a downshift");
+});
+
+// The remaining row 17 and row 18 sites live inside functions whose harness
+// would cost more than the assertion is worth — a cold-start `play()`, the
+// subtitle menu, the PiP toggle, the two-second stats poll. What can still be
+// pinned from here is the thing a refactor would quietly drop: that each of
+// them leaves the player through the presenter and not through `toast`.
+test("every remaining row 17/18 site raises rather than toasts", () => {
+  const sites = [
+    ["play", "degraded_notice", "That subtitle requires an SDR burn-in."],
+    ["setSub", "degraded_notice", "That subtitle requires an SDR burn-in."],
+    ["togglePip", "degraded_notice", "Picture-in-picture did not start."],
+    ["pollSessionHealth", "log_only", null],
+  ];
+  for (const [name, source, sentence] of sites) {
+    const src = shippedSource(name);
+    assert.ok(
+      src.includes(`raisePlaybackSurface("${source}"`),
+      `${name} must raise ${source}`,
+    );
+    if (sentence) {
+      assert.ok(src.includes(sentence), `${name} must keep its copy`);
+      assert.ok(
+        !new RegExp(`toast\\([^)]*${sentence.slice(0, 20).replace(/[.*+?^$()|[\]\\-]/g, "\\$&")}`).test(src),
+        `${name} must not also toast it`,
+      );
+    }
+  }
+});
+
+//
+// Both of these used to leave the player through `toast()` — a 2.2-second strip
+// with no class, no identity and no ledger row, which is exactly the imperative
+// message channel the contract exists to remove. They are `degraded` faults
+// now, and the copy is the copy that shipped.
+asyncTest("the decode rescue raises its notice as a degraded fault", async () => {
+  const player = pressuredRemuxPlayer();
+  const h = autoRescueHarness(player);
+  h.maybeDecodeRescue();
+  await h.settle();
+  const notices = h.raises.filter((entry) => entry.source === "degraded_notice");
+  assert.equal(notices.length, 1, "the decode rescue tells the viewer once");
+  assert.equal(
+    notices[0].fault.title,
+    "This browser can't hold Original smoothly — switching to optimized",
+  );
+  assert.ok(
+    !notices[0].fault.player_stopped,
+    "a downshift is a notice beside a running picture, never a stop",
+  );
+  await h.finishOpen();
+});
+
+asyncTest("the supply rescue raises its notice as a degraded fault", async () => {
+  const player = pressuredRemuxPlayer();
+  const h = autoRescueHarness(player);
+  const rescue = h.rescueAutoSupply();
+  await h.settle();
+  assert.deepEqual(
+    h.raises.map((entry) => entry.source),
+    ["owner_recovery_step", "degraded_notice"],
+    "the recovery step and the notice about it are two faults, in that order",
+  );
+  assert.equal(
+    h.raises[1].fault.title,
+    "Quality → Auto transcode — supply stalls",
+  );
   await h.finishOpen();
   await rescue;
 });
