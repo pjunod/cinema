@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["6be5672d"]
+points = []
+checks = []
+reason = "Prose only, and deliberately unpinned. This commit corrects two sentences inside the Developer readiness card in `crates/plurxd/src/web/index.html`: the Apple row claimed build 150 and a 532/518 test run two builds after both had moved, and the Android row claimed build 92 and 612 tests after that client had shipped again. Nothing checks these numbers and the commit says so in a comment it adds directly above them — `validation/doc_versions.py` sweeps the two client READMEs, `APPLE-CLIENT-PARITY.md` and `docs/STATUS.html` for build claims and has never read this file, so both rows went stale the moment a client shipped. A revert restores two stale sentences in a rendered card and no test anywhere goes red, which is exactly the gap the added comment records for whoever sweeps it next. Mapped as no-evidence rather than anchored to a test that does not exist."
+ignore = true

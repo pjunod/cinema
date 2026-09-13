@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["f020fd33"]
+points = []
+checks = []
+reason = "`STATUS.md` prose only: this commit adds the pull request number to the section describing the fix that opened it, so the page names #297 the way it names #291 and #294. It changes no runtime, no client and no validation behaviour, and there is nothing for a test to hold — `test_status_pr_claims` reads the number as a claim about what landed, which is why the section is worded as a `WIP:` title rather than as a merge. Mapped as no-evidence."
+ignore = true
