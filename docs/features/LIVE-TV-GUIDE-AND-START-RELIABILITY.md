@@ -129,6 +129,13 @@ client's **start barrier** when it holds a persisted marker it cannot resolve:
 | Apple | `LiveTvStartBarrier`, [LiveTv.swift 629–676](../../clients/apple/Sources/LiveTv.swift) | file `live-tv-start.pending` (Caches on tvOS, Application Support elsewhere) | `ContinuousClock.now + 90 s` in `init` if the file exists ([640](../../clients/apple/Sources/LiveTv.swift)) |
 | Android | `LiveTvStartBarrier`, [LiveTvLease.kt 58–95](../../clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvLease.kt) | `AtomicFile` marker via `LiveTvFileBarrierStore` | `elapsedRealtime() + 90_000` in `init` if pending ([65](../../clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvLease.kt)) |
 
+The exact text on the iPhone — "The start response was lost. Wait 90
+seconds for any unclaimed tuner session to expire before trying again." —
+is [LiveTv.swift 459](../../clients/apple/Sources/LiveTv.swift), rendered
+under a fully populated guide (Paul's screenshot, 2026-09-13): the two
+symptoms are independent, and nothing was lost on that press — the app
+refused on a marker left by the previous session.
+
 The design is documented in HDHOMERUN-LIVE-TV-PLAN.md 291–298 and is
 explicit about the trade: "This is conservative: … a restart may wait even
 when the old session has already expired." That sentence is the symptom.
