@@ -10,7 +10,8 @@ first.
 `04cbb2e44` into `main`; final adversarial findings were folded and
 [Main promotion gate run 2005](http://192.168.4.7:3000/noirr/plurx/actions/runs/2005)
 passed on the exact merged-base candidate.** The server, Android, and Apple
-task PRs are merged and their focused automated evidence is green.
+task PRs are merged and their focused automated evidence is green. The
+four-case documentation-index regression passes for this closeout.
 Paul explicitly directed promotion without waiting for the HDHomeRun, Apple TV,
 Android-phone, and web physical results. Those results and the authenticated
 tvOS simulator screenshots remain unclaimed; the exact hand-off prompts stay
