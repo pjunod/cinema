@@ -20,6 +20,11 @@ function test(name, run) {
     .then(() => process.stdout.write(`PASS ${name}\n`));
 }
 
+// Let real timers (the liveness probe) and the promises behind them finish.
+function settled(ms) {
+  return new Promise(done => setTimeout(done, ms)).then(() => Promise.resolve());
+}
+
 function deferred() {
   let resolve;
   const promise = new Promise((settle) => { resolve = settle; });
@@ -167,7 +172,7 @@ async function main() {
     assert.equal(liveTv.errorView({ code: "owner_unavailable" }).retryable, true);
     // The server's own advice drives the button now, not a table in here.
     assert.equal(liveTv.errorView({ code: "drm_unsupported", retry: "never" }).retryable, false);
-    assert.equal(liveTv.errorView({ code: "invalid_request" }).retryable, false,
+    assert.equal(liveTv.errorView({ code: "invalid_request", status: 400 }).retryable, false,
       "a refusal the ingress made offers no retry even when it advises nothing");
     assert.equal(liveTv.errorView({ code: "unknown-server-code" }).title, "Tuner owner unavailable");
     assert.equal(liveTv.errorView({ code: "no_answer" }).title, "The server did not answer");
@@ -557,6 +562,35 @@ async function main() {
     return scope;
   }
 
+  // The shipped open-time resume, with its real liveness probe attached.
+  function shippedResume(options) {
+    const settings = options || {};
+    const storage = settings.storage || memoryStorage();
+    const wall = settings.wall || (() => 1_000_000);
+    const attached = [], asked = [];
+    const state = Object.assign({
+      channels: [{ id: "7.1" }], serial: 0, protocols: [1, 2, 3],
+      lineupRead: true, resumed: false, hint: null, starting: null,
+    }, settings.state || {});
+    const hints = new liveTv.StartHints(() => storage, wall);
+    const lease = settings.lease || new liveTv.Lease({
+      start: async () => ({ session_id: "unused" }), release: async () => {},
+    });
+    const resume = new Function(
+      "PlurxLiveTv", "PlaybackPolicy", "LIVE_TV", "LIVE_TV_HINTS", "LIVE_TV_LEASE", "LIVE_TV_TABS",
+      "liveTvRequest", "Date", "ATTACHED",
+      `const PAGE_RENDER_GENERATION=1, location={hash:"#/live-tv"};
+       async function liveTvAttachSession(info,index,serial,generation){ ATTACHED.push({info,index}); }
+       ${shipped("liveTvRecoveryEnabled")}${shipped("liveTvAnswer")}${shipped("liveTvOrphanHints")}${shipped("liveTvResumeStart")}
+       return liveTvResumeStart;`,
+    )(
+      liveTv, policy, state, hints, lease, settings.tabs || null,
+      async (path, method) => { asked.push(`${method} ${path}`); return settings.answer(path); },
+      { now: wall }, attached,
+    );
+    return { resume, attached, asked, hints, lease, state, storage };
+  }
+
   // The shape the fixture's `answers` rows put on the wire.
   function answerRequest(rows, thrown) {
     return async (path, method, _timeout, _auth, _keepalive, body) => {
@@ -596,6 +630,38 @@ async function main() {
     }
   });
 
+  await test("an ingress code is only the ingress's verdict when the status is a 4xx", async () => {
+    // The same four codes can arrive from either side. A 4xx is the ingress
+    // rejecting the request before an owner saw it — nothing to retire. In a
+    // 5xx the request was on its way to, or already at, an owner that may have
+    // opened a tuner, so the handle has to survive. Apple rules it on
+    // 400..<500 and web now matches.
+    const ingress = liveTv.startOutcome({ status: 400, body: { code: "invalid_request" } });
+    assert.equal(ingress.keepHint, false);
+    assert.equal(ingress.offerRetry, false);
+    const enRoute = liveTv.startOutcome({ status: 502, body: { code: "invalid_request" } });
+    assert.equal(enRoute.keepHint, true,
+      "a 5xx carrying an ingress code and no verdict keeps the only handle to the start");
+    assert.equal(enRoute.offerRetry, true, "and the viewer can press again");
+    assert.equal(enRoute.render, "invalid_request", "the copy still names what the server said");
+    // A 5xx that an owner did decide still forgets it, on the verdict alone.
+    assert.equal(liveTv.startOutcome({
+      status: 503, body: { code: "live_tv_disabled", retry: "never", owner_decided: true },
+    }).keepHint, false);
+
+    // And through the shipped press, where the status comes off the wire.
+    const rows = [];
+    const lease = shippedLease({ request: answerRequest(rows, () => {
+      const error = new Error("bad gateway");
+      error.status = 502; error.code = "admin_required";
+      error.answer = { transport: "http", status: 502, body: { code: "admin_required" } };
+      return error;
+    }) });
+    await assert.rejects(lease.LIVE_TV_LEASE.start("7.1"), error => error.code === "admin_required");
+    assert.equal(lease.LIVE_TV_HINTS.list().length, 1,
+      "the press keeps the handle for a refusal no owner is known to have made");
+  });
+
   await test("the shipped press keeps, forgets and replays exactly as the fixture rules", async () => {
     for (const rule of START_CASES.answers) {
       const rows = [];
@@ -618,24 +684,13 @@ async function main() {
   await test("resume decides every shared open-time case, and never tunes", async () => {
     for (const rule of START_CASES.resume) {
       const storage = memoryStorage();
-      storage.setItem("plurx_live_tv_hint_v1:abc", "1000");
-      const attached = [];
-      const hints = new liveTv.StartHints(() => storage, () => 2000);
-      const lease = new liveTv.Lease({ start: async () => ({ session_id: "no" }), release: async () => {} });
-      const resume = new Function(
-        "PlurxLiveTv", "LIVE_TV", "LIVE_TV_HINTS", "LIVE_TV_LEASE", "liveTvRequest", "ATTACHED",
-        `const PAGE_RENDER_GENERATION=1, location={hash:"#/live-tv"};
-         async function liveTvAttachSession(info,index,serial,generation){ ATTACHED.push({info,index}); }
-         ${shipped("liveTvRecoveryEnabled")}${shipped("liveTvAnswer")}${shipped("liveTvResumeStart")}
-         return liveTvResumeStart;`,
-      )(
-        liveTv,
-        { channels: [{ id: "7.1" }], serial: 0, protocols: [1, 2, 3], resumed: false, hint: null, starting: null },
-        hints, lease,
-        async () => { if (rule.transport === "timeout") throw new Error("no answer"); return rule.body; },
-        attached,
-      );
-      await resume(1, "#/live-tv");
+      storage.setItem("plurx_live_tv_hint_v1:abc", "1000"); // long unclaimed
+      const run = shippedResume({
+        storage,
+        answer: () => { if (rule.transport === "timeout") throw new Error("no answer"); return rule.body; },
+      });
+      const { attached, hints, lease } = run;
+      await run.resume(1, "#/live-tv");
       const kept = hints.list().length === 1;
       if (rule.then === "reattach") {
         assert.equal(attached.length, 1, `${rule.case}: the session is attached`);
@@ -652,6 +707,116 @@ async function main() {
         assert.equal(kept, rule.then === "keep_hint_wait", `${rule.case}: ${rule.then}`);
       }
     }
+  });
+
+  await test("a second tab never rejoins the session the first tab is watching", async () => {
+    // Two tabs, one shared localStorage. Tab A is watching; tab B opens Live
+    // TV and finds A's hint. Rejoining it would put both documents on one
+    // capability, and the first of them to leave would DELETE it — A's picture
+    // would stop mid-programme with capability_expired. B must not ask.
+    const Channel = tabBus(), storage = memoryStorage(), wall = 1_000_000;
+    const watching = shippedLease({
+      storage, wall: () => wall, channel: Channel,
+      request: async (path, method) => method === "POST" && path.endsWith("/sessions")
+        ? { session_id: "cap-a", live: true } : { outcome: "retired" },
+    });
+    await watching.LIVE_TV_LEASE.start("7.1");
+    const held = watching.LIVE_TV.hint;
+    // Old on the wall clock: only being alive can save it.
+    storage.setItem(`plurx_live_tv_hint_v1:${held}`, String(wall - 600_000));
+
+    const second = shippedResume({
+      storage, wall: () => wall, tabs: new Channel(),
+      answer: () => ({ outcome: "live", session: { session_id: "cap-a", live: true,
+        playlist_url: "/api/v1/live-tv/sessions/cap-a/index.m3u8", channel: { id: "7.1" } } }),
+    });
+    await second.resume(1, "#/live-tv");
+    assert.deepEqual(second.asked, [],
+      "a hint a live document claims is not this document's to resume");
+    assert.deepEqual(second.attached, [], "and nothing is adopted");
+    assert.equal(second.lease.current, null);
+    assert.equal(watching.LIVE_TV_LEASE.current.session_id, "cap-a",
+      "the watching tab still holds the only handle on its session");
+    assert.ok(storage.getItem(`plurx_live_tv_hint_v1:${held}`) !== null, "and keeps its hint");
+
+    // The same hint, once nothing answers for it, is resumable again.
+    const later = shippedResume({
+      storage, wall: () => wall, tabs: new Channel(),
+      answer: () => ({ outcome: "live", session: { session_id: "cap-a", live: true,
+        playlist_url: "/api/v1/live-tv/sessions/cap-a/index.m3u8", channel: { id: "7.1" } } }),
+    });
+    watching.LIVE_TV.hint = null; // the watching document is gone
+    await later.resume(1, "#/live-tv");
+    assert.deepEqual(later.asked, [`POST /live-tv/starts/${held}/resume`],
+      "an unclaimed session is exactly what resume is for");
+    assert.equal(later.attached.length, 1);
+  });
+
+  await test("a lineup read that failed leaves the resume for the next visit", async () => {
+    // The app was killed mid-stream; the browser opens Live TV during a
+    // deploy and /live-tv/channels times out. Marking the document resumed on
+    // that silence would strand a running session for the life of the tab.
+    const storage = memoryStorage(), wall = 1_000_000;
+    storage.setItem("plurx_live_tv_hint_v1:stranded", String(wall - 600_000));
+    const session = { session_id: "cap", live: true, channel: { id: "7.1" },
+      playlist_url: "/api/v1/live-tv/sessions/cap/index.m3u8" };
+    const run = shippedResume({
+      storage, wall: () => wall,
+      state: { lineupRead: false, protocols: null },
+      answer: () => ({ outcome: "live", session }),
+    });
+    await run.resume(1, "#/live-tv");
+    assert.deepEqual(run.asked, [], "nothing is asked before the lineup answers");
+    assert.equal(run.state.resumed, false, "and the document has decided nothing yet");
+
+    // The viewer navigates away and back; this time the lineup answers.
+    run.state.lineupRead = true; run.state.protocols = [1, 2, 3];
+    await run.resume(1, "#/live-tv");
+    assert.deepEqual(run.asked, ["POST /live-tv/starts/stranded/resume"]);
+    assert.equal(run.attached.length, 1, "the still-running session is rejoined");
+    assert.equal(run.state.resumed, true);
+
+    // A lineup that answers without the protocol settles it for good: nothing
+    // to ask, and no reason to ask again.
+    const legacy = shippedResume({
+      storage: memoryStorage(), wall: () => wall,
+      state: { protocols: null }, answer: () => ({ outcome: "live", session }),
+    });
+    await legacy.resume(1, "#/live-tv");
+    assert.deepEqual(legacy.asked, []);
+    assert.equal(legacy.state.resumed, true);
+    // And the shipped view only claims a read that actually landed.
+    const view = shipped("viewLiveTv");
+    assert.ok(view.indexOf("LIVE_TV.lineupRead=true") > view.indexOf('await api("/live-tv/channels"'));
+    assert.ok(view.indexOf("LIVE_TV.lineupRead=true") < view.indexOf("}catch(e){"),
+      "the flag is set on the answered path, never in the failure path");
+  });
+
+  await test("a refused resume forgets the handle only when an owner decided it", async () => {
+    // Web's documented behaviour, where Apple and Android differ: the resume
+    // refusal goes through the same reducer a start refusal does.
+    const refuse = (status, body) => () => {
+      const error = new Error("refused");
+      error.status = status; error.code = body.code;
+      error.answer = { transport: "http", status, body };
+      throw error;
+    };
+    const decided = shippedResume({
+      storage: (() => { const s = memoryStorage(); s.setItem("plurx_live_tv_hint_v1:gone", "0"); return s; })(),
+      answer: refuse(404, { code: "channel_not_found", retry: "never", owner_decided: true }),
+    });
+    await decided.resume(1, "#/live-tv");
+    assert.deepEqual(decided.hints.list(), [],
+      "an owner that decided the answer leaves nothing to retire");
+
+    const undecided = shippedResume({
+      storage: (() => { const s = memoryStorage(); s.setItem("plurx_live_tv_hint_v1:maybe", "0"); return s; })(),
+      answer: refuse(503, { code: "owner_unavailable", retry: "now", owner_decided: false }),
+    });
+    await undecided.resume(1, "#/live-tv");
+    assert.equal(undecided.hints.list().length, 1,
+      "an answer no owner made leaves a start that may exist, and its only handle");
+    assert.deepEqual(undecided.attached, []);
   });
 
   await test("a resumed session is watched on its own channel, playlist and heartbeat", async () => {
@@ -726,6 +891,7 @@ async function main() {
       },
     });
     await lease.LIVE_TV_LEASE.start("7.1");
+    await settled(policy.liveContractTiming("retire_liveness_probe_ms") * 4);
     assert.equal(rows.filter(row => row.path.startsWith("/live-tv/starts/")).length, 0,
       "a hint younger than the keepalive window belongs to something alive");
     assert.ok(lease.LIVE_TV_HINTS.list().some(hint => hint.id === "fresh"));
@@ -752,6 +918,7 @@ async function main() {
       if (event.data && event.data.who === "sibling") watching.postMessage({ alive: "sibling" });
     };
     await lease.LIVE_TV_LEASE.start("7.1");
+    await settled(policy.liveContractTiming("retire_liveness_probe_ms") * 4);
     assert.equal(rows.filter(row => row.path.startsWith("/live-tv/starts/")).length, 0,
       "a document that answered the probe keeps its session");
     assert.ok(lease.LIVE_TV_HINTS.list().some(hint => hint.id === "sibling"));
@@ -777,6 +944,7 @@ async function main() {
     storage.setItem(`plurx_live_tv_hint_v1:${held}`, String(wall - 600_000));
     const pressing = shippedLease({ storage, wall: () => wall, channel: Channel, request: served(rowsB) });
     await pressing.LIVE_TV_LEASE.start("9.1");
+    await settled(policy.liveContractTiming("retire_liveness_probe_ms") * 4);
     assert.equal(rowsB.filter(row => row.path.startsWith("/live-tv/starts/")).length, 0,
       "a live sibling's start is never retired out from under it");
     assert.ok(storage.getItem(`plurx_live_tv_hint_v1:${held}`) !== null);
@@ -797,13 +965,39 @@ async function main() {
       },
     });
     await lease.LIVE_TV_LEASE.start("7.1");
-    await Promise.resolve(); await Promise.resolve();
+    // The press is already at the owner while the sweep is still inside its
+    // liveness probe: dispatched, not awaited.
+    assert.ok(rows.some(row => row.method === "POST" && row.path.endsWith("/sessions")),
+      "and the press proceeds either way");
+    assert.equal(rows.filter(row => row.path.startsWith("/live-tv/starts/")).length, 0,
+      "the tuner request must not wait behind a quarter-second probe");
+    await settled(policy.liveContractTiming("retire_liveness_probe_ms") * 4);
     assert.deepEqual(rows.filter(row => row.path.startsWith("/live-tv/starts/"))
       .map(row => `${row.method} ${row.path}`), ["DELETE /live-tv/starts/orphan"]);
     assert.ok(!lease.LIVE_TV_HINTS.list().some(hint => hint.id === "orphan"),
       "a typed 2xx retirement takes the handle away");
-    assert.ok(rows.some(row => row.method === "POST" && row.path.endsWith("/sessions")),
-      "and the press proceeds either way");
+  });
+
+  await test("the press does not wait for the liveness probe before reaching the owner", async () => {
+    // §5.5's acceptance: a stored hint costs the viewer nothing. The probe
+    // takes retire_liveness_probe_ms; the POST must already be gone by then,
+    // and the order of the two requests on the wire is the proof.
+    const rows = [], storage = memoryStorage(), wall = 1_000_000;
+    storage.setItem("plurx_live_tv_hint_v1:orphan", String(wall - 600_000));
+    const lease = shippedLease({
+      storage, wall: () => wall, channel: tabBus(),
+      request: async (path, method) => {
+        rows.push(`${method} ${path}`);
+        return method === "POST" && path.endsWith("/sessions")
+          ? { session_id: "cap", live: true } : { outcome: "retired" };
+      },
+    });
+    await lease.LIVE_TV_LEASE.start("7.1");
+    assert.equal(rows[0], "POST /live-tv/channels/7.1/sessions",
+      "the tuner request is the first thing on the wire, before any retire");
+    await settled(policy.liveContractTiming("retire_liveness_probe_ms") * 4);
+    assert.deepEqual(rows, ["POST /live-tv/channels/7.1/sessions", "DELETE /live-tv/starts/orphan"],
+      "and the sweep lands beside it, not in front of it");
   });
 
   await test("a hint is a request id and a touch, and the browser may refuse to keep it", () => {
@@ -925,22 +1119,48 @@ async function main() {
   });
 
   await test("the guide polls on the owner's clock and stops on route change", async () => {
+    // Every number the web guide loop paces on is the served contract table's,
+    // and the served table is the fixture's. Seven keys, no local constant.
+    for (const name of ["channel_coalesce_ms", "guide_poll_min_s", "guide_poll_after_next_refresh_s",
+      "guide_poll_unavailable_s", "guide_poll_ceiling_s", "retire_liveness_probe_ms",
+      "retire_orphan_after_keepalives", "start_replay_attempts"]) {
+      assert.equal(policy.liveContractTiming(name), CONTRACT_TIMINGS[name],
+        `${name} must reach the web reducer from the fixture`);
+    }
     const timings = {
       guide_poll_min_s: CONTRACT_TIMINGS.guide_poll_min_s,
       guide_poll_after_next_refresh_s: CONTRACT_TIMINGS.guide_poll_after_next_refresh_s,
       guide_poll_unavailable_s: CONTRACT_TIMINGS.guide_poll_unavailable_s,
+      guide_poll_ceiling_s: CONTRACT_TIMINGS.guide_poll_ceiling_s,
     };
     const now = 1_700_000_000;
     assert.equal(liveTv.guidePollDelayMs({ next_refresh_at: now + 60 }, now, timings), 65_000);
     assert.equal(liveTv.guidePollDelayMs({ next_refresh_at: now - 100 }, now, timings), 15_000,
       "the floor holds whatever the owner's next_refresh_at says");
     assert.equal(liveTv.guidePollDelayMs({ freshness: "unavailable" }, now, timings), 30_000);
-    assert.equal(liveTv.guidePollDelayMs(null, now, timings), 15_000);
+    assert.equal(liveTv.guidePollDelayMs({ freshness: "fresh" }, now, timings), 15_000);
+    // A read that threw is paced like an answer with nothing in it: same
+    // information, and the three clients must not disagree about it.
+    assert.equal(liveTv.guidePollDelayMs(null, now, timings), 30_000);
+    // A far-future next_refresh_at must not park the grid until then.
+    assert.equal(liveTv.guidePollDelayMs({ next_refresh_at: now + 86_400 }, now, timings), 1_200_000);
+    assert.equal(liveTv.guidePollDelayMs({ next_refresh_at: now + 1_195 }, now, timings), 1_200_000,
+      "the ceiling binds exactly where the owner's answer crosses it");
+    assert.equal(liveTv.guidePollDelayMs({ next_refresh_at: now + 1_100 }, now, timings), 1_105_000,
+      "and an answer inside the ceiling is still the owner's to give");
+    // The floor outranks the ceiling if the two are ever set to cross: a
+    // fan-out floor is a promise to the owner, a ceiling only to the viewer.
+    assert.equal(liveTv.guidePollDelayMs({ next_refresh_at: now + 600 },
+      now, { ...timings, guide_poll_ceiling_s: 5 }), 15_000);
+    // A timings object without the key at all still answers.
+    assert.equal(liveTv.guidePollDelayMs({ next_refresh_at: now + 86_400 }, now,
+      { ...timings, guide_poll_ceiling_s: undefined }), 86_405_000);
 
     // And the shipped loop actually reschedules itself from the answer.
     const delays = [], answers = [
       { source: "xmltv", freshness: "fresh", channels: [], next_refresh_at: now + 60 },
       { source: "xmltv", freshness: "unavailable", channels: [] },
+      { source: "xmltv", freshness: "fresh", channels: [], next_refresh_at: now + 604_800 },
     ];
     let reads = 0, pending = null;
     const load = new Function(
@@ -959,8 +1179,12 @@ async function main() {
     await pending();
     assert.deepEqual(delays, [65_000, 30_000], "an unavailable guide asks again soon");
     await pending();
-    assert.deepEqual(delays, [65_000, 30_000, 15_000], "and a guide read that failed keeps asking");
-    assert.equal(reads, 3, "the grid fills without the viewer leaving the page");
+    assert.deepEqual(delays, [65_000, 30_000, 1_200_000],
+      "an owner promising to refresh next week is still asked within the ceiling");
+    await pending();
+    assert.deepEqual(delays, [65_000, 30_000, 1_200_000, 30_000],
+      "and a guide read that failed keeps asking, on the unavailable cadence");
+    assert.equal(reads, 4, "the grid fills without the viewer leaving the page");
     assert.match(shipped("liveTvLeaveRoute"), /clearTimeout\(LIVE_TV\.guideTimer\)/);
     // Not one of those numbers is written into the page.
     assert.doesNotMatch(shipped("scheduleLiveTvGuide"), /\b(15|30|65)000\b/);

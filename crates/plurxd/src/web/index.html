@@ -14811,7 +14811,7 @@ function playbackPanel(settings){
 }
 // Live TV owns its own media element and capability. It never enters PLAYER,
 // file progress, playback-control, watched state, autoskip, or Trakt.
-const LIVE_TV={channels:[],serial:0,hls:null,timer:null,guideTimer:null,polling:false,lastChannel:null,hint:null,protocols:null,resumed:false,unplayedSince:null,lastPosition:0,starting:null,status:null,compatibility:null,compatibilityRetried:false};
+const LIVE_TV={channels:[],serial:0,hls:null,timer:null,guideTimer:null,polling:false,lastChannel:null,hint:null,protocols:null,lineupRead:false,resumed:false,unplayedSince:null,lastPosition:0,starting:null,status:null,compatibility:null,compatibilityRetried:false};
 function liveTvNow(){
   return performance.now();
 }
@@ -14852,9 +14852,18 @@ async function liveTvRetireHint(id){
     if(answer&&typeof answer.outcome==="string") LIVE_TV_HINTS.forget(id);
   }catch(e){ /* a hint that cannot be retired is simply left */ }
 }
-async function liveTvRetireOrphanHints(){
+// Which stored hints nothing alive is holding. One probe answers that for both
+// callers: the retire sweep before a press, and the open-time resume. A hint
+// another document claims — or one touched inside the keepalive window — is
+// still being driven by something, and it is neither this document's to retire
+// nor its to rejoin. Resuming a sibling's session would put two documents on
+// one capability, and the first of them to navigate away would DELETE the
+// picture out from under the other.
+//
+// This decides what to RETIRE or REJOIN, never whether to start.
+async function liveTvOrphanHints(){
   const hints=LIVE_TV_HINTS.list();
-  if(!hints.length) return;
+  if(!hints.length) return [];
   const alive=new Set();
   if(LIVE_TV_TABS){
     const claimed=event=>{ const message=event&&event.data; if(message&&typeof message.alive==="string") alive.add(message.alive); };
@@ -14869,10 +14878,10 @@ async function liveTvRetireOrphanHints(){
   // clock step can make a live tab's hint look orphaned: that tab then sees
   // `capability_expired` and its next press plays — annoying, not unsafe.
   const fresh=PlaybackPolicy.liveContractTiming("retire_orphan_after_keepalives")*5000, now=Date.now();
-  for(const hint of hints){
-    if(alive.has(hint.id)||now-hint.touchedAt<fresh) continue;
-    liveTvRetireHint(hint.id);
-  }
+  return hints.filter(hint=>!alive.has(hint.id)&&now-hint.touchedAt>=fresh);
+}
+async function liveTvRetireOrphanHints(){
+  for(const hint of await liveTvOrphanHints()) liveTvRetireHint(hint.id);
 }
 function liveTvPlaybackEnvelope(compatibility=null){
   const caps=currentCapsDocument();
@@ -14895,11 +14904,13 @@ function liveTvPlaybackEnvelope(compatibility=null){
 }
 const LIVE_TV_LEASE=new PlurxLiveTv.Lease({
   start:async channel=>{
-    // An orphaned hint is retired before the press, and the press proceeds
-    // whether or not the retire worked. Nothing on this path may refuse to
-    // start: admission is the owner's, and it has four slots.
+    // The retire sweep is dispatched, never awaited: the liveness probe costs
+    // a quarter second and this press must not spend it. The tuner request
+    // leaves now and the sweep tidies up beside it, exactly as the Apple and
+    // Android leases dispatch theirs. Nothing on this path may refuse or delay
+    // a start — admission is the owner's, and it has four slots.
     const recovery=liveTvRecoveryEnabled();
-    if(recovery){ try{ await liveTvRetireOrphanHints(); }catch(e){} }
+    if(recovery){ try{ liveTvRetireOrphanHints().catch(()=>{}); }catch(e){} }
     // An ingress older than protocol 3 has no id to be told and no route to
     // retire one on, so it is sent none; hints already stored are kept for an
     // ingress that is upgraded later.
@@ -14999,8 +15010,11 @@ async function viewLiveTv(generation=PAGE_RENDER_GENERATION){
     if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
     LIVE_TV.channels=result.channels;
     // Negotiated per lineup read. No field at all is an ingress older than the
-    // start-recovery contract: no request id, no retire, no resume.
+    // start-recovery contract: no request id, no retire, no resume. The flag
+    // separates "this ingress has no protocols" from "nobody has answered
+    // yet", which is what an open-time resume must not confuse.
     LIVE_TV.protocols=Array.isArray(result.protocols)?result.protocols:null;
+    LIVE_TV.lineupRead=true;
     if(!liveTvChannelById(LIVE_TV.selected)) LIVE_TV.selected=null;
     const toolbar=document.getElementById("live-tv-toolbar");
     if(toolbar) toolbar.innerHTML=liveTvToolbar();
@@ -15687,6 +15701,7 @@ function scheduleLiveTvGuide(guide,generation,route){
     guide_poll_min_s:PlaybackPolicy.liveContractTiming("guide_poll_min_s"),
     guide_poll_after_next_refresh_s:PlaybackPolicy.liveContractTiming("guide_poll_after_next_refresh_s"),
     guide_poll_unavailable_s:PlaybackPolicy.liveContractTiming("guide_poll_unavailable_s"),
+    guide_poll_ceiling_s:PlaybackPolicy.liveContractTiming("guide_poll_ceiling_s"),
   });
   LIVE_TV.guideTimer=setTimeout(()=>{
     LIVE_TV.guideTimer=null;
@@ -15837,12 +15852,22 @@ async function liveTvAttachSession(info,index,serial,generation){
 // ended or was retired takes the handle away, an owner that says anything else
 // — or says nothing — leaves it, and the viewer sees the channel list.
 async function liveTvResumeStart(generation,route){
-  // Once per document. A second visit to the route must not re-ask about a
-  // start this document has already settled.
-  if(LIVE_TV.resumed) return;
+  // Once per document — but only once something was actually decided. A
+  // lineup read that failed says nothing about whether this ingress speaks the
+  // recovery protocol, and a document that marked itself resumed on that
+  // silence would never rejoin a session again, however many times the viewer
+  // came back to the page.
+  if(LIVE_TV.resumed||!LIVE_TV.lineupRead) return;
+  if(!liveTvRecoveryEnabled()){ LIVE_TV.resumed=true; return; }
+  // Nothing to rejoin while this document is already driving a session; the
+  // next visit asks again, since that answer can change.
+  if(LIVE_TV_LEASE.current||LIVE_TV.starting) return;
   LIVE_TV.resumed=true;
-  if(!liveTvRecoveryEnabled()||LIVE_TV_LEASE.current||LIVE_TV.starting) return;
-  for(const hint of LIVE_TV_HINTS.list()){
+  // Only a hint nothing else is holding. A sibling tab that is watching right
+  // now answers the probe, and rejoining its session would hand two documents
+  // one capability — the first to navigate away would then DELETE the other's
+  // picture mid-programme.
+  for(const hint of await liveTvOrphanHints()){
     let answer=null;
     try{ answer=await liveTvRequest(`/live-tv/starts/${encodeURIComponent(hint.id)}/resume`,"POST",15000,true); }
     catch(e){

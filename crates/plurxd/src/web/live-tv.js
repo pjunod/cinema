@@ -55,7 +55,13 @@
     // No typed body is no answer: the client says so and the next press
     // repeats. It never invents a quarantine the server did not ask for.
     if (!code) return { render: "no_answer", offerRetry: true, keepHint: true, replay: true };
-    const ingress = INGRESS_REFUSALS.has(code);
+    // The status is half of what makes a refusal the ingress's own. A 4xx is
+    // the ingress rejecting the request itself, before any owner saw it, so
+    // there is no start to retire and the handle goes. The same code inside a
+    // 5xx is a failure on the way to — or at — an owner that may already have
+    // opened a tuner, and the handle is the only thing that could retire it.
+    const status = Number(answer && answer.status);
+    const ingress = INGRESS_REFUSALS.has(code) && status >= 400 && status < 500;
     const retry = typeof body.retry === "string" ? body.retry : null;
     return {
       render: Object.prototype.hasOwnProperty.call(ERROR_COPY, code) ? code : "owner_unavailable",
@@ -333,10 +339,22 @@
     const floor = timings.guide_poll_min_s;
     const at = guide && Number.isFinite(guide.next_refresh_at) ? guide.next_refresh_at : null;
     if (at !== null) {
-      return Math.max(at + timings.guide_poll_after_next_refresh_s, nowSeconds + floor) * 1000
+      const delay = Math.max(at + timings.guide_poll_after_next_refresh_s, nowSeconds + floor) * 1000
         - nowSeconds * 1000;
+      // An owner that says it will refresh next week must not park the grid
+      // until then: a channel line-up changes, a guide host comes back, and a
+      // page left open has to notice. The ceiling bounds only this branch —
+      // the other two return the contract's own cadences. The floor still
+      // wins if the two were ever set to cross, because a fan-out floor is a
+      // promise to the owner and a ceiling is only a promise to the viewer.
+      const ceiling = Number.isFinite(timings.guide_poll_ceiling_s)
+        ? timings.guide_poll_ceiling_s * 1000 : Infinity;
+      return Math.max(floor * 1000, Math.min(delay, ceiling));
     }
-    if (guide && guide.freshness === "unavailable") return timings.guide_poll_unavailable_s * 1000;
+    // A read that failed is paced like an `unavailable` answer: no document at
+    // all and a document with nothing in it carry the same information — the
+    // owner has no guide to serve yet — and the three clients pace them alike.
+    if (!guide || guide.freshness === "unavailable") return timings.guide_poll_unavailable_s * 1000;
     return floor * 1000;
   }
 

@@ -536,6 +536,7 @@
       "retire_liveness_probe_ms": 250,
       "retire_orphan_after_keepalives": 3,
       "start_replay_attempts": 1,
+      "guide_poll_ceiling_s": 1200,
       "notes": [
         "hide_after_ms and hidden_only_while_playing are the finite player's values unchanged: the overlay hides this long after the last input while playing, and never while paused or failed.",
         "channel_coalesce_ms: a held channel key accumulates and starts ONE session after this much quiet. Ten presses must not be ten tuner GETs.",
@@ -545,7 +546,8 @@
         "guide_poll_after_next_refresh_s: poll this long after the owner's next_refresh_at, so the client asks once the answer exists rather than just before it does.",
         "retire_liveness_probe_ms: how long a pressing web document waits for a sibling tab to claim a hint before treating it as an orphan. It decides what to RETIRE, never whether to start.",
         "retire_orphan_after_keepalives: a hint touched more recently than this many 5 s keepalives is held by something alive; leave it.",
-        "start_replay_attempts: how many times the lease re-sends a start that got no answer, with the same request id. One — the owner joins the replay to the same session."
+        "start_replay_attempts: how many times the lease re-sends a start that got no answer, with the same request id. One — the owner joins the replay to the same session.",
+        "guide_poll_ceiling_s: never wait longer than this between guide polls, whatever next_refresh_at says. A far-future answer must not park the grid for hours."
       ]
     },
     "hotkeys": {
