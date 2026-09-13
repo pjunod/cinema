@@ -6,9 +6,10 @@ first.
 
 ## Live TV starts are being rebuilt around a stable one-second cadence
 
-**Branch `codex/live-tv-start-stall-server` into
-`effort/live-tv-start-stall`; implementation complete, physical evidence
-pending.** The server half now has the reviewed 24-entry uniform one-second HLS
+**[#298](http://192.168.4.7:3000/noirr/plurx/pulls/298), from
+`codex/live-tv-start-stall-server` into `effort/live-tv-start-stall`;
+implementation complete, physical evidence pending.** The server half now has
+the reviewed 24-entry uniform one-second HLS
 window, a two-listed-segment / two-target-duration publication barrier,
 progress at the newest listed segment, startup counts in its timeout message,
 and a graph probe built by the production command path. The two-node harness
