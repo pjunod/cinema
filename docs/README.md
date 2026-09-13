@@ -305,6 +305,8 @@ Two rounds of performance work, each with its plan, review, and response.
 | [LIBRARY-CHANNELS-PLAYBACK-REPAIR.md](features/LIBRARY-CHANNELS-PLAYBACK-REPAIR.md) | Repair progress, native-muxer diagnostic, and deployed channel acceptance evidence. | open |
 | [WEEKLY-REVIEW-REMEDIATION-STATUS.md](features/WEEKLY-REVIEW-REMEDIATION-STATUS.md) | Which September 3–9 security, recovery, and playback findings were fixed, and which remain separately scoped capabilities. | done |
 | [LIVE-TV-NATIVE-LAYOUTS-STATUS.md](features/LIVE-TV-NATIVE-LAYOUTS-STATUS.md) | Three native TV presentations, compact mobile browsing, and the exact implementation evidence. | open |
+| [LIVE-TV-NATIVE-LAYOUTS-PROPORTIONS-REVIEW.md](features/LIVE-TV-NATIVE-LAYOUTS-PROPORTIONS-REVIEW.md) | Why the Apple TV, Google TV and phone Live TV screens have the wrong proportions — five causes with line anchors, the numbers that fix them, and the renders. | open |
+| [LIVE-TV-PROPORTIONS-IMPLEMENTATION.md](features/LIVE-TV-PROPORTIONS-IMPLEMENTATION.md) | The two-PR build plan for the approved TV and phone proportions — constants per platform, file ownership, acceptance screenshots. | open |
 | [SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md](features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md) | What is built, reviewed, and proved for the settings navigation and Developer-page redesign. | open |
 | [HOMEVIDEO-PLAN.md](features/HOMEVIDEO-PLAN.md) | Home video and photos — the `home` libraries. | built |
 | [INTEGRATION-PLAN.md](features/INTEGRATION-PLAN.md) | plurx's side of the monarr pipeline. | built |
