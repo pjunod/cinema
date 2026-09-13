@@ -5,8 +5,9 @@ including the first Apple and Android compiles this code has ever had. Nothing
 has touched a tuner yet — that pass is
 [DVR-HARDWARE-VERIFICATION-PROMPT.md](../clients/DVR-HARDWARE-VERIFICATION-PROMPT.md) ·
 **Branch:** `effort/live-tv-dvr` ·
-**Base:** Forgejo `main` at `a605d03c` (started at `75edcb44`; `main` moved 129
-commits under this branch, in two waves, and both are merged in) ·
+**Base:** Forgejo `main` at `a605d03c` (started at `75edcb44`; `main` moved 138
+commits under this branch — 116 excluding merges, in two waves of 115 and 23 —
+and both are merged in) ·
 **PR:** [#294](http://192.168.4.7:3000/noirr/plurx/pulls/294) ·
 **Issue:** [#295](http://192.168.4.7:3000/noirr/plurx/issues/295) ·
 **Apple build 153 · Android versionCode 94** ·
@@ -39,7 +40,7 @@ regression test rather than a claim.
 | Property | Why it is not obvious | Where it is enforced |
 |---|---|---|
 | An airing is `(channel_id, airing_start)` for its whole life | Rule expansion runs every 15 s. Without insert-if-absent over a unique index covering *every* state, a rule that keeps matching an airing the viewer skipped resurrects it on the next tick | `dvr_recordings_airing`, `insert_dvr_airing_if_absent`, `a_cancelled_airing_stays_cancelled_however_often_a_rule_matches_it` |
-| One channel is one tuner, however many programmes come off it | The 8:30 programme's tail pad overlaps the 9:00 programme's head pad. Counting recordings rather than channels would refuse the second one for no reason | `DvrTransport`/`DvrSink`, `back_to_back_airings_on_one_channel_cost_one_tuner` |
+| One channel is one tuner, however many programmes come off it | The 8:30 programme's tail pad overlaps the 9:00 programme's head pad. Counting recordings rather than channels would refuse the second one for no reason | `DvrTransport`/`DvrSink`, `back_to_back_airings_on_one_channel_cost_one_tuner` (adjacent windows) and `overlapping_pads_on_one_channel_still_share_the_tuner` (the padded case this row describes) |
 | An attempt is its own file | A fenced old owner may still be draining bytes when the replacement resumes. Appending to the same file is how two processes corrupt one recording | `.a<N>.part` + `create_new`, `finish` concatenates and records the gap |
 | A stop and a progress write own disjoint columns | They arrive from different nodes, seconds apart, on the same row | `request_dvr_stop` / `progress_dvr_recording`, `a_stop_request_survives_the_progress_writes_racing_it_and_is_idempotent` |
 
@@ -144,5 +145,8 @@ merge, is **green now**: `main` fixed it in `5ae76988`.
 Everything that needs the hardware. The FLEX 4K has never been asked whether
 its tier answers `Start=` days out or carries `SeriesID`; no capture has ever
 been written; the raw-TS files have never been played back through the real
-decision path; and no phone has fired a local notification. §8 of the
-implementation plan carries the two prompts for the session that can do it.
+decision path; and no phone has fired a local notification.
+[DVR-HARDWARE-VERIFICATION-PROMPT.md](../clients/DVR-HARDWARE-VERIFICATION-PROMPT.md)
+is the hand-off for the session that can: it carries §8's two prompts and the
+settings, owner-node and client details a reader needs to run them without
+filing a defect that is not one.
