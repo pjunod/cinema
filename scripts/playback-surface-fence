@@ -147,12 +147,12 @@ REGIONS = {
 # The migration budget: how many pre-contract write sites each file may still
 # have, and why. A milestone that lands drops its file's entry to zero and then
 # removes it. A NEW write site fails the fence today, which is the point.
-# `index.html` is not here any more: M1 landed, and a file with no entry is held
-# at zero by `MIGRATION_BUDGET.get(relative, (0, ""))` below — every web surface
-# write is inside the render anchors.
+# Neither `index.html` nor `PlayerController.swift` is here any more: M1 and M2
+# landed, and a file with no entry is held at zero by
+# `MIGRATION_BUDGET.get(relative, (0, ""))` below — every web surface write is
+# inside the render anchors and every Apple one is inside the publish region.
 MIGRATION_BUDGET = {
     Path("crates/plurxd/src/web/playback-policy.js"): (0, "The policy module never touched the DOM; it stays at zero."),
-    Path("clients/apple/Sources/PlayerController.swift"): (39, "M2 removes these: failed/playbackError/playbackFailureTitle/playbackNotice are still fields."),
     Path("clients/apple/Sources/PlayerView.swift"): (0, "The Apple view reads the model; it never wrote one."),
     Path("clients/apple/Sources/PlayerSurface.swift"): (0, "The Apple surface reads the model; it never wrote one."),
     Path("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"): (15, "M3 removes these: onError is still a constructor callback."),

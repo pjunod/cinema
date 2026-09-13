@@ -113,6 +113,15 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         for path in self.fence.MIGRATION_BUDGET:
             self.assertIn(path, self.fence.SCANNED, f"{path} is budgeted but never scanned")
 
+    def test_a_migrated_file_is_budgeted_at_zero_without_an_entry(self):
+        # M2's own ratchet: PlayerController no longer has a budget row, and
+        # the fence must still hold it to zero rather than to "unbudgeted".
+        player = Path("clients/apple/Sources/PlayerController.swift")
+        self.assertIn(player, self.fence.SCANNED)
+        self.assertNotIn(player, self.fence.MIGRATION_BUDGET)
+        budget, _reason = self.fence.MIGRATION_BUDGET.get(player, (0, ""))
+        self.assertEqual(budget, 0)
+
     def test_the_budget_is_tight_against_the_tree(self):
         # The fence itself is a ratchet (`len(hits) > budget`), so nothing can
         # be ADDED. This assertion is the other half: the budget must equal
