@@ -42,6 +42,7 @@ import tv.plurx.app.data.Library
 import tv.plurx.app.data.LoginReq
 import tv.plurx.app.data.Net
 import tv.plurx.app.data.PlurxApi
+import tv.plurx.app.data.parseRefusal
 import tv.plurx.app.data.ProgressReq
 import tv.plurx.app.data.Session
 import tv.plurx.app.data.ServerDiscovery
@@ -792,9 +793,18 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         requireNotNull(body.caps) {
             "Playback session is missing its decision capabilities."
         }
-        return acceptHlsSessionPresentation(
-            api().createHlsSession(fileId, body),
-        )
+        val started = try {
+            api().createHlsSession(fileId, body)
+        } catch (error: HttpException) {
+            // The surface adapter (PLAYBACK-SURFACE-CONTRACT.md §3.5): a
+            // refusal the server explained reaches the presenter as its own
+            // {code, message, film_position_ms} instead of a bare status, so a
+            // 503 "still building" stops reading as fatal. A bodiless or
+            // unparseable answer keeps HttpException, which is what every
+            // existing status matcher on this path matches.
+            throw parseRefusal(error.code(), error.response()?.errorBody()?.string()) ?: error
+        }
+        return acceptHlsSessionPresentation(started)
     }
 
     suspend fun hlsSessionStatus(sessionId: String) = api().hlsSessionStatus(sessionId)
