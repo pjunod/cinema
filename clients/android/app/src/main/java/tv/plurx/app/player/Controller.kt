@@ -309,24 +309,24 @@ class Controller(
         ),
     )
 
+    /**
+     * M5 addition 3, and its per-attach budget. The recovery itself
+     * re-prepares WITHOUT a new item, so it cannot refill its own budget.
+     */
+    private val behindLiveWindow = BehindLiveWindowRecovery()
+
     private fun attachRecipe(recipe: PlaybackRecipeOwnership.Claim) {
         recipeOwnership.attach(recipe)
         selectionRecipe = recipe
         textSelectionArmed = true
         audioSelectionArmed = true
-        // M5 addition 3's budget is per ATTACH, and this is the one function
-        // every `setMediaItem` + `prepare` in this file goes through. The
-        // recovery itself re-prepares WITHOUT a new item, so it cannot refill
-        // its own budget.
-        behindLiveWindowRecoveryUsed = 0
+        // M5 addition 3's budget is per ATTACH, and every `setMediaItem` +
+        // `prepare` in this file goes through here. It is NOT the only way an
+        // item takes the screen — `commitPreparedReplacement` swaps in a whole
+        // second `ExoPlayer` without coming near this function — so that site
+        // re-arms it too, and this comment no longer claims otherwise.
+        behindLiveWindow.attached()
     }
-
-    /**
-     * M5 addition 3: how many times this attach has taken the
-     * `BEHIND_LIVE_WINDOW` seek-and-prepare recovery. Once, and then the
-     * ladder's ordinary answer.
-     */
-    private var behindLiveWindowRecoveryUsed = 0
 
     /**
      * The dynamic range the *current* delivery puts on the wire, as the server
@@ -655,14 +655,15 @@ class Controller(
             // a transport nor a compatibility failure, so the ladder answers it
             // with `Fail` (or, on an established HDR delivery, with a recipe
             // retry that changes nothing about a window that moved).
-            if (behindLiveWindowRecovers(
+            val filmPositionMs = realPosition()
+            if (behindLiveWindow.recover(
                     errorCode = error.errorCode,
                     live = player.isCurrentMediaItemLive,
-                    used = behindLiveWindowRecoveryUsed,
+                    seekTargetMs = { playerTimelinePositionMs(filmPositionMs) },
+                    seekTo = { target -> player.seekTo(target) },
+                    prepare = { player.prepare() },
                 )
             ) {
-                behindLiveWindowRecoveryUsed += 1
-                val filmPositionMs = realPosition()
                 playbackTelemetry.report(
                     event = "playback_behind_live_window",
                     level = "warn",
@@ -670,8 +671,6 @@ class Controller(
                     code = error.errorCode,
                     detail = "finite timeline — seeking back to ${filmPositionMs}ms and preparing again",
                 )
-                player.seekTo(playerTimelinePositionMs(filmPositionMs))
-                player.prepare()
                 raiseRecoveryStep(refusal, "Reloading this stream.")
                 return
             }
@@ -1423,17 +1422,21 @@ class Controller(
         sessionIsVod = false
         scope.launch {
             try {
-                // M5 §4.6.1: row 6 is the START context, so the retry runs
-                // only where there is nothing behind this create. A create over
-                // a predecessor the viewer is still watching is a refused
-                // CHANGE (row 7), keeps its banner, and is not retried.
+                // M5 §4.6.1: row 6 is the START context, so the whole sequence
+                // — the ladder AND its deadline watchdog — runs only where
+                // there is nothing behind this create. `openSession` is also
+                // the create path for seeks and quality changes, and a create
+                // over a predecessor the viewer is still watching is a refused
+                // CHANGE (row 7): stopping that player after sixty seconds is
+                // the outcome §7 recipe (b) forbids outright.
                 val startContext = !predecessorAttached()
                 val retryEpoch = mediaMutationEpoch
                 val hls = try {
                     sessionCreateCoordinator.createRetryingNotYet(
                         body = createBody.copy(control_sequence = playbackIntent.orderedControlSequence(playbackControl.controlSequence())),
+                        startContext = startContext,
                         isCurrent = { stallGuard.isCurrent(requestVersion) },
-                        isNotYet = { failure -> startContext && createIsStillBuilding(failure) },
+                        isNotYet = { failure -> createIsStillBuilding(failure) },
                         onRetrying = { failure ->
                             surfaceOwner.preparingSessionCreate(
                                 retryEpoch,
@@ -3105,6 +3108,11 @@ class Controller(
 
         player = successor
         mediaSession.setPlayer(successor)
+        // A different `ExoPlayer` with its own item is on the screen now, so
+        // it gets its own single `BEHIND_LIVE_WINDOW` recovery. This path never
+        // reaches `attachRecipe`, which is why the budget is re-armed here
+        // rather than assumed.
+        behindLiveWindow.attached()
 
         // The successor is its own session on its own timeline. Everything the
         // controller derives from "which session am I playing" moves with it,

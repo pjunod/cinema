@@ -211,6 +211,52 @@ internal fun behindLiveWindowRecovers(
     used: Int,
 ): Boolean = errorCode == ERROR_CODE_BEHIND_LIVE_WINDOW && !live && used < 1
 
+/**
+ * M5 addition 3, as an object a test can hold.
+ *
+ * `Controller` cannot be constructed in a JVM unit test — it takes an
+ * `ExoPlayer`, a `MediaSession` and the app's view model — so the recovery
+ * lives here, with the player reached through three lambdas, and the test
+ * drives it directly. What it pins is exactly what the addition claims: ONE
+ * `seekTo(target)` and ONE `prepare()` for the first qualifying error, nothing
+ * for the second on the same attach, and a fresh budget when a new item takes
+ * the screen.
+ *
+ * The budget is per ATTACH, and "attach" means the item the viewer is looking
+ * at changed — a `setMediaItem` + `prepare`, or a prepared successor being
+ * committed onto the surface. The recovery itself re-prepares WITHOUT a new
+ * item, so it cannot refill its own budget.
+ */
+internal class BehindLiveWindowRecovery {
+    private var used = 0
+
+    /** A new item is on screen: this attach gets its own single recovery. */
+    fun attached() {
+        used = 0
+    }
+
+    /** Whether this attach has already spent its recovery. For the ledger and the tests. */
+    val spent: Boolean get() = used >= 1
+
+    /**
+     * `true` when the recovery ran. [seekTargetMs] is a lambda so the position
+     * is read only on the path that actually seeks.
+     */
+    fun recover(
+        errorCode: Int,
+        live: Boolean,
+        seekTargetMs: () -> Long,
+        seekTo: (Long) -> Unit,
+        prepare: () -> Unit,
+    ): Boolean {
+        if (!behindLiveWindowRecovers(errorCode, live, used)) return false
+        used += 1
+        seekTo(seekTargetMs())
+        prepare()
+        return true
+    }
+}
+
 // ---- §5.6 The quality menu is the server's ladder ---------------------------
 
 internal data class QualityOption(val quality: PlaybackQuality, val label: String)

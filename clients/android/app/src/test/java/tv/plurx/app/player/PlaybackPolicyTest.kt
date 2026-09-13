@@ -392,6 +392,9 @@ class LadderVerdictTest {
     // UNRUN on the machine this was written on: there is no Android toolchain
     // there. See the PR's "Needs an Android toolchain or a device" list.
 
+    // The predicate only; the recovery's EFFECTS (one seek, one prepare, the
+    // per-attach budget, the re-arm on a committed prepared successor) are
+    // `BehindLiveWindowRecoveryTest`.
     @Test
     fun behindLiveWindowRecoversOnceOnAFiniteTimeline() {
         assertEquals(
