@@ -6,40 +6,46 @@ first.
 
 ## The Apple playback surface is one projection of the player (M2)
 
-**Built 2026-09-13 on `apple/playback-surface`, Apple build 147, WIP PR open,
-unrun: this machine has no Xcode, so every Swift test in it is written and
-none has been compiled.** `failed`, `playbackError`, `playbackFailureTitle`
-and `playbackNotice` are deleted from `PlayerController` and replaced by one
+**Built 2026-09-13 on `apple/playback-surface`, Apple build 147, WIP PR #280,
+rebased on M1 and adversarially reviewed once. NOT RUN: this machine has no
+Xcode, so every Swift test in it is written and none has been compiled.**
+`failed`, `playbackError`, `playbackFailureTitle` and `playbackNotice` are
+deleted from `PlayerController` and replaced by one
 `@Published private(set) var surface = PlaybackSurfaceModel()` —
 `clients/apple/Sources/PlaybackSurfaceModel.swift`, a pure reducer over typed
-faults, evidence and identities, with the fixture's eight classes, 21 sources
-and five timings transcribed the way `PlayerInputRouting` transcribes the
-input contract. `AppleClientTests` runs all 54 of
+faults, evidence and identities. `AppleClientTests` runs all 57 of
 `tests/playback/playback-surface-contract.json`'s ordered-event cases against
-it; no case is skipped, and the two shapes Apple cannot express verbatim —
-named generations and the web's inert-event spellings — are mapped with the
-mapping commented beside it. `scripts/playback-surface-fence` now budgets
-`PlayerController.swift` at zero and its entry is gone.
+it, no skips; the two shapes Apple cannot express verbatim (named generations,
+the web's inert-event spellings) are mapped with the mapping commented beside
+it. `scripts/playback-surface-fence` now guards the field that replaced the
+four — six spellings got a surface write past the first version of it — holds
+`PlayerController.swift` at zero, and requires its publish anchors.
 
-What a viewer can see change: a readiness deadline with a rung left is a
-refusal banner over a predecessor that keeps playing instead of a full screen
-over a moving picture; with no rung left, `fail()` stops the player and *then*
-raises `exhausted`. The pre-start black-frame ladder stops the player and says
-so instead of exhausting in silence over audio. `PlurxAPI.check` keeps every
-`{code, message}` refusal body as `APIError.refused`, so a 503
-`startup_timeout` reads as the server's sentence rather than "Server returned
-503" — 401/403 stay status-shaped and 409 stays `.conflict`, each pinned by a
-test. Playback debug gains the SURFACE section and the last sixteen faults,
-and the four `surface_*` events go to the client log.
+**This is not behaviour-neutral, and the full list is in PR #280.** The
+headline changes: `fail()` decides on whether a picture is presenting rather
+than on whether an item is attached, so a readiness verdict over a black
+screen stops the player and prompts while a create failure over a playing
+predecessor is a banner; a 401 or 403 anywhere stops the player and offers
+Sign in (ruling R1), which is a new button and a new absence of Try Again; the
+pre-start black-frame ladder stops the player and says so instead of
+exhausting in silence; and swapping `!failed` for `!isPlaybackBlocked` changes
+when the stall detector and the recovery monitor are eligible in exactly the
+cases where the old flag and the new blocking surface differ. No threshold,
+budget, detector or ladder was retuned, and the presenter has no side effects.
 
-Behaviour-neutral otherwise: no threshold, budget, detector, ladder or
-control-plane verdict semantic moved, and the presenter has no side effects.
-Three deviations are stated in the PR rather than hidden — a subtitle notice
-that used to vanish the instant the viewer chose again now expires on its own
-five-second clock, a full-screen progress fault draws the existing
-stream-change spinner rather than new staged-text UI, and Apple does not raise
-`create_503_not_yet` until M5 gives its owner a create retry to make the
-`preparing` spinner honest.
+`PlurxAPI.check` keeps every `{code, message}` refusal body as
+`APIError.refused`, so a 503 `startup_timeout` reads as the server's sentence
+rather than "Server returned 503". 401/403 stay status-shaped and 409 stays
+`.conflict`; `LiveTvTests`' status loop was split to match, which is the
+existing-matcher hazard §3.5 warned about. Playback debug gains the SURFACE
+section and the last sixteen faults, and the four `surface_*` events go to the
+client log.
+
+Three M0 reducer fixes landed upstream with M1 and are ported here: the
+evidence gate (`presenting` is no longer postdate-gated), `hold` moving to
+`presenting_after_raise`, `media_owner_lost_410` becoming `context: any`, and
+the new `client_preparing` row.
+
 ## The web player's overlay is a projection now (M1)
 
 **Built 2026-09-13 on `web/playback-surface`, WIP PR #277 against `main`,

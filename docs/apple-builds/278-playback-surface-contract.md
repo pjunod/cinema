@@ -3,6 +3,9 @@
 Build: 147
 Issue: #278
 
+Tracked by issue #278 (the defect) and delivered by PR #280 (M2 of the
+playback surface contract); M1 is #277 and M0 is #276.
+
 `failed`, `playbackError`, `playbackFailureTitle` and `playbackNotice` are
 gone. In their place is one `PlaybackSurfaceModel`: a pure reducer over typed
 faults, evidence and identities, which every former writer now raises into
@@ -31,6 +34,11 @@ keeps `{code, message}` for every non-2xx it can parse, so a 503
 "Server returned 503". 401 and 403 stay status-shaped so the sign-in path is
 untouched, and a 409 is still a conflict for every matcher that reads one.
 
+A 401 or 403 refusing playback now stops the player and offers Sign in and
+Close, wherever it arrives. It used to read "Server returned 401" beside a Try
+Again that could not work, and during a quality change it did not even get
+that far.
+
 Playback debug gains a SURFACE section: what is drawn, which fault class, from
 which source, for which media generation and viewer request, and the last
 sixteen faults with what cleared each one. The same four events go to the
@@ -39,5 +47,11 @@ where something started the player after its owner had stopped it, and the
 iOS lock-screen play command is the first documented one.
 
 The presenter has no side effects: it never pauses, resumes, seeks, reopens,
-cancels a timer or reports to the control plane. No threshold, budget,
-detector or ladder moved.
+cancels a timer or reports to the control plane, and no threshold, budget,
+detector or ladder was retuned. What does change beyond the three surfaces
+above: a blocking surface is now narrower than the old `failed` flag, so the
+stall detector and the recovery monitor stay eligible over a picture that is
+still playing; a notice refusing a subtitle choice expires on its own
+five-second clock instead of being cleared the moment the viewer chooses
+again; and a Picture in Picture start failure shares that five-second banner
+rather than outliving the presenter.
