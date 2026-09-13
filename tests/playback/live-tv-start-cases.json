@@ -9,7 +9,8 @@
     "The rule the table encodes: a hint is kept unless the body is typed with owner_decided true, or is a typed 4xx the ingress decided before it ever reached an owner (invalid_request, admin_required, invalid_settings, live_tv_disabled). Anything the owner did not decide leaves a start that may or may not exist, and the hint is the only handle for retiring it.",
     "There is no start_outcome_unknown. An answer that never arrived is `no_answer`: the client says the server did not answer and the next press repeats — it never refuses to start.",
     "`protocols` is the intersection the ingress publishes on GET /api/v1/live-tv/channels. An ingress that omits the field is older than this contract: no request_id on the body, no /live-tv/starts/* routes, hints kept for later.",
-    "Timings that pace these flows live in tests/playback/player-input-contract.json under live.timings, and reach the clients through scripts/player-contract-table --embed."
+    "Timings that pace these flows live in tests/playback/player-input-contract.json under live.timings, and reach the clients through scripts/player-contract-table --embed.",
+    "The `resume` session object is a real LiveTvActivated, field for field: a client decodes it with exactly the decoder a successful start uses, which is the point — a resume is not a second shape."
   ],
   "answers": [
     {
@@ -115,9 +116,22 @@
         "outcome": "live",
         "session": {
           "session_id": "ltv1.7de1a4c0.9f2b",
-          "channel_id": "7.1",
-          "live": true,
-          "playlist_url": "/api/v1/live-tv/sessions/ltv1.7de1a4c0.9f2b/playlist.m3u8"
+          "playlist_url": "/api/v1/live-tv/sessions/ltv1.7de1a4c0.9f2b/index.m3u8",
+          "channel": {
+            "id": "7.1",
+            "guide_number": "7.1",
+            "guide_name": "WABC",
+            "favorite": true,
+            "drm": false,
+            "support": "ready"
+          },
+          "output": {
+            "container": "hls",
+            "video": "h264",
+            "audio": "aac",
+            "height": 720
+          },
+          "live": true
         }
       },
       "then": "reattach"
