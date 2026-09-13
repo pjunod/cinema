@@ -413,12 +413,11 @@ pub(crate) struct PublicLiveTvStart {
 /// 128 bits of hex. Not a UUID spelling, because the clients generate this
 /// without `crypto.randomUUID` (unavailable on the LAN HTTP origin the web UI
 /// runs on) and a hyphenless hex string is what all three can produce.
-fn valid_public_request_id(value: &str) -> bool {
-    value.len() == 32
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
+///
+/// The owner's `validate_start_request` applies this same function to the id
+/// it receives, so an id this surface accepts can never be one the owner
+/// refuses. They were two functions once and did not agree.
+use crate::live_tv::valid_request_id as valid_public_request_id;
 
 fn parse_public_request_id(value: &str) -> Result<&str, ApiError> {
     valid_public_request_id(value)

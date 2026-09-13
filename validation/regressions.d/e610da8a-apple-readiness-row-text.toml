@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["e610da8a"]
+reason = "The same static readiness row as 81d10f5d, one row up: the Apple entry said nothing Swift in M2 or M5 had been compiled and named the condition for clearing it, both halves of that condition were met, and the row now reads the result, keeps its tone token honest at `ok`, and says what it does not cover. STATUS.md and `docs/clients/PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md` carry the corrected A3 finding and the simulator trap that produced the false one. The only compiled or embedded file touched is `crates/plurxd/src/web/index.html`, and what changes inside it is a string and a status word passed to `devStaticReq`. NO RETAINED TEST READS THAT ROW: `tests/web/settings-sections.test.js` requires the card to be rendered by `developerPanel` and to keep its heading and its advisory sentences, and answers the same with either text; `validation/doc_versions.py` sweeps the two client READMEs, `docs/clients/APPLE-CLIENT-PARITY.md` and `docs/STATUS.html` for build claims and never reads this file. Ignored because there is no runtime behaviour here to turn red."
+ignore = true

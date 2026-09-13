@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["3e9a4c88"]
+reason = "STATUS.md only, and STATUS.md is governed by no check: this commit stops the page claiming that `make web-check` contains the player-input and playback-surface fences when the target is sixteen node tests plus `js-check` and `contrast-check`, names both shas the gate actually ran at and what each one is, and answers a review nit about which commit introduced four bare fractions by quoting the tree the blame was taken on. It also records the `TMPDIR` trap, where a full `/sessions` turns twelve reported failures in `tests/playback/network-shaping.test.js` into ninety-three passing contracts once `TMPDIR` points elsewhere. No file under `crates/`, `clients/` or `tests/` is touched and no point claims STATUS.md, so there is no behaviour to exercise and nothing that could go red."
+ignore = true

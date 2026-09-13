@@ -1570,3 +1570,116 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/StallReopen.kt"
 source_anchor = "// Before the cancel, not after: cancellation is cooperative, and a"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/CreateRetryTest.kt"
 test_anchor = "aSuccessAfterTheAbsoluteDeadlineIsReleasedAndNeverAttached"
+
+[[fixes]]
+# `:app:compileDebugUnitTestKotlin` refused this file the first time M3 and
+# M5's Kotlin was put in front of a compiler. `assertEquals(String, Object,
+# Object)` types its expected parameter as `Any?`, so a bare `?: emptyList()`
+# has nothing to constrain `T` with and the elvis result type never resolves.
+# Both arms say `emptyList<String>()` now, which is what the left arm already
+# produced - a `List<String>` of wire names read out of the fixture - so
+# nothing about what is compared changed. TEST-ONLY: no shipped Kotlin moved,
+# and reverting it breaks no behaviour, it stops the unit source compiling and
+# takes all 612 tests in the suite with it. The case named here requires the
+# Kotlin `SurfaceClass` table to be `tests/playback/playback-surface-contract.json`
+# transcribed verbatim - for every wire name in the fixture, the severity, the
+# blocking rule, the sorted retirement reasons, both timer bounds, the title,
+# the player-stopped requirement, the continuous bound, and the default actions
+# - so a client that quietly disagrees with the web and Apple tables fails here
+# rather than in front of a viewer. The arm this commit typed is the
+# `default_actions` comparison, and the anchor is the Kotlin field it is
+# compared against, whose own default is the empty list a fixture row naming no
+# actions must still equal. The second arm is the `codes` comparison in
+# `sourcesAreTheFixtureVerbatimAndInOrder`, in the same file.
+id = "android.fixture-elvis-arms-carry-an-element-type"
+commits = ["328ea4a5"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurface.kt"
+source_anchor = "val defaultActions: List<SurfaceAction> = emptyList(),"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackSurfaceReducerTest.kt"
+test_anchor = "fun classesAreTheFixtureVerbatim()"
+
+[[fixes]]
+# Three wrong assertions in M2's own tests, found by compiling them for the
+# first time. TEST-ONLY: no shipped Swift moved. Two of the three have no live
+# source half to anchor. One read `PlayerController.failed`, a flag M2 had
+# already replaced with `isPlaybackBlocked`, and that assertion sits in
+# `testEarlyEndThresholdBoundariesArePinned` - not in the test the commit
+# message names, which exists nowhere in this tree, at this commit or now. The
+# other added a `presenting: false` event to a model-only setup, and f8741f6d
+# later showed that event was the shipped bug reporting itself. The third is
+# anchored here because its source half is a live call site. The case named
+# requires the text of `handleBlackFrameDecodeFailure`, up to the
+# `black_frame_ladder_spent` raise that ends its range, to contain the owner's
+# stop, so a spent ladder can never raise a blocking class over a player that
+# is still running - which the presenter refuses outright, leaving a frozen
+# picture with no banner and no prompt. The assertion had been reading for a
+# literal `player.pause()`, a spelling M2 had moved into
+# `stopForBlockingSurface()`, so it was pinning nothing. The anchor is the call
+# site in the ladder-spent branch rather than the helper it calls: delete the
+# stop from this one branch and the anchor and the assertion go together.
+id = "apple.m2-tests-name-the-stop-the-ladder-makes"
+commits = ["7fbb5771"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "guard fallback != .none else {\n            stopForBlockingSurface()"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testTheBlackFrameLadderStopsThePlayerBeforeItRaises"
+
+[[fixes]]
+# `testAChangeContextCreateIsNotRetriedAndArmsNoDeadline` asserted a flow the
+# controller does not have, and could not reach the precondition it is named
+# for. It waited for a second `/decision` after a successful cold create, and a
+# warm quality change is a PREPARED replacement: it reuses the decision it
+# already holds and posts the successor create straight away, so no second
+# decision request is ever made and the wait could only time out. It now waits
+# on the create it does make. The property under test - row 6 is the `start`
+# context, so a change-context create runs no ladder and arms no watchdog - is
+# decided by `guard surfaceContext == .start`, and `surfaceContext` stays
+# `.start` until a frame has presented. A headless XCTest can never present
+# one: the item over a playlist URL nothing serves never readies, so
+# `isChangingStream` never clears, so the periodic observer returns before it
+# samples, so `sampleSurfacePresentation` - the only producer of presentation
+# evidence - never runs. The whole source half of this commit is therefore one
+# `#if DEBUG` seam, and that is what is anchored: it sets one piece of evidence,
+# decides nothing, and is not in a shipped binary. Reverting it changes no
+# behaviour; it stops the test compiling. With the seam the case drives the real
+# gate and requires exactly one armed wait across the sequence and no
+# `exhausted` fault, so a ladder wired to run over a picture the viewer is
+# already watching fails here. The same case is the nearest sequence-level test
+# named by `apple.create-sequence-stops-shadowing-started` above, which anchors
+# a different line of the same controller.
+id = "apple.a-change-context-create-needs-a-presented-frame"
+commits = ["e6924480"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func noteFramePresentedForTesting() { surfaceHasPresented = true }"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testAChangeContextCreateIsNotRetriedAndArmsNoDeadline"
+
+[[fixes]]
+# A shipped defect, not a test defect: `stopForBlockingSurface()` paused the
+# player and published `isPlaying = false` but never told the presenter the
+# picture had stopped presenting. Every owner site raises its blocking fault
+# synchronously right after that call, so the raise always landed before the
+# next sampler tick, the model still held `presenting == true`, and section 3.2
+# resolved that disagreement in favour of the picture: the fault was demoted to
+# `degraded` and retitled "Playback recovered". A demoted fault is never
+# promoted again, so a 401 or 403 during a quality change drew a paused player
+# under a recovery banner with no Sign in and no Close, permanently, and
+# deterministically whenever a picture was presenting. The fix is the owner's
+# stop recording its own evidence, and the anchor is that line. The end-to-end
+# half cannot be a behavioural test - reaching `stopForBlockingSurface()` needs
+# a decoding `AVPlayer` no headless XCTest has - so the case named requires the
+# source shape instead: presentation evidence has exactly two call sites, the
+# sampler's is one of them, and the body of `stopForBlockingSurface()` contains
+# the other, spelled `present(.presenting(false`. Delete the anchored line and
+# the count assertion reads 1 where it requires 2 and the body assertion fails
+# outright. The reducer half is in
+# `testACredentialRefusalDuringAPendingChangeIsATerminalWithSignIn` in the same
+# file: it forks the model and requires the same raise WITHOUT the evidence to
+# come out `degraded` and demoted, so the loss the missing line caused is
+# stated rather than left implied.
+id = "apple.the-owners-stop-records-its-own-evidence"
+commits = ["f8741f6d"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "present(.presenting(false, attached: attached))"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testOnlyTheEvidenceSamplerEverFeedsAPresentingEvent"

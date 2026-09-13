@@ -4376,11 +4376,32 @@ async fn wait_for_startup(
     }
 }
 
+/// A live-TV request id is 128 bits written as 32 lower-case hex characters,
+/// and it is opaque to everything that handles it: the owner keys a registry
+/// slot by it, a client persists it as its hint, and neither reads a meaning
+/// out of its bytes.
+///
+/// This is the ONLY definition. The owner used to demand a version-4 UUID
+/// here, which was true only for as long as the server minted the id itself.
+/// Once a client supplied it — three hex digits of a v4 UUID are not random,
+/// and `crypto.getRandomValues` does not know that — the ingress accepted ids
+/// the owner then refused as `invalid_request`, which is to say every start
+/// whose thirteenth hex digit was not a `4`. The public surface and the owner
+/// share one function so the two can never drift apart again.
+pub(crate) fn valid_request_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
 fn validate_start_request(request: &LiveTvStartRequest) -> Result<(), LiveTvError> {
-    let request_id = uuid::Uuid::parse_str(&request.request_id)
-        .map_err(|_| LiveTvError::InvalidResponse("live-TV request id is invalid".into()))?;
-    if request_id.get_version_num() != 4
-        || request.source_node_id.trim().is_empty()
+    if !valid_request_id(&request.request_id) {
+        return Err(LiveTvError::InvalidResponse(
+            "live-TV request id is invalid".into(),
+        ));
+    }
+    if request.source_node_id.trim().is_empty()
         || request.source_node_id.len() > 256
         || request.user_name.trim().is_empty()
         || request.user_name.len() > 256
@@ -6825,7 +6846,12 @@ mod tests {
                 source_node_id: "node-a".into(),
                 user_id: 1,
                 user_name: "viewer".into(),
-                request_id: uuid::Uuid::new_v4().to_string(),
+                // `.simple()`, because that is the only spelling on the wire:
+                // 32 lower-case hex, whether a client minted it or the ingress
+                // did. A fixture carrying a hyphenated UUID is a fixture that
+                // cannot reproduce a real start, and that is how the owner's
+                // version-4 rule survived being wrong.
+                request_id: uuid::Uuid::new_v4().simple().to_string(),
                 channel_id: "7.1".into(),
                 config_generation: generation,
                 source_serving_generation: 0,
@@ -10221,6 +10247,76 @@ Output #0, hls, to 'index.m3u8':
             manager.refresh_guide(&config, false).await,
             Err(LiveTvError::OwnerUnavailable(_))
         ));
+    }
+
+    fn start_request_with_id(request_id: &str) -> LiveTvStartRequest {
+        LiveTvStartRequest {
+            expected_owner_node_id: "node-a".into(),
+            source_node_id: "node-a".into(),
+            user_id: 1,
+            user_name: "viewer".into(),
+            request_id: request_id.to_owned(),
+            channel_id: "7.1".into(),
+            config_generation: 1,
+            source_serving_generation: 0,
+            playback: None,
+        }
+    }
+
+    /// The production failure, as a test. A client mints its request id from
+    /// sixteen random bytes, so the hex digit a UUID reserves for its version
+    /// is random too: fifteen ids in sixteen are not version 4. The owner
+    /// demanded version 4 — which held only while the server minted the id
+    /// itself — and refused those starts as `invalid_request`, which the web
+    /// renders as "Live TV could not read that request".
+    ///
+    /// Every nibble, so this cannot pass by drawing a lucky id.
+    #[test]
+    fn a_client_minted_request_id_is_not_a_uuid_and_the_owner_takes_it_anyway() {
+        for nibble in 0..16u8 {
+            let mut id = String::from("0123456789ab");
+            id.push(char::from_digit(u32::from(nibble), 16).expect("hex digit"));
+            id.push_str("def0123456789abcdef");
+            assert_eq!(id.len(), 32, "the spelling every client produces");
+            assert!(
+                valid_request_id(&id),
+                "the owner must accept the id its own public surface accepted: {id}"
+            );
+            assert!(
+                validate_start_request(&start_request_with_id(&id)).is_ok(),
+                "a start whose id is not version 4 is still a start: {id}"
+            );
+        }
+    }
+
+    /// The id is 128 bits in one spelling, and the owner is the only place
+    /// that decides it. A hyphenated UUID is not that spelling: no client and
+    /// no ingress produces one, and a fixture that used one was the reason
+    /// the version-4 rule survived as long as it did.
+    #[test]
+    fn the_owner_refuses_every_request_id_that_is_not_thirty_two_lower_case_hex() {
+        for bad in [
+            "",
+            &"a".repeat(31),
+            &"a".repeat(33),
+            "0123456789ABCDEF0123456789ABCDEF",
+            "0123456789abcdef0123456789abcde-",
+            "../../etc/passwd/aaaaaaaaaaaaaaa",
+            &uuid::Uuid::new_v4().to_string(),
+        ] {
+            assert!(
+                !valid_request_id(bad),
+                "not a request id, and the registry keys a slot by this: {bad:?}"
+            );
+            assert!(
+                validate_start_request(&start_request_with_id(bad)).is_err(),
+                "the owner must refuse it too: {bad:?}"
+            );
+        }
+        assert!(
+            valid_request_id(&uuid::Uuid::new_v4().simple().to_string()),
+            "the id the ingress mints for a client too old to send one"
+        );
     }
 
     #[test]

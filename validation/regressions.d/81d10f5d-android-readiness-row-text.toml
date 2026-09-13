@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["81d10f5d"]
+reason = "The Android row of the Developer readiness card is static operator-facing prose handed to `devStaticReq`, and this commit replaces a sentence that had stopped being true one commit earlier, drops the row's tone from `warn` to neutral, and narrows two STATUS.md claims plus one hand-off note to what was actually recorded. Nothing executable changes: the row is a string and a tone token, and NO RETAINED TEST READS EITHER. `tests/web/settings-sections.test.js` does render the card - it requires `developerPanel` to reach `playbackSurfaceReadinessCard`, to keep the `Playback surface contract` heading and the advisory wording that nothing on the card is a switch - and it passes identically with the old sentence in place. The build-claim sweep in `validation/doc_versions.py` covers the two client READMEs, `docs/clients/APPLE-CLIENT-PARITY.md` and `docs/STATUS.html`, and never opens `crates/plurxd/src/web/index.html`, so the build numbers these rows name are unguarded there as well. Ignored because there is no behaviour to pin, not because the text does not matter."
+ignore = true
