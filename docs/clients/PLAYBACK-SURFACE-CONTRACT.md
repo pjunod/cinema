@@ -439,7 +439,7 @@ Rows are evaluated in order; the first row whose `context` matches wins.
 | 10 | `client_preparing` | any | `preparing` | no | class default |  |
 | 11 | `change_failed` | change | `refused` | no | `retry` |  |
 | 12 | `segment_503_not_yet` | attached | `recovering` | no | class default |  |
-| 13 | `media_owner_lost_410` | attached | `recovering` | no | class default | re-classes to `stopped` when the owner stops; carries `position_ms` |
+| 13 | `media_owner_lost_410` | any | `recovering` | no | class default | re-classes to `stopped` when the owner stops; carries `position_ms` |
 | 14 | `control_hold` | attached | `hold` | no | class default |  |
 | 15 | `media_waiting` | attached | `buffering` | no | class default |  |
 | 16 | `owner_recovery_step` | any | `recovering` | no | class default |  |

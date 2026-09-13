@@ -232,7 +232,7 @@
     },
     {
       "id": "media_owner_lost_410",
-      "context": "attached",
+      "context": "any",
       "class": "recovering",
       "then_when_stopped": "stopped",
       "carries": [
@@ -1192,6 +1192,31 @@
           "log": [
             "surface_disagreement"
           ]
+        }
+      ]
+    },
+    {
+      "name": "media_owner_lost_on_create_carries_its_position",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 500,
+          "raise": "media_owner_lost_410",
+          "attached": "g1",
+          "position_ms": 146000,
+          "context": "start"
+        }
+      ],
+      "expect": [
+        {
+          "at": 500,
+          "surface": "blocking",
+          "class": "recovering",
+          "position_ms": 146000,
+          "input_failed": false
         }
       ]
     },
