@@ -104,11 +104,12 @@ failure(s)" there and "93 shaping contracts hold" with `TMPDIR` pointed
 anywhere else, and detached `nohup` jobs die without a message. Export
 `TMPDIR` off `/sessions` before believing any red result on that machine.
 
-## The playback surface contract — built, uncompiled, unverified
+## The playback surface contract — built, Kotlin compiled, unverified
 
 **Merged to `main`: M0 (#276), M1 (#277), M2 (#280), M3 (#279) and M5 (#282).
-M4 and M6 are not done, nothing Swift or Kotlin has ever been compiled, and no
-device has ever run any of it.** The effort replaced three imperative error
+M4 and M6 are not done, nothing Swift has ever been compiled, and no device
+has ever run any of it. The Kotlin now compiles and its JVM tests pass —
+2026-09-13, on a local SDK, see (2) below.** The effort replaced three imperative error
 channels — the web's `setLoading()`, Apple's
 `failed`/`playbackError`/`playbackFailureTitle`/`playbackNotice`, Android's
 `onError`/`playFailure`/`playbackNotice` — with one fixture-driven presenter
@@ -181,8 +182,10 @@ call, no timer of its own, no control-plane call), which is contract v2's
 actual thesis and was exempted wholesale before.
 
 The fixture is **60** ordered-event cases. The web presenter runs all 60 in
-`tests/playback/playback-surface-contract.test.js`; the Apple and Android
-presenters are written to run all 60 and never have.
+`tests/playback/playback-surface-contract.test.js`; the Android presenter
+runs all 60 in `PlaybackSurfaceReducerTest.everyFixtureCaseRuns`, executed for
+the first time on 2026-09-13; the Apple presenter is written to run all 60 and
+never has.
 
 ### Exactly what is not done
 
@@ -192,15 +195,38 @@ presenters are written to run all 60 and never have.
    three `PlayerOperationOwnershipTests` cases have never been executed. The
    hand-off is
    [PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md](docs/clients/PLAYBACK-SURFACE-APPLE-BUILD-PROMPT.md).
-2. **Nothing Kotlin has been compiled.** Same for M3 and M5's Android code:
-   no SDK and no disk for a Gradle build. `PlaybackSurfaceReducerTest`,
-   `PlaybackSurfaceOwnerTest`, `CreateRetryTest` and
-   `BehindLiveWindowRecoveryTest` have never run. The hand-off is
+2. **The Kotlin compiles and its JVM tests pass. Nothing has run on a
+   device.** M3 and M5's Android code was written on Linux with no SDK and no
+   disk for a Gradle build; it was compiled for the first time on 2026-09-13,
+   on both of the hand-off's routes. The **pinned image** on `m6`
+   (192.168.4.14, x86_64, Docker 29.1.3, so `linux/amd64` is native and
+   nothing is emulated): `make android-image`, `make android-test` and
+   `make android` all green — this is the run CI does. The **local SDK** on
+   `pauls.macbook.air.lan`: JDK 25, Homebrew command-line tools, platform
+   `android-37.0`, build-tools 36.0.0 and 37.0.0, Gradle 9.7.1, with
+   `:app:compileDebugKotlin`, `:app:testDebugUnitTest`, `:app:lintDebug` and
+   `:app:assembleDebug` all green. Both routes report the same
+   **612 tests, 0 failures, 0 skipped**, and the local-SDK one is stable over
+   five consecutive `--rerun-tasks` runs. The APK `make android` produced
+   carries `versionCode 92`, read back out of it with
+   `aapt2 dump badging`. `PlaybackSurfaceReducerTest`
+   (7 cases, `everyFixtureCaseRuns` over all 60 fixture cases included),
+   `PlaybackSurfaceOwnerTest` (14), `CreateRetryTest` (10),
+   `BehindLiveWindowRecoveryTest` (6) and `PlaybackInfoContractTest` (4) all
+   ran and all passed. One compile error was fixed and it was in a test, not
+   in the app: `Cannot infer type for type parameter 'T'` on the two
+   `?: emptyList()` elvis arms of `PlaybackSurfaceReducerTest`. No main-source
+   Kotlin was changed, so `versionCode` stays at 92. All eight of the
+   hand-off's K1–K8 mutations were applied and every one killed its named
+   test; K7, as the hand-off predicts, is killed by
+   `tests/playback/web-policy.test.js` and by no JVM test. What is still
+   missing is every part that needs hardware: no instrumented test, no
+   emulator, and none of the twelve recipes in §5 of
    [PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md](docs/clients/PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md).
-   What *was* done instead, and is evidence about the semantics and not about
-   the Kotlin: the shipped reducer was transliterated into Python, run against
-   every fixture case, and fuzzed 3,500 sequences differentially against the
-   shipped JS reducer with zero divergences.
+   What was done before any of this, and is evidence about the semantics and
+   not about the Kotlin: the shipped reducer was transliterated into Python,
+   run against every fixture case, and fuzzed 3,500 sequences differentially
+   against the shipped JS reducer with zero divergences.
 3. **M4 — physical verification — has not been run.** Not one of §7's four
    recipes has been executed on an Apple TV, an iPhone or an Android TV. No
    `surface_disagreement` has been observed, and that is an absence of looking
