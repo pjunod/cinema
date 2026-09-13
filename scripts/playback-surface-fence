@@ -25,19 +25,43 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # One pattern set per file kind. Spellings, not just the idiom that happened to
 # be in the tree: an assignment, a `+=`, and a class toggle are all writes.
+# A line that DEFINES the render entry point is not a call site. Checked before
+# the write patterns so the budget below counts the calls it says it counts.
+NOT_A_WRITE = (
+    re.compile(r"\bfunction\s+setLoading\s*\("),
+)
+
+# One pattern set per file kind. Spellings, not just the idiom that happened to
+# be in the tree: an assignment, a `+=`, a `toggle()`, a key path, an alias and
+# a call split across two lines are all writes. The scanner joins continuation
+# lines before matching (see `logical_lines`), so `setLoading\n  (true, …)` and
+# `playFailure\n    = message` are not hiding places.
 PATTERNS = {
     "web": (
         ("setLoading", re.compile(r"\bsetLoading\s*\(")),
-        ("failed class toggle", re.compile(r"classList\s*\.\s*(?:add|remove|toggle)\(\s*[^)]*[\"']failed[\"']")),
+        ("setLoading by name", re.compile(r"[\"']setLoading[\"']")),
+        ("setLoading alias", re.compile(r"=\s*setLoading\s*(?:[;,)\]}]|$)")),
+        ("failed class toggle", re.compile(r"classList\s*\.\s*(?:add|remove|toggle|replace)\s*\([^)]*(?i:failed)")),
+        ("overlay class toggle", re.compile(r"\bploading\b[^\n]*classList\s*\.\s*(?:add|remove|toggle|replace)\s*\(")),
+        ("computed class write", re.compile(r"classList\s*\[")),
+        ("computed class argument", re.compile(r"classList\s*\.\s*(?:add|remove|toggle|replace)\s*\([^)]*\+")),
+        ("overlay className write", re.compile(r"\.className\s*(?:=|\+=)(?!=)[^\n]*(?i:failed|ploading)")),
         ("stallPrompt write", re.compile(r"\b[A-Za-z_$][\w$]*\.stallPrompt\s*(?:=|\+=)(?!=)")),
-        ("overlay element write", re.compile(r"\b(?:ploadText|ploadSub|ploadAct)\b[^\n]*?\.(?:textContent|innerHTML)\s*=(?!=)")),
-        ("overlay bulk write", re.compile(r"Object\.assign\(\s*(?:ploadText|ploadSub|ploadAct)\b")),
+        ("stallPrompt in a literal", re.compile(r"[{,]\s*stallPrompt\s*:")),
+        ("overlay element write", re.compile(r"\bpload(?:ing|Text|Sub|Act)\b[^\n]*?\.(?:textContent|innerHTML|className)\s*=(?!=)")),
+        ("overlay attribute write", re.compile(r"\bpload(?:ing|Text|Sub|Act)\b[^\n]*?setAttribute\(\s*[\"']class[\"']")),
+        ("overlay bulk write", re.compile(r"Object\.assign\([^)]*\b(?:ploading|ploadText|ploadSub|ploadAct|stallPrompt)\b")),
     ),
     "swift": (
         ("failure field write", re.compile(r"(?<!var )(?<!let )(?<![=!<>])\b(?:failed|playbackError|playbackFailureTitle|playbackNotice)\s*(?:=|\+=)(?!=)")),
+        ("failure field mutation", re.compile(r"\b(?:failed|playbackError|playbackFailureTitle|playbackNotice)\s*\.\s*(?:toggle|negate)\s*\(")),
+        ("failure field key path", re.compile(r"keyPath:\s*\\\.(?:failed|playbackError|playbackFailureTitle|playbackNotice)\b")),
+        ("failure field by name", re.compile(r"forKey:\s*[\"'](?:failed|playbackError|playbackFailureTitle|playbackNotice)[\"']")),
+        ("failure field tuple write", re.compile(r"\(\s*(?:self\.)?(?:failed|playbackError|playbackFailureTitle|playbackNotice)\s*,[^)]*\)\s*=(?!=)")),
     ),
     "kotlin": (
-        ("onError call", re.compile(r"\bonError\s*\(")),
+        ("onError call", re.compile(r"\bonError\s*(?:\(|\.invoke\s*\()")),
+        ("onError alias", re.compile(r"=\s*onError\s*(?:[;,)\]}]|$)")),
         ("failure field write", re.compile(r"(?<!var )(?<!val )(?<![=!<>])\b(?:playFailure|playbackNotice)\s*(?:=|\+=)(?!=)")),
     ),
 }
@@ -110,7 +134,7 @@ REGIONS = {
 # have, and why. A milestone that lands drops its file's entry to zero and then
 # removes it. A NEW write site fails the fence today, which is the point.
 MIGRATION_BUDGET = {
-    Path("crates/plurxd/src/web/index.html"): (54, "M1 removes these: the web surface still writes #ploading imperatively."),
+    Path("crates/plurxd/src/web/index.html"): (55, "M1 removes these: the web surface still writes #ploading imperatively."),
     Path("crates/plurxd/src/web/playback-policy.js"): (0, "The policy module never touched the DOM; it stays at zero."),
     Path("clients/apple/Sources/PlayerController.swift"): (39, "M2 removes these: failed/playbackError/playbackFailureTitle/playbackNotice are still fields."),
     Path("clients/apple/Sources/PlayerView.swift"): (0, "The Apple view reads the model; it never wrote one."),
@@ -133,16 +157,46 @@ def region_allowed_lines(path: Path, lines: list[str]) -> set[int]:
         ends = [index for index, line in enumerate(lines) if end in line and index > starts[0]]
         if not ends:
             raise ValueError(f"has {begin!r} with no {end!r} after it")
-        allowed.update(range(starts[0] + 1, ends[0] + 2))
+        allowed.update(range(starts[0] + 2, ends[0] + 1))
     return allowed
+
+
+def logical_lines(text: str) -> list[tuple[int, str]]:
+    """(first line number, joined text) for every line, with continuations folded in.
+
+    A write split over two lines is still a write: `setLoading\n  (true, …)`,
+    `playFailure\n    = message`, `player\n  .classList.add("failed")`. At most
+    three following lines are folded so a long chained expression cannot make
+    the whole file one line.
+    """
+    raw = text.splitlines()
+    out: list[tuple[int, str]] = []
+    for index, line in enumerate(raw):
+        joined = line
+        cursor = index + 1
+        folded = 0
+        while cursor < len(raw) and folded < 3:
+            nxt = raw[cursor].strip()
+            if not nxt:
+                cursor += 1
+                continue
+            if nxt[0] not in "(.=+[?":
+                break
+            joined = f"{joined} {nxt}"
+            cursor += 1
+            folded += 1
+        out.append((index + 1, joined))
+    return out
 
 
 def scan_text(kind: str, text: str, allowed: set[int] | None = None) -> list[tuple[int, str]]:
     """Every write site in `text`, as (1-based line, token). Reads are not hits."""
     allowed = allowed or set()
     hits: list[tuple[int, str]] = []
-    for number, line in enumerate(text.splitlines(), start=1):
+    for number, line in logical_lines(text):
         if number in allowed:
+            continue
+        if any(pattern.search(line) for pattern in NOT_A_WRITE):
             continue
         for token, pattern in PATTERNS[kind]:
             if pattern.search(line):

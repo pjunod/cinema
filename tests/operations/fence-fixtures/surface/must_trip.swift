@@ -5,9 +5,15 @@ extension PlayerController {
         playbackFailureTitle = "Playback stopped."
         playbackNotice = "Dolby Vision did not start. Retrying…"
     }
-}
-extension PlayerController {
     func append(_ extra: String) {
         playbackNotice += extra
+    }
+    func sneaky() {
+        self.failed.toggle()
+        (failed, playbackError) = (true, "x")
+        self[keyPath: \.playbackError] = "x"
+        setValue(true, forKey: "failed")
+        failed
+            = true
     }
 }

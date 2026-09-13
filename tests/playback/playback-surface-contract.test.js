@@ -81,7 +81,7 @@ test("case names are unique and every expectation names a declared kind", () => 
   }
 });
 
-test("first-match precedence has no unreachable row: every source is exercised", () => {
+test("every source row is exercised by at least one case", () => {
   const raised = new Set();
   for (const item of contract.cases) {
     for (const event of item.events) if (event.raise) raised.add(event.raise);
@@ -96,6 +96,58 @@ test("every class is reachable from at least one source", () => {
   // `degraded` is also reached by the agreement rule demoting a blocking fault.
   for (const name of Object.keys(contract.classes)) {
     assert.ok(used.has(name), `class ${name} is reachable from no source`);
+  }
+});
+
+test("every source mapping to a blocking class declares the stop it needs", () => {
+  // The rendered source table is what an M1/M2/M3 author reads. A row that
+  // maps to `stopped` but prints "requires a stopped player: no" sends them to
+  // raise it over a running player, where the reducer answers with a log line
+  // and no sign-in prompt at all.
+  for (const row of contract.sources) {
+    if (!row.class) continue;
+    if (contract.classes[row.class].blocking !== true) continue;
+    assert.equal(
+      row.requires && row.requires.player_stopped,
+      true,
+      `source ${row.id} maps to blocking class ${row.class} without declaring requires.player_stopped`,
+    );
+  }
+});
+
+test("every action in the vocabulary is offered by at least one case", () => {
+  const offered = new Set();
+  for (const item of contract.cases) {
+    for (const event of item.events) for (const action of event.actions || []) offered.add(action);
+    for (const expectation of item.expect) for (const action of expectation.actions || []) offered.add(action);
+  }
+  for (const [name, cls] of Object.entries(contract.classes)) {
+    for (const action of cls.default_actions || []) offered.add(action);
+  }
+  for (const action of contract.actions) {
+    assert.ok(offered.has(action), `action ${action} is in the vocabulary and in no case`);
+  }
+});
+
+test("every retirement reason a class names is reachable, and none is invented", () => {
+  const known = new Set([
+    "presenting", "presenting_after_raise", "presenting_new_attached", "presenting_continuous_ms",
+    "intent_settled", "intent_superseded", "attached_retired", "owner_success", "timer", "user",
+  ]);
+  const continuous = { refused: "refused_progress_ms", degraded: "disagreement_notice_ms" };
+  for (const [name, cls] of Object.entries(contract.classes)) {
+    for (const reason of cls.retired_by || []) {
+      assert.ok(known.has(reason), `class ${name} names unknown retirement reason ${reason}`);
+      if (reason === "presenting_continuous_ms") {
+        assert.ok(
+          contract.timings[continuous[name]] != null,
+          `class ${name} retires on continuous presenting with no timing to measure it against`,
+        );
+      }
+      if (reason === "timer") {
+        assert.ok(cls.timed_ms != null, `class ${name} retires on a timer it does not declare`);
+      }
+    }
   }
 });
 
@@ -201,12 +253,47 @@ test("the presenter is pure: replaying a case twice gives the same answer", () =
   }
 });
 
-test("presentSurface does not mutate the state it was handed", () => {
-  const before = policy.initialSurfaceState();
-  const frozen = JSON.stringify(before);
-  policy.presentSurface(before, { t: 0, attach: "g1" });
-  policy.presentSurface(before, { t: 10, raise: "control_hold", attached: "g1", context: "attached" });
-  assert.equal(JSON.stringify(before), frozen, "the reducer mutated its input state");
+test("presentSurface does not mutate the state it was handed, faults and all", () => {
+  // The weak version of this test started from an empty state, so the
+  // fault-copying path — the one that actually matters, because the render and
+  // the ledger both hold a fault — was never exercised.
+  for (const item of contract.cases) {
+    let state = policy.initialSurfaceState();
+    for (const event of item.events) state = policy.presentSurface(state, event).state;
+    const snapshot = JSON.stringify(state);
+    const step = policy.presentSurface(state, { t: state.now + 1000, tick: true });
+    assert.equal(JSON.stringify(state), snapshot, `${item.name}: the reducer mutated its input state`);
+    // The surface's fault is a copy, not a window into the state behind it.
+    if (step.surface.fault) {
+      assert.throws(
+        () => step.surface.fault.actions.push("hacked"),
+        `${item.name}: the surface's actions are writable and shared`,
+      );
+    }
+    assert.equal(JSON.stringify(state), snapshot, `${item.name}: the state moved after the fact`);
+  }
+});
+
+test("replaying from an earlier state gives the same answer as the first pass", () => {
+  for (const item of contract.cases) {
+    let state = policy.initialSurfaceState();
+    const checkpoints = [state];
+    const kinds = [];
+    for (const event of item.events) {
+      const step = policy.presentSurface(state, event);
+      state = step.state;
+      checkpoints.push(state);
+      kinds.push(`${step.surface.kind}/${step.surface.class}`);
+    }
+    for (let index = 0; index < item.events.length; index += 1) {
+      const again = policy.presentSurface(checkpoints[index], item.events[index]);
+      assert.equal(
+        `${again.surface.kind}/${again.surface.class}`,
+        kinds[index],
+        `${item.name}: replaying event ${index} from its own checkpoint diverged`,
+      );
+    }
+  }
 });
 
 if (failures > 0) {

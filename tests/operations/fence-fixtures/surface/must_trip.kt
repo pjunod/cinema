@@ -5,7 +5,16 @@ internal class Owner(private val onError: (String) -> Unit) {
         playbackNotice = message
         playFailure = message
     }
-}
-internal fun appendNotice(extra: String) {
-    playFailure += extra
+    fun appendNotice(extra: String) {
+        playFailure += extra
+    }
+    fun sneaky(message: String) {
+        onError.invoke(message)
+        val cb = onError
+        onError
+            (message)
+        playFailure
+            = message
+        cb(message)
+    }
 }

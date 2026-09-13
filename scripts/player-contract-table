@@ -240,11 +240,11 @@ function renderInfoBlock(fields) {
   return out.join("\n");
 }
 
-function replaceBlock(doc, begin, end, block, label) {
+function replaceBlock(doc, begin, end, block, label, where = DOC) {
   const start = doc.indexOf(begin);
   const stop = doc.indexOf(end);
   if (start < 0 || stop < 0 || stop < start) {
-    throw new Error(`${DOC} has no ${begin} … ${end} block to rewrite (${label})`);
+    throw new Error(`${where} has no ${begin} … ${end} block to rewrite (${label})`);
   }
   return doc.slice(0, start) + block + doc.slice(stop + end.length);
 }
@@ -295,6 +295,20 @@ function renderSurfaceClassesBlock(surface) {
     );
   }
   out.push("");
+  out.push("| Severity | Rank | Meaning |");
+  out.push("|---|---|---|");
+  const severityMeaning = {
+    notice: "a banner beside the picture",
+    progress: "the player is working on it",
+    prompt: "the viewer has to answer",
+    terminal: "this attempt is over",
+  };
+  for (const [severity, rank] of Object.entries(surface.severity_rank)) {
+    out.push(`| ${severity} | ${rank} | ${severityMeaning[severity] || ""} |`);
+  }
+  out.push("");
+  out.push(surface.precedence_note);
+  out.push("");
   out.push(
     `**Surface kinds:** ${Object.entries(surface.kinds).map(([kind, meaning]) => `\`${kind}\` — ${meaning}`).join(" ")}`,
   );
@@ -334,7 +348,7 @@ function renderSurfaceSourcesBlock(surface) {
     if (row.carries) notes.push(`carries ${row.carries.map((c) => `\`${c}\``).join(" · ")}`);
     const actions = (row.actions || []).map((a) => `\`${a}\``).join(" · ") || "class default";
     out.push(
-      `| ${index + 1} | \`${row.id}\` | ${row.context} | ${row.class === null ? "*(log only)*" : `\`${row.class}\``} | ${row.requires && row.requires.player_stopped ? "yes" : "no"} | ${actions} | ${notes.join("; ")} |`,
+      `| ${index + 1} | \`${row.id}\` | ${row.context} | ${row.class === null ? "*(log only)*" : `\`${row.class}\``} | ${(row.requires && row.requires.player_stopped) || (row.class && surface.classes[row.class].requires_player_stopped) ? "yes" : "no"} | ${actions} | ${notes.join("; ")} |`,
     );
   });
   out.push("");
@@ -357,15 +371,6 @@ function renderSurfaceEmbedBlock(surface) {
     `  const SURFACE_SEVERITY_RANK = ${JSON.stringify(surface.severity_rank)};`,
     SURFACE_EMBED_END,
   ].join("\n");
-}
-
-function replaceIn(doc, begin, end, block, label, where) {
-  const start = doc.indexOf(begin);
-  const stop = doc.indexOf(end);
-  if (start < 0 || stop < 0 || stop < start) {
-    throw new Error(`${where} has no ${begin} … ${end} block to rewrite (${label})`);
-  }
-  return doc.slice(0, start) + block + doc.slice(stop + end.length);
 }
 
 function main() {
@@ -400,8 +405,8 @@ function main() {
     doc = replaceBlock(doc, INFO_BEGIN, INFO_END, info, "info");
     fs.writeFileSync(DOC, doc);
     let surfaceDoc = fs.readFileSync(SURFACE_DOC, "utf8");
-    surfaceDoc = replaceIn(surfaceDoc, SURFACE_CLASSES_BEGIN, SURFACE_CLASSES_END, renderSurfaceClassesBlock(surface), "surface classes", SURFACE_DOC);
-    surfaceDoc = replaceIn(surfaceDoc, SURFACE_SOURCES_BEGIN, SURFACE_SOURCES_END, renderSurfaceSourcesBlock(surface), "surface sources", SURFACE_DOC);
+    surfaceDoc = replaceBlock(surfaceDoc, SURFACE_CLASSES_BEGIN, SURFACE_CLASSES_END, renderSurfaceClassesBlock(surface), "surface classes", SURFACE_DOC);
+    surfaceDoc = replaceBlock(surfaceDoc, SURFACE_SOURCES_BEGIN, SURFACE_SOURCES_END, renderSurfaceSourcesBlock(surface), "surface sources", SURFACE_DOC);
     fs.writeFileSync(SURFACE_DOC, surfaceDoc);
     process.stdout.write(`rewrote the routing, outcome, row, timing, live and info blocks in ${path.relative(ROOT, DOC)} and the surface blocks in ${path.relative(ROOT, SURFACE_DOC)}\n`);
     return;

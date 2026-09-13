@@ -13,10 +13,12 @@ ruled, adversarially reviewed and answered, with the build plan in
 Building now: M0 (the fixture, the reference reducer, the generated doc
 blocks, the SURFACE ledger section and the fence) is in
 `docs/playback-surface-m0`; M1 web, M2 Apple and M3 Android follow, then M5's
-three recovery additions. The fixture is 34 ordered-event cases every client's
-presenter runs; `scripts/playback-surface-fence` budgets the 109 pre-contract
-surface writes that are left (54 web, 39 Apple, 16 Android) so no new one can
-be added and each milestone drives its file to zero.** Paul reported a full-screen playback
+three recovery additions. The fixture is 54 ordered-event cases every client's
+presenter runs; `scripts/playback-surface-fence` budgets the 110 pre-contract
+surface write sites that are left (55 web, 39 Apple, 16 Android — the fence's
+own count, and the current one: §2's "35 `setLoading` call sites" counted one
+spelling at `10f2afe6`) so no new one can be added in a spelling the fence
+knows, and each milestone drives its file to zero.** Paul reported a full-screen playback
 error while the picture keeps playing, or one that stays up after playback
 stopped and came back. It is one defect with three spellings: the blocking
 overlay is an imperative message channel — 40 `setLoading` sites on the web,

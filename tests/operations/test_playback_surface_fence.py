@@ -31,7 +31,7 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         self.fence = load_fence()
 
     def test_must_trip_fixtures_trip_on_every_write(self):
-        expected = {"web": 7, "swift": 5, "kotlin": 4}
+        expected = {"web": 16, "swift": 10, "kotlin": 8}
         names = {"web": "must_trip.web.html", "swift": "must_trip.swift", "kotlin": "must_trip.kt"}
         for kind, name in names.items():
             with self.subTest(kind=kind):
@@ -49,11 +49,50 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
                 hits = self.fence.scan_text(kind, (FIXTURES / name).read_text(encoding="utf-8"))
                 self.assertEqual(hits, [], f"{name}: the fence tripped on a read")
 
-    def test_an_allowed_region_silences_only_its_own_lines(self):
-        text = (FIXTURES / "must_trip.web.html").read_text(encoding="utf-8")
-        all_hits = self.fence.scan_text("web", text)
-        allowed = {line for line, _token in all_hits}
-        self.assertEqual(self.fence.scan_text("web", text, allowed), [])
+    def test_an_allowed_region_covers_its_body_and_not_its_anchors(self):
+        # No render anchors exist in the tree until M1/M2/M3 land, so this is
+        # the only coverage `region_allowed_lines` has. The anchors themselves
+        # are OUTSIDE the region: `setLoading(false); // …:end` on the end
+        # anchor would otherwise be exempt.
+        path = next(iter(self.fence.REGIONS))
+        begin, end, _reason, _required = self.fence.REGIONS[path][0]
+        lines = [
+            "before();",
+            f"  {begin}",
+            "  inside();",
+            f"  {end}",
+            "after();",
+        ]
+        self.assertEqual(self.fence.region_allowed_lines(path, lines), {3})
+
+    def test_a_broken_region_fails_rather_than_silently_allowing_nothing(self):
+        path = next(iter(self.fence.REGIONS))
+        begin, end, _reason, _required = self.fence.REGIONS[path][0]
+        with self.assertRaises(ValueError):
+            self.fence.region_allowed_lines(path, [f"  {begin}", "  inside();"])
+        with self.assertRaises(ValueError):
+            self.fence.region_allowed_lines(path, [f"  {begin}", f"  {begin}", "  x();", f"  {end}"])
+        # A region that has not been written yet is not an error: M1/M2/M3 add
+        # the anchors with the render they wrap.
+        self.assertEqual(self.fence.region_allowed_lines(path, ["nothing();"]), set())
+
+    def test_a_write_inside_the_region_is_allowed_and_one_outside_is_not(self):
+        path = next(iter(self.fence.REGIONS))
+        begin, end, _reason, _required = self.fence.REGIONS[path][0]
+        lines = [
+            'setLoading(true, "outside", "", "");',
+            f"  {begin}",
+            '  setLoading(true, "inside", "", "");',
+            f"  {end}",
+        ]
+        allowed = self.fence.region_allowed_lines(path, lines)
+        hits = self.fence.scan_text("web", "\n".join(lines), allowed)
+        self.assertEqual([number for number, _token in hits], [1])
+
+    def test_a_write_split_over_two_lines_is_still_one_write(self):
+        text = 'setLoading\n  (true, "x", "", "");\n'
+        hits = self.fence.scan_text("web", text)
+        self.assertEqual(hits, [(1, "setLoading")])
 
     def test_the_fence_passes_the_repository_as_it_stands(self):
         failures = self.fence.scan()
@@ -66,8 +105,13 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
             self.assertIn(path, self.fence.SCANNED, f"{path} is budgeted but never scanned")
 
     def test_the_budget_is_tight_against_the_tree(self):
-        # A budget with slack is a place a new write site can hide. Each entry
-        # must equal what the file actually has today.
+        # The fence itself is a ratchet (`len(hits) > budget`), so nothing can
+        # be ADDED. This assertion is the other half: the budget must equal
+        # what the file has, so a milestone that removes write sites is
+        # required to lower it in the same commit rather than leaving slack for
+        # the next one to hide in. A commit that legitimately removes a site
+        # and is surprised by this failure has one number to change, and the
+        # message says which.
         for path, kind in self.fence.SCANNED.items():
             source = self.fence.ROOT / path
             if not source.is_file():
