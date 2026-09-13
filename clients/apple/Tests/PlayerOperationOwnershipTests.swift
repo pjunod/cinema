@@ -393,6 +393,66 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         XCTAssertTrue(controller.surface.surface.playerStopped)
     }
 
+    /// A6, closed. Two create sequences overlap by the ordinary route — the
+    /// viewer leaves a cold start that is still waiting on its create and puts
+    /// another title on — and the abandoned one's exit must retire only its
+    /// OWN epoch. Retire the counter unconditionally and the survivor is left
+    /// with no watchdog at all: its deadline fires into a guard that no longer
+    /// matches, so a title that never starts sits on a spinner for ever with
+    /// no prompt and no way back.
+    ///
+    /// Until now the only thing that held this was a source-shape assertion in
+    /// `tests/playback/web-policy.test.js`, which reads the Swift as text.
+    /// This runs it.
+    func testAnAbandonedCreateSequenceRetiresOnlyItsOwnEpoch() async throws {
+        let decisions = Decisions()
+        let creates = Creates()
+        let waits = RetryWaits()
+        var released: [String] = []
+        creates.answers = [nil, nil]
+        let controller = PlayerController(
+            requestPlaybackDecision: { _, file, selection, quality in
+                try await decisions.request(file: file, selection: selection, quality: quality)
+            },
+            waitCreateRetry: { ms in try await waits.wait(ms) },
+            releaseHlsSession: { _, sessionId in released.append(sessionId) },
+            requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
+        )
+        let model = AppModel()
+        defer { controller.stop(); decisions.cancelAll(); creates.cancelAll(); waits.cancelAll() }
+
+        // The sequence that is about to be abandoned.
+        start(controller, model: model, file: 1)
+        try await waitUntil("the first decision") { decisions.requests.count == 1 }
+        decisions.resolve(0, with: .success((try coldDecision(file: 1), caps)))
+        try await waitUntil("the first create") { creates.attempts.count == 1 }
+        try await waitUntil("its deadline watchdog") { waits.waits.count == 1 }
+
+        // The viewer moves on. The create above is still in flight.
+        controller.stop()
+        start(controller, model: model, file: 2)
+        try await waitUntil("the second decision") { decisions.requests.count == 2 }
+        decisions.resolve(1, with: .success((try coldDecision(file: 2), caps)))
+        try await waitUntil("the second create") { creates.attempts.count == 2 }
+        try await waitUntil("the survivor armed its own deadline") { waits.waits.count == 2 }
+        XCTAssertEqual(waits.waits[1].ms, PlaybackCreateRetry.deadlineMs)
+
+        // …and now the abandoned sequence finally gets its answer and exits.
+        // The release is the proof it ran to the end, `defer` and all: a
+        // session nobody is watching is handed straight back.
+        creates.resolve(0, with: .success(try hlsStart("abandoned")))
+        try await waitUntil("the abandoned sequence exited") { released == ["abandoned"] }
+
+        // The survivor is still watched. Its deadline is the only thing that
+        // can end a create that never answers, and it still ends it.
+        waits.fire(1)
+        try await waitUntil("the survivor's deadline still raises its prompt") {
+            controller.surface.surface.cls == .exhausted
+        }
+        XCTAssertTrue(controller.surface.surface.playerStopped)
+        XCTAssertEqual(controller.player.rate, 0)
+    }
+
     /// The staged loading overlay, routed (§3.3 row 10). It is a
     /// `client_preparing` fault for as long as the open is in flight, it
     /// covers the picture without asking the viewer anything, and it is
