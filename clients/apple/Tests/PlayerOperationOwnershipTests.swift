@@ -393,6 +393,169 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         XCTAssertTrue(controller.surface.surface.playerStopped)
     }
 
+    /// The Apple wiring for the pause ruling, end to end and behaviourally:
+    /// the presenter's own clock raises the real wait from the real transport
+    /// status, the reducer draws it after the real 350 ms debounce, and the
+    /// viewer's own pause retires it.
+    ///
+    /// `AVPlayer` reports `.waitingToPlayAtSpecifiedRate` when it has been
+    /// asked to play and has nothing to play, which is the one way a headless
+    /// test reaches that status at all: an item over a playlist URL nothing
+    /// serves never readies. The decision is left pending, so nothing is ever
+    /// attached, nothing is changing, and the context is `attached` the moment
+    /// a frame is declared.
+    func testTheViewersPauseRetiresTheWaitThePresentersClockRaised() async throws {
+        let decisions = Decisions()
+        let controller = PlayerController(
+            requestPlaybackDecision: { _, file, selection, quality in
+                try await decisions.request(file: file, selection: selection, quality: quality)
+            }
+        )
+        let model = AppModel()
+        defer { controller.stop(); decisions.cancelAll() }
+        start(controller, model: model)
+        try await waitUntil("initial decision") { decisions.requests.count == 1 }
+        controller.noteFramePresentedForTesting()
+        controller.player.play()
+        try await waitUntil("the transport reports a wait") {
+            controller.player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+        }
+        try await waitUntil("the presenter's clock raises the wait and draws it") {
+            controller.surface.surface.source == "media_waiting"
+                && controller.surface.kind == .blocking
+        }
+        XCTAssertEqual(controller.surface.surface.cls, .buffering)
+        XCTAssertEqual(controller.progressSurfaceRender, .blocking)
+        XCTAssertFalse(controller.isPlaybackBlocked, "a spinner asks the viewer nothing")
+        XCTAssertTrue(controller.wantsPlayback)
+
+        // The viewer pauses. The wait was about a player that wanted media, so
+        // it is now about nothing.
+        controller.togglePlayPause()
+        XCTAssertFalse(controller.wantsPlayback)
+        XCTAssertEqual(
+            controller.surface.kind, .none,
+            "a buffer that fills while the viewer is paused must not leave a spinner behind"
+        )
+        XCTAssertTrue(controller.surface.faults.isEmpty)
+    }
+
+    /// A6, closed. Two create sequences overlap by the ordinary route — the
+    /// viewer leaves a cold start that is still waiting on its create and puts
+    /// another title on — and the abandoned one's exit must retire only its
+    /// OWN epoch. Retire the counter unconditionally and the survivor is left
+    /// with no watchdog at all: its deadline fires into a guard that no longer
+    /// matches, so a title that never starts sits on a spinner for ever with
+    /// no prompt and no way back.
+    ///
+    /// Until now the only thing that held this was a source-shape assertion in
+    /// `tests/playback/web-policy.test.js`, which reads the Swift as text.
+    /// This runs it.
+    func testAnAbandonedCreateSequenceRetiresOnlyItsOwnEpoch() async throws {
+        let decisions = Decisions()
+        let creates = Creates()
+        let waits = RetryWaits()
+        var released: [String] = []
+        creates.answers = [nil, nil]
+        let controller = PlayerController(
+            requestPlaybackDecision: { _, file, selection, quality in
+                try await decisions.request(file: file, selection: selection, quality: quality)
+            },
+            waitCreateRetry: { ms in try await waits.wait(ms) },
+            releaseHlsSession: { _, sessionId in released.append(sessionId) },
+            requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
+        )
+        let model = AppModel()
+        defer { controller.stop(); decisions.cancelAll(); creates.cancelAll(); waits.cancelAll() }
+
+        // The sequence that is about to be abandoned.
+        start(controller, model: model, file: 1)
+        try await waitUntil("the first decision") { decisions.requests.count == 1 }
+        decisions.resolve(0, with: .success((try coldDecision(file: 1), caps)))
+        try await waitUntil("the first create") { creates.attempts.count == 1 }
+        try await waitUntil("its deadline watchdog") { waits.waits.count == 1 }
+
+        // The viewer moves on. The create above is still in flight.
+        controller.stop()
+        start(controller, model: model, file: 2)
+        try await waitUntil("the second decision") { decisions.requests.count == 2 }
+        decisions.resolve(1, with: .success((try coldDecision(file: 2), caps)))
+        try await waitUntil("the second create") { creates.attempts.count == 2 }
+        try await waitUntil("the survivor armed its own deadline") { waits.waits.count == 2 }
+        XCTAssertEqual(waits.waits[1].ms, PlaybackCreateRetry.deadlineMs)
+
+        // …and now the abandoned sequence finally gets its answer and exits.
+        // The release is the proof it ran to the end, `defer` and all: a
+        // session nobody is watching is handed straight back.
+        creates.resolve(0, with: .success(try hlsStart("abandoned")))
+        try await waitUntil("the abandoned sequence exited") { released == ["abandoned"] }
+
+        // The survivor is still watched. Its deadline is the only thing that
+        // can end a create that never answers, and it still ends it.
+        waits.fire(1)
+        try await waitUntil("the survivor's deadline still raises its prompt") {
+            controller.surface.surface.cls == .exhausted
+        }
+        XCTAssertTrue(controller.surface.surface.playerStopped)
+        XCTAssertEqual(controller.player.rate, 0)
+    }
+
+    /// The staged loading overlay, routed (§3.3 row 10). It is a
+    /// `client_preparing` fault for as long as the open is in flight, it
+    /// covers the picture without asking the viewer anything, and it is
+    /// retired when the open settles — including when it settles by failing,
+    /// which is the path a successful open's `intent_settled` never reaches.
+    func testTheStagedOpenIsAPreparingFaultThatSettlesHoweverTheOpenEnds() async throws {
+        let decisions = Decisions()
+        let creates = Creates()
+        let waits = RetryWaits()
+        creates.answers = [nil]
+        let controller = PlayerController(
+            requestPlaybackDecision: { _, file, selection, quality in
+                try await decisions.request(file: file, selection: selection, quality: quality)
+            },
+            waitCreateRetry: { ms in try await waits.wait(ms) },
+            requestHlsSession: { _, file, body in try await creates.request(file: file, body: body) }
+        )
+        let model = AppModel()
+        defer { controller.stop(); decisions.cancelAll(); creates.cancelAll(); waits.cancelAll() }
+        start(controller, model: model)
+        try await waitUntil("initial decision") { decisions.requests.count == 1 }
+        decisions.resolve(0, with: .success((try coldDecision(), caps)))
+        try await waitUntil("the create is issued") { creates.attempts.count == 1 }
+
+        XCTAssertEqual(controller.surface.surface.source, "client_preparing")
+        XCTAssertEqual(controller.surface.surface.cls, .preparing)
+        XCTAssertEqual(
+            controller.surface.kind, .blocking,
+            "nothing is presenting yet, so the staged overlay covers the picture"
+        )
+        XCTAssertEqual(controller.progressSurfaceRender, .blocking)
+        XCTAssertFalse(
+            controller.isPlaybackBlocked,
+            "a spinner covers pixels and asks nothing; it is not the input contract's `failed`"
+        )
+        XCTAssertNil(controller.surface.surface.title, "the overlay it replaces had no words")
+
+        // The server refuses outright: no ladder, no retry, and `open` never
+        // reaches the `intent_settled` a successful attach would emit.
+        creates.resolve(0, with: .failure(
+            APIError.refused(
+                status: 503, code: "vod_disabled",
+                message: "streaming is switched off on this server", positionMs: nil
+            )
+        ))
+        try await waitUntil("the owner's terminal") {
+            controller.surface.surface.cls == .stopped
+        }
+        XCTAssertTrue(
+            controller.surface.faults.allSatisfy { $0.source != "client_preparing" },
+            "the staged overlay is retired when the open settles, however it settled"
+        )
+        XCTAssertTrue(controller.surface.surface.playerStopped)
+        XCTAssertTrue(controller.isPlaybackBlocked)
+    }
+
     /// Row 6 is the `start` context. A create refused over a picture the viewer
     /// is watching is a refused CHANGE, and the sequence must not run there at
     /// all — no ladder, and no sixty-second watchdog stopping that player.

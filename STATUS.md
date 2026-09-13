@@ -4,9 +4,157 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Every class in the playback surface contract can now be drawn on Apple
+
+**[#291](http://192.168.4.7:3000/noirr/plurx/pulls/291), titled `WIP:`.**
+Paul's to merge, and this branch has not been. (The wording is careful
+because `test_status_pr_claims` reads that number as landed: this
+repository's history carries a GitHub-era `Merge pull request #291` from
+before the numbering restarted on Gitea, and the check cannot tell two
+numbering spaces apart. Recorded rather than worked around in the check.)
+Build 147 landed the Apple presenter and an audit found parts of it
+unreachable. Four fixture source rows had no Apple raise site, one view branch
+could not be reached at all, and the one mutation the last round could not kill
+is now killed.
+
+### The one that mattered
+
+**`buffering` could never be drawn on this client.**
+`waitingToPlayAtSpecifiedRate` still drove the legacy `isPlaybackWaiting`
+spinner, painted by a second `if` in `PlayerView` underneath the one
+`isChangingStream` painted — two owners for one pixel, which is the defect the
+contract exists to kill. A wait is now a `media_waiting` fault (row 12) drawn
+as `buffering` once it has lasted the contract's 350 ms, and both legacy flags
+are gone. The debounce is the reducer's; nothing on the client keeps a second
+one.
+
+Row 12 is declared for the `attached` context alone, which is what "after
+start" means, so a wait before the first frame raises `client_preparing`
+(row 10) — the staged start it actually is. The legacy overlay drew in both
+cases and still does, with the words it always composed.
+
+### The other three rows, and the dead branch
+
+- **`client_preparing`** — the staged loading overlay was `isChangingStream`
+  and raised nothing. It raises on the transition that sets the flag and
+  settles on the transition that clears it, carrying the viewer request it
+  belongs to, so the fault's life is exactly the flag's life through an attach,
+  a refusal and a supersede alike.
+- **`readiness_deadline_rungs_left`** — contract row 14 names Apple's
+  `retryAfterReadinessTimeout` outright, and that path borrowed the ladder's
+  `owner_recovery_step`. It raises row 14 now. Same class, same pixel; the
+  ledger stops calling a readiness timeout an ordinary fallback.
+- **`log_only`** — raised by nobody on any client, so `surface_log_only` had
+  never been emitted. Apple's three row-18 equivalents raise it: a prepared
+  successor given up by any route that is not a committed switch, a control
+  exchange that came back with nothing (where `404 session_gone` on a
+  successor's first exchange arrives), and a status poll that answered
+  nothing. One row per fact per attached generation. `postClientLog` is not a
+  site, because this raise posts a client log.
+- **The Keep Waiting button** — `PlayerView:1529` strips `keep_waiting`
+  whenever `retry` is present, deliberately and documented, so the label at
+  `1560` was unreachable. The behaviour stays, the label is deleted, and the
+  reason the web is adding a real one is written where a reader will ask.
+
+### And one the audit did not name
+
+Closing the first gap surfaced it: a `buffering` fault was retired only by
+presentation evidence, and a paused picture never produces another sample, so a
+buffer that filled while the viewer had paused left a spinner over a still
+frame until the generation changed. The overlay outliving the thing it
+described — the defect this contract exists to kill, reintroduced by the
+migration. The Android session found it independently and the web had it too.
+
+**Ruled: a `buffering` fault is about a player that WANTS media, so a viewer
+who pauses makes it about nothing.** The fixture and reducer half arrived from
+`web/playback-surface-reach` as a cherry-pickable commit (`1e19b133`), together
+with `segment_503_not_yet`'s codes (`f7cad0fd`); both were cherry-picked onto
+this branch rather than rebased, and the Swift half is ported here. The Apple
+wiring is `wantsPlayback` — the viewer's own transport intent, and the flag
+`stopForBlockingSurface()` deliberately leaves alone, so the owner's own stop
+is filtered out by construction rather than by a rule somebody has to remember.
+`playback_not_requested` retires `buffering` and no other class: a `preparing`
+start has not been paused by a viewer who has not seen it, and a prompt is
+answered by the viewer rather than by a transport change.
+
+### Two findings from the review, both in code this branch wrote
+
+**An indicator was being drawn as the blocking box.** The new
+`showsProgressSurface` answered true for `kind == .indicator` and the view fed
+that into its one render — the centred, full-frame box. An indicator is by
+definition a progress fault *while the picture is presenting*, and `recovering`
+retires only on presentation that postdates its raise, so a compatibility rung,
+a node failover or a readiness deadline put a modal spinner over a picture that
+was playing perfectly well. The commit removing overlays-over-moving-pictures
+introduced one. §3.1's two renders are two views now, chosen by a pure function
+so the distinction is provable rather than read off a SwiftUI body.
+
+**"By construction" was not true.** `stopForBlockingSurface()` does leave
+`wantsPlayback` alone, but five other terminal stops wrote `player.pause()`,
+`isPlaying` and `wantsPlayback` out by hand immediately before raising, so all
+five fired `playback_requested(false)`. Benign — each raises a class that
+outranks `buffering` — but the guarantee did not exist and nothing tested it.
+All five go through the one helper now, which takes `revokingPlaybackIntent:`
+and says what it is doing; §3.4's obligation has one implementation and the
+viewer's transport intent has one owner-side writer.
+
+### One thing added that is not a raise site
+
+The presenter now has a clock. Every timing the contract states is measured by
+the reducer when its caller applies an event, and AVPlayer's periodic observer
+stops firing the moment the film clock stops — which is exactly when a wait
+needs drawing. A 500 ms task feeds `.tick`, the twin of the web's
+`playbackProgressTick` on the same interval. It samples nothing, detects
+nothing, and moves no threshold, budget, detector or ladder.
+
+### A6, closed
+
+A6 survived because no test had ever had two create sequences alive at once.
+The overlap is ordinary: a viewer leaves a cold start still waiting on its
+create and puts another title on. The abandoned sequence's `defer` must retire
+only its own epoch — retire the counter unconditionally and the replacement is
+left unwatched, so its sixty-second deadline fires into a guard that no longer
+matches and a title that never starts sits on a spinner for ever with no
+prompt.
+`testAnAbandonedCreateSequenceRetiresOnlyItsOwnEpoch` drives that, taking the
+abandoned sequence's release of its own late session as proof its `defer` ran.
+
+### What was run
+
+`make apple-build` (both schemes, `** BUILD SUCCEEDED **` twice) and
+`make apple-test` on iPhone 17 Pro (iOS 26.5) and Apple TV 4K 3rd generation
+(tvOS 26.5) on the macOS runner, on the rebased tree: **549 iOS tests and 535
+tvOS tests executed, zero failures**, with
+`testPlaybackSurfaceModelRunsEveryContractCase` confirmed to have run under
+each. Baseline before this branch was 532 and 518.
+
+Fifteen mutations were applied on the runner one at a time and reverted; each
+failed the test named for it against a run that executed 543, 546 or 549 tests.
+The first attempt at the first mutation executed **zero** tests and reported no
+failures — the wedged-simulator trap, a false survivor if believed — and was
+re-run after `simctl shutdown all` and `erase`.
+
+On Linux: both fences PASS with no new `MIGRATION_BUDGET` entries,
+`tests/playback/playback-surface-contract.test.js` (60 cases),
+`tests/playback/web-policy.test.js`, `make web-check` exit 0,
+`tests/operations` 355 OK, `scripts/validate lint` OK.
+
+### What this does not close
+
+- **Row 14's proof is a source-shape pin**, which is exactly the kind of proof
+  the last round found worthless for A3. `retryAfterReadinessTimeout` is
+  reachable only from an `open()` whose `seekWhenReady` times out over a
+  decoding player, which no headless XCTest has. The pin checks the row against
+  the shared table rather than against a spelling, so a wrong or invented row
+  fails — but it would not catch a semantically identical rewrite. Known gap,
+  not an implied guarantee; the honest route is §6's simulator recipe.
+- **The §6 simulator and device recipes still have not run.** Every one needs
+  a live `plurxd` with real media, and none was reachable from the runner.
+
 ## The Android playback surface has no unreachable sources left
 
-**WIP, not merged.** An audit of the merged playback-surface work found four of
+**Landed as [#289](http://192.168.4.7:3000/noirr/plurx/pulls/289).** An audit of
+the merged playback-surface work found four of
 the contract's sources with no Android raise site at all, so four rows of §3.3
 described behaviour the client could not produce. All four are closed, one is
 recorded as a deliberate parity gap, and one dead branch is gone.
@@ -182,7 +330,7 @@ remain unclaimed.
 
 ## The web half of the playback surface contract is reachable, and four rulings are closed
 
-**`web/playback-surface-reach`, WIP, not merged.** An audit found parts of the
+**Landed as [#290](http://192.168.4.7:3000/noirr/plurx/pulls/290).** An audit found parts of the
 merged work unreachable — two contract rows that no web site ever raised, an
 action in the vocabulary that no site ever offered, and a deadline that could
 not fire. All of it is closed here, together with the four rulings that were

@@ -122,6 +122,14 @@ private final class RecordingHost: PreparedSuccessorHost {
 
     func preparedSuccessorOwesAnExchange() { exchanges += 1 }
 
+    /// Contract §3.3 row 18, recorded so the wiring is provable rather than
+    /// assumed: every abandonment of a live staging owes exactly one of these.
+    var abandonments: [PreparedReplacementAbandonment] = []
+
+    func notePreparedSuccessorAbandoned(_ reason: PreparedReplacementAbandonment) {
+        abandonments.append(reason)
+    }
+
     func recordPreparedFallbackInterruption(ms: Int) { interruptions.append(ms) }
 }
 
@@ -501,6 +509,62 @@ final class PreparedReplacementCoordinatorTests: XCTestCase {
         XCTAssertEqual(coordinator.offer(action, filmPositionMs: 1_000), .alreadyOpen)
         XCTAssertEqual(host.started.count, 1)
         XCTAssertEqual(host.alive, 1)
+    }
+
+    /// Contract §3.3 row 18 — prepared-successor abandonment is `log_only`:
+    /// nothing was ever switched to, so the incumbent is untouched and the
+    /// event is the only trace there was ever a second pipeline.
+    ///
+    /// Every route out of a live staging that is NOT a committed switch is one
+    /// abandonment, and exactly one: the viewer moving on, the successor's own
+    /// item failing, a readiness bound elapsing, a refused commit, and a
+    /// switch that produced no frame.
+    func testEveryAbandonmentOfALiveStagingIsReportedExactlyOnce() async {
+        let viewerMovedOn = RecordingHost()
+        let moved = PreparedReplacementCoordinator(host: viewerMovedOn)
+        moved.offer(preparedAction(), filmPositionMs: 1_000)
+        moved.abandonWithoutFallback(.aborted)
+        moved.abandonWithoutFallback(.aborted)
+        XCTAssertEqual(
+            viewerMovedOn.abandonments, [.aborted],
+            "abandoned once, reported once — a settled staging cannot be abandoned again"
+        )
+
+        let successorFailed = RecordingHost()
+        let failed = PreparedReplacementCoordinator(host: successorFailed)
+        failed.offer(preparedAction(), filmPositionMs: 1_000)
+        failed.abandon(.failed)
+        XCTAssertEqual(successorFailed.abandonments, [.failed])
+        XCTAssertEqual(successorFailed.fallbacks.count, 1, "and the in-place path still runs")
+
+        let refused = RecordingHost()
+        refused.outcome = .refused
+        let refusedCoordinator = PreparedReplacementCoordinator(host: refused)
+        refusedCoordinator.offer(preparedAction(), filmPositionMs: 1_000)
+        refusedCoordinator.successorIsMetadataReady()
+        refusedCoordinator.successorIsBuffered(throughMs: 40_000)
+        await refusedCoordinator.commit()
+        XCTAssertEqual(refused.abandonments, [.aborted], "nothing was switched")
+
+        let frameless = RecordingHost()
+        frameless.outcome = .switchedWithoutAFrame
+        let framelessCoordinator = PreparedReplacementCoordinator(host: frameless)
+        framelessCoordinator.offer(preparedAction(), filmPositionMs: 1_000)
+        framelessCoordinator.successorIsMetadataReady()
+        framelessCoordinator.successorIsBuffered(throughMs: 40_000)
+        await framelessCoordinator.commit()
+        XCTAssertEqual(frameless.abandonments, [.failed])
+
+        let committed = RecordingHost()
+        let committedCoordinator = PreparedReplacementCoordinator(host: committed)
+        committedCoordinator.offer(preparedAction(), filmPositionMs: 1_000)
+        committedCoordinator.successorIsMetadataReady()
+        committedCoordinator.successorIsBuffered(throughMs: 40_000)
+        await committedCoordinator.commit()
+        XCTAssertEqual(
+            committed.abandonments, [],
+            "a switch the viewer is watching is not an abandonment"
+        )
     }
 
     /// SS5.2 — prepare then abandon: the successor is released and the

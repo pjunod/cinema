@@ -825,31 +825,21 @@ struct PlayerView: View {
                     }
                 }
 
-                if controller.isChangingStream || controller.showsBlockingProgress {
-                    streamChangeProgress
-                        .tint(.white)
-                        .padding(18)
-                        .background(.ultraThinMaterial, in: Circle())
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-
-                if controller.isPlaybackWaiting && !findingNext {
-                    let waiting = PlaybackWaitPresentation.make(
-                        runwaySeconds: controller.bufferedRunwaySeconds(),
-                        httpWaitCount: controller.sessionStatus?.httpWaitCount
-                    )
-                    VStack(spacing: 10) {
-                        ProgressView().tint(.white)
-                        Text(waiting.title)
-                            .font(.system(.callout, design: .monospaced).weight(.semibold))
-                        Text(waiting.detail)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundColor(.white.opacity(0.72))
+                // ONE progress surface, drawn by the presenter's verdict.
+                // `isChangingStream` used to draw a spinner here and
+                // `isPlaybackWaiting` a second box below it, so two things
+                // decided what covered the picture — the exact defect the
+                // contract exists to kill. Both are faults now
+                // (`client_preparing`, `media_waiting`).
+                //
+                // One owner, two renders, and §3.1 is emphatic about the
+                // difference: the box covers the picture, the indicator sits
+                // beside one that is playing. They must never be the same view.
+                if let progress = controller.progressSurfaceRender, !findingNext {
+                    switch progress {
+                    case .blocking: playbackProgressSurface
+                    case .indicator: playbackProgressIndicator
                     }
-                    .foregroundColor(.white)
-                    .padding(18)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
                 if findingNext {
@@ -1489,6 +1479,69 @@ struct PlayerView: View {
         #endif
     }
 
+    /// A progress fault over a picture that IS presenting (§3.1's `indicator`):
+    /// a small capsule in the corner of the chrome, covering nothing.
+    ///
+    /// Deliberately not the full-screen box. `recovering` is retired by
+    /// presentation that postdates its raise, so a compatibility rung, a node
+    /// failover or a readiness deadline is an indicator over a picture that is
+    /// playing perfectly well — and giving it the centered full-screen box
+    /// would put a modal spinner over a moving picture, which is the defect
+    /// this contract exists to remove. It takes no hits: a viewer's tap and a
+    /// remote's focus belong to the chrome behind it.
+    @ViewBuilder
+    private var playbackProgressIndicator: some View {
+        let surface = controller.surface.surface
+        HStack(spacing: 8) {
+            ProgressView().tint(.white)
+            if let title = surface.title, !title.isEmpty {
+                Text(title)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.85))
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+        .allowsHitTesting(false)
+    }
+
+    /// A progress fault over a picture that is NOT presenting (§3.1's
+    /// full-screen half), in the two shapes this player has always drawn: a
+    /// bare spinner for a fault with nothing to say (the staged open), and the
+    /// spinner with the fault's own sentence under it for one that does (a
+    /// wait). No new copy — the words are the ones the raising owner put on
+    /// the fault.
+    @ViewBuilder
+    private var playbackProgressSurface: some View {
+        let surface = controller.surface.surface
+        if let title = surface.title, !title.isEmpty {
+            VStack(spacing: 10) {
+                ProgressView().tint(.white)
+                Text(title)
+                    .font(.system(.callout, design: .monospaced).weight(.semibold))
+                if let detail = surface.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.72))
+                }
+            }
+            .foregroundColor(.white)
+            .padding(18)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            streamChangeProgress
+                .tint(.white)
+                .padding(18)
+                .background(.ultraThinMaterial, in: Circle())
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
     private var failureView: some View {
         let surface = controller.surface.surface
         return VStack(spacing: 14) {
@@ -1556,8 +1609,16 @@ struct PlayerView: View {
     @ViewBuilder
     private func failureActionButton(_ action: PlaybackFault.Action) -> some View {
         switch action {
+        // One button for both, never two: `failureActions` above strips
+        // `keep_waiting` whenever `retry` is present, and every blocking
+        // class's defaults offer `retry`, so a separate "Keep Waiting" was a
+        // label no viewer could ever reach. Apple does not offer it separately
+        // because on this client it is not a separate thing — §3.1 says Keep
+        // waiting IS `retryAfterPlaybackFailure`. (The web is adding a real
+        // one; the web's Keep waiting re-arms `armStall` and its Try again
+        // re-opens, which genuinely differ.)
         case .retry, .keepWaiting:
-            Button(action == .keepWaiting ? "Keep Waiting" : "Try Again") {
+            Button("Try Again") {
                 controller.retryAfterPlaybackFailure()
             }
             .buttonStyle(.borderedProminent)
