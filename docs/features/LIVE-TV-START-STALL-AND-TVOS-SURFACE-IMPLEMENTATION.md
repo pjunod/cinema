@@ -14,10 +14,12 @@ stops to flag anything that would need the guide reducers, the lease, the
 input contract's routing table, the playback-surface contract, or a new
 route — none of this touches them.
 
-The two rulings the diagnosis left open are taken here as **uniform 2 s
-segments answered at two listed segments** (§3 there) and **the telemetry
-strip separate from the band, as rendered** (§6 there). If Paul rules the
-other way on either, §8 says what changes; nothing else in this plan moves.
+The two rulings the diagnosis left open are taken here as **uniform 1 s
+segments answered at two listed segments** (§3 there — Paul's original
+intent for `init_time` was a start no slower than the tuner, and this keeps
+it) and **the telemetry strip separate from the band, as rendered** (§6
+there). If Paul rules the other way on either, §8 says what changes;
+nothing else in this plan moves.
 
 Line numbers cite `main` at `a605d03c`. Re-verify each anchor at build
 time; the files have been moving daily.
@@ -25,12 +27,13 @@ time; the files have been moving daily.
 ## 1. Objective
 
 A Live TV start that never stalls in its first thirty seconds on any
-client, at a cost of no more than 3 s to the first frame; and a tvOS
+client, at a cost of no more than one segment (1 s) to the first frame —
+the tuner, the probe and one segment stay the floor; and a tvOS
 fullscreen surface on which every button is reachable from every other
 button, waiting is drawn, and the facts about the stream are on screen.
 
 Acceptance for the whole effort, on the physical Apple TV: first frame
-≤ today + 3 s, `AVPlayerItemAccessLogEvent.numberOfStalls == 0` over 30 s
+≤ today + 1 s, `AVPlayerItemAccessLogEvent.numberOfStalls == 0` over 30 s
 on an ATSC 1.0 channel, and a Down/Left/Right/Up press from each of the
 five buttons lands on a button.
 
@@ -41,7 +44,8 @@ five buttons lands on a button.
 | `-hls_init_time 1` cuts seven 1 s segments, a 3 s catch-up, then 4 s; `TARGETDURATION` 1 → 3 → 4 | diagnosis §1, measured with the producer's arguments |
 | The owner answers the start at one listed segment | `live_tv.rs:4796–4842`; `parsed.segments.is_empty()` at 5758 is the only gate |
 | Every client starts ≤ 1 s behind live and stalls 3.6 s in three events | diagnosis §1, modelled from the recording; lower bound |
-| Uniform 2 s at two listed segments: 0 stalls, +3.0 s, one segment of margin | diagnosis §3 |
+| Uniform 1 s at two listed segments: 0 stalls, +1.0 s to the first frame, ≈ 2 s behind live; at one listed segment, one 0.5 s hiccup | diagnosis §3 |
+| The first frame's floor is tuner (2.77 s) + probe (~1 s) + one segment + fetch; the segment is the server's only lever | diagnosis §3, [HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md) |
 | hlsenc renames a finished segment before rewriting the playlist, so `threshold + 1` unlisted files exist for an instant | diagnosis §3.1, sampled at 2 ms |
 | `ScratchInventory.segments` is every final file on disk, not the listed set | `live_tv.rs:5772–5790` |
 | The reveal layer stays focusable while the overlay is visible and its adapter answers every direction with `.reveal` | `LiveTvView.swift:2317–2326`, `PlayerRemoteAdapter.swift:77–83`; inferred, not yet seen on a device |
@@ -70,27 +74,32 @@ const MAX_DELETION_LAG_SEGMENTS: usize = 1;
 becomes:
 
 ```rust
-/// Uniform two-second segments. Every client's live-sync rule — hls.js at
-/// 2 × TARGETDURATION, ExoPlayer at 4 s, AVPlayer at 3 × TARGETDURATION —
-/// then sits a whole segment behind the edge from its first frame, which is
-/// the margin a live HLS client needs to never wait for a segment to finish.
-/// The 24-second window is unchanged (12 × 2 s). `-hls_init_time` is gone on
-/// purpose: it bought ~3 s to the first frame and paid 3.6 s of stalls for
-/// it, because the cadence jump 1 → 3 → 4 s left the client with nothing to
-/// play; and it made TARGETDURATION drift, which RFC 8216 §6.2.1 forbids.
+/// Uniform one-second segments, for the whole session. The short first
+/// segment `-hls_init_time 1` used to cut is what keeps a start no slower
+/// than the tuner; what it also did was let the cadence grow to 4 s once the
+/// list filled, which left every client — attached 1 s behind live — waiting
+/// a whole segment at each jump (3.6 s of stalls, measured). Keeping the
+/// cadence at 1 s removes the jump; TARGETDURATION is 1 and never changes
+/// (RFC 8216 §6.2.1). Encode routes already force a keyframe every second,
+/// so the encoder does no extra work; copy routes cut at the broadcast's own
+/// keyframes and a 2 s GOP simply gives uniform 2 s segments. The 24-second
+/// window is unchanged (24 × 1 s).
 const LIVE_HLS_OUTPUT_ARGS: [&str; 8] = [
     "-f", "hls",
-    "-hls_time", "2",
-    "-hls_list_size", "12",
-    "-hls_delete_threshold", "2",
+    "-hls_time", "1",
+    "-hls_list_size", "24",
+    "-hls_delete_threshold", "4",
 ];
-/// How many listed segments the owner waits for before it answers a start.
-/// Two: the player starts on the first and has the second in hand, which is
-/// one segment of margin whatever the segment length turns out to be on a
-/// copy route — the rule is a count, not seconds, for exactly that reason.
+/// The owner answers a start once the playlist lists this many segments AND
+/// this many target durations of media. Two of each: the player starts on
+/// the first segment with the second in hand — one segment of margin — and
+/// on a copy route whose keyframes make the segments longer than the
+/// cadence, the seconds half still means "two target durations", which is
+/// what the margin actually is.
 const STARTUP_LISTED_SEGMENTS: usize = 2;
-const HLS_DELETE_THRESHOLD: usize = 2;
-const MAX_LISTED_SEGMENTS: usize = 12;
+const STARTUP_LISTED_TARGET_DURATIONS: f64 = 2.0;
+const HLS_DELETE_THRESHOLD: usize = 4;
+const MAX_LISTED_SEGMENTS: usize = 24;
 /// hlsenc renames a finished segment to its final name *before* it rewrites
 /// the playlist, so for an instant the scratch holds `threshold + 1` final
 /// files the playlist does not list. A budget equal to the threshold turns
@@ -98,35 +107,64 @@ const MAX_LISTED_SEGMENTS: usize = 12;
 const MAX_DELETION_LAG_SEGMENTS: usize = HLS_DELETE_THRESHOLD + 1;
 ```
 
-The literal `"-hls_delete_threshold", "2"` and `HLS_DELETE_THRESHOLD` must
-agree; a test pins it (§3.4). `MAX_SESSION_BYTES` stays: fifteen 2 s
-segments on disk is less media than today's eight 4 s ones.
+The literal `"-hls_delete_threshold", "4"` and `HLS_DELETE_THRESHOLD` must
+agree; a test pins it (§3.4). `MAX_SESSION_BYTES` stays: 24 + 4 + 1 files
+of 1 s each is ≈ 29 s of media, against today's ≈ 32 s
+(6 + 1 + 1 files of 4 s), both far under 128 MiB at any broadcast bitrate.
+The 250 ms `inspect_scratch` walk covers ~30 entries instead of ~8; the
+playlist is ≈ 1.2 KB against the 64 KiB cap.
 
 Two hard-coded copies of the old numbers follow the constants by hand:
 the message `"live-TV playlist exceeds six segments"` at 5879 (make it
 `format!("live-TV playlist exceeds {MAX_LISTED_SEGMENTS} segments")`), and
 `crates/plurxd/tests/live_tv_two_node.rs:779`
-`const LISTED_SEGMENTS: usize = 6; // MAX_LISTED_SEGMENTS …` → 12. That
+`const LISTED_SEGMENTS: usize = 6; // MAX_LISTED_SEGMENTS …` → 24. That
 harness also waits until `latest - first >= LISTED_SEGMENTS` (line 740):
-24 s to fill the window and 24 s for it to slide twelve places, the same
-48 s of streaming the 6 × 4 s window costs today; confirm the fixture's
-producer keeps up at 2 s rather than assume it.
+24 s to fill the window and 24 s for it to slide 24 places, the same 48 s
+of streaming the 6 × 4 s window costs today; confirm the fixture's producer
+keeps up at 1 s rather than assume it, and that the harness's 20 s
+per-request client timeout (516–517) is per request, not per walk.
 
-### 3.2 S · the inventory carries the listed count
+### 3.2 S · the inventory carries what the playlist lists
 
-`ScratchInventory` (4303–4308) gains one field, filled where the playlist
-is parsed (5757):
+`parse_playlist_bytes` (5799–5904) reads `#EXT-X-MEDIA-SEQUENCE`, the
+`#EXT-X-MAP` line and the segment names today, and nothing else. It gains
+two more tags, read as strictly as the media sequence — hlsenc always
+writes both, and a playlist without them is not one this owner produced:
+
+```rust
+struct ParsedPlaylist {
+    media_sequence: u64,
+    /// `#EXT-X-TARGETDURATION`, required by RFC 8216 §4.3.3.1. Refused when
+    /// missing, repeated, zero, or not an integer.
+    target_duration: u64,
+    /// The sum of every `#EXTINF` duration in the list — the media a viewer
+    /// handed this playlist could play before reaching the edge.
+    listed_seconds: f64,
+    init: Option<String>,
+    segments: Vec<u64>,
+}
+```
+
+The `#EXTINF:` branch (5844–5850) parses `<duration>,` as `f64` and refuses
+a value that is not finite, negative, or above 60 — the same shape of
+refusal as the segment-name and sequence checks around it. The
+`ScratchInventory` (4303–4308) then carries the three facts the gate needs,
+filled at 5781–5790:
 
 ```rust
 struct ScratchInventory {
     playlist: Vec<u8>,
     media_sequence: u64,
-    /// How many segments the playlist LISTS. `segments` below is every final
-    /// file on disk — listed, plus the deletion lag, plus a segment hlsenc
-    /// has renamed but not yet written into the playlist — and is the wrong
-    /// thing to gate a start on: in that rename-before-rewrite instant it
-    /// counts two while the viewer would be handed a one-segment playlist.
+    /// How many segments the playlist LISTS, and how much media that is.
+    /// `segments` below is every final file on disk — listed, plus the
+    /// deletion lag, plus a segment hlsenc has renamed but not yet written
+    /// into the playlist — and is the wrong thing to gate a start on: in that
+    /// rename-before-rewrite instant it counts two while the viewer would be
+    /// handed a one-segment playlist.
     listed: usize,
+    listed_seconds: f64,
+    target_duration: u64,
     init: Option<(String, u64)>,
     segments: HashMap<u64, (String, u64)>,
 }
@@ -137,6 +175,8 @@ struct ScratchInventory {
         playlist,
         media_sequence: parsed.media_sequence,
         listed: parsed.segments.len(),
+        listed_seconds: parsed.listed_seconds,
+        target_duration: parsed.target_duration,
         init,
         segments: final_segments,
     }))
@@ -180,12 +220,21 @@ with, next to `inspect_scratch`:
 
 ```rust
 /// The start is answered when the viewer will have a whole segment in hand
-/// after the one they start on. Counted from the playlist, never from the
-/// directory (§3.2).
+/// after the one they start on — and, on a copy route whose keyframes make
+/// segments longer than the cadence, a whole TARGETDURATION in hand. Counted
+/// from the playlist, never from the directory (§3.2).
 fn startup_publishable(inventory: &ScratchInventory) -> bool {
     inventory.listed >= STARTUP_LISTED_SEGMENTS
+        && inventory.listed_seconds
+            >= STARTUP_LISTED_TARGET_DURATIONS * inventory.target_duration as f64
 }
 ```
+
+With 1 s encode-route segments that is two segments and 2 s. With a 2 s-GOP
+HEVC copy route it is two 2 s segments behind a `TARGETDURATION` of 2, still
+one segment of margin. With an irregular 1 s + 3 s pair behind a
+`TARGETDURATION` of 3 it waits for a third segment, because two would not be
+a margin.
 
 Everything else in that loop stays: `state.publication` keeps being
 refreshed from the first segment on, so a playlist served after the answer
@@ -201,8 +250,8 @@ the relay's: a non-owner ingress gives one POST `START_EXCHANGE_ATTEMPT`
 unpublished session `StartupWaiter::drop` (4318–4334) cancels it. The
 measured ATSC 3.0 first segment after the probesize fix is 8.997 s
 ([HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md), 2026-09-05);
-a first segment of 2 s instead of 1 plus a second one lands at ≈ 12 s.
-That is inside 20 s with 8 s to spare, and §5 S3 records the real number.
+one more segment of that mux's GOP length lands at ≈ 10–11 s. That is
+inside 20 s with 9 s to spare, and §5 S3 records the real number.
 
 ### 3.4 S · tests that change, tests that appear
 
@@ -210,17 +259,17 @@ All in `crates/plurxd/src/live_tv.rs`'s `mod tests` unless said otherwise.
 
 | Test | Today | After |
 |---|---|---|
-| `live_hls_publishes_short_startup_segments_before_steady_cadence` (8493–8506) | asserts `init_time 1 / time 4 / list 6` and looks for `-force_key_frames` **in `LIVE_HLS_OUTPUT_ARGS`, which does not contain it** — as written its `value_after` closure panics; find out what the gate actually runs before touching it | renamed `live_hls_cuts_uniform_two_second_segments_and_keeps_a_24_second_window`: asserts `-hls_init_time` is absent, `time 2`, `list 12`, `delete_threshold` equals `HLS_DELETE_THRESHOLD`, and `MAX_DELETION_LAG_SEGMENTS == HLS_DELETE_THRESHOLD + 1`; the keyframe assertion moves to a check on `live_ffmpeg_command` output where the argument actually is (5375–5382) |
-| `live_tv_software_hls_argument_baseline_is_stable` (8376) | freezes the full argument vector with the old four pairs (8465–8472) | the vector without `-hls_init_time 1`, with `2 / 12 / 2` |
-| `live_playlist_accepts_only_the_closed_numeric_inventory` (8929) | `live_playlist(1, 7)` is refused | `live_playlist(1, MAX_LISTED_SEGMENTS + 1)` is refused and `live_playlist(1, MAX_LISTED_SEGMENTS)` is accepted; the fixture's `#EXTINF:4.000` becomes `2.000` (cosmetic; the parser reads no durations) |
-| `live_scratch_inventory_enforces_list_deletion_and_temp_budgets` (8948) | one lag segment ok, two refused | one, two and three lag segments ok (`MAX_DELETION_LAG_SEGMENTS`), four refused; and the returned `inventory.listed == 3` while `inventory.segments.len()` counts the lag too |
+| `live_hls_publishes_short_startup_segments_before_steady_cadence` (8493–8506) | asserts `init_time 1 / time 4 / list 6` and looks for `-force_key_frames` **in `LIVE_HLS_OUTPUT_ARGS`, which does not contain it** — as written its `value_after` closure panics; find out what the gate actually runs before touching it | renamed `live_hls_cuts_uniform_one_second_segments_and_keeps_a_24_second_window`: asserts `-hls_init_time` is absent, `time 1`, `list 24`, `delete_threshold` equals `HLS_DELETE_THRESHOLD`, and `MAX_DELETION_LAG_SEGMENTS == HLS_DELETE_THRESHOLD + 1`; the keyframe assertion moves to a check on `live_ffmpeg_command` output where the argument actually is (5375–5382) |
+| `live_tv_software_hls_argument_baseline_is_stable` (8376) | freezes the full argument vector with the old four pairs (8465–8472) | the vector without `-hls_init_time 1`, with `1 / 24 / 4` |
+| `live_playlist_accepts_only_the_closed_numeric_inventory` (8929) | `live_playlist(1, 7)` is refused; the fixture writes no `#EXT-X-TARGETDURATION` | the fixture `live_playlist` writes `#EXT-X-TARGETDURATION:1` and `#EXTINF:1.000,`; `live_playlist(1, MAX_LISTED_SEGMENTS + 1)` is refused, `live_playlist(1, MAX_LISTED_SEGMENTS)` is accepted with `target_duration == 1` and `listed_seconds == 24.0`; the refused-inventory list (8935–8941) gains a playlist with no `TARGETDURATION`, one with `TARGETDURATION:0`, and one whose `#EXTINF:` is `nan,` |
+| `live_scratch_inventory_enforces_list_deletion_and_temp_budgets` (8948) | one lag segment ok, two refused | one to five lag segments ok (`MAX_DELETION_LAG_SEGMENTS`), six refused; and the returned `inventory.listed == 3` while `inventory.segments.len()` counts the lag too |
 | `ten_live_windows_publish_manifest_and_bounded_deletion_lag_atomically` (8979) | `MAX_LISTED_SEGMENTS + 1` files per window | unchanged in shape; passes with 12 because the lag it writes is one |
-| **new** `the_start_is_answered_at_the_second_listed_segment` | — | `startup_publishable` is false for `listed: 1, segments: 2 files` (the rename instant), true for `listed: 2`; the assertion names the instant in its message |
-| **new** `the_rename_before_rewrite_instant_is_not_a_failure` | — | playlist lists 10..=12, disk holds 8, 9 (the threshold) and 13 (renamed, unlisted): `inspect_scratch` is `Ok(Some)` with `listed == 3`; add 7 and it is `Err` |
+| **new** `the_start_is_answered_at_the_second_listed_segment` | — | `startup_publishable` is false for `listed: 1, listed_seconds: 1.0, target_duration: 1, segments: 2 files` (the rename instant), true for `listed: 2, listed_seconds: 2.0`; false for `listed: 2, listed_seconds: 4.0, target_duration: 3` (the 1 s + 3 s copy-route pair) and true once a third segment makes it 7.0; the assertion names each case in its message |
+| **new** `the_rename_before_rewrite_instant_is_not_a_failure` | — | playlist lists 10..=12, disk holds 6, 7, 8, 9 (the threshold) and 13 (renamed, unlisted): `inspect_scratch` is `Ok(Some)` with `listed == 3`; add 5 and it is `Err` |
 | `crates/plurxd/tests/live_tv_two_node.rs` (`--features cluster-integration-tests`) | `LISTED_SEGMENTS = 6` | 12; the assertion at 721 and the wait at 740 follow |
 
 `run_graph_probe` (6652–6700) shares `LIVE_HLS_OUTPUT_ARGS` and encodes
-4.25 s of synthetic source; with 2 s segments it publishes two and the
+4.25 s of synthetic source; with 1 s segments it publishes four and the
 `.ts` check at 6700 holds. Leave it.
 
 ### 3.5 A · the controller publishes what the surface draws
@@ -468,8 +517,8 @@ content is a new `LiveTvStreamInfoPanel` rather than
   formatted as today at 563–567); DELIVERY method (`playbackMethod`) /
   video (`videoDescription`, plus `" · \(status.encoder)"` when encoding and
   `encoder != "pending"`, plus `" on \(status.ownerNodeId)"`) / audio
-  (`audioDescription`) / stream (`"HLS · \(packaging.uppercased()) · 2 s
-  segments"`); SIGNAL three meters (label, `%`, a 6 pt accent bar) from
+  (`audioDescription`) / stream (`"HLS · \(packaging.uppercased()) · 1 s
+  segments"` — literally the cadence, not a measured value); SIGNAL three meters (label, `%`, a 6 pt accent bar) from
   `signal.strengthPercent / qualityPercent / symbolQualityPercent`, each
   omitted when nil; PLAYER live (`behindLiveSeconds`, `bufferedSeconds`) /
   rate (`observedBitrate` as Mb/s, `numberOfDroppedVideoFrames`,
@@ -513,10 +562,12 @@ after the final rebase, not before — and a
 - **No Favorite button, no favourite route.** Nothing on the owner writes
   a favourite.
 - **No client live-sync changes.** hls.js `liveSyncDurationCount: 2`,
-  ExoPlayer `4_000` ms and AVPlayer's default all land ≥ 4 s behind a
-  2 s-segment edge on their own. (hls.js's `liveMaxLatencyDurationCount: 4`
-  becomes 8 s of tolerance rather than 16; still twice the sync distance.
-  Leave it, note it in the PR.)
+  ExoPlayer `4_000` ms and AVPlayer's default all land ≥ 2 s behind a
+  1 s-segment edge on their own. (hls.js's `liveMaxLatencyDurationCount: 4`
+  becomes 4 s of tolerance rather than 16, and a catch-up seek a 2 s jump
+  rather than 8; still twice the sync distance. Leave it, note it in the
+  PR — and if the physical pass shows the web catching up on a LAN, that
+  constant is the first suspect.)
 - **No phone changes.** The iOS branch of `fullscreenSurface`, the phone
   picture, caption and `LiveTvTechnicalDetails` are untouched.
 - **No new persisted state and no new `Palette` members.** Player chrome is
@@ -546,7 +597,7 @@ constant. Acceptance:
 
 ```bash
 cargo test -p plurxd live_hls_                       # the renamed cadence test + the frozen baseline, green
-cargo test -p plurxd live_playlist_accepts            # 12 accepted, 13 refused
+cargo test -p plurxd live_playlist_accepts            # 24 accepted, 25 refused; TARGETDURATION and EXTINF read
 grep -n '"6"\|six segments' crates/plurxd/src/live_tv.rs   # nothing left that means the old window
 ```
 
@@ -556,7 +607,7 @@ grep -n '"6"\|six segments' crates/plurxd/src/live_tv.rs   # nothing left that m
 §3.4. Acceptance:
 
 ```bash
-cargo test -p plurxd scratch_inventory                # lag 1..3 ok, 4 refused; listed counted from the playlist
+cargo test -p plurxd scratch_inventory                # lag 1..5 ok, 6 refused; listed counted from the playlist
 cargo test -p plurxd the_start_is_answered            # false at one listed segment with two on disk
 cargo test -p plurxd the_rename_before_rewrite         # the instant is Ok(Some), not StreamFailed
 ```
@@ -564,12 +615,12 @@ cargo test -p plurxd the_rename_before_rewrite         # the instant is Ok(Some)
 ### S3 · the harness and the hardware (evidence, not code)
 
 ```bash
-cargo test -p plurxd --features cluster-integration-tests --test live_tv_two_node   # 12-deep window, relay still serves every listed segment
-scripts/live-tv-hardware --self-host --device <ipv4> --channel <ATSC 1.0>          # "real segment duration" 2.0 s; startup latency recorded
-scripts/live-tv-hardware --self-host --device <ipv4> --channel <ATSC 3.0>          # startup latency ≈ 12 s, inside the relay's 20 s attempt
+cargo test -p plurxd --features cluster-integration-tests --test live_tv_two_node   # 24-deep window, relay still serves every listed segment
+scripts/live-tv-hardware --self-host --device <ipv4> --channel <ATSC 1.0>          # "real segment duration" 1.0 s; startup latency ≈ today + 1 s
+scripts/live-tv-hardware --self-host --device <ipv4> --channel <ATSC 3.0>          # segment duration = that mux's GOP; startup ≈ 10–11 s, inside the relay's 20 s attempt
 ```
 
-Record both startup numbers in
+Record both startup numbers and both segment durations in
 [HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md)'s evidence
 table. If the ATSC 3.0 number exceeds 16 s, stop: the relay budget needs a
 ruling before this merges, not a bigger constant.
@@ -623,43 +674,56 @@ Written for Astra; each is a place this plan could be wrong.
    and the second slow (a copy route with a long GOP), does the producer's
    30 s feeding budget or the relay's 20 s attempt fire first, and does the
    viewer get `startup_timeout` or a silent cancel? The plan claims
-   12 s on the worst measured channel; find the channel shape that breaks
-   it (a 4 s+ GOP HEVC mux would list its second segment at ≈ 9 + 8 s).
-4. **`StreamFailed` on `MAX_LISTED_SEGMENTS`.** `parse_playlist_bytes`
+   10–11 s on the worst measured channel; find the channel shape that
+   breaks it (a 4 s GOP HEVC mux lists its second segment at ≈ 9 + 4 s and
+   the seconds half of the gate is satisfied at two segments; a 5 s GOP
+   would be `TARGETDURATION` 5 and two segments = 10 s ≥ 2 × 5, at ≈ 14 s).
+4. **One request per second per viewer.** Playlist reload plus segment
+   fetch at a 1 s cadence, relayed per request by a non-owner ingress
+   (`http/live_tv.rs` playlist and segment handlers, `LOCAL_RESOURCE_CONCURRENCY`
+   = 4 per session). Four viewers on four tuners is eight requests a second
+   at the owner. Is anything in the relay, the admission permits or the
+   `resource_admission` semaphore sized for the old cadence?
+5. **`#EXTINF` and `#EXT-X-TARGETDURATION` parsing.** The parser is strict
+   by design; does hlsenc ever write a duration the new refusal rules would
+   reject on a real mux — a `-0.000` on a discontinuity, a value over 60 s
+   when a tuner drops and the encoder's clock jumps, an `#EXTINF` with a
+   title after the comma?
+6. **`StreamFailed` on `MAX_LISTED_SEGMENTS`.** `parse_playlist_bytes`
    refuses more than the constant. hlsenc lists exactly `hls_list_size`;
    is there a flag combination or an FFmpeg version in the fleet where the
    playlist briefly lists `list_size + 1`?
-5. **The two-node harness time.** 12 sequences at 2 s each before the
+7. **The two-node harness time.** 24 sequences at 1 s each before the
    window slides — does the fixture producer in `live_tv_two_node.rs:254`
    run realtime, and does the test's own timeout (516–517: 20 s per
    request) still cover the wait at 740?
-6. **`.focusable(!overlayVisible)` flipping in the same transaction as the
+8. **`.focusable(!overlayVisible)` flipping in the same transaction as the
    focus move.** The plan copies the finite player's yield-then-focus
    order; is there a first-appear case (`onAppear` sets `.play` before the
    buttons exist in the hierarchy) where focus lands nowhere and Menu is
    the only way out — the exact failure the finite player's comment at
    `PlayerView.swift:726–731` describes?
-7. **`.focusEffectDisabled()` on the row plus a custom `isFocused`
+9. **`.focusEffectDisabled()` on the row plus a custom `isFocused`
    style.** On tvOS 26 with the glass button treatment, does
    `@Environment(\.isFocused)` inside a `ButtonStyle` body still report the
    focused button (the `TVReadableButtonStyle` comment at `Theme.swift:
    111–114` says this was a real problem)?
-8. **The KVO observer's lifetime.** `player.observe` retains the closure;
+10. **The KVO observer's lifetime.** `player.observe` retains the closure;
    the plan invalidates on `detach()`. Is there a path — `resumeIfRecent`,
    the codec-retry `watch(channel, compatibilityRetry: true)` — that calls
    `attach` twice without a `detach` between, leaking an observer whose
    `expected` serial is stale but which still writes `waiting`?
-9. **`accessLog()` on a live item.** Is `events.last` the current event
+11. **`accessLog()` on a live item.** Is `events.last` the current event
    for a single-variant live playlist, and is `numberOfStalls` counted the
    way the physical pass will read it (cumulative per event)?
-10. **The message row.** `statusText` returns nil for the steady-state
+12. **The message row.** `statusText` returns nil for the steady-state
     string only; is there any other message the controller publishes while
     playing that would now sit permanently in the band (the compatibility
     retry sentence, the stale-lineup sentence)?
-11. **Nothing in §3.6 relies on `live.guide` being present.** Confirm every
+13. **Nothing in §3.6 relies on `live.guide` being present.** Confirm every
     guide-derived element degrades to the channel's own fields — a
     Live TV with `guide_source = off` must still draw a complete band.
-12. **The waiting tile and the playback-surface contract.** `LiveTvView.swift`
+14. **The waiting tile and the playback-surface contract.** `LiveTvView.swift`
     is outside the surface fence's scanned set and Live TV has no reducer;
     is that still the right boundary once the live surface draws a wait,
     or does §4 of the contract want `media_waiting` here too? The plan
@@ -675,7 +739,7 @@ the Apple TV:
 > Live TV on the Apple TV, start any ATSC 1.0 channel, stay on the inline
 > preview for 30 s and say whether it freezes and roughly when; then start
 > it again, go fullscreen immediately, and say the same. Then on the build
-> carrying "Live TV: 2 s segments" and "tvOS Live TV fullscreen surface":
+> carrying "Live TV: 1 s segments" and "tvOS Live TV fullscreen surface":
 > open Live TV, start the same channel, time from Select to first frame
 > with a stopwatch; watch 30 s and note any freeze. Open Info and read the
 > PLAYER rows — report "behind live", "buffered", and "stalls". Press Menu
@@ -688,15 +752,17 @@ the Apple TV:
 
 ## 8. If Paul rules the other way
 
-- **`init 1 / time 2` at ≥ 3 s listed instead of uniform 2 s at two
-  segments.** §3.1 keeps `-hls_init_time 1`; `STARTUP_LISTED_SEGMENTS`
-  becomes a seconds rule — `ScratchInventory` carries `listed_seconds`
-  parsed from `#EXTINF` (the parser reads no durations today, so that is
-  new parsing with its own refusal rules) and `startup_publishable` is
-  `listed_seconds >= 3.0`; the web's `liveSyncDurationCount: 2` becomes
-  `liveSyncDuration: 3` (seconds) at `index.html:16517`, or hls.js starts
-  2 s behind a 1 s edge and stalls 0.1 s at the cadence change. Everything
-  in A is unchanged.
+- **Answer at one listed segment instead of two** (first frame exactly as
+  today; the model shows one 0.5 s hiccup at 4 s, which the physical pass
+  can confirm or refute on AVPlayer). `STARTUP_LISTED_SEGMENTS = 1` and
+  `STARTUP_LISTED_TARGET_DURATIONS = 1.0`; nothing else in S changes, and
+  the two new tests flip their expected values. Everything in A is
+  unchanged. This is one constant, so it can also be tried after the fact
+  on the hardware.
+- **Uniform 2 s segments instead of 1 s** (the plan's earlier draft):
+  `time 2 / list 12 / delete_threshold 2`, `MAX_DELETION_LAG_SEGMENTS 3`;
+  +3 s to the first frame, half the request rate, ≈ 3.6 s behind live.
+  Only worth it if the request rate in §6 item 4 turns out to be real.
 - **Telemetry inside the band instead of a strip.** §3.6's strip chips
   become a fourth band row above the buttons; `scrim_top` goes; the clock
   moves to the band's right edge. Focus and everything else unchanged.
@@ -705,6 +771,7 @@ the Apple TV:
 
 - Whether the trap has actually been seen on the device; the fix is right
   either way, and A4 is where the before-state gets recorded.
-- The real ATSC 3.0 second-segment time (S3 measures it).
+- The real ATSC 3.0 second-segment time and that mux's GOP, i.e. its
+  segment length under `-hls_time 1` (S3 measures both).
 - How `numberOfStalls` behaves across a `replaceCurrentItem` on this tvOS;
   A4 reads it once, after a clean start, which is the case that matters.

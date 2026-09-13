@@ -127,65 +127,93 @@ A frozen frame with the overlay hidden is indistinguishable from a pause.
   pauses, seeks or replaces the item after `play()` (Apple 155–167, web
   16517–16522, Android 194–199).
 
-## 3. The fix — give the client a whole segment of margin from the first frame
+## 3. The fix — keep the short cadence, drop the jump
 
 The constraint is physical: a client must start at least one steady-state
 segment behind live, or it stalls the first time it catches up. Two levers
 move it — the steady segment length, and how much listed media exists when
-the owner answers the start. Measured on the same timeline model:
+the owner answers the start. The first frame, in turn, is bounded below by
+the tuner (2.77 s to first byte, measured), the probe (~1 s of
+`-analyzeduration` on a broadcast mux), one segment, and the fetch — the
+segment is the only one of those the server chooses. Paul's original
+intent with `-hls_init_time 1` was exactly that: a short first segment so
+the start is no slower than the tuner. The mistake was not the short
+segment; it was letting the cadence *grow* afterwards. Measured on the
+same timeline model:
 
 | Producer arguments | Answer the start at | First frame vs today | Stalls (AVPlayer · hls.js · Exo) | Settles |
 |---|---|---|---|---|
 | today: `init 1 · time 4 · list 6` | 1 listed segment | — | 3.6 s · 3.6 s · 3.6 s | 4.3 s behind |
 | today's arguments | 3 listed segments | +2.0 s | 1.6 s · 2.6 s · 1.6 s | 4.3 s |
-| `time 4 · list 6`, no `init_time` | 1 listed segment | +3.0 s | 0 · 0 · 0, **zero margin** | 3.7 s |
-| **`time 2 · list 12`, no `init_time`** | **2 listed segments** | **+3.0 s** | **0 · 0 · 0, one segment of margin** | **3.6 s** |
+| `time 1 · list 24`, no `init_time` | 1 listed segment | **as today** | 0.5 s · 0.5 s · 0.5 s, one hiccup at 4 s | 1.9 s |
+| **`time 1 · list 24`, no `init_time`** | **2 listed segments** | **+1.0 s** | **0 · 0 · 0, one segment of margin** | **≈ 2 s** |
+| `time 2 · list 12`, no `init_time` | 2 listed segments | +3.0 s | 0 · 0 · 0 | 3.6 s |
+| `time 4 · list 6`, no `init_time` | 1 listed segment | +3.0 s | 0 · 0 · 0, zero margin | 3.7 s |
 | `init 1 · time 2 · list 12` | ≥ 3 s listed | +2.0 s | 0 · 0.1 s · 0 | 2.6 s |
 
-**Recommended: uniform 2 s segments, answer at two listed segments.**
-`TARGETDURATION` never changes (RFC 8216 §6.2.1 says it must not; today it
-goes 1 → 3 → 4 and every client tolerates it, which is luck), the 24 s
-window is unchanged (`12 × 2 s`), every client's existing live-sync setting
-already lands 4 s behind the edge (hls.js 2 × 2 s, Exo 4 s, AVPlayer 3 × 2 s
-clamped to the list), and the viewer ends up *closer* to live than the
-stalled start leaves them today. The cost is 3 s more before the first
-frame — the same 3 s the freeze costs now, spent before the picture instead
-of during it. The `init 1 · time 2` row saves one of those seconds but
-reintroduces a drifting `TARGETDURATION` and needs hls.js moved to
-`liveSyncDuration: 3`; it is the fallback if Paul wants the second back.
+**Recommended: uniform 1 s segments, answer at two listed segments.** The
+first seven segments are already 1 s today; this keeps that cadence for the
+whole session instead of jumping to 4 s. `TARGETDURATION` is 1 and never
+changes (RFC 8216 §6.2.1 says it must not; today it goes 1 → 3 → 4 and
+every client tolerates it, which is luck), the 24 s window is unchanged
+(`24 × 1 s`), every client's existing live-sync setting lands ≥ 2 s behind
+the edge (hls.js 2 × 1 s, Exo 4 s, AVPlayer 3 × 1 s clamped to the list),
+and the viewer settles about 2 s behind live instead of 4.3 s. The cost is
+one segment — 1 s — before the first frame, which is the answer arriving at
+the end of segment two rather than segment one; nothing else in the start
+path moves. Answering at one segment keeps today's first-frame time but
+leaves a single 0.5 s hiccup at 4 s in the model, which is the thing Paul
+reported, only smaller; the second segment is what buys the margin.
+
+What 1 s segments cost that 4 s ones did not: one playlist reload and one
+segment fetch per second per viewer (against a LAN owner and a relay that
+forwards per request), a 24-entry playlist (~1.2 KB, against a 64 KiB
+cap), and a scratch directory of ~29 files for `inspect_scratch` to walk
+every 250 ms. Encode routes already force a keyframe every second
+(`-force_key_frames expr:gte(t,n_forced*1)`, 5376–5382), so the encoder
+does no extra work. Copy routes cut at the broadcast's own keyframes: an
+ATSC 1.0 MPEG-2 GOP is ~0.5 s and gives 1 s segments; an ATSC 3.0 HEVC
+mux with a 2 s GOP gives uniform 2 s segments and `TARGETDURATION` 2, and
+the gate below is written so that still means two target durations of
+media in hand.
 
 ### 3.1 What changes on the owner
 
 - `LIVE_HLS_OUTPUT_ARGS` ([`live_tv.rs:127`](../../crates/plurxd/src/live_tv.rs)):
-  drop `-hls_init_time 1`; `-hls_time 2`; `-hls_list_size 12`;
-  `-hls_delete_threshold 2` so the deletion lag stays 4 s of wall time for a
-  client holding the previous manifest.
-- `MAX_LISTED_SEGMENTS` 6 → 12 and `MAX_DELETION_LAG_SEGMENTS` 1 → **3**
-  ([`live_tv.rs:142–143`](../../crates/plurxd/src/live_tv.rs)). Three, not
-  two: hlsenc renames a finished segment to its final name *before* it
+  drop `-hls_init_time 1`; `-hls_time 1`; `-hls_list_size 24`;
+  `-hls_delete_threshold 4` so the deletion lag stays 4 s of wall time for
+  a client holding the previous manifest.
+- `MAX_LISTED_SEGMENTS` 6 → 24 and `MAX_DELETION_LAG_SEGMENTS` 1 → **5**
+  ([`live_tv.rs:142–143`](../../crates/plurxd/src/live_tv.rs)). Five, not
+  four: hlsenc renames a finished segment to its final name *before* it
   rewrites the playlist, so for an instant the scratch holds
   `threshold + 1` final segments that the playlist does not list. Measured
-  with the proposed arguments, sampling every 2 ms: unlisted count
-  `{0, 1, 2}` throughout, and `3` once in one of two 45 s runs — rare,
-  and a 250 ms `SESSION_TICK` sample that lands in it is fatal. `inspect_scratch` at 5776 answers that instant with
-  `StreamFailed("… exceeded its segment inventory budget")`, which ends the
-  session — the constant must be `threshold + 1`. (Today's `1 / 1` pair has
-  the same hole: two unlisted for a few milliseconds every four seconds,
-  and a 250 ms `SESSION_TICK` sample that lands in it kills a healthy
-  stream. Fix it in the same commit; it is the latent version of the same
-  bug.) The literal "exceeds six segments" at 5879 and the `+ 1` at 9008
-  are hard-coded and follow the constants by hand.
+  at 2 ms sampling with a threshold of 2: unlisted count `{0, 1, 2}`
+  throughout and `3` once in one of two 45 s runs — rare, and a 250 ms
+  `SESSION_TICK` sample that lands in it is fatal. `inspect_scratch` at
+  5776 answers that instant with `StreamFailed("… exceeded its segment
+  inventory budget")`, which ends the session — the constant must be
+  `threshold + 1`. (Today's `1 / 1` pair has the same hole: two unlisted
+  for a few milliseconds every four seconds. Fix it in the same commit; it
+  is the latent version of the same bug.) The literal "exceeds six
+  segments" at 5879 and the `+ 1` at 9008 are hard-coded and follow the
+  constants by hand.
 - The publish gate in the producer loop ([`live_tv.rs:4816`](../../crates/plurxd/src/live_tv.rs)):
-  `published` becomes true when the playlist **lists** two segments.
+  `published` becomes true when the playlist **lists** at least two
+  segments *and* at least two `TARGETDURATION`s of media.
   `ScratchInventory.segments` is `final_segments` — every final file on
   disk, listed or not (5772–5790) — so it is the wrong thing to count: in
   the rename-before-rewrite instant above it would answer the start with a
-  one-segment playlist and reproduce today's stall for that viewer. Add a
-  `listed: usize` field carrying `parsed.segments.len()` to
-  `ScratchInventory`, read it *before* line 4814 moves the inventory into
-  `state.publication`, and gate on `listed >= 2`. `state.publication` keeps
-  updating from the first segment as it does now, so nothing served can be
-  older than the inventory.
+  one-segment playlist and reproduce today's stall for that viewer.
+  `parse_playlist_bytes` (5799) reads neither `#EXT-X-TARGETDURATION` nor
+  the `#EXTINF` durations today; it gains both, as strictly as it reads
+  `#EXT-X-MEDIA-SEQUENCE` (hlsenc always writes them), and
+  `ScratchInventory` carries `listed`, `listed_seconds` and
+  `target_duration`. Read them *before* line 4814 moves the inventory into
+  `state.publication`. The seconds half is what makes a copy route with a
+  long GOP safe: two 2 s segments behind a `TARGETDURATION` of 2 is still
+  a segment of margin, and a 1 s + 3 s pair behind a 3 is not answered
+  until a third segment lands.
 - The budget the second segment must fit is the relay's, not the
   producer's: a non-owner ingress gives the owner `START_EXCHANGE_ATTEMPT`
   = 20 s per POST ([`http/live_tv.rs:25`](../../crates/plurxd/src/http/live_tv.rs)),
@@ -193,40 +221,36 @@ reintroduces a drifting `TARGETDURATION` and needs hls.js moved to
   `StartupWaiter::drop` cancels it (4318–4334). The measured ATSC 3.0 first
   segment after the probesize fix is 8.997 s
   ([HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md), 2026-09-05
-  row); a 2 s first segment plus one more lands at about 12 s. The 18.1 s
-  figure that predates that fix would not have fitted, so the hardware
-  check in §7.1 records the new number.
+  row); one more segment lands at about 10–11 s. The hardware check in
+  §7.1 records the new number.
 - Tests that pin the old numbers change in the same commit:
   `live_hls_publishes_short_startup_segments_before_steady_cadence`
-  (8493–8506) becomes the assertion that `init_time` is absent and the pair
-  is `2 / 12` — note it currently looks for `-force_key_frames` inside
+  (8493–8506) becomes the assertion that `init_time` is absent and the
+  pair is `1 / 24` — note it currently looks for `-force_key_frames` inside
   `LIVE_HLS_OUTPUT_ARGS`, which does not contain it (the keyframe arguments
   are added at 5375–5382), so as written its closure panics; the builder
   confirms what the gate actually runs. `live_tv_software_hls_argument_baseline_is_stable`
   (8376) re-freezes the argument list; the inventory tests at 8985–9008
   take `MAX_LISTED_SEGMENTS` but hard-code the lag.
-- Copy routes (ATSC 3.0 HEVC, fmp4) cut at the source's own keyframes, so a
-  3 s GOP gives 3 s segments; the rule "two listed segments" still gives one
-  segment of margin by construction, which is why the gate is a count and
-  not a number of seconds.
 
 ### 3.2 What changes on the clients
 
 Nothing is *required* for the stall. The web (`liveSyncDurationCount: 2`),
-Android (`4_000` ms) and Apple (default) start rules all sit ≥ 4 s behind
-the edge once the playlist offers it. Two settings change meaning and are
-worth a line in the lane:
+Android (`4_000` ms) and Apple (default) start rules all sit ≥ 2 s behind
+a 1 s-segment edge once the playlist offers it. Two settings change
+meaning and are worth a line in the lane:
 
 - **Web `liveMaxLatencyDurationCount: 4`** (same line as the sync count)
   is a multiple of `TARGETDURATION`: hls.js's forced catch-up seek moves
-  from 16 s behind to 8 s behind. Still twice the sync distance; keep it,
-  but it is a halved tolerance and the builder should know.
+  from 16 s behind to 4 s behind. Still twice the sync distance, and a
+  catch-up seek on a 1 s cadence is a 2 s jump, not a 16 s one; keep it,
+  but the builder should know the tolerance is a quarter of what it was.
 - **Android `maxOffsetMs 8_000`** is absolute and unchanged; the min
   buffer for playback to resume after a rebuffer is 2 s (`setBufferDurationsMs`
-  above), one segment — fine with a segment of margin, which is the point.
+  above), two segments — which is exactly what the gate hands it.
 - **Apple `preferredForwardBufferDuration = 12`** ([`LiveTvView.swift:156`](../../clients/apple/Sources/LiveTvView.swift))
   stays. Nothing here measured AVPlayer; the window is 24 s either way and
-  the 4 s distance to the edge is what bounds the buffer, not this.
+  the distance to the edge is what bounds the buffer, not this.
 
 And one thing the Apple lane should do regardless: **draw waiting.**
 Observe `player.timeControlStatus`; while it is
@@ -236,10 +260,11 @@ does; without it any residual rebuffer is a "pause" again.
 
 ## 4. Ruling wanted on the fix
 
-Uniform 2 s segments at two listed segments (+3 s to first frame, zero
-stalls, spec-clean), or `init 1 / time 2` at ≥ 3 s listed (+2 s, zero
-stalls, drifting `TARGETDURATION`, one web constant). The recommendation is
-the first; the second is one line different and also measured.
+Uniform 1 s segments answered at two listed segments (+1 s to first
+frame, zero stalls, ≈ 2 s behind live), or answered at one (first frame as
+today, one 0.5 s hiccup in the model at 4 s, ≈ 1.9 s behind). The
+recommendation is the first; the second is one constant different and the
+physical pass can measure whether the hiccup is real on AVPlayer.
 
 ## 5. The tvOS fullscreen surface — what is wrong and what it becomes
 
@@ -419,7 +444,7 @@ Paste to a session with the hardware after both PRs merge:
 > TV, start any ATSC 1.0 channel, stay on the inline preview for 30 s and
 > say whether it freezes and roughly when; then start it again, go
 > fullscreen immediately, and say the same. Then on the build carrying PR
-> "Live TV: 2 s segments" and PR "tvOS Live TV fullscreen surface": open
+> "Live TV: 1 s segments" and PR "tvOS Live TV fullscreen surface": open
 > Live TV, start the same channel, time from Select to first frame with a
 > stopwatch; then watch 30 s and note any freeze. Open Info and read the
 > PLAYER rows — report "behind live", "buffered", and "stalls". Then press

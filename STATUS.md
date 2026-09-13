@@ -21,15 +21,20 @@ one-segment playlist. The signal readout is the Apple heartbeat's first
 producer. The tvOS surface draws nothing while the player waits, so a
 stall reads as a pause.
 
-Recommended fix, measured: uniform `-hls_time 2 -hls_list_size 12`, answer
-at two **listed** segments (`ScratchInventory.segments` counts files on
-disk, not listed ones — a new field), `MAX_DELETION_LAG_SEGMENTS` =
-`hls_delete_threshold + 1` because hlsenc renames before it rewrites the
-playlist (today's `1 / 1` pair carries the same latent session-killing
-hole). +3 s to first frame, zero stalls with a segment of margin,
-`TARGETDURATION` constant, viewer ends 3.6 s behind live instead of 4.3 s.
-Alternative measured: keep `init 1` with `time 2`, answer at ≥ 3 s listed —
-+2 s, needs hls.js `liveSyncDuration ≥ 3`.
+Recommended fix, measured, after Paul reminded me what `init_time` was
+for (a start no slower than the tuner): keep the 1 s cadence for the whole
+session — `-hls_time 1 -hls_list_size 24 -hls_delete_threshold 4`, no
+`init_time` — and answer the start at two listed segments and two
+`TARGETDURATION`s of media (`parse_playlist_bytes` gains `TARGETDURATION`
+and `EXTINF`; `ScratchInventory.segments` counts files on disk, not listed
+ones). One segment (1 s) later than today's answer, zero stalls on all
+three clients, viewer settles ≈ 2 s behind live instead of 4.3 s;
+`MAX_DELETION_LAG_SEGMENTS` = `hls_delete_threshold + 1` because hlsenc
+renames before it rewrites the playlist (today's `1 / 1` pair carries the
+same latent session-killing hole). Answering at one segment keeps today's
+first frame with a single 0.5 s hiccup in the model — one constant, for
+the hardware to decide. The 2 s-segment draft (+3 s) is kept as the
+fallback if the request rate matters.
 
 The tvOS fullscreen surface, audited from source: the full-screen reveal
 layer stays focusable while the overlay is visible, and its adapter routes
@@ -45,7 +50,9 @@ Surface"; the write-up, both rulings and the two-PR plan are in
 [LIVE-TV-START-STALL-AND-TVOS-PLAYBACK-SURFACE.md](docs/features/LIVE-TV-START-STALL-AND-TVOS-PLAYBACK-SURFACE.md).
 One adversarial review folded in (the inventory budget, the listed-count
 gate, the relay's 20 s attempt as the real budget, the inline-then-fullscreen
-re-host as a candidate the physical pass must exclude).
+re-host as a candidate the physical pass must exclude). The implementation
+plan for Astra's review is
+[LIVE-TV-START-STALL-AND-TVOS-SURFACE-IMPLEMENTATION.md](docs/features/LIVE-TV-START-STALL-AND-TVOS-SURFACE-IMPLEMENTATION.md).
 
 ## Apple's notice strip was a dead end, and two rows of the readiness card were false
 
