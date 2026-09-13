@@ -105,6 +105,10 @@ SCANNED = {
     Path("clients/apple/Sources/PlayerSurface.swift"): "swift",
     Path("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"): "kotlin",
     Path("clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"): "kotlin",
+    # The recovery owner's surface arm: it stops the player and then raises,
+    # which is the one thing the presenter itself may never do. Scanned rather
+    # than allow-listed, so it can never grow a pre-contract write either.
+    Path("clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurfaceOwner.kt"): "kotlin",
 }
 
 # Named so a later reader can see the exclusion was a decision, not an
@@ -163,17 +167,17 @@ REGIONS = {
 
 # The migration budget: how many pre-contract write sites each file may still
 # have, and why. A milestone that lands drops its file's entry to zero and then
-# removes it. A NEW write site fails the fence today, which is the point.
-# Neither `index.html` nor `PlayerController.swift` is here any more: M1 and M2
-# landed, and a file with no entry is held at zero by
-# `MIGRATION_BUDGET.get(relative, (0, ""))` below — every web surface write is
-# inside the render anchors and every Apple one is inside the publish region.
+# removes it, and a file with no entry is held at zero by
+# `MIGRATION_BUDGET.get(relative, (0, ""))` below. A NEW write site fails the
+# fence either way, which is the point. All three client files have left:
+# `index.html` with M1 (every web surface write is inside the render anchors),
+# `PlayerController.swift` with M2 (every Apple one is inside the publish
+# region), and the two Android rows with M3 (`onError`, `playFailure` and
+# `playbackNotice` are gone).
 MIGRATION_BUDGET = {
     Path("crates/plurxd/src/web/playback-policy.js"): (0, "The policy module never touched the DOM; it stays at zero."),
     Path("clients/apple/Sources/PlayerView.swift"): (0, "The Apple view reads the model; it never wrote one."),
     Path("clients/apple/Sources/PlayerSurface.swift"): (0, "The Apple surface reads the model; it never wrote one."),
-    Path("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"): (15, "M3 removes these: onError is still a constructor callback."),
-    Path("clients/android/app/src/main/java/tv/plurx/app/player/PlayerScreen.kt"): (1, "M3 removes this: playFailure is still screen state."),
 }
 
 

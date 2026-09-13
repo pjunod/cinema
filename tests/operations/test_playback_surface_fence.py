@@ -105,14 +105,18 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         failures = self.fence.scan()
         self.assertEqual(failures, [], "\n".join(failures))
 
-    def test_no_budget_is_unscanned(self):
+    def test_no_budget_is_unscanned_and_every_budget_states_its_reason(self):
         # A milestone that lands removes its file's entry entirely and the fence
         # holds it at zero from then on, so a scanned file with no entry is the
         # finished state rather than an oversight — `test_the_budget_is_tight_
-        # against_the_tree` below is what proves it really is at zero. A budget
-        # for a file nobody scans is still nonsense.
+        # against_the_tree` below is what proves it really is at zero, and M1's
+        # `index.html` and M3's two Android rows both left that way. A budget
+        # for a file nobody scans is still nonsense, and so is one with no
+        # reason attached.
         for path in self.fence.MIGRATION_BUDGET:
             self.assertIn(path, self.fence.SCANNED, f"{path} is budgeted but never scanned")
+            _budget, reason = self.fence.MIGRATION_BUDGET[path]
+            self.assertTrue(reason.strip(), f"{path} is budgeted with no reason")
 
     def test_a_migrated_file_is_budgeted_at_zero_without_an_entry(self):
         # M2's own ratchet: PlayerController no longer has a budget row, and
@@ -209,6 +213,39 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
             "selectedAudio", "selectedHeight", "selectedQualityIsOriginal",
             "selectedSubtitle", "sessionStatus", "surface",
         ])
+
+    def test_the_android_player_carries_no_pre_contract_surface_write(self):
+        # M3's own ratchet: the two Android files the contract migrated have no
+        # budget left to spend, and the owner's surface arm is scanned too, so
+        # a reintroduced `onError`/`playFailure`/`playbackNotice` fails here
+        # rather than at review.
+        android = [path for path, kind in self.fence.SCANNED.items() if kind == "kotlin"]
+        self.assertTrue(android, "no Kotlin file is scanned at all")
+        for path in android:
+            self.assertNotIn(
+                path, self.fence.MIGRATION_BUDGET,
+                f"{path} still has a migration budget after M3",
+            )
+            source = self.fence.ROOT / path
+            self.assertTrue(source.is_file(), f"{path} is scanned but missing")
+            lines = source.read_text(encoding="utf-8").splitlines()
+            allowed = self.fence.region_allowed_lines(path, lines)
+            hits = self.fence.scan_text("kotlin", "\n".join(lines), allowed)
+            self.assertEqual(hits, [], f"{path}: {hits}")
+
+    def test_the_android_publish_region_wraps_the_single_surface_write(self):
+        # The anchors are not decoration: they are where the fence would allow a
+        # write, and M3 is required to have exactly one region in Controller.kt.
+        path = self.fence.ROOT.joinpath(
+            "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt",
+        )
+        lines = path.read_text(encoding="utf-8").splitlines()
+        allowed = self.fence.region_allowed_lines(
+            self.fence.Path("clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"),
+            lines,
+        )
+        self.assertEqual(len(allowed), 1, "the publish region should wrap exactly one line")
+        self.assertIn("_surface.value", lines[sorted(allowed)[0] - 1])
 
     def test_out_of_scope_files_are_named_not_forgotten(self):
         for path in self.fence.NEVER_SCANNED:
