@@ -6,7 +6,13 @@ first.
 
 ## Apple's notice strip was a dead end, and two rows of the readiness card were false
 
-**[#PRNUM](http://192.168.4.7:3000/noirr/plurx/pulls/PRNUM), titled `WIP:`.**
+**[#297](http://192.168.4.7:3000/noirr/plurx/pulls/297), titled `WIP:`.**
+Paul's to merge, and this branch has not been. (Worded carefully for the
+same reason #291 was: `test_status_pr_claims` reads that number as landed,
+because this repository's history carries a GitHub-era `(#297)` from before
+the numbering restarted on Gitea and the check cannot tell two numbering
+spaces apart. Twice now — the collision is a property of the check, not of
+either page.)
 A reachability audit of `main` found one real defect left on Apple after the
 three surface-reach branches merged, and it was the kind this contract exists
 to stop: a surface that tells the viewer something and gives them nothing to
