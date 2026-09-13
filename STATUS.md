@@ -7,13 +7,18 @@ first.
 ## Live TV starts are being rebuilt around a stable one-second cadence
 
 **Branch `codex/live-tv-start-stall-server` into
-`effort/live-tv-start-stall`; work in progress.** The server half is being
-implemented from the reviewed start-stall plan: a 24-entry uniform one-second
-HLS window, a two-listed-segment publication barrier, progress measured at the
-newest listed segment, and a graph probe built by the production command path.
-The two-node and physical-hardware evidence follows after the owner loop is
-complete; no timeout, signed request, route, client input contract, or feature
-gate moves in this effort.
+`effort/live-tv-start-stall`; implementation complete, physical evidence
+pending.** The server half now has the reviewed 24-entry uniform one-second HLS
+window, a two-listed-segment / two-target-duration publication barrier,
+progress at the newest listed segment, startup counts in its timeout message,
+and a graph probe built by the production command path. The two-node harness
+requires two entries in its first playlist, serves every listed name and rolls
+the full 24-entry window. `scripts/live-tv-hardware` measures first-list and
+answer times, durations, target duration and bitrate; `--copy` selects the real
+HEVC/AC-3 route and `--via` records the non-owner relay outcome under the
+runtime's existing 35 s public deadline. HDHomeRun and client evidence remains
+the physical hand-off; no timeout, signed request, route, client input
+contract, or feature gate moved.
 
 ## Apple's notice strip was a dead end, and two rows of the readiness card were false
 

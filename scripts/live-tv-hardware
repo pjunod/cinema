@@ -4,6 +4,9 @@
 Run: python3 scripts/live-tv-hardware --self-host \
          --device 192.168.4.20 --tuners 2 --out target/live-tv-hardware
 
+Relay: scripts/live-tv-hardware --via <ingress> --token <bearer> \
+         --device <ipv4> --channel <ATSC 3.0> --copy
+
 Every other Live TV check in this repo runs against a fixture. The fixture is
 honest about the protocol -- it answers discover.json and lineup.json on port
 80 and the stream on 5004, exactly as `pinned_url` addresses a real device --
@@ -18,9 +21,9 @@ limits the documentation currently marks as pending this pass:
 
   * the device's real tuner count, and that `live_tv_max_sessions` above it is
     refused by the session_limit readiness check rather than tried;
-  * real startup latency, measured from asking for the channel to a segment a
-    player could fetch, against the 15 s STARTUP_TIMEOUT budget, and split into
-    the part spent inside the start request and the part spent waiting after it;
+  * real startup latency, measured from asking for the channel to the first
+    listed segment and to the public answer, against the relay's public-start
+    deadline;
   * real segment duration and real signal strength for the tuned channel;
   * that the device itself agrees this run holds exactly the tuners we opened,
     and reports them free again after release -- proof from the other side of
@@ -45,10 +48,11 @@ rather than counted as ours. It reads `/discover.json`, `/lineup.json` and
 `/status.json` and opens `/auto/vN` streams; it writes nothing to the device
 and changes no device setting.
 
-WHAT THIS DOES NOT TOUCH. Nothing that is already running. `--self-host`
-boots a throwaway plurxd with its own data directory under `--out`, and the
-Live TV settings it writes are that daemon's own. Pointing this at a
-production server is refused: production servers are not test fixtures.
+WHAT THIS DOES NOT TOUCH. In `--self-host` mode, anything already running:
+the command boots a throwaway plurxd with its own data directory under `--out`,
+and the Live TV settings it writes are that daemon's own. `--via` is the one
+deliberate running-cluster mode: it changes no setting and starts only the
+named channel through the named non-owner ingress.
 
 Nothing here invents a device. `--device` is required, is validated by the
 same rule the runtime applies (private or link-local IPv4, never loopback),
@@ -66,10 +70,12 @@ reason, and is never counted as a pass.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import hashlib
 import json
 import re
 import runpy
+import secrets
 import shutil
 import socket
 import subprocess
@@ -85,8 +91,10 @@ HARNESS = runpy.run_path(str(ROOT / "scripts/ui-baseline"), run_name="live_tv_ha
 
 DEVICE_PORT = 80             # discover.json, lineup.json, status.json
 TUNER_PORT = 5004            # the stream, per pinned_url in crates/plurxd/src/live_tv.rs
-LISTED_SEGMENTS = 6          # MAX_LISTED_SEGMENTS
-STARTUP_BUDGET = 15          # STARTUP_TIMEOUT
+LISTED_SEGMENTS = 24         # MAX_LISTED_SEGMENTS
+START_EXCHANGE_ATTEMPT = 20  # http/live_tv.rs
+PUBLIC_START_DEADLINE = 35   # http/live_tv.rs; do not substitute the owner timeout
+STARTUP_BUDGET = PUBLIC_START_DEADLINE
 MAX_CONFIGURABLE_SESSIONS = 4  # LiveTvConfig::validate rejects outside 1..=4
 READY_DEADLINE = 180         # a real device is probed over the LAN, not in-process
 SEGMENT_DEADLINE = 90
@@ -293,10 +301,11 @@ def enable(client):
 
 def playlist_facts(text):
     sequence = int(re.search(r"#EXT-X-MEDIA-SEQUENCE:(\d+)", text)[1])
+    target_duration = int(re.search(r"#EXT-X-TARGETDURATION:(\d+)", text)[1])
     segments = [line.strip() for line in text.splitlines()
                 if line.strip() and not line.startswith("#")]
     durations = [float(m) for m in re.findall(r"#EXTINF:([0-9.]+)", text)]
-    return sequence, segments, (sum(durations) / len(durations) if durations else 0.0)
+    return sequence, segments, durations, target_duration
 
 
 def await_first_segment(client, playlist_url, deadline_seconds):
@@ -312,15 +321,194 @@ def await_first_segment(client, playlist_url, deadline_seconds):
                 continue
             raise
         if status == 200:
-            sequence, segments, seconds = playlist_facts(body.decode())
+            sequence, segments, durations, target_duration = playlist_facts(body.decode())
             if segments:
                 name = segments[-1]
                 code, chunk = client.raw(urljoin(playlist_url, name), timeout=30)
                 if code == 200 and chunk:
-                    return time.monotonic() - started, sequence, segments, seconds, name, chunk
+                    average = sum(durations) / len(durations) if durations else 0.0
+                    return (time.monotonic() - started, sequence, segments, durations,
+                            target_duration, average, name, chunk)
         time.sleep(0.25)
     raise AssertionError("no playable segment within %ds of starting the session"
                          % deadline_seconds)
+
+
+def playback_body(copy_route, request_id=None):
+    """The real public playback envelope, narrowed to the route under test."""
+    body = {}
+    if request_id is not None:
+        body["request_id"] = request_id
+    if copy_route:
+        body["playback"] = {
+            "v": 1,
+            "caps": {
+                "v": 2,
+                "video": [{"codec": "hevc", "profiles": [], "max_height": 2160}],
+                "audio": ["ac3"],
+                "containers": ["fmp4"],
+                "transports": ["hls"],
+            },
+            "hls_formats": [{"container": "fmp4", "video": "hevc", "audio": "ac3"}],
+            "video_limits": [{
+                "codec": "hevc",
+                "max_width": 3840,
+                "max_height": 2160,
+                "max_frame_rate": {"num": 60, "den": 1},
+                "interlaced": False,
+            }],
+            "audio_limits": [{"codec": "ac3", "max_channels": 8}],
+        }
+    return body or None
+
+
+def assert_copy_delivery(started):
+    delivery = started.get("delivery") or {}
+    assert delivery.get("video_action") == "copy", (
+        "--copy asked for an HEVC copy route but the owner chose %r: %s"
+        % (delivery.get("video_action"), json.dumps(delivery)))
+    assert delivery.get("audio_action") == "copy", (
+        "--copy asked for an AC-3 copy route but the owner chose %r: %s"
+        % (delivery.get("audio_action"), json.dumps(delivery)))
+
+
+def scratch_playlists(data_root):
+    """Current producer playlists, excluding fixture media under the output root."""
+    if data_root is None or not data_root.exists():
+        return {}
+    found = {}
+    for path in data_root.rglob("index.m3u8"):
+        if not path.parent.name.startswith("live-tv-"):
+            continue
+        try:
+            found[path] = path.stat().st_mtime_ns
+        except FileNotFoundError:
+            pass
+    return found
+
+
+def await_first_listed_on_disk(data_root, before, asked_at, start_future, deadline_seconds):
+    """Observe segment one before the gated POST is allowed to answer."""
+    deadline = asked_at + deadline_seconds
+    last_error = None
+    while time.monotonic() < deadline:
+        for path, stamp in scratch_playlists(data_root).items():
+            if before.get(path) == stamp:
+                continue
+            try:
+                sequence, segments, durations, target = playlist_facts(path.read_text())
+            except (OSError, TypeError, ValueError, AttributeError) as error:
+                last_error = error
+                continue
+            if segments:
+                return time.monotonic() - asked_at, sequence, segments, durations, target
+        if start_future.done():
+            # The publication scan and request completion can race. Give the
+            # atomic rename one final observation before declaring that this
+            # build failed to expose the measurement seam.
+            time.sleep(0.05)
+        else:
+            time.sleep(0.05)
+    raise AssertionError(
+        "no first listed segment was observable in the throwaway scratch within %ds%s"
+        % (deadline_seconds, " (%s)" % last_error if last_error else ""))
+
+
+def absolute_playlist_url(client, started):
+    return urljoin(client.base + "/", started["playlist_url"].lstrip("/"))
+
+
+def select_channel(client, wanted):
+    lineup = client.api("/live-tv/channels")["channels"]
+    playable = [c for c in lineup if c.get("support") == "ready" and not c.get("drm")]
+    assert playable, "the ingress reports no playable Live TV channel"
+    if wanted:
+        selected = next((c for c in playable if c.get("guide_number") == wanted), None)
+        assert selected is not None, (
+            "--channel %s is not playable; playable: %s"
+            % (wanted, ", ".join(c.get("guide_number", "?") for c in playable[:20])))
+        return selected
+    return playable[0]
+
+
+def run_via(client, mine, evidence, out):
+    """Exercise the public relay without changing the running cluster."""
+    ingress = client.api("/server")["node_id"]
+    owner = client.api("/settings")["live_tv_owner_node_id"]
+    assert ingress != owner, (
+        "--via must name a non-owner ingress; %s is the configured Live TV owner" % ingress)
+    channel = select_channel(client, mine.channel)
+    request_id = secrets.token_hex(16)
+    asked_at = time.monotonic()
+    started = None
+    refusal = None
+    try:
+        started = client.api(
+            "/live-tv/channels/%s/sessions" % channel["id"], "POST",
+            playback_body(mine.copy, request_id), timeout=PUBLIC_START_DEADLINE + 10)
+    except ApiRefusal as error:
+        refusal = error
+    answer_seconds = time.monotonic() - asked_at
+    state = client.api("/live-tv/starts/%s" % request_id)
+    outcome = {
+        "ingress_node_id": ingress,
+        "owner_node_id": owner,
+        "request_id": request_id,
+        "attempt_seconds": START_EXCHANGE_ATTEMPT,
+        "outlived_first_attempt": answer_seconds > START_EXCHANGE_ATTEMPT,
+        "attempt_2_request_identity": "same public request id",
+        "owner_start_state": state.get("state"),
+        "owner_start_code": state.get("code"),
+        "viewer_code": refusal.code if refusal else None,
+        "seconds_to_answer": round(answer_seconds, 3),
+        "same_owner_session": (
+            state.get("state") == "active" if answer_seconds > START_EXCHANGE_ATTEMPT else None),
+        "first_listed_segment_seconds": None,
+        "first_listed_segment_observation": (
+            "not observable through the public ingress before its start answer"),
+    }
+    evidence["relay_outcome"] = outcome
+
+    if refusal is not None:
+        (out / "hardware.json").write_text(json.dumps(evidence, indent=2) + "\n")
+        assert refusal.code in ("owner_unavailable", "startup_timeout"), (
+            "relayed start was refused with %r, not owner_unavailable or startup_timeout: %s"
+            % (refusal.code, refusal.detail))
+        print("RESULT relayed start refused after %.1fs: viewer=%s owner=%s/%s"
+              % (answer_seconds, refusal.code, state.get("state"), state.get("code")))
+        print("  evidence: %s" % (out / "hardware.json"))
+        return 0
+
+    if mine.copy:
+        assert_copy_delivery(started)
+    capability = started["session_id"]
+    try:
+        (waited, sequence, segments, durations, target_duration, average,
+         name, chunk) = await_first_segment(
+            client, absolute_playlist_url(client, started), SEGMENT_DEADLINE)
+        observed_bitrate = round(len(chunk) * 8 / average) if average > 0 else None
+        outcome.update({
+            "seconds_waiting_after_answer": round(waited, 3),
+            "first_media_sequence": sequence,
+            "listed_segments_at_observation": len(segments),
+            "segment_durations_seconds": durations,
+            "target_duration_seconds": target_duration,
+            "observed_segment_bitrate_bps": observed_bitrate,
+            "first_segment_name": name,
+        })
+    finally:
+        client.api("/live-tv/sessions/%s" % capability, "DELETE", timeout=15)
+
+    (out / "hardware.json").write_text(json.dumps(evidence, indent=2) + "\n")
+    if mine.copy and answer_seconds > 16:
+        raise AssertionError(
+            "the ATSC 3.0 copy start answered in %.1fs (>16s): stop for a relay-budget ruling; "
+            "do not increase a timeout" % answer_seconds)
+    print("PASS relayed start via %s answered in %.1fs (%s first 20s attempt); evidence: %s"
+          % (ingress, answer_seconds,
+             "outlived" if outcome["outlived_first_attempt"] else "within",
+             out / "hardware.json"))
+    return 0
 
 
 def probe_source(ffmpeg, device, guide_number, seconds, destination):
@@ -373,6 +561,10 @@ def split_own_args(argv):
     own.add_argument("--tuners", type=int, default=1,
                      help="how many of the device's tuners this run may occupy (default 1)")
     own.add_argument("--channel", help="pin a guide number instead of taking the first playable one")
+    own.add_argument("--copy", action="store_true",
+                     help="advertise HEVC/AC-3 playback so an eligible source stays direct")
+    own.add_argument("--via", metavar="INGRESS",
+                     help="send the public start through this non-owner node (host or URL)")
     own.add_argument("--host-address",
                      help="the address the device will see this host as, when it is not the "
                           "one routing picks (behind NAT, or in a bridged container)")
@@ -380,11 +572,14 @@ def split_own_args(argv):
     # Before the shared parser sees the rest: it would refuse `--base-url`
     # without a `--token` and name ui-baseline in the error, which sends the
     # operator to the wrong script for a decision this one has already made.
-    if "--self-host" not in rest:
+    self_host = "--self-host" in rest
+    if self_host == bool(mine.via):
         raise SystemExit(
             "preflight failed, nothing was run:\n"
-            "  - only --self-host is accepted; a production server is not a test fixture.\n"
-            "    This boots a throwaway plurxd under --out and points it at --device.")
+            "  - choose exactly one of --self-host or --via <non-owner-ingress>.")
+    if mine.via and "--base-url" not in rest:
+        base = mine.via if "://" in mine.via else "http://%s:32400" % mine.via
+        rest.extend(["--base-url", base])
     return mine, rest
 
 
@@ -399,21 +594,21 @@ def preflight(mine, args):
     problems = []
     if not mine.device:
         problems.append("--device is required; this script will not guess which box is your tuner")
-    if not args.self_host:
-        problems.append("only --self-host is accepted; a production server is not a test fixture")
+    if not args.self_host and not mine.via:
+        problems.append("choose --self-host or --via <non-owner-ingress>")
     if mine.tuners < 1 or mine.tuners > MAX_CONFIGURABLE_SESSIONS:
         problems.append("--tuners must be between 1 and %d (live_tv_max_sessions is validated to"
                         " that range)" % MAX_CONFIGURABLE_SESSIONS)
-    if shutil.which(args.ffmpeg) is None:
+    if args.self_host and shutil.which(args.ffmpeg) is None:
         problems.append("ffmpeg not found on PATH as %r\n"
                         "      brew install ffmpeg | apt install ffmpeg | --ffmpeg /path/to/ffmpeg"
                         % args.ffmpeg)
-    if shutil.which("ffprobe") is None:
+    if args.self_host and shutil.which("ffprobe") is None:
         problems.append("ffprobe not found on PATH; it is what reads the real codec back out of a\n"
                         "      published segment. It ships with ffmpeg.")
-    if args.server_bin and not Path(args.server_bin).exists():
+    if args.self_host and args.server_bin and not Path(args.server_bin).exists():
         problems.append("--server-bin %s does not exist" % args.server_bin)
-    elif not args.server_bin and shutil.which("cargo") is None \
+    elif args.self_host and not args.server_bin and shutil.which("cargo") is None \
             and not HARNESS["default_server_bin"]().exists():
         problems.append("no %s and no cargo to build one\n"
                         "      cargo build -p plurxd | --server-bin /path/to/plurxd"
@@ -498,6 +693,9 @@ def main(argv):
         if others:
             print("  %d of %d tuners are already in use by other clients (%s); "
                   "attribution excludes them" % (len(others), tuner_count, ", ".join(sorted(others))))
+
+    if mine.via:
+        return run_via(Client(args.base_url, args.token), mine, evidence, out)
 
     server = HARNESS["SelfHost"](args)
     server.start()
@@ -647,15 +845,29 @@ def main(argv):
         # that request -- the first run of this script measured 6.4 s of accept
         # and 0.007 s of waiting afterwards, and reported the 0.007 s as
         # "startup", which is the one number nobody wants.
+        before_playlists = scratch_playlists(data_root)
         asked_at = time.monotonic()
-        started = client.api("/live-tv/channels/%s/sessions" % channel["id"], "POST")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            start_future = executor.submit(
+                client.api,
+                "/live-tv/channels/%s/sessions" % channel["id"],
+                "POST",
+                playback_body(mine.copy),
+                PUBLIC_START_DEADLINE + 10,
+            )
+            (first_listed_seconds, first_sequence, first_names,
+             first_durations, first_target_duration) = await_first_listed_on_disk(
+                data_root, before_playlists, asked_at, start_future, PUBLIC_START_DEADLINE)
+            started = start_future.result()
         capability = started["session_id"]
         opened.append(capability)
         accept_seconds = time.monotonic() - asked_at
+        if mine.copy:
+            assert_copy_delivery(started)
 
-        playlist_url = "%s/api/v1/live-tv/sessions/%s/index.m3u8" % (server.base_url, capability)
-        waited, sequence, segments, segment_seconds, name, chunk = await_first_segment(
-            client, playlist_url, SEGMENT_DEADLINE)
+        playlist_url = absolute_playlist_url(client, started)
+        (waited, sequence, segments, durations, target_duration, segment_seconds,
+         name, chunk) = await_first_segment(client, playlist_url, SEGMENT_DEADLINE)
         startup = time.monotonic() - asked_at
 
         segment_path = out / "first-segment.ts"
@@ -673,13 +885,24 @@ def main(argv):
             "guide_number": channel.get("guide_number"),
             # The number a viewer feels, and its two halves.
             "seconds_from_asking_to_first_playable_segment": round(startup, 3),
+            "seconds_from_asking_to_first_listed_segment": round(first_listed_seconds, 3),
+            "seconds_from_first_listed_segment_to_answer": round(
+                accept_seconds - first_listed_seconds, 3),
             "of_which_inside_the_start_request": round(accept_seconds, 3),
             "of_which_waiting_for_a_segment": round(waited, 3),
             "startup_budget_seconds": STARTUP_BUDGET,
+            "first_listed_media_sequence": first_sequence,
+            "first_listed_window_segments": len(first_names),
+            "first_listed_segment_durations_seconds": first_durations,
+            "first_listed_target_duration_seconds": first_target_duration,
             "first_media_sequence": sequence,
             "published_window_segments": len(segments),
+            "segment_durations_seconds": durations,
+            "target_duration_seconds": target_duration,
             "segment_seconds": round(segment_seconds, 3),
             "first_segment_bytes": len(chunk),
+            "observed_segment_bitrate_bps": (
+                round(len(chunk) * 8 / segment_seconds) if segment_seconds > 0 else None),
             "container": container.get("format_name"),
             "video_codec": video[0].get("codec_name"),
             "video_height": video[0].get("height"),
@@ -689,11 +912,21 @@ def main(argv):
         assert len(segments) <= LISTED_SEGMENTS, (
             "the live window published %d segments; at most %d may be listed"
             % (len(segments), LISTED_SEGMENTS))
+        if not mine.copy:
+            assert target_duration == 1 and durations and all(
+                0.9 <= duration <= 1.1 for duration in durations), (
+                    "the encoded route did not publish the required 1s cadence: "
+                    "TARGETDURATION=%s EXTINF=%s" % (target_duration, durations))
         assert startup <= STARTUP_BUDGET, (
             "a playable segment took %.1fs from asking for the channel (%.1fs inside the start "
-            "request, %.1fs waiting after it); STARTUP_TIMEOUT is %ds, so a real tune on this "
+            "request, %.1fs waiting after it); the public start deadline is %ds, so a real tune on this "
             "device does not fit the budget the runtime enforces"
             % (startup, accept_seconds, waited, STARTUP_BUDGET))
+        if mine.copy and accept_seconds > 16:
+            (out / "hardware.json").write_text(json.dumps(evidence, indent=2) + "\n")
+            raise AssertionError(
+                "the ATSC 3.0 copy start answered in %.1fs (>16s): stop for a relay-budget "
+                "ruling; do not increase a timeout" % accept_seconds)
         # Configured output_height is a ceiling, not a promise to upscale: an SD
         # channel legitimately arrives shorter. Exceeding it is the defect.
         assert int(video[0].get("height") or 0) <= 720, (
@@ -865,6 +1098,8 @@ def main(argv):
                 client.api("/live-tv/sessions/%s" % capability, "DELETE", timeout=15)
             except Exception:
                 pass
+        if not args.keep_server:
+            server.stop()
 
 
 if __name__ == "__main__":
