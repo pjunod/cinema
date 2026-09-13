@@ -92,6 +92,32 @@ class PlaybackSurfaceReducerTest {
     }
 
     @Test
+    fun playbackNotRequestedRetiresBufferingAndNothingElse() {
+        // The same assertion `tests/playback/playback-surface-contract.test.js`
+        // makes, against this client's transcription. A retirement reason that
+        // starts spreading across the class table is a reason somebody has
+        // stopped thinking about: a `preparing` start has not been paused by a
+        // viewer who has not seen it yet, and a blocking prompt is answered by
+        // the viewer rather than by a transport change.
+        assertEquals(
+            listOf(SurfaceClass.Buffering),
+            SurfaceClass.entries.filter {
+                it.retiredBy.contains(SurfaceRetirement.PlaybackNotRequested)
+            },
+        )
+        // And the fixture agrees, read directly rather than through the table.
+        assertEquals(
+            listOf("buffering"),
+            contract.getValue("classes").jsonObject.entries
+                .filter { (_, raw) ->
+                    raw.jsonObject.getValue("retired_by").jsonArray
+                        .any { it.jsonPrimitive.content == "playback_not_requested" }
+                }
+                .map { it.key },
+        )
+    }
+
+    @Test
     fun sourcesAreTheFixtureVerbatimAndInOrder() {
         val rows = contract.getValue("sources").jsonArray.map { it.jsonObject }
         assertEquals(
@@ -333,6 +359,9 @@ class PlaybackSurfaceReducerTest {
             SurfaceEvent.OwnerSuccess(id(event.getValue("owner_success")))
         event.containsKey("user_action") ->
             SurfaceEvent.UserAction(actionOf(event.getValue("user_action").jsonPrimitive.content))
+        event.containsKey("playback_requested") -> SurfaceEvent.PlaybackRequested(
+            event.getValue("playback_requested").jsonPrimitive.boolean,
+        )
         event.containsKey("hidden") -> SurfaceEvent.Hidden(event.getValue("hidden").jsonPrimitive.boolean)
         event.containsKey("tick") -> SurfaceEvent.Tick
         else -> throw AssertionError("unmapped fixture event: $event")

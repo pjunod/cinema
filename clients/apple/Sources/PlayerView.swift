@@ -825,31 +825,21 @@ struct PlayerView: View {
                     }
                 }
 
-                if controller.isChangingStream || controller.showsBlockingProgress {
-                    streamChangeProgress
-                        .tint(.white)
-                        .padding(18)
-                        .background(.ultraThinMaterial, in: Circle())
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-
-                if controller.isPlaybackWaiting && !findingNext {
-                    let waiting = PlaybackWaitPresentation.make(
-                        runwaySeconds: controller.bufferedRunwaySeconds(),
-                        httpWaitCount: controller.sessionStatus?.httpWaitCount
-                    )
-                    VStack(spacing: 10) {
-                        ProgressView().tint(.white)
-                        Text(waiting.title)
-                            .font(.system(.callout, design: .monospaced).weight(.semibold))
-                        Text(waiting.detail)
-                            .font(.system(.caption, design: .monospaced))
-                            .foregroundColor(.white.opacity(0.72))
+                // ONE progress surface, drawn by the presenter's verdict.
+                // `isChangingStream` used to draw a spinner here and
+                // `isPlaybackWaiting` a second box below it, so two things
+                // decided what covered the picture — the exact defect the
+                // contract exists to kill. Both are faults now
+                // (`client_preparing`, `media_waiting`).
+                //
+                // One owner, two renders, and §3.1 is emphatic about the
+                // difference: the box covers the picture, the indicator sits
+                // beside one that is playing. They must never be the same view.
+                if let progress = controller.progressSurfaceRender, !findingNext {
+                    switch progress {
+                    case .blocking: playbackProgressSurface
+                    case .indicator: playbackProgressIndicator
                     }
-                    .foregroundColor(.white)
-                    .padding(18)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
                 if findingNext {
@@ -864,16 +854,9 @@ struct PlayerView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
-                if let error = playbackBannerMessage,
-                   !controller.isPlaybackBlocked {
-                    Text(error)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundColor(.white)
-                        .padding(10)
-                        .background(Palette.accent.opacity(0.9), in: RoundedRectangle(cornerRadius: 8))
-                        .frame(maxWidth: .infinity, alignment: .top)
-                        .padding(.top, 20)
-                        .padding(.horizontal, 80)
+                if let banner = playbackBannerSurface,
+                   let message = Self.bannerMessage(for: banner) {
+                    playbackBanner(banner, message: message)
                 }
             }
         }
@@ -1075,10 +1058,35 @@ struct PlayerView: View {
     /// is the same set of sentences `playbackNotice ?? playbackError` used to
     /// carry whenever `failed` was false. The prompt and the terminal are
     /// `failureView`, and the call site already excludes them.
+    private var playbackBannerSurface: PlaybackSurface? {
+        let surface = controller.surface.surface
+        // The KIND, not "not blocked". `banner` is the contract's notice strip
+        // and the other kinds each have their own render — `blocking` is
+        // `failureView` or the full-screen progress box, `indicator` is the
+        // in-chrome capsule. Asking only whether the viewer was blocked drew
+        // this strip UNDERNEATH the capsule for every indicator: one fault,
+        // two overlays, which is the thing §3.1 separates the kinds to stop.
+        guard surface.kind == .banner else { return nil }
+        return surface
+    }
+
     private var playbackBannerMessage: String? {
-        guard !controller.isPlaybackBlocked,
-              let fault = controller.surface.surface.fault
-        else { return nil }
+        playbackBannerSurface.flatMap(Self.bannerMessage(for:))
+    }
+
+    /// The sentence a banner carries.
+    ///
+    /// `detail` is the sentence in the ordinary case — a server's refusal, a
+    /// recovery step's reason, a PiP failure's own words — and `title` is the
+    /// heading the full-screen view puts above it. A DEMOTED fault is the
+    /// exception, and §3.2 is the reason: the demotion rewrites the title to
+    /// "Playback recovered" and deliberately KEEPS the old failure sentence in
+    /// `detail`, because the fault's Try again still has to know what it is
+    /// about. Reading `detail` there made the banner announce the thing that
+    /// failed at the exact moment the picture came back.
+    static func bannerMessage(for surface: PlaybackSurface) -> String? {
+        guard let fault = surface.fault else { return nil }
+        if surface.isDemoted { return fault.title ?? fault.detail }
         return fault.detail ?? fault.title
     }
 
@@ -1096,6 +1104,11 @@ struct PlayerView: View {
                 || controller.isPlaybackBlocked
                 || controller.isChangingStream
                 || findingNext
+                // Every surface the presenter is drawing, not only the strip.
+                // `playbackBannerMessage` used to answer for the indicator too,
+                // by accident; now that it answers only for the banner, the
+                // progress renders say so themselves.
+                || controller.progressSurfaceRender != nil
                 || playbackBannerMessage != nil
         )
     }
@@ -1489,6 +1502,103 @@ struct PlayerView: View {
         #endif
     }
 
+    /// A progress fault over a picture that IS presenting (§3.1's `indicator`):
+    /// a small capsule in the corner of the chrome, covering nothing.
+    ///
+    /// Deliberately not the full-screen box. `recovering` is retired by
+    /// presentation that postdates its raise, so a compatibility rung, a node
+    /// failover or a readiness deadline is an indicator over a picture that is
+    /// playing perfectly well — and giving it the centered full-screen box
+    /// would put a modal spinner over a moving picture, which is the defect
+    /// this contract exists to remove. It takes no hits: a viewer's tap and a
+    /// remote's focus belong to the chrome behind it.
+    @ViewBuilder
+    private var playbackProgressIndicator: some View {
+        let surface = controller.surface.surface
+        HStack(spacing: 8) {
+            ProgressView().tint(.white)
+            if let title = surface.title, !title.isEmpty {
+                Text(title)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(.white.opacity(0.85))
+                    .lineLimit(1)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+        .background(.ultraThinMaterial, in: Capsule())
+        .padding(20)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+        .allowsHitTesting(false)
+    }
+
+    /// A progress fault over a picture that is NOT presenting (§3.1's
+    /// full-screen half), in the two shapes this player has always drawn: a
+    /// bare spinner for a fault with nothing to say (the staged open), and the
+    /// spinner with the fault's own sentence under it for one that does (a
+    /// wait). No new copy — the words are the ones the raising owner put on
+    /// the fault.
+    @ViewBuilder
+    private var playbackProgressSurface: some View {
+        let surface = controller.surface.surface
+        if let title = surface.title, !title.isEmpty {
+            VStack(spacing: 10) {
+                ProgressView().tint(.white)
+                Text(title)
+                    .font(.system(.callout, design: .monospaced).weight(.semibold))
+                if let detail = surface.detail, !detail.isEmpty {
+                    Text(detail)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.white.opacity(0.72))
+                }
+            }
+            .foregroundColor(.white)
+            .padding(18)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            streamChangeProgress
+                .tint(.white)
+                .padding(18)
+                .background(.ultraThinMaterial, in: Circle())
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    /// The notice strip: §3.1's `banner` kind, which is "a notice strip with
+    /// **the fault's actions**; the picture is untouched".
+    ///
+    /// It used to be a bare `Text`. `failureView` was the only thing that drew
+    /// `surface.actions` and it is gated on a blocking surface, so a `refused`
+    /// change — the whole class whose point is that the predecessor keeps
+    /// playing — offered the viewer a sentence and no way to re-issue the
+    /// change. Physical recipe (b) forbids exactly that, and §3.2's demotion
+    /// exists so a fault the picture overruled KEEPS its actions for when the
+    /// buffer drains; both were dead ends here.
+    ///
+    /// Same button renderer and the same labels as the full-screen view, so
+    /// "Try Again" cannot come to mean two things.
+    private func playbackBanner(_ surface: PlaybackSurface, message: String) -> some View {
+        let actions = Self.renderedActions(for: surface)
+        return VStack(spacing: 10) {
+            Text(message)
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(.white)
+            if !actions.isEmpty {
+                HStack(spacing: 12) {
+                    ForEach(actions, id: \.self) { action in
+                        failureActionButton(action)
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(Palette.accent.opacity(0.9), in: RoundedRectangle(cornerRadius: 8))
+        .frame(maxWidth: .infinity, alignment: .top)
+        .padding(.top, 20)
+        .padding(.horizontal, 80)
+    }
+
     private var failureView: some View {
         let surface = controller.surface.surface
         return VStack(spacing: 14) {
@@ -1525,9 +1635,22 @@ struct PlayerView: View {
     /// * Close is guaranteed. A full screen with no way out is worse than an
     ///   extra button, and every blocking class's defaults include it anyway.
     static func failureActions(for surface: PlaybackSurface) -> [PlaybackFault.Action] {
+        var actions = renderedActions(for: surface)
+        if !actions.contains(.close) { actions.append(.close) }
+        return actions
+    }
+
+    /// The fault's own actions, in its own order, minus the ones this client
+    /// has no control for and minus the second of two buttons that are one
+    /// primitive here. Shared by both things that draw actions.
+    ///
+    /// Close is NOT added. A guaranteed way out belongs to a full screen; on a
+    /// banner the picture behind it is the viewer's film, and a Close on a
+    /// notice is a button that ends playback which is fine. `refused`'s whole
+    /// offer is `retry`, and that is what it gets.
+    static func renderedActions(for surface: PlaybackSurface) -> [PlaybackFault.Action] {
         var actions = surface.actions.filter(rendersFailureAction)
         if actions.contains(.retry) { actions.removeAll { $0 == .keepWaiting } }
-        if !actions.contains(.close) { actions.append(.close) }
         return actions
     }
 
@@ -1556,8 +1679,16 @@ struct PlayerView: View {
     @ViewBuilder
     private func failureActionButton(_ action: PlaybackFault.Action) -> some View {
         switch action {
+        // One button for both, never two: `failureActions` above strips
+        // `keep_waiting` whenever `retry` is present, and every blocking
+        // class's defaults offer `retry`, so a separate "Keep Waiting" was a
+        // label no viewer could ever reach. Apple does not offer it separately
+        // because on this client it is not a separate thing — §3.1 says Keep
+        // waiting IS `retryAfterPlaybackFailure`. (The web is adding a real
+        // one; the web's Keep waiting re-arms `armStall` and its Try again
+        // re-opens, which genuinely differ.)
         case .retry, .keepWaiting:
-            Button(action == .keepWaiting ? "Keep Waiting" : "Try Again") {
+            Button("Try Again") {
                 controller.retryAfterPlaybackFailure()
             }
             .buttonStyle(.borderedProminent)

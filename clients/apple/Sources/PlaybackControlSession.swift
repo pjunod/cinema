@@ -219,7 +219,13 @@ final class PlaybackControlSession {
         // player keeps the same acknowledgement on every snapshot, which is
         // what makes a commit impossible to lose to coalescing.
         onAcknowledgementDelivered: @escaping @MainActor @Sendable (ActionAcknowledgement)
-            -> Void = { _ in }
+            -> Void = { _ in },
+        // The surface contract's row 18. A control exchange that came back
+        // with nothing — a transport loss, a refusal, a `404 session_gone` on
+        // a successor's first exchange — says nothing about the picture the
+        // viewer is watching, and the reporter already owns whether to retry.
+        // The player is told so it can leave a trace, and for no other reason.
+        onExchangeFailure: @escaping @MainActor @Sendable (String) -> Void = { _ in }
     ) {
         end()
         // A generation, not a reset. A verdict outlives the session it was
@@ -271,6 +277,12 @@ final class PlaybackControlSession {
                     generation: generation,
                     ownerChanged: exchange.failure == "transport:409:owner_changed"
                 )
+                if let failure = exchange.failure {
+                    scheduleSubtitleReady {
+                        guard self?.activeGeneration == generation else { return }
+                        onExchangeFailure(failure)
+                    }
+                }
                 if exchange.capture.hasSameIntent(as: latest.load()), subtitleReadiness.record(
                     exchange.response?.delivery?.subtitleReadiness, commitReady: false
                 ) {

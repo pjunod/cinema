@@ -17394,6 +17394,13 @@ function dvrCard(settings,readiness){
 // number, a repository file or a device log, so a computed-looking pill here
 // would be a computed pill that lies. Each row names the file to check
 // instead.
+//
+// That is also the cost: nothing checks these numbers. `validation/doc_versions.py`
+// sweeps the two client READMEs, `APPLE-CLIENT-PARITY.md` and `docs/STATUS.html`
+// for build claims and has never read this file, so both client rows went stale
+// the moment a client shipped again — the Apple row still said build 150 and a
+// 532/518 run two builds after both had moved. Whoever moves a build number
+// moves the sentence here too, until something sweeps it.
 function playbackSurfaceReadinessCard(){
   return setCard(`${cardHead("Playback surface contract",
       "What the error overlay is allowed to be, on every client. Merged and shipping; this is what has not been verified about it.",
@@ -17403,9 +17410,9 @@ function playbackSurfaceReadinessCard(){
       <p class="hint">These readings are about the source tree and the devices, neither of which this server can see. Each row names the file that carries the answer.</p>
       <h3 class="devcheck-group">Client builds</h3>
       ${devStaticReq("Apple client build and unit suite","verified",
-        "Both schemes compile and the whole suite passes on both destinations &mdash; iPhone 17 Pro (iOS 26.5), 532 tests, and Apple TV 4K 3rd generation (tvOS 26.5), 518 tests, zero failures on each, under Xcode 26.6. <code>testPlaybackSurfaceModelRunsEveryContractCase</code> ran and passed under each. <code>clients/apple/README.md</code> claims build 150, above the 149 that carried M5. Getting there found one compile error, three wrong tests and one shipped bug: a 401 during a quality change demoted its own Sign in terminal to a &ldquo;Playback recovered&rdquo; banner. This row is about the unit suite only &mdash; &sect;6's eight simulator and device runs are still owed, and are counted by the rows below.","ok")}
+        "Both schemes compile and the whole suite passes on both destinations &mdash; iPhone 17 Pro (iOS 26.5), 549 tests, and Apple TV 4K 3rd generation (tvOS 26.5), 535 tests, zero failures on each, under Xcode 26.6. <code>testPlaybackSurfaceModelRunsEveryContractCase</code> ran and passed under each. <code>clients/apple/README.md</code> claims build 151, above the 150 that carried the first compile. Getting there found one compile error, three wrong tests and two shipped bugs &mdash; a 401 during a quality change demoted its own Sign in terminal to a &ldquo;Playback recovered&rdquo; banner, and <code>waitingToPlayAtSpecifiedRate</code> drove a second spinner of its own, so the <code>buffering</code> class could never be drawn. This row is about the unit suite only &mdash; &sect;6's eight simulator and device runs are still owed, and are counted by the rows below.","ok")}
       ${devStaticReq("Android client build and unit suite","JVM green, hardware owed",
-        "Compiled and run on 2026-09-13 against <code>clients/android/README.md</code>'s claimed build 92: <code>:app:compileDebugKotlin</code>, <code>:app:testDebugUnitTest</code> (612 tests, 0 failures), <code>:app:lintDebug</code> and <code>:app:assembleDebug</code>, on the pinned Docker image and on a local SDK, with the same answer from each. Not met because <code>docs/clients/PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md</code> §5 is still owed — the instrumented suite and the twelve device recipes have never been run.","")}      <h3 class="devcheck-group">Devices</h3>
+        "Compiled and run on 2026-09-13 against <code>clients/android/README.md</code>'s claimed build 93: <code>:app:compileDebugKotlin</code>, <code>:app:testDebugUnitTest</code> (634 tests, 0 failures), <code>:app:lintDebug</code> and <code>:app:assembleDebug</code>, on the pinned Docker image and on a local SDK, with the same answer from each. Not met because <code>docs/clients/PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md</code> §5 is still owed — the instrumented suite and the twelve device recipes have never been run.","")}      <h3 class="devcheck-group">Devices</h3>
       ${devStaticReq("Physical verification of the four recipes","not run",
         "The network drop, the failed change on a cold NAS, the Android remux seek and the iPhone lock screen — implementation plan §7, on an Apple TV, an iPhone and an Android TV. Met when a <code>docs/clients/PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-&lt;date&gt;.md</code> record exists; the script is <code>docs/clients/PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-PROMPT.md</code>.","warn")}
       ${devStaticReq("surface_disagreement","none observed",

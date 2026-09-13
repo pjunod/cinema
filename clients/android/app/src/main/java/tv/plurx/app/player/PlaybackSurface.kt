@@ -45,6 +45,15 @@ internal enum class SurfaceRetirement(val wire: String) {
     IntentSuperseded("intent_superseded"),
     AttachedRetired("attached_retired"),
     OwnerSuccess("owner_success"),
+
+    /**
+     * The viewer no longer wants media.
+     *
+     * On `buffering` and on NO other class: a `preparing` start has not been
+     * paused by a viewer who has not seen it yet, and a blocking prompt is
+     * answered by the viewer rather than by a transport change.
+     */
+    PlaybackNotRequested("playback_not_requested"),
     Timer("timer"),
     User("user"),
 }
@@ -107,7 +116,17 @@ internal enum class SurfaceClass(
         wire = "buffering",
         severity = SurfaceSeverity.Progress,
         blocking = SurfaceBlocking.WhileNotPresenting,
-        retiredBy = setOf(SurfaceRetirement.Presenting, SurfaceRetirement.AttachedRetired),
+        // A `buffering` fault is about a player that WANTS media. Presentation
+        // evidence is the only other thing that retires it, and a paused picture
+        // produces no more samples — so without `playback_not_requested` a
+        // buffer that fills while the viewer has paused leaves a spinner over a
+        // still frame until the generation changes, which is the overlay
+        // outliving the thing it described. Ruled upstream in 1e19b133.
+        retiredBy = setOf(
+            SurfaceRetirement.Presenting,
+            SurfaceRetirement.PlaybackNotRequested,
+            SurfaceRetirement.AttachedRetired,
+        ),
         minMs = SurfaceTimings.BUFFERING_MIN_MS,
     ),
     Recovering(
@@ -290,7 +309,33 @@ internal val SURFACE_SOURCES: List<SurfaceSourceRow> = listOf(
         SurfaceClass.Refused,
         actions = listOf(SurfaceAction.Retry),
     ),
-    SurfaceSourceRow(SurfaceSources.SEGMENT_503_NOT_YET, "attached", SurfaceClass.Recovering),
+    SurfaceSourceRow(
+        SurfaceSources.SEGMENT_503_NOT_YET,
+        "attached",
+        SurfaceClass.Recovering,
+        // The 503 codes a playlist or segment request can actually come back
+        // with. Transcribed from the fixture, which is where the argument for
+        // each of them lives; on those two resources a 503 is only ever a "not
+        // yet", and the terminal answers are 404/410/502.
+        codes = listOf(
+            "startup_timeout",
+            "playlist_state_changed",
+            "segment_pending",
+            "segment_wait_busy",
+            "node_wait_capacity",
+            "media_owner_transition",
+            "vod_resurrection_unavailable",
+            "response_owner_transition",
+            "response_state_changed",
+            "response_owner_reclassification_unavailable",
+            "response_publication_timeout",
+            "response_completion_capacity",
+            "response_snapshot_capacity",
+            "node_maintenance",
+            "node_removal_fenced",
+            "learner_route_ineligible",
+        ),
+    ),
     SurfaceSourceRow(
         SurfaceSources.MEDIA_OWNER_LOST_410,
         // `any`: a 410 is the server's answer on a create as well as on a
@@ -326,6 +371,51 @@ internal val SURFACE_SOURCES: List<SurfaceSourceRow> = listOf(
     SurfaceSourceRow(SurfaceSources.DEGRADED_NOTICE, "any", SurfaceClass.Degraded),
     SurfaceSourceRow(SurfaceSources.LOG_ONLY, "any", null),
 )
+
+/**
+ * Which source row a refusal CODE names, in [context], or null.
+ *
+ * The fixture's `codes` lists are what say "this status, with this code, is
+ * that row": §3.3 row 6 for a create, row 8 for a playlist or segment. A code
+ * in no row's list names no row — a 503 nobody explained is not a "still
+ * building" answer and may not borrow one's class, which is the rule
+ * `Controller.createIsStillBuilding` already applies to creates. A row is
+ * consulted only in a context it declares, so a create-only code cannot claim
+ * a segment refusal and the reverse.
+ *
+ * Read straight off [SURFACE_SOURCES], so a code the fixture adds or moves is
+ * honoured by the adapter the moment the transcribed table moves with it.
+ */
+internal fun surfaceSourceForCode(code: String?, context: SurfaceContext): String? {
+    val wanted = code?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    return SURFACE_SOURCES.firstOrNull { row ->
+        row.codes.contains(wanted) && row.matches(context)
+    }?.id
+}
+
+/**
+ * Does [sourceId]'s row admit a refusal carrying [code], in [context]?
+ *
+ * A row that lists `codes` is claiming "this status WITH one of these codes",
+ * and a refusal carrying something else is not that row. A row that lists none
+ * is claiming the status outright, and a client that demanded a code from it
+ * would make the row unreachable — which is the defect this whole change
+ * exists to remove, not one to add.
+ *
+ * Which of the two a row is doing belongs to the fixture, so it is READ here
+ * rather than decided: the same adapter is correct before and after a `codes`
+ * list is added to a row, and adding one narrows the row on every client at
+ * once.
+ */
+internal fun surfaceRowAdmitsCode(
+    sourceId: String,
+    code: String?,
+    context: SurfaceContext,
+): Boolean {
+    val row = SURFACE_SOURCES.firstOrNull { it.id == sourceId && it.matches(context) } ?: return false
+    if (row.codes.isEmpty()) return true
+    return row.codes.contains(code?.trim()?.takeIf { it.isNotEmpty() })
+}
 
 /**
  * Only the owner's OWN stop promotes a fault that declared a successor class
@@ -511,6 +601,20 @@ internal sealed interface SurfaceEvent {
     data class UserAction(val action: SurfaceAction) : SurfaceEvent
 
     /**
+     * The viewer's transport intent changed.
+     *
+     * `false` retires every fault whose class names `playback_not_requested` —
+     * `buffering`, and only `buffering`. `true` does nothing: the raise sites
+     * decide what comes back, which is the rule every other retirement follows.
+     *
+     * The VIEWER's intent, never the owner's stop-before-raise. Media3 reports
+     * both as a `USER_REQUEST`, and the filter that tells them apart is the
+     * caller's (`Controller.onPlayWhenReadyChanged`), because the caller is the
+     * only thing that knows which of the two wrote it.
+     */
+    data class PlaybackRequested(val requested: Boolean) : SurfaceEvent
+
+    /**
      * The app is hidden. Android has no hidden page: this is
      * `presentationForeground` inverted. While hidden, `presenting` samples are
      * ignored and every timer freezes.
@@ -549,6 +653,15 @@ internal data class SurfaceLog(
     val action: SurfaceAction? = null,
     val error: String? = null,
     val context: String? = null,
+    /**
+     * What the owner said about this event.
+     *
+     * Every other field is an identity or a class. `log_only` (§3.3 row 18) has
+     * neither — it maps to no class at all — so without this the one event that
+     * IS the whole trace would reach the client log saying only that something
+     * happened.
+     */
+    val detail: String? = null,
 )
 
 internal data class SurfaceStep(
@@ -595,6 +708,13 @@ internal class PlaybackSurfaceReducer {
             // replaced.
             is SurfaceEvent.OwnerSuccess -> dropFaults(next, log, "owner_success") { fault ->
                 fault.cls.retiredBy.contains(SurfaceRetirement.OwnerSuccess)
+            }
+            is SurfaceEvent.PlaybackRequested -> if (event.requested) {
+                next
+            } else {
+                dropFaults(next, log, SurfaceRetirement.PlaybackNotRequested.wire) { fault ->
+                    fault.cls.retiredBy.contains(SurfaceRetirement.PlaybackNotRequested)
+                }
             }
             is SurfaceEvent.UserAction -> applyUserAction(next, log, event.action)
             SurfaceEvent.Tick -> next
@@ -700,6 +820,7 @@ internal class PlaybackSurfaceReducer {
                 event = SurfaceLogEvents.LOG_ONLY,
                 source = row.id,
                 attached = event.attached,
+                detail = event.detail,
             )
             return state
         }
