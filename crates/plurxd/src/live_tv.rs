@@ -162,6 +162,17 @@ const SESSION_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINAL_TOMBSTONE_TTL: Duration = Duration::from_secs(60);
 const MAX_TERMINAL_TOMBSTONES: usize = 256;
 const SCRATCH_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
+/// A session belonging to the *requesting* viewer whose last keepalive is
+/// older than this is a stray — three missed five-second heartbeats — and is
+/// cancelled to admit that viewer's new start rather than refusing them.
+///
+/// A viewer whose phone slept, whose browser tab was closed without a stop, or
+/// whose app was force-quit is holding a tuner nobody is watching. Refusing
+/// them their own tuner is the worst of the three available answers, and it is
+/// also what would make the recording-capacity dialog lie: a viewer told
+/// "a recording has your tuner" while in fact holding it themselves would stop
+/// a recording for nothing.
+const STRAY_EVICTION_IDLE: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct LiveTvConfig {
@@ -2731,10 +2742,56 @@ impl LiveTvManager {
                 // it — never a bare "all slots are in use" that leaves them
                 // looking for a viewer who is not there.
                 if registry.held() >= usize::from(config.max_sessions) {
-                    return Err(LiveTvError::Capacity(format!(
-                        "all {} plurx Live TV session slots are in use",
-                        config.max_sessions
-                    )));
+                    // A possibly-held tuner is never a reason to refuse a
+                    // viewer. Their own stray goes first, before this refusal
+                    // can blame anything else: a viewer told "a recording has
+                    // your tuner" while they are in fact holding it
+                    // themselves would stop a recording for nothing.
+                    //
+                    // Idleness is only meaningful for a session with a
+                    // heartbeat to miss. A starting or provisional session has
+                    // never been touched by a player and is already bounded by
+                    // its own startup deadline, so it is never evicted here.
+                    let now = tokio::time::Instant::now();
+                    let stray = registry
+                        .sessions
+                        .values()
+                        .filter(|session| {
+                            session.request.user_id == request.user_id
+                                && !session.cancel.is_cancelled()
+                        })
+                        .filter(|session| {
+                            let state = session
+                                .state
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                            state.activated
+                                && state.phase == LiveTvSessionPhase::Active
+                                && now.duration_since(state.last_touch) >= STRAY_EVICTION_IDLE
+                        })
+                        .min_by_key(|session| {
+                            session
+                                .state
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .last_touch
+                        })
+                        .cloned();
+                    match stray {
+                        Some(stray) => {
+                            tracing::info!(
+                                user = request.user_id,
+                                "evicting a viewer's own idle live-TV session to admit their new start"
+                            );
+                            stray.cancel.cancel();
+                        }
+                        None => {
+                            return Err(LiveTvError::Capacity(format!(
+                                "all {} plurx Live TV session slots are in use",
+                                config.max_sessions
+                            )));
+                        }
+                    }
                 }
                 registry.requests.insert(key, capability.clone());
                 registry.sessions.insert(capability, Arc::clone(&session));
