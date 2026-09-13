@@ -1456,3 +1456,117 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
 source_anchor = "surfaceOwner.stoppedAfterControlVerdict("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackSurfaceOwnerTest.kt"
 test_anchor = "theControlPlaneTerminalVerdictStopsBeforeItRaises"
+
+[[fixes]]
+# M5 addition 3's `BEHIND_LIVE_WINDOW` budget is per ATTACH, and `attachRecipe`
+# was not the only way an item takes the screen: `commitPreparedReplacement`
+# swaps in a whole second `ExoPlayer` with its own item and never comes near it,
+# so a committed prepared successor inherited the predecessor's spent budget and
+# was denied its one recovery. The OWNER's call site is anchored here rather
+# than the extracted `BehindLiveWindowRecovery`, because what the fix means is
+# that the owner hands the recovery a target on the PLAYER's timeline together
+# with the player's own seek and prepare, instead of deciding with a predicate
+# and then seeking itself. `Controller` is not constructible in a JVM unit test
+# - it takes an `ExoPlayer`, a `MediaSession` and the app's view model - so the
+# named case drives the recovery object directly and requires the second 1002 on
+# one attach to do nothing, `attached()` to clear `spent`, and the next 1002 to
+# seek and prepare again, with both seek targets in order. The two re-arm CALL
+# SITES are held separately, by `web-policy`'s count of
+# `behindLiveWindow.attached()` in the shipped Kotlin.
+id = "android.behind-live-window-budget-is-per-attach"
+commits = ["450746f5"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "seekTargetMs = { playerTimelinePositionMs(filmPositionMs) },"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/BehindLiveWindowRecoveryTest.kt"
+test_anchor = "aNewItemOnTheScreenGetsItsOwnSingleRecovery"
+
+[[fixes]]
+# The review's first blocker. `isNotYet` was gated on `startContext`, so the
+# LADDER was start-only, but the sixty-second deadline watchdog was launched
+# unconditionally at the top of `createRetryingNotYet` and on expiry stopped the
+# player and raised a blocking `owner_exhausted` hard-coded to the `start`
+# context. `openSession` is also the create path for seeks and quality changes,
+# and this client's own read timeout is sixty seconds, so a quality change
+# against a cold NAS raced that boundary and often lost: a full-screen prompt
+# over a predecessor the viewer was watching, whose session was then released so
+# the change silently produced nothing, which is section 7 recipe (b)'s
+# explicitly not-allowed outcome. The gate is one parameter now, deciding the
+# ladder and the watchdog together, and `Controller.kt` computes it once at the
+# single call site. The named case requires a change-context create that holds
+# past `DEADLINE_MS` to raise nothing, to leave `currentTime` at 0 - no clock
+# armed at all, which is what moving the file to `runTest` made expressible -
+# and to ATTACH its session rather than release it. Fold the decision back into
+# `isNotYet` and the watchdog arms again: the virtual clock reaches
+# `DEADLINE_MS`, `exhausted` is not empty, and the session is released.
+id = "android.create-watchdog-is-the-start-contexts"
+commits = ["b4cf8e81"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/StallReopen.kt"
+source_anchor = "if (!startContext) return create(body, isCurrent)"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/CreateRetryTest.kt"
+test_anchor = "aChangeContextCreateIsNotRetriedAndArmsNoWatchdogAtAll"
+
+[[fixes]]
+# `createRetryEpoch` is one controller-wide counter and the exit path retired it
+# unconditionally: sequence A takes N, a later `open()` starts B at N+1, and A's
+# exit bumped it to N+2, so B's loop-top guard failed and
+# `expireCreateRetry(epoch:)` no longer matched B at all - leaving it unwatched
+# up to the 180 s request timeout - while `createRetryExpired`, a shared Bool on
+# the same counter, let B clear A's expiry. The counter is retired only while
+# this sequence still owns it, and the expiry is `createRetryExpiredEpoch: Int?`.
+# That half is held by the source alone: no retained test constructs two
+# overlapping sequences. What the named case does hold is the property with a
+# leaked transcode on the other side of it, and the line anchored here is the
+# one it runs. It requires exactly one wait to be armed and for it to be the
+# ABSOLUTE deadline, the owner to stop the player and raise `exhausted` when
+# that wait fires while the create is still in flight, and then the session the
+# server finally answers with to be RELEASED through `releaseHlsSession`, never
+# attached, and to raise no second fault. Delete `await release(session:)` and
+# `released == ["late"]` never becomes true; before the two constructor seams
+# this commit adds there was no way for a test to see either.
+id = "apple.create-sequence-identity-and-release"
+commits = ["0666a702"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "await release(session: opened.sessionId)"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testACreateThatLandsAfterTheDeadlineIsReleasedAndNeverAttached"
+
+[[fixes]]
+# A rename inside the create recovery sequence and nothing else: `let started =
+# try await requestHlsSession(...)` shadowed the controller's own "is this
+# player running" flag, and the binding is `opened` now. NOTHING ASSERTS THE
+# NAME, and reverting it does not even fail to compile, because `started` is a
+# real property of this controller - which is exactly why the shadowing was
+# worth removing and exactly why no test can stand behind it. The row exists
+# because every corrective commit touching `clients/` is anchored, and it names
+# the honest pair: the renamed binding itself, and a case that actually runs the
+# success return the binding feeds - a cold start whose create succeeds, ahead
+# of the quality change that must arm no second watchdog. That case proves the
+# path executes; it does not prove the identifier.
+id = "apple.create-sequence-stops-shadowing-started"
+commits = ["1f75e593"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "let opened = try await requestHlsSession(model, file, request)"
+test = "clients/apple/Tests/PlayerOperationOwnershipTests.swift"
+test_anchor = "testAChangeContextCreateIsNotRetriedAndArmsNoDeadline"
+
+[[fixes]]
+# Cancelling the deadline watchdog is not quite enough: cancellation is
+# cooperative, and a sleep that has already elapsed has no suspension point left
+# to observe the cancel at, so a create returning on the deadline's own
+# millisecond could be attached AND answered with a full-screen `exhausted` over
+# it. Android sets `expired` before the cancel, in the same `finally`; Apple
+# retires the sequence's epoch on exit, which makes `expireCreateRetry` a no-op
+# for it. NO RETAINED TEST REPRODUCES THAT INTERLEAVING on either client: under
+# `runTest`'s virtual clock the watchdog either fires before the create settles
+# or is cancelled while its delay is still pending, and nothing settles a
+# sequence inside the window between the two. The anchor is therefore the rule
+# itself, in the `finally` a revert removes; the test named is the nearest
+# sequence-level case, which requires a session landing after the deadline to be
+# released rather than attached and to raise no second prompt - the outcome this
+# ordering keeps true when the two land on the same millisecond.
+id = "clients.a-settled-create-sequence-answers-no-watchdog"
+commits = ["08559f5e"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/StallReopen.kt"
+source_anchor = "// Before the cancel, not after: cancellation is cooperative, and a"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/CreateRetryTest.kt"
+test_anchor = "aSuccessAfterTheAbsoluteDeadlineIsReleasedAndNeverAttached"
