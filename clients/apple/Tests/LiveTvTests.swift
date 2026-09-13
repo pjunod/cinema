@@ -855,6 +855,7 @@ final class LiveTvTests: XCTestCase {
         let source = try themeSource()
         let style = source
             .components(separatedBy: "struct LiveSurfacePillStyle: ButtonStyle {")[1]
+            .components(separatedBy: "/// Compact trailing action")[0]
         XCTAssertTrue(style.contains("Renderer(configuration: configuration)"))
         XCTAssertTrue(style.contains("private struct Renderer: View"))
         XCTAssertFalse(style.contains("struct Body: View"))
