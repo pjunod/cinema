@@ -291,7 +291,7 @@ that failed.
 | Class | Severity | Surface | Who stopped the player | Retired by |
 |---|---|---|---|---|
 | `preparing` | progress | spinner + stage text — full-screen while the attached picture is not presenting, in-chrome indicator while it is | nobody | presenting evidence on `attached` · intent settled |
-| `buffering` | progress | same rule; raised only once the wait has lasted `STALL_MIN_MS` (350 ms) | nobody | presenting evidence |
+| `buffering` | progress | same rule; raised only once the wait has lasted `STALL_MIN_MS` (350 ms) | nobody | presenting evidence · the viewer no longer wanting media |
 | `recovering` | progress | same rule, with the reason ("Reconnecting…", "Switching quality…") | nobody | presenting evidence on the *new* attached generation · owner reports success |
 | `hold` | notice | banner, timed (30 s), server sentence | nobody | timer · presenting evidence |
 | `degraded` | notice | banner, timed (5 s) | nobody | timer |
@@ -306,7 +306,7 @@ _Generated from [`tests/playback/playback-surface-contract.json`](../../tests/pl
 | Class | Severity | Blocking | Timer | Requires the owner to have stopped the player | Retired by | Default actions |
 |---|---|---|---|---|---|---|
 | `preparing` | progress | while not presenting | none | no | `presenting` · `intent_settled` · `attached_retired` | – |
-| `buffering` | progress | while not presenting | none | no | `presenting` · `attached_retired` | – |
+| `buffering` | progress | while not presenting | none | no | `presenting` · `playback_not_requested` · `attached_retired` | – |
 | `recovering` | progress | while not presenting | none | no | `presenting_after_raise` · `owner_success` · `attached_retired` | – |
 | `hold` | notice | never | 30000 ms | no | `timer` · `presenting_after_raise` | – |
 | `degraded` | notice | never | 5000 ms (paused while it has actions) | no | `timer` · `presenting_continuous_ms` | – |
@@ -438,7 +438,7 @@ Rows are evaluated in order; the first row whose `context` matches wins.
 | 9 | `create_503_not_yet` | start | `preparing` | no | class default | codes: `startup_timeout` · `media_owner_transition` · `vod_index_pending` · `vod_engine_unattested`; retryable by the owner (M5) |
 | 10 | `client_preparing` | any | `preparing` | no | class default |  |
 | 11 | `change_failed` | change | `refused` | no | `retry` |  |
-| 12 | `segment_503_not_yet` | attached | `recovering` | no | class default |  |
+| 12 | `segment_503_not_yet` | attached | `recovering` | no | class default | codes: `startup_timeout` · `playlist_state_changed` · `segment_pending` · `segment_wait_busy` · `node_wait_capacity` · `media_owner_transition` · `vod_resurrection_unavailable` · `response_owner_transition` · `response_state_changed` · `response_owner_reclassification_unavailable` · `response_publication_timeout` · `response_completion_capacity` · `response_snapshot_capacity` · `node_maintenance` · `node_removal_fenced` · `learner_route_ineligible` |
 | 13 | `media_owner_lost_410` | any | `recovering` | no | class default | re-classes to `stopped` when the owner stops; carries `position_ms` |
 | 14 | `control_hold` | attached | `hold` | no | class default |  |
 | 15 | `media_waiting` | attached | `buffering` | no | class default |  |
@@ -461,6 +461,7 @@ Rows are evaluated in order; the first row whose `context` matches wins.
 - A fault whose `attached` generation is retired stops being about anything and is dropped (`surface_cleared {by: attached_retired}`). That is identity, not one of the class's `retired_by` rules, so it applies to blocking faults too — otherwise a `stopped` prompt would outlive the attempt it described and sit over the next one.
 - Each retirement reason is a property of the CLASS, not of the event: `intent_settled` retires only classes whose `retired_by` names it, so a prompt the viewer has to answer is not swept away by a seek landing underneath it. `attached_retired` is the one exception, and the note above says why.
 - `owner_success: G` is the recovery owner reporting that its recovery produced attached generation G. There is one recovery owner per player, so it retires every `recovering` fault, not only the ones about the generation it replaced.
+- `playback_not_requested` is the viewer no longer wanting media. A `buffering` fault is about a player that WANTS it — the wait is only a wait while something is trying to play — so a pause makes the fault about nothing and it is retired. It is on `buffering` and on no other class: a `preparing` start has not been paused by a viewer who has not seen it yet, and a blocking prompt is answered by the viewer rather than by a transport change. Resuming raises nothing back; the raise sites decide what comes back, which is the same rule every other retirement follows.
 
 <!-- contract:surface-sources:end -->
 
@@ -482,10 +483,14 @@ deadline is spent — in the `start` context only, ladder AND deadline alike,
 because a create refused over a predecessor is row 7 and a prompt that stops
 that player is §7 recipe (b)'s not-allowed outcome. **On the web the 60 s is not
 the operative bound:** `beginPlaybackPreparation` gives every open a
-pre-existing 20 s absolute deadline and the sequence runs inside it, so the web
-reaches `exhausted` only by spending the ladder (~7 s) and otherwise ends as
-`owner_stopped` at 20 s. That is a conflict between this contract and the code,
-awaiting a ruling (implementation §4.6). Row 8 gains the web's one bounded `hls.startLoad(position)`
+pre-existing 20 s absolute deadline and the sequence runs inside it. **Ruled
+2026-09-13 (implementation §4.6, ruling 2): the 20 s stands and the OUTCOME is
+what changes.** When that deadline ends a sequence the server has already
+answered "not yet" to, the sequence's own `exhausted` is what surfaces, with the
+server's own sentence — so the web reaches `exhausted` either by spending the
+ladder (~7 s) or on the preparation clock, and `owner_stopped` "Playback could
+not prepare." is left to a create that refused nothing and was merely slow. Row
+8 gains the web's one bounded `hls.startLoad(position)`
 two seconds after the refusal, sharing a single per-attach budget with the
 network-class fatal. Row 13's `BEHIND_LIVE_WINDOW` clause is Android's
 `seekTo(lastRealPosition)` + `prepare()`, once per attach, on FINITE timelines

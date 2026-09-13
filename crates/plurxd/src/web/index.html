@@ -3693,8 +3693,23 @@ function beginPlaybackPreparation(isCurrent){
   const controller=new AbortController(), began=performance.now();
   let abandoned=false, rejectPending=null;
   const cancelled=()=>Object.assign(new Error("Playback preparation superseded."),{name:"AbortError"});
-  const timedOut=()=>Object.assign(new Error("Playback preparation timed out. Your place is saved."),{name:"TimeoutError"});
+  // The 20 s bound stays where it is (§6: it is a pre-existing threshold), and
+  // ruling 2 makes what it PRODUCES honest. An operation that has its own
+  // truthful answer for this deadline leaves it in `expiry`; M5's create-retry
+  // sequence is the one that does, because when the server has been answering
+  // "not yet" the end of that sequence is the sequence's own exhaustion and not
+  // a generic preparation failure. The hook raises before it returns, so the
+  // error carries `surfaceRaised` and `failPreparation` leaves the prompt
+  // standing instead of painting "Playback could not prepare." over it.
+  const timedOut=()=>{
+    const own=owner.expiry&&owner.expiry();
+    return own||Object.assign(new Error("Playback preparation timed out. Your place is saved."),{name:"TimeoutError"});
+  };
   const owner={
+    // Set by the running operation, cleared when it leaves. A supersede does
+    // not consult it: cancelling an open raises nothing, because the newer
+    // intent owns the surface.
+    expiry:null,
     cancel(){abandoned=true;controller.abort();rejectPending?.(cancelled());},
     finish(){if(beginPlaybackPreparation.active===owner)beginPlaybackPreparation.active=null;},
     async run(operation,release){
@@ -4063,7 +4078,7 @@ async function persistentWait(v,p,began,generation,actionGeneration){
     raisePlaybackSurface("owner_exhausted",{player_stopped:true,
       title:"Playback is still stalled.",
       detail:"One automatic recovery was already tried. Your place is saved.",
-      actions:playbackStallActions(p)});
+      actions:playbackExhaustedActions(p)});
     return;
   }
   const estimateBps=(p.hls&&p.hls.bandwidthEstimate)||p.bandwidthSeedBps;
@@ -4111,7 +4126,7 @@ function showStallRecoveryFailure(note){
   stopPlayerForExhaustion();
   raisePlaybackSurface("owner_exhausted",{player_stopped:true,
     title:"Playback could not reconnect.",detail:note||"Your place is saved.",
-    actions:playbackStallActions(p)});
+    actions:playbackExhaustedActions(p)});
 }
 // The failure every per-frame counter forgives: hardware decode, a full
 // buffer, and the presentation clock quietly running at three-quarter speed.
@@ -8003,6 +8018,9 @@ function failPreparedReplacement(p,state,detail){
   queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
   clientLog(Object.assign({level:"warn",event:"prepared_replacement",detail:"failed",
     message:`preparation of ${state.sessionId} failed: ${detail}`},playbackContext()));
+  // §3.3 row 18, the same reason as the abandonment above: the successor never
+  // took the picture, so nothing the viewer can see has changed.
+  raisePlaybackSurface("log_only",{attached:playbackSurfaceGeneration(p)});
   freePreparedReplacement(p,state);
 }
 // Settle and free. Every exit path runs through here — a new attach, a seek, a
@@ -8019,6 +8037,10 @@ function abandonPreparedReplacement(p,ackState,reason){
     clientLog(Object.assign({level:"info",event:"prepared_replacement",detail:ackState||"aborted",
       message:`preparation of ${state.sessionId} abandoned: ${reason||"no reason given"}`},
       playbackContext()));
+    // §3.3 row 18. A staging nobody took up leaves the incumbent exactly where
+    // it was — the viewer is watching the same picture, and there is nothing to
+    // tell them — so the ledger row IS the trace, and the fence keeps it so.
+    raisePlaybackSurface("log_only",{attached:playbackSurfaceGeneration(p)});
   }
   freePreparedReplacement(p,state);
   return true;
@@ -8506,6 +8528,10 @@ function startPlaybackControl(v,p,bootstrap){
           p.controlLastError={at:now,message};
           if(!p.controlLastFailureLogAt||now-p.controlLastFailureLogAt>=60000){
             p.controlLastFailureLogAt=now;
+            // §3.3 row 18: the reporter owns no recovery, so a refused exchange
+            // — `session_gone` on a committed successor's first one included —
+            // changes nothing the viewer can see. The event is the only trace.
+            raisePlaybackSurface("log_only",{attached:playbackSurfaceGeneration(p)});
             clientLog({level:"warn",event:"playback_control",
               detail:String(error.code||error.name||"exchange_failed"),message});
           }
@@ -8651,49 +8677,62 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
   const settings=options||{};
   const where=settings.context||playbackCreateRetryContext();
   const answeredLocally=settings.answeredLocally||null;
+  // The preparation owner this sequence runs inside, and the only absolute
+  // bound it has (ruling 2). Every shipped create already runs inside one —
+  // `startCopyHls` refuses to open without it — and M5's own 60 s watchdog
+  // could never fire behind a 20 s one, so it is gone rather than left as a
+  // branch that reads like a bound and is not. Refuse an ownerless sequence
+  // rather than leave the next caller an unbounded one.
+  const preparation=settings.preparation||null;
+  if(!preparation) throw Object.assign(
+    new Error("A create-retry sequence needs a preparation owner to bound and cancel it."),
+    {name:"TypeError"});
   const requestId=newRequestId();
   const began=Date.now();
-  const sequence={expired:false,raised:false};
-  let deadlineTimer=null;
-  const disarm=()=>{ if(deadlineTimer!=null){clearTimeout(deadlineTimer);deadlineTimer=null;} };
+  const sequence={raised:false,refusal:null};
   const superseded=()=>Object.assign(new Error("Playback preparation superseded."),
     {name:"AbortError"});
+  // Two things about the raise below, both of them decisions rather than
+  // accidents. The DETAIL is the server's own sentence, the last thing it said
+  // about this stream: both ways the sequence ends have one — the ladder is
+  // spent only after a refusal, and the preparation deadline ends the SEQUENCE
+  // only when one has already arrived — so the viewer reads why the stream is
+  // not here rather than "Playback could not prepare." And the class's
+  // `keep_waiting` is deliberately ABSENT from the ACTIONS; putting it back
+  // would be a regression rather than a fix. §3.1's web Keep waiting is
+  // `armStall` re-armed, and on this path nothing is attached: the watchdog it
+  // arms calls `stallDiagnose`, which returns on its first line
+  // (`!playbackOwnsAttachedMedia(p)`). The button would clear the prompt and do
+  // nothing, leaving a stopped black player whose only way out is the chrome's
+  // Close. Try again re-runs the whole open, which IS the honest "one more
+  // bounded attempt" here. Ruled 2026-09-13, alongside the ruling that put the
+  // action on the two STALL sites, where there is a detector to re-arm.
   const exhaust=reason=>{
     if(!sequence.raised){
       sequence.raised=true;
       stopPlayerForExhaustion();
-      // Deliberately NOT the class's `keep_waiting`: on this path there is no
-      // stream to keep waiting on and no detector to re-arm, so offering it
-      // would be a button that does nothing. Try again re-runs the whole open,
-      // which IS the honest "one more bounded attempt" here.
       raisePlaybackSurface("owner_exhausted",{context:where,player_stopped:true,
         title:"Playback is stalled.",
-        detail:"the server is still building this stream and did not finish in a minute",
+        detail:(sequence.refusal&&sequence.refusal.message)
+          ||"the server did not finish starting this stream",
         actions:["retry","close"]});
     }
     return Object.assign(new Error("The server did not finish starting this stream."),
       {name:"PlaybackCreateExhausted",surfaceRaised:true,createRetryReason:reason});
   };
-  const deadline=new Promise((_,reject)=>{
-    deadlineTimer=setTimeout(()=>{
-      deadlineTimer=null;
-      sequence.expired=true;
-      reject(exhaust("deadline"));
-    },PlaybackPolicy.CREATE_RETRY.deadline_ms);
-  });
-  const attempts=(async()=>{
+  // What the preparation deadline MEANS to a sequence the server has been
+  // answering "not yet" to: this owner's ladder ending, on the owner's clock.
+  // Nothing to answer with before the first refusal — a create that is merely
+  // slow is a preparation that timed out, and says so.
+  preparation.expiry=()=>(sequence.refusal?exhaust("preparation_deadline"):null);
+  try{
     for(let attempt=0;;attempt+=1){
       if(signal&&signal.aborted) throw superseded();
-      // Belt and braces on the absolute deadline: `createRetryStep` never
-      // schedules a rung that would BEGIN past it, but a drifting timer or a
-      // clock that jumped must not be able to post one either.
-      if(sequence.expired) throw superseded();
       let info;
       try{
         info=await openSession(fileId,opts,signal,requestId);
       }catch(error){
         if(signal&&signal.aborted) throw superseded();
-        if(sequence.expired) throw superseded();
         const failure=error&&error.streamFailure;
         if(answeredLocally&&failure&&answeredLocally(failure)) throw error;
         const source=failure?PlaybackPolicy.classifyStreamFailure({
@@ -8701,6 +8740,10 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
         const step=PlaybackPolicy.createRetryStep({
           attempt,elapsedMs:Date.now()-began,source});
         if(step.action==="fail") throw error;
+        // The refusal this sequence is about, kept before either ending can
+        // use it: the ladder's own exhaustion and the preparation deadline's
+        // read the same sentence.
+        sequence.refusal=failure;
         if(step.action==="exhausted") throw exhaust(step.reason);
         // Still building. One fault for the sequence, not one per attempt: the
         // ring is for distinct faults, and a viewer watching a spinner does not
@@ -8716,19 +8759,20 @@ async function openSessionRetryingNotYet(fileId, opts, signal, options){
         await playbackRetryDelay(step.delayMs,signal);
         continue;
       }
-      // A session the sequence no longer owns belongs to nobody.
-      if(sequence.expired||(signal&&signal.aborted)){
+      // A session the sequence no longer owns belongs to nobody. Reachable now
+      // that the preparation deadline is the one that ends this: it aborts the
+      // signal, and the create already in flight still lands.
+      if(signal&&signal.aborted){
         releaseSession(info&&info.session_id);
-        throw sequence.expired?exhaust("deadline"):superseded();
+        throw superseded();
       }
       return info;
     }
-  })();
-  // The deadline may answer first; the attempt behind it is still running and
-  // will release whatever it produces. Its rejection is not an unhandled one.
-  attempts.catch(()=>{});
-  try{ return await Promise.race([attempts,deadline]); }
-  finally{ disarm(); }
+  }finally{
+    // A hook left behind would answer the NEXT operation's deadline with this
+    // sequence's exhaustion.
+    preparation.expiry=null;
+  }
 }
 // Take on a newly-opened session's identity, and attach it.
 //
@@ -9536,7 +9580,6 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   // `PLAYER.burnedSub`.
   const applied=prePlayApplication(decision, selection);
   const wantSub=applied.subtitle, preBurn=applied.burnedSub;
-  if(applied.blockedByHdr) toast("That subtitle requires an SDR burn-in. HDR playback was kept unchanged.");
   PLAYER={fileId, timer:null, offset:0, hls:null, knownDur:knownDurMs||0,
     decodeRetest:retestDecodeLimit,
     durMs:(src.duration_ms||knownDurMs||0), method:decision.method, encoder:null,
@@ -9609,6 +9652,12 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   const openIsAttached=()=>openIsCurrent()&&PLAYER===openedPlayer
     &&PLAYER.openToken===openAttempt.token;
   newAttempt(requestedAttemptReason || (startSec>0?"resume":"cold-start"));
+  // §3.3 row 17: the picture the viewer is getting is not quite the one they
+  // asked for, and that is a notice beside it. Raised here rather than where
+  // the decision was read, because a fault is about a media generation and
+  // this is the line that mints the one this refusal belongs to.
+  if(applied.blockedByHdr) raisePlaybackSurface("degraded_notice",
+    {title:"That subtitle requires an SDR burn-in. HDR playback was kept unchanged."});
   if(PLAYER.curAudio<0) PLAYER.curAudio=0;
   const initialAudio=selectedAudioIndex(PLAYER);
   setupAirplay(video);
@@ -9667,7 +9716,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     const options=transcodeOpts(startSec,initialAudio);
     const retryContext=playbackCreateRetryContext();
     let info; try{info=await preparation.run(
-      signal=>openSessionRetryingNotYet(fileId,options,signal,{context:retryContext}),
+      signal=>openSessionRetryingNotYet(fileId,options,signal,{context:retryContext,preparation}),
       late=>releaseSession(late&&late.session_id));}catch(e){
       if(openIsAttached())failPreparation(e);
       return;
@@ -9830,7 +9879,7 @@ async function executePlaybackMediaChange(p,change){
       // point: which context a create is in is decided in ONE place, not by
       // which branch of this function happened to call which function.
       const info=await preparation.run(
-        signal=>openSessionRetryingNotYet(p.fileId,opts,signal,{}),
+        signal=>openSessionRetryingNotYet(p.fileId,opts,signal,{preparation}),
         late=>releaseSession(late&&late.session_id));
       if(!live()){ releaseSession(info&&info.session_id); return false; }
       retirePlaybackPredecessor(p);
@@ -9921,7 +9970,7 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
       audio_offset_ms:PLAYER.aoffset||0};
     // `vod_index_pending` has a better answer than waiting on this path — the
     // progressive remux below — so it is answered locally instead of retried.
-    const retry={context:playbackCreateRetryContext(),
+    const retry={context:playbackCreateRetryContext(),preparation,
       answeredLocally:failure=>PlaybackPolicy.indexPendingFallback({
         code:failure&&failure.code,method:PLAYER&&PLAYER.method,nativeHls:native
       })==="progressive_remux"};
@@ -10900,6 +10949,15 @@ function handlePlaybackTransportEvent(v,p,event){
       play.pendingIntent.wantsPlayback=false;
     supersedePlaybackControlIntent(p);
     endWait(false);
+    // §3.1: a `buffering` fault is about a player that WANTS media, and this
+    // viewer does not any more. `endWait` clears the watchdog and the episode
+    // bookkeeping and has never touched the surface, so without this the
+    // spinner sat over a still frame until the generation changed — the overlay
+    // outliving the thing it described, reintroduced by the migration itself.
+    // The presenter is told the client's own fact; no detector, no timer.
+    // Internal pauses never reach here (`playbackTransportEvents` filters them
+    // above), which is right: this is the VIEWER's intent and nothing else.
+    playbackSurfaceStep({playback_requested:false});
   }else if(event==="play"){
     if(playbackTransportEvents(v).play.shift()) return;
     if(v.paused) return; // queued native edge superseded by a newer Pause
@@ -10907,6 +10965,9 @@ function handlePlaybackTransportEvent(v,p,event){
     if(typeof play==='function'&&play.pendingIntent&&PLAY_OPEN_GATE.current(play.pendingIntent.attempt))
       play.pendingIntent.wantsPlayback=true;
     supersedePlaybackControlIntent(p);
+    // Symmetry, and nothing more: resuming raises no fault back. If the buffer
+    // is still empty the element fires `waiting` again and THAT is the raise.
+    playbackSurfaceStep({playback_requested:true});
   }
 }
 // Every timer hanging off PLAYER, stopped. Anything that replaces or discards
@@ -11142,7 +11203,8 @@ function maybeDecodeRescue(){
       : `this browser lost ${verdict.lost} frames in ${verdict.secs}s (${verdict.rate}/min) `+
         `playing ${decodeLimitLabel(p.source)||'this stream'} — switching to transcode`},
     playbackContext()));
-  toast("This browser can't hold Original smoothly — switching to optimized");
+  raisePlaybackSurface("degraded_notice",
+    {title:"This browser can't hold Original smoothly — switching to optimized"});
   startTranscodeFallback("decode-rescue")
     .finally(()=>releaseAutoFallback(p)).catch(()=>{});
 }
@@ -11175,7 +11237,8 @@ async function switchAutoRung(currentHeight,decision){
     const attached=await requestPlaybackMediaChange(p,{method:'transcode',copyHls:false,
       height:decision.height,reason:"auto-quality",automatic:true,
       from:currentHeight,switchReason:decision.reason});
-    if(attached) toast(`Quality → ${decision.height}p — ${decision.reason}`);
+    if(attached) raisePlaybackSurface("degraded_notice",
+      {title:`Quality → ${decision.height}p — ${decision.reason}`});
   } finally { releaseAutoFallback(p); }
 }
 async function rescueAutoSupply(){
@@ -11191,7 +11254,6 @@ async function rescueAutoSupply(){
   p.abr.supplyRescued=true;
   raisePlaybackSurface("owner_recovery_step",{title:"Adjusting quality…",
     detail:"repeated supply stalls — starting transcode Auto"});
-  toast("Quality → Auto transcode — supply stalls");
   try{
     await startTranscodeFallback("auto-supply",
       "switched to transcode Auto after 3 supply stalls in 60 seconds");
@@ -11205,6 +11267,11 @@ async function rescueAutoSupply(){
     p.abr.supplyRescued=false;
     return;
   }
+  // Said once the switch has LANDED, the same gate `switchAutoRung` uses. The
+  // `recovering` step above outranks a notice for as long as it is up, so a
+  // raise beside it is a sentence whose 5 s timer expires behind a spinner —
+  // which is worse than the toast it replaced, not better.
+  raisePlaybackSurface("degraded_notice",{title:"Quality → Auto transcode — supply stalls"});
   const now=performance.now();
   p.abr.lastSwitchAtMs=now;
   p.abr.stableSinceMs=now;
@@ -11436,6 +11503,17 @@ function playbackSurfaceHasLiveFault(source,attached){
 function playbackStallActions(p,transcodeReason){
   if(p) p.surfaceTranscodeReason=transcodeReason||"stall-manual";
   return ["retry"].concat(p&&p.method!=='transcode'?["force_transcode"]:[]).concat(["close"]);
+}
+// The same list for an `exhausted` PROMPT, which leads with one more bounded
+// attempt. Ruled 2026-09-13: the web offers Keep waiting. The class's default
+// actions are `keep_waiting · retry · close` and the label and handler have
+// been in place since M1 — the only thing missing was a site that offered it.
+// Deliberately not folded into `playbackStallActions`: that list is also what a
+// `stopped` terminal carries, and a server verdict that ended the recipe has
+// nothing left to wait for, so re-arming a detector over it would be a button
+// that lies.
+function playbackExhaustedActions(p,transcodeReason){
+  return ["keep_waiting"].concat(playbackStallActions(p,transcodeReason));
 }
 // One step of the presenter: feed the event, keep the state, emit what it says,
 // render what it returns. The only way a surface changes.
@@ -12060,7 +12138,17 @@ function nudge(d){
   NUDGE_T=setTimeout(()=>{ if(PLAYER!==me) return; commitPendingSeek(); },
     PlaybackPolicy.contractTiming("desktop_hotkey_coalesce_ms"));
 }
-async function togglePip(){ const v=document.getElementById("video"); try{ if(document.pictureInPictureElement) await document.exitPictureInPicture(); else if(v) await v.requestPictureInPicture(); }catch(e){} }
+// §3.3 row 17's PiP failure. The browser refuses picture-in-picture for its own
+// reasons — no user gesture left, a disabled policy, an element it will not
+// detach — and this used to swallow the sentence it gives. Nothing about the
+// playback changed, so it is a notice beside the picture and never over it.
+async function togglePip(){
+  const v=document.getElementById("video");
+  try{ if(document.pictureInPictureElement) await document.exitPictureInPicture();
+       else if(v) await v.requestPictureInPicture(); }
+  catch(e){ raisePlaybackSurface("degraded_notice",
+    {title:"Picture-in-picture did not start.",detail:String(e&&e.message||e)}); }
+}
 // Is the player fullscreen by any of the three routes into it? The document
 // API doesn't know about the iOS one: `webkitEnterFullscreen` on the video
 // element opens a separate mode that `document.fullscreenElement` never
@@ -13060,7 +13148,8 @@ async function setSub(index){
     requiresBurn:index>=0&&subNeedsBurn(want), deliveredRange:me.deliveredRange
   });
   if(burnAction==="keep_hdr"){
-    toast("That subtitle requires an SDR burn-in. HDR playback was kept unchanged.");
+    raisePlaybackSurface("degraded_notice",
+      {title:"That subtitle requires an SDR burn-in. HDR playback was kept unchanged."});
     return false;   // nothing changed, so nothing to remember
   }
   const video=document.getElementById("video");
@@ -13631,7 +13720,15 @@ async function pollSessionHealth(force){
     // the vanishing-section problem this work exists to fix — so keep the last
     // numbers, which are the real final ones, and say that is what they are.
     if(!current()) return;
-    if(p.health && !p.health.final){ p.health.final=true; updateStats(); }
+    // §3.3 row 18: a stats poll that could not answer is a panel, not a
+    // playback — the picture is untouched and the numbers on screen are the
+    // real final ones. Raised on the transition only, so a poll that keeps
+    // failing every two seconds does not become a ring of its own.
+    if(p.health && !p.health.final){
+      p.health.final=true;
+      raisePlaybackSurface("log_only",{attached:playbackSurfaceGeneration(p)});
+      updateStats();
+    }
     else if(!p.health) p.health=null;
   }
 }

@@ -1680,6 +1680,9 @@ test("every shipped stall report carries the wait's start as its identity", () =
 // session-create POST.
 function autoRescueHarness(player, autoAbr = true) {
   const opened = [];
+  // Every fault the rescue owner raised, so the degraded notices §3.3 row 17
+  // moved off `toast` are read here rather than assumed.
+  const raises = [];
   let releaseOpen = null;
   let openFails = false;
   const video = { currentTime: 12, paused: false, videoHeight: 720 };
@@ -1751,7 +1754,7 @@ function autoRescueHarness(player, autoAbr = true) {
     noop,
     noop,
     () => ({}),
-    noop,
+    (source, fault) => raises.push({ source, fault: fault || {} }),
     noop,
     startTranscodeFallback,
     async () => {}, // the health poll resolves before the session-create request
@@ -1764,6 +1767,7 @@ function autoRescueHarness(player, autoAbr = true) {
   return {
     ...shipped,
     opened,
+    raises,
     video,
     failNextOpen() {
       openFails = true;
@@ -1988,6 +1992,135 @@ asyncTest("a failed automatic session-open releases the claim", async () => {
   assert.deepEqual(h.opened, ["decode-rescue", "auto-supply"]);
   await h.finishOpen();
   await rescue;
+});
+
+// ---- §3.3 row 17: the automatic downshifts are notices, not toasts ----------
+//
+// The Auto rung switch, run shipped: the notice is raised only when the rung
+// actually attached, because a change that failed is the predecessor's
+// `refused` banner and not a second sentence claiming the quality moved.
+function autoRungHarness(attaches) {
+  const raises = [];
+  const player = { abr: { switching: false }, autoFallbackInFlight: false, started: true };
+  const build = new Function(
+    "PLAYER", "document", "raisePlaybackSurface",
+    "positionForPlaybackIntent", "beginPlaybackControlSeek", "requestPlaybackMediaChange",
+    [
+      shippedSource("hasPendingPlaybackOpen"),
+      shippedSource("playbackOwnsAttachedMedia"),
+      shippedSource("claimAutoFallback"),
+      shippedSource("releaseAutoFallback"),
+      shippedSource("switchAutoRung"),
+      "return {switchAutoRung};",
+    ].join("\n"),
+  );
+  const shipped = build(
+    player,
+    { getElementById: () => ({}) },
+    (source, fault) => raises.push({ source, fault: fault || {} }),
+    () => 120,
+    () => {},
+    async () => attaches,
+  );
+  return { ...shipped, raises, player };
+}
+
+asyncTest("an Auto rung that attached says so as a degraded fault", async () => {
+  const h = autoRungHarness(true);
+  await h.switchAutoRung(2160, { height: 1080, reason: "sustained supply pressure" });
+  assert.deepEqual(h.raises, [{
+    source: "degraded_notice",
+    fault: { title: "Quality → 1080p — sustained supply pressure" },
+  }]);
+  assert.equal(h.player.autoFallbackInFlight, false, "the claim is released either way");
+});
+
+asyncTest("an Auto rung that did not attach says nothing", async () => {
+  const h = autoRungHarness(false);
+  await h.switchAutoRung(2160, { height: 1080, reason: "sustained supply pressure" });
+  assert.deepEqual(h.raises, [], "a failed change is the change's own refusal, not a downshift");
+});
+
+// The remaining row 17 and row 18 sites live inside functions whose harness
+// would cost more than the assertion is worth — a cold-start `play()`, the
+// subtitle menu, the PiP toggle, the two-second stats poll. What can still be
+// pinned from here is the thing a refactor would quietly drop: that each of
+// them leaves the player through the presenter and not through `toast`.
+test("every remaining row 17/18 site raises rather than toasts", () => {
+  const sites = [
+    ["play", "degraded_notice", "That subtitle requires an SDR burn-in."],
+    ["setSub", "degraded_notice", "That subtitle requires an SDR burn-in."],
+    ["togglePip", "degraded_notice", "Picture-in-picture did not start."],
+    ["pollSessionHealth", "log_only", null],
+  ];
+  for (const [name, source, sentence] of sites) {
+    const src = shippedSource(name);
+    assert.ok(
+      src.includes(`raisePlaybackSurface("${source}"`),
+      `${name} must raise ${source}`,
+    );
+    if (sentence) {
+      assert.ok(src.includes(sentence), `${name} must keep its copy`);
+      assert.ok(
+        !new RegExp(`toast\\([^)]*${sentence.slice(0, 20).replace(/[.*+?^$()|[\]\\-]/g, "\\$&")}`).test(src),
+        `${name} must not also toast it`,
+      );
+    }
+  }
+});
+
+//
+// Both of these used to leave the player through `toast()` — a 2.2-second strip
+// with no class, no identity and no ledger row, which is exactly the imperative
+// message channel the contract exists to remove. They are `degraded` faults
+// now, and the copy is the copy that shipped.
+asyncTest("the decode rescue raises its notice as a degraded fault", async () => {
+  const player = pressuredRemuxPlayer();
+  const h = autoRescueHarness(player);
+  h.maybeDecodeRescue();
+  await h.settle();
+  const notices = h.raises.filter((entry) => entry.source === "degraded_notice");
+  assert.equal(notices.length, 1, "the decode rescue tells the viewer once");
+  assert.equal(
+    notices[0].fault.title,
+    "This browser can't hold Original smoothly — switching to optimized",
+  );
+  assert.ok(
+    !notices[0].fault.player_stopped,
+    "a downshift is a notice beside a running picture, never a stop",
+  );
+  await h.finishOpen();
+});
+
+asyncTest("the supply rescue raises its notice once the switch has landed", async () => {
+  const player = pressuredRemuxPlayer();
+  const h = autoRescueHarness(player);
+  const rescue = h.rescueAutoSupply();
+  await h.settle();
+  // While the switch is in flight the only fault is the recovery step. A
+  // `degraded` notice beside it would be outranked by that rank-2 progress
+  // fault and would spend its whole 5 s timer behind a spinner.
+  assert.deepEqual(h.raises.map((entry) => entry.source), ["owner_recovery_step"]);
+  await h.finishOpen();
+  await rescue;
+  assert.deepEqual(
+    h.raises.map((entry) => entry.source),
+    ["owner_recovery_step", "degraded_notice"],
+    "the notice arrives when the transcode has actually attached",
+  );
+  assert.equal(h.raises[1].fault.title, "Quality → Auto transcode — supply stalls");
+});
+
+asyncTest("a supply rescue that did not land says nothing", async () => {
+  const player = pressuredRemuxPlayer();
+  const h = autoRescueHarness(player);
+  h.failNextOpen();
+  const rescue = h.rescueAutoSupply();
+  await h.settle();
+  await h.finishOpen();
+  await rescue;
+  assert.deepEqual(h.raises.map((entry) => entry.source), ["owner_recovery_step"],
+    "a rescue whose open failed never claims the quality moved");
 });
 
 test("mild pressure needs two samples plus cooldown, dwell, and switch gain", () => {
@@ -2703,6 +2836,103 @@ test("the shipped canplay listener feeds an inert event and nothing else", () =>
   assert.equal(after.class, before.class);
 });
 
+// ---- Keep waiting: the button, and exactly what pressing it does -----------
+//
+// Ruled 2026-09-13. The label and the handler were in place from M1 and no site
+// offered the action, so `keep_waiting` was vocabulary the viewer could never
+// reach. Two halves are pinned here: that the prompt still offers it, and that
+// pressing it is ONE MORE BOUNDED ATTEMPT from the existing ladder and nothing
+// else — §3.1's web definition is `armStall` re-armed and `recoveringStall`
+// cleared, and a handler that also reopened, seeked or reported would make the
+// presenter's button a second recovery actor.
+function keepWaitingHarness() {
+  const calls = [];
+  const player = { method: "remux", recoveringStall: { at: 1, action: "reconnect" } };
+  const act = new Function(
+    "PLAYER", "playbackSurfaceStep", "retryPlayback", "closePlayer",
+    "startTranscodeFallback", "logout", "armStall", "pbPosSec",
+    [
+      shippedSource("playbackSurfaceAction"),
+      "return playbackSurfaceAction;",
+    ].join("\n"),
+  )(
+    player,
+    (event) => calls.push(["step", event]),
+    () => calls.push(["retryPlayback"]),
+    () => calls.push(["closePlayer"]),
+    (reason) => calls.push(["startTranscodeFallback", reason]),
+    (options) => calls.push(["logout", options]),
+    (from) => calls.push(["armStall", from]),
+    () => 742,
+  );
+  return { act, calls, player };
+}
+
+test("Keep waiting re-arms the ladder, and does nothing else", () => {
+  const h = keepWaitingHarness();
+  const answer = h.act("keep_waiting");
+  assert.equal(answer, undefined, "Keep waiting returns no recovery to await");
+  assert.deepEqual(h.calls, [
+    ["step", { user_action: "keep_waiting" }],
+    ["armStall", 742],
+  ], "the reducer clears the fault, the owner re-arms, and that is the whole of it");
+  assert.equal(h.player.recoveringStall, null,
+    "the spent recovery is cleared, so the next stall is a fresh episode");
+});
+
+test("every other action is still its own effect", () => {
+  for (const [action, effect] of [
+    ["retry", "retryPlayback"],
+    ["close", "closePlayer"],
+    ["force_transcode", "startTranscodeFallback"],
+  ]) {
+    const h = keepWaitingHarness();
+    h.act(action);
+    assert.deepEqual(h.calls.map((call) => call[0]),
+      ["step", effect], `${action} must not have become Keep waiting`);
+  }
+});
+
+test("the two stall prompts offer Keep waiting, and the create one does not", () => {
+  // The two stall sites share one list and lead with the class's own first
+  // action. The create-exhaustion site names its own, and Keep waiting is
+  // deliberately not on it: nothing is attached there, so `armStall` would arm
+  // a watchdog `stallDiagnose` returns from on its first line, and the button
+  // would clear the prompt and do nothing. Ruled 2026-09-13.
+  const shared = new Function(
+    "PLAYER",
+    [
+      shippedSource("playbackStallActions"),
+      shippedSource("playbackExhaustedActions"),
+      "return playbackExhaustedActions;",
+    ].join("\n"),
+  );
+  assert.deepEqual(shared({ method: "remux" })({ method: "remux" }),
+    ["keep_waiting", "retry", "force_transcode", "close"]);
+  assert.deepEqual(shared({ method: "transcode" })({ method: "transcode" }),
+    ["keep_waiting", "retry", "close"],
+    "Force transcode is still not offered on a session that already is one");
+  // …and a `stopped` terminal keeps the list it had: there is nothing left to
+  // wait for when the server has ended the recipe.
+  const stall = new Function("PLAYER",
+    [shippedSource("playbackStallActions"), "return playbackStallActions;"].join("\n"));
+  assert.deepEqual(stall({})({ method: "remux" }), ["retry", "force_transcode", "close"]);
+  // The create-exhaustion owner names the actions inline, so read them back.
+  const exhaust = shippedSource("openSessionRetryingNotYet");
+  assert.match(exhaust, /actions:\["retry","close"\]/,
+    "the create-exhaustion prompt names its own list");
+  assert.ok(!exhaust.includes("keep_waiting\","),
+    "…and Keep waiting is not on it — there is no detector to re-arm");
+  assert.ok(exhaust.includes("stallDiagnose"),
+    "the comment that says why must name the function that proves it, so a "
+      + "reader who moves `stallDiagnose` finds this");
+  assert.equal(
+    policy.SURFACE_CLASSES.exhausted.default_actions[0],
+    "keep_waiting",
+    "and the fixture's own class default is what all three follow",
+  );
+});
+
 // MUTATION (i): delete the stop from showStallRecoveryFailure and this fails.
 // A blocking surface is only ever drawn over a player its owner has stopped.
 test("the stall-recovery prompt stops the player before it raises", () => {
@@ -2712,6 +2942,7 @@ test("the stall-recovery prompt stops the player before it raises", () => {
     "PLAYER", "document", "pausePlaybackInternally", "stopPlayerTimers", "raisePlaybackSurface",
     [
       shippedSource("playbackStallActions"),
+      shippedSource("playbackExhaustedActions"),
       shippedSource("stopPlayerForExhaustion"),
       shippedSource("showStallRecoveryFailure"),
       "return showStallRecoveryFailure;",
@@ -2731,7 +2962,11 @@ test("the stall-recovery prompt stops the player before it raises", () => {
     "the owner stops the player, and only then raises (contract §3.4)");
   assert.equal(raised.source, "owner_exhausted");
   assert.equal(raised.fault.player_stopped, true);
-  assert.deepEqual(raised.fault.actions, ["retry", "force_transcode", "close"]);
+  // Ruled 2026-09-13: an `exhausted` prompt leads with Keep waiting, which is
+  // the class's own default action list. MUTATION: drop `keep_waiting` from
+  // `playbackExhaustedActions` and this line fails.
+  assert.deepEqual(raised.fault.actions,
+    ["keep_waiting", "retry", "force_transcode", "close"]);
 
   // The reducer's half of the same rule: without the stop this is a fixture
   // error and no surface at all.
@@ -5192,6 +5427,56 @@ test("only the fixture's `create_503_not_yet` codes are retried", () => {
   assert.deepEqual(
     policy.createRetryStep({ attempt: 0, elapsedMs: 0, source: "change_failed" }),
     { action: "fail" },
+  );
+});
+
+// Ruling 4: §3.3 row 8 is "playlist/segment 503 WITH a 'not yet' code", and the
+// row now carries the list the server can actually answer those two resources
+// with. Both halves, because a list nothing falls through is the same defect as
+// no list at all.
+test("every fixture `segment_503_not_yet` code recovers an attached playback", () => {
+  const row = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "playback-surface-contract.json"), "utf8"),
+  ).sources.find((entry) => entry.id === "segment_503_not_yet");
+  assert.ok(row.codes && row.codes.length, "the row must carry its codes");
+  for (const code of row.codes) {
+    assert.equal(
+      policy.classifyStreamFailure({ status: 503, code, context: "attached" }),
+      "segment_503_not_yet",
+      code,
+    );
+  }
+});
+
+test("an attached 503 the row does not list falls through to the code's own row", () => {
+  const row = JSON.parse(
+    fs.readFileSync(path.join(__dirname, "playback-surface-contract.json"), "utf8"),
+  ).sources.find((entry) => entry.id === "segment_503_not_yet");
+  // The defect this ruling closes: the service being switched OFF was read as
+  // the segment not being ready yet, because the row matched on the status
+  // alone. It is a start-context row, so on an attached playback no row claims
+  // it and the caller keeps the handling it had.
+  assert.ok(!row.codes.includes("vod_disabled"));
+  assert.equal(
+    policy.classifyStreamFailure({ status: 503, code: "vod_disabled", context: "attached" }),
+    null,
+  );
+  assert.equal(
+    policy.classifyStreamFailure({ status: 503, code: "vod_disabled", context: "start" }),
+    "vod_disabled",
+  );
+  // A 503 nobody explained is not a "not yet" answer either — same rule as the
+  // create row above.
+  assert.equal(
+    policy.classifyStreamFailure({ status: 503, code: null, context: "attached" }),
+    null,
+  );
+  // …and a code that only means "not yet" on a 503 does not claim another
+  // status. `media_owner_transition` is in both 503 rows; a 425 carrying it is
+  // neither.
+  assert.equal(
+    policy.classifyStreamFailure({ status: 425, code: "media_owner_transition", context: "attached" }),
+    null,
   );
 });
 

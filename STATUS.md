@@ -4,6 +4,53 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The web half of the playback surface contract is reachable, and four rulings are closed
+
+**`web/playback-surface-reach`, WIP, not merged.** An audit found parts of the
+merged work unreachable — two contract rows that no web site ever raised, an
+action in the vocabulary that no site ever offered, and a deadline that could
+not fire. All of it is closed here, together with the four rulings that were
+waiting on somebody (§*Open rulings* below says where each landed).
+
+- **`degraded_notice` had no web raise site.** Six §3.3 row 17 notices left the
+  player through `toast()` — a 2.2-second strip with no class, no identity and
+  no ledger row — and picture-in-picture's failure left through a `catch` that
+  dropped the browser's own sentence. They raise now, with the copy they
+  shipped with.
+- **`log_only` was raised by nobody, on any client**, so `surface_log_only` was
+  a log event the fleet could never emit. Four web sites raise it: a prepared
+  successor abandoned, one that failed on its own, a refused control exchange,
+  a stats poll that could not answer. The incumbent is untouched at all four,
+  which is the row.
+- **`keep_waiting` never reached a button.** It does now, at all three
+  `owner_exhausted` raises, and a test fails if it disappears or if pressing it
+  does more than re-arm the ladder.
+- **The create-retry deadline could not fire.** M5's 60 s sequence ran inside a
+  pre-existing 20 s preparation bound, so the viewer got "Playback could not
+  prepare." where the server had been saying "still building". The bound stays;
+  the outcome is now the sequence's own exhaustion with the server's own
+  sentence, and the branches that could never run are deleted rather than left
+  reading like a bound.
+- **`segment_503_not_yet` got its codes**, in a separate cherry-pickable commit
+  the Apple and Android sessions rebase onto.
+- **A `buffering` fault that the viewer pauses under now retires.** Found
+  independently by the Apple and Android sessions and true of the web too: §3.1
+  retired `buffering` only on presentation evidence, and a paused picture never
+  produces another sample, so a buffer that filled while paused left a spinner
+  over a still frame until the generation changed — the overlay outliving the
+  thing it described, reintroduced by the migration itself. A `buffering` fault
+  is about a player that WANTS media, so a viewer who pauses makes it about
+  nothing. New `playback_requested` event, new `playback_not_requested`
+  retirement reason on `buffering` **and on no other class**, wired to the web's
+  own `wantsPlayback` transport edges. Its own cherry-pickable commit, second of
+  the two.
+
+Not done here, and named rather than implied: Apple and Android still raise
+neither row 17 nor row 18, and no part of this has been seen in a browser — the
+evidence is the lane (`make web-check`, both contract tests, both fences, the
+whole of `tests/operations`, `scripts/validate lint`) plus a five-mutation table
+in the pull request.
+
 ## `make web-check` is green, and `rust-gate` has actually been run
 
 **[#286](http://192.168.4.7:3000/noirr/plurx/pulls/286), WIP, not merged.**
@@ -298,7 +345,8 @@ prompt predicted, and the field route is §6.6.
    "from the client log", and there is no such log line —
    `ProgressiveMediaOrigin.acceptResponse` has no logging at all. The prompt
    gives two ways that do exist.
-5. **Five rulings are open.** See
+5. **One ruling is still open; four and the web half of a fifth are decided.**
+   See
    [Open rulings — the playback surface contract](#open-rulings--the-playback-surface-contract)
    below.
 
@@ -317,60 +365,84 @@ only about where it is written.
 
 ## Open rulings — the playback surface contract
 
-Five questions the effort could not answer for itself. They are referenced
-from §4.6 and §4.7 of
-[PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md](docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md);
-this is the list.
+Five questions the effort could not answer for itself. **Paul ruled on all
+five 2026-09-13 and delegated the open ones; four are closed, and the fifth is
+closed on the web and open on the two native clients.** Where each landed is
+below; the reasoning is in §4.6 of
+[PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md](docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md).
 
-**1. Keep waiting is not offered on the web.** §3.4's table lists
-`keep_waiting` in the web's `exhausted` actions and §3.1 says what it does —
-re-arm `armStall`, clear `recoveringStall`. The vocabulary, the label
-(`SURFACE_ACTION_LABELS`) and the handler (`playbackSurfaceAction`) are all in
-place and correct. **No site offers the button.** `playbackStallActions`
-returns `retry` · `force_transcode` · `close`, and M5's create-exhaustion site
-declines it deliberately, with a comment saying why: on that path there is no
-stream to keep waiting on and no detector to re-arm. Adding it anywhere is new
-behaviour M1 was not allowed to introduce. The question is whether it should
-be offered, and where.
+**1. Keep waiting is offered on the two stall prompts, and the two rows nothing
+raised now have raise sites — web done, Apple and Android open.** *(Decided;
+the web half landed in `web/playback-surface-reach`.)* The two stall sites share
+a new `playbackExhaustedActions` (`playbackStallActions` with the action in
+front). It is deliberately not folded into `playbackStallActions` itself,
+because that list is also what the D1 terminal verdict and the diagnosed-stall
+`decoder_failed` carry, and those are `stopped` — a recipe the server has ended
+leaves nothing to wait for. The **create-exhaustion** prompt does not offer it:
+nothing is attached there, so `armStall` arms a watchdog `stallDiagnose` returns
+from immediately, and the button would clear the prompt and do nothing. The
+handler is unchanged and a test now fails if the button disappears from the
+stall prompts, if it appears on the create one, or if pressing it does more than
+clear `recoveringStall` and re-arm `armStall`.
 
-**2. The web's create-retry deadline is dead code.** `beginPlaybackPreparation`
-bounds every web create at **20 s absolute**, measured from before the decision
-call, and M5's 60 s sequence runs inside it. When preparation wins it aborts the
-create's signal, the sequence throws a plain `AbortError` carrying no
-`surfaceRaised`, and `failPreparation` raises **`owner_stopped` — "Playback
-could not prepare."** rather than M5's `exhausted` sentence. So on the web the
-only reachable termination is `ladder_spent` at about 7 s, and the `deadline`
-reason, the release-a-late-success branch and the `sequence.expired` guard are
-exercised by the test suite and by **nothing on a shipped path** — "a late
-success is released, not attached" is a property of the tests, not of the
-browser. Apple (180 s request timeout) and Android (60 s read timeout) both
-reach the deadline in production, so whichever way this is ruled the web is the
-client that diverges. Closing it means moving a pre-existing threshold, which
-§6 forbade in M5. **The question is not a timing number: should the web raise
-`exhausted` for a still-building create at all, or is 20 s + `owner_stopped`
-the right answer for a client whose whole open is bounded at 20 s?**
+The same branch gave `degraded_notice` its first web raise site — six of them:
+the pre-play HDR/burn refusal, the same refusal from the subtitle menu, the
+decode rescue, the Auto rung downshift, the supply rescue and a
+picture-in-picture that would not start, all of which used to leave the player
+through `toast()` or, for PiP, through a swallowed `catch` — and `log_only` its
+first raise site on **any** client, so `surface_log_only` is emitted at last:
+a prepared successor abandoned, one that failed on its own, a refused control
+exchange (`session_gone` on a committed successor's first one included), and a
+stats poll that could not answer.
 
-**3. "Backoff 1 s · 2 s · 4 s" has two readings.** A closed list of three
-retries, or a ramp that holds at 4 s until the 60 s deadline — about fourteen
-retries. The closed list shipped, because the text is a closed list and the
-deadline is still load-bearing under it (it cuts a slow server mid-attempt).
-Nothing in the review or the contract asked for the second reading. Recorded in
-implementation §4.6.
+**Still open:** Apple and Android raise neither row either. Their `degraded`
+notices (`playbackNotice`, the PiP persistent error) and their row-18 events
+(prepared-successor abandonment, telemetry and reporter failures) are the same
+shape as the web's and want the same treatment; that is native work and is not
+in this branch.
 
-**4. `segment_503_not_yet` has no `codes` list.** The fixture row carries
-`context: attached` and `class: recovering` and nothing else, so **any**
-attached 503 classifies as `recovering`, while contract §3.3's prose row 8
-says "Playlist/segment 503 **with a 'not yet' code**". The code follows the
-fixture — which is correct, because the fixture is the contract — so the
-fixture and the prose disagree and one of them is wrong. Compare row 9,
-`create_503_not_yet`, which does carry its four codes.
+**2. The web's create-retry deadline: keep the 20 s, make the outcome honest.**
+*(Closed in `web/playback-surface-reach`.)* The bound does not move — §6 forbids
+it, and 20 s is the right bound for a client whose whole open is bounded at
+20 s. What changes is what it produces. `beginPlaybackPreparation` gained one
+hook, `expiry`, where a running operation may leave the error its own deadline
+should produce; M5's sequence answers with its own `exhausted`, carrying the
+server's own sentence, when and only when the server has already refused it
+with a "not yet" code. A create that was merely slow is still a preparation
+timeout and still says so. Both terminations are reachable on the web now, and
+"a late success is released, not attached" is a property of the browser rather
+than of the tests. M5's own 60 s watchdog, `sequence.expired` and both its
+guards, and the dead half of the late-success fork are deleted;
+`openSessionRetryingNotYet` refuses an ownerless sequence outright so nothing
+is left unbounded by the removal. `CREATE_RETRY.deadline_ms` stays in the
+shared policy: Apple and Android reach it on shipped paths.
 
-**5. The branch model diverged.** [AGENTS.md](AGENTS.md)'s "large efforts"
-rule says a multi-task project integrates on one `effort/<project>` branch
-with task PRs into it. This effort went task-branch → `main` throughout,
-because §9 of the implementation plan says "branch from `main`". Both are
-written down, both were followed, and they disagree. For reconciliation, not
-for action on the merged work.
+**3. "Backoff 1 s · 2 s · 4 s" is the closed list.** *(Ruled; recorded in
+implementation §4.6 so it stops reading as an open question.)* Three retries,
+four attempts. The text is a closed list, the deadline is still load-bearing
+under it — it cuts a slow server mid-attempt — and nothing in the review or the
+contract asked for the fourteen-retry reading. What shipped is what was meant.
+
+**4. `segment_503_not_yet` carries its codes.** *(Closed; its own
+cherry-pickable commit on `web/playback-surface-reach`, which the Apple and
+Android sessions rebase onto.)* The row lists the sixteen 503 codes a playlist
+or segment request can actually come back with, read off `http/hls.rs`,
+`vodserve.rs` and `http/mod.rs`. On those two resources a 503 is only ever a
+"not yet" — the terminal answers are 404/410/502 — so the `recovering` class is
+right for every code on the list. `classifyStreamFailure` requires the status
+**and** the code for that row, so `vod_disabled` is no longer read as "the
+segment is not ready yet", and a code that is also a create code cannot match
+off a status that never carried it.
+
+**5. The branch model: task branches into `main`, as an explicit exception.**
+*(Ruled; both documents now say the same thing.)* The rule that was followed is
+the one that worked, so [AGENTS.md](AGENTS.md)'s "large efforts" section keeps
+its `effort/<project>` default and gains one bounded exception: a multi-task
+project may branch each task from `main` when its implementation plan says so
+*and* names the file ownership per task — an effort branch buys serialised
+integration, and there is nothing to serialise when no two tasks can touch the
+same file. §9 of the implementation plan now says which rule it is exercising
+and what earns it.
 
 ## The player input fence was red on `main`, on two doc comments
 

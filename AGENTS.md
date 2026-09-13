@@ -60,6 +60,18 @@ test failures, or denied lints.
   the qualification receipt exists. If `main` or the effort moves, qualify the
   new tree again.
 
+**The one bounded exception.** A multi-task project may branch each task from
+`main` and merge it there instead, when its implementation plan says so *and*
+names the file ownership per task, because an effort branch buys serialised
+integration and there is nothing to serialise when no two tasks can touch the
+same file. Everything else in this section still applies to such a project —
+focused regression per task, the tracked hook, the gate — and the plan carries
+the ownership table that makes the exception safe. The playback surface
+contract ran this way through eleven task pull requests
+([§8 and §9 of its plan](docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md));
+ruled 2026-09-13, and recorded here rather than left as two documents that
+disagree.
+
 Ordinary independent changes may continue to target `main` and use its
 affected-surface validation. The complete commands and rationale live in
 [docs/DEVELOPMENT_PIPELINE.md](docs/DEVELOPMENT_PIPELINE.md).
