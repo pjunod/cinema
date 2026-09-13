@@ -30,6 +30,19 @@ final class LiveTvPlayerController: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var playing = false
     @Published private(set) var paused = false
+    /// True only for a sustained mid-stream stall. AVPlayer's ordinary
+    /// buffering-rate evaluation at startup is not something the viewer
+    /// should be told about.
+    @Published private(set) var waiting = false
+    /// Distance from the playhead to the edge the current playlist offers.
+    /// This is not end-to-end broadcast latency.
+    @Published private(set) var behindEdgeSeconds: Double?
+    /// Media available after the playhead in the loaded range that contains it.
+    @Published private(set) var bufferedSeconds: Double?
+    @Published private(set) var pausedAt: Date?
+    /// Fullscreen copy only. Lineup status in `message` never reaches the
+    /// picture merely because the browser loaded or refreshed.
+    @Published private(set) var surfaceMessage: String?
     /// The guide is a second, independent read. It never gates the lineup and
     /// never gates a start: a page that waited on it would be a page that
     /// cannot tune while a guide host is slow.
@@ -47,6 +60,8 @@ final class LiveTvPlayerController: ObservableObject {
     private var heartbeat: Task<Void, Never>?
     private var guideRefresh: Task<Void, Never>?
     private var channelChange: Task<Void, Never>?
+    private var timeControlObservation: NSKeyValueObservation?
+    private var waitingDebounce: Task<Void, Never>?
     private var ownsAudioSession = false
     private var activateAudioSession: () -> Void = {
 #if os(iOS)
@@ -165,7 +180,19 @@ final class LiveTvPlayerController: ObservableObject {
         delivery = info.delivery
         playing = true
         player.play()
+        surfaceMessage = nil
         message = "Playing live · no recording or rewind"
+        timeControlObservation = player.observe(
+            \.timeControlStatus,
+            options: [.initial, .new]
+        ) { [weak self] player, _ in
+            let status = player.timeControlStatus
+            let reason = player.reasonForWaitingToPlay
+            Task { @MainActor [weak self] in
+                guard let self, self.serial == expected else { return }
+                self.applyTimeControl(status: status, reason: reason)
+            }
+        }
         heartbeat = Task { @MainActor [weak self] in
             var progress = LiveTvPlaybackWatchdog()
             while !Task.isCancelled {
@@ -174,6 +201,7 @@ final class LiveTvPlayerController: ObservableObject {
                 do {
                     if item.status == .failed { throw Self.playerFailure(item.error) }
                     let position = self.player.currentTime().seconds
+                    self.sampleLiveEdge(item: item, position: position)
                     if !self.paused && progress.observe(position: position) {
                         try await api.keepalive(info.sessionId)
                         guard self.serial == expected else { return }
@@ -197,6 +225,7 @@ final class LiveTvPlayerController: ObservableObject {
                     } else if progress.expired {
                         if self.paused {
                             self.message = "Paused for 30 seconds. The tuner was released; select a channel to resume live."
+                            self.surfaceMessage = self.message
                             await self.stop()
                             return
                         }
@@ -210,9 +239,11 @@ final class LiveTvPlayerController: ObservableObject {
                         self.message = failureCode == "source_format_changed"
                             ? "The broadcast changed format. Selecting a fresh route once…"
                             : "The original route was rejected. Retrying once with a compatible conversion…"
+                        self.surfaceMessage = self.message
                         do { try await self.stopChecked() }
                         catch {
                             self.message = "Cleanup is unconfirmed; retry Stop before opening another channel."
+                            self.surfaceMessage = self.message
                             return
                         }
                         if failureCode == "codec_unsupported" {
@@ -224,6 +255,7 @@ final class LiveTvPlayerController: ObservableObject {
                         return
                     }
                     self.message = error.localizedDescription
+                    self.surfaceMessage = self.message
                     await self.stop()
                     return
                 }
@@ -345,15 +377,76 @@ final class LiveTvPlayerController: ObservableObject {
                              ? "codec_unsupported" : "stream_failed")
     }
 
+    /// Pure classification kept separate from the debounce so tests can cover
+    /// every AVPlayer reason without constructing a player item.
+    static func waitingDecision(
+        status: AVPlayer.TimeControlStatus,
+        reason: AVPlayer.WaitingReason?
+    ) -> Bool {
+        status == .waitingToPlayAtSpecifiedRate && reason == .toMinimizeStalls
+    }
+
+    /// The observation seam: production KVO and tests enter through the same
+    /// debounce, while neither needs to manufacture a fake AVPlayer.
+    func applyTimeControl(
+        status: AVPlayer.TimeControlStatus,
+        reason: AVPlayer.WaitingReason?
+    ) {
+        let expected = serial
+        waitingDebounce?.cancel()
+        waitingDebounce = nil
+        guard Self.waitingDecision(status: status, reason: reason) else {
+            waiting = false
+            return
+        }
+        waitingDebounce = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: 350_000_000) } catch { return }
+            guard !Task.isCancelled, let self, self.serial == expected else { return }
+            self.waiting = true
+        }
+    }
+
+    private func sampleLiveEdge(item: AVPlayerItem, position: Double) {
+        guard position.isFinite else {
+            behindEdgeSeconds = nil
+            bufferedSeconds = nil
+            return
+        }
+        let seekable = item.seekableTimeRanges.compactMap { value -> Double? in
+            let range = value.timeRangeValue
+            let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+            return end.isFinite ? end : nil
+        }
+        behindEdgeSeconds = seekable.max().map { max(0, $0 - position) }
+
+        let loaded = item.loadedTimeRanges.compactMap { value -> (Double, Double)? in
+            let range = value.timeRangeValue
+            let start = CMTimeGetSeconds(range.start)
+            let end = CMTimeGetSeconds(CMTimeRangeGetEnd(range))
+            guard start.isFinite, end.isFinite else { return nil }
+            return (start, end)
+        }
+        guard !loaded.isEmpty else {
+            bufferedSeconds = nil
+            return
+        }
+        bufferedSeconds = loaded.first(where: { $0.0 <= position && position < $0.1 })
+            .map { max(0, $0.1 - position) } ?? 0
+    }
+
     func togglePause() {
         guard playing else { return }
         paused.toggle()
         if paused {
             player.pause()
+            pausedAt = Date()
             message = "Paused. The tuner is released after 30 seconds without playback; resuming has no rewind guarantee."
+            surfaceMessage = message
         } else {
             player.play()
+            pausedAt = nil
             message = "Playing live · no recording or rewind"
+            surfaceMessage = nil
         }
     }
 
@@ -388,6 +481,14 @@ final class LiveTvPlayerController: ObservableObject {
         heartbeat = nil
         channelChange?.cancel()
         channelChange = nil
+        timeControlObservation?.invalidate()
+        timeControlObservation = nil
+        waitingDebounce?.cancel()
+        waitingDebounce = nil
+        waiting = false
+        behindEdgeSeconds = nil
+        bufferedSeconds = nil
+        pausedAt = nil
         watching = nil
         status = nil
         delivery = nil
@@ -505,6 +606,16 @@ enum LiveTvType {
     static let eyebrow = Font.caption2.weight(.bold)
     static let chip = Font.system(size: 10.5, weight: .bold)
     #endif
+}
+
+struct LiveSurfaceChip: Equatable, Identifiable {
+    enum Kind: String {
+        case live, behind, signal, method, audio, clock
+    }
+
+    let kind: Kind
+    let text: String
+    var id: Kind { kind }
 }
 
 private let liveTvClock: DateFormatter = {
@@ -1292,6 +1403,63 @@ struct LiveTvView: View {
     private var tvLayout: TvLiveLayout {
         get { TvLiveLayout(rawValue: tvLayoutRaw) ?? .guidePreview }
         nonmutating set { tvLayoutRaw = newValue.rawValue }
+    }
+
+    static func liveSurfaceChips(
+        status: LiveTvStatus?,
+        delivery: LiveTvDelivery?,
+        behindEdge: Double?,
+        paused: Date?,
+        now: Date = Date()
+    ) -> [LiveSurfaceChip] {
+        var chips = [LiveSurfaceChip(kind: .live, text: "LIVE")]
+        if let behindEdge {
+            let behind = if let paused {
+                "paused · \(Self.livePauseDuration(from: paused, to: now))"
+            } else {
+                String(format: "%.1f s behind the edge", max(0, behindEdge))
+            }
+            chips.append(LiveSurfaceChip(kind: .behind, text: behind))
+        }
+        if let signal = status?.signal {
+            var facts = [String]()
+            if let strength = signal.strengthPercent {
+                let bars = String(repeating: "▮", count: min(5, max(0, strength / 20)))
+                facts.append([bars, "\(strength)% signal"].filter { !$0.isEmpty }.joined(separator: " "))
+            }
+            if let quality = signal.qualityPercent { facts.append("\(quality)% quality") }
+            if !facts.isEmpty {
+                chips.append(LiveSurfaceChip(kind: .signal, text: facts.joined(separator: " · ")))
+            }
+        }
+        if let delivery {
+            let output = delivery.output
+            let method = delivery.videoAction == "copy"
+                ? "direct \(output.videoCodec)"
+                : "transcode \(output.height)p \(output.videoCodec)"
+            chips.append(LiveSurfaceChip(kind: .method, text: method))
+            let channels = switch output.audioChannels {
+            case 1: "mono"
+            case 2: "stereo"
+            case 6: "5.1"
+            default: "\(output.audioChannels) ch"
+            }
+            let action = delivery.audioAction == "copy" ? "copied" : "transcoded"
+            chips.append(LiveSurfaceChip(
+                kind: .audio,
+                text: "\(output.audioCodec) \(channels) \(action)"
+            ))
+        }
+        chips.append(LiveSurfaceChip(
+            kind: .clock,
+            text: now.formatted(date: .omitted, time: .shortened)
+        ))
+        return chips
+    }
+
+    private static func livePauseDuration(from start: Date, to end: Date) -> String {
+        let seconds = max(0, Int(end.timeIntervalSince(start)))
+        return String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
 
     /// Leaving the tab or backgrounding the app releases the tuner — unless

@@ -902,6 +902,136 @@ final class LiveTvTests: XCTestCase {
         XCTAssertEqual(LiveTvPlayerController.playerFailure(decoder).code, "codec_unsupported")
     }
 
+    func testWaitingIsOnlyDrawnForAStallAndNeverForBufferingRateEvaluation() {
+        XCTAssertTrue(LiveTvPlayerController.waitingDecision(
+            status: .waitingToPlayAtSpecifiedRate,
+            reason: .toMinimizeStalls
+        ))
+        for reason: AVPlayer.WaitingReason? in [
+            .evaluatingBufferingRate, .noItemToPlay, nil,
+        ] {
+            XCTAssertFalse(LiveTvPlayerController.waitingDecision(
+                status: .waitingToPlayAtSpecifiedRate,
+                reason: reason
+            ))
+        }
+        for status: AVPlayer.TimeControlStatus in [.playing, .paused] {
+            for reason: AVPlayer.WaitingReason? in [
+                .toMinimizeStalls, .evaluatingBufferingRate, .noItemToPlay, nil,
+            ] {
+                XCTAssertFalse(LiveTvPlayerController.waitingDecision(
+                    status: status,
+                    reason: reason
+                ))
+            }
+        }
+    }
+
+    func testWaitingIsDebouncedAndClearsOnDetach() async {
+        let controller = LiveTvPlayerController.testing(
+            requests: LiveTvMockRequests(result: started())
+        )
+        controller.applyTimeControl(
+            status: .waitingToPlayAtSpecifiedRate,
+            reason: .toMinimizeStalls
+        )
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertFalse(controller.waiting, "a 200 ms transport pause is not viewer-facing")
+        controller.applyTimeControl(status: .playing, reason: nil)
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        XCTAssertFalse(controller.waiting, "clearing a short wait must cancel its delayed publish")
+
+        controller.applyTimeControl(
+            status: .waitingToPlayAtSpecifiedRate,
+            reason: .toMinimizeStalls
+        )
+        try? await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertTrue(controller.waiting, "350 ms of sustained stall must become visible")
+        await controller.stop()
+        XCTAssertFalse(controller.waiting)
+        XCTAssertNil(controller.behindEdgeSeconds)
+        XCTAssertNil(controller.bufferedSeconds)
+    }
+
+    func testTheTelemetryStripOmitsWhatItDoesNotKnow() {
+        let output = LiveTvDeliveryOutput(
+            container: "mpegts", videoCodec: "mpeg2video", audioCodec: "ac3",
+            width: 1920, height: 1080, bitDepth: nil, frameRate: nil,
+            hdr: nil, audioChannels: 6
+        )
+        let copied = LiveTvDelivery(
+            output: output, videoAction: "copy", audioAction: "copy",
+            packaging: "mpegts"
+        )
+        let empty = LiveTvView.liveSurfaceChips(
+            status: nil, delivery: nil, behindEdge: nil, paused: nil
+        )
+        XCTAssertNil(empty.first { $0.kind == .signal })
+        XCTAssertNil(empty.first { $0.kind == .behind })
+
+        let status = LiveTvStatus(
+            state: "active", channel: nil, ownerNodeId: "owner",
+            encoder: "pending", outputHeight: 720,
+            signal: LiveTvSignal(
+                strengthPercent: 92, qualityPercent: nil,
+                symbolQualityPercent: nil
+            )
+        )
+        let direct = LiveTvView.liveSurfaceChips(
+            status: status, delivery: copied, behindEdge: nil, paused: nil
+        )
+        XCTAssertTrue(direct.first { $0.kind == .signal }?.text.contains("92% signal") == true)
+        XCTAssertFalse(direct.first { $0.kind == .signal }?.text.contains("quality") == true)
+        XCTAssertEqual(direct.first { $0.kind == .method }?.text, "direct mpeg2video")
+        XCTAssertEqual(direct.first { $0.kind == .audio }?.text, "ac3 5.1 copied")
+
+        let encoded = LiveTvDelivery(
+            output: LiveTvDeliveryOutput(
+                container: "mpegts", videoCodec: "h264", audioCodec: "aac",
+                width: 1280, height: 720, bitDepth: nil, frameRate: nil,
+                hdr: nil, audioChannels: 2
+            ),
+            videoAction: "encode", audioAction: "encode", packaging: "mpegts"
+        )
+        let transcode = LiveTvView.liveSurfaceChips(
+            status: nil, delivery: encoded, behindEdge: 3.25, paused: nil
+        )
+        XCTAssertEqual(transcode.first { $0.kind == .method }?.text, "transcode 720p h264")
+        XCTAssertEqual(transcode.first { $0.kind == .behind }?.text, "3.2 s behind the edge")
+    }
+
+    func testTheSurfaceMessageIsNotTheLineupMessage() async throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent(
+                "../Sources/LiveTvView.swift"
+            ).standardizedFileURL,
+            encoding: .utf8
+        )
+        let load = source
+            .components(separatedBy: "func load(origin: String, token: String?) async {")[1]
+            .components(separatedBy: "private func resumeIfRecent")[0]
+        XCTAssertFalse(load.contains("surfaceMessage"),
+                       "loading lineup copy must never write on the picture")
+
+        let controller = LiveTvPlayerController.testing(
+            requests: LiveTvMockRequests(result: started())
+        )
+        XCTAssertNil(controller.surfaceMessage)
+        await controller.watch(channel)
+        XCTAssertEqual(controller.message, "Playing live · no recording or rewind")
+        XCTAssertNil(controller.surfaceMessage, "attach clears stale surface copy")
+        controller.togglePause()
+        XCTAssertEqual(
+            controller.surfaceMessage,
+            "Paused. The tuner is released after 30 seconds without playback; resuming has no rewind guarantee."
+        )
+        await controller.stop()
+        await controller.watch(channel)
+        XCTAssertNil(controller.surfaceMessage, "a fresh attachment owns a fresh surface")
+        await controller.stop()
+    }
+
     func testLiveTvOwnsThePlaybackAudioSessionForItsSeparatePlayer() async {
         let requests = LiveTvMockRequests(result: started())
         var audioEvents: [String] = []
