@@ -133,15 +133,16 @@ The constraint is physical: a client must start at least one steady-state
 segment behind live, or it stalls the first time it catches up. Two levers
 move it — the steady segment length, and how much listed media exists when
 the owner answers the start. The first frame, in turn, is bounded below by
-the tuner (2.77 s to first byte, measured), the probe (~1 s of
-`-analyzeduration` on a broadcast mux), one segment, and the fetch — the
-segment is the only one of those the server chooses. Paul's original
+the tuner (first byte in 0.36 s on one measured channel and 2.77 s on
+another — not a constant), the probe (~1 s of `-analyzeduration` on a
+broadcast mux), one segment, and the fetch — the segment is the only one
+of those the server chooses. Paul's original
 intent with `-hls_init_time 1` was exactly that: a short first segment so
 the start is no slower than the tuner. The mistake was not the short
 segment; it was letting the cadence *grow* afterwards. Measured on the
 same timeline model:
 
-| Producer arguments | Answer the start at | First frame vs today | Stalls (AVPlayer · hls.js · Exo) | Settles |
+| Producer arguments | Answer the start at | First frame vs today | Stalls in the model (AVPlayer · hls.js · Exo) | Settles |
 |---|---|---|---|---|
 | today: `init 1 · time 4 · list 6` | 1 listed segment | — | 3.6 s · 3.6 s · 3.6 s | 4.3 s behind |
 | today's arguments | 3 listed segments | +2.0 s | 1.6 s · 2.6 s · 1.6 s | 4.3 s |
@@ -151,7 +152,9 @@ same timeline model:
 | `time 4 · list 6`, no `init_time` | 1 listed segment | +3.0 s | 0 · 0 · 0, zero margin | 3.7 s |
 | `init 1 · time 2 · list 12` | ≥ 3 s listed | +2.0 s | 0 · 0.1 s · 0 | 2.6 s |
 
-**Recommended: uniform 1 s segments, answer at two listed segments.** The
+**Recommended: uniform 1 s segments, answer at two listed segments.**
+(Model numbers; the candidate build measures them on all three clients
+before anything merges — the implementation plan's §5.) The
 first seven segments are already 1 s today; this keeps that cadence for the
 whole session instead of jumping to 4 s. `TARGETDURATION` is 1 and never
 changes (RFC 8216 §6.2.1 says it must not; today it goes 1 → 3 → 4 and
@@ -214,6 +217,17 @@ media in hand.
   long GOP safe: two 2 s segments behind a `TARGETDURATION` of 2 is still
   a segment of margin, and a 1 s + 3 s pair behind a 3 is not answered
   until a third segment lands.
+- **The progress watchdog must count listed segments, not the media
+  sequence** (Astra, review finding 1): `last_progress` advances only when
+  `media_sequence` advances (4804–4808), which with a 24-entry window is
+  24 s on an encode route and 48 s on a 2 s-GOP copy route — past the 30 s
+  `PRODUCER_PROGRESS_TIMEOUT` at 4875. Without this, every copy stream
+  would start and then end half a minute in. The plan's §3.3 makes the
+  newest listed sequence the progress mark.
+- **Android starts where its explicit 4 s offset lands it**, which on a
+  long-GOP copy route is the *second* listed segment with no margin
+  (Astra, finding 3); the plan's §3.9 drops `setTargetOffsetMs(4_000)` so
+  Media3 uses the playlist's own hold-back and starts on the first.
 - The budget the second segment must fit is the relay's, not the
   producer's: a non-owner ingress gives the owner `START_EXCHANGE_ATTEMPT`
   = 20 s per POST ([`http/live_tv.rs:25`](../../crates/plurxd/src/http/live_tv.rs)),

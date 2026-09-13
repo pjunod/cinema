@@ -51,8 +51,16 @@ Surface"; the write-up, both rulings and the two-PR plan are in
 One adversarial review folded in (the inventory budget, the listed-count
 gate, the relay's 20 s attempt as the real budget, the inline-then-fullscreen
 re-host as a candidate the physical pass must exclude). The implementation
-plan for Astra's review is
-[LIVE-TV-START-STALL-AND-TVOS-SURFACE-IMPLEMENTATION.md](docs/features/LIVE-TV-START-STALL-AND-TVOS-SURFACE-IMPLEMENTATION.md).
+plan is
+[LIVE-TV-START-STALL-AND-TVOS-SURFACE-IMPLEMENTATION.md](docs/features/LIVE-TV-START-STALL-AND-TVOS-SURFACE-IMPLEMENTATION.md);
+Astra's review of its v1 found seventeen things, three of them blockers —
+the progress watchdog counts the media sequence, so a 24-entry window
+would have ended every copy stream at 30 s; Android's fixed 4 s offset
+starts it on the second segment of a long-GOP copy route with no margin;
+the graph probe has two outputs and the second is unbounded — and v2 folds
+all seventeen (§0 of the plan says where), adds a one-line Android PR, and
+moves the physical qualification to candidate builds before either PR is
+un-drafted.
 
 ## Apple's notice strip was a dead end, and two rows of the readiness card were false
 
