@@ -96,16 +96,56 @@ it unreachable. **The `when` arm itself could not be deleted** — Kotlin 2.3
 requires a `when` statement over an enum to be exhaustive — so it names its own
 guarantee instead of silently swallowing.
 
+### The pause ruling, ported
+
+The first round of this branch flagged a residue rather than fixing it: a
+`buffering` fault raised while playing and then *paused* never retired, because
+§3.1 retired `buffering` on presentation evidence and `attached_retired` only,
+and a paused picture produces no more samples. The Apple session found the same
+hole independently and the web had it too — the overlay outliving the thing it
+described, reintroduced by the migration itself. It is now **ruled**, and this
+branch carries the two cherry-picked fixture commits plus the Kotlin port:
+
+- `playback_not_requested` joins `SurfaceRetirement` and
+  `SurfaceClass.Buffering.retiredBy` — and **no other class's**. A `preparing`
+  start has not been paused by a viewer who has not seen it yet, and a blocking
+  prompt is answered by the viewer rather than by a transport change.
+  `PlaybackSurfaceReducerTest` asserts that list is exactly `[Buffering]`, twice:
+  once against the transcribed table and once against the fixture read directly.
+- `SurfaceEvent.PlaybackRequested` joins the reducer. `false` retires every
+  fault whose class names the reason; `true` moves nothing, because the raise
+  sites decide what comes back.
+- **The filter this client needs.** Media3 reports every app write of
+  `playWhenReady` as `PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST` whoever wrote
+  it, so the owner's own stop-before-raise is indistinguishable from a viewer's
+  pause at the callback — and a stop that retired the fault it is about to raise
+  over would be the owner deciding what the presenter shows. `Controller` keeps
+  the distinction as a **level**: the `SurfaceOwnerPlayer` setter marks it
+  *before* writing, because Media3 may deliver the callback before the setter
+  returns, and the next request for playback clears it. A level rather than an
+  edge, so a stop Media3 never reported — the player was already paused — cannot
+  swallow a later genuine pause; nothing can pause an already-paused player, and
+  the only event that can follow is a resume. No new detector, no new timer.
+
+### The fixture's codes, now that they exist
+
+The sixteen `segment_503_not_yet` codes are transcribed into `SURFACE_SOURCES`
+off the fixture. `surfaceRowAdmitsCode` already asked the row rather than
+deciding, so nothing else in the adapter moved — the row simply stopped claiming
+every 503, and `vod_disabled` on a segment is no longer `recovering`.
+
 ### Evidence
 
 `clients/android`, in the pinned image on m6 (`make android-test` / `make
 android`): `:app:compileDebugKotlin`, `:app:testDebugUnitTest`,
 `:app:lintDebug`, `:app:assembleDebug`. Counts read from
-`app/build/test-results/testDebugUnitTest/*.xml`, not from the log.
-Both fences, the node playback tests, `make web-check`, `tests/operations` and
-`scripts/validate lint` on the VM. Five mutations applied on the build host,
-each failing a named test against a run whose XML shows tests executed; the
-table is in the PR.
+`app/build/test-results/testDebugUnitTest/*.xml`, not from the log —
+**629 tests, 0 failures, 0 errors, 0 skipped** across 88 files, against 612 on
+`main` at the branch point. Both fences, all five node playback tests (62
+surface cases), `make web-check` exit 0, `tests/operations` 355 OK and
+`scripts/validate lint` on the VM. **Ten mutations** applied on the build host,
+each failing a named test against a run whose XML shows 629 tests executed, each
+reverted; the table is in the PR.
 
 **Unrun:** no emulator or physical device. §4.4's recorded emulator run — inject
 a 503 on a segment after 30 s of playback — has not been done, and M4's recipes

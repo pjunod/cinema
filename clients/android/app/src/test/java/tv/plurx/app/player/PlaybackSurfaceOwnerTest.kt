@@ -456,6 +456,127 @@ class PlaybackSurfaceOwnerTest {
         }
     }
 
+    // ------------------------------------ the viewer's own transport intent
+
+    @Test
+    fun theOwnersOwnStopIsNotAViewerPause() {
+        val intent = ViewerTransportIntent()
+        // An ordinary pause and an ordinary resume are the viewer's.
+        assertEquals(false, intent.report(false))
+        assertEquals(true, intent.report(true))
+        // The owner's stop-before-raise is not, however Media3 attributes it.
+        intent.ownerStopping()
+        assertNull("the owner's own stop must never retire a fault", intent.report(false))
+        // And the level clears on the next request for playback, not on the
+        // first report — a stop the platform never reported (already paused)
+        // would otherwise swallow the viewer's next real pause.
+        assertEquals(true, intent.report(true))
+        assertEquals(false, intent.report(false))
+    }
+
+    @Test
+    fun aStopTheplatformNeverReportedDoesNotSwallowALaterPause() {
+        val intent = ViewerTransportIntent()
+        // The owner stops a player that is already paused: Media3 reports
+        // nothing at all, so the level is still in force.
+        intent.ownerStopping()
+        // The viewer presses play — the only thing that can follow — and then
+        // pauses for real.
+        assertEquals(true, intent.report(true))
+        assertEquals(false, intent.report(false))
+    }
+
+    @Test
+    fun aBufferingFaultRetiresWhenTheViewerPauses() {
+        attached()
+        owner.bufferingMediaWait(epoch, positionMs = 90_000)
+        now += SurfaceTimings.BUFFERING_MIN_MS
+        owner.tick()
+        assertTrue("the wait is on screen", owner.current is PlaybackSurface.Blocking)
+        logs.clear()
+        // A paused picture produces no more presentation samples, so evidence
+        // can never retire this — the spinner would sit over a still frame
+        // until the generation changed.
+        owner.playbackRequested(false)
+        assertEquals(PlaybackSurface.None, owner.current)
+        assertEquals(listOf(SurfaceLogEvents.CLEARED), logs.map { it.event })
+        assertEquals("playback_not_requested", logs.single().by)
+    }
+
+    @Test
+    fun resumingRaisesNothingBack() {
+        attached()
+        owner.bufferingMediaWait(epoch, positionMs = 90_000)
+        owner.playbackRequested(false)
+        logs.clear()
+        now += 5_000
+        owner.playbackRequested(true)
+        owner.tick()
+        assertEquals("the raise sites decide what comes back", PlaybackSurface.None, owner.current)
+        assertTrue(logs.none { it.event == SurfaceLogEvents.RAISED })
+    }
+
+    @Test
+    fun aPauseDoesNotAnswerAPrompt() {
+        attached()
+        owner.exhaustedAfterReopenBudget(epoch, positionMs = 90_000)
+        owner.bufferingMediaWait(epoch, positionMs = 90_000)
+        logs.clear()
+        owner.playbackRequested(false)
+        val surface = owner.current
+        assertTrue("a prompt is answered by the viewer, not by a transport change",
+            surface is PlaybackSurface.Blocking)
+        val fault = checkNotNull(surface.fault)
+        assertEquals(SurfaceClass.Exhausted, fault.cls)
+        // The wait underneath it went, and only the wait.
+        assertEquals(listOf(SurfaceLogEvents.CLEARED), logs.map { it.event })
+        assertEquals(SurfaceClass.Buffering, logs.single().cls)
+        // And the way out is still there.
+        assertTrue(fault.actions.contains(SurfaceAction.Close))
+        owner.userAction(SurfaceAction.Close)
+        assertEquals(PlaybackSurface.None, owner.current)
+    }
+
+    @Test
+    fun aPauseLeavesAClientOpenAlone() {
+        // `playback_not_requested` is on `buffering` and no other class: a start
+        // the viewer has not seen yet has not been paused by them.
+        attached()
+        owner.preparingClientOpen(epoch, SurfaceContext.Start)
+        owner.playbackRequested(false)
+        val fault = checkNotNull(owner.current.fault)
+        assertEquals(SurfaceClass.Preparing, fault.cls)
+    }
+
+    @Test
+    fun theSegmentRefusalRowAdmitsOnlyTheCodesTheFixtureLists() {
+        // Contract §3.3 row 8 is a 503 WITH a "not yet" code, and this client is
+        // the one that can read the body. `vod_disabled` is the service being
+        // switched off; a 503 carrying it is not a recovery in progress.
+        assertEquals(
+            SurfaceSources.SEGMENT_503_NOT_YET,
+            surfaceSourceForCode("segment_pending", SurfaceContext.Attached),
+        )
+        assertTrue(
+            surfaceRowAdmitsCode(
+                SurfaceSources.SEGMENT_503_NOT_YET,
+                "node_wait_capacity",
+                SurfaceContext.Attached,
+            ),
+        )
+        assertFalse(
+            surfaceRowAdmitsCode(
+                SurfaceSources.SEGMENT_503_NOT_YET,
+                "vod_disabled",
+                SurfaceContext.Attached,
+            ),
+        )
+        assertFalse(
+            "a 503 nobody explained is not a \"still building\" answer either",
+            surfaceRowAdmitsCode(SurfaceSources.SEGMENT_503_NOT_YET, null, SurfaceContext.Attached),
+        )
+    }
+
     @Test
     fun aRowThatListsNoCodesClaimsItsStatusOutright() {
         // The adapter has to be right BEFORE and AFTER a `codes` list is added

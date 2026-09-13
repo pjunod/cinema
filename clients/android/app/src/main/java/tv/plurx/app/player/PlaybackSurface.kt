@@ -45,6 +45,15 @@ internal enum class SurfaceRetirement(val wire: String) {
     IntentSuperseded("intent_superseded"),
     AttachedRetired("attached_retired"),
     OwnerSuccess("owner_success"),
+
+    /**
+     * The viewer no longer wants media.
+     *
+     * On `buffering` and on NO other class: a `preparing` start has not been
+     * paused by a viewer who has not seen it yet, and a blocking prompt is
+     * answered by the viewer rather than by a transport change.
+     */
+    PlaybackNotRequested("playback_not_requested"),
     Timer("timer"),
     User("user"),
 }
@@ -107,7 +116,17 @@ internal enum class SurfaceClass(
         wire = "buffering",
         severity = SurfaceSeverity.Progress,
         blocking = SurfaceBlocking.WhileNotPresenting,
-        retiredBy = setOf(SurfaceRetirement.Presenting, SurfaceRetirement.AttachedRetired),
+        // A `buffering` fault is about a player that WANTS media. Presentation
+        // evidence is the only other thing that retires it, and a paused picture
+        // produces no more samples — so without `playback_not_requested` a
+        // buffer that fills while the viewer has paused leaves a spinner over a
+        // still frame until the generation changes, which is the overlay
+        // outliving the thing it described. Ruled upstream in 1e19b133.
+        retiredBy = setOf(
+            SurfaceRetirement.Presenting,
+            SurfaceRetirement.PlaybackNotRequested,
+            SurfaceRetirement.AttachedRetired,
+        ),
         minMs = SurfaceTimings.BUFFERING_MIN_MS,
     ),
     Recovering(
@@ -290,7 +309,33 @@ internal val SURFACE_SOURCES: List<SurfaceSourceRow> = listOf(
         SurfaceClass.Refused,
         actions = listOf(SurfaceAction.Retry),
     ),
-    SurfaceSourceRow(SurfaceSources.SEGMENT_503_NOT_YET, "attached", SurfaceClass.Recovering),
+    SurfaceSourceRow(
+        SurfaceSources.SEGMENT_503_NOT_YET,
+        "attached",
+        SurfaceClass.Recovering,
+        // The 503 codes a playlist or segment request can actually come back
+        // with. Transcribed from the fixture, which is where the argument for
+        // each of them lives; on those two resources a 503 is only ever a "not
+        // yet", and the terminal answers are 404/410/502.
+        codes = listOf(
+            "startup_timeout",
+            "playlist_state_changed",
+            "segment_pending",
+            "segment_wait_busy",
+            "node_wait_capacity",
+            "media_owner_transition",
+            "vod_resurrection_unavailable",
+            "response_owner_transition",
+            "response_state_changed",
+            "response_owner_reclassification_unavailable",
+            "response_publication_timeout",
+            "response_completion_capacity",
+            "response_snapshot_capacity",
+            "node_maintenance",
+            "node_removal_fenced",
+            "learner_route_ineligible",
+        ),
+    ),
     SurfaceSourceRow(
         SurfaceSources.MEDIA_OWNER_LOST_410,
         // `any`: a 410 is the server's answer on a create as well as on a
@@ -556,6 +601,20 @@ internal sealed interface SurfaceEvent {
     data class UserAction(val action: SurfaceAction) : SurfaceEvent
 
     /**
+     * The viewer's transport intent changed.
+     *
+     * `false` retires every fault whose class names `playback_not_requested` —
+     * `buffering`, and only `buffering`. `true` does nothing: the raise sites
+     * decide what comes back, which is the rule every other retirement follows.
+     *
+     * The VIEWER's intent, never the owner's stop-before-raise. Media3 reports
+     * both as a `USER_REQUEST`, and the filter that tells them apart is the
+     * caller's (`Controller.onPlayWhenReadyChanged`), because the caller is the
+     * only thing that knows which of the two wrote it.
+     */
+    data class PlaybackRequested(val requested: Boolean) : SurfaceEvent
+
+    /**
      * The app is hidden. Android has no hidden page: this is
      * `presentationForeground` inverted. While hidden, `presenting` samples are
      * ignored and every timer freezes.
@@ -649,6 +708,13 @@ internal class PlaybackSurfaceReducer {
             // replaced.
             is SurfaceEvent.OwnerSuccess -> dropFaults(next, log, "owner_success") { fault ->
                 fault.cls.retiredBy.contains(SurfaceRetirement.OwnerSuccess)
+            }
+            is SurfaceEvent.PlaybackRequested -> if (event.requested) {
+                next
+            } else {
+                dropFaults(next, log, SurfaceRetirement.PlaybackNotRequested.wire) { fault ->
+                    fault.cls.retiredBy.contains(SurfaceRetirement.PlaybackNotRequested)
+                }
             }
             is SurfaceEvent.UserAction -> applyUserAction(next, log, event.action)
             SurfaceEvent.Tick -> next

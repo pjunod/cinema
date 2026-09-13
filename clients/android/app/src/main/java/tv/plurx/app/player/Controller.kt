@@ -456,6 +456,14 @@ class Controller(
     private var presentationForeground = true
     private var mediaMutationEpoch = 0L
 
+    /**
+     * Which of the two things that write `playWhenReady` wrote it.
+     *
+     * Media3 attributes both to the viewer; [ViewerTransportIntent] is where the
+     * argument for keeping them apart lives, and where it is tested.
+     */
+    private val viewerTransport = ViewerTransportIntent()
+
     // ------------------------------------------------ the playback surface
     //
     // What the viewer is shown when playback is not simply playing, as a
@@ -485,6 +493,11 @@ class Controller(
             override var playbackRequested: Boolean
                 get() = player.playWhenReady
                 set(value) {
+                    // Marked BEFORE the write, not after: Media3 may deliver the
+                    // resulting `onPlayWhenReadyChanged` before this setter has
+                    // returned, and that callback is where the owner's own stop
+                    // has to be told apart from a viewer's pause.
+                    if (!value) viewerTransport.ownerStopping()
                     player.playWhenReady = value
                 }
             override val positionMs: Long get() = realPosition()
@@ -843,6 +856,12 @@ class Controller(
             // and audio-focus suppression do not replace viewer intent.
             if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST) {
                 playbackIntent.setPlaybackRequested(playWhenReady)
+                // The client's own fact, on the edge it already listens to: no
+                // new detector and no new timer. A `buffering` fault is about a
+                // player that wants media, so the viewer pausing makes it about
+                // nothing — but the owner's stop-before-raise arrives here too,
+                // and it is the owner deciding rather than the viewer.
+                viewerTransport.report(playWhenReady)?.let(surfaceOwner::playbackRequested)
             }
             sampleTargetPresentationDeadline()
         }

@@ -17,11 +17,16 @@ for that viewer and keeps server administration out of the comparison.
 > a successor's 404 `session_gone` lands — and session-status polling that
 > stopped answering each emit `surface_log_only` and move nothing, per row 18. A
 > playlist or segment 503 is `segment_503_not_yet` only when the fixture's row
-> admits its code: Android reads refusal bodies, so once that row lists codes, a
-> 503 nobody explained falls through to what the owner's own ladder was already
-> doing rather than borrowing `recovering`. The row lists none today, and a row
-> that lists none claims its status outright — so this is behaviour-identical
-> until the fixture narrows it, on every client at once. **Known parity gap:** `repeated_early_end` (row 16)
+> admits its code, and the row now lists sixteen: Android reads refusal bodies,
+> so a 503 carrying anything else — `vod_disabled`, the service switched off —
+> falls through to whatever row the code names, or to what the owner's own
+> ladder was already doing, rather than borrowing `recovering`. A
+> `buffering` fault the viewer pauses under is retired, per the 2026-09-13
+> ruling: it is about a player that wants media, and a paused picture produces
+> no more presentation samples, so without it the spinner sat over a still frame
+> until the generation changed. The owner's own stop-before-raise is filtered out
+> of that — Media3 reports it as a `USER_REQUEST` like any pause — so it can
+> never retire the fault it is about to raise over. **Known parity gap:** `repeated_early_end` (row 16)
 > still has no Android raise site, deliberately — see "Repeated early end"
 > below. No threshold, budget, detector or ladder moved.
 

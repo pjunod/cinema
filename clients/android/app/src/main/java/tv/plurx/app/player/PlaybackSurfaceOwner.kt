@@ -33,6 +33,49 @@ internal interface SurfaceOwnerPlayer {
     val rate: Float
 }
 
+/**
+ * Tells the owner's own stop apart from the viewer's pause.
+ *
+ * `playback_not_requested` retires a `buffering` fault because the VIEWER no
+ * longer wants media (contract §3.1, ruled 2026-09-13). On this client the
+ * platform cannot say which of the two wrote `playWhenReady`: Media3 reports
+ * every app write as `PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST`, and the
+ * owner's stop-before-raise is one of those. A stop that retired the fault it is
+ * about to raise over would be the owner deciding what the presenter shows,
+ * which is the one thing §3.0 gives the presenter instead.
+ *
+ * A LEVEL, not an edge. [ownerStopping] is called before the write rather than
+ * after, because Media3 may deliver the change before the setter that caused it
+ * returns; and the level is cleared by the next request for playback rather than
+ * by the first report, so a stop the platform never reported — the player was
+ * already paused — cannot swallow a later, genuine pause. Nothing can pause an
+ * already-paused player, so the only event that can follow such a stop is a
+ * resume, and that is exactly what clears it.
+ */
+internal class ViewerTransportIntent {
+    private var ownerStopInForce = false
+
+    /** The owner is about to stop the player. Call BEFORE the write. */
+    fun ownerStopping() {
+        ownerStopInForce = true
+    }
+
+    /**
+     * A `playWhenReady` change the platform attributed to a user request.
+     *
+     * Returns what to report to the presenter, or null when this is the owner's
+     * own stop and there is nothing about the viewer to report.
+     */
+    fun report(playWhenReady: Boolean): Boolean? {
+        if (playWhenReady) {
+            ownerStopInForce = false
+            return true
+        }
+        if (ownerStopInForce) return null
+        return false
+    }
+}
+
 /** What the player looked like when a fault was raised. Diagnostics, not evidence. */
 internal data class SurfacePlayerSample(
     val rate: Float,
@@ -111,6 +154,17 @@ internal class PlaybackSurfaceOwner(
 
     /** `presentationForeground` inverted: Android's stand-in for a hidden page. */
     fun hidden(hidden: Boolean) = dispatch(SurfaceEvent.Hidden(hidden))
+
+    /**
+     * The viewer's own transport intent. `false` retires `buffering` and nothing
+     * else; `true` moves nothing, because the raise sites decide what comes back.
+     *
+     * The caller owes the filter: this must never carry the owner's own
+     * stop-before-raise, because a stop that retired the fault it is about to
+     * raise over would be the owner deciding what the presenter shows.
+     */
+    fun playbackRequested(requested: Boolean) =
+        dispatch(SurfaceEvent.PlaybackRequested(requested))
 
     /** A platform callback that is not proof of anything. It moves nothing. */
     fun inert(name: String) = dispatch(SurfaceEvent.Inert(name))
