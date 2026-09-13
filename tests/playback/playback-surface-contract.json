@@ -213,6 +213,11 @@
       "retryable": true
     },
     {
+      "id": "client_preparing",
+      "context": "any",
+      "class": "preparing"
+    },
+    {
       "id": "change_failed",
       "context": "change",
       "class": "refused",
@@ -1424,6 +1429,41 @@
           "at": 1100,
           "surface": "none",
           "error": "unknown_source"
+        }
+      ]
+    },
+    {
+      "name": "client_preparing_is_the_staged_start",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 100,
+          "raise": "client_preparing",
+          "attached": "g1",
+          "context": "start"
+        },
+        {
+          "t": 2000,
+          "presenting": true,
+          "attached": "g1"
+        }
+      ],
+      "expect": [
+        {
+          "at": 100,
+          "surface": "blocking",
+          "class": "preparing",
+          "input_failed": false
+        },
+        {
+          "at": 2000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
         }
       ]
     },

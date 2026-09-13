@@ -436,18 +436,19 @@ Rows are evaluated in order; the first row whose `context` matches wins.
 | 7 | `vod_subtitle_burn_unavailable` | start | `stopped` | yes | class default |  |
 | 8 | `vod_disabled` | start | `stopped` | yes | class default |  |
 | 9 | `create_503_not_yet` | start | `preparing` | no | class default | codes: `startup_timeout` · `media_owner_transition` · `vod_index_pending` · `vod_engine_unattested`; retryable by the owner (M5) |
-| 10 | `change_failed` | change | `refused` | no | `retry` |  |
-| 11 | `segment_503_not_yet` | attached | `recovering` | no | class default |  |
-| 12 | `media_owner_lost_410` | attached | `recovering` | no | class default | re-classes to `stopped` when the owner stops; carries `position_ms` |
-| 13 | `control_hold` | attached | `hold` | no | class default |  |
-| 14 | `media_waiting` | attached | `buffering` | no | class default |  |
-| 15 | `owner_recovery_step` | any | `recovering` | no | class default |  |
-| 16 | `readiness_deadline_rungs_left` | any | `recovering` | no | class default |  |
-| 17 | `decoder_failed` | any | `stopped` | yes | class default |  |
-| 18 | `black_frame_ladder_spent` | start | `exhausted` | yes | `close` · `retry` |  |
-| 19 | `repeated_early_end` | attached | `stopped` | yes | class default |  |
-| 20 | `degraded_notice` | any | `degraded` | no | class default |  |
-| 21 | `log_only` | any | *(log only)* | no | class default |  |
+| 10 | `client_preparing` | any | `preparing` | no | class default |  |
+| 11 | `change_failed` | change | `refused` | no | `retry` |  |
+| 12 | `segment_503_not_yet` | attached | `recovering` | no | class default |  |
+| 13 | `media_owner_lost_410` | attached | `recovering` | no | class default | re-classes to `stopped` when the owner stops; carries `position_ms` |
+| 14 | `control_hold` | attached | `hold` | no | class default |  |
+| 15 | `media_waiting` | attached | `buffering` | no | class default |  |
+| 16 | `owner_recovery_step` | any | `recovering` | no | class default |  |
+| 17 | `readiness_deadline_rungs_left` | any | `recovering` | no | class default |  |
+| 18 | `decoder_failed` | any | `stopped` | yes | class default |  |
+| 19 | `black_frame_ladder_spent` | start | `exhausted` | yes | `close` · `retry` |  |
+| 20 | `repeated_early_end` | attached | `stopped` | yes | class default |  |
+| 21 | `degraded_notice` | any | `degraded` | no | class default |  |
+| 22 | `log_only` | any | *(log only)* | no | class default |  |
 
 | Fixture error | Meaning |
 |---|---|
@@ -462,6 +463,15 @@ Rows are evaluated in order; the first row whose `context` matches wins.
 - `owner_success: G` is the recovery owner reporting that its recovery produced attached generation G. There is one recovery owner per player, so it retires every `recovering` fault, not only the ones about the generation it replaced.
 
 <!-- contract:surface-sources:end -->
+
+`client_preparing` was added to the fixture by M1 (`web/playback-surface`) and
+is the one row above that the v2 table did not have. The staged loading overlay
+every client paints while it is opening a stream — "Reading media…", "Starting
+the transcoder…", "Preparing the stream…" — is a `preparing` fault with no
+refusal behind it, and the only row that produced `preparing` was the create
+503. It is the same class, so nothing about what is drawn changes; what changes
+is that the ledger can name the ordinary case instead of borrowing
+`owner_recovery_step` and calling a cold start a recovery.
 
 Rows 6, 8 and the `BEHIND_LIVE_WINDOW` clause of 13 name recovery steps the
 clients do not all perform today; those are **M5**, their own PR (ruled), and
