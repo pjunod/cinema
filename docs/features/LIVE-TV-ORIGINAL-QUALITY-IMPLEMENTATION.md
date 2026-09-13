@@ -609,9 +609,10 @@ profiles are not permission to restore the old PR test graph.
 5. **Open the main-bound PR as draft.** Request exactly one adversarial agent
    review of the integrated result. Address every finding and verify the
    fixes as author. No second review, re-review, panel, or follow-up approval.
-6. **Mark ready, then apply `fast-lane`.** Merge only after the current head
-   has a green **Main promotion gate**. Remove `fast-lane` before returning
-   to draft. Draft PRs execute no Forgejo checks or tests.
+6. **Mark ready.** That is what starts the lane — since 2026-09-13 there is
+   no label to apply. Merge only after the current head has a green **Main
+   promotion gate**. Returning a ready PR to draft cancels the run in
+   flight. Draft PRs execute no Forgejo checks or tests.
 7. **Keep runtime suites in the separate sweep.** The fast lane contains
    policy/static contracts and affected compilation, not unit, integration,
    browser, simulator, emulator, recovery, playback, package, or smoke suites.
