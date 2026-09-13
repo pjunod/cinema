@@ -460,6 +460,14 @@ class Controller(
     /** The only playback surface. Rendered from; never written to from a view. */
     internal val surface: StateFlow<PlaybackSurface> = _surface.asStateFlow()
 
+    /**
+     * Moves on every ledger change, including ones the drawn surface cannot
+     * show — a fault cleared underneath the one on screen changes the history
+     * and nothing else. Compose state, so Playback debug recomposes on it.
+     */
+    internal var surfaceRevision by mutableIntStateOf(0)
+        private set
+
     private val surfaceOwner = PlaybackSurfaceOwner(
         player = object : SurfaceOwnerPlayer {
             // Read through `player` rather than captured: a committed prepared
@@ -471,7 +479,12 @@ class Controller(
                     player.playWhenReady = value
                 }
             override val positionMs: Long get() = realPosition()
-            override val rate: Float get() = player.playbackParameters.speed
+            // `playbackParameters.speed` is the requested SETTING and stays
+            // 1.0 while the player is stopped — it is not Apple's
+            // `AVPlayer.rate`. The ledger's `rate` has to be able to read zero,
+            // because "exhausted with rate 0" is what M4 measures.
+            override val rate: Float
+                get() = if (player.isPlaying) player.playbackParameters.speed else 0f
         },
         nowMs = { monotonicNowMs() },
         publish = { value ->
@@ -479,7 +492,10 @@ class Controller(
             _surface.value = value
             // playback-surface-publish:end
         },
-        emit = { entry -> reportSurfaceLog(entry) },
+        emit = { entry ->
+            surfaceRevision += 1
+            reportSurfaceLog(entry)
+        },
     )
 
     /** Last `realPosition()` the surface sampled, or null after a generation change. */
@@ -489,6 +505,7 @@ class Controller(
 
     /** Last 16 faults, for the ledger's SURFACE section. */
     internal val surfaceHistory: List<SurfaceLedgerRow> get() = surfaceOwner.history
+
     private var statusPollingJob: Job? = null
     var playbackStallCount by mutableIntStateOf(0)
         private set
@@ -1368,7 +1385,14 @@ class Controller(
                             "PlurxPlayback",
                             "session create failed ${redactedFailureDetail("session_create", error)}",
                         )
-                        raiseSessionCreateFailure(error, "The server couldn't start this stream.")
+                        raiseSessionCreateFailure(
+                            error,
+                            "The server couldn't start this stream.",
+                            // Sound here: on a cold start nothing was ever set
+                            // on the player, so there is genuinely nothing
+                            // behind this failure.
+                            predecessor = predecessorAttached(),
+                        )
                     }
                     return@launch
                 }
@@ -1424,10 +1448,27 @@ class Controller(
         event: OpenPlaybackStallTracker.Event,
     ): Boolean = when (verdict.type) {
         "terminal" -> {
-            // Ruling D1: the verdict is armed, not executed. It is not a
-            // surface source (contract §3.3 row 10) — it never tears down, and
-            // the wording it arms is consumed by the `stopped` the owner raises
-            // when it has stopped the player. So: no stop, and no fault.
+            // Ruling D1 keeps the verdict from tearing anything down: returning
+            // true here is what stops a reopen from starting and a budget from
+            // being spent, and that is unchanged.
+            //
+            // But the owner has nothing left to try either, and nothing else
+            // will speak for it: this branch returns before
+            // `openStallTracker.reset()`, so the tracker stays latched with
+            // `fired = true` on a playhead that will never move; `playWhenReady`
+            // is still true so the tracker's own escape never fires;
+            // `sampleTargetPresentationDeadline` needs a `pendingSeek` a
+            // mid-film stall does not have; and `onPlayerError` never comes,
+            // because ExoPlayer is buffering rather than failing. There is no
+            // later `stopped` to consume the wording. So the owner stops the
+            // player and says so, in the server's words — see the amendment to
+            // §3.4's Android row in
+            // docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md.
+            surfaceOwner.stoppedAfterControlVerdict(
+                attached = mediaMutationEpoch,
+                positionMs = event.positionMs,
+                detail = verdict.message ?: "Playback stopped.",
+            )
             true
         }
         "hold", "retry_resource" -> {
@@ -1442,13 +1483,9 @@ class Controller(
             if (!event.controlMayDefer || !openStallTracker.defer(monotonicNowMs())) {
                 false
             } else {
-                surfaceOwner.raise(
-                    source = SurfaceSources.CONTROL_HOLD,
-                    // A stall is about attached media by definition, even
-                    // before this playback has rendered its first frame.
-                    context = SurfaceContext.Attached,
-                    attached = mediaMutationEpoch,
-                    detail = if (verdict.type == "hold") {
+                surfaceOwner.controlHold(
+                    mediaMutationEpoch,
+                    if (verdict.type == "hold") {
                         "Waiting briefly for the server. Your place is saved."
                     } else {
                         "The server asked playback to retry shortly. Your place is saved."
@@ -1546,13 +1583,7 @@ class Controller(
                 // (PlaybackTelemetry.kt), which is what closes the
                 // restart-under-overlay path. `stallWatchdogJob` stays: it is
                 // this owner's detector, and Keep waiting needs it.
-                surfaceOwner.stopAndRaise(
-                    source = SurfaceSources.OWNER_EXHAUSTED,
-                    context = SurfaceContext.Attached,
-                    attached = mediaMutationEpoch,
-                    positionMs = positionMs,
-                    detail = "Playback stopped responding after retrying this stream.",
-                )
+                surfaceOwner.exhaustedAfterSessionlessStall(mediaMutationEpoch, positionMs)
                 return
             }
             sessionlessStallRecoveryUsed = true
@@ -1565,13 +1596,7 @@ class Controller(
         // The server cannot step further down, so this is a visible terminal
         // failure with a retry affordance rather than silent infinite wait.
         if (!stallReopenBudget.canReopen()) {
-            surfaceOwner.stopAndRaise(
-                source = SurfaceSources.OWNER_EXHAUSTED,
-                context = SurfaceContext.Attached,
-                attached = mediaMutationEpoch,
-                positionMs = positionMs,
-                detail = "Playback stopped responding after exhausting recovery attempts.",
-            )
+            surfaceOwner.exhaustedAfterReopenBudget(mediaMutationEpoch, positionMs)
             return
         }
         val reason = "stall"
@@ -1663,6 +1688,16 @@ class Controller(
                             error,
                             playbackControl.terminalVerdict?.message
                                 ?: "The stream stalled and recovery failed.",
+                            // S5: a stalled player still holds its item and sits
+                            // in STATE_BUFFERING, so "an item is attached" is not
+                            // the question here — "is there a picture behind this
+                            // failure" is. Without the presentation test a frozen
+                            // stream got a passive banner with `intent = null`,
+                            // which `intent_superseded` can never match and which
+                            // ten seconds of continuous presentation will never
+                            // reach. See the amendment to §3.4's row for the
+                            // stall-reopen site.
+                            predecessor = predecessorAttached() && surfaceOwner.isPresenting,
                         )
                     }
                     return@launch
@@ -2299,19 +2334,17 @@ class Controller(
             detail = "target_ms=${event.targetMs} terminal=${event.terminal}",
         )
         if (event.terminal) {
-            surfaceOwner.stopAndRaise(
-                source = SurfaceSources.OWNER_EXHAUSTED,
-                context = SurfaceContext.Attached,
-                attached = mediaMutationEpoch,
-                positionMs = event.targetMs,
-                detail = "Playback couldn't reach the requested position after retrying. " +
-                    "Your place is saved.",
-            )
+            surfaceOwner.exhaustedAfterTargetDeadline(mediaMutationEpoch, event.targetMs)
         } else if (targetPresentationDeadline.recover(event, now, expectedOwner = targetPresentationOwner)) {
             restartAt(event.targetMs, "presentation-recovery", now)
-            // A deadline that fires with a rung left is recovery, not a prompt —
-            // and it is about the generation the restart just produced.
-            raiseRecoveryStep(null, "Getting back to the requested position.")
+            // §3.3 row 14: a readiness deadline that fires with a rung left is
+            // its own source, so the ledger names what actually happened. It is
+            // about the generation the restart just produced.
+            surfaceOwner.recoveringReadinessDeadline(
+                mediaMutationEpoch,
+                surfaceContext(),
+                "Getting back to the requested position.",
+            )
         }
     }
 
@@ -2462,12 +2495,7 @@ class Controller(
      * refusal, a PGS or PiP failure (§3.3 row 17). Banner, timed, no stop.
      */
     private fun raiseDegradedNotice(message: String) {
-        surfaceOwner.raise(
-            source = SurfaceSources.DEGRADED_NOTICE,
-            context = surfaceContext(),
-            attached = mediaMutationEpoch,
-            detail = message,
-        )
+        surfaceOwner.degradedNotice(mediaMutationEpoch, surfaceContext(), message)
     }
 
     /**
@@ -2476,23 +2504,24 @@ class Controller(
      */
     private fun raiseRecoveryStep(refusal: MediaRefusal?, reason: String) {
         val context = surfaceContext()
-        // `segment_503_not_yet` and `media_owner_lost_410` are attached-context
-        // rows; before the first frame the same failure is the owner's own
-        // recovery step and nothing more specific is true.
-        val source = if (context == SurfaceContext.Attached && refusal != null &&
-            refusal.source != SurfaceSources.AUTH_401_403
-        ) {
-            refusal.source
-        } else {
-            SurfaceSources.OWNER_RECOVERY_STEP
+        val detail = refusal?.message ?: reason
+        when {
+            // `segment_503_not_yet` is an attached-context row; before the
+            // first frame the same failure is the owner's own recovery step and
+            // nothing more specific is true. A 410 is `any` context since
+            // upstream 97231607, because it is an answer on a create too.
+            refusal?.source == SurfaceSources.SEGMENT_503_NOT_YET &&
+                context == SurfaceContext.Attached ->
+                surfaceOwner.recoveringSegmentRefusal(mediaMutationEpoch, refusal.positionMs, detail)
+            refusal?.source == SurfaceSources.MEDIA_OWNER_LOST_410 ->
+                surfaceOwner.recoveringMediaOwnerLost(
+                    mediaMutationEpoch,
+                    context,
+                    refusal.positionMs,
+                    detail,
+                )
+            else -> surfaceOwner.recoveringOwnerStep(mediaMutationEpoch, context, detail)
         }
-        surfaceOwner.raise(
-            source = source,
-            context = context,
-            attached = mediaMutationEpoch,
-            positionMs = refusal?.positionMs,
-            detail = refusal?.message ?: reason,
-        )
     }
 
     /**
@@ -2506,28 +2535,22 @@ class Controller(
      */
     private fun stopAndRaisePlaybackFailure(refusal: MediaRefusal?, sentence: String) {
         val attached = mediaMutationEpoch
-        if (refusal != null &&
-            refusal.source == SurfaceSources.MEDIA_OWNER_LOST_410 &&
-            surfaceContext() == SurfaceContext.Attached
-        ) {
-            surfaceOwner.raise(
-                source = SurfaceSources.MEDIA_OWNER_LOST_410,
-                context = SurfaceContext.Attached,
+        if (refusal != null && refusal.source == SurfaceSources.MEDIA_OWNER_LOST_410) {
+            surfaceOwner.recoveringMediaOwnerLost(
                 attached = attached,
+                context = surfaceContext(),
                 positionMs = refusal.positionMs ?: realPosition(),
                 detail = refusal.message ?: sentence,
                 actions = listOf(SurfaceAction.Retry, SurfaceAction.Close),
             )
         }
-        val source = if (refusal?.source == SurfaceSources.AUTH_401_403) {
-            SurfaceSources.AUTH_401_403
-        } else {
-            SurfaceSources.OWNER_STOPPED
-        }
-        surfaceOwner.stopAndRaise(
-            source = source,
-            context = SurfaceContext.Attached,
+        surfaceOwner.stoppedAfterPlaybackError(
             attached = attached,
+            source = if (refusal?.source == SurfaceSources.AUTH_401_403) {
+                SurfaceSources.AUTH_401_403
+            } else {
+                SurfaceSources.OWNER_STOPPED
+            },
             positionMs = refusal?.positionMs,
             detail = refusal?.message ?: sentence,
         )
@@ -2542,15 +2565,31 @@ class Controller(
      * is not the one that failed: context `change`, a banner with Try again,
      * and NO stop.
      */
-    private fun raiseSessionCreateFailure(error: Throwable, sentence: String) {
+    private fun raiseSessionCreateFailure(
+        error: Throwable,
+        sentence: String,
+        predecessor: Boolean,
+    ) {
         val status = refusalStatusOf(error)
         val refusal = error as? RefusalException
         val attached = mediaMutationEpoch
         val message = refusal?.message ?: sentence
-        if (predecessorAttached()) {
-            surfaceOwner.raise(
-                source = SurfaceSources.CHANGE_FAILED,
-                context = SurfaceContext.Change,
+        // R1: 401/403 beats context, everywhere. §3.3's table is first-match and
+        // the `auth_401_403` row (context `any`) sits above `change_failed`
+        // precisely so a pending change cannot demote a refused credential into
+        // a banner the viewer can ignore. It maps to a blocking class, so the
+        // owner stops the player first.
+        if (status == 401 || status == 403) {
+            surfaceOwner.stoppedAfterSessionCreate(
+                attached = attached,
+                source = SurfaceSources.AUTH_401_403,
+                positionMs = refusal?.positionMs,
+                detail = message,
+            )
+            return
+        }
+        if (predecessor) {
+            surfaceOwner.refusedChange(
                 attached = attached,
                 intent = playbackIntent.pendingSeek?.sequence,
                 positionMs = refusal?.positionMs,
@@ -2558,10 +2597,9 @@ class Controller(
             )
             return
         }
-        surfaceOwner.stopAndRaise(
-            source = createFailureSource(status, refusal),
-            context = SurfaceContext.Start,
+        surfaceOwner.stoppedAfterSessionCreate(
             attached = attached,
+            source = createFailureSource(refusal),
             positionMs = refusal?.positionMs,
             detail = message,
         )
@@ -2575,8 +2613,7 @@ class Controller(
      * `stopped` with the server's sentence: the create retry that would make it
      * a `preparing` is M5, and this change is behaviour-neutral (§3.3 row 9).
      */
-    private fun createFailureSource(status: Int?, refusal: RefusalException?): String = when {
-        status == 401 || status == 403 -> SurfaceSources.AUTH_401_403
+    private fun createFailureSource(refusal: RefusalException?): String = when {
         refusal == null -> SurfaceSources.OWNER_STOPPED
         refusal.code == "vod_source_rescan_required" -> SurfaceSources.VOD_SOURCE_RESCAN_REQUIRED
         refusal.code == "vod_source_unsupported" -> SurfaceSources.VOD_SOURCE_UNSUPPORTED

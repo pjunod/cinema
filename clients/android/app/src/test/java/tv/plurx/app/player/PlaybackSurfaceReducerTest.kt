@@ -77,6 +77,9 @@ class PlaybackSurfaceReducerTest {
             )
             // A class that retires on continuous presentation must name the
             // bound it is measured against, and it must be the fixture's.
+            // (`hold` moved from `presenting` to `presenting_after_raise`
+            // upstream in 881cf82f; the retired_by comparison above is what
+            // catches a client that did not port it.)
             if (cls.retiredBy.contains(SurfaceRetirement.PresentingContinuousMs)) {
                 val timings = contract.getValue("timings").jsonObject
                 val expected = when (cls) {

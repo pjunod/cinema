@@ -124,7 +124,9 @@ internal enum class SurfaceClass(
         wire = "hold",
         severity = SurfaceSeverity.Notice,
         blocking = SurfaceBlocking.Never,
-        retiredBy = setOf(SurfaceRetirement.Timer, SurfaceRetirement.Presenting),
+        // A server hold over a picture that never stopped expires on its timer,
+        // not on the picture that was already there.
+        retiredBy = setOf(SurfaceRetirement.Timer, SurfaceRetirement.PresentingAfterRaise),
         timedMs = SurfaceTimings.HOLD_NOTICE_MS,
     ),
     Degraded(
@@ -203,6 +205,7 @@ internal object SurfaceSources {
     const val VOD_SUBTITLE_BURN_UNAVAILABLE = "vod_subtitle_burn_unavailable"
     const val VOD_DISABLED = "vod_disabled"
     const val CREATE_503_NOT_YET = "create_503_not_yet"
+    const val CLIENT_PREPARING = "client_preparing"
     const val CHANGE_FAILED = "change_failed"
     const val SEGMENT_503_NOT_YET = "segment_503_not_yet"
     const val MEDIA_OWNER_LOST_410 = "media_owner_lost_410"
@@ -280,6 +283,7 @@ internal val SURFACE_SOURCES: List<SurfaceSourceRow> = listOf(
         ),
         retryable = true,
     ),
+    SurfaceSourceRow(SurfaceSources.CLIENT_PREPARING, "any", SurfaceClass.Preparing),
     SurfaceSourceRow(
         SurfaceSources.CHANGE_FAILED,
         "change",
@@ -289,7 +293,9 @@ internal val SURFACE_SOURCES: List<SurfaceSourceRow> = listOf(
     SurfaceSourceRow(SurfaceSources.SEGMENT_503_NOT_YET, "attached", SurfaceClass.Recovering),
     SurfaceSourceRow(
         SurfaceSources.MEDIA_OWNER_LOST_410,
-        "attached",
+        // `any`: a 410 is the server's answer on a create as well as on a
+        // segment, and it carries the position either way.
+        "any",
         SurfaceClass.Recovering,
         thenWhenStopped = SurfaceClass.Stopped,
         carriesPositionMs = true,
@@ -435,6 +441,27 @@ internal fun presentationEvidence(
     previousPositionMs != null &&
     previousPositionMs != positionMs
 
+/**
+ * The terminal for a playback that never got a player.
+ *
+ * The decision or the detail request failed, so there is no `Controller`, no
+ * presenter instance, no media generation for a fault to be about and no player
+ * to stop — `player_stopped` is true because there is nothing running. The
+ * class is still the contract's `stopped`, so the pre-play screen and the
+ * player's own terminal read and route alike. It lives here so the fence can
+ * forbid building a fault anywhere else.
+ */
+internal fun preplayerStoppedFault(detail: String): PlaybackFault = PlaybackFault(
+    cls = SurfaceClass.Stopped,
+    source = SurfaceSources.OWNER_STOPPED,
+    attached = 0,
+    intent = null,
+    raisedAtMs = 0,
+    detail = detail,
+    actions = SurfaceClass.Stopped.defaultActions,
+    playerStopped = true,
+)
+
 /** One ordered input to the reducer. Mirrors the fixture's event vocabulary. */
 internal sealed interface SurfaceEvent {
     /** Generation [generation] becomes attached; an earlier one is retired. */
@@ -509,6 +536,8 @@ internal data class SurfaceState(
 /** One log line for the client log and the ledger ring. */
 internal data class SurfaceLog(
     val event: String,
+    /** The fault's own raise order. The ledger pairs a clear to its raise by it. */
+    val seq: Long? = null,
     val cls: SurfaceClass? = null,
     val source: String? = null,
     val attached: Long? = null,
@@ -785,11 +814,18 @@ internal class PlaybackSurfaceReducer {
     }
 
     /**
-     * Evidence retires a fault only when the run of presentation BEGAN at or
-     * after the fault was raised. The picture that was already on screen when
-     * the server said "held" is not proof the hold is over — and an owner that
-     * reopens in place produces exactly this, which is why `recovering` does
-     * not need a new generation to be retired.
+     * `presenting_after_raise` only. The run of presentation has to have BEGUN
+     * at or after the fault was raised: the picture that was already on screen
+     * when the server said "held" is not proof the hold is over, and an owner
+     * that reopens in place produces exactly this, which is why `recovering`
+     * does not need a new generation to be retired.
+     *
+     * Plain `presenting` is NOT gated by it, and gating it was a bug: a picture
+     * that is presenting is not buffering and is not preparing, whenever its
+     * run began. A `media_waiting` raised over a picture that never stopped had
+     * no evidence that could ever postdate it, so the spinner stayed up for the
+     * rest of the film. The classes that need the stronger proof say so in
+     * `retiredBy`.
      */
     private fun evidencePostdates(state: SurfaceState, fault: PlaybackFault): Boolean {
         val since = state.presentingSinceMs ?: return false
@@ -829,9 +865,13 @@ internal class PlaybackSurfaceReducer {
             }
             // Evidence never retires a fault about a pending destination.
             if (fault.intent != null) continue
-            if (!state.presenting || !evidencePostdates(state, fault)) continue
-            if (cls.retiredBy.contains(SurfaceRetirement.Presenting) ||
-                cls.retiredBy.contains(SurfaceRetirement.PresentingAfterRaise)
+            if (!state.presenting) continue
+            if (cls.retiredBy.contains(SurfaceRetirement.Presenting)) {
+                reasons[fault.seq] = "presenting"
+                continue
+            }
+            if (cls.retiredBy.contains(SurfaceRetirement.PresentingAfterRaise) &&
+                evidencePostdates(state, fault)
             ) {
                 reasons[fault.seq] = "presenting"
             }
@@ -919,6 +959,7 @@ internal class PlaybackSurfaceReducer {
         action: SurfaceAction? = null,
     ): SurfaceLog = SurfaceLog(
         event = event,
+        seq = fault.seq,
         cls = fault.cls,
         source = fault.source,
         attached = fault.attached,

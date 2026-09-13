@@ -38,7 +38,7 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         # and reflected `setLoading`, and every one of them again against the
         # two surfaces M1 added. An exact count, because a pattern that stops
         # matching is a hole, and so is a fixture line nobody notices is dead.
-        expected = {"web": 37, "swift": 17, "kotlin": 8}
+        expected = {"web": 37, "swift": 17, "kotlin": 19}
         names = {"web": "must_trip.web.html", "swift": "must_trip.swift", "kotlin": "must_trip.kt"}
         for kind, name in names.items():
             with self.subTest(kind=kind):
@@ -246,6 +246,37 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         )
         self.assertEqual(len(allowed), 1, "the publish region should wrap exactly one line")
         self.assertIn("_surface.value", lines[sorted(allowed)[0] - 1])
+
+    def test_the_kotlin_arm_catches_the_six_bypasses_of_the_deleted_channel(self):
+        # M3 deleted `onError`, `playFailure` and `playbackNotice`, so the three
+        # patterns that used to be the whole Kotlin arm now guard nothing that
+        # exists — the arm was a no-op and six rewrites of the surface walked
+        # through it. Each is named here so removing a pattern fails a test that
+        # says which bypass it reopened.
+        text = (FIXTURES / "must_trip.kt").read_text(encoding="utf-8")
+        tokens = {token for _number, token in self.fence.scan_text("kotlin", text)}
+        for token in (
+            "surface flow write",        # `_surface.value =` outside the anchors,
+                                         # and tryEmit / emit / update
+            "surface constructed",       # PlaybackSurface.Blocking(...) outside the presenter
+            "fault constructed",         # a PlaybackFault built by hand
+            "generic surface raise",     # a site reaching past its named method,
+                                         # including the spelling without the stop
+            "screen-held failure string",  # the imperative channel under a new name
+        ):
+            self.assertIn(token, tokens, f"the Kotlin arm no longer catches: {token}")
+
+    def test_the_android_publish_region_is_required(self):
+        # Deleting both anchors used to open `Controller.kt` silently, because
+        # a missing region is not an error while a milestone is still ahead.
+        # M3 has landed, so it is an error now.
+        path = self.fence.Path(
+            "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt",
+        )
+        _begin, _end, _reason, required = self.fence.REGIONS[path][0]
+        self.assertTrue(required, "the Android publish region must be required after M3")
+        with self.assertRaises(ValueError):
+            self.fence.region_allowed_lines(path, ["_surface.value = surface"])
 
     def test_out_of_scope_files_are_named_not_forgotten(self):
         for path in self.fence.NEVER_SCANNED:

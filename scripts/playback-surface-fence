@@ -87,10 +87,36 @@ PATTERNS = {
         ("published storage write", re.compile(r"\b_surface(?:History)?\s*(?:=|\+=)(?!=)")),
         ("surface ledger write", re.compile(r"(?<!var )(?<!let )(?<![=!<>])\bsurfaceHistory\s*(?:=(?!=)|\+=|\.\s*record\s*\()")),
     ),
+    # M3 deleted `onError`, `playFailure` and `playbackNotice`, so those three
+    # patterns now guard nothing that exists. What replaced them is what has to
+    # be guarded: the StateFlow the presenter publishes through, the surface
+    # types themselves, the owner's stop, and the shape of the imperative
+    # channel that was removed — a nullable String the screen holds and paints.
     "kotlin": (
         ("onError call", re.compile(r"\bonError\s*(?:\(|\.invoke\s*\()")),
         ("onError alias", re.compile(r"=\s*onError\s*(?:[;,)\]}]|$)")),
         ("failure field write", re.compile(r"(?<!var )(?<!val )(?<![=!<>])\b(?:playFailure|playbackNotice)\s*(?:=|\+=)(?!=)")),
+        # The publish itself. Only the one assignment inside the anchors is
+        # allowed, and the region is `required=True` so deleting the anchors
+        # fails rather than opening the file.
+        ("surface flow write", re.compile(
+            r"\b_surface\s*\.\s*(?:value\s*(?:=|\+=)(?!=)|tryEmit\s*\(|emit\s*\(|update\s*[({])")),
+        # A surface built anywhere but the presenter. The render reads
+        # `PlaybackSurface`; it never constructs one.
+        ("surface constructed", re.compile(
+            r"\bPlaybackSurface\s*\.\s*(?:Blocking|Banner|Indicator)\s*\(")),
+        # A fault built by hand instead of raised. `preplayerStoppedFault` is
+        # the presenter's own factory for the one playback that never got one.
+        ("fault constructed", re.compile(r"\bPlaybackFault\s*\(")),
+        # The generic raise. Every site in `Controller` goes through a named
+        # method on `PlaybackSurfaceOwner`, so a new site has to add itself
+        # where a test can name it.
+        ("generic surface raise", re.compile(
+            r"\bsurfaceOwner\s*\.\s*(?:raise|raiseNotice|raiseBlocking|stopAndRaise)\s*\(")),
+        # The imperative channel, in the shape it would come back in: a
+        # nullable message the screen holds and paints for itself.
+        ("screen-held failure string", re.compile(
+            r"\bmutableStateOf\s*<\s*String\s*\?\s*>\s*\(\s*null\s*\)")),
     ),
 }
 
@@ -160,7 +186,10 @@ REGIONS = {
             "// playback-surface-publish:begin",
             "// playback-surface-publish:end",
             "The single assignment that publishes the presenter's surface.",
-            False,
+            # Required: M3 has landed, so deleting the anchors is not a file
+            # waiting for its milestone — it is the one write site going
+            # unfenced.
+            True,
         ),
     ),
 }

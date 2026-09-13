@@ -6,53 +6,73 @@ first.
 
 ## M3 — the Android playback surface is a projection of the player
 
-**In `android/playback-surface` (build 90), open as a WIP PR against `main`.**
-The third milestone of the [playback surface
-contract](docs/clients/PLAYBACK-SURFACE-CONTRACT.md) ports the presenter to
-Kotlin. `PlaybackSurface.kt` is a pure reducer — no Android imports, no player,
-no timers of its own — carrying the fixture's classes, sources and timings
-verbatim, and `PlaybackSurfaceReducerTest` runs all 54 ordered-event cases of
-`tests/playback/playback-surface-contract.json` against it. The two events
-Android cannot spell literally are MAPPED, with the mapping named beside it: a
-hidden page is `presentationForeground` inverted, and `canplay`/`playing`/
-`timeControlStatus` join `onIsPlayingChanged` on the one inert event Media3
-actually has.
+**In `android/playback-surface` (build 90), rebased onto M1, open as a WIP PR
+against `main` and adversarially reviewed twice.** The third milestone of the
+[playback surface contract](docs/clients/PLAYBACK-SURFACE-CONTRACT.md) ports
+the presenter to Kotlin. `PlaybackSurface.kt` is a pure reducer — no Android
+imports, no player, no timers of its own — carrying the fixture's classes,
+sources and timings verbatim, and `PlaybackSurfaceReducerTest` runs all 57
+ordered-event cases against it. The two events Android cannot spell literally
+are MAPPED, with the mapping named beside it: a hidden page is
+`presentationForeground` inverted, and `canplay`/`playing`/`timeControlStatus`
+join `onIsPlayingChanged` on the one inert event Media3 actually has. M0's
+evidence-gate fix (`881cf82f`), the 410's move to context `any` (`97231607`)
+and the new `client_preparing` row (`28e8ff56`) are ported and re-verified.
 
 `Controller` now publishes `StateFlow<PlaybackSurface>` and the `onError:
 (String) -> Unit` constructor parameter, `playbackNotice` and `PlayerScreen`'s
 `playFailure` are deleted. `PlaybackFailed` is opaque and reads the fault's
-title, sentence and actions; `PlayerInputState.Failed` is a blocking surface
+title, sentence and actions; the banner carries its actions too, so a failed
+change keeps the Retry it had; `PlayerInputState.Failed` is a blocking surface
 whose class is a prompt or a terminal, so a full-screen progress surface keeps
-today's routing. The recovery owner gains its one obligation at the sites §3.4
-names — the sessionless second stall, the spent reopen budget and the
-target-deadline terminal all set `playWhenReady = false` **before** they raise
-`exhausted`, and `onPlayerError` → `Fail` does the same before `stopped`, which
-also resets the open-stall tracker and closes the restart-under-overlay path by
-construction. `PlaybackSurfaceOwner.stopAndRaise` is the only route to a
-blocking class, and it samples `playWhenReady` after the stop: a site that
-forgot to stop produces a `blocking_without_stop` log line and no surface, not
-an overlay over a moving picture.
+today's routing. §3.1's progress rule is implemented on the waiting block this
+screen already draws: a `preparing`/`buffering`/`recovering` fault shows the
+existing spinner with the fault's own sentence, which is the in-chrome
+indicator when the picture is presenting and covers nothing that was there when
+it is not.
+
+Every site with nothing left to try is a **named method** on
+`PlaybackSurfaceOwner` that does its own stop before it raises, and there is no
+generic raise reachable from `Controller` — the fence fails on one. One test
+per site, so deleting one stop fails exactly one test. The first version of
+this work claimed that property and did not have it: it was a single helper
+called with three sentences, and any one site could have been changed to raise
+without stopping with every test still green.
+
+**Two behaviour changes beyond the stop-before-raise obligation, both
+deliberate.** The control-plane `terminal` verdict now stops the player and
+raises `stopped` with the server's wording. §3.4's Android row said "no stop,
+no fault; the wording is consumed by the later `stopped`" — there is no later
+`stopped`: that branch returns before the stall tracker is reset, the tracker
+is latched on a playhead that will never move, and nothing else fires. Followed
+literally it produced a frozen picture with no surface at all where `main` gave
+a full-screen overlay with Retry. D1 is untouched — the branch still returns
+`true`, so no reopen starts and no budget is spent. And §3.1's progress rule
+now draws, where the first version of this work recorded `recovering` in the
+ledger and the log and drew nothing at all — full screen and indicator alike.
+Both rows of §3.4 were amended in
+[PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md](docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md),
+with the reasoning, in the same commit as the code.
 
 The adapter reads refusal bodies for the first time: `createHlsSession` decodes
 a non-2xx into `RefusalException(status, code, message, positionMs)` and keeps
 `HttpException` for bodiless answers, and `onPlayerError` unwraps Media3's
-`InvalidResponseCodeException` and classifies 503 / 410 / 401 / 403.
+`InvalidResponseCodeException` and classifies 503 / 410 / 401 / 403. A 401 or
+403 keeps its Sign in wherever it is met, ahead of any pending change.
 `PlaybackPolicy.playbackErrorAction` is untouched — the adapter runs after it,
 on its outcome, and its tests pass unmodified. Playback debug gains the SURFACE
-section (kind, fault, source, attached/intent, and the last sixteen faults with
-the player as it was at each raise), and the four client-log events go out
-through `PlaybackTelemetry.report`. `scripts/playback-surface-fence` now scans
-three Kotlin files with no migration budget at all.
+section, and the four client-log events go out through
+`PlaybackTelemetry.report`.
 
-**Two things to watch.** Ruling D1 says the control-plane `terminal` verdict
-arms wording and never tears down, so `applyStallVerdict` no longer raises
-anything — and because that branch returns before the reopen and the stall
-tracker stays latched on a frozen playhead, a stream that ends there now shows
-nothing where it used to show an overlay. That is what §3.4's Android row asks
-for, and it is flagged rather than quietly re-decided. And `recovering`
-indicators are recorded in the ledger and the log but drawn nowhere yet: the
-existing waiting spinner still owns that pixel, deliberately, so this PR stays
-behaviour-neutral outside the stop-before-raise obligation.
+**Nothing Kotlin has been compiled**: this session has no Android SDK and no
+room for a Gradle build. `./gradlew :app:testDebugUnitTest :app:lintDebug` and a
+device run are outstanding and enumerated in the PR. What did run: the fences,
+the node contract test, the whole of `tests/operations`, `scripts/validate
+lint`, and — because the reducer is the part that must not drift — a Python
+transliteration of the shipped Kotlin over all 57 fixture cases plus a 3,500-
+sequence differential fuzz against the shipped JS reducer, with zero
+divergences.
+
 ## The Apple playback surface is one projection of the player (M2)
 
 **Built 2026-09-13 on `apple/playback-surface`, Apple build 147, WIP PR #280,

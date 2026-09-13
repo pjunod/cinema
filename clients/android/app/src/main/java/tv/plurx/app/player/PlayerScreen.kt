@@ -520,22 +520,7 @@ fun PlayerScreen(
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         when {
             failed -> PlaybackFailed(
-                // Before any Controller exists: the decision never loaded, so
-                // there is no player to stop, no media generation for a fault
-                // to be about and no presenter to run. The shape is still the
-                // contract's `stopped` — a terminal with Retry and Back — so
-                // this screen and the player's own terminal read and route
-                // alike.
-                fault = PlaybackFault(
-                    cls = SurfaceClass.Stopped,
-                    source = SurfaceSources.OWNER_STOPPED,
-                    attached = 0,
-                    intent = null,
-                    raisedAtMs = 0,
-                    detail = "Couldn't start playback.",
-                    actions = SurfaceClass.Stopped.defaultActions,
-                    playerStopped = true,
-                ),
+                fault = preplayerStoppedFault("Couldn't start playback."),
                 onAction = { action ->
                     if (action == SurfaceAction.Retry) {
                         startReason = "fallback"
@@ -759,12 +744,25 @@ private fun PlayerContent(
         )
     }
     // The one surface, projected from the player by the presenter.
-    val surface by controller.surface.collectAsStateWithLifecycle()
+    val collectedSurface by controller.surface.collectAsStateWithLifecycle()
+    // A plain local, because a delegated property cannot be smart-cast.
+    val surface: PlaybackSurface = collectedSurface
     // The input contract's `failed` state: a blocking surface with an answer
     // the viewer has to give. A full-screen progress surface covers pixels,
     // not routing (PLAYBACK-SURFACE-CONTRACT.md §4).
     val blockingFault = surface.fault?.takeIf { surface.entersFailedRouting }
     val bannerFault = (surface as? PlaybackSurface.Banner)?.fault
+    // §3.1's progress rule: `preparing`/`buffering`/`recovering` are full-screen
+    // while the attached picture is not presenting and an in-chrome indicator
+    // while it is. Both halves are the waiting block below — the same spinner
+    // this screen already draws for `isPlaybackWaiting`, which is the in-chrome
+    // indicator by construction and covers the picture only because there is no
+    // picture to cover when nothing is presenting.
+    val progressFault = when (surface) {
+        is PlaybackSurface.Indicator -> surface.fault
+        is PlaybackSurface.Blocking -> surface.fault.takeUnless { surface.entersFailedRouting }
+        is PlaybackSurface.Banner, is PlaybackSurface.None -> null
+    }
     val surfaceFocusRequester = remember { FocusRequester() }
     // Which grades this panel can show. Probed once per playback: it is a
     // property of the cable, and this screen owns one HDMI route for its life.
@@ -858,6 +856,37 @@ private fun PlayerContent(
             lastMarkerSkipEndMs = -1
         }
         controller.seekTo(targetMs)
+    }
+
+    /**
+     * The viewer answered a surface.
+     *
+     * The reducer clears the fault the action belonged to; the EFFECT is the
+     * recovery owner's and this screen's. Shared by the blocking prompt and the
+     * banner, so one action cannot come to mean two things.
+     */
+    fun onSurfaceAction(action: SurfaceAction) {
+        controller.surfaceAction(action)
+        when (action) {
+            SurfaceAction.KeepWaiting -> controller.keepWaiting()
+            // Re-issuing a failed change and retrying a spent ladder are the
+            // same call: the reload carries the position and the quality the
+            // viewer asked for, which is what the change was.
+            SurfaceAction.Retry -> onReload(
+                controller.prepareViewerRetry(),
+                "fallback",
+                playbackIntent.desiredQuality,
+            )
+            SurfaceAction.Close -> onExit()
+            // The credential the server refused is the one this app is holding;
+            // dropping it lands on the sign-in screen.
+            SurfaceAction.SignIn -> {
+                vm.logout()
+                onExit()
+            }
+            // No Android owner offers it; both renders filter it out.
+            SurfaceAction.ForceTranscode -> Unit
+        }
     }
 
     fun inputState(): PlayerInputState = when {
@@ -1311,16 +1340,24 @@ private fun PlayerContent(
         }
 
         val playbackWaiting = controller.isPlaybackWaiting
-        if (!isInPip && (playbackWaiting || findingNext)) {
+        if (!isInPip && (playbackWaiting || findingNext || progressFault != null)) {
             val waiting = playbackWaitPresentation(
                 runwaySeconds = (controller.player.bufferedPosition - controller.player.currentPosition)
                     .coerceAtLeast(0) / 1_000.0,
                 httpWaitCount = controller.sessionStatus?.http_wait_count,
             )
+            // A typed fault says what the player is working on ("Reconnecting
+            // on another server address."); `playbackWaitPresentation` only
+            // knows that it is waiting. The fault wins when there is one.
+            val title = when {
+                findingNext -> "Up next…"
+                progressFault?.detail != null -> progressFault.detail
+                else -> waiting.title
+            }
             Column(Modifier.align(Alignment.Center), horizontalAlignment = Alignment.CenterHorizontally) {
                 CircularProgressIndicator(color = Accent)
                 Text(
-                    if (findingNext) "Up next…" else waiting.title,
+                    title,
                     color = Color.White,
                     modifier = Modifier.padding(top = 12.dp),
                 )
@@ -1503,49 +1540,45 @@ private fun PlayerContent(
         }
 
         blockingFault?.let { fault ->
-            PlaybackFailed(
-                fault = fault,
-                onAction = { action ->
-                    // The reducer clears the fault the action belonged to; the
-                    // EFFECT of the action is the recovery owner's.
-                    controller.surfaceAction(action)
-                    when (action) {
-                        SurfaceAction.KeepWaiting -> controller.keepWaiting()
-                        SurfaceAction.Retry -> onReload(
-                            controller.prepareViewerRetry(),
-                            "fallback",
-                            playbackIntent.desiredQuality,
-                        )
-                        SurfaceAction.Close -> onExit()
-                        // The credential the server refused is the one this app
-                        // is holding; dropping it lands on the sign-in screen.
-                        SurfaceAction.SignIn -> {
-                            vm.logout()
-                            onExit()
-                        }
-                        SurfaceAction.ForceTranscode -> Unit
-                    }
-                },
-            )
+            PlaybackFailed(fault = fault, onAction = { action -> onSurfaceAction(action) })
         }
 
-        // The title first, because the one fault that has both is a blocking
-        // surface the agreement rule demoted: "Playback recovered" is the news,
-        // and the sentence underneath it is about the failure that lost.
-        // NOTE: the contract gives a `refused` banner a Retry action; Android
-        // still renders the banner as today's plain notice, so those actions
-        // reach the ledger and the client log but not a button yet.
-        (bannerFault?.title ?: bannerFault?.detail)?.let { notice ->
-            Text(
-                text = notice,
-                color = Color.White,
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 24.dp, start = 40.dp, end = 40.dp)
-                    .background(Color.Black.copy(alpha = 0.82f), MaterialTheme.shapes.medium)
-                    .padding(horizontal = 14.dp, vertical = 10.dp),
-            )
+        bannerFault?.let { fault ->
+            // The title first, because the one fault that has both is a
+            // blocking surface the agreement rule demoted: "Playback recovered"
+            // is the news, and the sentence under it is about the failure that
+            // lost. The actions come with it — a failed change that offers no
+            // Retry is the dead end this contract exists to remove.
+            val notice = fault.title ?: fault.detail
+            val actions = fault.actions.filter { it != SurfaceAction.ForceTranscode }
+            if (notice != null || actions.isNotEmpty()) {
+                Column(
+                    Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 24.dp, start = 40.dp, end = 40.dp)
+                        .background(Color.Black.copy(alpha = 0.82f), MaterialTheme.shapes.medium)
+                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    if (notice != null) {
+                        Text(
+                            text = notice,
+                            color = Color.White,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    if (actions.isNotEmpty()) {
+                        Spacer(Modifier.size(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            actions.forEach { action ->
+                                TvButton(onClick = { onSurfaceAction(action) }) {
+                                    Text(surfaceActionLabel(action))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -1951,11 +1984,15 @@ private fun PlayerInfo(
     onDismiss: () -> Unit,
 ) {
     val player = controller.player
-    // The ledger's SURFACE section. The history ring is not Compose state; the
-    // collected surface is, and every row in the ring arrives with a surface
-    // change, so reading it here recomposes with the answer.
+    // The ledger's SURFACE section.
     val surface by controller.surface.collectAsStateWithLifecycle()
     val surfaceFault = surface.fault
+    // `surfaceRevision` is Compose state and moves on every ring change, which
+    // the collected surface does not: a fault cleared underneath the one being
+    // drawn changes the history and nothing else, and Playback debug has to
+    // show that.
+    val surfaceRevision = controller.surfaceRevision
+    val surfaceHistory = remember(surfaceRevision) { controller.surfaceHistory }
     val selectedAudio = player.audioFormat?.let(::audioLabel)
         ?: plan.audio.firstOrNull { it.index == controller.selectedAudio }?.let(::serverAudioLabel)
         ?: plan.audio.firstOrNull { it.default }?.let(::serverAudioLabel)
@@ -2038,7 +2075,7 @@ private fun PlayerInfo(
             surfaceIds = surfaceFault?.let { fault ->
                 "${fault.attached} / ${fault.intent?.toString() ?: "—"}"
             },
-            surfaceHistory = surfaceHistoryLine(controller.surfaceHistory),
+            surfaceHistory = surfaceHistoryLine(surfaceHistory),
         ),
         reasons = plan.reasons,
         mode = mode,
