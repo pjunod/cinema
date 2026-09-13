@@ -2631,13 +2631,15 @@ final class PlayerController: ObservableObject {
         }
     }
 
-    /// Actions are a property of the FAULT, not of the class (contract §3.1),
-    /// so Try Again is offered when the fault offers it. Every blocking class
-    /// defaults to including `retry`, which is why this is the same answer the
-    /// bare `started` test gave for every fault this client raises today; the
-    /// exception the contract adds is an auth refusal, whose actions are Sign
-    /// in and Close, and where retrying the same bearer is the one thing that
-    /// cannot work.
+    /// Whether the blocking surface on screen offers another attempt.
+    ///
+    /// The failure view no longer gates a hard-coded button on this — it
+    /// renders the fault's own actions, `PlayerView.failureActions` — so this
+    /// is the same question asked of the model for callers that only want the
+    /// answer. Every blocking class defaults to including `retry`, which is
+    /// why it is the same answer the bare `started` test gave for every fault
+    /// this client raises, except an auth refusal, whose actions are Sign in
+    /// and Close and where retrying the same bearer cannot work.
     var canRetryPlaybackFailure: Bool {
         guard started else { return false }
         let actions = surface.surface.actions
@@ -4934,18 +4936,25 @@ final class PlayerController: ObservableObject {
     /// The decision, create and readiness failure path.
     ///
     /// What used to decide the blocking surface here was "is an item
-    /// attached", which is not the same question as "is the player stopped" —
-    /// a readiness deadline could put a full screen over a picture that was
-    /// still playing (§2.2). Now:
+    /// attached", which is not the same question the contract asks (§2.2). The
+    /// question is **is a picture presenting**, and the presenter already knows:
+    /// `surface.presenting` is the last sample of the client's own presentation
+    /// proof. "An item is attached" answers yes for an item AVFoundation never
+    /// readied, which is how a readiness timeout used to leave a red strip over
+    /// a black screen with no way out of it.
     ///
-    /// * a readiness verdict with **no rung left** is the owner declaring
-    ///   exhaustion, so it stops the player and then raises. This is the one
-    ///   place `fail()` gains a `player.pause()`;
-    /// * with **no item attached** there is nothing playing to disagree with,
-    ///   and the failure is terminal for this attempt;
-    /// * with an item still attached it is a refusal of a pending change —
-    ///   the predecessor keeps playing and keeps its own faults, which is what
-    ///   the banner says.
+    /// * **Nothing presenting** — there is no picture to disagree with, so the
+    ///   owner stops the player and raises a blocking fault: `exhausted` when
+    ///   this is a readiness verdict with the ladder spent, `stopped`
+    ///   otherwise. This is where `fail()` gained its `player.pause()`.
+    /// * **A picture presenting** — the viewer is watching something, so this
+    ///   is about the destination that failed and not about what is on screen:
+    ///   a 410 the buffer can still play out, or the refused change.
+    ///
+    /// R1 overrides both: a 401 or 403 beats context everywhere. The source
+    /// table puts `auth_401_403` above `change_failed` precisely so a pending
+    /// change cannot demote a credential refusal, and because it maps to a
+    /// blocking class the owner has to stop first.
     ///
     /// The server's own sentence wins wherever it sent one: the adapter reads
     /// the refusal body and the source table classifies on its code.
@@ -4956,32 +4965,33 @@ final class PlayerController: ObservableObject {
         let title = currentMs > 0
             ? Self.playbackStoppedFailureTitle
             : Self.playbackStartFailureTitle
-        let hasItem = player.currentItem != nil
-        let readinessVerdict = error is PlaybackPreparationError
-        if readinessVerdict, plannedCompatibilityFallback == .none {
-            // Stop, then raise. The ladder is spent, so nothing is coming that
-            // could make this picture move again on its own.
-            player.pause()
-            isPlaying = false
+        let classified = Self.refusalSurfaceOutcome(for: error)?.source
+        if classified == "auth_401_403" {
+            // R1. Stop first: the row is `stopped`, and a blocking class raised
+            // over a running player is refused by the presenter and draws
+            // nothing at all — a frozen picture with no banner and no prompt.
+            stopForBlockingSurface()
+            raiseOwnerFault(source: "auth_401_403", error: error, title: title, detail: detail)
+            return
+        }
+        guard surface.presenting else {
+            let ladderSpent = error is PlaybackPreparationError
+                && plannedCompatibilityFallback == .none
+                && player.currentItem != nil
+            // Stop, then raise. With the ladder spent nothing is coming that
+            // could make this picture move again on its own; with no picture at
+            // all the pause changes nothing a viewer can see and makes the stop
+            // the fault declares literally true.
+            stopForBlockingSurface()
             raiseOwnerFault(
-                source: hasItem ? "owner_exhausted" : "owner_stopped",
+                source: ladderSpent ? "owner_exhausted" : "owner_stopped",
                 error: error,
                 title: title,
                 detail: detail
             )
             return
         }
-        guard hasItem else {
-            // Nothing is attached, so this pause changes nothing a viewer can
-            // see — and it makes `player_stopped: true` literally true rather
-            // than a reading of what an itemless AVPlayer's rate happens to
-            // be. A blocking surface is only ever drawn over a stopped player.
-            player.pause()
-            isPlaying = false
-            raiseOwnerFault(source: "owner_stopped", error: error, title: title, detail: detail)
-            return
-        }
-        if Self.refusalSurfaceOutcome(for: error)?.source == "media_owner_lost_410" {
+        if classified == "media_owner_lost_410" {
             // D1's shape: the owner is gone but the buffered media in front of
             // the viewer is not, so this is `recovering` until the owner stops
             // — and the stop promotes this same fault, carrying the film
@@ -4994,8 +5004,8 @@ final class PlayerController: ObservableObject {
             )
             return
         }
-        // A predecessor is still attached and still playing. This is the
-        // change that failed, not the picture the viewer is watching.
+        // A picture is presenting. This is the change that failed, not the
+        // film the viewer is watching, and the predecessor keeps its own faults.
         raiseSurfaceNotice(
             source: "change_failed",
             context: .change,
@@ -5004,6 +5014,13 @@ final class PlayerController: ObservableObject {
             detail: detail,
             intent: viewerActionEpoch
         )
+    }
+
+    /// The recovery owner's one obligation, in one place: stop the player, and
+    /// make the published transport say so, before raising a blocking fault.
+    private func stopForBlockingSurface() {
+        player.pause()
+        isPlaying = false
     }
 
     // MARK: - The playback surface
@@ -5033,6 +5050,32 @@ final class PlayerController: ObservableObject {
         surfaceEpoch = ContinuousClock.now
         lastSurfaceSampleMs = nil
         surfaceHasPresented = false
+    }
+
+    /// The ledger ring and the four client-log events of the contract's §3.6.
+    ///
+    /// One POST per entry, not one per step. `/client-log` takes a single
+    /// `ClientLog` object and has its own per-user limiter, so batching a step
+    /// is a server change and this milestone does not touch the server. The
+    /// volume is bounded by the events themselves: a raise or a retirement,
+    /// never an evidence sample — a `presenting` sample that retires nothing
+    /// returns no entries and this returns immediately.
+    private func recordSurfaceLog(_ entries: [PlaybackSurfaceLog], at now: ContinuousClock.Instant) {
+        guard !entries.isEmpty else { return }
+        let elapsed = surfaceEpoch <= now
+            ? Self.milliseconds(surfaceEpoch.duration(to: now))
+            : 0
+        let snapshot = PlaybackSurfaceHistory.PlayerSnapshot(
+            rate: Double(player.rate),
+            positionMs: currentMs,
+            presenting: surface.presenting,
+            sessionId: sessionId,
+            attempt: playbackAttemptId
+        )
+        for entry in entries {
+            surfaceHistory.record(entry, atMs: elapsed, player: snapshot)
+            reportSurfaceEvent(entry, at: elapsed, snapshot: snapshot)
+        }
     }
     // playback-surface-publish:end
 
@@ -5080,7 +5123,6 @@ final class PlayerController: ObservableObject {
             source: outcome.source,
             context: resolved,
             attached: surfaceAttachedGeneration,
-            now: ContinuousClock.now,
             playerStopped: true,
             actions: outcome.actions,
             positionMs: outcome.positionMs ?? positionMs,
@@ -5092,6 +5134,13 @@ final class PlayerController: ObservableObject {
     /// Raise a fault that leaves the player alone: a notice, a hold, a
     /// recovery step, or a refused change over a predecessor that keeps
     /// playing.
+    ///
+    /// Structurally incapable of a blocking class. `surfaceOutcome` is told it
+    /// may not return one, so a code rewrite cannot turn a banner into a
+    /// `stopped` the presenter then refuses for want of a stop — which is not a
+    /// surface but the absence of one: a frozen picture with nothing drawn over
+    /// it. A blocking `fallback` is a call-site bug rather than a runtime
+    /// outcome, and trips in debug rather than shipping silence.
     private func raiseSurfaceNotice(
         source: String,
         context: PlaybackSurfaceModel.Context,
@@ -5100,12 +5149,20 @@ final class PlayerController: ObservableObject {
         detail: String?,
         intent: Int? = nil
     ) {
-        let outcome = Self.surfaceOutcome(for: error, context: context, fallback: source)
+        assert(
+            !Self.surfaceSourceIsBlocking(source, context: context),
+            "\(source) maps to a blocking class; raise it through raiseOwnerFault after a stop"
+        )
+        let outcome = Self.surfaceOutcome(
+            for: error,
+            context: context,
+            fallback: source,
+            allowsBlocking: false
+        )
         present(PlaybackSurfaceModel.raise(
             source: outcome.source,
             context: context,
             attached: surfaceAttachedGeneration,
-            now: ContinuousClock.now,
             intent: intent,
             playerStopped: false,
             actions: outcome.actions,
@@ -5124,13 +5181,30 @@ final class PlayerController: ObservableObject {
         for error: Error?,
         context: PlaybackSurfaceModel.Context,
         fallback: String,
-        fallbackActions: [PlaybackFault.Action] = []
+        fallbackActions: [PlaybackFault.Action] = [],
+        allowsBlocking: Bool = true
     ) -> PlaybackSurfaceOutcome {
         let generic = PlaybackSurfaceOutcome(source: fallback, actions: fallbackActions)
         guard let error, let classified = refusalSurfaceOutcome(for: error) else { return generic }
         guard case .success = PlaybackSurfaceContract.row(source: classified.source, context: context)
         else { return generic }
+        // A caller that has not stopped the player may not be handed a row the
+        // presenter will only draw over one.
+        guard allowsBlocking || !surfaceSourceIsBlocking(classified.source, context: context)
+        else { return generic }
         return classified
+    }
+
+    /// Does this row map to a class the presenter draws only over a player its
+    /// owner has already stopped?
+    nonisolated static func surfaceSourceIsBlocking(
+        _ source: String,
+        context: PlaybackSurfaceModel.Context
+    ) -> Bool {
+        guard case .success(let row) = PlaybackSurfaceContract.row(source: source, context: context),
+              let cls = row.cls
+        else { return false }
+        return PlaybackSurfaceContract.rule(for: cls).blocking == .always
     }
 
     /// The source row a create/decision refusal maps to, or `nil` when the
@@ -5239,25 +5313,6 @@ final class PlayerController: ObservableObject {
         let presenting = !isChangingStream && player.rate > 0 && moved && picture
         if presenting { surfaceHasPresented = true }
         present(.presenting(presenting, attached: attached))
-    }
-
-    /// The ledger ring and the four client-log events of the contract's §3.6.
-    private func recordSurfaceLog(_ entries: [PlaybackSurfaceLog], at now: ContinuousClock.Instant) {
-        guard !entries.isEmpty else { return }
-        let elapsed = surfaceEpoch <= now
-            ? Self.milliseconds(surfaceEpoch.duration(to: now))
-            : 0
-        let snapshot = PlaybackSurfaceHistory.PlayerSnapshot(
-            rate: Double(player.rate),
-            positionMs: currentMs,
-            presenting: surface.presenting,
-            sessionId: sessionId,
-            attempt: playbackAttemptId
-        )
-        for entry in entries {
-            surfaceHistory.record(entry, atMs: elapsed, player: snapshot)
-            reportSurfaceEvent(entry, at: elapsed, snapshot: snapshot)
-        }
     }
 
     /// A `Duration` as whole milliseconds, for the ledger and the log.
@@ -6595,8 +6650,7 @@ final class PlayerController: ObservableObject {
         guard started, !isChangingStream, player.currentItem != nil else { return }
         let fallback = plannedCompatibilityFallback
         guard fallback != .none else {
-            player.pause()
-            isPlaying = false
+            stopForBlockingSurface()
             raiseOwnerFault(
                 source: "black_frame_ladder_spent",
                 context: .start,

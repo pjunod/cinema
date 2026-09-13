@@ -16,4 +16,14 @@ extension PlayerController {
         failed
             = true
     }
+    // The six spellings that got a surface write past the first M2 fence.
+    func sneakierStill() {
+        surface = PlaybackSurfaceModel()
+        self.surface.apply(.raise(fault, context: .attached), now: .now)
+        self[keyPath: \.surface] = PlaybackSurfaceModel()
+        _surface = Published(initialValue: PlaybackSurfaceModel())
+        setValue(nil, forKey: "surfaceHistory")
+        surfaceHistory = PlaybackSurfaceHistory()
+        surfaceHistory.record(entry, atMs: 0, player: snapshot)
+    }
 }

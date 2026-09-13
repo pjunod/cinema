@@ -8,6 +8,9 @@ enum PlayerControl: Hashable {
     case reveal
     case close
     case retry
+    /// A blocking surface whose fault offers `sign_in` — a 401 or 403, where
+    /// retrying the same bearer is the one thing that cannot work.
+    case signIn
     case progress
     case marker
     case skipBack
@@ -1012,7 +1015,7 @@ struct PlayerView: View {
         #if os(tvOS)
         .onChange(of: controller.isPlaybackBlocked) { _, blocked in
             guard blocked else { return }
-            focusedControl = controller.canRetryPlaybackFailure ? .retry : .close
+            focusedControl = Self.failureFocusTarget(for: controller.surface.surface)
         }
         .onChange(of: focusedControl) { oldControl, newControl in
             if let newControl, newControl.isChromeControl {
@@ -1487,35 +1490,108 @@ struct PlayerView: View {
     }
 
     private var failureView: some View {
-        VStack(spacing: 14) {
-            Text(controller.surface.surface.title ?? PlayerController.playbackStartFailureTitle)
+        let surface = controller.surface.surface
+        return VStack(spacing: 14) {
+            Text(surface.title ?? PlayerController.playbackStartFailureTitle)
                 .font(.system(.body, design: .monospaced))
                 .foregroundColor(.white)
-            if let error = controller.surface.surface.detail {
+            if let error = surface.detail {
                 Text(error)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundColor(Palette.muted)
                     .multilineTextAlignment(.center)
             }
             HStack(spacing: 12) {
-                if controller.canRetryPlaybackFailure {
-                    Button("Try Again") { controller.retryAfterPlaybackFailure() }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Palette.accent)
-                        #if os(tvOS)
-                        .focused($focusedControl, equals: .retry)
-                        #endif
+                ForEach(Self.failureActions(for: surface), id: \.self) { action in
+                    failureActionButton(action)
                 }
-                Button("Close") { closePlayer() }
-                    .buttonStyle(.bordered)
-                    #if os(tvOS)
-                    .focused($focusedControl, equals: .close)
-                    #endif
             }
         }
         .padding(30)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
+    }
+
+    /// The buttons a blocking surface offers, in the fault's own order.
+    ///
+    /// Actions are a property of the FAULT (contract §3.1), so this is a
+    /// projection and not a hard-coded pair. Two rules on top of the fault's
+    /// list, each with a reason:
+    ///
+    /// * `keep_waiting` and `retry` are the same primitive on this client —
+    ///   §3.1 says Apple's Keep waiting IS `retryAfterPlaybackFailure`, which
+    ///   resets `recoveryReopenBudget` and only that — so offering both would
+    ///   be two buttons that do the same thing;
+    /// * Close is guaranteed. A full screen with no way out is worse than an
+    ///   extra button, and every blocking class's defaults include it anyway.
+    static func failureActions(for surface: PlaybackSurface) -> [PlaybackFault.Action] {
+        var actions = surface.actions.filter(rendersFailureAction)
+        if actions.contains(.retry) { actions.removeAll { $0 == .keepWaiting } }
+        if !actions.contains(.close) { actions.append(.close) }
+        return actions
+    }
+
+    /// Which button the remote lands on when a blocking surface appears: the
+    /// first one the fault actually offers, so a 401 opens on Sign In rather
+    /// than on a Try Again that is not drawn.
+    static func failureFocusTarget(for surface: PlaybackSurface) -> PlayerControl {
+        guard let first = failureActions(for: surface).first else { return .close }
+        switch first {
+        case .retry, .keepWaiting: return .retry
+        case .signIn: return .signIn
+        case .close, .forceTranscode: return .close
+        }
+    }
+
+    /// `force_transcode` is the web's, offered on its diagnosed-stall path.
+    /// This client has no such control, and a button that does nothing is
+    /// worse than no button.
+    static func rendersFailureAction(_ action: PlaybackFault.Action) -> Bool {
+        switch action {
+        case .retry, .keepWaiting, .close, .signIn: true
+        case .forceTranscode: false
+        }
+    }
+
+    @ViewBuilder
+    private func failureActionButton(_ action: PlaybackFault.Action) -> some View {
+        switch action {
+        case .retry, .keepWaiting:
+            Button(action == .keepWaiting ? "Keep Waiting" : "Try Again") {
+                controller.retryAfterPlaybackFailure()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Palette.accent)
+            #if os(tvOS)
+            .focused($focusedControl, equals: .retry)
+            #endif
+        case .signIn:
+            Button("Sign In") { signInAfterPlaybackFailure() }
+                .buttonStyle(.borderedProminent)
+                .tint(Palette.accent)
+                #if os(tvOS)
+                .focused($focusedControl, equals: .signIn)
+                #endif
+        case .close:
+            Button("Close") { closePlayer() }
+                .buttonStyle(.bordered)
+                #if os(tvOS)
+                .focused($focusedControl, equals: .close)
+                #endif
+        case .forceTranscode:
+            EmptyView()
+        }
+    }
+
+    /// Sign in belongs to the app, not to the player: the bearer is no longer
+    /// honoured, so the player tears down and `AppModel` puts the login screen
+    /// up through the same path every other screen uses. This adds no in-player
+    /// credential prompt.
+    private func signInAfterPlaybackFailure() {
+        finishPlayback {
+            model.noteAuthFailure(APIError.http(401))
+            dismiss()
+        }
     }
 
     #if os(iOS)

@@ -352,7 +352,10 @@ enum PlaybackSurfaceContract {
         .hold: ClassRule(
             severity: .notice,
             timedMs: 30_000,
-            retiredBy: [.timer, .presenting]
+            // `presenting_after_raise`, not `presenting`: a server hold over a
+            // picture that never stopped has not been answered by that picture,
+            // so it expires on its own timer instead.
+            retiredBy: [.timer, .presentingAfterRaise]
         ),
         .degraded: ClassRule(
             severity: .notice,
@@ -400,9 +403,18 @@ enum PlaybackSurfaceContract {
             codes: ["startup_timeout", "media_owner_transition", "vod_index_pending", "vod_engine_unattested"],
             retryable: true
         ),
+        // The commonest `preparing` surface there is: a staged start with no
+        // refusal behind it. Without this row a cold start had to borrow
+        // `owner_recovery_step` and tell the ledger a first play was a recovery.
+        SourceRow("client_preparing", nil, .preparing),
         SourceRow("change_failed", .change, .refused, actions: [.retry]),
         SourceRow("segment_503_not_yet", .attached, .recovering),
-        SourceRow("media_owner_lost_410", .attached, .recovering, thenWhenStopped: .stopped, carries: ["position_ms"]),
+        // `any`, not `attached`: a session handed to a node that is already
+        // gone answers 410 on the create with the same body, and this is the one
+        // row that carries `film_position_ms`. First-match still puts
+        // `change_failed` above it, so a 410 during a pending change stays a
+        // refusal about the destination rather than a verdict on the predecessor.
+        SourceRow("media_owner_lost_410", nil, .recovering, thenWhenStopped: .stopped, carries: ["position_ms"]),
         SourceRow("control_hold", .attached, .hold),
         SourceRow("media_waiting", .attached, .buffering),
         SourceRow("owner_recovery_step", nil, .recovering),
@@ -515,11 +527,12 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
 
     /// Build the event for a fault the adapter is raising. The source table
     /// decides the class, so the adapter never has to.
+    /// The raise carries no timestamp: `apply` stamps the fault with the
+    /// `now` it is applied at, which is the only clock the reducer has.
     static func raise(
         source: String,
         context: Context,
         attached: Int,
-        now: ContinuousClock.Instant,
         intent: Int? = nil,
         playerStopped: Bool = false,
         actions: [PlaybackFault.Action] = [],
@@ -535,7 +548,8 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
             source: source,
             attached: attached,
             intent: intent,
-            raisedAt: now,
+            // Overwritten by `applyRaise` with the instant it is applied at.
+            raisedAt: ContinuousClock.now,
             positionMs: positionMs,
             title: title,
             detail: detail,
@@ -782,11 +796,18 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
         faults = kept
     }
 
-    /// Evidence retires a fault only when the run of presentation BEGAN at or
-    /// after the fault was raised. The picture that was already on screen when
-    /// the server said "held" is not proof the hold is over — and an owner
-    /// that reopens in place produces exactly this, which is why `recovering`
-    /// does not need a new generation to be retired.
+    /// `presenting_after_raise` ONLY. The run of presentation has to have
+    /// begun at or after the fault was raised: the picture that was already on
+    /// screen when the server said "held" is not proof the hold is over, and an
+    /// owner that reopens in place produces exactly this, which is why
+    /// `recovering` does not need a new generation to be retired.
+    ///
+    /// Plain `presenting` is NOT gated by it, and gating it was M0's bug: a
+    /// picture that is presenting is not buffering and is not preparing,
+    /// whenever its run began. Safari fires `waiting` at every fMP4 boundary on
+    /// healthy 4K, so a `media_waiting` raised over a picture that never
+    /// stopped had no evidence that could ever postdate it and the spinner
+    /// stayed up for the rest of the film.
     private func evidencePostdates(_ fault: PlaybackFault) -> Bool {
         guard let presentingSince else { return false }
         return presentingSince >= fault.raisedAt
@@ -828,8 +849,13 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
             }
             // Evidence never retires a fault about a pending destination.
             if fault.intent != nil { continue }
-            guard presenting, evidencePostdates(fault) else { continue }
-            if rule.retiredBy.contains(.presenting) || rule.retiredBy.contains(.presentingAfterRaise) {
+            guard presenting else { continue }
+            if rule.retiredBy.contains(.presenting) {
+                expired.insert(fault.seq)
+                reasons[fault.seq] = .presenting
+                continue
+            }
+            if rule.retiredBy.contains(.presentingAfterRaise), evidencePostdates(fault) {
                 expired.insert(fault.seq)
                 reasons[fault.seq] = .presenting
             }
