@@ -2220,7 +2220,8 @@ fn spawn_background_loops(
     );
     tokio::spawn(std::sync::Arc::clone(&state.live_tv).metrics_loop(background_shutdown.clone()));
     tokio::spawn(
-        std::sync::Arc::clone(&state.live_tv).guide_refresh_loop(background_shutdown.clone()),
+        std::sync::Arc::clone(&state.live_tv)
+            .guide_refresh_loop(state.serving.subscribe(), background_shutdown.clone()),
     );
     // Reap idle transcode sessions in the background.
     tokio::spawn(std::sync::Arc::clone(&state.transcode).reap_loop());

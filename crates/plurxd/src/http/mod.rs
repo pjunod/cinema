@@ -131,6 +131,17 @@ pub fn router(state: AppState) -> Router {
             "/live-tv/sessions/{capability}",
             delete(live_tv::stop_session),
         )
+        // The three recovery routes, keyed by the client's own request id
+        // rather than by a capability: after an unclean end the id is the only
+        // handle the client still has.
+        .route(
+            "/live-tv/starts/{request_id}",
+            delete(live_tv::retire_start).get(live_tv::start_state),
+        )
+        .route(
+            "/live-tv/starts/{request_id}/resume",
+            post(live_tv::resume_start),
+        )
         .route("/scan/status", get(system::scan_status))
         .route("/activity", get(system::activity))
         .route("/activity/detail", get(system::activity_detail))
@@ -512,6 +523,18 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            crate::live_tv::RETIRE_PATH,
+            post(internal_live_tv::retire).layer(DefaultBodyLimit::max(1_024)),
+        )
+        .route(
+            crate::live_tv::RESUME_PATH,
+            post(internal_live_tv::resume).layer(DefaultBodyLimit::max(1_024)),
+        )
+        .route(
+            crate::live_tv::START_STATE_PATH,
+            post(internal_live_tv::start_state).layer(DefaultBodyLimit::max(1_024)),
+        )
+        .route(
             crate::live_tv::DRAIN_PATH,
             post(internal_live_tv::drain).layer(DefaultBodyLimit::max(
                 crate::live_tv::MAX_INTERNAL_BODY_BYTES,
@@ -655,6 +678,11 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 | crate::media_sessions::CONTROL_PATH
                 | crate::live_tv::RESOURCE_PATH
                 | crate::live_tv::STOP_PATH
+                // A retire is a stop plus a fence. Refusing it during
+                // maintenance refuses it precisely when a client needs it.
+                | crate::live_tv::RETIRE_PATH
+                | crate::live_tv::RESUME_PATH
+                | crate::live_tv::START_STATE_PATH
         )
     {
         return true;
@@ -681,6 +709,12 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
                 ["api", "v1", "hls", _]
                     | ["api", "v1", "publication", _]
                     | ["api", "v1", "live-tv", "sessions", _]
+                    | ["api", "v1", "live-tv", "starts", _]
+            ))
+        || (method == Method::POST
+            && matches!(
+                segments.as_slice(),
+                ["api", "v1", "live-tv", "starts", _, "resume"]
             ));
     let live_keepalive = method == Method::PUT
         && matches!(
@@ -891,13 +925,13 @@ async fn cluster_capacity_gate(
 
 fn safe_trace_target(uri: &Uri) -> String {
     let mut segments = uri.path().split('/').collect::<Vec<_>>();
-    for marker in ["media", "hls", "publication", "sessions"] {
+    for marker in ["media", "hls", "publication", "sessions", "starts"] {
         if let Some(index) = segments.iter().position(|segment| *segment == marker) {
             let is_capability_route = match marker {
                 "media" => index >= 2 && segments.get(index.wrapping_sub(1)) == Some(&"offline"),
                 "hls" => true,
                 "publication" => true,
-                "sessions" => index > 0 && segments.get(index - 1) == Some(&"live-tv"),
+                "sessions" | "starts" => index > 0 && segments.get(index - 1) == Some(&"live-tv"),
                 _ => false,
             };
             if is_capability_route && index + 1 < segments.len() {
@@ -1206,6 +1240,19 @@ mod tests {
             (Method::DELETE, "/api/v1/live-tv/sessions/cap"),
             (Method::POST, crate::live_tv::RESOURCE_PATH),
             (Method::POST, crate::live_tv::STOP_PATH),
+            // A viewer must be able to let go of a tuner, or rejoin the stream
+            // they already hold, precisely while the node is being worked on.
+            (Method::POST, crate::live_tv::RETIRE_PATH),
+            (Method::POST, crate::live_tv::RESUME_PATH),
+            (Method::POST, crate::live_tv::START_STATE_PATH),
+            (
+                Method::DELETE,
+                "/api/v1/live-tv/starts/0123456789abcdef0123456789abcdef",
+            ),
+            (
+                Method::POST,
+                "/api/v1/live-tv/starts/0123456789abcdef0123456789abcdef/resume",
+            ),
         ] {
             assert!(maintenance_route_eligible(&method, path), "{method} {path}");
         }
@@ -1381,6 +1428,33 @@ mod tests {
         assert_eq!(
             safe_trace_target(&publication),
             "/api/v1/publication/[REDACTED]/OEBPS/chapter.xhtml"
+        );
+
+        // A public start id is not a capability, but it derives one through
+        // replay and resume, so the access log must not carry it either.
+        let retire: Uri = "/api/v1/live-tv/starts/0123456789abcdef0123456789abcdef"
+            .parse()
+            .expect("uri");
+        assert_eq!(
+            safe_trace_target(&retire),
+            "/api/v1/live-tv/starts/[REDACTED]"
+        );
+        let resume: Uri = "/api/v1/live-tv/starts/0123456789abcdef0123456789abcdef/resume"
+            .parse()
+            .expect("uri");
+        assert_eq!(
+            safe_trace_target(&resume),
+            "/api/v1/live-tv/starts/[REDACTED]/resume"
+        );
+
+        // The marker only redacts under `live-tv`; an unrelated route that
+        // happens to contain the word keeps its shape.
+        let elsewhere: Uri = "/api/v1/library-channels/starts/summary"
+            .parse()
+            .expect("uri");
+        assert_eq!(
+            safe_trace_target(&elsewhere),
+            "/api/v1/library-channels/starts/summary"
         );
     }
 

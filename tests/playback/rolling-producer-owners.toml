@@ -1442,7 +1442,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # actor through its returned handle and retained executor registration. The
 # fixture drops both together; no task escapes the test and no shipped spawn
 # was added.
-expected_occurrences = 487
+# +3 for the Live TV reliability lane, all reviewed and none a producer:
+# two tokio::task::spawn_blocking calls in GuideCache (persist_guide's encode
+# and rename, discard_persisted's remove) that move one bounded file operation
+# off the runtime, and one tokio::spawn in the retire path. None of them selects
+# a recipe, publishes a response, or starts a tuner.
+expected_occurrences = 490
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1785,7 +1790,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 733 -> 734: `hold_actor_managed_producer` awaits one bounded one-second
 # observation of the actor's physical hold acknowledgement. The timeout is
 # test-only, is awaited to completion, and owns neither producer nor process.
-expected_occurrences = 734
+# +6 for the Live TV reliability lane: the refresh loop's own
+# tokio::time::sleep in its select, and five tokio::time::timeout /
+# Instant-arithmetic sites in the new registry tests. None bounds a producer;
+# the loop's cadence is the owner's, not a stream's.
+expected_occurrences = 740
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2058,7 +2067,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 318 -> 322: four `Response::status()` assertions cover live transcode, live
 # remux, and unchanged VOD HTTP answers. They inspect in-process responses;
 # none is a child-process launch or a producer owner.
-expected_occurrences = 322
+# +2 for the Live TV reliability lane, both spawn_blocking file writes in
+# GuideCache rather than child processes. The pattern cannot tell them apart, so
+# the count is reviewed here instead.
+expected_occurrences = 324
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

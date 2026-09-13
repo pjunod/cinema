@@ -359,6 +359,13 @@ _Generated from the `live` section of [`tests/playback/player-input-contract.jso
 | `hidden_only_while_playing` | true |
 | `channel_coalesce_ms` | 350 |
 | `preview_auto_commit_ms` | none |
+| `guide_poll_unavailable_s` | 30 |
+| `guide_poll_min_s` | 15 |
+| `guide_poll_after_next_refresh_s` | 5 |
+| `retire_liveness_probe_ms` | 250 |
+| `retire_orphan_after_keepalives` | 3 |
+| `start_replay_attempts` | 1 |
+| `guide_poll_ceiling_s` | 1200 |
 
 **Hotkeys** (desktop, only while the live host is fullscreen or focused): `f` fullscreen · `m` mute · `p` picture_in_picture · `g` guide_sheet · `escape` exit.
 

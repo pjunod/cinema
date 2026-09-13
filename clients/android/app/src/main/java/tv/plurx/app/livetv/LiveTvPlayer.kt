@@ -42,7 +42,7 @@ data class LiveTvPlayerState(
 class LiveTvPlayer private constructor(context: Context) {
     private val context = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val barrier = LiveTvStartBarrier(LiveTvFileBarrierStore(this.context))
+    private val hints = LiveTvStartHintStore(this.context)
     private var lease: LiveTvLease? = null
     private var api: LiveTvApi? = null
     private var profile: Pair<String, String>? = null
@@ -77,7 +77,7 @@ class LiveTvPlayer private constructor(context: Context) {
                 if (profile != identity || api == null) {
                     val next = LiveTvApi(origin, token, context)
                     api = next
-                    lease = LiveTvLease(next, barrier, scope)
+                    lease = LiveTvLease(next, hints, scope)
                     profile = identity
                 }
                 val lineup = api!!.lineup()
@@ -86,6 +86,7 @@ class LiveTvPlayer private constructor(context: Context) {
                     message = if (lineup.channels.isEmpty()) "No channels. Check the saved tuner and channel scan in Settings → Developer."
                     else "Select a channel · lineup ${lineup.freshness}")
                 startGuideRefresh(origin, token)
+                resumeIfRecent(mine)
             } catch (error: Exception) { if (mine == serial) fail(error) }
         }
     }
@@ -137,84 +138,144 @@ class LiveTvPlayer private constructor(context: Context) {
             try {
                 val started = lease.start(channel.id).await() ?: return@launch
                 if (mine != serial) return@launch
-                val output = ExoPlayer.Builder(context)
-                    .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(api.mediaClient)))
-                    .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(4_000, 12_000, 1_000, 2_000).build())
-                    .build()
-                player = output
-                // Both of these tear the player down, and they arrive from
-                // inside ExoPlayer's own listener iteration. Releasing a player
-                // re-entrantly from its callback is not a documented-safe
-                // operation, so the teardown is posted: `Dispatchers.Main`
-                // rather than the scope's `Main.immediate`, which would run it
-                // inline and change nothing.
-                output.addListener(object : Player.Listener {
-                    override fun onPlayerError(error: PlaybackException) {
-                        if (mine != serial) return
-                        val code = liveTvPlaybackErrorCode(error.errorCode)
-                        scope.launch(Dispatchers.Main) {
-                            if (mine == serial && code == "codec_unsupported" && !compatibilityRetry) {
-                                retryCompatible(channel, api, lease, LiveTvCompatibility(
-                                    failed_video = true, failed_audio = true, failed_container = true,
-                                ))
-                            } else if (mine == serial) stopWithMessage(liveTvMessage(code))
-                        }
-                    }
-                    override fun onPlaybackStateChanged(playbackState: Int) {
-                        if (mine != serial || playbackState != Player.STATE_ENDED) return
-                        scope.launch(Dispatchers.Main) {
-                            if (mine == serial) stopWithMessage(liveTvMessage("stream_failed"))
-                        }
-                    }
-                })
-                output.setMediaItem(MediaItem.Builder().setUri(api.playlistUrl(started.session_id))
-                    .setMimeType(MimeTypes.APPLICATION_M3U8)
-                    .setLiveConfiguration(MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(4_000).setMaxOffsetMs(8_000).build())
-                    .build())
-                output.prepare()
-                output.play()
-                mutableState.value = mutableState.value.copy(playing = true, busy = false, paused = false, muted = false, message = "Playing live")
-                val watchdog = LiveTvWatchdog()
-                heartbeat = scope.launch {
-                    try {
-                        while (mine == serial) {
-                            delay(5_000)
-                            if (mine != serial) break
-                            val counters = output.videoDecoderCounters
-                            counters?.ensureUpdated()
-                            if (watchdog.observe(counters?.renderedOutputBufferCount ?: 0, output.isPlaying)) {
-                                lease.heartbeatMarker()
-                                api.keepalive(started.session_id)
-                                if (mine != serial) break
-                                val status = api.status(started.session_id)
-                                if (status.state != "active") throw LiveTvFailure("stream_failed")
-                                if (mine == serial) {
-                                    val observed = status.channel
-                                    val current = mutableState.value
-                                    mutableState.value = current.copy(
-                                        status = status,
-                                        watching = observed?.takeIf { it.id == current.watching?.id }
-                                            ?: current.watching,
-                                        channels = if (observed == null) current.channels else current.channels.map {
-                                            if (it.id == observed.id) observed else it
-                                        },
-                                    )
-                                    expireSourceFormats(System.currentTimeMillis() / 1000)
-                                }
-                            } else if (watchdog.expired) {
-                                stopWithMessage("Live TV stopped after the 30-second no-progress budget. Select a channel to resume.")
-                            }
-                        }
-                    } catch (error: Exception) {
-                        if (mine == serial && error is LiveTvFailure &&
-                            error.code == "source_format_changed" && !compatibilityRetry) {
-                            retryCompatible(channel, api, lease, null)
-                        } else if (mine == serial) stopWithMessage(message(error))
-                    }
-                }
+                attach(channel, started, mine, api, lease, compatibilityRetry)
             } catch (error: Exception) {
                 if (mine == serial) { fail(error); stopWithMessage(message(error)) }
             }
+        }
+    }
+
+    /**
+     * Everything a live session needs once it exists: the decoder, the error
+     * listener, the media item and the heartbeat.
+     *
+     * A fresh start and a resume both arrive here, which is exactly what makes
+     * "rejoin the session the viewer left" the same thing as "tune it" rather
+     * than a second, thinner playback path that drifts.
+     */
+    private fun attach(
+        channel: LiveTvChannel,
+        started: LiveTvStarted,
+        mine: Long,
+        api: LiveTvApi,
+        lease: LiveTvLease,
+        compatibilityRetry: Boolean,
+    ) {
+        val output = ExoPlayer.Builder(context)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(api.mediaClient)))
+            .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(4_000, 12_000, 1_000, 2_000).build())
+            .build()
+        player = output
+        // Both of these tear the player down, and they arrive from
+        // inside ExoPlayer's own listener iteration. Releasing a player
+        // re-entrantly from its callback is not a documented-safe
+        // operation, so the teardown is posted: `Dispatchers.Main`
+        // rather than the scope's `Main.immediate`, which would run it
+        // inline and change nothing.
+        output.addListener(object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                if (mine != serial) return
+                val code = liveTvPlaybackErrorCode(error.errorCode)
+                scope.launch(Dispatchers.Main) {
+                    if (mine == serial && code == "codec_unsupported" && !compatibilityRetry) {
+                        retryCompatible(channel, api, lease, LiveTvCompatibility(
+                            failed_video = true, failed_audio = true, failed_container = true,
+                        ))
+                    } else if (mine == serial) stopWithMessage(liveTvMessage(code))
+                }
+            }
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (mine != serial || playbackState != Player.STATE_ENDED) return
+                scope.launch(Dispatchers.Main) {
+                    if (mine == serial) stopWithMessage(liveTvMessage("stream_failed"))
+                }
+            }
+        })
+        output.setMediaItem(MediaItem.Builder().setUri(api.playlistUrl(started.session_id))
+            .setMimeType(MimeTypes.APPLICATION_M3U8)
+            .setLiveConfiguration(MediaItem.LiveConfiguration.Builder().setTargetOffsetMs(4_000).setMaxOffsetMs(8_000).build())
+            .build())
+        output.prepare()
+        output.play()
+        mutableState.value = mutableState.value.copy(playing = true, busy = false, paused = false, muted = false, message = "Playing live")
+        val watchdog = LiveTvWatchdog()
+        heartbeat = scope.launch {
+            try {
+                while (mine == serial) {
+                    delay(5_000)
+                    if (mine != serial) break
+                    val counters = output.videoDecoderCounters
+                    counters?.ensureUpdated()
+                    if (watchdog.observe(counters?.renderedOutputBufferCount ?: 0, output.isPlaying)) {
+                        lease.touchHint()
+                        api.keepalive(started.session_id)
+                        if (mine != serial) break
+                        val status = api.status(started.session_id)
+                        if (status.state != "active") throw LiveTvFailure("stream_failed")
+                        if (mine == serial) {
+                            val observed = status.channel
+                            val current = mutableState.value
+                            mutableState.value = current.copy(
+                                status = status,
+                                watching = observed?.takeIf { it.id == current.watching?.id }
+                                    ?: current.watching,
+                                channels = if (observed == null) current.channels else current.channels.map {
+                                    if (it.id == observed.id) observed else it
+                                },
+                            )
+                            expireSourceFormats(System.currentTimeMillis() / 1000)
+                        }
+                    } else if (watchdog.expired) {
+                        stopWithMessage("Live TV stopped after the 30-second no-progress budget. Select a channel to resume.")
+                    }
+                }
+            } catch (error: Exception) {
+                if (mine == serial && error is LiveTvFailure &&
+                    error.code == "source_format_changed" && !compatibilityRetry) {
+                    retryCompatible(channel, api, lease, null)
+                } else if (mine == serial) stopWithMessage(message(error))
+            }
+        }
+    }
+
+    /**
+     * The open-time step of §3.16: a hint from a run that ended unexpectedly is
+     * handed straight back to the owner, and a session the viewer never meant
+     * to leave comes back through [attach] — the same path a successful start
+     * uses — instead of the channel list.
+     *
+     * It never auto-tunes (guardrail §4.6). If the owner says the session
+     * ended, was retired, or is still activating, this returns quietly and the
+     * list the lineup already produced is what the viewer sees.
+     */
+    private suspend fun resumeIfRecent(expected: Long) {
+        val client = api ?: return
+        val holder = lease ?: return
+        if (expected != serial) return
+        val resumed = try {
+            holder.resumeIfRecent()
+        } catch (error: Exception) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            null
+        } ?: return
+        if (expected != serial) {
+            // A profile change or a press overtook the resume. The session is
+            // the lease's now, and stopping is what hands it back.
+            runCatching { holder.stop().await() }
+            return
+        }
+        val mine = ++serial
+        detach()
+        val channel = mutableState.value.channels.firstOrNull { it.id == resumed.channel.id }
+            ?: resumed.channel
+        mutableState.value = mutableState.value.copy(
+            busy = true, playing = false, title = channel.title, watching = channel,
+            status = null, message = "Rejoining ${channel.title}…",
+        )
+        try {
+            attach(channel, resumed, mine, client, holder, compatibilityRetry = false)
+        } catch (error: Exception) {
+            if (mine == serial) { fail(error); stopWithMessage(message(error)) }
         }
     }
 
@@ -357,10 +418,12 @@ class LiveTvPlayer private constructor(context: Context) {
     }
 
     /**
-     * Twenty minutes, matching the owner's own refresh cadence. It lives on the
-     * controller's scope beside the heartbeat rather than in a `LaunchedEffect`
-     * on the screen, so leaving the screen — or entering picture-in-picture —
-     * cannot forget the guide.
+     * The guide poll, on the owner's clock rather than a cadence of this
+     * client's own: every answer carries `next_refresh_at`, and the next read
+     * is scheduled just after the owner intends to have a new answer. It lives
+     * on the controller's scope beside the heartbeat rather than in a
+     * `LaunchedEffect` on the screen, so leaving the screen — or entering
+     * picture-in-picture — cannot forget the guide.
      */
     private fun startGuideRefresh(origin: String, token: String) {
         guideRefresh?.cancel()
@@ -375,12 +438,14 @@ class LiveTvPlayer private constructor(context: Context) {
                 if (profile != origin to token) return@launch
                 val now = System.currentTimeMillis() / 1000
                 val from = now - now.mod(LiveTvGuideReducer.SLOT_SECONDS)
-                runCatching { api.guide(from = from, hours = 6) }.getOrNull()?.let { fetched ->
-                    if (profile == origin to token) {
-                        mutableState.value = mutableState.value.copy(guide = fetched)
-                    }
-                }
-                delay(GUIDE_REFRESH_MS)
+                val fetched = runCatching { api.guide(from = from, hours = 6) }.getOrNull()
+                if (profile != origin to token) return@launch
+                fetched?.let { mutableState.value = mutableState.value.copy(guide = it) }
+                delay(
+                    LiveTvGuideReducer.nextPollDelaySeconds(
+                        fetched, System.currentTimeMillis() / 1000,
+                    ) * 1_000L,
+                )
             }
         }
     }
@@ -406,8 +471,6 @@ class LiveTvPlayer private constructor(context: Context) {
     }
 
     companion object {
-        const val GUIDE_REFRESH_MS: Long = 20 * 60 * 1_000
-
         @Volatile private var instance: LiveTvPlayer? = null
         fun get(context: Context): LiveTvPlayer = instance ?: synchronized(this) {
             instance ?: LiveTvPlayer(context).also { instance = it }

@@ -140,6 +140,11 @@ pub(crate) struct LiveTvGuide {
     pub(crate) window: GuideWindow,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) refresh_error: Option<String>,
+    /// When the owner's loop next intends to refresh, unix seconds. Clients
+    /// poll on this rather than on a cadence of their own. Absent only when
+    /// the loop has not run yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) next_refresh_at: Option<i64>,
     /// How many lineup channels the source could be matched to, and how many
     /// were offered. The operator's whole diagnostic for a grabber whose
     /// display names do not line up.
@@ -163,6 +168,7 @@ impl LiveTvGuide {
             fetched_at: None,
             window,
             refresh_error: error,
+            next_refresh_at: None,
             matched_channels: 0,
             lineup_channels: 0,
             channels: Vec::new(),

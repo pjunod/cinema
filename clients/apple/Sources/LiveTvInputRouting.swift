@@ -65,6 +65,40 @@ enum LiveTvInputRouting {
     /// quiet. Ten presses must not be ten tuner GETs.
     static let channelCoalesceMilliseconds: Int = 350
 
+    /// When the guide answers `unavailable` and says nothing about when it
+    /// comes back, ask again this often. Short, because an owner with nothing
+    /// to serve is usually an owner about to have something.
+    static let guidePollUnavailableSeconds: Int = 30
+
+    /// Never poll the guide faster than this, whatever `next_refresh_at` says.
+    /// A floor on fan-out, not a cadence.
+    static let guidePollMinSeconds: Int = 15
+
+    /// Poll this long after the owner's `next_refresh_at`, so the client asks
+    /// once the answer exists rather than just before it does.
+    static let guidePollAfterNextRefreshSeconds: Int = 5
+
+    /// Never sleep longer than this between guide reads, whatever the document
+    /// claims — the far end of the same clamp `guidePollMinSeconds` holds.
+    /// Transcribed like its siblings: the contract's `guide_poll_ceiling_s`.
+    static let guidePollCeilingSeconds: Int = 1200
+
+    /// How long a pressing *web* document waits for a sibling tab to claim a
+    /// start hint before treating it as an orphan. Transcribed because the
+    /// contract pins all of `live.timings` in every client; Apple has one
+    /// process and one hint file, so there is no sibling to probe — see
+    /// `LiveTvLease.retireOrphanedHint`.
+    static let retireLivenessProbeMilliseconds: Int = 250
+
+    /// A hint touched more recently than this many five-second keepalives is
+    /// held by something alive. Web mechanics, for the same reason as
+    /// `retireLivenessProbeMilliseconds`.
+    static let retireOrphanAfterKeepalives: Int = 3
+
+    /// How many times the lease re-sends a start that got no answer, with the
+    /// same request id. One — the owner joins the replay to the same session.
+    static let startReplayAttempts: Int = 1
+
     static func route(
         surface: LiveTvInputSurface,
         state: LiveTvInputState,

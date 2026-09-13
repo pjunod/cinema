@@ -15,7 +15,7 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     MARKETING_VERSION: "0.3.0"
-    CURRENT_PROJECT_VERSION: "147"
+    CURRENT_PROJECT_VERSION: "148"
     CODE_SIGN_STYLE: Automatic
 
 targets:
@@ -122,6 +122,8 @@ targets:
         buildPhase: resources
       - path: ../../tests/playback/live-tv-guide-cases.json
         buildPhase: resources
+      - path: ../../tests/playback/live-tv-start-cases.json
+        buildPhase: resources
     dependencies:
       - target: plurx-iOS
     settings:
@@ -145,6 +147,8 @@ targets:
       - path: ../../tests/playback/playback-surface-contract.json
         buildPhase: resources
       - path: ../../tests/playback/live-tv-guide-cases.json
+        buildPhase: resources
+      - path: ../../tests/playback/live-tv-start-cases.json
         buildPhase: resources
     dependencies:
       - target: plurx-tvOS

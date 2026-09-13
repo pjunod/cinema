@@ -445,7 +445,7 @@
     color:var(--muted);font-size:11.5px;line-height:1.35}
   .lt-tech-row b{color:var(--text);font-size:10px;text-transform:uppercase;letter-spacing:.06em}
   .lt-signal{display:grid;grid-template-columns:repeat(3,minmax(58px,1fr));gap:6px}
-  .lt-signal span{display:grid;grid-template-columns:auto 1fr auto;gap:4px;align-items:center;font-size:10px}
+  .lt-signal span{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:4px;align-items:center;font-size:10px}
   .lt-signal meter{width:100%;height:6px;accent-color:var(--accent)}
   .lt-nowbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 14px;
     border-top:1px solid var(--line);font-size:13px}
@@ -15313,22 +15313,78 @@ function playbackPanel(settings){
 }
 // Live TV owns its own media element and capability. It never enters PLAYER,
 // file progress, playback-control, watched state, autoskip, or Trakt.
-const LIVE_TV={channels:[],serial:0,hls:null,timer:null,polling:false,lastChannel:null,cleanupMarker:null,unplayedSince:null,lastPosition:0,starting:null,status:null,compatibility:null,compatibilityRetried:false};
+const LIVE_TV={channels:[],serial:0,hls:null,timer:null,guideTimer:null,polling:false,lastChannel:null,hint:null,protocols:null,lineupRead:false,resumed:false,unplayedSince:null,lastPosition:0,starting:null,status:null,compatibility:null,compatibilityRetried:false};
 function liveTvNow(){
   return performance.now();
 }
-function liveTvMarkerId(){
-  // getRandomValues works on private-LAN HTTP origins; randomUUID does not.
+function liveTvRequestId(){
+  // 32 lower-case hex. getRandomValues works on private-LAN HTTP origins;
+  // randomUUID does not.
   return Array.from(crypto.getRandomValues(new Uint8Array(16)),b=>b.toString(16).padStart(2,"0")).join("");
 }
-const LIVE_TV_BARRIER=new PlurxLiveTv.StartBarrier(()=>localStorage,liveTvNow,liveTvMarkerId);
-// Observe persisted uncertainty at document boot, not at the first Watch click.
-try{ LIVE_TV_BARRIER.sync(); }catch(e){}
-// Typed worker failures are sent only after the owner has reaped FFmpeg,
-// released admission, and closed the tuner response. They are real answers,
-// not lost starts, so the browser must show them instead of inventing a
-// 90-second quarantine. Unknown transport/owner failures retain the marker.
-const LIVE_TV_DEFINITIVE_REFUSALS=new Set(["live_tv_disabled","live_tv_protocol_unready","drm_unsupported","channel_not_found","settings_conflict","tuner_capacity","tuner_unavailable","device_unavailable","codec_unsupported","stream_failed","capability_expired","admin_required","invalid_settings"]);
+const LIVE_TV_HINTS=new PlurxLiveTv.StartHints(()=>localStorage,()=>Date.now());
+// Liveness decides what to RETIRE, never whether to start. A document that
+// holds a live session — or is still starting one — claims its hint when
+// another document asks who owns it, and an unclaimed hint is a candidate for
+// retirement and nothing more. Web Locks would be cleaner and is unavailable
+// on the LAN HTTP origin this page runs on.
+const LIVE_TV_TABS=(()=>{ try{ return new BroadcastChannel("plurx-live-tv"); }catch(e){ return null; } })();
+if(LIVE_TV_TABS) LIVE_TV_TABS.onmessage=event=>{
+  const message=event&&event.data;
+  if(!message||typeof message.who!=="string"||message.who!==LIVE_TV.hint) return;
+  if(LIVE_TV_LEASE.current||LIVE_TV.starting) LIVE_TV_TABS.postMessage({alive:message.who});
+};
+function liveTvRecoveryEnabled(){
+  // Protocol 3 is the client request id and the /live-tv/starts/* routes. The
+  // answer is cached per lineup read, not per process: an ingress upgraded (or
+  // rolled back) between two visits is believed the next time this page reads
+  // /live-tv/channels.
+  return Array.isArray(LIVE_TV.protocols)&&LIVE_TV.protocols.includes(3);
+}
+function liveTvAnswer(error){
+  // What the reducer rules on, from whatever the request threw. A failure that
+  // carries no body never arrived as an answer at all.
+  return error&&error.answer?error.answer:{transport:"timeout"};
+}
+async function liveTvRetireHint(id){
+  // Forget the hint on a typed 2xx and only then: anything else leaves the
+  // handle in place for a later press to try again.
+  try{
+    const answer=await liveTvRequest(`/live-tv/starts/${encodeURIComponent(id)}`,"DELETE",8000,true);
+    if(answer&&typeof answer.outcome==="string") LIVE_TV_HINTS.forget(id);
+  }catch(e){ /* a hint that cannot be retired is simply left */ }
+}
+// Which stored hints nothing alive is holding. One probe answers that for both
+// callers: the retire sweep before a press, and the open-time resume. A hint
+// another document claims — or one touched inside the keepalive window — is
+// still being driven by something, and it is neither this document's to retire
+// nor its to rejoin. Resuming a sibling's session would put two documents on
+// one capability, and the first of them to navigate away would DELETE the
+// picture out from under the other.
+//
+// This decides what to RETIRE or REJOIN, never whether to start.
+async function liveTvOrphanHints(){
+  const hints=LIVE_TV_HINTS.list();
+  if(!hints.length) return [];
+  const alive=new Set();
+  if(LIVE_TV_TABS){
+    const claimed=event=>{ const message=event&&event.data; if(message&&typeof message.alive==="string") alive.add(message.alive); };
+    LIVE_TV_TABS.addEventListener("message",claimed);
+    try{
+      for(const hint of hints) LIVE_TV_TABS.postMessage({who:hint.id});
+      await new Promise(done=>setTimeout(done,PlaybackPolicy.liveContractTiming("retire_liveness_probe_ms")));
+    }finally{ LIVE_TV_TABS.removeEventListener("message",claimed); }
+  }
+  // A hint touched more recently than this many keepalives is held by
+  // something alive, so it is left alone. That rule reads the wall clock, so a
+  // clock step can make a live tab's hint look orphaned: that tab then sees
+  // `capability_expired` and its next press plays — annoying, not unsafe.
+  const fresh=PlaybackPolicy.liveContractTiming("retire_orphan_after_keepalives")*5000, now=Date.now();
+  return hints.filter(hint=>!alive.has(hint.id)&&now-hint.touchedAt>=fresh);
+}
+async function liveTvRetireOrphanHints(){
+  for(const hint of await liveTvOrphanHints()) liveTvRetireHint(hint.id);
+}
 function liveTvPlaybackEnvelope(compatibility=null){
   const caps=currentCapsDocument();
   const audio=(caps.audio||[]).filter(codec=>["aac","ac3","eac3"].includes(codec));
@@ -15350,40 +15406,62 @@ function liveTvPlaybackEnvelope(compatibility=null){
 }
 const LIVE_TV_LEASE=new PlurxLiveTv.Lease({
   start:async channel=>{
-    const marker=LIVE_TV_BARRIER.begin(); // durable before the POST can leave
-    try{
-      const compatibility=LIVE_TV.compatibility; LIVE_TV.compatibility=null;
-      const info=await liveTvRequest(`/live-tv/channels/${encodeURIComponent(channel)}/sessions`,"POST",45000,true,false,
-        {playback:liveTvPlaybackEnvelope(compatibility)});
-      if(!info||typeof info.session_id!=="string"||!info.session_id) throw {code:"start_outcome_unknown"};
-      // Retain ownership through an active-player crash too. Normal channel
-      // switches confirm DELETE first; another document waits conservatively.
-      LIVE_TV.cleanupMarker=marker;
-      return info;
+    // The retire sweep is dispatched, never awaited: the liveness probe costs
+    // a quarter second and this press must not spend it. The tuner request
+    // leaves now and the sweep tidies up beside it, exactly as the Apple and
+    // Android leases dispatch theirs. Nothing on this path may refuse or delay
+    // a start — admission is the owner's, and it has four slots.
+    const recovery=liveTvRecoveryEnabled();
+    if(recovery){ try{ liveTvRetireOrphanHints().catch(()=>{}); }catch(e){} }
+    // An ingress older than protocol 3 has no id to be told and no route to
+    // retire one on, so it is sent none; hints already stored are kept for an
+    // ingress that is upgraded later.
+    const requestId=recovery?liveTvRequestId():null;
+    if(requestId){
+      LIVE_TV_HINTS.remember(requestId); // durable before the POST can leave
+      // Claimed from this instant, so a sibling document probing during the
+      // start window finds this one holding it rather than an orphan.
+      LIVE_TV.hint=requestId;
     }
-    catch(e){
-      // A lost public start response cannot be safely retried as a new request.
-      // No client heartbeat exists for that capability; allow the server's
-      // bounded start + idle expiry to finish before admitting another start.
-      const definitive=LIVE_TV_DEFINITIVE_REFUSALS.has(e.code)||(!e.code&&e.status>=400&&e.status<500);
-      if(!definitive){ LIVE_TV_BARRIER.hold(marker); throw {code:"start_outcome_unknown"}; }
-      LIVE_TV_BARRIER.confirm(marker);
-      throw e;
+    const compatibility=LIVE_TV.compatibility; LIVE_TV.compatibility=null;
+    const body={playback:liveTvPlaybackEnvelope(compatibility)};
+    if(requestId) body.request_id=requestId;
+    // A start that got no answer is replayed once with the SAME id, which the
+    // owner joins to the same session. A start with no id is never replayed —
+    // that is exactly how a second tuner gets opened.
+    const attempts=1+(requestId?PlaybackPolicy.liveContractTiming("start_replay_attempts"):0);
+    for(let attempt=0;;attempt++){
+      let answer=null;
+      try{
+        const info=await liveTvRequest(`/live-tv/channels/${encodeURIComponent(channel)}/sessions`,"POST",45000,true,false,body);
+        // The hint stays until a DELETE confirms the session is gone, so an
+        // active-player crash still leaves a handle behind to retire.
+        if(info&&typeof info.session_id==="string"&&info.session_id) return info;
+        answer={body:{}}; // a 2xx that is not a session is not an answer either
+      }
+      catch(e){ answer=liveTvAnswer(e); }
+      const outcome=PlurxLiveTv.startOutcome(answer);
+      if(requestId&&!outcome.keepHint){
+        LIVE_TV_HINTS.forget(requestId);
+        if(LIVE_TV.hint===requestId) LIVE_TV.hint=null;
+      }
+      if(outcome.replay&&attempt+1<attempts) continue;
+      const typed=answer.body||{};
+      throw {code:outcome.render,retry:typed.retry,owner_decided:typed.owner_decided,status:answer.status};
     }
   },
   release:async id=>{
-    // Persist before DELETE too: reload while cleanup is pending must not
-    // forget that this document still owns an unconfirmed physical session.
-    try{ LIVE_TV.cleanupMarker=LIVE_TV_BARRIER.hold(LIVE_TV.cleanupMarker); }catch(e){}
     for(let attempt=0;attempt<2;attempt++){
       try{ await liveTvRequest(`/live-tv/sessions/${encodeURIComponent(id)}`,"DELETE",8000,false,LIVE_TV.unloading===true); break; }
       catch(e){ if(e.status===404||e.status===410||e.code==="capability_expired") break; if(attempt===1) throw e; }
     }
-    LIVE_TV_BARRIER.confirm(LIVE_TV.cleanupMarker); LIVE_TV.cleanupMarker=null;
+    // The owner has said this session is gone, so its handle is worth nothing.
+    // A DELETE that never confirmed keeps its hint and its next press retires.
+    LIVE_TV_HINTS.forget(LIVE_TV.hint); LIVE_TV.hint=null;
   },
   status:id=>liveTvRequest(`/live-tv/sessions/${encodeURIComponent(id)}/status`,"GET",15000),
   keepalive:id=>{
-    LIVE_TV.cleanupMarker=LIVE_TV_BARRIER.hold(LIVE_TV.cleanupMarker);
+    LIVE_TV_HINTS.touch(LIVE_TV.hint);
     return liveTvRequest(`/live-tv/sessions/${encodeURIComponent(id)}/keepalive`,"PUT",15000);
   },
 });
@@ -15396,9 +15474,15 @@ async function liveTvRequest(path,method,timeout,authenticated=false,keepalive=f
   // tuner the server had in fact already released.
   const response=await fetch(API+path,{method,headers,body:body===null?undefined:JSON.stringify(body),cache:"no-store",keepalive,signal:AbortSignal.timeout(timeout)});
   if(!response.ok){
-    let body={}; try{ body=await response.json(); }catch(e){}
-    const error=new Error(body.message||body.error||"Live TV request failed");
-    error.status=response.status; error.code=body.code; throw error;
+    let payload={}; try{ payload=await response.json(); }catch(e){}
+    const error=new Error(payload.message||payload.error||"Live TV request failed");
+    error.status=response.status; error.code=payload.code;
+    // The two flat fields every typed Live TV refusal carries, plus the whole
+    // answer the start reducer rules on. A rejection with no `answer` at all is
+    // a request that never came back.
+    error.retry=payload.retry; error.owner_decided=payload.owner_decided;
+    error.answer={transport:"http",status:response.status,body:payload};
+    throw error;
   }
   return response.status===204?null:response.json();
 }
@@ -15427,6 +15511,12 @@ async function viewLiveTv(generation=PAGE_RENDER_GENERATION){
     const result=await api("/live-tv/channels",{signal:AbortSignal.timeout(30000)});
     if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
     LIVE_TV.channels=result.channels;
+    // Negotiated per lineup read. No field at all is an ingress older than the
+    // start-recovery contract: no request id, no retire, no resume. The flag
+    // separates "this ingress has no protocols" from "nobody has answered
+    // yet", which is what an open-time resume must not confuse.
+    LIVE_TV.protocols=Array.isArray(result.protocols)?result.protocols:null;
+    LIVE_TV.lineupRead=true;
     if(!liveTvChannelById(LIVE_TV.selected)) LIVE_TV.selected=null;
     const toolbar=document.getElementById("live-tv-toolbar");
     if(toolbar) toolbar.innerHTML=liveTvToolbar();
@@ -15439,6 +15529,10 @@ async function viewLiveTv(generation=PAGE_RENDER_GENERATION){
   // The guide is the second read and never gates the first: the page is
   // usable, and a channel is tunable, before it answers.
   loadLiveTvGuide(generation,route);
+  // Opening Live TV rejoins a session this viewer still owns — it never tunes
+  // anything. A resume that cannot even be attempted is a page showing the
+  // channel list, never a page that failed to render.
+  try{ liveTvResumeStart(generation,route).catch(()=>{}); }catch(e){}
   // Everything on this page is a statement about the present tense — the red
   // now line, every progress bar, "18 min left", which programme is "on now".
   // Without a tick they were all frozen at first paint, so a page left open
@@ -15523,6 +15617,10 @@ function liveTvSetMode(mode){
 // a dock. Stopping stays explicit — the stop button here, on the overlay, or
 // the existing watchdogs.
 function liveTvLeaveRoute(){
+  // The guide loop belongs to the page, not to the stream: a docked picture
+  // keeps its tuner watchdog (LIVE_TV.timer) on another route, but nothing off
+  // this route can show a grid, so the poll stops here.
+  clearTimeout(LIVE_TV.guideTimer); LIVE_TV.guideTimer=null;
   const host=liveTvHost(); if(!host) return;
   // `LIVE_TV.starting` matters as much as a current lease: during the start
   // POST there is no `current` yet, and hiding the host here left a tuner
@@ -16077,9 +16175,11 @@ function liveTvShowHost(){
   liveTvPaint();
 }
 async function loadLiveTvGuide(generation,route){
+  let answered=null;
   try{
     const guide=await api("/live-tv/guide",{signal:AbortSignal.timeout(20000)});
     if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
+    answered=guide;
     LIVE_TV.guide=guide;
     renderLiveTvChannels();
     if(guide.source!=="off"&&guide.freshness==="unavailable"){
@@ -16089,6 +16189,26 @@ async function loadLiveTvGuide(generation,route){
     // A guide that will not load is a degraded page, never a broken one.
     if(generation===PAGE_RENDER_GENERATION&&location.hash===route) LIVE_TV.guide=null;
   }
+  // And never a page that stops asking: the grid has to fill without the
+  // viewer leaving and coming back. A loop that cannot be scheduled costs this
+  // page its guide refresh and nothing else, so it is never thrown upwards.
+  try{ scheduleLiveTvGuide(answered,generation,route); }catch(e){}
+}
+function scheduleLiveTvGuide(guide,generation,route){
+  clearTimeout(LIVE_TV.guideTimer); LIVE_TV.guideTimer=null;
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
+  // The owner's clock decides when there is something new to ask for; every
+  // number in that decision comes from the shared contract table.
+  const delay=PlurxLiveTv.guidePollDelayMs(guide,Math.floor(Date.now()/1000),{
+    guide_poll_min_s:PlaybackPolicy.liveContractTiming("guide_poll_min_s"),
+    guide_poll_after_next_refresh_s:PlaybackPolicy.liveContractTiming("guide_poll_after_next_refresh_s"),
+    guide_poll_unavailable_s:PlaybackPolicy.liveContractTiming("guide_poll_unavailable_s"),
+    guide_poll_ceiling_s:PlaybackPolicy.liveContractTiming("guide_poll_ceiling_s"),
+  });
+  LIVE_TV.guideTimer=setTimeout(()=>{
+    LIVE_TV.guideTimer=null;
+    loadLiveTvGuide(generation,route);
+  },delay);
 }
 function detachLiveTvMedia(){
   clearInterval(LIVE_TV.timer); LIVE_TV.timer=null;
@@ -16129,7 +16249,6 @@ async function watchLiveTv(index,isCompatibilityRetry=false){
   // and gates writes into page DOM that no longer exists.
   const owned=()=>serial===LIVE_TV.serial;
   const onPage=()=>owned()&&generation===PAGE_RENDER_GENERATION&&location.hash==="#/live-tv";
-  const current=onPage;
   detachLiveTvMedia();
   if(PLAYER&&PLAYER.fileId) closePlayer();
   LIVE_TV.lastChannel=index; liveTvMessage(`Starting ${channel.guide_number} · ${channel.guide_name}…`);
@@ -16142,9 +16261,24 @@ async function watchLiveTv(index,isCompatibilityRetry=false){
     // on screen able to release it. A start that completes is always wired up;
     // if the route moved on, it is wired up into the dock.
     if(!info||!owned()) return;
+    await liveTvAttachSession(info,index,serial,generation);
+  }catch(e){ if(onPage()) liveTvFailure(e); }
+  finally{ if(LIVE_TV.starting===serial) LIVE_TV.starting=null; }
+}
+// Everything a live capability needs around it — playlist, autoplay, failure
+// routing, the keepalive and the tuner watchdog. A session recovered by
+// `resume` enters here exactly as a fresh start does; that is what makes
+// reopening the page show the picture instead of the list.
+async function liveTvAttachSession(info,index,serial,generation){
+  const owned=()=>serial===LIVE_TV.serial;
+  const onPage=()=>owned()&&generation===PAGE_RENDER_GENERATION&&location.hash==="#/live-tv";
+  try{
+    const channel=LIVE_TV.channels[index]||null;
     const video=document.getElementById("live-tv-video");
     LIVE_TV.unplayedSince=liveTvNow(); LIVE_TV.lastPosition=0; LIVE_TV.lastFrames=0;
-    LIVE_TV.selected=channel.id;
+    // Watching is the channel this capability is on, whether the press named
+    // it or the owner did when it handed the session back.
+    LIVE_TV.selected=(channel&&channel.id)||(info.channel&&info.channel.id)||LIVE_TV.selected;
     if(onPage()) liveTvShowHost(); else liveTvSetMode("dock");
     // Ignore the wire URL: the capability only grants same-origin live resources.
     const playlist=API+`/live-tv/sessions/${encodeURIComponent(info.session_id)}/index.m3u8`;
@@ -16214,7 +16348,55 @@ async function watchLiveTv(index,isCompatibilityRetry=false){
       finally{ LIVE_TV.polling=false; }
     },10000);
   }catch(e){ if(onPage()) liveTvFailure(e); }
-  finally{ if(LIVE_TV.starting===serial) LIVE_TV.starting=null; }
+}
+// Opening Live TV asks the owner about every start this browser still holds a
+// handle for. It rejoins one; it never tunes one. An owner that says the start
+// ended or was retired takes the handle away, an owner that says anything else
+// — or says nothing — leaves it, and the viewer sees the channel list.
+async function liveTvResumeStart(generation,route){
+  // Once per document — but only once something was actually decided. A
+  // lineup read that failed says nothing about whether this ingress speaks the
+  // recovery protocol, and a document that marked itself resumed on that
+  // silence would never rejoin a session again, however many times the viewer
+  // came back to the page.
+  if(LIVE_TV.resumed||!LIVE_TV.lineupRead) return;
+  if(!liveTvRecoveryEnabled()){ LIVE_TV.resumed=true; return; }
+  // Nothing to rejoin while this document is already driving a session; the
+  // next visit asks again, since that answer can change.
+  if(LIVE_TV_LEASE.current||LIVE_TV.starting) return;
+  LIVE_TV.resumed=true;
+  // Only a hint nothing else is holding. A sibling tab that is watching right
+  // now answers the probe, and rejoining its session would hand two documents
+  // one capability — the first to navigate away would then DELETE the other's
+  // picture mid-programme.
+  for(const hint of await liveTvOrphanHints()){
+    let answer=null;
+    try{ answer=await liveTvRequest(`/live-tv/starts/${encodeURIComponent(hint.id)}/resume`,"POST",15000,true); }
+    catch(e){
+      // The ingress's own typed refusals say this id will never be answered
+      // here; everything else keeps the handle and shows the list.
+      if(!PlurxLiveTv.startOutcome(liveTvAnswer(e)).keepHint) LIVE_TV_HINTS.forget(hint.id);
+      continue;
+    }
+    const outcome=answer&&typeof answer.outcome==="string"?answer.outcome:"";
+    if(outcome==="ended"||outcome==="retired"){ LIVE_TV_HINTS.forget(hint.id); continue; }
+    const session=outcome==="live"?answer.session:null;
+    if(!session||typeof session.session_id!=="string"||!session.session_id) continue;
+    if(generation!==PAGE_RENDER_GENERATION||location.hash!==route||LIVE_TV_LEASE.current||LIVE_TV.starting) return;
+    const channelId=(session.channel&&session.channel.id)||session.channel_id||null;
+    const index=LIVE_TV.channels.findIndex(channel=>channel&&channel.id===channelId);
+    const serial=++LIVE_TV.serial;
+    LIVE_TV.hint=hint.id;
+    LIVE_TV.starting=serial;
+    try{
+      const adopted=await LIVE_TV_LEASE.adopt(session);
+      if(!adopted||serial!==LIVE_TV.serial) return;
+      if(index>=0) LIVE_TV.lastChannel=index;
+      await liveTvAttachSession(adopted,index,serial,generation);
+    }
+    finally{ if(LIVE_TV.starting===serial) LIVE_TV.starting=null; }
+    return;
+  }
 }
 function resumeLiveTv(){
   const video=document.getElementById("live-tv-video");
@@ -16283,22 +16465,18 @@ async function exitLiveTvPresentation(){
   try{ if(video&&video.webkitPresentationMode==="picture-in-picture"&&video.webkitSetPresentationMode) video.webkitSetPresentationMode("inline"); }catch(e){}
 }
 window.addEventListener("pagehide",()=>{
-  const info=LIVE_TV_LEASE.current;
-  if(info){ try{ LIVE_TV.cleanupMarker=LIVE_TV_BARRIER.hold(LIVE_TV.cleanupMarker); }catch(e){} }
+  // A reload that lands mid-DELETE must still find a handle for this start.
+  if(LIVE_TV_LEASE.current) LIVE_TV_HINTS.touch(LIVE_TV.hint);
   // One DELETE, not two. The release path now carries `keepalive` itself, so
   // the request that is actually delivered is also the one whose result can
-  // clear the marker; a duplicate raw fetch only spent a second request that
+  // forget the hint; a duplicate raw fetch only spent a second request that
   // nothing could observe.
   LIVE_TV.unloading=true;
   stopLiveTv().catch(()=>{});
 });
-// The parameter is named `change` because this is a StorageEvent. The input
-// fence reads the ordinary spelling as a keyboard decode wherever it appears,
-// and naming this one for what it actually is removes a standing false
-// positive rather than adding an exemption for it.
-window.addEventListener("storage",change=>{
-  if(change.key===null||change.key.startsWith(LIVE_TV_BARRIER.prefix)){ try{ LIVE_TV_BARRIER.sync(); }catch(e){} }
-});
+// Hints are read from storage at the moment they are used, so no document has
+// a cached view of them to keep in step: the `storage` listener the barrier
+// needed is gone with it.
 document.addEventListener("visibilitychange",()=>{
   if(document.visibilityState==="hidden"&&location.hash==="#/live-tv"&&!liveTvInPip()){
     stopLiveTv().catch(()=>{}); liveTvMessage("Live TV stopped while the page was in the background. Select a channel to resume.");

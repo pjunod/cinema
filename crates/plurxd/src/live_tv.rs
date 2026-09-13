@@ -37,6 +37,9 @@ pub(crate) const START_V2_PATH: &str = "/_internal/v2/live-tv/start";
 pub(crate) const ACTIVATE_PATH: &str = "/_internal/v1/live-tv/activate";
 pub(crate) const RESOURCE_PATH: &str = "/_internal/v1/live-tv/resource";
 pub(crate) const STOP_PATH: &str = "/_internal/v1/live-tv/stop";
+pub(crate) const RETIRE_PATH: &str = "/_internal/v1/live-tv/retire";
+pub(crate) const RESUME_PATH: &str = "/_internal/v1/live-tv/resume";
+pub(crate) const START_STATE_PATH: &str = "/_internal/v1/live-tv/start-state";
 pub(crate) const DRAIN_PATH: &str = "/_internal/v1/live-tv/drain";
 pub(crate) const GUIDE_PATH: &str = "/_internal/v1/live-tv/guide";
 pub(crate) const MAX_INTERNAL_BODY_BYTES: usize = 16 * 1024;
@@ -77,6 +80,10 @@ const MAX_XMLTV_URL_BYTES: usize = 1024;
 /// than the refresh interval: this bounds fan-out, it does not add staleness
 /// the owner has not already accounted for.
 const RELAY_GUIDE_MEMORY: Duration = Duration::from_secs(60);
+/// An owner with nothing to serve is an owner about to have something: a
+/// minute of repeating "unavailable" is how a client that opened Live TV
+/// during a deploy ends up staring at an empty grid.
+const RELAY_UNAVAILABLE_GUIDE_MEMORY: Duration = Duration::from_secs(10);
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 const TUNER_READ_TIMEOUT: Duration = Duration::from_secs(30);
 const PRODUCER_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
@@ -139,9 +146,20 @@ const LOCAL_RESOURCE_CHUNK_BYTES: usize = 64 * 1024;
 const LOCAL_RESOURCE_CONCURRENCY: usize = 4;
 const LOCAL_RESOURCE_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
 const LOCAL_RESOURCE_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
-const SESSION_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const SESSION_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const TERMINAL_TOMBSTONE_TTL: Duration = Duration::from_secs(60);
 const MAX_TERMINAL_TOMBSTONES: usize = 256;
+/// How many retired request ids one viewer may hold at once, and for how long.
+/// The same minute as a tombstone, because that is how long a replay of the
+/// retired id could still be in flight.
+const MAX_RETIRED_PER_USER: usize = 8;
+const RETIRED_TTL: Duration = TERMINAL_TOMBSTONE_TTL;
+/// A session of the requesting viewer whose last keepalive is older than this
+/// is a stray — the app it belonged to is gone — and it is cancelled to admit
+/// that viewer's new start when every slot is full. Three missed 5 s
+/// heartbeats. Paul's ruling: a tuner this viewer may still be holding is
+/// never a reason to refuse that same viewer.
+const STRAY_EVICTION_IDLE: Duration = Duration::from_secs(15);
 const SCRATCH_SWEEP_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1036,6 +1054,83 @@ pub(crate) struct LiveTvActivity {
     pub(crate) programme_title: Option<String>,
 }
 
+/// What a retire did. `Stopped` means a stream was running and is not any
+/// more; `Ended` means the owner had already reaped it; `Retired` means there
+/// was nothing, and now the id can never produce anything either.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LiveTvRetireOutcome {
+    Stopped,
+    Ended,
+    Retired,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum LiveTvResumeOutcome {
+    Live,
+    Pending,
+    Ended,
+    Retired,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct LiveTvResumeAnswer {
+    pub(crate) outcome: LiveTvResumeOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) session: Option<LiveTvActivated>,
+}
+
+impl LiveTvResumeAnswer {
+    fn outcome(outcome: LiveTvResumeOutcome) -> Self {
+        Self {
+            outcome,
+            session: None,
+        }
+    }
+}
+
+/// A poll of a start's fate. Deliberately never a capability: this route is a
+/// status read, and a handle that produces a stream belongs on `resume`, which
+/// is defined to hand back exactly one.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct LiveTvStartState {
+    /// Owned rather than `&'static str` so an ingress can decode the owner's
+    /// answer into the very same type it would have produced locally.
+    pub(crate) state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) code: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveTvRetireRequest {
+    pub(crate) expected_owner_node_id: String,
+    pub(crate) user_id: i64,
+    pub(crate) request_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveTvResumeRequest {
+    pub(crate) expected_owner_node_id: String,
+    pub(crate) user_id: i64,
+    pub(crate) request_id: String,
+}
+
+/// Its own path rather than a flag on the resume body, because it is its own
+/// operation: `resume` selects one session and cancels the others, touches
+/// what it selects and retires an id it has never seen. A status read that
+/// did any of that would fence a viewer's start the moment anyone looked at
+/// it.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveTvStartStateRequest {
+    pub(crate) expected_owner_node_id: String,
+    pub(crate) user_id: i64,
+    pub(crate) request_id: String,
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct LiveTvRequestKey {
     source_node_id: String,
@@ -1185,6 +1280,15 @@ struct LiveTvRegistry {
     sessions: HashMap<String, Arc<LiveTvSession>>,
     requests: HashMap<LiveTvRequestKey, String>,
     terminals: HashMap<String, LiveTvTerminalTombstone>,
+    /// `(user_id, request_id)` a viewer has retired, and when that fact
+    /// expires. Deliberately **not** counted against `MAX_TERMINAL_TOMBSTONES`:
+    /// any signed-in viewer could otherwise fill the shared cap with 256 retire
+    /// calls and refuse every other viewer's start for a minute.
+    /// The sequence number is the tie-break: two retires inside one clock tick
+    /// have the same expiry, and `min_by_key` over a HashMap would then evict
+    /// an arbitrary one — including the entry just inserted.
+    retired: HashMap<(i64, String), (tokio::time::Instant, u64)>,
+    next_retire_sequence: u64,
 }
 
 #[derive(Clone)]
@@ -1199,6 +1303,111 @@ impl LiveTvRegistry {
         let now = tokio::time::Instant::now();
         self.terminals
             .retain(|_, tombstone| tombstone.expires_at > now);
+        self.retired.retain(|_, (expires_at, _)| *expires_at > now);
+    }
+
+    /// Every session a viewer's public request id currently maps to. Usually
+    /// zero or one — but `LiveTvRequestKey` includes the ingress's serving
+    /// generation, so a fence blip between a POST and its replay legitimately
+    /// produces two. Every public operation is defined over the whole set:
+    /// one public identity ends up with one stream either way.
+    fn sessions_for_public_request(
+        &self,
+        user_id: i64,
+        request_id: &str,
+    ) -> Vec<Arc<LiveTvSession>> {
+        self.requests
+            .iter()
+            .filter(|(key, _)| key.user_id == user_id && key.request_id == request_id)
+            .filter_map(|(_, capability)| self.sessions.get(capability).cloned())
+            .collect()
+    }
+
+    fn tombstone_for_public_request(
+        &self,
+        user_id: i64,
+        request_id: &str,
+    ) -> Option<&LiveTvTerminalTombstone> {
+        self.terminals.values().find(|entry| {
+            entry.request.user_id == user_id && entry.request.request_id == request_id
+        })
+    }
+
+    /// Record that this viewer will never use this request id again. Bounded
+    /// per user so one viewer cannot grow the map without limit.
+    fn retire(&mut self, user_id: i64, request_id: String, now: tokio::time::Instant) {
+        let sequence = self.next_retire_sequence;
+        self.next_retire_sequence = self.next_retire_sequence.saturating_add(1);
+        self.retired
+            .insert((user_id, request_id), (now + RETIRED_TTL, sequence));
+        let mine = self
+            .retired
+            .iter()
+            .filter(|((owner, _), _)| *owner == user_id)
+            .count();
+        for _ in MAX_RETIRED_PER_USER..mine {
+            let Some(oldest) = self
+                .retired
+                .iter()
+                .filter(|((owner, _), _)| *owner == user_id)
+                .min_by_key(|(_, (expires_at, sequence))| (*expires_at, *sequence))
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.retired.remove(&oldest);
+        }
+    }
+
+    /// Which of this viewer's sessions, if any, to cancel so their new start
+    /// can be admitted when every slot is full.
+    ///
+    /// Idle is only meaningful for a session that has a heartbeat to miss:
+    /// `last_touch` is set at admission, and a starting or provisional session
+    /// cannot yet be touched by a player, so neither is ever evicted for
+    /// idleness — both are already bounded by the startup and provisional
+    /// timeouts. Only a request id the viewer has retired evicts those.
+    ///
+    /// Another viewer's session is never a candidate, however idle. The ruling
+    /// is that a viewer's own stray must not refuse them, not that anyone may
+    /// take anyone's tuner.
+    fn stray_to_evict(
+        &self,
+        user_id: i64,
+        now: tokio::time::Instant,
+    ) -> Option<Arc<LiveTvSession>> {
+        self.sessions
+            .values()
+            .filter(|session| session.request.user_id == user_id && !session.cancel.is_cancelled())
+            .filter(|session| {
+                let idle_active = {
+                    let state = session
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.activated
+                        && state.phase == LiveTvSessionPhase::Active
+                        && now.duration_since(state.last_touch) >= STRAY_EVICTION_IDLE
+                };
+                idle_active || self.is_retired(user_id, &session.request.request_id)
+            })
+            .min_by_key(|session| {
+                session
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .last_touch
+            })
+            .cloned()
+    }
+
+    /// Checks the expiry inline rather than trusting a prune to have run: a
+    /// status read on an idle owner would otherwise keep answering "retired"
+    /// hours past the minute this map documents.
+    fn is_retired(&self, user_id: i64, request_id: &str) -> bool {
+        self.retired
+            .get(&(user_id, request_id.to_owned()))
+            .is_some_and(|(expires_at, _)| *expires_at > tokio::time::Instant::now())
     }
 
     fn request_session(
@@ -1206,6 +1415,11 @@ impl LiveTvRegistry {
         request: &LiveTvStartRequest,
     ) -> Result<Option<Arc<LiveTvSession>>, LiveTvError> {
         self.prune_terminals();
+        if self.is_retired(request.user_id, &request.request_id) {
+            return Err(LiveTvError::Conflict(
+                "the live-TV request id was retired".into(),
+            ));
+        }
         let key = LiveTvRequestKey::from(request);
         if let Some(tombstone) = self
             .terminals
@@ -1241,13 +1455,17 @@ pub(crate) struct LiveTvMetrics {
     starts_created: AtomicU64,
     starts_recovered: AtomicU64,
     starts_failed: AtomicU64,
-    ended: AtomicU64,
+    /// Ends broken out by `LiveTvError::code()`. A single counter said how many
+    /// sessions stopped and nothing about why, which is the question an
+    /// operator actually has.
+    ends: StdMutex<BTreeMap<&'static str, u64>>,
+    stray_evictions: AtomicU64,
     relay_bytes: Arc<AtomicU64>,
     /// Guide refresh outcomes by source, and a projection of the cache the
     /// same shape as the device one: a value plus when it was observed, so a
     /// stalled refresh loop reports staleness instead of a frozen number.
     guide_refreshes: StdMutex<BTreeMap<(&'static str, &'static str), u64>>,
-    guide: StdMutex<Option<(tokio::time::Instant, usize)>>,
+    guide: StdMutex<Option<(tokio::time::Instant, Duration, usize)>>,
 }
 
 #[derive(Default)]
@@ -1265,12 +1483,60 @@ impl LiveTvMetrics {
         *counters.entry((source.as_str(), outcome)).or_default() += 1;
     }
 
+    fn observe_session_end(&self, reason: &'static str) {
+        *self
+            .ends
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(reason)
+            .or_default() += 1;
+    }
+
+    fn observe_stray_eviction(&self) {
+        self.stray_evictions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// One line per reason, and a zero line when nothing has ended yet so the
+    /// series exists before the first failure rather than after it.
+    fn session_ends_prometheus(&self) -> String {
+        let ends = self
+            .ends
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut out = String::from(
+            "# HELP plurx_live_tv_session_ends_total Live TV sessions that ended, by reason.\n\
+             # TYPE plurx_live_tv_session_ends_total counter\n",
+        );
+        if ends.is_empty() {
+            out.push_str("plurx_live_tv_session_ends_total{reason=\"released\"} 0\n");
+        }
+        for (reason, value) in &ends {
+            out.push_str(&format!(
+                "plurx_live_tv_session_ends_total{{reason=\"{reason}\"}} {value}\n"
+            ));
+        }
+        out
+    }
+
     fn observe_guide(&self, programmes: usize) {
+        self.observe_guide_at(tokio::time::Instant::now(), Duration::ZERO, programmes);
+    }
+
+    /// The same observation for a guide this process did not fetch. The offset
+    /// is the wall-clock age it already had, so the gauge reports the copy's
+    /// real age rather than the moment it was adopted.
+    fn observe_guide_at(
+        &self,
+        observed: tokio::time::Instant,
+        age_offset: Duration,
+        programmes: usize,
+    ) {
         let mut projection = self
             .guide
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        *projection = Some((tokio::time::Instant::now(), programmes));
+        *projection = Some((observed, age_offset, programmes));
     }
 
     /// The three guide series. `plurx_live_tv_guide_age_seconds` is the one an
@@ -1301,9 +1567,8 @@ impl LiveTvMetrics {
             ));
         }
         let (age, programmes) = match projection {
-            Some((observed, programmes)) => (
-                tokio::time::Instant::now()
-                    .duration_since(observed)
+            Some((observed, age_offset, programmes)) => (
+                (age_offset + tokio::time::Instant::now().duration_since(observed))
                     .as_secs()
                     .to_string(),
                 programmes.to_string(),
@@ -1354,13 +1619,26 @@ struct SnapshotCacheState {
 struct SnapshotCache {
     state: tokio::sync::Mutex<SnapshotCacheState>,
     forced_admission: tokio::sync::Semaphore,
+    /// The same `Notify` the guide refresh loop awaits. A lineup that fills for
+    /// the first time — or for a new generation — is the event the loop was
+    /// otherwise sleeping twenty minutes through. Signalled from here rather
+    /// than from the manager because this is the only place that can tell a
+    /// cold fill from a warm one.
+    lineup_filled: Arc<tokio::sync::Notify>,
 }
 
 impl Default for SnapshotCache {
     fn default() -> Self {
+        Self::with_wake(Arc::new(tokio::sync::Notify::new()))
+    }
+}
+
+impl SnapshotCache {
+    fn with_wake(lineup_filled: Arc<tokio::sync::Notify>) -> Self {
         Self {
             state: tokio::sync::Mutex::new(SnapshotCacheState::default()),
             forced_admission: tokio::sync::Semaphore::new(MAX_FORCED_REFRESH_CALLERS),
+            lineup_filled,
         }
     }
 }
@@ -1435,11 +1713,20 @@ impl SnapshotCache {
                 snapshot.age_seconds = 0;
                 snapshot.freshness = SnapshotFreshness::Fresh;
                 snapshot.refresh_error = None;
+                // Computed before the replacement: afterwards there is no way
+                // to tell whether this generation had a lineup a moment ago.
+                let was_cold = state
+                    .snapshot
+                    .as_ref()
+                    .is_none_or(|cached| cached.generation != generation);
                 state.snapshot = Some(CachedSnapshot {
                     generation,
                     observed,
                     snapshot: snapshot.clone(),
                 });
+                if was_cold {
+                    self.lineup_filled.notify_one();
+                }
                 Ok(snapshot)
             }
             Err(error) => {
@@ -1482,6 +1769,29 @@ struct GuideCache {
     refresh_admission: Arc<tokio::sync::Semaphore>,
     refresh_cancel: StdMutex<Option<(LiveTvConfig, CancellationToken)>>,
     next_sequence: AtomicU64,
+    /// Where the owner's copy of the last good guide lives, so a deploy does
+    /// not start the grid from nothing. `None` in tests and on a node that was
+    /// built without a store path.
+    persist: Option<PathBuf>,
+    /// Shared with `SnapshotCache`: a cold lineup that just filled, or a
+    /// settings generation that just changed, wakes the refresh loop instead
+    /// of leaving it asleep for twenty minutes.
+    wake: Arc<tokio::sync::Notify>,
+    /// The last generation `observe_config` saw. `i64::MIN` until the first
+    /// observation, so construction does not itself look like a change.
+    observed_generation: AtomicI64,
+    /// Bumped by every `invalidate`. A persist that was already in flight when
+    /// the cache was discarded checks this before renaming its temp file into
+    /// place, so a settings save cannot be undone by a write that started
+    /// before it — which would otherwise leave the discarded guide on disk for
+    /// the next process to adopt.
+    discard_epoch: Arc<AtomicU64>,
+    /// Serialises the two file operations, so a remove and a rename cannot
+    /// interleave inside the filesystem.
+    persist_gate: Arc<StdMutex<()>>,
+    /// The settings generation of the copy currently on disk, for the
+    /// Developer panel. `i64::MIN` when there is none.
+    persisted_generation: AtomicI64,
 }
 
 #[derive(Default)]
@@ -1493,6 +1803,10 @@ struct GuideCacheState {
     /// Scoped to the generation it happened under: an error from the previous
     /// configuration is not a fact about the current one.
     last_error: Option<(i64, String)>,
+    /// When the refresh loop next intends to run, unix seconds. Served on
+    /// every guide answer — including an unavailable one, which still tells a
+    /// client when asking again is worthwhile.
+    next_refresh_at: Option<i64>,
 }
 
 impl GuideCacheState {
@@ -1513,9 +1827,38 @@ type GuideTitleIndex = BTreeMap<String, Vec<(i64, i64, String)>>;
 struct CachedGuide {
     generation: i64,
     observed: tokio::time::Instant,
+    /// The wall-clock age this copy already had when it was adopted, zero for
+    /// a guide this process fetched. `tokio::time::Instant` cannot represent a
+    /// moment before the clock started — under `tokio::time::pause()` that is
+    /// near zero — so an hour-old copy loaded from disk keeps its hour here
+    /// rather than silently reporting as fresh.
+    age_offset: Duration,
     fetched_at: i64,
     guide: LiveTvGuide,
 }
+
+impl CachedGuide {
+    /// The only age anyone may use. Every reader adds the adoption offset.
+    fn age_at(&self, now: tokio::time::Instant) -> Duration {
+        self.age_offset + now.duration_since(self.observed)
+    }
+}
+
+/// The on-disk shape. `fetched_at` is wall-clock, which is what makes the age
+/// meaningful across a restart; the in-memory `observed` instant is
+/// reconstructed from it on load.
+#[derive(Serialize, Deserialize)]
+struct PersistedGuide {
+    version: u32,
+    generation: i64,
+    fetched_at: i64,
+    guide: LiveTvGuide,
+}
+
+/// Anything else on disk is ignored rather than migrated: the guide is a
+/// cache, and one refresh interval replaces it.
+const PERSISTED_GUIDE_VERSION: u32 = 1;
+const PERSISTED_GUIDE_FILE: &str = "guide.json";
 
 impl Default for GuideCache {
     fn default() -> Self {
@@ -1524,11 +1867,196 @@ impl Default for GuideCache {
             refresh_admission: Arc::new(tokio::sync::Semaphore::new(1)),
             refresh_cancel: StdMutex::new(None),
             next_sequence: AtomicU64::new(1),
+            persist: None,
+            wake: Arc::new(tokio::sync::Notify::new()),
+            observed_generation: AtomicI64::new(i64::MIN),
+            discard_epoch: Arc::new(AtomicU64::new(0)),
+            persist_gate: Arc::new(StdMutex::new(())),
+            persisted_generation: AtomicI64::new(i64::MIN),
         }
     }
 }
 
 impl GuideCache {
+    /// A cache that keeps the owner's last good guide on disk. The directory
+    /// is a child of an already-managed persistent cache root, so it needs no
+    /// storage-census entry of its own.
+    fn with_store(dir: PathBuf) -> Self {
+        let path = dir.join(PERSISTED_GUIDE_FILE);
+        let cached = Self::load_persisted(&path);
+        let cache = Self {
+            persist: Some(path),
+            ..Self::default()
+        };
+        if let Some(cached) = cached {
+            cache
+                .persisted_generation
+                .store(cached.generation, Ordering::Release);
+            // Uncontended: nothing else holds this mutex before the manager is
+            // published. `try_lock` keeps the constructor synchronous.
+            match cache.state.try_lock() {
+                Ok(mut state) => state.cached = Some(cached),
+                Err(_) => tracing::warn!(
+                    "the persisted programme guide was read but could not be adopted"
+                ),
+            }
+        }
+        cache
+    }
+
+    /// Adopt a guide written by a previous process, or decide not to. Garbage,
+    /// a version this build does not know, and a copy already past the stale
+    /// window are all ignored; the file is left where it is, because the next
+    /// successful refresh overwrites it anyway.
+    fn load_persisted(path: &Path) -> Option<CachedGuide> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "reading the persisted programme guide"
+                );
+                return None;
+            }
+        };
+        let persisted: PersistedGuide = match serde_json::from_slice(&bytes) {
+            Ok(persisted) => persisted,
+            Err(error) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    %error,
+                    "the persisted programme guide is unreadable; starting cold"
+                );
+                return None;
+            }
+        };
+        if persisted.version != PERSISTED_GUIDE_VERSION {
+            tracing::warn!(
+                path = %path.display(),
+                version = persisted.version,
+                "ignoring a persisted programme guide written by another version"
+            );
+            return None;
+        }
+        // Clamped: a clock step at boot must not discard a good copy, and must
+        // not make one look like it came from the future.
+        let age = Duration::from_secs(
+            unix_seconds()
+                .saturating_sub(persisted.fetched_at)
+                .max(0)
+                .unsigned_abs(),
+        );
+        if age > guide::GUIDE_STALE_TTL {
+            return None;
+        }
+        let now = tokio::time::Instant::now();
+        let (observed, age_offset) = match now.checked_sub(age) {
+            Some(observed) => (observed, Duration::ZERO),
+            // A process whose clock has been running for less time than the
+            // guide's age has no instant that far back. Keep the age in the
+            // offset instead of losing it.
+            None => (now, age),
+        };
+        Some(CachedGuide {
+            generation: persisted.generation,
+            observed,
+            age_offset,
+            fetched_at: persisted.fetched_at,
+            guide: persisted.guide,
+        })
+    }
+
+    /// Write the copy out for the next process. Never an error to the refresh
+    /// that produced it: a guide that could not be saved is still a guide.
+    async fn persist_guide(&self, cached: &CachedGuide) {
+        let Some(path) = self.persist.clone() else {
+            return;
+        };
+        let epoch = self.discard_epoch.load(Ordering::Acquire);
+        let persisted = PersistedGuide {
+            version: PERSISTED_GUIDE_VERSION,
+            generation: cached.generation,
+            fetched_at: cached.fetched_at,
+            guide: cached.guide.clone(),
+        };
+        let gate = Arc::clone(&self.persist_gate);
+        let discard_epoch = Arc::clone(&self.discard_epoch);
+        let written = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            // One writer at a time, and the rename checks that nobody
+            // discarded the cache while the bytes were being encoded.
+            let _held = gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let bytes = serde_json::to_vec(&persisted)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            let tmp = path.with_extension("json.tmp");
+            std::fs::write(&tmp, &bytes)?;
+            if discard_epoch.load(Ordering::Acquire) != epoch {
+                let _ = std::fs::remove_file(&tmp);
+                return Ok(());
+            }
+            std::fs::rename(&tmp, &path)?;
+            Ok(())
+        })
+        .await;
+        match written {
+            Ok(Ok(())) => self
+                .persisted_generation
+                .store(cached.generation, Ordering::Release),
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "persisting the programme guide")
+            }
+            Err(error) => tracing::warn!(%error, "the programme-guide writer did not finish"),
+        }
+    }
+
+    async fn discard_persisted(&self) {
+        self.discard_epoch.fetch_add(1, Ordering::AcqRel);
+        let Some(path) = self.persist.clone() else {
+            return;
+        };
+        let gate = Arc::clone(&self.persist_gate);
+        let removed = tokio::task::spawn_blocking(move || {
+            let _held = gate
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match std::fs::remove_file(&path) {
+                Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+                _ => Ok(()),
+            }
+        })
+        .await;
+        self.persisted_generation.store(i64::MIN, Ordering::Release);
+        if let Ok(Err(error)) = removed {
+            tracing::warn!(%error, "removing the persisted programme guide");
+        }
+    }
+
+    /// A permit, not a broadcast: `notify_one` stores a wake that arrives while
+    /// the loop is mid-refresh, so a lineup that fills during a fetch is not
+    /// lost.
+    fn wake(&self) {
+        self.wake.notify_one();
+    }
+
+    /// A settings save is the one skip reason that does not resolve itself, so
+    /// it wakes the loop. The first observation is not a change.
+    fn observe_generation(&self, generation: i64) {
+        let previous = self.observed_generation.swap(generation, Ordering::AcqRel);
+        if previous != i64::MIN && previous != generation {
+            self.wake();
+        }
+    }
+
+    async fn note_next_refresh(&self, at: i64) {
+        self.state.lock().await.next_refresh_at = Some(at);
+    }
+
     fn begin_refresh(&self, config: &LiveTvConfig) -> CancellationToken {
         let token = CancellationToken::new();
         let mut active = self
@@ -1563,15 +2091,20 @@ impl GuideCache {
             .cached
             .as_ref()
             .filter(|cached| cached.generation == config.generation)
-            .filter(|cached| now.duration_since(cached.observed) <= guide::GUIDE_STALE_TTL)
+            .filter(|cached| cached.age_at(now) <= guide::GUIDE_STALE_TTL)
         else {
-            return LiveTvGuide::unavailable(
+            let mut guide = LiveTvGuide::unavailable(
                 config.guide_source,
                 window,
                 state.error_for(config.generation),
             );
+            // An unavailable answer still says when to ask again — that is the
+            // difference between a client polling on the owner's clock and one
+            // guessing a cadence of its own.
+            guide.next_refresh_at = state.next_refresh_at;
+            return guide;
         };
-        let age = now.duration_since(cached.observed);
+        let age = cached.age_at(now);
         let mut guide = cached.guide.clipped(&window);
         guide.age_seconds = age.as_secs();
         guide.fetched_at = Some(cached.fetched_at);
@@ -1581,6 +2114,7 @@ impl GuideCache {
             GuideFreshness::Stale
         };
         guide.refresh_error = state.error_for(config.generation);
+        guide.next_refresh_at = state.next_refresh_at;
         guide
     }
 
@@ -1592,24 +2126,35 @@ impl GuideCache {
         sequence: u64,
         result: &Result<LiveTvGuide, LiveTvError>,
     ) -> bool {
-        let mut state = self.state.lock().await;
-        if sequence < state.published_sequence {
-            return false;
-        }
-        state.published_sequence = sequence;
-        match result {
-            Ok(guide) => {
-                state.cached = Some(CachedGuide {
-                    generation,
-                    observed: tokio::time::Instant::now(),
-                    fetched_at: unix_seconds(),
-                    guide: guide.clone(),
-                });
-                state.last_error = None;
+        let stored = {
+            let mut state = self.state.lock().await;
+            if sequence < state.published_sequence {
+                return false;
             }
-            Err(error) => {
-                state.last_error = Some((generation, guide::sanitize_refresh_error(error)))
+            state.published_sequence = sequence;
+            match result {
+                Ok(guide) => {
+                    let cached = CachedGuide {
+                        generation,
+                        observed: tokio::time::Instant::now(),
+                        age_offset: Duration::ZERO,
+                        fetched_at: unix_seconds(),
+                        guide: guide.clone(),
+                    };
+                    state.cached = Some(cached.clone());
+                    state.last_error = None;
+                    Some(cached)
+                }
+                Err(error) => {
+                    state.last_error = Some((generation, guide::sanitize_refresh_error(error)));
+                    None
+                }
             }
+        };
+        // Outside the state lock: the write is a blocking file operation and
+        // every guide read would otherwise wait behind it.
+        if let Some(cached) = stored {
+            self.persist_guide(&cached).await;
         }
         true
     }
@@ -1617,9 +2162,40 @@ impl GuideCache {
     /// A settings change discards the cache: the lineup it was matched
     /// against, and possibly the source itself, just changed.
     async fn invalidate(&self) {
-        let mut state = self.state.lock().await;
-        state.cached = None;
-        state.last_error = None;
+        {
+            let mut state = self.state.lock().await;
+            state.cached = None;
+            state.last_error = None;
+        }
+        self.discard_persisted().await;
+    }
+
+    /// What the Developer panel reports about the copy on disk: where it is,
+    /// how big it is, and which settings generation it was matched under.
+    /// Advisory only.
+    fn persisted_status(&self) -> Option<(PathBuf, u64, Option<i64>)> {
+        let path = self.persist.clone()?;
+        // Metadata only. Parsing the document here would have meant a
+        // multi-megabyte blocking read on a runtime worker every time an
+        // administrator opened the Developer panel; the generation is the one
+        // thing worth reporting and it is already known in memory.
+        let bytes = std::fs::metadata(&path).map(|meta| meta.len()).ok()?;
+        let generation = match self.persisted_generation.load(Ordering::Acquire) {
+            i64::MIN => None,
+            generation => Some(generation),
+        };
+        Some((path, bytes, generation))
+    }
+
+    /// How old the copy matched to this generation is, if there is one.
+    async fn age_for(&self, generation: i64) -> Option<Duration> {
+        let state = self.state.lock().await;
+        let now = tokio::time::Instant::now();
+        state
+            .cached
+            .as_ref()
+            .filter(|cached| cached.generation == generation)
+            .map(|cached| cached.age_at(now))
     }
 
     async fn cached_generation(&self) -> Option<i64> {
@@ -1741,9 +2317,12 @@ impl LiveTvManager {
         serving: crate::serving_fence::ServingAuthority,
         node_id: String,
         scratch_root: PathBuf,
+        guide_store: PathBuf,
     ) -> Arc<Self> {
         let metrics = Arc::new(LiveTvMetrics::default());
-        Arc::new(Self {
+        let guide_cache = GuideCache::with_store(guide_store);
+        let lineup_wake = Arc::clone(&guide_cache.wake);
+        let manager = Arc::new(Self {
             store,
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
@@ -1756,8 +2335,8 @@ impl LiveTvManager {
             serving,
             node_id,
             scratch_root,
-            cache: SnapshotCache::default(),
-            guide_cache: GuideCache::default(),
+            cache: SnapshotCache::with_wake(lineup_wake),
+            guide_cache,
             guide_titles: StdMutex::new(Arc::new(BTreeMap::new())),
             relayed_guide: tokio::sync::Mutex::new(None),
             graph_cache: tokio::sync::Mutex::new(None),
@@ -1766,7 +2345,41 @@ impl LiveTvManager {
             scratch_claims: StdMutex::new(HashSet::new()),
             scratch_sweep_gate: tokio::sync::Mutex::new(()),
             metrics,
-        })
+        });
+        manager.adopt_persisted_guide();
+        manager
+    }
+
+    /// Make a guide loaded from disk visible to everything that reads the
+    /// in-memory one: the age gauge, and the activity path's title index. The
+    /// cache itself already holds it — this only publishes the projections.
+    ///
+    /// The generation is deliberately not checked here: settings are not
+    /// readable synchronously at construction, and `read()` filters on it
+    /// anyway, so a guide matched under an older generation is never *served*.
+    /// The bounded consequence is that the Activity page can label programmes
+    /// from it until the refresh loop's first tick invalidates, which is
+    /// seconds away — against the certainty of an empty grid if adoption
+    /// waited for that tick.
+    fn adopt_persisted_guide(&self) {
+        let Ok(state) = self.guide_cache.state.try_lock() else {
+            return;
+        };
+        let Some(cached) = state.cached.as_ref() else {
+            return;
+        };
+        self.metrics.observe_guide_at(
+            cached.observed,
+            cached.age_offset,
+            cached.guide.total_programmes(),
+        );
+        self.publish_guide_titles(&cached.guide);
+    }
+
+    /// Where the owner's guide copy lives, how big it is, and the generation it
+    /// was matched under — for the Developer panel, which never gates on it.
+    pub(crate) fn guide_store_status(&self) -> Option<(PathBuf, u64, Option<i64>)> {
+        self.guide_cache.persisted_status()
     }
 
     pub(crate) async fn config(&self) -> Result<LiveTvConfig, LiveTvError> {
@@ -1780,6 +2393,7 @@ impl LiveTvManager {
 
     pub(crate) fn observe_config(&self, config: &LiveTvConfig) {
         self.guide_cache.cancel_if_config_changed(config);
+        self.guide_cache.observe_generation(config.generation);
         self.source_formats
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1957,7 +2571,9 @@ impl LiveTvManager {
             ffmpeg_graph_ready: false,
             ffmpeg_graph_message:
                 "Run the Developer readiness check to test the live-TV FFmpeg graph".to_owned(),
-            start_protocols: vec![1, 2],
+            // 3 = client-supplied request ids and the /live-tv/starts/*
+            // recovery routes. An ingress intersects this with its own list.
+            start_protocols: vec![1, 2, 3],
         })
     }
 
@@ -2197,11 +2813,26 @@ impl LiveTvManager {
                         "live-TV request recovery history is full; retry after one minute".into(),
                     ));
                 }
-                if registry.sessions.len() >= usize::from(config.max_sessions) {
-                    return Err(LiveTvError::Capacity(format!(
-                        "all {} plurx Live TV session slots are in use",
-                        config.max_sessions
-                    )));
+                let live = registry
+                    .sessions
+                    .values()
+                    .filter(|session| !session.cancel.is_cancelled())
+                    .count();
+                if live >= usize::from(config.max_sessions) {
+                    // Paul's ruling: a tuner this viewer may still be holding
+                    // is never a reason to refuse that same viewer.
+                    match registry.stray_to_evict(request.user_id, now) {
+                        Some(stray) => {
+                            stray.cancel.cancel();
+                            self.metrics.observe_stray_eviction();
+                        }
+                        None => {
+                            return Err(LiveTvError::Capacity(format!(
+                                "all {} plurx Live TV session slots are in use",
+                                config.max_sessions
+                            )))
+                        }
+                    }
                 }
                 registry.requests.insert(key, capability.clone());
                 registry.sessions.insert(capability, Arc::clone(&session));
@@ -2631,17 +3262,35 @@ impl LiveTvManager {
             .requests
             .retain(|_, capability| capability != &session.capability);
         registry.prune_terminals();
-        let error = session
+        let terminal = session
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .terminal_error
-            .clone()
-            .unwrap_or_else(|| {
-                LiveTvError::CapabilityExpired(
-                    "the live-TV session ended; start a new Watch request".into(),
-                )
-            });
+            .clone();
+        // A session with no terminal error was released, not failed — a stop,
+        // a drain, a shutdown, an idle reap. Counting that under
+        // `capability_expired` would bury every real failure in it.
+        let reason = terminal.as_ref().map_or("released", LiveTvError::code);
+        let error = terminal.unwrap_or_else(|| {
+            LiveTvError::CapabilityExpired(
+                "the live-TV session ended; start a new Watch request".into(),
+            )
+        });
+        // Every session end is on the box. `ps auxwww` is not an acceptable
+        // answer for work that held a tuner: what it was, why it stopped, how
+        // long it ran, and how much the tuner actually delivered. No
+        // capability, no tuner URL, no DeviceAuth — the same rule the guide
+        // fetch follows.
+        tracing::info!(
+            channel = %session.channel.guide_number,
+            reason,
+            duration_s = session.started.elapsed().as_secs(),
+            tuner_bytes = session.tuner_bytes.load(Ordering::Acquire),
+            user = session.request.user_id,
+            "Live TV session ended"
+        );
+        self.metrics.observe_session_end(reason);
         registry.terminals.insert(
             session.capability.clone(),
             LiveTvTerminalTombstone {
@@ -2650,8 +3299,181 @@ impl LiveTvManager {
                 expires_at: tokio::time::Instant::now() + TERMINAL_TOMBSTONE_TTL,
             },
         );
-        self.metrics.ended.fetch_add(1, Ordering::Relaxed);
         session.changed.notify_waiters();
+    }
+
+    /// Stop whatever this viewer's request produced, and make sure nothing can
+    /// be produced from it later. The fence goes in **before** anything is
+    /// looked at, so a start racing this call finds `Conflict` or a session
+    /// that is about to be cancelled — never a fresh admission.
+    pub(crate) async fn retire_local(&self, user_id: i64, request_id: &str) -> LiveTvRetireOutcome {
+        let (live, ended) = {
+            let mut registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry.retire(user_id, request_id.to_owned(), tokio::time::Instant::now());
+            let live = registry.sessions_for_public_request(user_id, request_id);
+            let ended = registry
+                .tombstone_for_public_request(user_id, request_id)
+                .is_some();
+            (live, ended)
+        };
+        if !live.is_empty() {
+            let _ = self.cancel_and_wait(live).await;
+            return LiveTvRetireOutcome::Stopped;
+        }
+        if ended {
+            return LiveTvRetireOutcome::Ended;
+        }
+        LiveTvRetireOutcome::Retired
+    }
+
+    /// The same document the original activation answered, for a session that
+    /// is still live and still this viewer's. One public identity, one stream:
+    /// every other match is cancelled.
+    pub(crate) async fn resume_local(&self, user_id: i64, request_id: &str) -> LiveTvResumeAnswer {
+        let (resumed, pending, ended, strays) = {
+            let mut registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry.prune_terminals();
+            if registry.is_retired(user_id, request_id) {
+                return LiveTvResumeAnswer::outcome(LiveTvResumeOutcome::Retired);
+            }
+            let matches = registry.sessions_for_public_request(user_id, request_id);
+            let resumable = |session: &Arc<LiveTvSession>| {
+                if session.cancel.is_cancelled() {
+                    return None;
+                }
+                let state = session
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (state.activated && state.phase == LiveTvSessionPhase::Active)
+                    .then_some(state.last_touch)
+            };
+            let resumed = matches
+                .iter()
+                .filter_map(|session| resumable(session).map(|touch| (touch, Arc::clone(session))))
+                .max_by_key(|(touch, _)| *touch)
+                .map(|(_, session)| session);
+            let pending = resumed.is_none()
+                && matches.iter().any(|session| {
+                    !session.cancel.is_cancelled()
+                        && matches!(
+                            session
+                                .state
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .phase,
+                            LiveTvSessionPhase::Starting | LiveTvSessionPhase::Provisional
+                        )
+                });
+            let strays = match resumed.as_ref() {
+                Some(kept) => matches
+                    .iter()
+                    .filter(|session| !Arc::ptr_eq(session, kept))
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                None => Vec::new(),
+            };
+            let ended = registry
+                .tombstone_for_public_request(user_id, request_id)
+                .is_some();
+            (resumed, pending, ended, strays)
+        };
+        if !strays.is_empty() {
+            let _ = self.cancel_and_wait(strays).await;
+        }
+        if let Some(session) = resumed {
+            session
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .last_touch = tokio::time::Instant::now();
+            return LiveTvResumeAnswer {
+                outcome: LiveTvResumeOutcome::Live,
+                session: Some(LiveTvActivated {
+                    session_id: session.capability.clone(),
+                    playlist_url: format!(
+                        "/api/v1/live-tv/sessions/{}/index.m3u8",
+                        session.capability
+                    ),
+                    channel: session.channel_with_source_format(),
+                    output: session.output(),
+                    delivery: session.delivery(),
+                    live: true,
+                }),
+            };
+        }
+        if pending {
+            // An activation is in flight from an ingress. The client keeps its
+            // hint, shows the list and touches nothing: that ingress, or the
+            // provisional timeout, settles it.
+            return LiveTvResumeAnswer::outcome(LiveTvResumeOutcome::Pending);
+        }
+        if ended {
+            return LiveTvResumeAnswer::outcome(LiveTvResumeOutcome::Ended);
+        }
+        self.registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retire(user_id, request_id.to_owned(), tokio::time::Instant::now());
+        LiveTvResumeAnswer::outcome(LiveTvResumeOutcome::Retired)
+    }
+
+    /// What a client's poll of its own start says, without ever handing back a
+    /// capability. `unknown` is the honest answer for an id this owner has
+    /// never seen — which, after a restart, is every id.
+    pub(crate) fn start_state_local(&self, user_id: i64, request_id: &str) -> LiveTvStartState {
+        let registry = self
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for session in registry.sessions_for_public_request(user_id, request_id) {
+            if session.cancel.is_cancelled() {
+                continue;
+            }
+            let phase = session
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .phase;
+            return match phase {
+                LiveTvSessionPhase::Active => LiveTvStartState {
+                    state: "active".to_owned(),
+                    code: None,
+                },
+                LiveTvSessionPhase::Starting | LiveTvSessionPhase::Provisional => {
+                    LiveTvStartState {
+                        state: "starting".to_owned(),
+                        code: None,
+                    }
+                }
+                LiveTvSessionPhase::Failed => LiveTvStartState {
+                    state: "ended".to_owned(),
+                    code: Some("stream_failed".to_owned()),
+                },
+            };
+        }
+        if let Some(tombstone) = registry.tombstone_for_public_request(user_id, request_id) {
+            return LiveTvStartState {
+                state: "ended".to_owned(),
+                code: Some(tombstone.error.code().to_owned()),
+            };
+        }
+        if registry.is_retired(user_id, request_id) {
+            return LiveTvStartState {
+                state: "retired".to_owned(),
+                code: None,
+            };
+        }
+        LiveTvStartState {
+            state: "unknown".to_owned(),
+            code: None,
+        }
     }
 
     pub(crate) fn activities(&self) -> Vec<LiveTvActivity> {
@@ -3007,6 +3829,7 @@ impl LiveTvManager {
             fetched_at: Some(unix_seconds()),
             window,
             refresh_error: None,
+            next_refresh_at: None,
             matched_channels: matched,
             lineup_channels: lineup.len(),
             channels,
@@ -3125,8 +3948,9 @@ impl LiveTvManager {
         let cached = self.relayed_guide.lock().await;
         let (cached_generation, observed, guide) = cached.as_ref()?;
         (*cached_generation == generation
-            && tokio::time::Instant::now().duration_since(*observed) <= RELAY_GUIDE_MEMORY)
-            .then(|| guide.clone())
+            && tokio::time::Instant::now().duration_since(*observed)
+                <= relay_guide_memory(guide, unix_seconds()))
+        .then(|| guide.clone())
     }
 
     pub(crate) async fn remember_relayed_guide(&self, generation: i64, guide: LiveTvGuide) {
@@ -3203,8 +4027,13 @@ impl LiveTvManager {
     /// serving read is a cache hit by construction. It runs only on the owner
     /// and only while a source is configured, and it re-reads settings each
     /// tick so turning the guide on or off takes effect without a restart.
-    pub(crate) async fn guide_refresh_loop(self: Arc<Self>, shutdown: CancellationToken) {
+    pub(crate) async fn guide_refresh_loop(
+        self: Arc<Self>,
+        mut serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
+        shutdown: CancellationToken,
+    ) {
         let mut delay = guide::GUIDE_REFRESH_INTERVAL;
+        let mut serving_open = true;
         loop {
             if let Ok(config) = self.config().await {
                 let ours = config.owner_node_id == self.node_id;
@@ -3217,7 +4046,30 @@ impl LiveTvManager {
                     self.guide_cache.invalidate().await;
                     self.clear_guide_titles();
                 }
-                if ours && config.guide_fetches() && self.serving.admit().is_some() {
+                // A wake can arrive for a guide that was fetched moments ago —
+                // a rolling deploy produces one fence transition per node, and
+                // each one wakes this loop. Refetching from a third-party
+                // grabber four times in a minute is rude and buys nothing, so
+                // a copy younger than the cold-retry window stands.
+                let just_refreshed = self
+                    .guide_cache
+                    .age_for(config.generation)
+                    .await
+                    .is_some_and(|age| age < guide::GUIDE_COLD_LINEUP_RETRY);
+                if ours
+                    && config.guide_fetches()
+                    && !just_refreshed
+                    && self.serving.admit().is_some()
+                {
+                    // One bounded lineup read when nothing has been read yet:
+                    // the guide cannot be matched against an empty lineup, and
+                    // on a cold owner nothing else has asked for one. A warm
+                    // snapshot is never refreshed from here — `local_snapshot`
+                    // serves it, and its own connect timeout bounds a tuner
+                    // that is switched off.
+                    if self.cached_lineup(&config).await.is_empty() {
+                        let _ = self.local_snapshot(&config, false, false).await;
+                    }
                     let refreshed = self
                         .refresh_guide_with_cancel(&config, false, shutdown.clone())
                         .await;
@@ -3242,17 +4094,73 @@ impl LiveTvManager {
                             );
                         }
                     }
-                } else {
+                } else if just_refreshed {
+                    // Not a skip in the sense the metric means: there is a
+                    // guide, it is current, and the loop simply has nothing to
+                    // do until the interval comes round.
                     delay = guide::GUIDE_REFRESH_INTERVAL;
+                } else {
+                    delay = guide_skip_delay(ours && config.guide_fetches());
                     self.metrics
                         .observe_guide_refresh(config.guide_source, "skipped");
                 }
             }
+            self.guide_cache
+                .note_next_refresh(unix_seconds().saturating_add(delay.as_secs() as i64))
+                .await;
+            let wake = Arc::clone(&self.guide_cache.wake);
             tokio::select! {
                 _ = shutdown.cancelled() => return,
                 _ = tokio::time::sleep(delay) => {}
+                _ = wake.notified() => {}
+                // A fence gained *or* lost fires this. On a loss the next tick
+                // sees `admit()` is `None`, records a skip and sleeps a minute;
+                // that is cheap, and it is what makes admission arrive within
+                // seconds rather than at the next interval.
+                changed = async {
+                    if serving_open {
+                        serving.changed().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    if changed.is_err() {
+                        serving_open = false;
+                    }
+                }
             }
         }
+    }
+}
+
+/// How long to wait after a tick that did no work. The owner with a source
+/// that is merely not admitted yet is seconds from being admitted, so it comes
+/// back in a minute; every other skip — not the owner, no source configured —
+/// changes only with a settings save, and a save wakes the loop itself.
+/// How long an ingress may repeat the owner's answer without asking again.
+/// Bounded by the owner's own clock, so an ingress never holds a guide past
+/// the moment a newer one exists.
+fn relay_guide_memory(guide: &LiveTvGuide, now: i64) -> Duration {
+    if guide.freshness == GuideFreshness::Unavailable {
+        return RELAY_UNAVAILABLE_GUIDE_MEMORY;
+    }
+    match guide.next_refresh_at {
+        Some(next) => RELAY_GUIDE_MEMORY.min(Duration::from_secs(
+            next.saturating_sub(now).max(0).unsigned_abs(),
+        )),
+        None => RELAY_GUIDE_MEMORY,
+    }
+}
+
+/// How long to wait after a tick that did no work. The owner with a source
+/// that is merely not admitted yet is seconds from being admitted, so it comes
+/// back in a minute; every other skip — not the owner, no source configured —
+/// changes only with a settings save, and a save wakes the loop itself.
+fn guide_skip_delay(owner_with_source: bool) -> Duration {
+    if owner_with_source {
+        guide::GUIDE_COLD_LINEUP_RETRY
+    } else {
+        guide::GUIDE_REFRESH_INTERVAL
     }
 }
 
@@ -3319,9 +4227,9 @@ impl LiveTvMetrics {
              plurx_live_tv_starts_total{{outcome=\"created\"}} {}\n\
              plurx_live_tv_starts_total{{outcome=\"recovered\"}} {}\n\
              plurx_live_tv_starts_total{{outcome=\"failed\"}} {}\n\
-             # HELP plurx_live_tv_session_ends_total Live TV session owners released.\n\
-             # TYPE plurx_live_tv_session_ends_total counter\n\
-             plurx_live_tv_session_ends_total{{reason=\"terminal\"}} {}\n\
+             # HELP plurx_live_tv_stray_evictions_total Sessions cancelled to admit their own viewer's new start.\n\
+             # TYPE plurx_live_tv_stray_evictions_total counter\n\
+             plurx_live_tv_stray_evictions_total {}\n\
              # HELP plurx_live_tv_relay_bytes_total Bytes relayed for Live TV resources.\n\
              # TYPE plurx_live_tv_relay_bytes_total counter\n\
              plurx_live_tv_relay_bytes_total {}\n",
@@ -3332,9 +4240,10 @@ impl LiveTvMetrics {
             self.starts_created.load(Ordering::Acquire),
             self.starts_recovered.load(Ordering::Acquire),
             self.starts_failed.load(Ordering::Acquire),
-            self.ended.load(Ordering::Acquire),
+            self.stray_evictions.load(Ordering::Acquire),
             self.relay_bytes.load(Ordering::Acquire),
-        ) + &self.guide_prometheus()
+        ) + &self.session_ends_prometheus()
+            + &self.guide_prometheus()
     }
 }
 
@@ -5865,6 +6774,7 @@ mod tests {
             crate::serving_fence::ServingAuthority::always_ready(),
             "node-a".into(),
             root.join("live-tv"),
+            root.join("live-tv-guide"),
         )
     }
 
@@ -5971,6 +6881,562 @@ mod tests {
             }),
             signal_cache: tokio::sync::Mutex::new(None),
         })
+    }
+
+    /// Put a session in the registry under a public identity, and give it the
+    /// fake worker `cancel_and_wait` waits for: on cancellation it retires the
+    /// session the way `run_live_session` would.
+    fn register_test_session(
+        manager: &Arc<LiveTvManager>,
+        user_id: i64,
+        request_id: &str,
+        phase: LiveTvSessionPhase,
+        last_touch: tokio::time::Instant,
+    ) -> Arc<LiveTvSession> {
+        register_test_session_at(manager, user_id, request_id, phase, last_touch, 0)
+    }
+
+    /// `serving_generation` distinguishes two sessions under one public
+    /// identity: `LiveTvRequestKey` includes it, so a fence blip between a POST
+    /// and its replay is exactly how a viewer ends up with two.
+    fn register_test_session_at(
+        manager: &Arc<LiveTvManager>,
+        user_id: i64,
+        request_id: &str,
+        phase: LiveTvSessionPhase,
+        last_touch: tokio::time::Instant,
+        serving_generation: u64,
+    ) -> Arc<LiveTvSession> {
+        let session = test_session(
+            manager.scratch_root.join(uuid::Uuid::new_v4().to_string()),
+            1,
+        );
+        // `test_session` builds an owned request; rewrite the identity fields
+        // through a fresh Arc so the registry key is the one under test.
+        let mut request = session.request.clone();
+        request.user_id = user_id;
+        request.request_id = request_id.to_owned();
+        request.source_serving_generation = serving_generation;
+        let session = Arc::new(LiveTvSession {
+            request,
+            state: StdMutex::new(LiveTvSessionState {
+                phase,
+                startup: None,
+                activated: phase == LiveTvSessionPhase::Active,
+                provisional_at: Some(last_touch),
+                last_touch,
+                last_progress: last_touch,
+                media_sequence: 0,
+                publication: None,
+                encoder: "software".into(),
+                error: None,
+                terminal_error: None,
+                cleanup: None,
+            }),
+            capability: session.capability.clone(),
+            activation_token: session.activation_token.clone(),
+            channel: session.channel.clone(),
+            device_id: session.device_id.clone(),
+            output: StdMutex::new(session.output()),
+            delivery: StdMutex::new(None),
+            device_ipv4: None,
+            owner_serving_generation: 0,
+            started: last_touch,
+            directory: session.directory.clone(),
+            cancel: CancellationToken::new(),
+            changed: tokio::sync::Notify::new(),
+            startup_waiters: AtomicUsize::new(0),
+            worker: StdMutex::new(None),
+            process: tokio::sync::Mutex::new(None),
+            decoder_unavailable: Arc::new(AtomicBool::new(false)),
+            source_format: Arc::new(StdMutex::new(None)),
+            source_format_expires_at: Arc::new(AtomicI64::new(0)),
+            tuner_bytes: Arc::new(AtomicU64::new(0)),
+            resource_admission: Arc::new(tokio::sync::Semaphore::new(LOCAL_RESOURCE_CONCURRENCY)),
+            signal_cache: tokio::sync::Mutex::new(None),
+        });
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry.requests.insert(
+                LiveTvRequestKey::from(&session.request),
+                session.capability.clone(),
+            );
+            registry
+                .sessions
+                .insert(session.capability.clone(), Arc::clone(&session));
+        }
+        let worker_manager = Arc::clone(manager);
+        let worker_session = Arc::clone(&session);
+        tokio::spawn(async move {
+            worker_session.cancel.cancelled().await;
+            worker_session
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .cleanup = Some(Ok(()));
+            worker_manager.retire_session(&worker_session);
+            worker_session.changed.notify_waiters();
+        });
+        session
+    }
+
+    fn hex_request_id(seed: u8) -> String {
+        format!("{seed:02x}").repeat(16)
+    }
+
+    #[tokio::test]
+    async fn a_retired_request_id_can_never_start_again() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        let id = hex_request_id(1);
+        let mut request = test_session(root.path().join("x"), 1).request.clone();
+        request.user_id = 7;
+        request.request_id = id.clone();
+
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(
+                registry.request_session(&request).expect("fresh").is_none(),
+                "an id nobody has seen is simply new"
+            );
+            registry.retire(7, id.clone(), tokio::time::Instant::now());
+            assert!(matches!(
+                registry.request_session(&request),
+                Err(LiveTvError::Conflict(_))
+            ));
+            // A different viewer's identical id is a different fact.
+            let mut other = request.clone();
+            other.user_id = 8;
+            assert!(registry
+                .request_session(&other)
+                .expect("other user")
+                .is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn one_viewer_cannot_fill_the_shared_recovery_history_by_retiring() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        let now = tokio::time::Instant::now();
+        {
+            let mut registry = manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for seed in 0..40u8 {
+                registry.retire(
+                    7,
+                    hex_request_id(seed),
+                    now + Duration::from_millis(seed.into()),
+                );
+            }
+            assert_eq!(
+                registry
+                    .retired
+                    .keys()
+                    .filter(|(user, _)| *user == 7)
+                    .count(),
+                MAX_RETIRED_PER_USER,
+                "a viewer holds at most MAX_RETIRED_PER_USER ids, oldest evicted"
+            );
+            assert!(
+                registry.is_retired(7, &hex_request_id(39)),
+                "the newest survives"
+            );
+            assert!(
+                registry.is_retired(7, &hex_request_id(38)),
+                "and so does the one before it, even though both were retired \
+                 inside one clock tick — insertion order is the tie-break"
+            );
+            assert!(
+                !registry.is_retired(7, &hex_request_id(0)),
+                "the oldest does not"
+            );
+            assert!(
+                registry.terminals.is_empty(),
+                "retires are not tombstones: they must never consume the shared cap"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn retire_stops_every_session_one_public_identity_produced() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        tokio::fs::create_dir_all(&manager.scratch_root)
+            .await
+            .expect("root");
+        let id = hex_request_id(2);
+        let now = tokio::time::Instant::now();
+        // Two sessions for one identity: legitimate, because the registry key
+        // includes the ingress's serving generation and a fence blip between a
+        // POST and its replay makes a second one.
+        let first = register_test_session_at(&manager, 7, &id, LiveTvSessionPhase::Active, now, 0);
+        let second = register_test_session_at(&manager, 7, &id, LiveTvSessionPhase::Active, now, 1);
+        assert_eq!(
+            manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .sessions_for_public_request(7, &id)
+                .len(),
+            2,
+            "one public identity, two registry keys — the race the plan names"
+        );
+
+        assert_eq!(
+            manager.retire_local(7, &id).await,
+            LiveTvRetireOutcome::Stopped
+        );
+        assert!(first.cancel.is_cancelled());
+        assert!(second.cancel.is_cancelled());
+
+        // And a start racing the retire finds the fence, never a fresh slot.
+        let mut racing = first.request.clone();
+        racing.source_serving_generation = 9;
+        assert!(matches!(
+            manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .request_session(&racing),
+            Err(LiveTvError::Conflict(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn retire_reports_what_it_actually_did() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        assert_eq!(
+            manager.retire_local(7, &hex_request_id(3)).await,
+            LiveTvRetireOutcome::Retired,
+            "nothing to stop, and now nothing ever will be"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_hands_back_one_stream_and_cancels_the_rest() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        tokio::fs::create_dir_all(&manager.scratch_root)
+            .await
+            .expect("root");
+        let id = hex_request_id(4);
+        let now = tokio::time::Instant::now();
+
+        let stale = register_test_session_at(
+            &manager,
+            7,
+            &id,
+            LiveTvSessionPhase::Active,
+            now - Duration::from_secs(30),
+            0,
+        );
+        let freshest =
+            register_test_session_at(&manager, 7, &id, LiveTvSessionPhase::Active, now, 1);
+
+        let answer = manager.resume_local(7, &id).await;
+        assert_eq!(answer.outcome, LiveTvResumeOutcome::Live);
+        assert_eq!(
+            answer.session.as_ref().expect("session").session_id,
+            freshest.capability,
+            "the one the viewer most recently touched"
+        );
+        assert!(
+            stale.cancel.is_cancelled(),
+            "one public identity, one stream"
+        );
+        assert!(!freshest.cancel.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn resume_answers_pending_ended_and_retired_apart() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        tokio::fs::create_dir_all(&manager.scratch_root)
+            .await
+            .expect("root");
+        let now = tokio::time::Instant::now();
+
+        let pending_id = hex_request_id(5);
+        let provisional = register_test_session(
+            &manager,
+            7,
+            &pending_id,
+            LiveTvSessionPhase::Provisional,
+            now,
+        );
+        let answer = manager.resume_local(7, &pending_id).await;
+        assert_eq!(
+            answer.outcome,
+            LiveTvResumeOutcome::Pending,
+            "an activation in flight from an ingress is that ingress's to finish"
+        );
+        assert!(answer.session.is_none());
+        assert!(
+            !provisional.cancel.is_cancelled(),
+            "resume never cancels the session it is waiting on"
+        );
+
+        let ended_id = hex_request_id(6);
+        let ended = register_test_session(&manager, 7, &ended_id, LiveTvSessionPhase::Active, now);
+        ended.cancel.cancel();
+        manager.retire_session(&ended);
+        assert_eq!(
+            manager.resume_local(7, &ended_id).await.outcome,
+            LiveTvResumeOutcome::Ended
+        );
+
+        let unknown_id = hex_request_id(7);
+        assert_eq!(
+            manager.resume_local(7, &unknown_id).await.outcome,
+            LiveTvResumeOutcome::Retired
+        );
+        assert!(
+            manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_retired(7, &unknown_id),
+            "an id the owner has never heard of is retired on the spot, so a \
+             racing start cannot revive it"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_full_owner_evicts_this_viewers_stray_and_nobody_elses() {
+        // The five capacity fixtures the plan names, each decided by the very
+        // function the start path calls — not by a copy of its predicate.
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        let now = tokio::time::Instant::now();
+        let idle = now - STRAY_EVICTION_IDLE - Duration::from_secs(1);
+
+        let mine_idle = register_test_session_at(
+            &manager,
+            7,
+            &hex_request_id(20),
+            LiveTvSessionPhase::Active,
+            idle,
+            0,
+        );
+        let mine_fresh = register_test_session_at(
+            &manager,
+            7,
+            &hex_request_id(21),
+            LiveTvSessionPhase::Active,
+            now,
+            1,
+        );
+        let mine_starting = register_test_session_at(
+            &manager,
+            7,
+            &hex_request_id(22),
+            LiveTvSessionPhase::Starting,
+            idle,
+            2,
+        );
+        let mine_provisional = register_test_session_at(
+            &manager,
+            7,
+            &hex_request_id(23),
+            LiveTvSessionPhase::Provisional,
+            idle,
+            3,
+        );
+        let theirs_idle = register_test_session_at(
+            &manager,
+            8,
+            &hex_request_id(24),
+            LiveTvSessionPhase::Active,
+            idle,
+            4,
+        );
+
+        let chosen = manager
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stray_to_evict(7, now)
+            .expect("this viewer has a stray");
+        assert_eq!(
+            chosen.capability, mine_idle.capability,
+            "the one that has missed three heartbeats, and only that one"
+        );
+        for other in [&mine_fresh, &mine_starting, &mine_provisional, &theirs_idle] {
+            assert_ne!(chosen.capability, other.capability);
+        }
+
+        // Another viewer has nothing to evict here, however idle this
+        // viewer's sessions are: their start is refused, which is correct.
+        assert!(
+            manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stray_to_evict(9, now)
+                .is_none(),
+            "a viewer's own stray must not refuse them; it is not a licence to \
+             take someone else's tuner"
+        );
+
+        // With the stray gone, nothing is left to take: a viewer being
+        // actively watched, a start in flight and a session awaiting
+        // activation are all refused rather than cancelled.
+        mine_idle.cancel.cancel();
+        assert!(
+            manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stray_to_evict(7, now)
+                .is_none(),
+            "a fresh active session, a start and a provisional are never \
+             evicted for idleness \u{2014} their own timeouts bound them"
+        );
+
+        assert!(
+            STRAY_EVICTION_IDLE < CAPABILITY_IDLE_TIMEOUT,
+            "a viewer must be able to reclaim their own slot before the owner \
+             reaps it, or the eviction never fires"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_retired_id_evicts_a_session_in_any_phase() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        let id = hex_request_id(25);
+        let now = tokio::time::Instant::now();
+        // Freshly touched and only provisional: neither half of the idleness
+        // rule can reach it.
+        let provisional =
+            register_test_session_at(&manager, 7, &id, LiveTvSessionPhase::Provisional, now, 0);
+
+        assert!(
+            manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .stray_to_evict(7, now)
+                .is_none(),
+            "nothing to evict before the viewer says the id is spent"
+        );
+
+        manager
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retire(7, id.clone(), now);
+
+        let chosen = manager
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .stray_to_evict(7, now)
+            .expect("a retired id is evictable in any phase");
+        assert_eq!(chosen.capability, provisional.capability);
+    }
+
+    #[tokio::test]
+    async fn a_retired_id_stops_being_retired_when_its_minute_is_up() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        let id = hex_request_id(26);
+        let now = tokio::time::Instant::now();
+        manager
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retire(7, id.clone(), now);
+        assert!(manager
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_retired(7, &id));
+
+        tokio::time::pause();
+        tokio::time::advance(RETIRED_TTL + Duration::from_secs(1)).await;
+        assert!(
+            !manager
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_retired(7, &id),
+            "the expiry is checked on read, not left to whenever a prune \
+             happens to run \u{2014} an idle owner would otherwise answer \
+             \"retired\" for hours"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_started_session_reports_its_state_without_handing_back_a_capability() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        let id = hex_request_id(9);
+        let now = tokio::time::Instant::now();
+        assert_eq!(manager.start_state_local(7, &id).state, "unknown");
+        let session = register_test_session(&manager, 7, &id, LiveTvSessionPhase::Active, now);
+        assert_eq!(manager.start_state_local(7, &id).state, "active");
+        session.cancel.cancel();
+        manager.retire_session(&session);
+        let ended = manager.start_state_local(7, &id);
+        assert_eq!(ended.state, "ended");
+        assert_eq!(ended.code.as_deref(), Some("capability_expired"));
+        let json = serde_json::to_string(&ended).expect("encode");
+        assert!(
+            !json.contains(&session.capability),
+            "a status read is never a handle: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_clean_release_is_counted_apart_from_a_failure() {
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        let now = tokio::time::Instant::now();
+        let released = register_test_session(
+            &manager,
+            7,
+            &hex_request_id(10),
+            LiveTvSessionPhase::Active,
+            now,
+        );
+        released.cancel.cancel();
+        manager.retire_session(&released);
+
+        let failed = register_test_session(
+            &manager,
+            7,
+            &hex_request_id(11),
+            LiveTvSessionPhase::Active,
+            now,
+        );
+        failed
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .terminal_error = Some(LiveTvError::StreamFailed("the tuner stopped".into()));
+        failed.cancel.cancel();
+        manager.retire_session(&failed);
+
+        let prometheus = manager.metrics.session_ends_prometheus();
+        assert!(
+            prometheus.contains("plurx_live_tv_session_ends_total{reason=\"released\"} 1"),
+            "a stop, a drain and an idle reap are releases, not failures: {prometheus}"
+        );
+        assert!(
+            prometheus.contains("plurx_live_tv_session_ends_total{reason=\"stream_failed\"} 1"),
+            "and a real failure is visible on its own line: {prometheus}"
+        );
     }
 
     async fn seed_test_config(manager: &LiveTvManager) {
@@ -7142,7 +8608,7 @@ Output #0, hls, to 'index.m3u8':
             refresh_error: None,
             ffmpeg_graph_ready: false,
             ffmpeg_graph_message: "not probed".to_owned(),
-            start_protocols: vec![1, 2],
+            start_protocols: vec![1, 2, 3],
         }
     }
 
@@ -7902,6 +9368,7 @@ Output #0, hls, to 'index.m3u8':
                 end: i64::from(u32::MAX),
             },
             refresh_error: None,
+            next_refresh_at: None,
             matched_channels: channels,
             lineup_channels: channels,
             channels: (0..channels)
@@ -8034,6 +9501,265 @@ Output #0, hls, to 'index.m3u8':
             cache.read(&config, window).await.freshness,
             GuideFreshness::Unavailable,
             "a settings generation change invalidates the cache it was matched against"
+        );
+    }
+
+    fn guide_config(generation: i64) -> LiveTvConfig {
+        let mut config = LiveTvConfig::from_snapshot(&BTreeMap::new(), "node-a");
+        config.generation = generation;
+        config.guide_source = GuideSource::HdHomeRun;
+        config
+    }
+
+    fn whole_window() -> GuideWindow {
+        GuideWindow {
+            start: 0,
+            end: i64::from(u32::MAX),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_persisted_guide_survives_a_restart_at_its_real_age() {
+        // The clock starts near zero under a paused runtime, so an hour-old
+        // copy has no instant to hang itself on. The age must survive that
+        // anyway: reporting zero would make a deploy look like a fresh fetch
+        // and hold the stale expiry open for six extra hours.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let age = Duration::from_secs(3600);
+        let first = GuideCache::with_store(dir.path().to_path_buf());
+        let config = guide_config(4);
+        first.store(4, 1, &Ok(guide_with(2, 2, 8))).await;
+        let fetched_at = unix_seconds() - age.as_secs() as i64;
+        // Rewrite the copy as if it had been written an hour ago; the file is
+        // the only thing a new process sees.
+        let path = dir.path().join(PERSISTED_GUIDE_FILE);
+        let mut persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        persisted["fetched_at"] = serde_json::json!(fetched_at);
+        std::fs::write(&path, serde_json::to_vec(&persisted).expect("encode")).expect("write");
+
+        let restarted = GuideCache::with_store(dir.path().to_path_buf());
+        let served = restarted.read(&config, whole_window()).await;
+        assert_eq!(
+            served.freshness,
+            GuideFreshness::Stale,
+            "an hour-old copy is served, and says so"
+        );
+        assert_eq!(served.age_seconds, age.as_secs(), "the real age, not zero");
+        assert_eq!(served.fetched_at, Some(fetched_at));
+        assert_eq!(served.channels.len(), 2);
+
+        // It expires at the stale window measured from the fetch, not from the
+        // adoption: five more hours, not six.
+        tokio::time::advance(guide::GUIDE_STALE_TTL - age - Duration::from_secs(1)).await;
+        assert_eq!(
+            restarted.read(&config, whole_window()).await.freshness,
+            GuideFreshness::Stale,
+            "one second short of the window it is still served"
+        );
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert_eq!(
+            restarted.read(&config, whole_window()).await.freshness,
+            GuideFreshness::Unavailable,
+            "the window is measured from the fetch, so the adopted copy expires early"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_persisted_guide_past_the_stale_window_or_unreadable_is_not_adopted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join(PERSISTED_GUIDE_FILE);
+        let config = guide_config(4);
+
+        std::fs::create_dir_all(dir.path()).expect("mkdir");
+        std::fs::write(&path, b"{not json at all").expect("write");
+        assert_eq!(
+            GuideCache::with_store(dir.path().to_path_buf())
+                .read(&config, whole_window())
+                .await
+                .freshness,
+            GuideFreshness::Unavailable,
+            "garbage on disk starts cold rather than panicking"
+        );
+
+        let written = GuideCache::with_store(dir.path().to_path_buf());
+        written.store(4, 1, &Ok(guide_with(2, 2, 8))).await;
+        let mut persisted: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).expect("read")).expect("json");
+        persisted["fetched_at"] =
+            serde_json::json!(unix_seconds() - guide::GUIDE_STALE_TTL.as_secs() as i64 - 60);
+        std::fs::write(&path, serde_json::to_vec(&persisted).expect("encode")).expect("write");
+        assert_eq!(
+            GuideCache::with_store(dir.path().to_path_buf())
+                .read(&config, whole_window())
+                .await
+                .freshness,
+            GuideFreshness::Unavailable,
+            "a copy older than the stale window is not adopted"
+        );
+
+        persisted["version"] = serde_json::json!(PERSISTED_GUIDE_VERSION + 1);
+        persisted["fetched_at"] = serde_json::json!(unix_seconds());
+        std::fs::write(&path, serde_json::to_vec(&persisted).expect("encode")).expect("write");
+        assert_eq!(
+            GuideCache::with_store(dir.path().to_path_buf())
+                .read(&config, whole_window())
+                .await
+                .freshness,
+            GuideFreshness::Unavailable,
+            "a version this build does not know is ignored, not migrated"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_invalidated_guide_leaves_nothing_on_disk_for_the_next_process() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = GuideCache::with_store(dir.path().to_path_buf());
+        cache.store(4, 1, &Ok(guide_with(2, 2, 8))).await;
+        assert!(dir.path().join(PERSISTED_GUIDE_FILE).exists());
+        cache.invalidate().await;
+        assert!(
+            !dir.path().join(PERSISTED_GUIDE_FILE).exists(),
+            "a settings change discards the copy a restart would otherwise adopt"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_guide_document_says_when_the_owner_comes_back() {
+        let cache = GuideCache::default();
+        let config = guide_config(4);
+        let next = unix_seconds() + 60;
+
+        cache.note_next_refresh(next).await;
+        let unavailable = cache.read(&config, whole_window()).await;
+        assert_eq!(unavailable.freshness, GuideFreshness::Unavailable);
+        assert_eq!(
+            unavailable.next_refresh_at,
+            Some(next),
+            "an unavailable answer still says when asking again is worthwhile"
+        );
+
+        cache.store(4, 1, &Ok(guide_with(2, 2, 8))).await;
+        assert_eq!(
+            cache.read(&config, whole_window()).await.next_refresh_at,
+            Some(next)
+        );
+    }
+
+    #[test]
+    fn a_skipped_tick_on_the_owner_comes_back_in_a_minute_not_twenty() {
+        assert_eq!(
+            guide_skip_delay(true),
+            guide::GUIDE_COLD_LINEUP_RETRY,
+            "an owner that is merely not admitted yet is seconds from admitted"
+        );
+        assert_eq!(
+            guide_skip_delay(false),
+            guide::GUIDE_REFRESH_INTERVAL,
+            "not the owner, or no source: only a settings save changes that, and a save wakes the loop"
+        );
+    }
+
+    #[test]
+    fn an_ingress_forgets_an_unavailable_answer_quickly_and_a_real_one_by_the_owners_clock() {
+        let now = 1_789_000_000;
+        let mut unavailable =
+            LiveTvGuide::unavailable(GuideSource::HdHomeRun, whole_window(), None);
+        unavailable.next_refresh_at = Some(now + 1200);
+        assert_eq!(
+            relay_guide_memory(&unavailable, now),
+            RELAY_UNAVAILABLE_GUIDE_MEMORY
+        );
+
+        let mut fresh = guide_with(1, 1, 8);
+        fresh.next_refresh_at = None;
+        assert_eq!(relay_guide_memory(&fresh, now), RELAY_GUIDE_MEMORY);
+
+        fresh.next_refresh_at = Some(now + 5);
+        assert_eq!(
+            relay_guide_memory(&fresh, now),
+            Duration::from_secs(5),
+            "an ingress never holds an answer past the moment a newer one exists"
+        );
+
+        fresh.next_refresh_at = Some(now - 30);
+        assert_eq!(
+            relay_guide_memory(&fresh, now),
+            Duration::ZERO,
+            "an owner already past its refresh is asked again immediately"
+        );
+
+        fresh.next_refresh_at = Some(now + 100_000);
+        assert_eq!(
+            relay_guide_memory(&fresh, now),
+            RELAY_GUIDE_MEMORY,
+            "the fan-out bound still applies to an owner that is far from refreshing"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_settings_generation_change_wakes_the_guide_loop_once() {
+        let cache = GuideCache::default();
+        // The first observation is construction, not a change.
+        cache.observe_generation(4);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), cache.wake.notified())
+                .await
+                .is_err(),
+            "seeing a generation for the first time is not an event"
+        );
+        cache.observe_generation(4);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), cache.wake.notified())
+                .await
+                .is_err(),
+            "the same generation twice is not an event"
+        );
+        cache.observe_generation(5);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), cache.wake.notified())
+                .await
+                .is_ok(),
+            "a settings save is the one skip reason that does not resolve itself"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lineup_that_fills_from_cold_wakes_the_guide_loop_and_a_warm_one_does_not() {
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let cache = SnapshotCache::with_wake(Arc::clone(&wake));
+
+        cache
+            .get_or_refresh(4, true, || async { Ok(cache_test_snapshot(4)) })
+            .await
+            .expect("cold");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), wake.notified())
+                .await
+                .is_ok(),
+            "the first lineup for a generation is the event the loop was sleeping through"
+        );
+
+        cache
+            .get_or_refresh(4, true, || async { Ok(cache_test_snapshot(4)) })
+            .await
+            .expect("warm");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), wake.notified())
+                .await
+                .is_err(),
+            "a lineup that was already there is not a wake"
+        );
+
+        cache
+            .get_or_refresh(5, true, || async { Ok(cache_test_snapshot(5)) })
+            .await
+            .expect("new generation");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), wake.notified())
+                .await
+                .is_ok(),
+            "a new generation starts cold again"
         );
     }
 
@@ -8393,6 +10119,59 @@ Output #0, hls, to 'index.m3u8':
         assert!(!failure_json.contains(secret));
         assert!(!failure_json.contains("DeviceAuth"));
         assert!(!failure_json.contains("api.hdhomerun.com"));
+
+        // The copy on disk is the newest way a credential could outlive the
+        // process, so it is held to the same rule as the served and relayed
+        // copies — and it is held to it by reading the actual bytes.
+        let on_disk = manager
+            .guide_cache
+            .persist
+            .as_ref()
+            .expect("the manager keeps a copy on disk");
+        let bytes = std::fs::read(on_disk).expect("persisted guide");
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(!text.contains(secret), "{on_disk:?}");
+        assert!(!text.contains("DeviceAuth"), "{on_disk:?}");
+        assert!(!text.contains("api.hdhomerun.com"), "{on_disk:?}");
+    }
+
+    #[tokio::test]
+    async fn a_session_end_line_names_the_channel_and_nothing_that_opens_a_stream() {
+        // The line an operator reads to find out what a tuner was doing. It
+        // must be enough to answer that, and never enough to resume anything.
+        let root = crate::test_tempdir().expect("root");
+        let manager = test_manager(root.path());
+        let session = register_test_session(
+            &manager,
+            7,
+            &hex_request_id(30),
+            LiveTvSessionPhase::Active,
+            tokio::time::Instant::now(),
+        );
+        session.cancel.cancel();
+
+        let rendered = format!(
+            "channel={} reason={} duration_s={} tuner_bytes={} user={}",
+            session.channel.guide_number,
+            "released",
+            session.started.elapsed().as_secs(),
+            session.tuner_bytes.load(Ordering::Acquire),
+            session.request.user_id,
+        );
+        manager.retire_session(&session);
+
+        assert!(rendered.contains("channel=7.1"));
+        assert!(
+            !rendered.contains(&session.capability),
+            "a capability in an access-controlled log is still a capability: {rendered}"
+        );
+        assert!(!rendered.contains(&session.activation_token), "{rendered}");
+        assert!(!rendered.contains("DeviceAuth"), "{rendered}");
+        assert!(!rendered.contains("http"), "{rendered}");
+        assert!(
+            !rendered.contains(&session.request.request_id),
+            "the request id derives a capability through replay and resume: {rendered}"
+        );
     }
 
     #[tokio::test]

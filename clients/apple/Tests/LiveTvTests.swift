@@ -234,16 +234,593 @@ final class LiveTvTests: XCTestCase {
             .hasPrefix("Playback method unavailable"))
     }
 
-    func testPlatformRestartMarkerStoreCanRoundTrip() throws {
-        let store = LiveTvFileBarrierStore()
-        try store.setPending(false)
-        defer { try? store.setPending(false) }
+    func testTheHintStoreRoundTripsAndTreatsAMissingFileAsNoHint() throws {
+        let store = LiveTvStartHintStore()
+        store.clear()
+        defer { store.clear() }
 
-        XCTAssertFalse(try store.pending())
-        try store.setPending(true)
-        XCTAssertTrue(try store.pending())
-        try store.setPending(false)
-        XCTAssertFalse(try store.pending())
+        // The whole of the tvOS Caches case: a purged file is "no hint", never
+        // an error and never a reason to refuse a start.
+        XCTAssertNil(store.read())
+        let id = LiveTvStartReducer.newRequestId()
+        try store.write(LiveTvStartHint(requestId: id, touchedAt: 1_788_998_400_000))
+        let read = try XCTUnwrap(store.read())
+        XCTAssertEqual(read.requestId, id)
+        XCTAssertEqual(read.touchedAt, 1_788_998_400_000)
+        store.clear()
+        XCTAssertNil(store.read())
+    }
+
+    func testTheHintIsSnakeCasedJsonAndNothingElse() throws {
+        let store = LiveTvMemoryHintStore()
+        try store.write(LiveTvStartHint(requestId: String(repeating: "a", count: 32), touchedAt: 7))
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let hint = try XCTUnwrap(store.value)
+        let wire = try XCTUnwrap(JSONSerialization.jsonObject(with: encoder.encode(hint)) as? [String: Any])
+        XCTAssertEqual(Set(wire.keys), ["request_id", "touched_at"],
+                       "a hint is a request id and a timestamp — never a capability or a token")
+        XCTAssertEqual(wire["request_id"] as? String, String(repeating: "a", count: 32))
+    }
+
+    func testARequestIdIsThirtyTwoLowerCaseHexCharacters() {
+        for _ in 0..<64 {
+            let id = LiveTvStartReducer.newRequestId()
+            XCTAssertEqual(id.count, 32, id)
+            XCTAssertTrue(LiveTvStartReducer.isRequestId(id), id)
+        }
+        XCTAssertFalse(LiveTvStartReducer.isRequestId(String(repeating: "A", count: 32)))
+        XCTAssertFalse(LiveTvStartReducer.isRequestId(String(repeating: "a", count: 31)))
+        XCTAssertFalse(LiveTvStartReducer.isRequestId(String(repeating: "g", count: 32)))
+        XCTAssertFalse(LiveTvStartReducer.isRequestId(""))
+    }
+
+    func testTheOldRestartBarrierIsGoneFromTheSource() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        for file in ["LiveTv.swift", "LiveTvView.swift"] {
+            let source = try String(
+                contentsOf: testsDirectory.appendingPathComponent("../Sources/\(file)").standardizedFileURL,
+                encoding: .utf8)
+            XCTAssertFalse(source.contains("start_outcome_unknown"),
+                           "\(file): the text in Paul's screenshot cannot be renderable")
+            XCTAssertFalse(source.contains("LiveTvStartBarrier"), file)
+            XCTAssertFalse(source.contains("LiveTvFileBarrierStore"), file)
+            XCTAssertFalse(source.contains("Wait 90 seconds"), file)
+            XCTAssertFalse(source.contains("live_tv_storage_unavailable"),
+                           "\(file): failing to persist a hint is not a reason to refuse a start")
+        }
+        // And the leftover marker file is cleaned up rather than left behind.
+        let sources = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTv.swift").standardizedFileURL,
+            encoding: .utf8)
+        XCTAssertTrue(sources.contains("live-tv-start.pending"),
+                      "the legacy marker is named exactly once, to delete it")
+        XCTAssertTrue(sources.contains("removeItem(at: Self.url(Self.legacyBarrierMarker))"))
+    }
+
+    func testEveryRenderKeyTheFixtureNamesHasCopy() throws {
+        let cases = try startCases()
+        var keys = Set(cases.answers.map(\.render))
+        keys.insert("no_answer")
+        for key in keys.sorted() {
+            let description = try XCTUnwrap(LiveTvFailure(code: key).errorDescription, key)
+            XCTAssertFalse(description.isEmpty, key)
+            if key != "owner_unavailable" {
+                XCTAssertNotEqual(description, LiveTvFailure(code: "unrecognised-code").errorDescription,
+                                  "\(key) must have copy of its own, not the fallback")
+            }
+        }
+        XCTAssertEqual(LiveTvFailure(code: "no_answer").errorDescription,
+                       "The server did not answer. Press the channel again.")
+    }
+
+    // ---- the shared start-outcome fixture -------------------------------
+    // tests/playback/live-tv-start-cases.json is the same file the web and
+    // Android lease suites read. Three clients, one reducer: if this file and
+    // tests/web/live-tv.test.js disagree, one of them is keeping a hint the
+    // other throws away, and a tuner stays held for nothing.
+
+    private struct StartCases: Decodable {
+        struct Body: Decodable {
+            let code: String?
+            let retry: String?
+            let ownerDecided: Bool?
+        }
+        struct Answer: Decodable {
+            let `case`: String
+            let transport: String?
+            let status: Int?
+            let body: Body?
+            let render: String
+            let offerRetry: Bool
+            let keepHint: Bool
+            let replay: Bool?
+        }
+        struct ResumeBody: Decodable {
+            let outcome: String?
+            /// The fixture's `live` session is a real activation document, so
+            /// it decodes into the very type a successful start answers — which
+            /// is what "shaped exactly like a successful start" has to mean if
+            /// the resume is to enter playback through the same path.
+            let session: LiveTvStarted?
+        }
+        struct ResumeCase: Decodable {
+            let `case`: String
+            let transport: String?
+            let body: ResumeBody?
+            let then: String
+        }
+        struct ChannelsResponse: Decodable {
+            let protocols: [Int]?
+        }
+        struct ProtocolCase: Decodable {
+            let `case`: String
+            let channelsResponse: ChannelsResponse
+            let requestId: Bool
+            let recoveryRoutes: Bool
+        }
+        let answers: [Answer]
+        let resume: [ResumeCase]
+        let protocols: [ProtocolCase]
+    }
+
+    /// `.convertFromSnakeCase` over the whole document, exactly as the client
+    /// decodes a live server response — which is also what proves the answer
+    /// shape this reducer reads is the shape the server sends.
+    private func startCases() throws -> StartCases {
+        let url = try XCTUnwrap(
+            Bundle(for: LiveTvTests.self).url(forResource: "live-tv-start-cases", withExtension: "json")
+        )
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(StartCases.self, from: Data(contentsOf: url))
+    }
+
+    func testTheStartReducerAnswersEverySharedCase() throws {
+        let cases = try startCases()
+        XCTAssertFalse(cases.answers.isEmpty, "the fixture lost its answer cases")
+        for row in cases.answers {
+            // A timeout produced no body at all; an untyped HTTP failure
+            // produced one with no `code`. Both reach the reducer as "nothing
+            // typed a verdict".
+            let answer = LiveTvStartAnswer(
+                status: row.status,
+                code: row.transport == "timeout" ? nil : row.body?.code,
+                retry: row.body?.retry,
+                ownerDecided: row.body?.ownerDecided ?? false)
+            let verdict = LiveTvStartReducer.verdict(answer)
+            XCTAssertEqual(verdict.render, row.render, row.`case`)
+            XCTAssertEqual(verdict.offerRetry, row.offerRetry, row.`case`)
+            XCTAssertEqual(verdict.keepHint, row.keepHint, row.`case`)
+            XCTAssertEqual(verdict.replay, row.replay ?? false, row.`case`)
+        }
+        // The fixture is the contract, but these two are the point of it: a
+        // code nobody has ever heard of is not a verdict, and no answer at all
+        // is never a refusal.
+        XCTAssertEqual(LiveTvStartReducer.verdict(LiveTvStartAnswer(status: 503, code: "from_the_future")).render,
+                       "owner_unavailable")
+        XCTAssertTrue(LiveTvStartReducer.verdict(LiveTvStartAnswer(status: 503, code: "from_the_future")).keepHint)
+        XCTAssertEqual(LiveTvStartReducer.verdict(LiveTvStartAnswer()), LiveTvStartReducer.noAnswer)
+    }
+
+    func testAThrownFailureBecomesTheAnswerTheReducerReads() {
+        // The path a real POST takes: `LiveTvAPI.request` throws a typed
+        // failure carrying the envelope's two flat fields, or `no_answer`, or
+        // a bare URLError. All three must reduce the fixture's way.
+        let typed = LiveTvStartAnswer(error: LiveTvFailure(
+            code: "tuner_unavailable", retry: "now", ownerDecided: true, status: 503))
+        XCTAssertEqual(LiveTvStartReducer.verdict(typed).render, "tuner_unavailable")
+        XCTAssertFalse(LiveTvStartReducer.verdict(typed).keepHint)
+
+        let untyped = LiveTvStartAnswer(error: LiveTvFailure(code: "no_answer", status: 404))
+        XCTAssertNil(untyped.code, "`no_answer` is this client's word, not a code the server sent")
+        XCTAssertEqual(LiveTvStartReducer.verdict(untyped), LiveTvStartReducer.noAnswer)
+
+        let dropped = LiveTvStartAnswer(error: URLError(.timedOut))
+        XCTAssertNil(dropped.code)
+        XCTAssertEqual(LiveTvStartReducer.verdict(dropped), LiveTvStartReducer.noAnswer)
+    }
+
+    func testTheResumeReducerAnswersEverySharedCase() throws {
+        let cases = try startCases()
+        XCTAssertFalse(cases.resume.isEmpty, "the fixture lost its resume cases")
+        for row in cases.resume {
+            let outcome = row.transport == "timeout" ? nil : row.body?.outcome
+            XCTAssertEqual(LiveTvStartReducer.resumeAction(outcome: outcome).rawValue, row.then, row.`case`)
+            guard row.then == "reattach" else {
+                XCTAssertNil(row.body?.session, "only a live answer carries a session: \(row.`case`)")
+                continue
+            }
+            // The reattach row must decode into the same document a start
+            // answers, or `attach` could not take it: capability, channel and
+            // the live flag, with no client-side guessing in between.
+            let session = try XCTUnwrap(row.body?.session, row.`case`)
+            XCTAssertFalse(session.sessionId.isEmpty)
+            XCTAssertTrue(session.live)
+            XCTAssertFalse(session.channel.id.isEmpty)
+            XCTAssertTrue(session.channel.watchable, "a resumed session is one the viewer can watch")
+            XCTAssertEqual(session.channel.title, "7.1 · WABC")
+        }
+        // An outcome from a newer server keeps the hint and shows the list: it
+        // is not proof the session ended.
+        XCTAssertEqual(LiveTvStartReducer.resumeAction(outcome: "something_new"), .keepHintWait)
+    }
+
+    func testProtocolNegotiationDecidesRequestIdsAndRecoveryRoutes() throws {
+        let cases = try startCases()
+        XCTAssertEqual(cases.protocols.count, 3)
+        for row in cases.protocols {
+            let negotiated = LiveTvStartReducer.negotiatesRecovery(
+                protocols: row.channelsResponse.protocols)
+            XCTAssertEqual(negotiated, row.requestId, row.`case`)
+            XCTAssertEqual(negotiated, row.recoveryRoutes, row.`case`)
+        }
+        // A channels response with no `protocols` field decodes to nil rather
+        // than to an empty list, which is what makes an older ingress legacy
+        // rather than a server that negotiated nothing.
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let legacy = try decoder.decode(LiveTvLineup.self, from: Data(#"""
+        {"channels":[],"freshness":"fresh","age_seconds":1}
+        """#.utf8))
+        XCTAssertNil(legacy.protocols)
+        let negotiated = try decoder.decode(LiveTvLineup.self, from: Data(#"""
+        {"channels":[],"freshness":"fresh","age_seconds":1,"protocols":[1,2,3]}
+        """#.utf8))
+        XCTAssertEqual(negotiated.protocols, [1, 2, 3])
+    }
+
+    // ---- the advisory enable card ---------------------------------------
+
+    /// Paul's standing rule: nothing in the code gates a feature; the Developer
+    /// tab says what is needed and whether each part is met, and never refuses
+    /// the enable. These two tests are that rule, pinned.
+    func testTheDeveloperCardDrawsEveryReadinessRowTheServerSendsAndGatesNothing() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvDeveloperView.swift")
+                .standardizedFileURL,
+            encoding: .utf8)
+        // Both cards iterate the server's array rather than naming rows. That
+        // is what makes `start_recovery` — and the next row nobody has written
+        // yet — appear without a client change.
+        XCTAssertEqual(source.components(separatedBy: "ForEach(readiness.checks) { check in").count - 1, 1)
+        XCTAssertEqual(source.components(separatedBy: "ForEach(guideReadiness.checks) { check in").count - 1, 1)
+        XCTAssertFalse(source.contains("check.id =="),
+                       "a hand-written subset silently drops the check nobody remembered")
+        XCTAssertFalse(source.contains("\"start_recovery\""),
+                       "start_recovery needs no special case; it is a row like any other")
+        XCTAssertFalse(source.contains("\"guide_age\""))
+        // Met/unmet colouring, and nothing else, hangs off `ready`.
+        XCTAssertEqual(
+            source.components(separatedBy: "systemImage: check.ready ? \"checkmark.circle\" : \"exclamationmark.triangle\"").count - 1,
+            2)
+        // Advisory means advisory: no readiness value may reach a `disabled`.
+        for gate in ["disabled(!readiness", "disabled(readiness", "disabled(!guideReadiness",
+                     "disabled(guideReadiness", "readiness.ready ||", "!readiness.ready"] {
+            XCTAssertFalse(source.contains(gate), "\(gate) would let an advisory check block an operator")
+        }
+        // The enable and save controls gate on exactly what they always did:
+        // an in-flight request and unsaved edits. Never on a check.
+        XCTAssertTrue(source.contains("Button(saved.liveTvEnabled ? \"Disable Live TV and drain sessions\" : \"Enable Live TV\")"))
+        XCTAssertTrue(source.contains("}.disabled(busy || dirty)"))
+        // And a guide card that cannot be read is an empty card.
+        XCTAssertTrue(source.contains("guideReadiness = try? await api.guideReadiness()"))
+    }
+
+    func testTheGuideReadinessCardSurvivesAServerThatSendsMoreThanThisBuildKnows() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let card = try decoder.decode(LiveTvGuideReadiness.self, from: Data(#"""
+        {"advisory":true,"source":"schedules_direct","guide_hours":6,"freshness":"fresh",
+         "age_seconds":42,"fetched_at":1700000000,"matched_channels":11,"lineup_channels":12,
+         "programmes":480,"refresh_interval_seconds":1200,"a_field_from_the_future":{"x":1},
+         "checks":[
+           {"id":"guide_age","ready":true,"message":"The cached guide is 42 seconds old."},
+           {"id":"guide_next_refresh","ready":true,"message":"The owner's loop next runs in 58 seconds."},
+           {"id":"guide_persisted","ready":true,"message":"A copy is on disk."},
+           {"id":"guide_last_error","ready":false,"message":"The last refresh failed: upstream 502"},
+           {"id":"a_check_from_the_future","ready":false,"message":"Something this build has never heard of."}
+         ]}
+        """#.utf8))
+        XCTAssertTrue(card.advisory)
+        XCTAssertEqual(card.source, "schedules_direct")
+        XCTAssertEqual(card.programmes, 480)
+        XCTAssertEqual(card.matchedChannels, 11)
+        XCTAssertEqual(card.checks.map(\.id),
+                       ["guide_age", "guide_next_refresh", "guide_persisted", "guide_last_error",
+                        "a_check_from_the_future"],
+                       "every row the server sends is kept, including one this build cannot name")
+        XCTAssertFalse(card.allMet)
+        XCTAssertTrue(card.checks.filter(\.ready).count == 3)
+        // A sparse or hostile document is an empty card, never a thrown error:
+        // the operator must still be able to save and enable.
+        let sparse = try decoder.decode(LiveTvGuideReadiness.self, from: Data(#"{}"#.utf8))
+        XCTAssertTrue(sparse.checks.isEmpty)
+        XCTAssertTrue(sparse.allMet, "no rows is not an unmet row")
+        XCTAssertTrue(sparse.advisory)
+        let wrongTypes = try decoder.decode(LiveTvGuideReadiness.self, from: Data(#"""
+        {"advisory":"yes","source":7,"programmes":"many","checks":[]}
+        """#.utf8))
+        XCTAssertEqual(wrongTypes.source, "unknown")
+        XCTAssertEqual(wrongTypes.programmes, 0)
+    }
+
+    /// The session card already answered `start_recovery` without a change:
+    /// `POST /live-tv/readiness/refresh` and `GET /live-tv/readiness` are the
+    /// same document, and the view draws its whole `checks` array.
+    func testTheSessionReadinessCardCarriesStartRecoveryWithoutAClientChange() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let readiness = try decoder.decode(LiveTvReadiness.self, from: Data(#"""
+        {"ready":false,"enabled":true,"owner_node_id":"owner","generation":12,"checks":[
+          {"id":"configuration","ready":true,"message":"The saved address is valid"},
+          {"id":"start_recovery","ready":false,"message":"Start recovery needs protocol 3 on both sides."}
+        ]}
+        """#.utf8))
+        XCTAssertEqual(readiness.checks.map(\.id), ["configuration", "start_recovery"])
+        XCTAssertEqual(readiness.checks.last?.ready, false)
+        XCTAssertEqual(readiness.generation, 12)
+    }
+
+    // ---- the press, the open, and the release ---------------------------
+
+    func testSwitchConfirmsReleaseBeforeStartingAnotherChannel() async throws {
+        let requests = LiveTvMockRequests(result: started())
+        let lease = LiveTvLease(requests: requests, hints: LiveTvMemoryHintStore())
+        _ = try await lease.start("first")
+        requests.result = started("two")
+        _ = try await lease.start("second")
+        try await lease.stop()
+        try await lease.stop()
+        XCTAssertEqual(requests.events, ["start:first", "release:one", "start:second", "release:two"])
+        XCTAssertNil(lease.current)
+    }
+
+    func testFailedReleaseRetainsCapabilityAndBlocksNewAllocation() async throws {
+        let requests = LiveTvMockRequests(result: started())
+        let lease = LiveTvLease(requests: requests, hints: LiveTvMemoryHintStore())
+        _ = try await lease.start("first")
+        requests.releaseFails = true
+        do { _ = try await lease.start("second"); XCTFail("cleanup must block a new tuner") } catch {}
+        XCTAssertEqual(lease.current?.sessionId, "one")
+        XCTAssertEqual(requests.events, ["start:first", "release:one"])
+        requests.releaseFails = false
+        try await lease.stop()
+        XCTAssertNil(lease.current)
+    }
+
+    func testLateStartAfterCloseIsReleasedBeforeCloseCompletes() async throws {
+        let requests = LiveTvMockRequests(result: started())
+        let entered = expectation(description: "POST entered")
+        requests.started = entered
+        requests.holdStart = true
+        let lease = LiveTvLease(requests: requests, hints: LiveTvMemoryHintStore())
+        let opening = Task { try await lease.start("first") }
+        await fulfillment(of: [entered], timeout: 2)
+        let closing = Task { try await lease.stop() }
+        // Give the close operation a turn to advance the generation; no real
+        // time or network timing is needed to order the mocked start response.
+        await Task.yield()
+        requests.continuation?.resume(returning: started())
+        let result = try await opening.value
+        try await closing.value
+        XCTAssertNil(result)
+        XCTAssertNil(lease.current)
+        XCTAssertEqual(requests.events, ["start:first", "release:one"])
+    }
+
+    func testAnAnswerThatNeverCameIsReplayedOnceWithTheSameIdAndKeepsItsHint() async throws {
+        let hints = LiveTvMemoryHintStore()
+        let requests = LiveTvMockRequests(result: started())
+        requests.protocols = [1, 2, 3]
+        requests.startFailure = URLError(.timedOut)
+        let lease = LiveTvLease(requests: requests, hints: hints)
+        do { _ = try await lease.start("first"); XCTFail("a lost answer is still a failure to render") }
+        catch let failure as LiveTvFailure { XCTAssertEqual(failure.code, "no_answer") }
+        XCTAssertEqual(requests.events, ["start:first", "start:first"],
+                       "start_replay_attempts is one: the POST is sent twice, never three times")
+        XCTAssertEqual(Set(requests.startRequestIds).count, 1,
+                       "the replay carries the SAME request id, so the owner joins it to one session")
+        let id = try XCTUnwrap(requests.startRequestIds.first ?? nil)
+        XCTAssertTrue(LiveTvStartReducer.isRequestId(id))
+        XCTAssertEqual(hints.value?.requestId, id, "a lost answer keeps the only handle on the start")
+    }
+
+    func testAnOwnerDecidedRefusalForgetsTheHintAndNeverRefusesTheNextPress() async throws {
+        let hints = LiveTvMemoryHintStore()
+        let requests = LiveTvMockRequests(result: started())
+        requests.protocols = [1, 2, 3]
+        requests.startFailure = LiveTvFailure(code: "tuner_unavailable", retry: "now",
+                                              ownerDecided: true, status: 503)
+        let lease = LiveTvLease(requests: requests, hints: hints)
+        do { _ = try await lease.start("first"); XCTFail("a typed refusal is still a failure") }
+        catch let failure as LiveTvFailure { XCTAssertEqual(failure.code, "tuner_unavailable") }
+        XCTAssertEqual(requests.events, ["start:first"], "a typed verdict is not replayed")
+        XCTAssertNil(hints.value, "the owner decided, so there is nothing left to retire")
+
+        // And the press after it goes straight to the server. No barrier, no
+        // monotonic wait, no quarantine.
+        requests.startFailure = nil
+        let info = try await lease.start("second")
+        XCTAssertEqual(info?.sessionId, "one")
+        XCTAssertEqual(requests.events, ["start:first", "start:second"])
+    }
+
+    func testALegacyIngressGetsNoRequestIdAndKeepsAnyHintForLater() async throws {
+        let hints = LiveTvMemoryHintStore()
+        let stale = LiveTvStartHint(requestId: String(repeating: "b", count: 32), touchedAt: 1)
+        try hints.write(stale)
+        let requests = LiveTvMockRequests(result: started())
+        requests.protocols = nil            // an ingress older than the contract
+        let lease = LiveTvLease(requests: requests, hints: hints)
+        _ = try await lease.start("first")
+        XCTAssertEqual(requests.startRequestIds, [nil],
+                       "an older ingress rejects the field outright — it must not be sent")
+        XCTAssertFalse(requests.events.contains { $0.hasPrefix("retire:") },
+                       "there are no recovery routes to call")
+        XCTAssertEqual(hints.value, stale, "the hint is kept for a server that later negotiates 3")
+        try await lease.stop()
+    }
+
+    func testAHintLeftByAKilledProcessIsRetiredInTheBackgroundAndDoesNotDelayThePress() async throws {
+        let hints = LiveTvMemoryHintStore()
+        let orphan = String(repeating: "c", count: 32)
+        // Touched a second ago: exactly the process that was killed while
+        // playing, which is the case that must be retired rather than left to
+        // the owner's 45 s reap.
+        try hints.write(LiveTvStartHint(
+            requestId: orphan,
+            touchedAt: Int64(Date().timeIntervalSince1970 * 1000) - 1_000))
+        let requests = LiveTvMockRequests(result: started())
+        requests.protocols = [1, 2, 3]
+        let entered = expectation(description: "retire entered")
+        requests.retireEntered = entered
+        requests.holdRetire = true
+        let lease = LiveTvLease(requests: requests, hints: hints)
+
+        let info = try await lease.start("first")
+        XCTAssertEqual(info?.sessionId, "one", "the press completes while the retire is still in flight")
+        XCTAssertFalse(requests.retireFinished, "the retire is fire-and-forget")
+        await fulfillment(of: [entered], timeout: 2)
+        XCTAssertTrue(requests.events.contains("retire:\(orphan)"),
+                      "the orphan a killed process left behind is retired")
+        // The new press owns the hint now; a late retire answer must not take
+        // it away.
+        let pressed = try XCTUnwrap(hints.value)
+        XCTAssertNotEqual(pressed.requestId, orphan)
+        requests.retireContinuation?.resume(returning: ())
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(requests.retireFinished)
+        XCTAssertEqual(hints.value?.requestId, pressed.requestId,
+                       "a retire that belongs to the previous start cannot forget this one's hint")
+        try await lease.stop()
+    }
+
+    func testAConfirmedReleaseForgetsTheHintSoACleanBackgroundShowsTheList() async throws {
+        let hints = LiveTvMemoryHintStore()
+        let requests = LiveTvMockRequests(result: started())
+        requests.protocols = [1, 2, 3]
+        let lease = LiveTvLease(requests: requests, hints: hints)
+        _ = try await lease.start("first")
+        XCTAssertNotNil(hints.value, "a live session keeps its handle until DELETE confirms")
+        try await lease.stop()
+        XCTAssertNil(hints.value, "a confirmed release is a confirmed end — nothing to resume")
+    }
+
+    func testResumeReattachesALiveSessionAndClearsTheHintOnlyWhenTheOwnerSaysItIsOver() async throws {
+        let hints = LiveTvMemoryHintStore()
+        let id = String(repeating: "d", count: 32)
+        let requests = LiveTvMockRequests(result: started())
+        requests.protocols = [1, 2, 3]
+
+        // live → the same stream back, with no press and no start.
+        try hints.write(LiveTvStartHint(requestId: id, touchedAt: 1))
+        requests.resumeAnswer = LiveTvResumeAnswer(outcome: "live", session: started("resumed"))
+        let live = LiveTvLease(requests: requests, hints: hints)
+        let recovered = await live.resumeIfRecent()
+        XCTAssertEqual(recovered?.sessionId, "resumed")
+        XCTAssertEqual(live.current?.sessionId, "resumed")
+        XCTAssertEqual(requests.events, ["resume:\(id)"], "resuming is not starting")
+        XCTAssertEqual(hints.value?.requestId, id)
+        try await live.stop()
+        XCTAssertNil(hints.value)
+
+        // pending → keep the hint, show the list, touch nothing.
+        try hints.write(LiveTvStartHint(requestId: id, touchedAt: 1))
+        requests.resumeAnswer = LiveTvResumeAnswer(outcome: "pending")
+        let pending = await LiveTvLease(requests: requests, hints: hints).resumeIfRecent()
+        XCTAssertNil(pending)
+        XCTAssertEqual(hints.value?.requestId, id)
+
+        // ended → forget it; the first press starts a fresh session.
+        requests.resumeAnswer = LiveTvResumeAnswer(outcome: "ended")
+        let ended = await LiveTvLease(requests: requests, hints: hints).resumeIfRecent()
+        XCTAssertNil(ended)
+        XCTAssertNil(hints.value)
+
+        // A resume that never answered keeps the hint, exactly as a timeout on
+        // a start does.
+        try hints.write(LiveTvStartHint(requestId: id, touchedAt: 1))
+        requests.resumeAnswer = nil
+        requests.resumeFailure = URLError(.timedOut)
+        let unanswered = await LiveTvLease(requests: requests, hints: hints).resumeIfRecent()
+        XCTAssertNil(unanswered)
+        XCTAssertEqual(hints.value?.requestId, id)
+    }
+
+    func testARefusedResumeForgetsTheHintOnlyWhenTheOwnerDecidedIt() async throws {
+        let hints = LiveTvMemoryHintStore()
+        let id = String(repeating: "f", count: 32)
+        let requests = LiveTvMockRequests(result: started())
+        requests.protocols = [1, 2, 3]
+
+        // The owner decided: this request id is spent. Keeping the hint would
+        // make the next press waste a retire on it and would run this resume
+        // again at every launch, for ever.
+        try hints.write(LiveTvStartHint(requestId: id, touchedAt: 1))
+        requests.resumeFailure = LiveTvFailure(code: "channel_not_found", retry: "never",
+                                               ownerDecided: true, status: 409)
+        let decided = await LiveTvLease(requests: requests, hints: hints).resumeIfRecent()
+        XCTAssertNil(decided)
+        XCTAssertNil(hints.value, "an owner-decided refusal spends the id")
+
+        // The ingress refused the request itself before any owner saw it —
+        // also spent, and for the same reason the start reducer says so.
+        try hints.write(LiveTvStartHint(requestId: id, touchedAt: 1))
+        requests.resumeFailure = LiveTvFailure(code: "invalid_request", status: 400)
+        let refusedById = await LiveTvLease(requests: requests, hints: hints).resumeIfRecent()
+        XCTAssertNil(refusedById)
+        XCTAssertNil(hints.value)
+    }
+
+    func testARefusedResumeTheOwnerDidNotDecideKeepsTheHint() async throws {
+        let hints = LiveTvMemoryHintStore()
+        let id = String(repeating: "0", count: 32)
+        let requests = LiveTvMockRequests(result: started())
+        requests.protocols = [1, 2, 3]
+
+        // A deploy blip. The ingress never reached the owner, so nothing here
+        // proves the session is gone — and a peer failure is stamped
+        // `owner_decided: false` precisely so this case keeps its handle.
+        for refusal in [LiveTvFailure(code: "owner_unavailable", retry: "now",
+                                      ownerDecided: false, status: 503),
+                        // A typed refusal minted outside the Live TV module
+                        // carries no verdict at all.
+                        LiveTvFailure(code: "node_maintenance", status: 503),
+                        // An older ingress has no resume route to answer with.
+                        LiveTvFailure(code: "owner_unavailable", status: 404)] {
+            try hints.write(LiveTvStartHint(requestId: id, touchedAt: 1))
+            requests.resumeFailure = refusal
+            let kept = await LiveTvLease(requests: requests, hints: hints).resumeIfRecent()
+            XCTAssertNil(kept)
+            XCTAssertEqual(hints.value?.requestId, id,
+                           "\(refusal.code) is not proof the session is gone")
+        }
+
+        // And the transport failure the fixture already pins, for the same
+        // reason: no answer is not a verdict.
+        try hints.write(LiveTvStartHint(requestId: id, touchedAt: 1))
+        requests.resumeFailure = URLError(.timedOut)
+        let dropped = await LiveTvLease(requests: requests, hints: hints).resumeIfRecent()
+        XCTAssertNil(dropped)
+        XCTAssertEqual(hints.value?.requestId, id)
+    }
+
+    func testResumeIsNotAttemptedWithoutAHintOrWithoutTheRecoveryRoutes() async throws {
+        let hints = LiveTvMemoryHintStore()
+        let requests = LiveTvMockRequests(result: started())
+        requests.protocols = [1, 2, 3]
+        let noHint = await LiveTvLease(requests: requests, hints: hints).resumeIfRecent()
+        XCTAssertNil(noHint)
+        XCTAssertEqual(requests.events, [], "no hint, no question to ask")
+
+        try hints.write(LiveTvStartHint(requestId: String(repeating: "e", count: 32), touchedAt: 1))
+        requests.protocols = [1, 2]
+        let legacy = await LiveTvLease(requests: requests, hints: hints).resumeIfRecent()
+        XCTAssertNil(legacy)
+        XCTAssertEqual(requests.events, [], "an owner that does not retire starts has no resume either")
+        XCTAssertNotNil(hints.value, "and the hint survives for a server that later does")
     }
 
     private let channel = LiveTvChannel(id: "7.1", guideNumber: "7.1", guideName: "Local",
@@ -303,130 +880,6 @@ final class LiveTvTests: XCTestCase {
         XCTAssertEqual(status.signal?.strengthPercent, 96)
         XCTAssertEqual(status.signal?.qualityPercent, 89)
         XCTAssertEqual(status.signal?.symbolQualityPercent, 100)
-    }
-
-    func testSwitchConfirmsReleaseBeforeStartingAnotherChannel() async throws {
-        let requests = LiveTvMockRequests(result: started())
-        let lease = LiveTvLease(requests: requests, barrier: LiveTvStartBarrier())
-        _ = try await lease.start("first")
-        requests.result = started("two")
-        _ = try await lease.start("second")
-        try await lease.stop()
-        try await lease.stop()
-        XCTAssertEqual(requests.events, ["start:first", "release:one", "start:second", "release:two"])
-        XCTAssertNil(lease.current)
-    }
-
-    func testFailedReleaseRetainsCapabilityAndBlocksNewAllocation() async throws {
-        let requests = LiveTvMockRequests(result: started())
-        let lease = LiveTvLease(requests: requests, barrier: LiveTvStartBarrier())
-        _ = try await lease.start("first")
-        requests.releaseFails = true
-        do { _ = try await lease.start("second"); XCTFail("cleanup must block a new tuner") } catch {}
-        XCTAssertEqual(lease.current?.sessionId, "one")
-        XCTAssertEqual(requests.events, ["start:first", "release:one"])
-        requests.releaseFails = false
-        try await lease.stop()
-        XCTAssertNil(lease.current)
-    }
-
-    func testLateStartAfterCloseIsReleasedBeforeCloseCompletes() async throws {
-        let requests = LiveTvMockRequests(result: started())
-        let entered = expectation(description: "POST entered")
-        requests.started = entered
-        requests.holdStart = true
-        let lease = LiveTvLease(requests: requests, barrier: LiveTvStartBarrier())
-        let opening = Task { try await lease.start("first") }
-        await fulfillment(of: [entered], timeout: 2)
-        let closing = Task { try await lease.stop() }
-        // Give the close operation a turn to advance the generation; no real
-        // time or network timing is needed to order the mocked start response.
-        await Task.yield()
-        requests.continuation?.resume(returning: started())
-        let result = try await opening.value
-        try await closing.value
-        XCTAssertNil(result)
-        XCTAssertNil(lease.current)
-        XCTAssertEqual(requests.events, ["start:first", "release:one"])
-    }
-
-    func testTypedAmbiguousStartSurvivesProfileSwitchUntilMonotonicExpiry() async throws {
-        var now = ContinuousClock.now
-        let barrier = LiveTvStartBarrier(now: { now })
-        let oldProfile = LiveTvMockRequests(result: started())
-        oldProfile.startFailure = LiveTvFailure(code: "owner_unavailable")
-        let oldLease = LiveTvLease(requests: oldProfile, barrier: barrier)
-        do { _ = try await oldLease.start("first"); XCTFail("expected unknown result") }
-        catch let failure as LiveTvFailure { XCTAssertEqual(failure.code, "start_outcome_unknown") }
-        try await oldLease.stop()
-        let newProfile = LiveTvMockRequests(result: started("new"))
-        let newLease = LiveTvLease(requests: newProfile, barrier: barrier)
-        do { _ = try await newLease.start("second"); XCTFail("profile switch must not bypass uncertainty") } catch {}
-        XCTAssertEqual(newProfile.events, [])
-        now = now.advanced(by: .seconds(89))
-        XCTAssertTrue(barrier.pending)
-        now = now.advanced(by: .seconds(2))
-        XCTAssertFalse(barrier.pending)
-        let result = try await newLease.start("third")
-        XCTAssertEqual(result?.sessionId, "new")
-        try await newLease.stop()
-    }
-
-    func testDefiniteCapacityRefusalDoesNotCreateUncertainty() async throws {
-        let barrier = LiveTvStartBarrier()
-        let requests = LiveTvMockRequests(result: started())
-        requests.startFailure = LiveTvFailure(code: "tuner_capacity")
-        let lease = LiveTvLease(requests: requests, barrier: barrier)
-        do { _ = try await lease.start("first"); XCTFail("capacity refusal expected") } catch {}
-        XCTAssertFalse(barrier.pending)
-        XCTAssertNil(lease.current)
-    }
-
-    func testPendingPostAndFailedCleanupSurviveAppRestart() throws {
-        var now = ContinuousClock.now
-        let disk = LiveTvMemoryBarrierStore()
-        let original = LiveTvStartBarrier(now: { now }, persistence: disk)
-        try original.begin()
-        XCTAssertTrue(disk.value, "marker must precede POST")
-        let restarted = LiveTvStartBarrier(now: { now }, persistence: disk)
-        XCTAssertThrowsError(try restarted.begin())
-        now = now.advanced(by: .seconds(91))
-        try restarted.begin()
-        restarted.confirm()
-        XCTAssertFalse(disk.value)
-        try restarted.arm() // before a DELETE whose response never arrives
-        let afterCleanupLoss = LiveTvStartBarrier(now: { now }, persistence: disk)
-        XCTAssertTrue(afterCleanupLoss.pending)
-        XCTAssertThrowsError(try afterCleanupLoss.begin())
-    }
-
-    func testFailedPersistencePreventsPostDispatch() async throws {
-        let disk = LiveTvMemoryBarrierStore()
-        disk.writeFails = true
-        let barrier = LiveTvStartBarrier(persistence: disk)
-        let requests = LiveTvMockRequests(result: started())
-        let lease = LiveTvLease(requests: requests, barrier: barrier)
-        do { _ = try await lease.start("one"); XCTFail("storage failure must precede POST") }
-        catch let failure as LiveTvFailure { XCTAssertEqual(failure.code, "live_tv_storage_unavailable") }
-        XCTAssertEqual(requests.events, [])
-    }
-
-    func testActiveOwnershipSurvivesCrashButNormalSwitchStillReleases() async throws {
-        let disk = LiveTvMemoryBarrierStore()
-        let barrier = LiveTvStartBarrier(persistence: disk)
-        let requests = LiveTvMockRequests(result: started())
-        let lease = LiveTvLease(requests: requests, barrier: barrier)
-        _ = try await lease.start("one")
-        XCTAssertFalse(barrier.pending, "known ownership is not an uncertain outcome")
-        XCTAssertTrue(disk.value, "disk ownership survives a crash")
-        let restarted = LiveTvStartBarrier(persistence: disk)
-        XCTAssertTrue(restarted.pending)
-        XCTAssertThrowsError(try restarted.begin())
-        requests.result = started("two")
-        _ = try await lease.start("two")
-        XCTAssertEqual(requests.events, ["start:one", "release:one", "start:two"])
-        try await lease.stop()
-        XCTAssertFalse(disk.value)
     }
 
     func testNoProgressBudgetUsesMonotonicTimeAndRejectsNaN() {
@@ -817,9 +1270,23 @@ final class LiveTvTests: XCTestCase {
             struct Timings: Decodable {
                 let hideAfterMs: Int
                 let channelCoalesceMs: Int
+                let guidePollUnavailableS: Int
+                let guidePollMinS: Int
+                let guidePollAfterNextRefreshS: Int
+                let retireLivenessProbeMs: Int
+                let retireOrphanAfterKeepalives: Int
+                let startReplayAttempts: Int
+                let guidePollCeilingS: Int
                 enum CodingKeys: String, CodingKey {
                     case hideAfterMs = "hide_after_ms"
                     case channelCoalesceMs = "channel_coalesce_ms"
+                    case guidePollUnavailableS = "guide_poll_unavailable_s"
+                    case guidePollMinS = "guide_poll_min_s"
+                    case guidePollAfterNextRefreshS = "guide_poll_after_next_refresh_s"
+                    case retireLivenessProbeMs = "retire_liveness_probe_ms"
+                    case retireOrphanAfterKeepalives = "retire_orphan_after_keepalives"
+                    case startReplayAttempts = "start_replay_attempts"
+                    case guidePollCeilingS = "guide_poll_ceiling_s"
                 }
             }
             // Spelled out rather than decoded with `.convertFromSnakeCase`:
@@ -860,6 +1327,25 @@ final class LiveTvTests: XCTestCase {
                        UInt64(fixture.live.timings.hideAfterMs) * 1_000_000)
         XCTAssertEqual(LiveTvInputRouting.channelCoalesceMilliseconds,
                        fixture.live.timings.channelCoalesceMs)
+        // The six start/guide timings reach Swift by exactly the route
+        // `channel_coalesce_ms` does, and are pinned here by the same test.
+        XCTAssertEqual(LiveTvInputRouting.guidePollUnavailableSeconds,
+                       fixture.live.timings.guidePollUnavailableS)
+        XCTAssertEqual(LiveTvInputRouting.guidePollMinSeconds,
+                       fixture.live.timings.guidePollMinS)
+        XCTAssertEqual(LiveTvInputRouting.guidePollAfterNextRefreshSeconds,
+                       fixture.live.timings.guidePollAfterNextRefreshS)
+        XCTAssertEqual(LiveTvInputRouting.retireLivenessProbeMilliseconds,
+                       fixture.live.timings.retireLivenessProbeMs)
+        XCTAssertEqual(LiveTvInputRouting.retireOrphanAfterKeepalives,
+                       fixture.live.timings.retireOrphanAfterKeepalives)
+        XCTAssertEqual(LiveTvInputRouting.startReplayAttempts,
+                       fixture.live.timings.startReplayAttempts)
+        // The far end of the guide-poll clamp is a contract number like the
+        // rest: a missing `guide_poll_ceiling_s` now fails the decode rather
+        // than passing silently, which is the whole point of pinning it.
+        XCTAssertEqual(LiveTvInputRouting.guidePollCeilingSeconds,
+                       fixture.live.timings.guidePollCeilingS)
     }
 
     // ---- the two narrowings, pinned in the source they live in ----------
@@ -983,7 +1469,112 @@ final class LiveTvTests: XCTestCase {
         XCTAssertTrue(source.contains("private var guideRefresh: Task<Void, Never>?"))
         XCTAssertTrue(source.contains("guideRefresh = Task { @MainActor [weak self] in"))
         XCTAssertTrue(source.contains("heartbeat = Task { @MainActor [weak self] in"))
-        XCTAssertEqual(LiveTvPlayerController.guideRefreshNanoseconds, 20 * 60 * 1_000_000_000)
+        // The loop reschedules from the answered guide rather than from a
+        // constant of its own; the ceiling is the only fixed number left, and
+        // it is a clamp, not a cadence.
+        XCTAssertFalse(source.contains("guideRefreshNanoseconds"),
+                       "a fixed twenty-minute cadence cannot see an owner that came back in one")
+        XCTAssertTrue(source.contains("seconds = Self.guidePollSeconds("))
+        // A failed read is paced like an unavailable document that says
+        // nothing about coming back — the same information, the same wait.
+        XCTAssertTrue(
+            source.contains("var seconds = LiveTvInputRouting.guidePollUnavailableSeconds"),
+            "a failed guide read must not poll a struggling owner at the floor")
+        // The poll ceiling is a contract number transcribed beside its six
+        // siblings, not one invented in the view. (The `20 * 60` still in this
+        // file is the unrelated source-format TTL.)
+        XCTAssertFalse(source.contains("static let guidePollCeilingSeconds"),
+                       "the ceiling must not be redefined here")
+        XCTAssertTrue(source.contains("let ceiling = LiveTvInputRouting.guidePollCeilingSeconds"))
+    }
+
+    /// The poll lands where the owner said it should, floored, ceilinged, and
+    /// never computed from a cadence this client invented.
+    func testTheGuidePollFollowsTheOwnersClockWithinItsFloorAndCeiling() {
+        func poll(_ next: Int?, _ freshness: String = "fresh", now: Int = 1_700_000_000) -> Int {
+            LiveTvPlayerController.guidePollSeconds(nextRefreshAt: next, freshness: freshness, now: now)
+        }
+        let now = 1_700_000_000
+        // next_refresh_at + guide_poll_after_next_refresh_s, when that is past
+        // the floor.
+        XCTAssertEqual(poll(now + 100), 105)
+        // ... and the floor when it is not — including a next_refresh_at that
+        // has already passed, which is what a just-restarted owner publishes.
+        XCTAssertEqual(poll(now + 1), LiveTvInputRouting.guidePollMinSeconds)
+        XCTAssertEqual(poll(now - 3600), LiveTvInputRouting.guidePollMinSeconds)
+        // No next_refresh_at at all: unavailable asks sooner than the owner's
+        // cadence, everything else takes the floor.
+        XCTAssertEqual(poll(nil, "unavailable"), LiveTvInputRouting.guidePollUnavailableSeconds)
+        XCTAssertEqual(poll(nil, "stale"), LiveTvInputRouting.guidePollMinSeconds)
+        XCTAssertEqual(poll(nil, "fresh"), LiveTvInputRouting.guidePollMinSeconds)
+        // The owner's clock wins whenever it exists: an unavailable guide that
+        // DOES say when it comes back is polled on that, not on the flat
+        // unavailable cadence. A recorded deviation from the plan's §3.16,
+        // shared with the web and Android reducers.
+        XCTAssertEqual(poll(now + 100, "unavailable"), 105)
+        XCTAssertEqual(poll(now + 1, "unavailable"), LiveTvInputRouting.guidePollMinSeconds,
+                       "the floor still applies to an unavailable document")
+        // Nonsense off the wire can neither spin the loop nor park it.
+        XCTAssertEqual(poll(Int.max), LiveTvInputRouting.guidePollCeilingSeconds)
+        XCTAssertEqual(poll(Int.min), LiveTvInputRouting.guidePollMinSeconds)
+        XCTAssertEqual(poll(now + 86_400), LiveTvInputRouting.guidePollCeilingSeconds)
+        // The clamp guards the wire, not the contract: it is applied to the
+        // `next_refresh_at` branch only. The two constants come back verbatim,
+        // because a client that silently rewrote them would disagree with the
+        // value the shared fixture pins.
+        XCTAssertEqual(poll(nil, "unavailable"), LiveTvInputRouting.guidePollUnavailableSeconds)
+        XCTAssertEqual(poll(nil, "fresh"), LiveTvInputRouting.guidePollMinSeconds)
+        // Whatever comes off the wire, the answer lands inside the contract's
+        // own bounds — and never under the floor, which is the direction that
+        // would poll a struggling owner harder than the contract allows.
+        for next in [nil, Int.min, Int.min + 1, -1, 0, now - 86_400, now - 1, now, now + 14,
+                     now + 15, now + 1_195, now + 1_200, now + 86_400, Int.max - 1, Int.max] {
+            for freshness in ["fresh", "stale", "unavailable"] {
+                let seconds = poll(next, freshness)
+                let where_ = "\(String(describing: next))/\(freshness)"
+                XCTAssertGreaterThanOrEqual(seconds, LiveTvInputRouting.guidePollMinSeconds, where_)
+                XCTAssertLessThanOrEqual(seconds, LiveTvInputRouting.guidePollCeilingSeconds, where_)
+            }
+        }
+    }
+
+    /// The floor is applied last on purpose. `min(max(gap, floor), ceiling)`
+    /// looks equivalent and is not: if the two contract numbers ever crossed it
+    /// would return a delay *below* `guide_poll_min_s`. Identical for every
+    /// value the contract actually carries, which is why only the source says
+    /// so — and why it would be swapped back by someone tidying up.
+    func testTheGuidePollAppliesItsFloorLastSoTheFloorWins() throws {
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
+            encoding: .utf8)
+        XCTAssertTrue(
+            source.contains("return max(min(gap + LiveTvInputRouting.guidePollAfterNextRefreshSeconds, ceiling), floor)"),
+            "the floor must be the outermost clamp")
+        XCTAssertFalse(source.contains("floor), ceiling)"),
+                       "clamping the ceiling last lets a crossed pair poll below the floor")
+        XCTAssertLessThan(LiveTvInputRouting.guidePollMinSeconds,
+                          LiveTvInputRouting.guidePollCeilingSeconds,
+                          "the contract's own pair must not be crossed")
+    }
+
+    func testTheGuideDocumentCarriesTheOwnersNextRefreshTime() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let withIt = try decoder.decode(LiveTvGuide.self, from: Data(#"""
+        {"source":"owner","freshness":"stale","age_seconds":90,"fetched_at":1700000000,
+         "next_refresh_at":1700000060,"window":{"start":0,"end":0},"channels":[]}
+        """#.utf8))
+        XCTAssertEqual(withIt.nextRefreshAt, 1_700_000_060)
+        // Absent from an owner whose loop has not completed a tick, and from
+        // one older than this contract: a rendered state, not a decode failure.
+        let without = try decoder.decode(LiveTvGuide.self, from: Data(#"""
+        {"source":"owner","freshness":"unavailable","age_seconds":0,
+         "window":{"start":0,"end":0},"channels":[]}
+        """#.utf8))
+        XCTAssertNil(without.nextRefreshAt)
+        // And the shared guide fixture, which predates the field, still loads.
+        XCTAssertNil(try guideCases().guide.nextRefreshAt)
     }
 
     func testAHeldChannelKeyIsOneTunerStart() async throws {
@@ -1120,7 +1711,9 @@ final class LiveTvTests: XCTestCase {
 /// constant before, which would have passed with `requestChannel` deleted.
 private final class LiveTvCountingRequests: LiveTvRequests, @unchecked Sendable {
     private(set) var starts = 0
-    func start(_ channel: String) async throws -> LiveTvStarted {
+    /// Legacy by default, so nothing in these tests touches the real hint file.
+    func recoveryRoutesAvailable() async -> Bool { false }
+    func start(_ channel: String, requestId: String?) async throws -> LiveTvStarted {
         starts += 1
         return LiveTvStarted(
             sessionId: "cap-\(starts)",
@@ -1130,16 +1723,22 @@ private final class LiveTvCountingRequests: LiveTvRequests, @unchecked Sendable 
             live: true)
     }
     func release(_ capability: String) async throws {}
+    func resume(_ requestId: String) async throws -> LiveTvResumeAnswer { LiveTvResumeAnswer(outcome: "retired") }
+    func retire(_ requestId: String) async throws {}
 }
 
-private final class LiveTvMemoryBarrierStore: LiveTvBarrierStore {
-    var value = false
+/// The hint store with the disk taken out. Nothing in the suite may write the
+/// app container's real `live-tv-start.hint` except the round-trip test that
+/// cleans up after itself.
+private final class LiveTvMemoryHintStore: LiveTvHintStore, @unchecked Sendable {
+    var value: LiveTvStartHint?
     var writeFails = false
-    func pending() throws -> Bool { value }
-    func setPending(_ value: Bool) throws {
+    func read() -> LiveTvStartHint? { value }
+    func write(_ hint: LiveTvStartHint) throws {
         if writeFails { throw CocoaError(.fileWriteOutOfSpace) }
-        self.value = value
+        value = hint
     }
+    func clear() { value = nil }
 }
 
 @MainActor
@@ -1151,10 +1750,29 @@ private final class LiveTvMockRequests: LiveTvRequests {
     var holdStart = false
     var started: XCTestExpectation?
     var continuation: CheckedContinuation<LiveTvStarted, Error>?
+    /// What the last channels response listed. `nil` is an ingress older than
+    /// the contract; the default is that same legacy shape, so a test that
+    /// says nothing about protocols exercises the legacy path.
+    var protocols: [Int]?
+    /// Every `request_id` a start POST carried, in order — `nil` for a body
+    /// that deliberately omitted the field.
+    var startRequestIds: [String?] = []
+    var resumeAnswer: LiveTvResumeAnswer?
+    var resumeFailure: Error?
+    var holdRetire = false
+    var retireEntered: XCTestExpectation?
+    var retireContinuation: CheckedContinuation<Void, Error>?
+    var retireFinished = false
 
     init(result: LiveTvStarted) { self.result = result }
-    func start(_ channel: String) async throws -> LiveTvStarted {
+
+    func recoveryRoutesAvailable() async -> Bool {
+        LiveTvStartReducer.negotiatesRecovery(protocols: protocols)
+    }
+
+    func start(_ channel: String, requestId: String?) async throws -> LiveTvStarted {
         events.append("start:\(channel)")
+        startRequestIds.append(requestId)
         if holdStart {
             return try await withCheckedThrowingContinuation { continuation in
                 self.continuation = continuation
@@ -1167,5 +1785,21 @@ private final class LiveTvMockRequests: LiveTvRequests {
     func release(_ capability: String) async throws {
         events.append("release:\(capability)")
         if releaseFails { throw LiveTvFailure(code: "owner_unavailable") }
+    }
+    func resume(_ requestId: String) async throws -> LiveTvResumeAnswer {
+        events.append("resume:\(requestId)")
+        if let resumeFailure { throw resumeFailure }
+        guard let resumeAnswer else { throw LiveTvFailure(code: "owner_unavailable") }
+        return resumeAnswer
+    }
+    func retire(_ requestId: String) async throws {
+        events.append("retire:\(requestId)")
+        if holdRetire {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                self.retireContinuation = continuation
+                retireEntered?.fulfill()
+            }
+        }
+        retireFinished = true
     }
 }
