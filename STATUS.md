@@ -4,6 +4,40 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The error overlay and the picture disagree, on every client
+
+**Investigated 2026-09-13; contract v2 at
+[docs/clients/PLAYBACK-SURFACE-CONTRACT.md](docs/clients/PLAYBACK-SURFACE-CONTRACT.md),
+ruled, adversarially reviewed and answered, with the Opus build plan in
+[PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md](docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md)
+— ready to build, nothing built yet.** Paul reported a full-screen playback
+error while the picture keeps playing, or one that stays up after playback
+stopped and came back. It is one defect with three spellings: the blocking
+overlay is an imperative message channel — 40 `setLoading` sites on the web,
+12 writers of `failed`/`playbackError` on Apple, 9 `onError` strings on
+Android — not a projection of player state. Raising it never stops the player
+(web hls.js fatal leaves 30 s of buffer playing; Apple's 15 s readiness
+timeout sets `failed` with `play()` standing; Android's `Fail` leaves
+`playWhenReady` and the stall watchdog then restarts the stream under the
+overlay), and no client clears it on progress evidence. The natives also
+discard the server's `{code,message}` refusal bodies, so a 503 "not yet"
+reads as fatal.
+
+The proposal is a Playback Surface Contract in the input contract's shape:
+typed faults with a fixed class, a blocking surface rendered only over a
+player its *recovery owner* has already stopped (the review's central
+finding — v1 had the presenter pause, which made the overlay a recovery
+actor), the player's own presentation evidence retires faults, two
+identities per fault (attached media, requested intent), a surface ledger in
+Playback debug, and a fence. Four
+surface PRs (fixture, web, Apple, Android), behaviour-neutral by ruling, then
+one PR for the three bounded recovery additions and one for a separate
+probable defect surfaced on the way — Android copied-video seeks never land
+within the 250 ms tolerance because the item is not seeked forward from the
+keyframe origin — which needs a device check before it is built. Paul's
+tablet supplied the field evidence: "Playback stopped
+(ERROR_CODE_IO_BAD_HTTP_STATUS)" over a moving picture.
+
 ## Live TV: the empty guide and the "wait 90 seconds" refusal, diagnosed
 
 **Diagnosis in [#273](http://192.168.4.7:3000/noirr/plurx/pulls/273); Paul
