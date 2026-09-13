@@ -7804,8 +7804,19 @@ exec /bin/cat >/dev/null
         .expect("fake FFmpeg");
         std::fs::set_permissions(&ffmpeg, std::fs::Permissions::from_mode(0o755))
             .expect("executable fake FFmpeg");
+        let ffprobe = root.path().join("fake-ffprobe");
+        std::fs::write(
+            &ffprobe,
+            r#"#!/bin/sh
+printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width":1920,"height":1080,"field_order":"progressive"},{"codec_type":"audio","codec_name":"ac3","channels":2}]}'
+"#,
+        )
+        .expect("fake FFprobe");
+        std::fs::set_permissions(&ffprobe, std::fs::Permissions::from_mode(0o755))
+            .expect("executable fake FFprobe");
         let system = SystemInfo {
             ffmpeg: ffmpeg.to_string_lossy().into_owned(),
+            ffprobe: ffprobe.to_string_lossy().into_owned(),
             ..SystemInfo::default()
         };
         let mut manager = test_manager_with_system(root.path(), system);
@@ -7875,18 +7886,31 @@ exec /bin/cat >/dev/null
                 .is_err(),
             "one listed segment must not answer the start"
         );
-        {
-            let registry = manager.registry.lock().expect("registry");
-            let session = registry.sessions.values().next().expect("starting session");
-            let state = session.state.lock().expect("session state");
-            assert_eq!(
+        // The fixture drip-feeds fewer than SOURCE_PREFIX_BYTES, so the real
+        // source-observation stage spends SOURCE_PREFIX_TIME before FFmpeg is
+        // launched. Bound the publication wait from that production contract,
+        // not from a scheduler-sensitive subsecond guess.
+        let first_publication_deadline =
+            tokio::time::Instant::now() + SOURCE_PREFIX_TIME + Duration::from_secs(3);
+        loop {
+            let observed = {
+                let registry = manager.registry.lock().expect("registry");
+                let session = registry.sessions.values().next().expect("starting session");
+                let state = session.state.lock().expect("session state");
+                assert!(state.startup.is_none());
                 state
                     .publication
                     .as_ref()
-                    .map(|publication| publication.listed),
-                Some(1)
+                    .map(|publication| publication.listed)
+            };
+            if observed == Some(1) {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < first_publication_deadline,
+                "producer never published its first listed segment; last count {observed:?}"
             );
-            assert!(state.startup.is_none());
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
         tokio::fs::write(manager.scratch_root.join("release-second"), b"release")
             .await
