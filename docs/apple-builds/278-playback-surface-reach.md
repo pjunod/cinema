@@ -46,4 +46,16 @@ moment the film clock stops — which is exactly when a wait needs drawing. A
 500 ms task feeds `.tick`, the twin of the web's `playbackProgressTick` on
 the same interval. It samples nothing and detects nothing.
 
+**And one thing the audit did not name, found by closing the first.** A
+`buffering` fault was retired only by presentation evidence, and a paused
+picture never produces another sample — so a buffer that filled while the
+viewer had paused left a spinner over a still frame until the generation
+changed. That is the overlay outliving the thing it described: the defect this
+contract exists to kill, reintroduced by the migration itself. The Android
+session found it independently and the web had it too. Ruled: a `buffering`
+fault is about a player that wants media, so a viewer who pauses makes it about
+nothing. The Apple wiring is `wantsPlayback` — the viewer's own intent, and the
+flag the owner's `stopForBlockingSurface()` deliberately leaves alone, so the
+owner's stop can never retire a fault.
+
 No threshold, budget, detector or ladder moved.

@@ -56,6 +56,27 @@ cases and still does, with the words it always composed.
   `1560` was unreachable. The behaviour stays, the label is deleted, and the
   reason the web is adding a real one is written where a reader will ask.
 
+### And one the audit did not name
+
+Closing the first gap surfaced it: a `buffering` fault was retired only by
+presentation evidence, and a paused picture never produces another sample, so a
+buffer that filled while the viewer had paused left a spinner over a still
+frame until the generation changed. The overlay outliving the thing it
+described — the defect this contract exists to kill, reintroduced by the
+migration. The Android session found it independently and the web had it too.
+
+**Ruled: a `buffering` fault is about a player that WANTS media, so a viewer
+who pauses makes it about nothing.** The fixture and reducer half arrived from
+`web/playback-surface-reach` as a cherry-pickable commit (`1e19b133`), together
+with `segment_503_not_yet`'s codes (`f7cad0fd`); both were cherry-picked onto
+this branch rather than rebased, and the Swift half is ported here. The Apple
+wiring is `wantsPlayback` — the viewer's own transport intent, and the flag
+`stopForBlockingSurface()` deliberately leaves alone, so the owner's own stop
+is filtered out by construction rather than by a rule somebody has to remember.
+`playback_not_requested` retires `buffering` and no other class: a `preparing`
+start has not been paused by a viewer who has not seen it, and a prompt is
+answered by the viewer rather than by a transport change.
+
 ### One thing added that is not a raise site
 
 The presenter now has a clock. Every timing the contract states is measured by
@@ -79,15 +100,17 @@ abandoned sequence's release of its own late session as proof its `defer` ran.
 
 ### What was run
 
-`make apple-build` (both schemes) and `make apple-test` on iPhone 17 Pro
-(iOS 26.5) and Apple TV 4K 3rd generation (tvOS 26.5) on the macOS runner:
-**543 iOS tests and 529 tvOS tests executed, zero failures**, with
-`testPlaybackSurfaceModelRunsEveryContractCase` confirmed to have run under
-each. Baseline before this branch was 532 and 518. Nine mutations were applied
-on the runner one at a time and reverted; each failed the test named for it
-against a run that executed 543 tests. The first attempt at the first mutation
-executed **zero** tests and reported no failures — the wedged-simulator trap —
-and was re-run after erasing the simulators.
+`make apple-build` (both schemes, `** BUILD SUCCEEDED **` twice) and
+`make apple-test` on iPhone 17 Pro (iOS 26.5) and Apple TV 4K 3rd generation
+(tvOS 26.5) on the macOS runner: **546 iOS tests and 532 tvOS tests executed,
+zero failures**, with `testPlaybackSurfaceModelRunsEveryContractCase` confirmed
+to have run under each. Baseline before this branch was 532 and 518.
+
+Thirteen mutations were applied on the runner one at a time and reverted; each
+failed the test named for it against a run that executed 543 or 546 tests. The
+first attempt at the first mutation executed **zero** tests and reported no
+failures — the wedged-simulator trap, a false survivor if believed — and was
+re-run after `simctl shutdown all` and `erase`.
 
 On Linux: both fences PASS with no new `MIGRATION_BUDGET` entries,
 `tests/playback/playback-surface-contract.test.js` (60 cases),
@@ -96,11 +119,13 @@ On Linux: both fences PASS with no new `MIGRATION_BUDGET` entries,
 
 ### What this does not close
 
-- **A viewer who pauses during a wait keeps the buffering surface** until the
-  picture moves again. The shared reducer retires `buffering` on presentation
-  evidence and on `attached_retired`, and a viewer's pause is neither; the web
-  behaves the same way, so this is a property of the contract rather than of
-  this client, and it is written here rather than diverged from unilaterally.
+- **Row 14's proof is a source-shape pin**, which is exactly the kind of proof
+  the last round found worthless for A3. `retryAfterReadinessTimeout` is
+  reachable only from an `open()` whose `seekWhenReady` times out over a
+  decoding player, which no headless XCTest has. The pin checks the row against
+  the shared table rather than against a spelling, so a wrong or invented row
+  fails — but it would not catch a semantically identical rewrite. Known gap,
+  not an implied guarantee; the honest route is §6's simulator recipe.
 - **The §6 simulator and device recipes still have not run.** Every one needs
   a live `plurxd` with real media, and none was reachable from the runner.
 
