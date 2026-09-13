@@ -279,6 +279,12 @@ internal class SessionCreateCoordinator(
                 break@attempts
             }
         } finally {
+            // Before the cancel, not after: cancellation is cooperative, and a
+            // watchdog whose sleep has already elapsed has no suspension point
+            // left to observe it at. A sequence that settled on the deadline's
+            // own millisecond must not be answered with a full-screen prompt
+            // over the session it just attached.
+            expired = true
             watchdog.cancel()
         }
         outcome

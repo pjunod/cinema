@@ -5172,7 +5172,15 @@ final class PlayerController: ObservableObject {
             guard let self else { return }
             self.expireCreateRetry(epoch: epoch, lifecycle: lifecycle, generation: generation)
         }
-        defer { watchdog.cancel() }
+        // Cancelling the watchdog is not quite enough: a sleep that has already
+        // elapsed cannot be cancelled out of its own continuation, and a
+        // sequence that settled on the deadline's own millisecond must not be
+        // answered with a full-screen prompt over the session it just attached.
+        // Retiring the epoch is what makes `expireCreateRetry` a no-op there.
+        defer {
+            watchdog.cancel()
+            createRetryEpoch &+= 1
+        }
         var attempt = 0
         while true {
             // Re-asked before EVERY rung, not only after a failure: the sleep
