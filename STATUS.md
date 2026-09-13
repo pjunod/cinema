@@ -4,6 +4,49 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Live TV: why every start freezes a few seconds in, and the tvOS surface that hid it
+
+**Diagnosed and designed, nothing built — two rulings open.** Paul reported
+that every Live TV start plays a few seconds, pauses, shows the signal
+readout, then plays on. The pause is a stall the owner manufactures:
+`LIVE_HLS_OUTPUT_ARGS` carries `-hls_init_time 1` and the producer answers
+the start POST at the first listed segment, so every client attaches with
+1 s of runway; hlsenc then cuts seven 1 s segments, one 3 s catch-up, and
+4 s from there (measured with the owner's exact arguments: `TARGETDURATION`
+1 → 3 → 4). Each cadence jump makes the playhead wait for a whole segment —
+3.6 s stalled in three events between 5 and 14 s, identical on AVPlayer,
+hls.js and ExoPlayer because their live-sync settings never get to act on a
+one-segment playlist. The signal readout is the Apple heartbeat's first
+5 s tick landing in the cluster; the status handler never touches the
+producer. The tvOS surface draws nothing while the player waits, so a
+stall reads as a pause.
+
+Recommended fix, measured: uniform `-hls_time 2 -hls_list_size 12`, answer
+at two **listed** segments (`ScratchInventory.segments` counts files on
+disk, not listed ones — a new field), `MAX_DELETION_LAG_SEGMENTS` =
+`hls_delete_threshold + 1` because hlsenc renames before it rewrites the
+playlist (today's `1 / 1` pair carries the same latent session-killing
+hole). +3 s to first frame, zero stalls with a segment of margin,
+`TARGETDURATION` constant, viewer ends 3.6 s behind live instead of 4.3 s.
+Alternative measured: keep `init 1` with `time 2`, answer at ≥ 3 s listed —
++2 s, needs hls.js `liveSyncDuration ≥ 3`.
+
+The tvOS fullscreen surface, audited from source: the full-screen reveal
+layer stays focusable while the overlay is visible, and its adapter routes
+every direction to a no-op `.reveal`, so a Down from any button strands
+focus there (inferred, not yet seen on the device); the Info sheet is the
+phone view at 9 pt labels; five app-palette text plates over video. The
+redesign is a bottom band with channel, programme, progress with times and
+"next", the five existing actions as icon pills with the house focus ring,
+a telemetry strip (signal, delivery, behind-live, clock), an Info ledger,
+a catching-up tile and a paused state. Six renders in
+`docs/mockups/live-tv/surface-*.png` and the canvas "Live TV Playback
+Surface"; the write-up, both rulings and the two-PR plan are in
+[LIVE-TV-START-STALL-AND-TVOS-PLAYBACK-SURFACE.md](docs/features/LIVE-TV-START-STALL-AND-TVOS-PLAYBACK-SURFACE.md).
+One adversarial review folded in (the inventory budget, the listed-count
+gate, the relay's 20 s attempt as the real budget, the inline-then-fullscreen
+re-host as a candidate the physical pass must exclude).
+
 ## Apple's notice strip was a dead end, and two rows of the readiness card were false
 
 **[#297](http://192.168.4.7:3000/noirr/plurx/pulls/297), titled `WIP:`.**
