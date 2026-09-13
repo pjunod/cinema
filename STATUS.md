@@ -4,6 +4,78 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## `make web-check` is green, and `rust-gate` has actually been run
+
+**[#286](http://192.168.4.7:3000/noirr/plurx/pulls/286), WIP, not merged.**
+Two gaps the playback surface effort left behind: its own acceptance command
+could not go green, and its Rust gate had never been executed at all.
+
+### `make web-check`
+
+Three tests were red on `main`, none of them for a defect in what the page
+does.
+
+- **`layout-containment`** — four bare `1fr` content columns, all four from
+  `78c48a95`. `1fr` is `minmax(auto, 1fr)`: content sets the track's minimum,
+  so a long programme title in `.lc-programme` widens the middle column and
+  pushes the "Watch from start" button off the card, and the under-760px
+  overrides for `.lc-editor`, `.lc-grid` and `.lc-programme` put that failure
+  where the viewport is narrowest. Fixed in the CSS with `minmax(0,1fr)` — the
+  floor the other thirty-odd grid declarations in this stylesheet already use,
+  and the one that also drops the grid item's automatic minimum size, which a
+  track-only fix leaves behind. The title cell gets `min-width:0` and
+  `overflow-wrap:anywhere` for the same reason `.specs dd` has them.
+- **`page-read-budget`** and **`settings-sections`** — `ReferenceError` in
+  both, and the shipped page is correct in both. `shippedSource(name)` hands a
+  harness one function, sliced declaration-to-declaration, so the harness must
+  declare everything that function calls. `78c48a95` added
+  `clearLibraryChannelDraft()` and `LIBRARY_CHANNEL_TUNE.stop()` to
+  `clearLocalSession`, and `583bcd1d` added `playbackSurfaceReadinessCard()`
+  to `developerPanel`, neither with the stub its harness needed. The two
+  sign-out collaborators are stubbed as observable state rather than as
+  no-ops — so the test now asserts that signing out really does drop the
+  unsaved wizard draft and the tune fence, and deleting either call from
+  `index.html` fails it — and the readiness card is evaluated from the shipped
+  source rather than stubbed, with an assertion that Developer renders it.
+
+Every test in the target passes afterwards, both fences included, with no new
+`MIGRATION_BUDGET` entries.
+
+### `rust-gate`, at last
+
+Archived out of the clone and compiled in a container on the pinned `1.97.1`,
+the `COMPILE-LOOP.md` route. At `ec1c324f`, and identically at the merge base
+`3062f3c9` with all seven playback-surface PRs in: `cargo fmt --all --check`
+**clean**, `cargo clippy -p plurxd --all-targets -- -D warnings` **clean**,
+`cargo test -p plurxd --bin plurxd` **2192 passed, 18 failed, 6 ignored**.
+
+**Nothing in the playback surface work broke a Rust test.** `index.html` and
+`playback-policy.js` are `include_str!`'d into the binary and asserted on by
+`http::web::tests`; every one of those passes, before and after the CSS change
+here. The 18 are identical on both shas, so this branch introduces none of
+them:
+
+- 13 `decode_facts` tests fail at `Spawn("Function not implemented (os error
+  38)")` before any assertion — the bound-exec probe's `pre_exec` builds a
+  Landlock ruleset and `landlock_create_ruleset` is `ENOSYS` in that
+  container, confirmed directly. Environmental.
+- `live_tv::one_tuner_get_runs_the_full_hls_lifecycle_and_stop_waits_for_cleanup`
+  says "FFprobe is not configured on the tuner owner"; `playback_control::copy_retry_is_unsupported_only…`
+  and `vodserve::a_capacity_stall_still_says_no_room_after_its_producer_is_gone`
+  both need a real producer process to reach a particular exit. Environmental.
+- **Two `live_tv` tests are deterministically red on `main`** — pure in-memory
+  assertions, no I/O, so they fail on any machine.
+  `live_tv_software_hls_argument_baseline_is_stable` freezes an expected
+  FFmpeg argument list containing `bwdif=mode=send_frame:…` and an ordering
+  the code no longer emits: the fixture sets `deinterlace: false` so `bwdif`
+  cannot appear, and the shipped filter says `send_field`.
+  `live_hls_publishes_short_startup_segments_before_steady_cadence` looks for
+  `-force_key_frames` in `LIVE_HLS_OUTPUT_ARGS`, which is a 10-element array
+  ending at `-hls_delete_threshold`; the flag moved into the encoder block.
+  **Both are left alone on purpose** — fixing either means editing a frozen
+  Live TV FFmpeg baseline, and neither is playback-surface work. Reported, not
+  changed, and still red.
+
 ## The playback surface contract — built, uncompiled, unverified
 
 **Merged to `main`: M0 (#276), M1 (#277), M2 (#280), M3 (#279) and M5 (#282).
