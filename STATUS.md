@@ -4,6 +4,182 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The Android playback surface has no unreachable sources left
+
+**WIP, not merged.** An audit of the merged playback-surface work found four of
+the contract's sources with no Android raise site at all, so four rows of §3.3
+described behaviour the client could not produce. All four are closed, one is
+recorded as a deliberate parity gap, and one dead branch is gone.
+
+### `media_waiting` — the one that mattered
+
+`STATE_BUFFERING` fed `Controller.isPlaybackWaiting`, and `PlayerScreen` drew a
+spinner from it *beside* the presenter's own progress surface. Two things
+decided what covered the picture, which is the exact defect this contract
+exists to kill — and because the legacy path owned the wait, the `buffering`
+class could never be drawn on Android at all.
+
+The wait now reaches the surface as every other reason does. `sampleSurfaceWait`
+raises `media_waiting` from the loop the stall watchdog already runs, on the
+same predicate (`playbackIsWaiting`) the spinner read, in the `attached` context
+(`establishedPlayback`). It is raised **once per wait** — the sampler runs every
+second and a fault per sample would make the ledger's history the sampler's
+cadence — and the class's 350 ms debounce is the reducer's, not a second timer.
+`isPlaybackWaiting` is deleted. Nothing about *when* a wait is detected moved;
+what moved is who owns the pixel.
+
+### `client_preparing`
+
+Retiring the legacy spinner leaves the cold start with nothing to draw, because
+before the first frame there is no wait in the `attached` context — there is an
+open. `restartAt` is the one function every open goes through, so it raises
+`client_preparing` there, right after the new generation attaches and only when
+playback is actually requested. It carries no sentence: the screen's existing
+wait copy is what this window said before, and a reopen still says why, because
+a recovery step raised after its `restartAt` is newer and wins the progress tie.
+
+### `log_only`
+
+Raised by nobody on any client, so `surface_log_only` had never been emitted.
+Row 18 is "the incumbent is untouched and the event is the only trace", and
+Android has three of those: a prepared successor abandoned *after failing*
+(a deliberate abandonment is not a failure and says nothing), the playback
+control reporter giving up — which is where a successor's 404 `session_gone`
+lands, and which needed a `onGaveUp` hook the reporter did not have — and
+session-status polling that stopped answering, once per polling job rather than
+once every two seconds. `SurfaceLog` gained a `detail` field, because an event
+that is the only trace has to say what happened.
+
+### `repeated_early_end` — recorded as a parity gap, not implemented
+
+The row says "unchanged", and the two clients that have it disagree: the web
+tolerates a second at the same position and gives up after four tries, Apple
+tolerates 250 ms and gives up on the second. There is no single semantics to
+port, and picking one is inventing a threshold. Worse, **Android has no
+early-end recovery at all** — `STATE_ENDED` posts progress and autoplays — so
+"repeated" has nothing to count, and building the ladder it would count is a new
+detector plus a new recovery path, which implementation §6 forbids here. The
+argument is in `docs/clients/ANDROID-CLIENT-PARITY.md` under "Repeated early
+end".
+
+### The fixture's `codes`, honoured
+
+A playlist or segment 503 was unconditionally `segment_503_not_yet`. Contract
+§3.3 row 8 is a 503 *with a "not yet" code*, and Android is the one client that
+can read the body (`InvalidResponseCodeException.responseBody`).
+
+The adapter asks the ROW rather than deciding: `surfaceRowAdmitsCode` reads the
+row's own list off the transcribed table. A row that lists no codes is claiming
+its status outright — demanding a code from one would make the row unreachable,
+which is the defect this change removes, not one to add. A row that *does* list
+codes claims only those, so a 503 whose code the row does not name falls through
+to whatever row the code actually names (`surfaceSourceForCode`), and otherwise
+to nothing. 401/403 and 410 stay status-based per §3.5, and the server's
+sentence and position survive either way.
+
+**What that changes is the attribution, not the class.** On the recovery path the
+owner is recovering, because `PlaybackPolicy.playbackErrorAction` said so — and
+that is a ladder decision this work may not move (§3.5 puts the adapter *after*
+it, on the outcome). So an unadmitted 503 still surfaces as `recovering`; what it
+no longer does is claim to be `segment_503_not_yet` while doing it. It is
+reported as `owner_recovery_step`, which is what it actually is, and the ledger
+stops attributing the owner's own reconnect to a server refusal that never said
+"not yet". Making such a 503 *stop* the player instead would be a ladder change,
+and it is not in this PR.
+
+### `SurfaceAction.ForceTranscode`
+
+Unreachable, and correctly so: it is a web affordance. The duplicated filter in
+the two renders is now one `surfaceActions`, which is the single fact that makes
+it unreachable. **The `when` arm itself could not be deleted** — Kotlin 2.3
+requires a `when` statement over an enum to be exhaustive — so it names its own
+guarantee instead of silently swallowing.
+
+### The pause ruling, ported
+
+The first round of this branch flagged a residue rather than fixing it: a
+`buffering` fault raised while playing and then *paused* never retired, because
+§3.1 retired `buffering` on presentation evidence and `attached_retired` only,
+and a paused picture produces no more samples. The Apple session found the same
+hole independently and the web had it too — the overlay outliving the thing it
+described, reintroduced by the migration itself. It is now **ruled**, and this
+branch carries the two cherry-picked fixture commits plus the Kotlin port:
+
+- `playback_not_requested` joins `SurfaceRetirement` and
+  `SurfaceClass.Buffering.retiredBy` — and **no other class's**. A `preparing`
+  start has not been paused by a viewer who has not seen it yet, and a blocking
+  prompt is answered by the viewer rather than by a transport change.
+  `PlaybackSurfaceReducerTest` asserts that list is exactly `[Buffering]`, twice:
+  once against the transcribed table and once against the fixture read directly.
+- `SurfaceEvent.PlaybackRequested` joins the reducer. `false` retires every
+  fault whose class names the reason; `true` moves nothing, because the raise
+  sites decide what comes back.
+- **The filter this client needs.** Media3 reports every app write of
+  `playWhenReady` as `PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST` whoever wrote
+  it, so the owner's own stop-before-raise is indistinguishable from a viewer's
+  pause at the callback — and a stop that retired the fault it is about to raise
+  over would be the owner deciding what the presenter shows. `Controller` keeps
+  the distinction as a **level**: the `SurfaceOwnerPlayer` setter marks it
+  *before* writing, because Media3 may deliver the callback before the setter
+  returns, and the next request for playback clears it. A level rather than an
+  edge, so a stop Media3 never reported — the player was already paused — cannot
+  swallow a later genuine pause; nothing can pause an already-paused player, and
+  the only event that can follow is a resume. No new detector, no new timer.
+
+### The fixture's codes, now that they exist
+
+The sixteen `segment_503_not_yet` codes are transcribed into `SURFACE_SOURCES`
+off the fixture. `surfaceRowAdmitsCode` already asked the row rather than
+deciding, so nothing else in the adapter moved — the row simply stopped claiming
+every 503. A `vod_disabled` on a segment is no longer *named*
+`segment_503_not_yet`; it is `owner_recovery_step`, and its class is still
+`recovering` because the owner is in fact recovering. See the attribution note
+above: changing that would be a ladder change.
+
+### The blocker review found, and the regression it was
+
+Retiring `isPlaybackWaiting` left a hole the first round did not see.
+`sampleSurfaceWait` answered only past the first frame, and `client_preparing`
+was raised from exactly one place — `restartAt`. But `executeSeek` **bypasses**
+`restartAt` on purpose (its own comment says so), and all four of its transports
+call `beginPlaybackAttempt`, which clears `establishedPlayback`;
+`retryMediaOnNextNode` does the same. In those windows the player is
+`STATE_BUFFERING` with `playWhenReady` true and `attachSurfaceGeneration` has
+just retired every fault about the outgoing generation — so the surface was
+`None` and the screen drew nothing. **Every seek and every node failover was a
+frozen or black picture with no spinner and no text until the first frame
+rendered**, which is exactly the window the legacy spinner used to cover and the
+one regression its deletion had to avoid.
+
+The sampler now answers the wait by context rather than only past the first
+frame, which is the split Apple's presenter already makes: `media_waiting` with a
+picture established, `client_preparing` in the `start` context before one,
+because before the first frame the same wait is not a wait — it is the open.
+`mediaWaitSource` is that decision as a function rather than two branches at a
+call site no JVM test can reach, so the tests can name the entry path each one
+stands for.
+
+### Evidence
+
+`clients/android`, in the pinned image on m6 (`make android-test` / `make
+android`): `:app:compileDebugKotlin`, `:app:testDebugUnitTest`,
+`:app:lintDebug`, `:app:assembleDebug`. Counts read from
+`app/build/test-results/testDebugUnitTest/*.xml`, not from the log —
+**634 tests, 0 failures, 0 errors, 0 skipped** across 88 files. `main` was 612
+when this branch opened and has changed no Android source since (#290 is web,
+fixture and docs), so the 22 new tests are this branch's. Both fences, all five
+node playback tests (62 surface cases), `make web-check` exit 0,
+`tests/operations` 356 OK and `scripts/validate lint` on the VM. **Eleven
+mutations** applied on the build host, each failing a named test against a run
+whose XML shows 634 tests executed, each reverted; the table is in the PR.
+
+Rebased onto `origin/main` after #290 merged; both cherry-picked fixture commits
+dropped out as duplicates, exactly as expected.
+
+**Unrun:** no emulator or physical device. §4.4's recorded emulator run — inject
+a 503 on a segment after 30 s of playback — has not been done, and M4's recipes
+remain unclaimed.
+
 ## The web half of the playback surface contract is reachable, and four rulings are closed
 
 **`web/playback-surface-reach`, WIP, not merged.** An audit found parts of the

@@ -742,6 +742,15 @@ class PlaybackControlReporter private constructor(
     private val pace: suspend (Long) -> Unit,
     private val now: () -> Long,
     private val onExchange: (Exchange) -> Unit,
+    /**
+     * This reporter has given up on the session and will not exchange again.
+     *
+     * Distinct from [onExchange], which fires for every failed exchange
+     * including the ones the protocol retries. This fires once, at the point
+     * there is nothing left to try. It reports; it never decides — the player
+     * keeps its item either way, because control reporting is not playback.
+     */
+    private val onGaveUp: (String) -> Unit = {},
 ) {
     data class Exchange(
         val request: ControlRequest,
@@ -817,10 +826,11 @@ class PlaybackControlReporter private constructor(
             pace: suspend (Long) -> Unit,
             now: () -> Long,
             onExchange: (Exchange) -> Unit = {},
+            onGaveUp: (String) -> Unit = {},
         ): PlaybackControlReporter? {
             if (!bootstrap.isValid || !PlaybackControl.isUuid(clientInstanceId)) return null
             return PlaybackControlReporter(
-                bootstrap, clientInstanceId, owner, capture, send, pace, now, onExchange,
+                bootstrap, clientInstanceId, owner, capture, send, pace, now, onExchange, onGaveUp,
             )
         }
     }
@@ -1231,6 +1241,7 @@ class PlaybackControlReporter private constructor(
         // body this client could not read will not become readable on the
         // fourth attempt.
         if (failure is ControlProtocolException) {
+            gaveUp(describe(failure))
             stop()
             return
         }
@@ -1246,7 +1257,10 @@ class PlaybackControlReporter private constructor(
                     true
                 }
             }
-            if (!adopted) stop()
+            if (!adopted) {
+                gaveUp(describe(failure))
+                stop()
+            }
             return
         }
         val retryableControl = (status == 425 && code == "owner_transition") ||
@@ -1254,6 +1268,10 @@ class PlaybackControlReporter private constructor(
             (status == 503 && code == "control_unavailable")
         val retryableTransport = status == 408 || status == null
         if (!retryableControl && !retryableTransport) {
+            // Nothing left to try on this session's control channel: a 404
+            // `session_gone` on a successor's first exchange, a 410, a refusal
+            // the protocol does not make retryable. The player is untouched.
+            gaveUp(describe(failure))
             stop()
             return
         }
@@ -1291,6 +1309,15 @@ class PlaybackControlReporter private constructor(
         lastStartedAt = null
         pending = newest
         return true
+    }
+
+    /** Once per reporter: a second give-up is the same give-up. */
+    private var gaveUpReported = false
+
+    private fun gaveUp(reason: String) {
+        if (gaveUpReported) return
+        gaveUpReported = true
+        onGaveUp(reason)
     }
 
     private fun currentCapture(): PlaybackControlCapture? = capture()?.takeIf { it.owner == owner }

@@ -415,9 +415,6 @@ class Controller(
         get() = sessionStatusObservedAtMs?.let { (monotonicNowMs() - it).coerceAtLeast(0) }
     val presentationProgressAgeMs: Long?
         get() = openStallTracker.progressAgeMs(monotonicNowMs())
-    val isPlaybackWaiting: Boolean
-        get() = playbackIsWaiting(player.playWhenReady, player.playbackState)
-
     val currentSessionId: String? get() = sessionId
     val currentSessionIsVod: Boolean get() = sessionIsVod
 
@@ -459,6 +456,14 @@ class Controller(
     private var presentationForeground = true
     private var mediaMutationEpoch = 0L
 
+    /**
+     * Which of the two things that write `playWhenReady` wrote it.
+     *
+     * Media3 attributes both to the viewer; [ViewerTransportIntent] is where the
+     * argument for keeping them apart lives, and where it is tested.
+     */
+    private val viewerTransport = ViewerTransportIntent()
+
     // ------------------------------------------------ the playback surface
     //
     // What the viewer is shown when playback is not simply playing, as a
@@ -488,6 +493,11 @@ class Controller(
             override var playbackRequested: Boolean
                 get() = player.playWhenReady
                 set(value) {
+                    // Marked BEFORE the write, not after: Media3 may deliver the
+                    // resulting `onPlayWhenReadyChanged` before this setter has
+                    // returned, and that callback is where the owner's own stop
+                    // has to be told apart from a viewer's pause.
+                    if (!value) viewerTransport.ownerStopping()
                     player.playWhenReady = value
                 }
             override val positionMs: Long get() = realPosition()
@@ -846,6 +856,12 @@ class Controller(
             // and audio-focus suppression do not replace viewer intent.
             if (reason == Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST) {
                 playbackIntent.setPlaybackRequested(playWhenReady)
+                // The client's own fact, on the edge it already listens to: no
+                // new detector and no new timer. A `buffering` fault is about a
+                // player that wants media, so the viewer pausing makes it about
+                // nothing — but the owner's stop-before-raise arrives here too,
+                // and it is the owner deciding rather than the viewer.
+                viewerTransport.report(playWhenReady)?.let(surfaceOwner::playbackRequested)
             }
             sampleTargetPresentationDeadline()
         }
@@ -1028,8 +1044,15 @@ class Controller(
             sessionBaseMs = baseMs,
         )
 
-    /** A refusal Media3 carried, classified. */
-    private data class MediaRefusal(val source: String, val message: String?, val positionMs: Long?)
+    /**
+     * A refusal Media3 carried, classified.
+     *
+     * [source] is null when the body was legible but no source row claims it —
+     * a 503 whose code is in no row's `codes` list. The sentence and the
+     * position are still the server's and are still used; what the client will
+     * not do is borrow a class from a row that does not name this refusal.
+     */
+    private data class MediaRefusal(val source: String?, val message: String?, val positionMs: Long?)
 
     /** The viewer's newest film target, even while the predecessor still renders. */
     fun positionForPlaybackIntent(): Long =
@@ -1344,6 +1367,20 @@ class Controller(
         if (!playbackControlBootstrapFence.isActive()) return
         mediaMutationEpoch += 1
         attachSurfaceGeneration()
+        // The client is opening a stream (§3.3 row 10). Every open reaches this
+        // function, and the attach above has just dropped every fault about the
+        // generation being replaced, so this is the first thing true about the
+        // new one. It carries no sentence: the spinner's own copy is what the
+        // screen falls back to, which is the text this window had before the
+        // presenter owned it. A recovery step raised AFTER its `restartAt` is
+        // newer and wins the progress tie, so a reopen still says why.
+        //
+        // Not raised for a viewer who is paused: the presenter's evidence needs
+        // `playWhenReady` (§3.4), so a preparing fault over a paused open would
+        // have nothing that could ever retire it.
+        if (playbackIntent.playbackRequested) {
+            surfaceOwner.preparingClientOpen(mediaMutationEpoch, SurfaceContext.Start)
+        }
         if (planReplacement.route(playbackIntent, retry = reason == "presentation-recovery")) return
         // A user-initiated restart (seek, quality switch, track change) resets
         // the stall reopen budget and invalidates any in-flight stall.
@@ -2005,6 +2042,10 @@ class Controller(
         sessionStatus = null
         sessionStatusObservedAtMs = null
         statusPollingJob = scope.launch {
+            // §3.3 row 18 again, and once per polling job: the poll runs every
+            // two seconds, and a session that has gone away fails every one of
+            // them. The first is the event; the rest are the same event.
+            var reportedFailure = false
             while (isActive && sessionId == polledSessionId) {
                 try {
                     val observed = vm.hlsSessionStatus(polledSessionId)
@@ -2014,6 +2055,15 @@ class Controller(
                 } catch (_: Exception) {
                     // Keep the last real sample. A completed session may
                     // disappear before the player finishes its buffered tail.
+                    // The picture is untouched either way, so the surface is
+                    // too — but the stats stopping is worth one line.
+                    if (!reportedFailure) {
+                        reportedFailure = true
+                        surfaceOwner.logOnly(
+                            mediaMutationEpoch,
+                            "session status polling stopped answering",
+                        )
+                    }
                 }
                 delay(2_000)
             }
@@ -2144,6 +2194,7 @@ class Controller(
                 onSubtitleReady = ::retryNativeSubtitleAfterReadiness,
                 onPrepare = ::onPrepareAction,
                 onAcknowledged = ::acknowledgementDelivered,
+                onGaveUp = ::controlReportingGaveUp,
             )
         }
     }
@@ -2490,6 +2541,40 @@ class Controller(
         )
     }
 
+    /**
+     * `STATE_BUFFERING` after start, as the contract's `media_waiting` (row 12).
+     *
+     * This is the whole of the retired spinner's detection, unchanged:
+     * [playbackIsWaiting] is the same predicate `isPlaybackWaiting` read, on the
+     * same loop, and the 350 ms debounce the class carries is the reducer's. No
+     * threshold, budget or detector moves — what moves is who owns the pixel.
+     *
+     * `establishedPlayback` picks the row: with a picture established the wait
+     * is `media_waiting`; before the first frame it is not a wait but the open,
+     * and [mediaWaitSource] says which. Both halves matter here and not only in
+     * [restartAt] — `executeSeek` deliberately bypasses `restartAt`, and its
+     * four transports and the node failover all call [beginPlaybackAttempt],
+     * which clears `establishedPlayback` right after `attachSurfaceGeneration`
+     * has retired every fault about the outgoing generation. Without the
+     * `client_preparing` answer the sampler makes, every seek and every failover
+     * is a frozen or black picture with nothing drawn over it until the first
+     * frame renders — which is precisely what the retired spinner covered.
+     *
+     * `playWhenReady` is inside [playbackIsWaiting]: a viewer who paused is not
+     * waiting for the stream, and the presenter's evidence needs the same flag,
+     * so a fault raised over a paused player would have nothing to retire it.
+     */
+    private fun sampleSurfaceWait() {
+        val waiting = playbackIsWaiting(player.playWhenReady, player.playbackState)
+        when (mediaWaitSource(waiting, establishedPlayback)) {
+            SurfaceSources.MEDIA_WAITING ->
+                surfaceOwner.bufferingMediaWait(mediaMutationEpoch, realPosition())
+            SurfaceSources.CLIENT_PREPARING ->
+                surfaceOwner.preparingClientOpen(mediaMutationEpoch, SurfaceContext.Start)
+            else -> Unit
+        }
+    }
+
     /** A destination that landed settles its faults; one replaced supersedes them. */
     private fun sampleSurfaceIntent() {
         val current = playbackIntent.pendingSeek?.sequence
@@ -2509,8 +2594,21 @@ class Controller(
     private fun sampleSurface(positionMs: Long, observedAtMs: Long) {
         surfaceOwner.hidden(!presentationForeground)
         sampleSurfacePresentation(positionMs, observedAtMs)
+        sampleSurfaceWait()
         sampleSurfaceIntent()
         surfaceOwner.tick()
+    }
+
+    /**
+     * The control reporter has stopped and will not exchange again (§3.3 row 18).
+     *
+     * A 404 `session_gone` on a successor's first exchange, a body this client
+     * cannot read, any refusal the protocol does not make retryable. The player
+     * keeps its item and keeps playing — control reporting is not playback — so
+     * the surface does not move and the event is the only trace.
+     */
+    private fun controlReportingGaveUp(failure: String) {
+        surfaceOwner.logOnly(mediaMutationEpoch, "control reporting stopped ($failure)")
     }
 
     /** The contract's client-log events (§3.6), on the reporter that already exists. */
@@ -2536,6 +2634,7 @@ class Controller(
             entry.action?.let { append(" action=").append(it.wire) }
             entry.error?.let { append(" error=").append(it) }
             entry.context?.let { append(" context=").append(it) }
+            entry.detail?.let { append(" detail=").append(it) }
         }
         playbackTelemetry.report(
             event = entry.event,
@@ -2562,18 +2661,41 @@ class Controller(
             depth += 1
         }
         val response = cause as? HttpDataSource.InvalidResponseCodeException ?: return null
-        val source = when (response.responseCode) {
-            503 -> SurfaceSources.SEGMENT_503_NOT_YET
-            410 -> SurfaceSources.MEDIA_OWNER_LOST_410
-            401, 403 -> SurfaceSources.AUTH_401_403
-            else -> return null
-        }
         val body = try {
             String(response.responseBody, Charsets.UTF_8)
         } catch (_: Exception) {
             null
         }
         val refusal = tv.plurx.app.data.parseRefusal(response.responseCode, body)
+        // 401/403 and 410 are status-based by §3.5: the status IS the answer
+        // and a body cannot take it away. A 503 is not — contract §3.3 row 8 is
+        // a 503 "with a 'not yet' code", and Android is the one client that can
+        // read one. Whether a code is required at all is the ROW's to say, so
+        // `surfaceRowAdmitsCode` asks it rather than this adapter deciding:
+        // while the row lists no codes it claims the status outright and this
+        // is exactly today's behaviour; once it lists them, a 503 carrying
+        // something else is not row 8's refusal and falls through to whatever
+        // row the code does name, or to what the caller's own ladder was
+        // already doing — rather than claiming `recovering` on the strength of
+        // a status nobody explained.
+        val source = when (response.responseCode) {
+            410 -> SurfaceSources.MEDIA_OWNER_LOST_410
+            401, 403 -> SurfaceSources.AUTH_401_403
+            503 -> if (
+                surfaceRowAdmitsCode(
+                    SurfaceSources.SEGMENT_503_NOT_YET,
+                    refusal?.code,
+                    SurfaceContext.Attached,
+                )
+            ) {
+                SurfaceSources.SEGMENT_503_NOT_YET
+            } else {
+                // Not row 8's refusal. Whatever row the code DOES name, or none.
+                surfaceSourceForCode(refusal?.code, SurfaceContext.Attached)
+            }
+            else -> return null
+        }
+        if (source == null && refusal == null) return null
         return MediaRefusal(source, refusal?.message, refusal?.positionMs)
     }
 
@@ -3265,6 +3387,16 @@ class Controller(
      * where they are tested; this is the residue that genuinely needs a player.
      */
     private fun abandonPreparedReplacement(failed: Boolean) {
+        // §3.3 row 18: a successor that failed is dropped and the incumbent is
+        // untouched, so nothing is drawn and this event is the only trace the
+        // viewer's session keeps of it. A deliberate abandonment — a seek, a
+        // quality change, a release — is not a failure and says nothing.
+        if (failed) {
+            surfaceOwner.logOnly(
+                mediaMutationEpoch,
+                "prepared successor abandoned after it failed",
+            )
+        }
         // A switched preparation cannot be aborted, but neither may an exit
         // fabricate a rendered frame. Settle it as failed; the caller's normal
         // reopen/end path replaces the black successor immediately afterward.

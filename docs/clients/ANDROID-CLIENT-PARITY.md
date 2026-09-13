@@ -4,6 +4,35 @@ The Android client is the native plurx **viewer** for phones, foldables,
 tablets, Android TV, and Google TV. This page records what “web parity” means
 for that viewer and keeps server administration out of the comparison.
 
+> Status (2026-09-13): source is v0.3.0, Android build 93. Every source the
+> playback surface contract gives this client now has a raise site, which four
+> of them did not ([PLAYBACK-SURFACE-CONTRACT.md](PLAYBACK-SURFACE-CONTRACT.md)
+> §3.3). `STATE_BUFFERING` after start is `media_waiting` → `buffering`, raised
+> once per wait from the sampler the stall watchdog already runs and debounced
+> by the class's own 350 ms in the reducer; the legacy `isPlaybackWaiting`
+> spinner is deleted, so exactly one thing decides what covers the picture.
+> Opening a stream is `client_preparing`, raised in `restartAt` once the new
+> generation has attached and retired by the picture. A prepared successor
+> abandoned after failing, a control reporter that has given up — which is where
+> a successor's 404 `session_gone` lands — and session-status polling that
+> stopped answering each emit `surface_log_only` and move nothing, per row 18. A
+> playlist or segment 503 is *named* `segment_503_not_yet` only when the
+> fixture's row admits its code, and the row now lists sixteen: Android reads
+> refusal bodies, so a 503 carrying anything else — `vod_disabled`, the service
+> switched off — falls through to whatever row the code names, or to the owner's
+> own `owner_recovery_step`. The CLASS is unchanged on that path: the owner is
+> recovering because `PlaybackPolicy.playbackErrorAction` said so, and that is a
+> ladder decision this work does not move. What changes is that the ledger stops
+> attributing the owner's own reconnect to a refusal that never said "not yet". A
+> `buffering` fault the viewer pauses under is retired, per the 2026-09-13
+> ruling: it is about a player that wants media, and a paused picture produces
+> no more presentation samples, so without it the spinner sat over a still frame
+> until the generation changed. The owner's own stop-before-raise is filtered out
+> of that — Media3 reports it as a `USER_REQUEST` like any pause — so it can
+> never retire the fault it is about to raise over. **Known parity gap:** `repeated_early_end` (row 16)
+> still has no Android raise site, deliberately — see "Repeated early end"
+> below. No threshold, budget, detector or ladder moved.
+
 > Status (2026-09-13): source is v0.3.0, Android build 92. The two bounded
 > recovery steps this client owns under the playback surface contract are in
 > ([PLAYBACK-SURFACE-CONTRACT.md](PLAYBACK-SURFACE-CONTRACT.md), M5). A session
@@ -127,6 +156,45 @@ for that viewer and keeps server administration out of the comparison.
 Android also adds platform-native behavior that the browser does not provide:
 MediaSession integration, picture-in-picture, immersive playback, hardware
 media keys, and D-pad focus states.
+
+## Repeated early end — a known parity gap
+
+`repeated_early_end` (playback surface contract §3.3 row 16, "repeated early
+end at the same position < 95 %") has **no Android raise site, and will not get
+one until Android grows the detector the row describes.** Recorded here rather
+than implemented, because implementing it means inventing numbers.
+
+The row says "unchanged", and what is unchanged is different on each client
+that has it:
+
+| Client | Same-position tolerance | Repeats before it is terminal | The ladder underneath |
+|---|---|---|---|
+| Web | 1 s (`Math.abs(pos-prev)<1`, `index.html`) | `PLAYER.endedTries>3` — or the first one, on `direct_play` | reconnects and resumes from the truncation point, counting attempts in `endedTries` |
+| Apple | 250 ms (`repeatedEndToleranceMs`) | the second uncorroborated end at the same place (`lastUncorroboratedEndMs`) | one bounded replacement, cleared by `observeProgressPastEarlyEnd` one tolerance window past the boundary |
+| Android | — | — | **none: `STATE_ENDED` posts progress and autoplays the next episode** |
+
+Three things follow, and each on its own is disqualifying:
+
+1. **There is no shared threshold to port.** The web tolerates a second at the
+   same position and gives up after four tries; Apple tolerates 250 ms and
+   gives up on the second. Picking either for Android is picking, and the rule
+   this work was given is that inventing a threshold means recording the gap.
+2. **There is nothing to repeat.** "Repeated" counts *retries*, and Android has
+   no early-end recovery to retry. `PlaybackControlMapping.terminallyEnded`
+   already draws the line — a stream that ends more than `ENDED_SLACK_MS` short
+   of the duration reports `ACTIVE` demand, and the comment beside it says "the
+   client reopens it" — but no Android code does. The count the row needs would
+   always be one.
+3. **Building the ladder is not a rendering change.** An early-end reopen path
+   is a new detector and a new recovery ladder, which
+   [PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md](PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md)
+   §6 forbids for this work outright.
+
+What Android does with a truncated stream is therefore unchanged: the player
+reports `ENDED`, progress is posted at the plan duration, and autoplay moves on.
+The surface shows nothing, which is honest — no recovery owner gave up, because
+none tried. Closing this gap is its own effort: a detector, a bounded reopen,
+and a ruling on whose tolerance and count the three clients should share.
 
 ## Apple parity handoff
 

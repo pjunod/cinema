@@ -33,6 +33,77 @@ internal interface SurfaceOwnerPlayer {
     val rate: Float
 }
 
+/**
+ * Which source a media wait is, by context (§3.3 rows 10 and 12).
+ *
+ * The same wait means two different things either side of the first frame. With
+ * a picture established it is `media_waiting` — the stream this viewer is
+ * watching has run out of media. Before one it is not a wait at all, it is the
+ * open: `client_preparing`, in the `start` context, which is the row the staged
+ * loading overlay every client paints belongs to. Apple's presenter makes the
+ * same split.
+ *
+ * A FUNCTION rather than two branches at the call site because `Controller`
+ * cannot be built on the JVM, and this is the decision every entry into a new
+ * attempt depends on: `restartAt` raises the open itself, but `executeSeek`
+ * deliberately bypasses `restartAt` (its own comment says so) and all four of
+ * its transports call `beginPlaybackAttempt`, as does the node failover — so in
+ * those windows this is the only thing that draws anything at all. Deleting the
+ * `client_preparing` answer here is a black picture with no spinner and no text
+ * for the length of every seek, which is exactly what the legacy spinner used to
+ * cover and what its deletion had to replace.
+ *
+ * Returns null when the player is not waiting, which is most of the time.
+ */
+internal fun mediaWaitSource(waiting: Boolean, establishedPlayback: Boolean): String? = when {
+    !waiting -> null
+    establishedPlayback -> SurfaceSources.MEDIA_WAITING
+    else -> SurfaceSources.CLIENT_PREPARING
+}
+
+/**
+ * Tells the owner's own stop apart from the viewer's pause.
+ *
+ * `playback_not_requested` retires a `buffering` fault because the VIEWER no
+ * longer wants media (contract §3.1, ruled 2026-09-13). On this client the
+ * platform cannot say which of the two wrote `playWhenReady`: Media3 reports
+ * every app write as `PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST`, and the
+ * owner's stop-before-raise is one of those. A stop that retired the fault it is
+ * about to raise over would be the owner deciding what the presenter shows,
+ * which is the one thing §3.0 gives the presenter instead.
+ *
+ * A LEVEL, not an edge. [ownerStopping] is called before the write rather than
+ * after, because Media3 may deliver the change before the setter that caused it
+ * returns; and the level is cleared by the next request for playback rather than
+ * by the first report, so a stop the platform never reported — the player was
+ * already paused — cannot swallow a later, genuine pause. Nothing can pause an
+ * already-paused player, so the only event that can follow such a stop is a
+ * resume, and that is exactly what clears it.
+ */
+internal class ViewerTransportIntent {
+    private var ownerStopInForce = false
+
+    /** The owner is about to stop the player. Call BEFORE the write. */
+    fun ownerStopping() {
+        ownerStopInForce = true
+    }
+
+    /**
+     * A `playWhenReady` change the platform attributed to a user request.
+     *
+     * Returns what to report to the presenter, or null when this is the owner's
+     * own stop and there is nothing about the viewer to report.
+     */
+    fun report(playWhenReady: Boolean): Boolean? {
+        if (playWhenReady) {
+            ownerStopInForce = false
+            return true
+        }
+        if (ownerStopInForce) return null
+        return false
+    }
+}
+
 /** What the player looked like when a fault was raised. Diagnostics, not evidence. */
 internal data class SurfacePlayerSample(
     val rate: Float,
@@ -111,6 +182,17 @@ internal class PlaybackSurfaceOwner(
 
     /** `presentationForeground` inverted: Android's stand-in for a hidden page. */
     fun hidden(hidden: Boolean) = dispatch(SurfaceEvent.Hidden(hidden))
+
+    /**
+     * The viewer's own transport intent. `false` retires `buffering` and nothing
+     * else; `true` moves nothing, because the raise sites decide what comes back.
+     *
+     * The caller owes the filter: this must never carry the owner's own
+     * stop-before-raise, because a stop that retired the fault it is about to
+     * raise over would be the owner deciding what the presenter shows.
+     */
+    fun playbackRequested(requested: Boolean) =
+        dispatch(SurfaceEvent.PlaybackRequested(requested))
 
     /** A platform callback that is not proof of anything. It moves nothing. */
     fun inert(name: String) = dispatch(SurfaceEvent.Inert(name))
@@ -313,7 +395,71 @@ internal class PlaybackSurfaceOwner(
             detail = detail,
         )
 
+    /**
+     * `STATE_BUFFERING` while playback is requested, after start (§3.3 row 12).
+     *
+     * Raised ONCE per wait. The caller is a sampler on a loop that already runs,
+     * so a fault per sample would push a ring row per second at a stall and make
+     * the ledger's history the sampler's cadence rather than the player's story.
+     * The web does the same thing for the same reason — `waiting` fires at every
+     * fMP4 boundary — and calls it `{once:true}`.
+     *
+     * The 350 ms debounce is the CLASS's and lives in the reducer: the fault
+     * exists from this instant and is simply not drawn until it has lasted that
+     * long. There is no timer here and no second detector: `playbackIsWaiting`
+     * is the same predicate the retired spinner read.
+     */
+    fun bufferingMediaWait(attached: Long, positionMs: Long?) {
+        if (hasLiveFault(SurfaceSources.MEDIA_WAITING, attached)) return
+        raiseNotice(
+            SurfaceSources.MEDIA_WAITING,
+            SurfaceContext.Attached,
+            attached,
+            positionMs = positionMs,
+        )
+    }
+
+    /**
+     * The client is opening a stream (§3.3 row 10).
+     *
+     * The overlay every client paints between "the viewer asked for this" and
+     * "a picture is presenting". It is a `preparing` fault with no refusal
+     * behind it, which is what lets the ledger name an ordinary cold start
+     * instead of borrowing `owner_recovery_step` and calling it a recovery.
+     *
+     * Once per open: the generation it is about has just been attached, so a
+     * second one could only be a duplicate of this one.
+     */
+    fun preparingClientOpen(attached: Long, context: SurfaceContext, detail: String? = null) {
+        if (hasLiveFault(SurfaceSources.CLIENT_PREPARING, attached)) return
+        raiseNotice(SurfaceSources.CLIENT_PREPARING, context, attached, detail = detail)
+    }
+
+    /**
+     * Something failed and the incumbent is untouched (§3.3 row 18).
+     *
+     * A prepared successor abandoned, a control exchange the protocol will not
+     * retry, a stats poll that stopped answering. Nothing about the PICTURE
+     * changed, so nothing is drawn — `log_only` maps to no class at all and the
+     * reducer leaves the surface exactly as it was. The event is the only trace
+     * there is, which is why [detail] is carried rather than dropped.
+     */
+    fun logOnly(attached: Long, detail: String) =
+        raiseNotice(SurfaceSources.LOG_ONLY, SurfaceContext.Attached, attached, detail = detail)
+
     // ------------------------------------------------------------- internals
+
+    /**
+     * Is a fault from [source] about [attached] still live?
+     *
+     * A READ of the reducer's state and nothing else. It exists so a site that
+     * is restating a fact rather than reporting a new one can say so: a fault
+     * inside its class's debounce is live and undrawn, so `current` cannot
+     * answer this and a site that asked it would raise a second fault every
+     * sample for the whole of the first one's 350 ms.
+     */
+    private fun hasLiveFault(source: String, attached: Long): Boolean =
+        state.faults.any { it.source == source && it.attached == attached }
 
     /**
      * A fault the owner has NOT stopped the player for. A blocking class raised
