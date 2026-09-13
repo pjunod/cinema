@@ -717,7 +717,58 @@
       status,
       code: typeof parsed.code === "string" ? parsed.code : null,
       message,
+      // Where the film was when the server lost it. `media_owner_lost` is the
+      // body that carries it, and it is what a Try again has to reopen at:
+      // without it the viewer is sent back to the start of a film they were
+      // ninety minutes into. Absent, null or unparseable stays `null` — a
+      // guessed position is worse than no position.
+      position_ms:
+        parsed.film_position_ms != null &&
+        Number.isFinite(Number(parsed.film_position_ms))
+          ? Number(parsed.film_position_ms)
+          : null,
     };
+  }
+
+  // Which fault source a refused stream response IS (contract §3.3).
+  //
+  // Driven by the embedded table so the three clients cannot drift: rows are
+  // scanned in order and the first whose id and context both match wins, which
+  // is the table's own precedence rule. A row whose id is the server's code
+  // matches on that code; the "not yet" row lists its codes; the three rows
+  // below are the ones the server answers with a status and no code of its own.
+  //
+  // `null` means no row claims this response. The caller keeps whatever
+  // handling it had rather than being handed a class the table never assigned.
+  const SURFACE_REFUSAL_BY_STATUS = Object.freeze({
+    auth_401_403: (status) => status === 401 || status === 403,
+    media_owner_lost_410: (status) => status === 410,
+    segment_503_not_yet: (status) => status === 503,
+  });
+
+  function classifyStreamFailure({ status, code, context } = {}) {
+    const where = context || "attached";
+    const numeric = Number(status);
+    const named = typeof code === "string" && code.trim() ? code.trim() : null;
+    for (const row of SURFACE_SOURCES) {
+      if (!(row.context === "any" || row.context === where)) continue;
+      const byStatus = SURFACE_REFUSAL_BY_STATUS[row.id];
+      if (byStatus) {
+        if (byStatus(numeric)) return row.id;
+        continue;
+      }
+      // A viewer-requested replacement that failed is a refusal about the
+      // destination, whatever the server said about it: the predecessor keeps
+      // playing and keeps its own faults.
+      if (row.id === "change_failed") {
+        if (where === "change") return row.id;
+        continue;
+      }
+      if (!named) continue;
+      if (row.id === named) return row.id;
+      if (Array.isArray(row.codes) && row.codes.includes(named)) return row.id;
+    }
+    return null;
   }
 
   // The two overlay lines for a failure the server explained.
@@ -1527,6 +1578,7 @@
     stallReopenSessionOptions,
     fallbackResetBeforeOpen,
     parseStreamFailure,
+    classifyStreamFailure,
     SURFACE_CLASSES,
     SURFACE_SOURCES,
     SURFACE_TIMINGS,
