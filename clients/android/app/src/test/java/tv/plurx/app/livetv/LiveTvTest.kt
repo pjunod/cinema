@@ -22,11 +22,13 @@ import tv.plurx.app.data.Net
 @OptIn(ExperimentalCoroutinesApi::class)
 class LiveTvTest {
     @Test fun liveConfigurationLeavesTheTargetOffsetToThePlaylist() {
-        val configuration = MediaItem.LiveConfiguration.Builder()
-            .setMaxOffsetMs(8_000)
+        val item = MediaItem.Builder()
+            .setLiveConfiguration(
+                MediaItem.LiveConfiguration.Builder().setMaxOffsetMs(8_000).build(),
+            )
             .build()
-        assertEquals(C.TIME_UNSET, configuration.targetOffsetMs)
-        assertEquals(8_000, configuration.maxOffsetMs)
+        assertEquals(C.TIME_UNSET, item.liveConfiguration.targetOffsetMs)
+        assertEquals(8_000L, item.liveConfiguration.maxOffsetMs)
 
         val source = listOf(
             File("app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"),
