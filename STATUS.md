@@ -308,7 +308,7 @@ remain unclaimed.
 
 ## The web half of the playback surface contract is reachable, and four rulings are closed
 
-**`web/playback-surface-reach`, WIP, not merged.** An audit found parts of the
+**Landed as [#290](http://192.168.4.7:3000/noirr/plurx/pulls/290).** An audit found parts of the
 merged work unreachable — two contract rows that no web site ever raised, an
 action in the vocabulary that no site ever offered, and a deadline that could
 not fire. All of it is closed here, together with the four rulings that were
