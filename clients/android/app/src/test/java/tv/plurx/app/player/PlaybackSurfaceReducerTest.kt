@@ -72,7 +72,7 @@ class PlaybackSurfaceReducerTest {
             assertEquals(wire, stringOrNull(row["title"]), cls.title)
             assertEquals(
                 wire,
-                row["default_actions"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+                row["default_actions"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList<String>(),
                 cls.defaultActions.map { it.wire },
             )
             // A class that retires on continuous presentation must name the
@@ -117,7 +117,7 @@ class PlaybackSurfaceReducerTest {
             )
             assertEquals(
                 id,
-                raw["codes"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList(),
+                raw["codes"]?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList<String>(),
                 row.codes,
             )
             assertEquals(id, stringOrNull(raw["then_when_stopped"]), row.thenWhenStopped?.wire)
