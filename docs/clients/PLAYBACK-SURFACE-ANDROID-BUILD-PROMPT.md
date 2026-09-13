@@ -52,6 +52,12 @@ Homebrew command-line-tools build (15859902) is the same one the image
 downloads. The whole `:app:testDebugUnitTest :app:lintDebug :app:assembleDebug`
 run takes about four minutes cold on that machine.
 
+**One trap on the agent VM, wherever you drive this from.** `/sessions` is
+that VM's `$TMPDIR` and it sits at 100% full. Two things follow and neither
+announces itself: `tests/playback/network-shaping.test.js` fails with
+`ENOSPC`, and a detached `nohup` job can die mid-run with nothing in its log
+to say why. Point `TMPDIR` at something on `/` before running either.
+
 - **Pinned image (preferred).** Docker, and `make android-test` from the
   repository root — it builds `clients/android`'s image (JDK 25 + SDK) and
   runs `./gradlew --no-daemon testDebugUnitTest lintDebug` inside it. This is

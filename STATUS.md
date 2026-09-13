@@ -109,7 +109,7 @@ anywhere else, and detached `nohup` jobs die without a message. Export
 **Merged to `main`: M0 (#276), M1 (#277), M2 (#280), M3 (#279) and M5 (#282).
 M4 and M6 are not done, nothing Swift has ever been compiled, and no device
 has ever run any of it. The Kotlin now compiles and its JVM tests pass —
-2026-09-13, on a local SDK, see (2) below.** The effort replaced three imperative error
+2026-09-13, on both of the hand-off's routes, see (2) below.** The effort replaced three imperative error
 channels — the web's `setLoading()`, Apple's
 `failed`/`playbackError`/`playbackFailureTitle`/`playbackNotice`, Android's
 `onError`/`playFailure`/`playbackNotice` — with one fixture-driven presenter
@@ -207,9 +207,11 @@ never has.
    `:app:compileDebugKotlin`, `:app:testDebugUnitTest`, `:app:lintDebug` and
    `:app:assembleDebug` all green. Both routes report the same
    **612 tests, 0 failures, 0 skipped**, and the local-SDK one is stable over
-   five consecutive `--rerun-tasks` runs. The APK `make android` produced
-   carries `versionCode 92`, read back out of it with
-   `aapt2 dump badging`. `PlaybackSurfaceReducerTest`
+   five consecutive `--rerun-tasks` runs on the Mac. The APK `make android`
+   produced carries `versionCode 92`, read back out of the APK itself with
+   the image's own `build-tools/37.0.0/aapt2 dump badging` (`aapt2` is not on
+   `PATH` in the image) and independently out of `output-metadata.json`.
+   `PlaybackSurfaceReducerTest`
    (7 cases, `everyFixtureCaseRuns` over all 60 fixture cases included),
    `PlaybackSurfaceOwnerTest` (14), `CreateRetryTest` (10),
    `BehindLiveWindowRecoveryTest` (6) and `PlaybackInfoContractTest` (4) all
