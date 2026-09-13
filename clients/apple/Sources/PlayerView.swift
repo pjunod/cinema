@@ -1572,8 +1572,16 @@ struct PlayerView: View {
     @ViewBuilder
     private func failureActionButton(_ action: PlaybackFault.Action) -> some View {
         switch action {
+        // One button for both, never two: `failureActions` above strips
+        // `keep_waiting` whenever `retry` is present, and every blocking
+        // class's defaults offer `retry`, so a separate "Keep Waiting" was a
+        // label no viewer could ever reach. Apple does not offer it separately
+        // because on this client it is not a separate thing — §3.1 says Keep
+        // waiting IS `retryAfterPlaybackFailure`. (The web is adding a real
+        // one; the web's Keep waiting re-arms `armStall` and its Try again
+        // re-opens, which genuinely differ.)
         case .retry, .keepWaiting:
-            Button(action == .keepWaiting ? "Keep Waiting" : "Try Again") {
+            Button("Try Again") {
                 controller.retryAfterPlaybackFailure()
             }
             .buttonStyle(.borderedProminent)

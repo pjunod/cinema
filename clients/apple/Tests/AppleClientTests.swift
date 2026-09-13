@@ -3565,6 +3565,42 @@ final class AppleClientTests: XCTestCase {
         )
     }
 
+    /// Apple has no separate Keep waiting, and the branch that drew one was
+    /// unreachable: `failureActions` strips `keep_waiting` whenever `retry` is
+    /// present, and every blocking class's defaults include `retry`.
+    func testAppleNeverDrawsKeepWaitingBesideTryAgain() throws {
+        func surface(_ actions: [PlaybackFault.Action]) -> PlaybackSurface {
+            PlaybackSurface(
+                kind: .blocking,
+                fault: PlaybackFault(
+                    cls: .exhausted, source: "owner_exhausted", attached: 1,
+                    raisedAt: ContinuousClock.now, actions: actions, playerStopped: true
+                )
+            )
+        }
+        let defaults = PlaybackSurfaceContract.rule(for: .exhausted).defaultActions
+        XCTAssertTrue(defaults.contains(.keepWaiting) && defaults.contains(.retry))
+        XCTAssertEqual(
+            PlayerView.failureActions(for: surface(defaults)), [.retry, .close],
+            "the class offers both; this client draws one, because they are one primitive"
+        )
+        // The `case .keepWaiting` arm is still load-bearing: a fault that
+        // offers ONLY Keep waiting is drawn, and drawn as Try Again.
+        XCTAssertEqual(
+            PlayerView.failureActions(for: surface([.keepWaiting])), [.keepWaiting, .close]
+        )
+        XCTAssertEqual(PlayerView.failureFocusTarget(for: surface([.keepWaiting])), .retry)
+        let view = try playerViewSource()
+        XCTAssertFalse(
+            view.contains("action == .keepWaiting ?"),
+            "a label no viewer can reach is a lie about what this client offers"
+        )
+        XCTAssertTrue(
+            view.contains("Button(\"Try Again\") {"),
+            "both actions draw the one button they both are"
+        )
+    }
+
     /// The adapter, pinned — because the reducer cannot pin this.
     ///
     /// `.inert` returns before the reducer's switch, so a model test fed inert
