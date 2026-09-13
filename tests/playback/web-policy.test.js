@@ -5082,6 +5082,10 @@ test("the create-retry ladder is one set of numbers on all three clients", () =>
     APPLE_PLAYER.includes("hls = try await createRetryingNotYet("),
     "Apple's create must go through the retry sequence",
   );
+  assert.ok(
+    !APPLE_PLAYER.includes("hls = try await requestHlsSession("),
+    "no Apple create may go round the retry sequence — the unbound re-post included",
+  );
   const androidCreate = fs.readFileSync(
     path.join(__dirname, "../../clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"),
     "utf8",
@@ -5207,9 +5211,10 @@ test("the hls.js retry budget is one per attach, and `BEHIND_LIVE_WINDOW` is fin
     androidController.includes("player.prepare()"),
     "the recovery prepares again after its seek",
   );
-  assert.ok(
-    androidController.includes("behindLiveWindowRecovers("),
-    "the Android owner must ask the shared rule",
+  assert.match(
+    androidController,
+    /\n {12}if \(behindLiveWindowRecovers\(/,
+    "the Android owner must ask the shared rule, and nothing may gate it",
   );
   // A CALL, not a mention: the owner's comment explains why it does not reach
   // for Media3's recovery, and a fence that banned the word would ban the
