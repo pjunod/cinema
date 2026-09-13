@@ -77,6 +77,27 @@ is filtered out by construction rather than by a rule somebody has to remember.
 start has not been paused by a viewer who has not seen it, and a prompt is
 answered by the viewer rather than by a transport change.
 
+### Two findings from the review, both in code this branch wrote
+
+**An indicator was being drawn as the blocking box.** The new
+`showsProgressSurface` answered true for `kind == .indicator` and the view fed
+that into its one render — the centred, full-frame box. An indicator is by
+definition a progress fault *while the picture is presenting*, and `recovering`
+retires only on presentation that postdates its raise, so a compatibility rung,
+a node failover or a readiness deadline put a modal spinner over a picture that
+was playing perfectly well. The commit removing overlays-over-moving-pictures
+introduced one. §3.1's two renders are two views now, chosen by a pure function
+so the distinction is provable rather than read off a SwiftUI body.
+
+**"By construction" was not true.** `stopForBlockingSurface()` does leave
+`wantsPlayback` alone, but five other terminal stops wrote `player.pause()`,
+`isPlaying` and `wantsPlayback` out by hand immediately before raising, so all
+five fired `playback_requested(false)`. Benign — each raises a class that
+outranks `buffering` — but the guarantee did not exist and nothing tested it.
+All five go through the one helper now, which takes `revokingPlaybackIntent:`
+and says what it is doing; §3.4's obligation has one implementation and the
+viewer's transport intent has one owner-side writer.
+
 ### One thing added that is not a raise site
 
 The presenter now has a clock. Every timing the contract states is measured by
@@ -102,13 +123,14 @@ abandoned sequence's release of its own late session as proof its `defer` ran.
 
 `make apple-build` (both schemes, `** BUILD SUCCEEDED **` twice) and
 `make apple-test` on iPhone 17 Pro (iOS 26.5) and Apple TV 4K 3rd generation
-(tvOS 26.5) on the macOS runner: **546 iOS tests and 532 tvOS tests executed,
-zero failures**, with `testPlaybackSurfaceModelRunsEveryContractCase` confirmed
-to have run under each. Baseline before this branch was 532 and 518.
+(tvOS 26.5) on the macOS runner, on the rebased tree: **549 iOS tests and 535
+tvOS tests executed, zero failures**, with
+`testPlaybackSurfaceModelRunsEveryContractCase` confirmed to have run under
+each. Baseline before this branch was 532 and 518.
 
-Thirteen mutations were applied on the runner one at a time and reverted; each
-failed the test named for it against a run that executed 543 or 546 tests. The
-first attempt at the first mutation executed **zero** tests and reported no
+Fifteen mutations were applied on the runner one at a time and reverted; each
+failed the test named for it against a run that executed 543, 546 or 549 tests.
+The first attempt at the first mutation executed **zero** tests and reported no
 failures — the wedged-simulator trap, a false survivor if believed — and was
 re-run after `simctl shutdown all` and `erase`.
 
