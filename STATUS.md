@@ -6,13 +6,14 @@ first.
 
 ## M5 — the three bounded recovery additions
 
-**In `playback/recovery-additions` (Apple build 148, Android build 91), open as
-a WIP PR against `main`.** The fifth milestone of the [playback surface
+**In `playback/recovery-additions` (Apple build 149, Android build 92), rebased
+onto `main`, open as a WIP PR and adversarially reviewed once.** The fifth
+milestone of the [playback surface
 contract](docs/clients/PLAYBACK-SURFACE-CONTRACT.md) is the only PR of the
 effort that changes what the player *does*, which is why it is its own PR by
-ruling. Three additions, and nothing else about playback moved: no threshold,
-no budget, no detector, no ladder, no control-plane verdict semantics, and the
-presenter is still pure.
+ruling. Three additions. No threshold, budget, detector, ladder or
+control-plane verdict semantic was retuned, and the presenter is still pure —
+the fence now checks that last claim instead of taking it on trust.
 
 **1. A create the server is still building is retried, on all three clients.**
 A 503 carrying `startup_timeout`, `media_owner_transition`, `vod_index_pending`
@@ -25,63 +26,78 @@ a boundary check would let a server that holds each create stretch the bound,
 which is the case the review asked for a deadline to close. When the ladder or
 the deadline is spent the owner stops the player and raises `exhausted`; a
 create that succeeds after the deadline is **released**, never attached. Any
-newer intent ends the sequence and raises nothing. Web:
-`openSessionRetryingNotYet` in `index.html`, reading
-`PlaybackPolicy.createRetryStep`. Apple: `createRetryingNotYet` and
-`PlaybackCreateRetry` in `PlayerController.swift`. Android:
-`SessionCreateCoordinator.createRetryingNotYet` in `StallReopen.kt` with
-`createRetryStep` in `PlaybackPolicy.kt`. Source row 6 becomes reachable on
-Apple and Android for the first time — before this, their owners produced
-`stopped` with the server's sentence; the surface is now `preparing` while the
-retry runs.
+newer intent ends the sequence and raises nothing.
+
+The whole sequence — **ladder and watchdog alike** — is the `start` context
+only. That was the review's first blocker: Android gated the ladder on it and
+armed the watchdog unconditionally, so a seek or a quality change against a
+cold NAS could stop a player the viewer was watching at exactly the boundary of
+that client's own 60 s read timeout, and release the session the change was
+going to attach. `startContext` is a parameter of the coordinator now, not a
+predicate folded into the refusal test.
+
+Web: `openSessionRetryingNotYet` in `index.html`. Apple: `createRetryingNotYet`
+and `PlaybackCreateRetry` in `PlayerController.swift`, with two new constructor
+seams (`waitCreateRetry`, `releaseHlsSession`) so the sequence is testable
+without spending a minute or guessing whether a session was released. Android:
+`SessionCreateCoordinator.createRetryingNotYet` in `StallReopen.kt`. Source
+row 6 becomes reachable on Apple and Android for the first time — before this,
+their owners produced `stopped` with the server's sentence.
 
 **2. One bounded hls.js retry per attach, on the web.** A network-class fatal
 already leaves the ladder running and raises `recovering` (M1); it now also
 schedules a single `hls.startLoad(position)` two seconds later, with the
-position read from `v.currentTime` at the moment it fires, because the element
-kept playing through the wait. The budget is **per attach and shared** with the
+position read when the retry fires, because the element kept playing through
+the wait. The budget is **per attach and shared** with the
 `segment_503_not_yet` row — whichever fires first spends it — and then the
-existing reopen path is what recovers. Reset in `attachHls`, so a seek or a
-quality change gets its own single retry and a retry whose attach is gone does
-not reload the instance that replaced it.
+existing reopen path is what recovers.
 
 **3. `BEHIND_LIVE_WINDOW` recovers on finite timelines, on Android.** Error
-1002 with `player.isCurrentMediaItemLive == false` now seeks back to the last
-real position and prepares again, once per attach, instead of failing. Media3's
+1002 with `player.isCurrentMediaItemLive == false` seeks back to the last real
+position and prepares again, once per attach, instead of failing. Media3's
 `seekToDefaultPosition()` is a **live-edge** policy — on a finite timeline it
-skips content — and is deliberately not used; a live item keeps today's `Fail`.
-The seek needs the film position expressed on the player's own timeline, so
-`playerLocalPositionMs` was added beside `realMediaPositionMs` as its inverse
-rather than doing the subtraction at the call site.
+skips content — and is deliberately not used. It is an object with the player
+behind three lambdas (`BehindLiveWindowRecovery`), because `Controller` cannot
+be constructed in a JVM test and the addition needs one; the per-attach budget
+is re-armed at **both** sites where an item takes the screen, `attachRecipe`
+and `commitPreparedReplacement`, which swaps in a second `ExoPlayer` without
+going near the first.
+
+**The fence grew three rules, all of which M5's own surfaces needed.** A
+computed member write (`el["class"+"Name"]="failed"`) matches no property
+pattern and never will, so the web fence now guards the element LOOKUP, which
+cannot be hidden. `PlaybackSurfaceOwner.kt` was scanned with a rule that
+required a `surfaceOwner.` receiver — a spelling that never appears inside that
+file — so a bare `raiseBlocking(...)` with no stop passed; the invariant its own
+doc comment states is now checked directly. And `PRESENTER_FILES` was exempt
+wholesale, which left contract v2's actual thesis unfenced: a presenter is now
+scanned by the inverted rule (no player call, no timer of its own, no
+control-plane call), with must-trip and must-not-trip fixtures for each.
 
 **Acceptance.** Three fixture cases — `m5_create_retry_deadline`,
 `m5_hls_retry_once`, `m5_behind_live_window_finite` — join the 57 already
-there, and every client's presenter runs all 60. Beyond the fixture the real
-tests are at each client's own seam: the web's in `web-control.test.js`
-against the functions sliced out of the shipped `index.html` (the backoff
-sequence, the one replayed identity, the absolute deadline, the late-success
-release, the cancel-on-newer-intent, and the shared one-retry budget), Apple's
-in `AppleClientTests`, Android's in a new `CreateRetryTest` plus
-`PlaybackPolicyTest` and `MediaOriginTest`. A cross-client parity test reads
-the Swift and Kotlin back out of the tree and fails if a number drifts from the
-web's. The mutation table is in the PR: removing any one of the three retries
-fails its own case.
+there, and every client's presenter runs all 60. They pin the SURFACE sequence
+each addition produces, which is all a pure presenter can see; the retries
+themselves are pinned at each client's own seam, and the PR is explicit about
+which is which. The mutation battery is 22 rows, every one demonstrated
+failing.
 
-**Two things this PR does not settle.** The web's 60 s deadline is bounded by
-`beginPlaybackPreparation`'s pre-existing 20 s preparation deadline, so on the
-web the sequence ends at `min(60 s, what preparation has left)` — a real
-conflict between the plan and the code, recorded in
+**Two things this PR does not settle, and Paul's ruling is wanted on both.**
+On the web the 60 s deadline is not reachable at all: `beginPlaybackPreparation`
+bounds every open at 20 s absolute, and when it wins the sequence ends as
+`owner_stopped` rather than M5's `exhausted`, leaving the deadline branch and
+the late-release branch exercised by tests and nothing else. Closing that means
+moving a threshold, which §6 forbids here, so the question is whether the web
+should raise `exhausted` for this at all. And "backoff 1 s · 2 s · 4 s" was
+read as a closed list of three retries rather than a ramp that holds at 4 s
+until the deadline; both fit the text, and
 [the implementation doc](docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md)
-§4.6 rather than closed by quietly raising a threshold. And "backoff
-1 s · 2 s · 4 s" was read as a closed list of three retries rather than a ramp
-that holds at 4 s until the deadline; both readings fit the text, and the same
-section says which was taken and why.
+§4.6 says which was taken and why.
 
-**Unrun:** the Swift and Kotlin tests have never been compiled — there is no
-Xcode and no Android toolchain on the machine this was written on. `make
-apple-test` on a Mac and `make android-test` are owed, and so are the three
-device recipes in the PR's "Needs a Mac" / "Needs an Android toolchain or a
-device" lists.
+**Unrun:** every Swift and Kotlin test in this PR — there is no Xcode and no
+Android toolchain on the machine it was written on. `make apple-test` on a Mac
+and `make android-test` are owed, and so are the device recipes in the PR's
+"Needs a Mac" and "Needs an Android toolchain or a device" lists.
 
 ## M3 — the Android playback surface is a projection of the player
 

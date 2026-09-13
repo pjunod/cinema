@@ -405,7 +405,7 @@ disambiguate are *context* (start · attached playback · pending change) and
 | 3 | 401 / 403 on any playback request | `stopped` | `sign_in` action; keeps the status-based auth match the app has (`AppModel.swift:288`) |
 | 4 | 409 `vod_source_rescan_required`, 422 `vod_source_unsupported` / unsupported tracks, 501 `vod_transcode_unavailable` / `vod_subtitle_burn_unavailable` (start) | `stopped` | server sentence; no retry |
 | 5 | 503 `vod_disabled` (start) | `stopped` | server sentence; no retry — service is off, not building |
-| 6 | 503 `startup_timeout` / `media_owner_transition` / `vod_index_pending` / `vod_engine_unattested` on create (start) | `preparing` | "still building"; the owner retries the same request identity on 1 s · 2 s · 4 s inside an absolute 60 s deadline and then raises `exhausted` (M5, landed) |
+| 6 | 503 `startup_timeout` / `media_owner_transition` / `vod_index_pending` / `vod_engine_unattested` on create (start) | `preparing` | "still building"; the owner retries the same request identity on 1 s · 2 s · 4 s inside an absolute 60 s deadline and then raises `exhausted` (M5, landed). **One exception, by call site:** the web's `startCopyHls` answers `vod_index_pending` with its existing progressive-remux fallback instead of retrying — that path already has a strictly better local answer, and waiting seven seconds for a stream it can play now would be a regression dressed as a recovery |
 | 7 | Any create failure, decision timeout or cancelled request during a **pending change** (predecessor still attached) | `refused` | `intent` = the change; actions `retry` (re-issue the change); the predecessor keeps its own faults |
 | 8 | Playlist/segment 503 with a "not yet" code, attached playback | `recovering` | hls.js keeps `stopLoad()`; the owner's existing reopen is the recovery; natives see only the status code (§2.2) and take failover/HDR retry first |
 | 9 | 410 `media_owner_lost` | `recovering` while buffered media plays out, then `stopped` when the owner stops | D1's shape; `position_ms` from the body (web) or the last observed position (natives); Try again reopens there |
@@ -478,8 +478,14 @@ clients did not all perform; those are **M5**, their own PR (ruled), and it has
 landed. Row 6 is now reachable on all three clients: the owner re-posts the same
 create identity on 1 s · 2 s · 4 s inside an absolute 60 s deadline, releases a
 success that arrives after it, and raises `exhausted` when the ladder or the
-deadline is spent — in the `start` context only, because a create refused over a
-predecessor is row 7. Row 8 gains the web's one bounded `hls.startLoad(position)`
+deadline is spent — in the `start` context only, ladder AND deadline alike,
+because a create refused over a predecessor is row 7 and a prompt that stops
+that player is §7 recipe (b)'s not-allowed outcome. **On the web the 60 s is not
+the operative bound:** `beginPlaybackPreparation` gives every open a
+pre-existing 20 s absolute deadline and the sequence runs inside it, so the web
+reaches `exhausted` only by spending the ladder (~7 s) and otherwise ends as
+`owner_stopped` at 20 s. That is a conflict between this contract and the code,
+awaiting a ruling (implementation §4.6). Row 8 gains the web's one bounded `hls.startLoad(position)`
 two seconds after the refusal, sharing a single per-attach budget with the
 network-class fatal. Row 13's `BEHIND_LIVE_WINDOW` clause is Android's
 `seekTo(lastRealPosition)` + `prepare()`, once per attach, on FINITE timelines

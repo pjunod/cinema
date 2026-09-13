@@ -745,26 +745,53 @@ left open, recorded here rather than resolved silently:
    three minutes. All three clients arm a timer at the first attempt; when it
    fires the owner stops the player and raises `exhausted` immediately, and the
    create still in flight is awaited only so its session can be RELEASED.
-3. **The web's 60 s is bounded by an older 20 s.** `beginPlaybackPreparation`
-   (`index.html`) gives every open a 20 s absolute preparation deadline,
-   measured from before the decision call. The M5 sequence runs inside it, so on
-   the web the effective bound is `min(60 s, whatever the preparation owner has
-   left)`. That is a **conflict between this plan and the code**, not a
-   resolution: implementing a true 60 s on the web means raising or restructuring
-   a pre-existing threshold, which §6 forbids in this PR. In practice a "not
-   yet" 503 returns immediately and the whole ladder finishes inside 7 s, so the
-   two bounds only disagree when the server also holds each create — the case
-   the deadline exists for. Flagged for the reviewer; it wants a ruling, not a
-   quiet threshold change.
+3. **On the web the 60 s deadline is not reachable at all, and three of M5's
+   own branches are dead there.** `beginPlaybackPreparation` (`index.html`)
+   gives every open a 20 s ABSOLUTE preparation deadline, measured from before
+   the decision call, and the M5 sequence runs inside it. The consequence is not
+   a shorter timer. When preparation wins it aborts the create's signal, so the
+   sequence throws a plain `AbortError` carrying no `surfaceRaised`, and
+   `failPreparation` raises **`owner_stopped` — "Playback could not prepare."**,
+   not M5's `exhausted` sentence. So on the web:
 
-Scope notes worth keeping: the create retry runs in the `start` context only on
-every client (a create refused over an attached predecessor is row 7, and a
-stall reopen is neither), `startCopyHls` keeps answering `vod_index_pending`
-with its existing progressive-remux fallback rather than waiting seven seconds
-for a stream it can already play, and Apple's `refusalSurfaceOutcome` still
-declines to classify `create_503_not_yet` — that function feeds a raise that
-only happens after the owner's stop, where a progress class would be a spinner
-over a stopped player.
+   * the only reachable termination is `ladder_spent`, at about 7 s;
+   * the `deadline` reason, the release-a-late-success branch and the
+     `sequence.expired` guard are exercised by the test suite and by nothing on
+     a shipped path;
+   * "a late success is released, not attached" is a property of the tests, not
+     of the browser.
+
+   This is a **conflict between this plan and the code**, not a resolution.
+   Closing it means moving or restructuring a pre-existing threshold, which §6
+   forbids in this PR. The question for Paul is therefore not a timing number:
+   it is **should the web raise `exhausted` for a still-building create at all,
+   or is 20 s + `owner_stopped` the right answer for a client whose whole open
+   is bounded at 20 s?** Apple (180 s request timeout) and Android (60 s read
+   timeout) both reach the deadline on shipped paths, so whichever way it is
+   ruled, the web is the client that diverges.
+
+Scope notes worth keeping:
+
+* The create retry runs in the `start` context only on every client — **the
+  ladder and its deadline watchdog alike.** The first version of this work
+  gated only the ladder on Android and armed the watchdog unconditionally,
+  which put a sixty-second stop-the-player timer on every seek and quality
+  change: §7 recipe (b)'s explicitly not-allowed outcome, raced against that
+  client's own sixty-second read timeout. `startContext` is now a parameter of
+  `createRetryingNotYet` rather than a predicate folded into `isNotYet`, which
+  is what makes the gate one decision instead of two.
+* `startCopyHls` keeps answering `vod_index_pending` with its existing
+  progressive-remux fallback rather than waiting seven seconds for a stream it
+  can already play. Both branches of a pending change on the web now go through
+  the same wrapper, so which context a create is in is decided in one place.
+* Apple's `refusalSurfaceOutcome` still declines to classify
+  `create_503_not_yet` — that function feeds a raise that only happens after the
+  owner's stop, where a progress class would be a spinner over a stopped
+  player.
+* "Attach" for the Android `BEHIND_LIVE_WINDOW` budget means the item on the
+  screen changed. `attachRecipe` is not the only way that happens:
+  `commitPreparedReplacement` swaps in a second `ExoPlayer` without going near
+  it, so the budget is re-armed at both sites.
 
 ### 4.7 M6 — Android progressive-remux landing (`android/remux-seek-origin`)
 

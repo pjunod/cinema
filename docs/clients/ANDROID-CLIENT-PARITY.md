@@ -4,7 +4,7 @@ The Android client is the native plurx **viewer** for phones, foldables,
 tablets, Android TV, and Google TV. This page records what “web parity” means
 for that viewer and keeps server administration out of the comparison.
 
-> Status (2026-09-13): source is v0.3.0, Android build 91. The two bounded
+> Status (2026-09-13): source is v0.3.0, Android build 92. The two bounded
 > recovery steps this client owns under the playback surface contract are in
 > ([PLAYBACK-SURFACE-CONTRACT.md](PLAYBACK-SURFACE-CONTRACT.md), M5). A session
 > create refused with `startup_timeout`, `media_owner_transition`,

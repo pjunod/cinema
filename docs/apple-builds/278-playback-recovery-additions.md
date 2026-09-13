@@ -1,6 +1,6 @@
 # A create the server is still building is retried, not called a failure
 
-Build: 148
+Build: 149
 Issue: #278
 
 M5 of the playback surface contract
@@ -27,10 +27,14 @@ the deadline is released through `endHlsSession`, never attached: the viewer
 has already been told this attempt is over, and an encoder nobody is watching
 is a hardware slot held for nobody.
 
-Scope, and what it is not. The ladder runs in the `start` context only. A
-create refused over a predecessor the viewer is still watching is a refused
-*change* (row 7), keeps its banner and is not retried; a stall reopen is not
-retried either. A 503 the server did not explain is not a "not yet" answer —
+Scope, and what it is not. The ladder runs in the `start` context only, and
+the gate is `surfaceContext == .start` — which is "this playback has never
+presented", not "this is a cold start". A create refused over a predecessor the
+viewer is still watching is a refused *change* (row 7), keeps its banner and is
+not retried. A stall reopen on a stream that HAS presented is not retried for
+the same reason; a reopen on one that never did still runs the ladder, which is
+the honest answer for a stream that has yet to produce a picture. A 503 the
+server did not explain is not a "not yet" answer —
 the code is what says so — and every other refusal keeps exactly the handling
 it had. No threshold, budget, detector or ladder was retuned, the presenter
 gained no side effect, and `refusalSurfaceOutcome` still declines to classify
@@ -45,6 +49,14 @@ client.
 Tested: `PlaybackCreateRetry`'s ladder, its absolute deadline, and the fact
 that the retried codes are the fixture's row rather than a second list.
 `AppleClientTests` also runs the fixture's three new ordered-event cases along
-with the other 57. **Not tested here:** the async sequence itself — its
-watchdog, its late-session release and its cancellation — needs a Mac, and this
-build was written without one.
+with the other 57. The sequence itself is tested too, in
+`PlayerOperationOwnershipTests`, through two new constructor seams —
+`waitCreateRetry` (M5's one clock, so a sixty-second bound costs the suite
+nothing) and `releaseHlsSession` (so "a late session is RELEASED" is a thing a
+test can see rather than a claim): the ladder's three delays under one request
+identity, the deadline raising `exhausted` on the clock while the create is
+still in flight, the late session being released and never attached, and a
+quality change arming no deadline at all.
+
+**None of it has been compiled.** There is no Xcode on the machine this build
+was written on, so every assertion above is unrun.
