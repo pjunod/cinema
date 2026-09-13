@@ -1,15 +1,21 @@
 name: main fast lane
 
+# Every main-bound pull request, as soon as it is ready. `ready_for_review`
+# is what starts the lane now — a PR that is marked ready and merged can no
+# longer skip the gate, which is what an opt-in label allowed.
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, labeled, unlabeled]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
 
 env:
   CARGO_TERM_COLOR: always
 
-# Removing `fast-lane` cancels the active run. Reapplying it after returning a
-# PR to ready state starts one exact-head promotion attempt.
+# Returning a PR to draft cancels the active run: `converted_to_draft` enters
+# this group and every job below declines it, so the run in flight is
+# superseded and nothing replaces it. Marking it ready again starts one
+# exact-head promotion attempt. That is what removing and reapplying the
+# `fast-lane` label used to do.
 concurrency:
   group: main-fast-lane-${{ github.event.pull_request.number }}
   cancel-in-progress: true
@@ -17,9 +23,12 @@ concurrency:
 jobs:
   scope:
     name: fast-lane validation scope
-    if: >-
-      github.event.pull_request.draft == false &&
-      contains(github.event.pull_request.labels.*.name, 'fast-lane')
+    # Draft is the whole gate. A draft allocates no jobs, so a PR opened early
+    # still costs nothing; anything else runs. It was `draft == false` AND the
+    # `fast-lane` label, and the label is what let three lanes merge in one day
+    # without this workflow ever running - one of them carrying a fix for the
+    # regression the lane before it had shipped to the fleet.
+    if: github.event.pull_request.draft == false
     runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 2
     outputs:
@@ -216,8 +225,7 @@ jobs:
     name: Main promotion gate
     if: >-
       always() &&
-      github.event.pull_request.draft == false &&
-      contains(github.event.pull_request.labels.*.name, 'fast-lane')
+      github.event.pull_request.draft == false
     needs:
       - scope
       - mobile_version

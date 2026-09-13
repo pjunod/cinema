@@ -21,9 +21,24 @@ class EvidenceWorkflowCase(unittest.TestCase):
             self.assertNotIn("branches: [main]", triggers)
             self.assertNotIn("  schedule:", triggers)
         fast = self.read(".github/workflows/main-fast-lane.yml")
-        self.assertIn("types: [opened, synchronize, reopened, labeled, unlabeled]", fast)
+        self.assertIn(
+            "types: [opened, synchronize, reopened, ready_for_review, "
+            "converted_to_draft]",
+            fast,
+        )
         self.assertIn("github.event.pull_request.draft == false", fast)
-        self.assertIn("contains(github.event.pull_request.labels.*.name, 'fast-lane')", fast)
+        # The lane is not opt-in. It was `draft == false` AND a `fast-lane`
+        # label, and a PR could be marked ready, reviewed and merged without
+        # anyone applying it - which is how three lanes merged in one day with
+        # this workflow never having run, the third of them carrying a fix for
+        # what the first had shipped to the fleet. Draft is the only gate now,
+        # so an unlabelled PR cannot be a gateless one.
+        self.assertNotIn("labels.*.name", fast)
+        self.assertNotIn("'fast-lane'", fast)
+        # Ready is what starts it and draft is what stops it, so neither state
+        # change depends on a human remembering a label.
+        self.assertIn("ready_for_review", fast)
+        self.assertIn("converted_to_draft", fast)
 
     def test_fix_evidence_is_manual_and_report_only(self) -> None:
         workflow = self.read(".github/workflows/fix-evidence.yml")

@@ -1618,8 +1618,9 @@ assert.equal(context.ACT_TIMER, null);
         membership_web_tests = read("tests/web/cluster-membership.test.js")
 
         # Forgejo has no GitHub merge-queue event. The single required
-        # aggregate workflow fires in the labeled fast lane for main-bound
-        # pull requests. Runtime sweeps are manual or release-tag only.
+        # aggregate workflow fires on every ready main-bound pull request -
+        # no label, so no way to merge one the lane never saw. Runtime sweeps
+        # are manual or release-tag only.
         self.assertNotIn("\n  merge_group:\n", workflow)
         self.assertNotIn("\n  merge_group:\n", lint)
         self.assertNotIn("\n  pull_request:\n", lint)
