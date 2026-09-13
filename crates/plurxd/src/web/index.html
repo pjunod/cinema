@@ -6749,8 +6749,17 @@ function showSessionOpenFailure(error,context){
   if(PLAYER) clientLog(Object.assign({level:"error",event:"stream_refused",
     detail:failure.code||String(failure.status), message:explained.detail},
     playbackContext()));
-  raisePlaybackSurfaceRefusal(source,where,{title:explained.title,detail:explained.detail,
-    intent:where==="change"?playbackSurfaceIntent(PLAYER):null,
+  // The owner's decision, taken here rather than by the table: a refusal the
+  // table answers with a blocking class is the server saying this attempt is
+  // over, so there is nothing left to try and the player stops before the
+  // surface goes over it (§3.2, §3.4). Ruled 2026-09-13: row 3 (401/403) wins
+  // in every context, a pending change included — a stream nobody is
+  // authorised for is not a stream the predecessor's playback can outlive.
+  const spent=playbackSurfaceSourceIsBlocking(source,where);
+  if(spent) stopPlayerForExhaustion();
+  raisePlaybackSurface(source,{context:where,player_stopped:spent,
+    title:explained.title,detail:explained.detail,
+    intent:where==="change"&&!spent?playbackSurfaceIntent(PLAYER):null,
     position_ms:failure.position_ms==null?null:failure.position_ms});
   toast(explained.retryable?"Still starting…":"Playback failed");
   return true;
@@ -7048,13 +7057,32 @@ function attachHls(video, playlistUrl, startAt){
           message:explained.detail,control_trigger:controlTrigger}, playbackContext()));
       }
       if(refusal){
-        raisePlaybackSurfaceRefusal(refusal,where,{title:explained.title,detail:explained.detail,
+        // The site's own decision, not the table's (§3.4).
+        const spent=playbackSurfaceSourceIsBlocking(refusal,where);
+        if(spent) stopPlayerForExhaustion();
+        raisePlaybackSurface(refusal,{context:where,player_stopped:spent,
+          title:explained.title,detail:explained.detail,
           position_ms:STREAM_FAILURE.position_ms==null?null:STREAM_FAILURE.position_ms});
         toast(explained.retryable?"Still starting…":"Playback failed");
         return;
       }
-      // Nothing left to try and nothing that explains it. Contract §3.4: the
-      // owner stops the player, then raises.
+      // A NETWORK fatal is not the owner out of rungs. hls.js has called
+      // stopLoad() and the element still holds everything it buffered — up to
+      // half a minute of it — and `persistentWait`'s reopen, with its budget
+      // untouched, is the thing that fixes exactly this. Stopping here would
+      // throw the buffer away AND tear down the detector that would have used
+      // it, so §3.0 does not authorise it: the owner has plenty left to try.
+      // Row 13, and the picture keeps playing under an indicator.
+      if(!isMedia){
+        raisePlaybackSurface("owner_recovery_step",{context:where,
+          title:"Reconnecting…",
+          detail:"the stream connection failed ("+d.details+") — recovering"});
+        toast("Reconnecting…");
+        return;
+      }
+      // A media/codec fatal with the rescue ladder spent: a decoder that
+      // refused these samples refuses them again, and there is no rung left.
+      // Contract §3.4: the owner stops the player, then raises.
       stopPlayerForExhaustion();
       raisePlaybackSurface("owner_stopped",{context:where,player_stopped:true,
         title:explained?explained.title:"Playback failed to start ("+d.details+").",
@@ -9136,12 +9164,12 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
         if(index>=0)predecessor.curAudio=index;
       }
     }
-    // A predecessor that still holds the picture makes this a refused CHANGE,
-    // not a failed start (contract §3.3 row 7): the sentence below belongs
-    // beside a film that is still playing, never over it.
-    const media=document.getElementById("video");
-    const surfaceContext=(PLAYER&&PLAYER.started&&media&&!media.paused&&!media.ended)
-      ?"change":"start";
+    // A predecessor that is still ATTACHED makes this a refused CHANGE, not a
+    // failed start (contract §3.3 row 7). Attached, not playing: a viewer who
+    // paused before asking for a different quality still has that stream under
+    // them, and covering it because the element happens to be paused is the
+    // same mistake in a quieter spelling.
+    const surfaceContext=(PLAYER&&PLAYER.started)?"change":"start";
     if(!showSessionOpenFailure(error,surfaceContext)){
       if(surfaceContext==="change"){
         raisePlaybackSurface("change_failed",{context:"change",
@@ -11172,9 +11200,14 @@ function playbackSurfaceClassBlocks(cls){
   return !!definition&&definition.blocking===true;
 }
 // The old `PLAYER.stallPrompt` flag, read off the presenter rather than kept as
-// a second copy of the same truth: a prompt the viewer has to answer is up.
+// a second copy of the same truth: something on screen is asking the viewer to
+// answer. A NOTICE with actions counts — a server hold says why production
+// stopped and offers Try again, and burying that under a full-screen
+// "Buffering…" is the wrong answer twice over: it hides the only explanation
+// there is and it hides the buttons that act on it.
 function playbackSurfacePromptUp(){
-  return PlaybackPolicy.surfaceEntersFailedRouting(PLAYBACK_SURFACE.surface);
+  const surface=PLAYBACK_SURFACE.surface;
+  return !!surface&&surface.kind!=="none"&&(surface.actions||[]).length>0;
 }
 function playbackSurfaceHasLiveFault(source,attached){
   return PLAYBACK_SURFACE.state.faults.some(
@@ -11227,23 +11260,12 @@ function raisePlaybackSurface(source,fault,options){
     actions:given.actions,
   });
 }
-// A refusal the server explained, classified by the shared table.
-//
-// The class decides whether the owner has to stop first: a "not yet" leaves the
-// picture — and the buffer it is playing out — exactly as it was, and only a
-// blocking class is the owner saying it has nothing left (§3.2, §3.4).
-function raisePlaybackSurfaceRefusal(source,context,fault){
-  let row=source;
-  // Row 3 (401/403) matches in every context, a pending change included.
-  // Stopping a predecessor that is playing perfectly well so a Sign in can be
-  // drawn over it is the exact defect §2.1 names, so a refusal that arrives
-  // while a predecessor still holds the picture stays the refusal it is: the
-  // viewer gets the banner, and the next start gets the sign-in prompt.
-  if(context==="change"&&playbackSurfaceClassBlocks(playbackSurfaceClassOf(row,context)))
-    row="change_failed";
-  const blocking=playbackSurfaceClassBlocks(playbackSurfaceClassOf(row,context));
-  if(blocking) stopPlayerForExhaustion();
-  return raisePlaybackSurface(row,Object.assign({context,player_stopped:blocking},fault||{}));
+// Does the shared table answer this refusal with a class that covers the
+// picture? A READ of the table and nothing else — it says what the surface
+// would be, never what the player should do. The decision to stop is the
+// raising site's, because the class table is not allowed to move the player.
+function playbackSurfaceSourceIsBlocking(source,context){
+  return playbackSurfaceClassBlocks(playbackSurfaceClassOf(source,context));
 }
 // The recovery owner’s one new obligation (§3.4): when it has nothing left to
 // try it stops the player, and only then raises. `pausePlaybackInternally`
@@ -11454,8 +11476,11 @@ function playerInputState(){
   // prompt or a terminal — one with an answer the viewer has to give. A
   // full-screen `preparing` covers the picture and asks nothing, so it keeps
   // today's routing (PLAYBACK-SURFACE-CONTRACT.md §4).
-  const surface=PLAYER&&PLAYER.surfaceState?PLAYER.surfaceState.surface:null;
-  if(PlaybackPolicy.surfaceEntersFailedRouting(surface)) return "failed";
+  // The model, not `PLAYER.surfaceState`: they are the same object whenever
+  // there is a player, and when there is not — a cold start whose create was
+  // refused before `play()` built one — the prompt on screen still has to
+  // route as `failed` rather than as ordinary transport.
+  if(PlaybackPolicy.surfaceEntersFailedRouting(PLAYBACK_SURFACE.surface)) return "failed";
   // Contract §2.2 orders the precedence scrub → menu → info: a pending seek
   // is the most local thing on screen, so Escape cancels it rather than
   // closing whatever is behind it.

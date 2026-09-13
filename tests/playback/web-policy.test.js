@@ -2343,7 +2343,7 @@ test("the shipped player adapter applies state precedence and preview-then-commi
   const clearTimeoutStub = () => { pending = null; };
   let surface = "desktop";
   const build = new Function(
-    "document", "PLAYER", "PlaybackPolicy", "isFullscreenAnywhere", "toggleFullscreen",
+    "document", "PLAYER", "PlaybackPolicy", "PLAYBACK_SURFACE", "isFullscreenAnywhere", "toggleFullscreen",
     "toggleStats", "cycleSub", "playerActivity", "pbTotalSec", "pbPosSec",
     "pbTick", "seekTo", "togglePlay", "closeMenu", "closePlayer", "coarsePointer",
     "setTimeout", "clearTimeout",
@@ -2363,8 +2363,9 @@ test("the shipped player adapter applies state precedence and preview-then-commi
       "return {playerInputState,playerInputSurface,playerContractInput,applyPlayerOutcome,handlePlayerKeydown};",
     ].join("\n"),
   );
+  const model = { surface: null };
   const adapter = build(
-    document, player, policy, () => false, () => { calls.fullscreen += 1; },
+    document, player, policy, model, () => false, () => { calls.fullscreen += 1; },
     () => { calls.stats += 1; }, () => {}, () => {}, () => 100, () => 20,
     () => { calls.ticks += 1; }, (target) => calls.seek.push(target),
     () => { calls.play += 1; }, () => { calls.menu += 1; }, () => { calls.close += 1; },
@@ -2464,12 +2465,13 @@ test("the shipped player adapter applies state precedence and preview-then-commi
   surface = "desktop";
 
   // `failed` is the presenter's answer now, not a class four call sites set:
-  // a BLOCKING surface whose class is a prompt or a terminal.
-  player.surfaceState = { surface: { kind: "blocking", class: "stopped" } };
+  // a BLOCKING surface whose class is a prompt or a terminal. Read off the
+  // model, so a prompt raised before `play()` built a PLAYER still routes.
+  model.surface = { kind: "blocking", class: "stopped" };
   assert.equal(adapter.playerInputState(), "failed");
-  player.surfaceState = { surface: { kind: "blocking", class: "preparing" } };
+  model.surface = { kind: "blocking", class: "preparing" };
   assert.equal(adapter.playerInputState(), "transport");
-  player.surfaceState = null;
+  model.surface = null;
   elements.statsov.classList.add("on");
   assert.equal(adapter.playerInputState(), "info");
   elements.statsov.classList.remove("on");
@@ -2619,7 +2621,7 @@ test("the shipped presenter step is the only thing that renders, and it renders 
 test("surface kind x class x input is a fixed cross-product", () => {
   const { render, elements } = buildShippedSurfaceRender();
   const inputState = new Function(
-    "document", "PLAYER", "PlaybackPolicy",
+    "document", "PLAYER", "PlaybackPolicy", "PLAYBACK_SURFACE",
     [
       shippedSource("playerSeekPending"),
       shippedSource("playerInputState"),
@@ -2656,8 +2658,9 @@ test("surface kind x class x input is a fixed cross-product", () => {
       input_failed: policy.surfaceEntersFailedRouting({ kind, class: cls }), fault: null,
     });
     render(surface);
-    const player = { surfaceState: { surface } };
-    assert.equal(inputState(document, player, policy)(), state, `${pair} must route as ${state}`);
+    // No PLAYER at all: a prompt the presenter raised before one existed has
+    // to route the same way, which is finding 7.
+    assert.equal(inputState(document, null, policy, { surface })(), state, `${pair} must route as ${state}`);
     assert.equal(
       elements.ploading.classList.contains("failed"),
       state === "failed",
@@ -2869,39 +2872,69 @@ test("the shipped glue resolves a disagreement in favour of the picture", () => 
 test("a refusal no source row claims still reaches the surface as the server's sentence", () => {
   const raised = [];
   const toasts = [];
+  const stops = [];
   const build = new Function(
     "PLAYER", "PlaybackPolicy", "STREAM_FAILURE", "currentStreamFailureOverlay",
-    "playbackSurfaceContext", "playbackSurfaceIntent", "raisePlaybackSurfaceRefusal",
+    "playbackSurfaceContext", "playbackSurfaceIntent", "playbackSurfaceClassOf",
+    "playbackSurfaceClassBlocks", "stopPlayerForExhaustion", "raisePlaybackSurface",
     "clientLog", "playbackContext", "toast",
-    [shippedSource("showSessionOpenFailure"), "return showSessionOpenFailure;"].join("\n"),
+    [
+      // The table read is the SHIPPED one, so the stop this site takes is
+      // decided by the same rows the reducer renders from.
+      shippedSource("playbackSurfaceSourceIsBlocking"),
+      shippedSource("showSessionOpenFailure"),
+      "return showSessionOpenFailure;",
+    ].join("\n"),
   );
   const run = (status, code, message, context) => {
     raised.length = 0;
+    stops.length = 0;
     const failure = policy.parseStreamFailure({ status, body: JSON.stringify({ code, message }) });
     const overlay = policy.streamFailureOverlay(failure);
+    const classOf = (source, where) => {
+      for (const row of policy.SURFACE_SOURCES) {
+        if (row.id === source && (row.context === "any" || row.context === where)) return row.class || null;
+      }
+      return null;
+    };
     return [
       build(
         { fileId: 1 }, policy, null, () => overlay, () => context, () => 3,
-        (source, where, fault) => raised.push({ source, where, fault }),
+        classOf,
+        (cls) => !!(cls && policy.SURFACE_CLASSES[cls] && policy.SURFACE_CLASSES[cls].blocking === true),
+        () => stops.push(true),
+        (source, fault) => raised.push({ source, where: fault.context, fault }),
         () => {}, () => ({}), (text) => toasts.push(text),
       )({ streamFailure: failure }, context),
       raised[0],
+      stops.length,
     ];
   };
 
   // No row: a 502 the encoder died on, at start. The owner has nothing left,
   // so it is `owner_stopped` — carrying the sentence, not losing it.
-  const [handled, terminal] = run(502, "producer_failed", "the encoder exited before it produced video", "start");
+  const [handled, terminal, terminalStops] = run(502, "producer_failed", "the encoder exited before it produced video", "start");
   assert.equal(handled, true, "the caller must not fall back to its own generic sentence");
   assert.equal(terminal.source, "owner_stopped");
   assert.equal(terminal.fault.title, "Playback failed to start.");
   assert.equal(terminal.fault.detail, "the encoder exited before it produced video");
+  assert.equal(terminal.fault.player_stopped, true);
+  assert.equal(terminalStops, 1, "a blocking class is only ever raised over a stopped player");
 
   // The same body during a pending change is the predecessor's business, not
-  // its execution: a notice, and the intent it belongs to.
-  const [, refused] = run(502, "producer_failed", "the encoder exited before it produced video", "change");
+  // its execution: a notice, the intent it belongs to, and no stop.
+  const [, refused, refusedStops] = run(502, "producer_failed", "the encoder exited before it produced video", "change");
   assert.equal(refused.source, "change_failed");
   assert.equal(refused.fault.intent, 3);
+  assert.equal(refused.fault.player_stopped, false);
+  assert.equal(refusedStops, 0, "a refused change never stops the predecessor");
+
+  // Ruled 2026-09-13: row 3 wins in every context. A 403 during a pending
+  // change is `stopped` with Sign in, and it takes the stop that goes with it.
+  const [, auth, authStops] = run(403, "forbidden", "this bearer is not allowed to open a session", "change");
+  assert.equal(auth.source, "auth_401_403");
+  assert.equal(auth.fault.player_stopped, true);
+  assert.equal(authStops, 1);
 
   // A row that DOES claim it still wins, and carries its position.
   const [, lost] = run(410, "media_owner_lost", "the node serving this media session is gone", "attached");
@@ -3254,6 +3287,7 @@ test("a successful playlist retry immediately clears its 503 explanation", () =>
 // refusal about the CHANGE rather than anything drawn over that picture.
 asyncTest("a burn session-open refusal reaches the surface as a refused change", async () => {
   const raised = [];
+  const stopped = [];
   const toasts = [];
   let request = null;
   const player = {
@@ -3278,7 +3312,9 @@ asyncTest("a burn session-open refusal reaches the surface as a refused change",
     "clearSubs",
     "pbSyncSubIcon",
     "raisePlaybackSurface",
-    "raisePlaybackSurfaceRefusal",
+    "playbackSurfaceClassOf",
+    "playbackSurfaceClassBlocks",
+    "stopPlayerForExhaustion",
     "playbackSurfaceContext",
     "playbackSurfaceIntent",
     "subLabelFor",
@@ -3303,6 +3339,7 @@ asyncTest("a burn session-open refusal reaches the surface as a refused change",
       CAPS_DOCUMENT_PRELUDE,
       shippedSource("openSession"),
       shippedSource("currentStreamFailureOverlay"),
+      shippedSource("playbackSurfaceSourceIsBlocking"),
       shippedSource("showSessionOpenFailure"),
       shippedSource("positionForPlaybackIntent"),
       shippedSource("selectedAudioIndex"),
@@ -3334,8 +3371,15 @@ asyncTest("a burn session-open refusal reaches the surface as a refused change",
     () => {},
     () => {},
     () => {},
-    (source, fault) => raised.push({ source, fault }),
-    (source, context, fault) => raised.push({ source, context, fault }),
+    (source, fault) => raised.push({ source, context: fault && fault.context, fault }),
+    (source, where) => {
+      for (const row of policy.SURFACE_SOURCES) {
+        if (row.id === source && (row.context === "any" || row.context === where)) return row.class || null;
+      }
+      return null;
+    },
+    (cls) => !!(cls && policy.SURFACE_CLASSES[cls] && policy.SURFACE_CLASSES[cls].blocking === true),
+    () => stopped.push(true),
     () => "change",
     () => null,
     () => "English bitmap",
@@ -3367,6 +3411,8 @@ asyncTest("a burn session-open refusal reaches the surface as a refused change",
     source: "change_failed",
     context: "change",
     fault: {
+      context: "change",
+      player_stopped: false,
       title: "Playback failed to start.",
       detail: "this server's ffmpeg build has no overlay filter",
       intent: null,
@@ -3378,6 +3424,7 @@ asyncTest("a burn session-open refusal reaches the surface as a refused change",
     false,
     "a refused change must never raise a blocking fault over the predecessor",
   );
+  assert.deepEqual(stopped, [], "and must never stop the predecessor");
   assert.equal(toasts.at(-1), "Playback failed");
 });
 
