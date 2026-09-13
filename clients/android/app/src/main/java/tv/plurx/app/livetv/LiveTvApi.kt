@@ -16,6 +16,7 @@ import kotlinx.serialization.json.JsonEncoder
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.longOrNull
@@ -180,7 +181,20 @@ data class LiveTvChannel(
 }
 
 @Serializable
-data class LiveTvLineup(val channels: List<LiveTvChannel>, val freshness: String = "fresh")
+data class LiveTvLineup(
+    val channels: List<LiveTvChannel>,
+    val freshness: String = "fresh",
+    /**
+     * The start protocols the ingress and its owner both carry. Absent on an
+     * ingress older than this contract, which is not the same fact as an empty
+     * list — hence nullable.
+     */
+    val protocols: List<Int>? = null,
+)
+
+/** The answer to `POST /api/v1/live-tv/starts/{id}/resume`. */
+@Serializable
+data class LiveTvResumeAnswer(val outcome: String, val session: LiveTvStarted? = null)
 
 @Serializable data class LiveTvRational(val num: Int, val den: Int)
 @Serializable data class LiveTvHlsFormat(val container: String, val video: String, val audio: String)
@@ -297,14 +311,53 @@ data class LiveTvReadiness(val ready: Boolean, val generation: Long, val checks:
 @Serializable
 data class LiveTvCheck(val id: String, val ready: Boolean, val message: String)
 
-class LiveTvFailure(val code: String) : Exception(liveTvMessage(code))
+/**
+ * The guide's own advisory enablement facts, for the Developer tab.
+ *
+ * Every field outside [checks] is a summary line; [checks] is the part that
+ * matters and the part that is rendered generically, row by row, so an owner
+ * that grows a row shows it on a client built before that row existed. Nothing
+ * in here gates anything — `advisory` is the server saying so itself.
+ */
+@Serializable
+data class LiveTvGuideReadiness(
+    val advisory: Boolean = true,
+    val source: String = "off",
+    val guide_hours: Int = 0,
+    val freshness: String = "unavailable",
+    val age_seconds: Long = 0,
+    val fetched_at: Long? = null,
+    val refresh_error: String? = null,
+    val matched_channels: Int = 0,
+    val lineup_channels: Int = 0,
+    val programmes: Int = 0,
+    val refresh_interval_seconds: Long = 0,
+    val checks: List<LiveTvCheck> = emptyList(),
+)
 
-internal fun liveTvMessage(code: String): String = when (code) {
+/**
+ * A typed failure. [retry] and [ownerDecided] are the two fields of the
+ * server's typed envelope the start reducer dispatches on; both are absent on
+ * a refusal minted outside the Live TV module, which is itself the fact that
+ * matters.
+ */
+class LiveTvFailure(
+    val code: String,
+    val retry: String? = null,
+    val ownerDecided: Boolean? = null,
+) : Exception(liveTvMessage(code))
+
+/**
+ * The copy this client has of its own, or null. Null is a real answer: it is
+ * how [LiveTvStartReducer] tells a code it can draw from one it cannot, and a
+ * code it cannot draw is a refusal that carries no verdict.
+ */
+internal fun liveTvKnownMessage(code: String): String? = when (code) {
     "live_tv_disabled" -> "Live TV is disabled. An administrator can enable it in Settings → Developer."
     "tuner_capacity" -> "All Live TV slots are busy. Stop another session and try again."
+    "tuner_unavailable" -> "Every tuner is busy. Stop another session and try again."
     "owner_unavailable" -> "The tuner owner is unavailable. Check its network and cluster health."
-    "start_outcome_unknown" -> "Start or cleanup is unconfirmed. Wait 90 seconds before retrying; restarting or changing profiles does not bypass this safety period."
-    "storage_unavailable" -> "Live TV cannot safely save its pending-start marker. Check device storage and restart the app."
+    "no_answer" -> "The server did not answer. Press the channel again."
     "drm_unsupported" -> "DRM-protected channels are unsupported. Select an unprotected channel."
     "codec_unsupported" -> "This stream's audio or video cannot be decoded by the server or this device. Try an ATSC 1.0 channel."
     "capability_expired" -> "The live session expired. Select the channel again."
@@ -313,8 +366,42 @@ internal fun liveTvMessage(code: String): String = when (code) {
     "channel_not_found" -> "This channel is no longer in the saved lineup. Reload channels."
     "startup_timeout" -> "The tuner did not produce playable media in time."
     "source_format_changed" -> "The broadcast changed format. plurx will select a fresh compatible route."
+    "invalid_request" -> "This build sent a start request the server refused. Update plurx."
     "invalid_settings" -> "Check the private IPv4 address, voter node ID, session budget and output height."
-    else -> "The live stream could not continue. Stop and select a channel again."
+    else -> null
+}
+
+internal fun liveTvMessage(code: String): String = liveTvKnownMessage(code)
+    ?: "The live stream could not continue. Stop and select a channel again."
+
+/**
+ * A non-2xx response, as a typed failure.
+ *
+ * The server's envelope is flat: `code` and `message`, plus the optional
+ * `retry` and `owner_decided` that [LiveTvStartReducer] dispatches on. A body
+ * with no `code` is not a refusal anyone minted — for a start it is no answer
+ * at all, which is the one thing the ninety-second unknown-outcome refusal this
+ * replaced could never say.
+ *
+ * Separate from the call so `LiveTvStartCasesTest` can drive it from the bodies
+ * in `tests/playback/live-tv-start-cases.json` rather than from a description
+ * of them.
+ */
+internal fun liveTvTypedFailure(body: String, status: Int, starting: Boolean): LiveTvFailure {
+    val envelope = runCatching { Net.json.decodeFromString<JsonObject>(body) }.getOrNull()
+    fun field(name: String) = runCatching { envelope?.get(name)?.jsonPrimitive }.getOrNull()
+    val code = field("code")?.contentOrNull
+    return LiveTvFailure(
+        code = code ?: when {
+            status in setOf(401, 403) -> "admin_required"
+            starting -> "no_answer"
+            else -> "stream_failed"
+        },
+        // Only ever read off a body that actually typed itself: a `retry` beside
+        // no `code` is not this contract's envelope.
+        retry = if (code == null) null else field("retry")?.contentOrNull,
+        ownerDecided = if (code == null) null else field("owner_decided")?.booleanOrNull,
+    )
 }
 
 sealed interface LiveTvSettingsChange {
@@ -348,8 +435,22 @@ sealed interface LiveTvSettingsChange {
 }
 
 interface LiveTvRequests {
-    suspend fun start(channel: String): LiveTvStarted
+    /**
+     * [requestId] is sent only when the last channels answer listed protocol 3;
+     * the implementation drops it otherwise, so the lease always mints one and
+     * always persists its hint.
+     */
+    suspend fun start(channel: String, requestId: String): LiveTvStarted
     suspend fun release(capability: String)
+
+    /** `DELETE /api/v1/live-tv/starts/{id}`. Idempotent by the owner's design. */
+    suspend fun retire(requestId: String)
+
+    /** `POST /api/v1/live-tv/starts/{id}/resume`. */
+    suspend fun resume(requestId: String): LiveTvResumeAnswer
+
+    /** Whether the last channels answer listed protocol 3's recovery routes. */
+    val recoveryRoutes: Boolean
 }
 
 /** Immutable profile-bound API. Narrow capabilities never inherit Session.token. */
@@ -370,6 +471,15 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
     private val base = (Session.canonicalOrigin(origin) ?: throw LiveTvFailure("invalid_settings")).toHttpUrl()
     private val capabilityContext = context?.applicationContext
     @Volatile private var nextCompatibility: LiveTvCompatibility? = null
+
+    /**
+     * What the last `GET /live-tv/channels` said both ends carry. Legacy until
+     * a lineup is read: an ingress older than this contract omits `protocols`
+     * entirely, would answer 400 to a `request_id` it does not know, and has no
+     * `/live-tv/starts/…` routes to call.
+     */
+    @Volatile private var protocols: LiveTvProtocolSupport = LiveTvProtocolSupport.legacy
+    override val recoveryRoutes: Boolean get() = protocols.recoveryRoutes
     private val client: OkHttpClient = Net.capabilityClient.newBuilder()
         .connectTimeout(8, TimeUnit.SECONDS).readTimeout(45, TimeUnit.SECONDS)
         .callTimeout(45, TimeUnit.SECONDS).build()
@@ -381,7 +491,7 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
         .addPathSegments("api/v1").apply { parts.forEach(::addPathSegment) }.build()
 
     internal fun playlistUrl(capability: String): String {
-        if (capability.isEmpty() || capability.length > 1024) throw LiveTvFailure("start_outcome_unknown")
+        if (capability.isEmpty() || capability.length > 1024) throw LiveTvFailure("no_answer")
         return url("live-tv", "sessions", capability, "index.m3u8").toString()
     }
 
@@ -401,16 +511,9 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
             call.execute().use { response ->
                 if (method == "DELETE" && response.code in setOf(404, 410)) return@withContext ""
                 val source = response.body?.source()
-                if (source?.request(maxBytes + 1) == true) throw LiveTvFailure(if (starting) "start_outcome_unknown" else "stream_failed")
+                if (source?.request(maxBytes + 1) == true) throw LiveTvFailure(if (starting) "no_answer" else "stream_failed")
                 val text = source?.readUtf8().orEmpty()
-                if (!response.isSuccessful) {
-                    val code = runCatching { Net.json.decodeFromString<JsonObject>(text)["code"]?.jsonPrimitive?.content }.getOrNull()
-                    throw LiveTvFailure(code ?: when {
-                        response.code in setOf(401, 403) -> "admin_required"
-                        starting -> "start_outcome_unknown"
-                        else -> "stream_failed"
-                    })
-                }
+                if (!response.isSuccessful) throw liveTvTypedFailure(text, response.code, starting)
                 text
             }
         } catch (error: LiveTvFailure) {
@@ -424,30 +527,56 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
             throw cancelled
         } catch (_: Exception) {
             // Never surface a transport exception containing a capability URL.
-            throw LiveTvFailure(if (starting) "start_outcome_unknown" else "stream_failed")
+            throw LiveTvFailure(if (starting) "no_answer" else "stream_failed")
         }
     }
 
-    suspend fun lineup(): LiveTvLineup = Net.json.decodeFromString(request(url("live-tv", "channels"), authenticated = true))
+    /**
+     * The lineup, and the protocol negotiation that rides on it. An answer with
+     * no `protocols` field is an ingress older than this contract: no
+     * `request_id` on the start body, and no `/live-tv/starts/…` routes. Hints
+     * are still written — the ingress this device talks to tomorrow may carry
+     * both halves.
+     */
+    suspend fun lineup(): LiveTvLineup =
+        Net.json.decodeFromString<LiveTvLineup>(request(url("live-tv", "channels"), authenticated = true))
+            .also { protocols = LiveTvProtocolSupport.from(it.protocols) }
     fun retryCompatibility(compatibility: LiveTvCompatibility) {
         nextCompatibility = compatibility
     }
 
-    override suspend fun start(channel: String): LiveTvStarted = try {
-        val body = capabilityContext?.let { current ->
+    override suspend fun start(channel: String, requestId: String): LiveTvStarted = try {
+        val playback = capabilityContext?.let { current ->
             val compatibility = nextCompatibility
             nextCompatibility = null
-            buildJsonObject {
-                put("playback", Net.json.encodeToJsonElement(
-                    LiveTvPlaybackEnvelope.from(Caps.snapshot(current).document, compatibility)
-                ))
-            }
+            Net.json.encodeToJsonElement(
+                LiveTvPlaybackEnvelope.from(Caps.snapshot(current).document, compatibility)
+            )
         }
+        val body = buildJsonObject {
+            playback?.let { put("playback", it) }
+            // Guardrail §4.2 in the client's direction: an ingress that did not
+            // publish protocol 3 would answer 400 to this field and take the
+            // whole start down.
+            if (protocols.requestId) put("request_id", requestId)
+        }.takeIf { it.isNotEmpty() }
         Net.json.decodeFromString(request(url("live-tv", "channels", channel, "sessions"), "POST",
             authenticated = true, body = body, starting = true))
     } catch (error: LiveTvFailure) { throw error }
     catch (cancelled: CancellationException) { throw cancelled }
-    catch (_: Exception) { throw LiveTvFailure("start_outcome_unknown") }
+    catch (_: Exception) { throw LiveTvFailure("no_answer") }
+
+    /**
+     * Stop whatever a request id produced and fence it. Fire and forget from
+     * the lease: the press never waits for it, so the timeout is short.
+     */
+    override suspend fun retire(requestId: String) {
+        request(url("live-tv", "starts", requestId), "DELETE", authenticated = true, timeout = 8)
+    }
+
+    override suspend fun resume(requestId: String): LiveTvResumeAnswer = Net.json.decodeFromString(
+        request(url("live-tv", "starts", requestId, "resume"), "POST", authenticated = true, timeout = 20),
+    )
 
     override suspend fun release(capability: String) {
         repeat(2) { attempt ->
@@ -482,6 +611,15 @@ class LiveTvApi(origin: String, private val token: String, context: Context? = n
         request(url("settings"), "PUT", authenticated = true, body = change.body(settings.live_tv_config_generation)),
     )
     suspend fun readiness(): LiveTvReadiness = Net.json.decodeFromString(request(url("live-tv", "readiness", "refresh"), "POST", authenticated = true))
+
+    /**
+     * The guide's advisory rows. A read, never a refresh: it answers with
+     * whatever the owner's cache already knows, so opening the Developer tab
+     * cannot itself become a device or network request.
+     */
+    suspend fun guideReadiness(): LiveTvGuideReadiness = Net.json.decodeFromString(
+        request(url("live-tv", "guide", "readiness"), authenticated = true, timeout = 20),
+    )
     suspend fun developerReadiness(): DeveloperReadiness = Net.json.decodeFromString(
         request(url("developer", "readiness"), authenticated = true),
     )

@@ -53,6 +53,13 @@ data class LiveTvGuide(
     val refresh_error: String? = null,
     val matched_channels: Int = 0,
     val lineup_channels: Int = 0,
+    /**
+     * When the owner's own refresh loop next intends to run, unix seconds.
+     * Optional: an owner older than this contract says nothing, and the client
+     * falls back to the contract's floor. Served even on an unavailable guide,
+     * which still tells a client when asking again is worthwhile.
+     */
+    val next_refresh_at: Long? = null,
     val channels: List<LiveTvGuideChannel> = emptyList(),
 ) {
     /**
@@ -119,6 +126,38 @@ data class LiveTvChannelFilter(
 object LiveTvGuideReducer {
     const val SLOT_SECONDS: Long = 1800
     const val VISIBLE_SLOTS: Int = 8
+
+    /**
+     * How long to wait before asking for the guide again — the owner's clock,
+     * not a cadence this client invented.
+     *
+     * A guide that names its `next_refresh_at` is asked again just after the
+     * answer exists rather than just before it does, never faster than the
+     * contract's floor. A guide that is `unavailable` and says nothing about
+     * when it comes back is asked again sooner, because an owner with nothing
+     * to serve is usually an owner about to have something.
+     *
+     * [fetched] is null when the read itself did not answer, which carries
+     * exactly the information an unavailable guide with no `next_refresh_at`
+     * does, and is paced the same way.
+     */
+    fun nextPollDelaySeconds(fetched: LiveTvGuide?, now: Long): Long {
+        val floor = LiveTvInputPolicy.GUIDE_POLL_MIN_S
+        val announced = fetched?.next_refresh_at
+        if (announced != null) {
+            val after = if (announced > Long.MAX_VALUE - LiveTvInputPolicy.GUIDE_POLL_AFTER_NEXT_REFRESH_S) {
+                Long.MAX_VALUE
+            } else {
+                announced + LiveTvInputPolicy.GUIDE_POLL_AFTER_NEXT_REFRESH_S
+            }
+            return maxOf(after - now, floor)
+        }
+        return if (fetched == null || fetched.freshness == "unavailable") {
+            LiveTvInputPolicy.GUIDE_POLL_UNAVAILABLE_S
+        } else {
+            floor
+        }
+    }
 
     fun channel(guide: LiveTvGuide?, channelId: String): LiveTvGuideChannel? =
         guide?.channels?.firstOrNull { it.id == channelId }

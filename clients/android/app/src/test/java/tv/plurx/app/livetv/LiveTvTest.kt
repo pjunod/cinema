@@ -33,29 +33,38 @@ class LiveTvTest {
     }
 
     private val channel = LiveTvChannel("one", "7.1", "Fixture News")
-    private class Store : LiveTvBarrierStore {
-        var value = false
+
+    /**
+     * The hint store's in-memory half. [fail] makes every write fail the way a
+     * full or read-only `noBackupFilesDir` does — which, since §3.16, must cost
+     * a start nothing at all.
+     */
+    private class Store : LiveTvHintStore {
+        var value: LiveTvStartHint? = null
         var fail = false
-        override fun pending() = value
-        override fun setPending(pending: Boolean) {
-            if (fail) error("storage unavailable")
-            value = pending
-        }
+        override fun read() = value
+        override fun remember(hint: LiveTvStartHint) { if (!fail) value = hint }
+        override fun touch(at: Long) { if (!fail) value = value?.copy(touched_at = at) }
+        override fun forget() { value = null }
     }
     private inner class Requests : LiveTvRequests {
         val events = mutableListOf<String>()
         var error: String? = null
+        var ownerDecided: Boolean? = null
         var releaseFails = false
         var response: CompletableDeferred<LiveTvStarted>? = null
-        override suspend fun start(channel: String): LiveTvStarted {
+        override val recoveryRoutes = true
+        override suspend fun start(channel: String, requestId: String): LiveTvStarted {
             events += "start:$channel"
-            error?.let { throw LiveTvFailure(it) }
+            error?.let { throw LiveTvFailure(it, ownerDecided = ownerDecided) }
             return response?.await() ?: LiveTvStarted("cap-$channel", this@LiveTvTest.channel, true)
         }
         override suspend fun release(capability: String) {
             events += "release:$capability"
             if (releaseFails) throw LiveTvFailure("owner_unavailable")
         }
+        override suspend fun retire(requestId: String) { events += "retire:$requestId" }
+        override suspend fun resume(requestId: String) = LiveTvResumeAnswer("ended")
     }
     private suspend fun failure(code: String, action: suspend () -> Unit) {
         try { action(); fail("expected $code") } catch (error: LiveTvFailure) { assertEquals(code, error.code) }
@@ -106,38 +115,47 @@ class LiveTvTest {
         assertEquals(100, status.signal?.symbol_quality_percent)
     }
 
+    private fun lease(
+        requests: LiveTvRequests,
+        store: LiveTvHintStore,
+        scope: CoroutineScope,
+    ) = LiveTvLease(requests, store, scope) { 1_000 }
+
     @Test fun everySwitchConfirmsReleaseBeforeNextStart() = runTest {
         val requests = Requests()
         val store = Store()
-        val lease = LiveTvLease(requests, LiveTvStartBarrier(store) { 0 }, CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
+        val lease = lease(requests, store, CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
         lease.start("one").await()
-        assertTrue(store.value)
+        assertNotNull(store.value)
         lease.start("two").await()
         lease.stop().await()
-        assertEquals(listOf("start:one", "release:cap-one", "start:two", "release:cap-two"), requests.events)
+        assertEquals(
+            listOf("start:one", "release:cap-one", "start:two", "release:cap-two"),
+            requests.events.filterNot { it.startsWith("retire:") },
+        )
         assertNull(lease.current)
-        assertFalse(store.value)
+        assertNull("a confirmed DELETE forgets the hint", store.value)
     }
 
     @Test fun failedDeleteRetainsCapabilityAndBlocksSecondAllocation() = runTest {
         val requests = Requests()
         val store = Store()
-        val lease = LiveTvLease(requests, LiveTvStartBarrier(store) { 0 }, CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
+        val lease = lease(requests, store, CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
         lease.start("one").await()
         requests.releaseFails = true
         failure("owner_unavailable") { lease.stop().await() }
         failure("owner_unavailable") { lease.start("two").await() }
         assertEquals("cap-one", lease.current?.session_id)
-        assertTrue(store.value)
+        assertNotNull(store.value)
         assertEquals(1, requests.events.count { it.startsWith("start:") })
         requests.releaseFails = false
         lease.stop().await()
-        assertFalse(store.value)
+        assertNull(store.value)
     }
 
     @Test fun lateStartAfterStopIsReleasedBeforeItsCallerReturns() = runTest {
         val requests = Requests().apply { response = CompletableDeferred() }
-        val lease = LiveTvLease(requests, LiveTvStartBarrier(Store()) { 0 }, CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
+        val lease = lease(requests, Store(), CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
         val started = lease.start("one")
         val stopped = lease.stop()
         requests.response!!.complete(LiveTvStarted("late", channel, true))
@@ -149,7 +167,7 @@ class LiveTvTest {
     @Test fun cancellingCallerDoesNotCancelPendingLeaseBookkeeping() = runTest {
         val requests = Requests().apply { response = CompletableDeferred() }
         val scope = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
-        val lease = LiveTvLease(requests, LiveTvStartBarrier(Store()) { 0 }, scope)
+        val lease = lease(requests, Store(), scope)
         val started = lease.start("one")
         // A screen cancels its awaiter, not the application-owned deferred.
         val waiter = launch { started.await() }
@@ -161,38 +179,34 @@ class LiveTvTest {
         assertEquals(listOf("start:one", "release:late"), requests.events)
     }
 
-    @Test fun ambiguousTypedOwnerFailurePersistsAcrossProfilesAndRestart() = runTest {
-        var now = 0L
+    @Test fun anUndecidedFailureKeepsItsHintAndNeverRefusesTheNextPress() = runTest {
+        // The barrier this replaced turned exactly this answer into a
+        // ninety-second client-side refusal that survived a restart and a
+        // profile change. Guardrail §4.4: the press always reaches the owner,
+        // and the hint is what lets the stray be retired first.
         val store = Store()
         val scope = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
-        val barrier = LiveTvStartBarrier(store) { now }
-        val first = Requests().apply { error = "owner_unavailable" }
-        failure("start_outcome_unknown") { LiveTvLease(first, barrier, scope).start("one").await() }
+        val first = Requests().apply { error = "owner_unavailable"; ownerDecided = false }
+        failure("owner_unavailable") { lease(first, store, scope).start("one").await() }
+        val stray = checkNotNull(store.value).request_id
+        assertTrue(isLiveTvRequestId(stray))
+
         val other = Requests()
-        failure("start_outcome_unknown") { LiveTvLease(other, barrier, scope).start("two").await() }
-        now = 50_000
-        val restarted = LiveTvStartBarrier(store) { now }
-        failure("start_outcome_unknown") { LiveTvLease(other, restarted, scope).start("two").await() }
-        now = 139_999
-        assertTrue(restarted.pending)
-        now = 140_000
-        assertFalse(restarted.pending)
-        assertTrue(other.events.isEmpty())
+        assertNotNull("the next press must start", lease(other, store, scope).start("two").await())
+        assertTrue("and must hand the stray back first", "retire:$stray" in other.events)
+        assertNotEquals(stray, checkNotNull(store.value).request_id)
     }
 
-    @Test fun unrecognisedStartFailureKeepsTheDurableMarker() = runTest {
-        // A typed 5xx this client has never seen. The owner may already have
-        // opened a tuner, so the barrier must arm and refuse the retry rather
-        // than let a second physical tuner be allocated for one viewer.
+    @Test fun unrecognisedStartFailureKeepsTheHint() = runTest {
+        // A typed 5xx this client has never seen, with no verdict. The owner may
+        // already have opened a tuner, so the id must survive — and the viewer
+        // is told the owner is unavailable rather than shown a code nobody
+        // wrote copy for.
         val store = Store()
         val scope = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
-        val barrier = LiveTvStartBarrier(store) { 0 }
         val requests = Requests().apply { error = "encoder_spawn_failed" }
-        failure("start_outcome_unknown") { LiveTvLease(requests, barrier, scope).start("one").await() }
-        assertTrue("an unknown failure must leave the durable marker", store.value)
-        assertTrue(barrier.pending)
-        failure("start_outcome_unknown") { LiveTvLease(requests, barrier, scope).start("two").await() }
-        assertEquals(listOf("start:one"), requests.events)
+        failure("owner_unavailable") { lease(requests, store, scope).start("one").await() }
+        assertNotNull("an unknown failure must leave the handle", store.value)
     }
 
     @Test fun anUnconfirmedReleaseRecoversWithoutAUserGesture() = runTest {
@@ -202,7 +216,7 @@ class LiveTvTest {
         val store = Store()
         val requests = Requests()
         val scope = CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler))
-        val lease = LiveTvLease(requests, LiveTvStartBarrier(store) { 0 }, scope)
+        val lease = lease(requests, store, scope)
         assertNotNull(lease.start("one").await())
         requests.releaseFails = true
         try { lease.stop().await(); fail("expected the DELETE to fail") } catch (_: Exception) { }
@@ -211,42 +225,40 @@ class LiveTvTest {
         testScheduler.advanceTimeBy(2_001)
         testScheduler.runCurrent()
         assertNull("the retry must release it without a user gesture", lease.current)
-        assertFalse("and clear the durable marker", store.value)
+        assertNull("and forget the hint", store.value)
         assertEquals(listOf("start:one", "release:cap-one", "release:cap-one"), requests.events)
     }
 
-    @Test fun definitiveCapacityRejectionClearsMarker() = runTest {
+    @Test fun anOwnerDecidedCapacityRejectionForgetsItsHint() = runTest {
         val store = Store()
-        val requests = Requests().apply { error = "tuner_capacity" }
-        val lease = LiveTvLease(requests, LiveTvStartBarrier(store) { 0 }, CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
+        val requests = Requests().apply { error = "tuner_capacity"; ownerDecided = true }
+        val lease = lease(requests, store, CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
         failure("tuner_capacity") { lease.start("one").await() }
-        assertFalse(store.value)
+        assertNull("the owner decided; nothing is open to retire", store.value)
         requests.error = null
         lease.start("one").await()
         lease.stop().await()
     }
 
-    @Test fun activePlaybackRetainsDiskMarkerForCrashRecovery() = runTest {
+    @Test fun anActiveSessionLeavesItsHintOnDiskForTheNextProcess() = runTest {
         val store = Store()
-        val barrier = LiveTvStartBarrier(store) { 0 }
-        val lease = LiveTvLease(Requests(), barrier, CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
+        val lease = lease(Requests(), store, CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
         lease.start("one").await()
-        assertFalse(barrier.pending)
-        assertTrue(store.value)
-        assertTrue(LiveTvStartBarrier(store) { 200_000 }.pending)
+        // This is the crash case: the hint is what the next run resumes from.
+        assertNotNull(store.value)
         lease.stop().await()
-        assertFalse(LiveTvStartBarrier(store) { 200_000 }.pending)
+        assertNull(store.value)
     }
 
-    @Test fun unavailableStoragePreventsStartButDoesNotPreventCleanup() = runTest {
+    @Test fun aHintStoreThatCannotWriteNeverPreventsAStart() = runTest {
+        // Guardrail §4.4. The barrier refused to start on a storage failure;
+        // the cost of not writing a hint is a stray the owner reaps after 45 s,
+        // which is nothing next to a television that will not tune.
         val store = Store().apply { fail = true }
         val requests = Requests()
-        val lease = LiveTvLease(requests, LiveTvStartBarrier(store) { 0 }, CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
-        failure("storage_unavailable") { lease.start("one").await() }
-        assertTrue(requests.events.isEmpty())
-        store.fail = false
-        lease.start("one").await()
-        store.fail = true
+        val lease = lease(requests, store, CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
+        assertNotNull(lease.start("one").await())
+        assertNull(store.value)
         lease.stop().await()
         assertEquals(listOf("start:one", "release:cap-one"), requests.events)
     }

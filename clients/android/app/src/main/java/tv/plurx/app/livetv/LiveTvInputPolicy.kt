@@ -73,6 +73,41 @@ internal object LiveTvInputPolicy {
      */
     const val CHANNEL_COALESCE_MS: Long = 350L
 
+    /**
+     * The guide answered `unavailable` and said nothing about when it comes
+     * back. Short, because an owner with nothing to serve is usually an owner
+     * about to have something.
+     */
+    const val GUIDE_POLL_UNAVAILABLE_S: Long = 30L
+
+    /** A floor on fan-out, not a cadence: never poll the guide faster than this. */
+    const val GUIDE_POLL_MIN_S: Long = 15L
+
+    /** Poll this long after the owner's `next_refresh_at`, so the answer exists. */
+    const val GUIDE_POLL_AFTER_NEXT_REFRESH_S: Long = 5L
+
+    /**
+     * How long a pressing *web* document waits for a sibling tab to claim a
+     * hint before treating it as an orphan. Transcribed because §3.14 pins all
+     * six of the contract's live timings in every client; Android has one
+     * process and one hint, so there is no sibling to probe.
+     */
+    const val RETIRE_LIVENESS_PROBE_MS: Long = 250L
+
+    /**
+     * A hint touched more recently than this many five-second keepalives is
+     * held by something alive. Web mechanics, for the same reason as
+     * [RETIRE_LIVENESS_PROBE_MS]: on Android the live session's hint is already
+     * forgotten by the time a press looks for a stale one.
+     */
+    const val RETIRE_ORPHAN_AFTER_KEEPALIVES: Int = 3
+
+    /**
+     * How many times the lease re-sends a start that got no answer, with the
+     * same request id. One — the owner joins the replay to the same session.
+     */
+    const val START_REPLAY_ATTEMPTS: Int = 1
+
     fun route(
         surface: LiveTvInputSurface,
         state: LiveTvInputState,
