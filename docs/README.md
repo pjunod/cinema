@@ -83,8 +83,6 @@ Apple build 138: [Library channel playback decision](apple-builds/245-library-ch
 Apple build 141: [Library channel buffering demand](apple-builds/245-library-channel-buffering-demand.md).
 Apple build 143: [Playback lifecycle recovery and prepared handoff](apple-builds/257-playback-lifecycle.md).
 Apple build 147: [The playback surface contract](apple-builds/278-playback-surface-contract.md).
-Apple build 151: [Playback surface reach](apple-builds/278-playback-surface-reach.md).
-Apple build 152: [Banner actions](apple-builds/278-banner-actions.md).
 
 Previous: [Live TV playback method](apple-builds/245-live-tv-playback-method.md).
 
@@ -324,6 +322,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [LIVE-TV-RELIABILITY-IMPLEMENTATION.md](features/LIVE-TV-RELIABILITY-IMPLEMENTATION.md) | The plan Opus builds from Paul's four rulings — exact interfaces for the durable guide, the event-driven loop, `request_id`, retire/resume, stray eviction and the barrier removal on all three clients; milestones with acceptance checks and the reviewer's attack list. | open |
 | [LIVE-TV-RELIABILITY-STATUS.md](features/LIVE-TV-RELIABILITY-STATUS.md) | How far the reliability lane has got: milestone by milestone, the deviations from the plan and why, and the evidence recorded for each. | open |
 | [LIVE-TV-START-STALL-AND-TVOS-PLAYBACK-SURFACE.md](features/LIVE-TV-START-STALL-AND-TVOS-PLAYBACK-SURFACE.md) | Why every Live TV start plays a few seconds and then freezes on every client — the measured `-hls_init_time 1` cadence jump, the 2 s-segment fix with its costs — and the tvOS fullscreen surface redesign: the reveal-layer focus trap, the new band, Info, waiting and paused states, renders, and the two-PR plan. | open |
+| [LIVE-TV-START-STALL-AND-TVOS-SURFACE-IMPLEMENTATION.md](features/LIVE-TV-START-STALL-AND-TVOS-SURFACE-IMPLEMENTATION.md) | The two-PR plan for the stall fix and the tvOS surface — exact constants, the listed-count publish gate, the `threshold + 1` lag budget, the controller's `waiting`/behind-live publishers, the band, focus rules, the Info ledger, tests, milestones with acceptance, and the reviewer's attack list. | open |
 | [SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md](features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md) | What is built, reviewed, and proved for the settings navigation and Developer-page redesign. | open |
 | [HOMEVIDEO-PLAN.md](features/HOMEVIDEO-PLAN.md) | Home video and photos — the `home` libraries. | built |
 | [INTEGRATION-PLAN.md](features/INTEGRATION-PLAN.md) | plurx's side of the monarr pipeline. | built |
