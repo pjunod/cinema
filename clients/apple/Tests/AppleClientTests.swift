@@ -249,6 +249,7 @@ private struct PlaybackSurfaceContractFixture: Decodable {
         let intentSuperseded: String?
         let ownerSuccess: String?
         let userAction: String?
+        let playbackRequested: Bool?
         let tick: Bool?
 
         enum CodingKeys: String, CodingKey {
@@ -261,6 +262,7 @@ private struct PlaybackSurfaceContractFixture: Decodable {
             case intentSuperseded = "intent_superseded"
             case ownerSuccess = "owner_success"
             case userAction = "user_action"
+            case playbackRequested = "playback_requested"
         }
     }
 
@@ -3091,6 +3093,7 @@ final class AppleClientTests: XCTestCase {
         if let action = raw.userAction {
             return .userAction(PlaybackFault.Action(rawValue: action) ?? .close)
         }
+        if let requested = raw.playbackRequested { return .playbackRequested(requested) }
         return .tick
     }
 
@@ -3599,6 +3602,95 @@ final class AppleClientTests: XCTestCase {
             view.contains("Button(\"Try Again\") {"),
             "both actions draw the one button they both are"
         )
+    }
+
+    /// The ruling of 2026-09-13, ported: a `buffering` fault is about a player
+    /// that WANTS media, so a viewer who pauses makes it about nothing.
+    ///
+    /// `buffering` is the only class that names the reason, and the negative
+    /// half is the point: a pause is a transport change, and a prompt is
+    /// answered by the viewer. A reason that started spreading would take the
+    /// only way out of a stalled playback away with it.
+    func testOnlyBufferingIsRetiredByTheViewerNoLongerWantingPlayback() throws {
+        let fixture = try playbackSurfaceContractFixture()
+        let naming = fixture.classes
+            .filter { $0.value.retiredBy.contains("playback_not_requested") }
+            .keys
+            .sorted()
+        XCTAssertEqual(
+            naming, ["buffering"],
+            "the reason belongs to `buffering` and to nothing else"
+        )
+        let mine = PlaybackFault.Class.allCases.filter {
+            PlaybackSurfaceContract.rule(for: $0).retiredBy.contains(.playbackNotRequested)
+        }
+        XCTAssertEqual(mine, [.buffering], "and the Swift transcription agrees")
+
+        // The behaviour, class by class. Everything drawable is raised over one
+        // generation, the viewer pauses, and only the wait goes.
+        let origin = ContinuousClock.now
+        var model = PlaybackSurfaceModel()
+        model.apply(.attach(1), now: origin)
+        model.apply(
+            PlaybackSurfaceModel.raise(source: "media_waiting", context: .attached, attached: 1),
+            now: origin
+        )
+        model.apply(
+            PlaybackSurfaceModel.raise(source: "client_preparing", context: .start, attached: 1),
+            now: origin
+        )
+        model.apply(
+            PlaybackSurfaceModel.raise(source: "owner_recovery_step", context: .attached, attached: 1),
+            now: origin
+        )
+        model.apply(
+            PlaybackSurfaceModel.raise(source: "degraded_notice", context: .attached, attached: 1),
+            now: origin
+        )
+        XCTAssertEqual(model.faults.count, 4)
+        let cleared = model.apply(.playbackRequested(false), now: origin.advanced(by: .seconds(1)))
+        XCTAssertEqual(
+            cleared.map(\.event), [.cleared],
+            "exactly one fault is retired by a pause"
+        )
+        XCTAssertEqual(cleared.first?.by, .playbackNotRequested)
+        XCTAssertEqual(cleared.first?.source, "media_waiting")
+        XCTAssertEqual(
+            model.faults.map(\.source).sorted(),
+            ["client_preparing", "degraded_notice", "owner_recovery_step"]
+        )
+        // And resuming raises nothing back: the raise sites decide that.
+        XCTAssertTrue(
+            model.apply(.playbackRequested(true), now: origin.advanced(by: .seconds(2))).isEmpty
+        )
+    }
+
+    /// The negative half, at the surface rather than in the fault list: a pause
+    /// under a blocking prompt leaves the prompt, and leaves it answerable.
+    func testAPauseUnderAPromptLeavesThePromptAndItsActions() {
+        let origin = ContinuousClock.now
+        var model = PlaybackSurfaceModel()
+        model.apply(.attach(1), now: origin)
+        model.apply(
+            PlaybackSurfaceModel.raise(
+                source: "owner_exhausted", context: .attached, attached: 1, playerStopped: true
+            ),
+            now: origin
+        )
+        model.apply(
+            PlaybackSurfaceModel.raise(source: "media_waiting", context: .attached, attached: 1),
+            now: origin
+        )
+        model.apply(.playbackRequested(false), now: origin.advanced(by: .seconds(1)))
+        XCTAssertEqual(model.kind, .blocking)
+        XCTAssertEqual(model.currentFault?.cls, .exhausted)
+        XCTAssertTrue(model.entersFailedRouting)
+        XCTAssertEqual(
+            PlayerView.failureActions(for: model.surface), [.retry, .close],
+            "the way out is still offered"
+        )
+        model.apply(.userAction(.close), now: origin.advanced(by: .seconds(2)))
+        XCTAssertEqual(model.kind, .none, "and the viewer, not the transport, is what answers it")
     }
 
     /// The adapter, pinned — because the reducer cannot pin this.
@@ -4342,6 +4434,7 @@ final class AppleClientTests: XCTestCase {
     private func playerControllerSource() throws -> String {
         try sharedClientSource("PlayerController.swift")
     }
+
 
     private func sharedClientSource(_ name: String) throws -> String {
         let sourcesDirectory = URL(fileURLWithPath: #filePath)

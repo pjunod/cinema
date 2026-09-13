@@ -393,6 +393,53 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         XCTAssertTrue(controller.surface.surface.playerStopped)
     }
 
+    /// The Apple wiring for the pause ruling, end to end and behaviourally:
+    /// the presenter's own clock raises the real wait from the real transport
+    /// status, the reducer draws it after the real 350 ms debounce, and the
+    /// viewer's own pause retires it.
+    ///
+    /// `AVPlayer` reports `.waitingToPlayAtSpecifiedRate` when it has been
+    /// asked to play and has nothing to play, which is the one way a headless
+    /// test reaches that status at all: an item over a playlist URL nothing
+    /// serves never readies. The decision is left pending, so nothing is ever
+    /// attached, nothing is changing, and the context is `attached` the moment
+    /// a frame is declared.
+    func testTheViewersPauseRetiresTheWaitThePresentersClockRaised() async throws {
+        let decisions = Decisions()
+        let controller = PlayerController(
+            requestPlaybackDecision: { _, file, selection, quality in
+                try await decisions.request(file: file, selection: selection, quality: quality)
+            }
+        )
+        let model = AppModel()
+        defer { controller.stop(); decisions.cancelAll() }
+        start(controller, model: model)
+        try await waitUntil("initial decision") { decisions.requests.count == 1 }
+        controller.noteFramePresentedForTesting()
+        controller.player.play()
+        try await waitUntil("the transport reports a wait") {
+            controller.player.timeControlStatus == .waitingToPlayAtSpecifiedRate
+        }
+        try await waitUntil("the presenter's clock raises the wait and draws it") {
+            controller.surface.surface.source == "media_waiting"
+                && controller.surface.kind == .blocking
+        }
+        XCTAssertEqual(controller.surface.surface.cls, .buffering)
+        XCTAssertTrue(controller.showsProgressSurface)
+        XCTAssertFalse(controller.isPlaybackBlocked, "a spinner asks the viewer nothing")
+        XCTAssertTrue(controller.wantsPlayback)
+
+        // The viewer pauses. The wait was about a player that wanted media, so
+        // it is now about nothing.
+        controller.togglePlayPause()
+        XCTAssertFalse(controller.wantsPlayback)
+        XCTAssertEqual(
+            controller.surface.kind, .none,
+            "a buffer that fills while the viewer is paused must not leave a spinner behind"
+        )
+        XCTAssertTrue(controller.surface.faults.isEmpty)
+    }
+
     /// A6, closed. Two create sequences overlap by the ordinary route — the
     /// viewer leaves a cold start that is still waiting on its create and puts
     /// another title on — and the abandoned one's exit must retire only its

@@ -155,6 +155,7 @@ struct PlaybackSurfaceLog: Equatable, Sendable {
         case attachedRetired = "attached_retired"
         case ownerSuccess = "owner_success"
         case ownerStopped = "owner_stopped"
+        case playbackNotRequested = "playback_not_requested"
         case timer
         case user
     }
@@ -256,6 +257,7 @@ enum PlaybackSurfaceContract {
         case intentSuperseded = "intent_superseded"
         case attachedRetired = "attached_retired"
         case ownerSuccess = "owner_success"
+        case playbackNotRequested = "playback_not_requested"
         case timer
         case user
     }
@@ -350,7 +352,17 @@ enum PlaybackSurfaceContract {
             severity: .progress,
             blocking: .whileNotPresenting,
             minMs: 350,
-            retiredBy: [.presenting, .attachedRetired]
+            // `playback_not_requested`, and on no other class. A `buffering`
+            // fault is about a player that WANTS media: the wait is only a wait
+            // while something is trying to play. Presentation evidence is the
+            // only other thing that retires it and a paused picture never
+            // produces another sample, so without this a buffer that filled
+            // while the viewer had paused left a spinner over a still frame
+            // until the generation changed — the overlay outliving the thing it
+            // described, which is the defect this contract exists to kill.
+            // Ruled 2026-09-13; found independently by this session and the
+            // Android one, and true of the web too.
+            retiredBy: [.presenting, .playbackNotRequested, .attachedRetired]
         ),
         .recovering: ClassRule(
             severity: .progress,
@@ -416,7 +428,35 @@ enum PlaybackSurfaceContract {
         // `owner_recovery_step` and tell the ledger a first play was a recovery.
         SourceRow("client_preparing", nil, .preparing),
         SourceRow("change_failed", .change, .refused, actions: [.retry]),
-        SourceRow("segment_503_not_yet", .attached, .recovering),
+        // The 503 codes a playlist or segment request can actually come back
+        // with. On those two resources a 503 is only ever a "not yet" — the
+        // terminal answers are 404/410/502 — and matching on the status alone
+        // made `vod_disabled` a recovery. Apple reads media refusals as a
+        // status and nothing else (`mediaFailureSurfaceSource`), so this list
+        // is carried for the shared table's sake rather than consulted here.
+        SourceRow(
+            "segment_503_not_yet",
+            .attached,
+            .recovering,
+            codes: [
+                "startup_timeout",
+                "playlist_state_changed",
+                "segment_pending",
+                "segment_wait_busy",
+                "node_wait_capacity",
+                "media_owner_transition",
+                "vod_resurrection_unavailable",
+                "response_owner_transition",
+                "response_state_changed",
+                "response_owner_reclassification_unavailable",
+                "response_publication_timeout",
+                "response_completion_capacity",
+                "response_snapshot_capacity",
+                "node_maintenance",
+                "node_removal_fenced",
+                "learner_route_ineligible",
+            ]
+        ),
         // `any`, not `attached`: a session handed to a node that is already
         // gone answers 410 on the create with the same body, and this is the one
         // row that carries `film_position_ms`. First-match still puts
@@ -508,6 +548,12 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
         case intentSettled(Int)
         case intentSuperseded(Int)
         case ownerSuccess(Int)
+        /// The viewer's transport intent. `false` retires every fault whose
+        /// class names `playback_not_requested`; `true` does nothing, because
+        /// the raise sites decide what comes back — if the player is still
+        /// waiting when it resumes, the next sample raises the wait again and
+        /// THAT is the raise.
+        case playbackRequested(Bool)
         case userAction(PlaybackFault.Action)
         case hidden(Bool)
         case tick
@@ -648,6 +694,17 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
             // `recovering` fault, not only the ones about the generation it
             // replaced.
             drop(&log, by: .ownerSuccess) { Self.retires($0, by: .ownerSuccess) }
+
+        case .playbackRequested(let requested):
+            // Only classes that NAME the reason, which today is `buffering`
+            // alone: a `preparing` start has not been paused by a viewer who
+            // has not seen it yet, and a blocking prompt is answered by the
+            // viewer rather than by a transport change — a pause under one must
+            // not clear the only thing offering a way out.
+            guard !requested else { break }
+            drop(&log, by: .playbackNotRequested) {
+                Self.retires($0, by: .playbackNotRequested)
+            }
 
         case .userAction(let action):
             let current = surfaceFrom(now: now).fault

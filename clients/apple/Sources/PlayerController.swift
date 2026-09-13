@@ -2203,7 +2203,22 @@ final class PlayerController: ObservableObject {
     private var openGeneration = 0
     /// The transport the viewer asked for, which is not what AVPlayer reports
     /// while it buffers or after an item fails. Reopens restore this.
-    private(set) var wantsPlayback = true
+    ///
+    /// It is also the presenter's `playback_requested`, and it is the right
+    /// fact for it twice over. A `buffering` fault is about a player that WANTS
+    /// media, so a viewer who pauses makes it about nothing (contract §3.1,
+    /// ruled 2026-09-13) — and the owner's own stop is exactly the thing that
+    /// must NOT retire one. `stopForBlockingSurface()` pauses the player and
+    /// leaves this alone, deliberately and for its own reasons, so keying the
+    /// event here filters the owner out by construction rather than by a rule
+    /// somebody has to remember. No new detector and no new timer: this is a
+    /// flag the client already keeps.
+    private(set) var wantsPlayback = true {
+        didSet {
+            guard wantsPlayback != oldValue else { return }
+            present(.playbackRequested(wantsPlayback))
+        }
+    }
     /// The last rate the player was genuinely playing at, so a viewer paused
     /// at 1.5× resumes at 1.5× rather than at the 0 the transport reports
     /// while paused (P2-5).
