@@ -6,41 +6,72 @@ first.
 
 ## The web player's overlay is a projection now (M1)
 
-**Built 2026-09-13 on `web/playback-surface`, WIP PR open against `main`.
-Executes §4.2 of
+**Built 2026-09-13 on `web/playback-surface`, WIP PR #277 against `main`,
+adversarially reviewed twice. Executes §4.2 of
 [PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md](docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md).
-All 55 pre-contract web surface write sites are gone;
-`scripts/playback-surface-fence` no longer budgets `index.html` at all, and
-`tests/operations/test_playback_surface_fence.py` holds it at zero. Apple (M2)
-and Android (M3) still have theirs.** `setLoading` is the presenter's private
-paint helper between the `// playback-surface-render:begin/end` anchors, and
-`renderPlaybackSurface` is the only code in the page that writes `#ploading`,
-the `failed` class, `#ploadAct` or the two new non-blocking surfaces. Every
-former call site raises a typed fault instead;
-`PlaybackPolicy.presentSurface` decides what is drawn and the shipped render
-is run against every one of the fixture's 55 ordered-event cases.
+`scripts/playback-surface-fence` no longer budgets `index.html` at all —
+`tests/operations/test_playback_surface_fence.py` holds it at zero — and Apple
+(M2) and Android (M3) still have theirs.** `setLoading` is the presenter's
+private paint helper between the `// playback-surface-render:begin/end`
+anchors, and `renderPlaybackSurface` is the only code in the page that writes
+`#ploading`, the `failed` class, `#ploadAct` or the two non-blocking surfaces
+this adds. Every former call site raises a typed fault;
+`PlaybackPolicy.presentSurface` decides what is drawn, and the shipped render is
+run against every one of the fixture's 57 ordered-event cases.
 
-What changes for a viewer: a failed quality change is a notice beside a
-picture that keeps playing instead of "Playback could not reconnect." over
-it; an hls.js fatal the server explained as "not yet" is an indicator over
-the buffer that is still playing rather than a full screen calling it a
-failed start; Safari's per-fragment `waiting` is debounced by the contract's
-350 ms before anything is drawn; a stale refusal cannot explain the next
-title, because a fault dies with the generation it was about instead of
-living for 90 s. The four exhaustion sites — `showStallRecoveryFailure`, the
-`stallRecoveryAction === 'prompt'` branch, `stallDiagnose`'s verdicts and the
-spent hls.js/`<video>` ladder — stop the player and only then raise, which is
-the one behaviour change the contract allows outside M5. `Playback debug`
-gained the SURFACE section and the client log gained `surface_raised`,
-`surface_cleared`, `surface_disagreement` and `surface_log_only`.
+The fence counted 55 write SITES in `index.html` at `6e66c136` — one per line,
+across 38 `setLoading(` calls, 7 `failed` class toggles, 9 `stallPrompt` writes
+and one comment that named `setLoading(false)`. The contract's §2.1 count of
+"35 call sites" was one spelling at `10f2afe6` and has drifted since; 38 calls
+across 55 sites is what this branch actually removed.
 
-Two things to know before M2/M3 rebase. The fixture gained one row,
-`client_preparing`, in its own commit: the staged loading overlay is the
-commonest `preparing` surface there is and the v2 table produced `preparing`
-only from a create 503. And the owner's stop takes `stopPlayerTimers` with
-it, so `armStall` now re-arms the sampling timers for a stream that starts
-again — without that, Force transcode from a stalled prompt resumed into a
-player with no stall detection and a presenter with no evidence.
+What changes for a viewer: a failed quality change is a notice beside a picture
+that keeps playing instead of "Playback could not reconnect." over it; an hls.js
+fatal the server explained as "not yet" is an indicator over the buffer that is
+still playing; an hls.js NETWORK fatal is `recovering` with the reopen ladder
+untouched rather than a terminal screen over a buffer thrown away; Safari's
+per-fragment `waiting` is debounced by the contract's 350 ms before anything is
+drawn and retired again by the picture that never stopped; a stale refusal
+cannot explain the next title, because a fault dies with the generation it was
+about. `Playback debug` gained the SURFACE section and the client log gained
+`surface_raised`, `surface_cleared`, `surface_disagreement` and
+`surface_log_only`.
+
+**Behaviour changes, all of them.** This is not one change, and calling it one
+was wrong. (1) §3.4's stop-before-raise, at eleven sites: `persistentWait`'s
+terminal verdict and its `'prompt'` branch, `showStallRecoveryFailure`,
+`showSessionOpenFailure`, two in `attachHls`, `play`'s `failPreparation`,
+`stallDiagnose`, the `<video>` error, and `handleEnded`'s two terminal branches.
+The stop is `pausePlaybackInternally` + `stopPlayerTimers`, and
+`stopPlayerTimers` is not only timers: it calls `stopPlaybackControl`, which
+abandons a prepared replacement, flushes its settlement and ends the control
+reporter, and it stops `reportProgress`, the hitch report, the decode rescue and
+the Auto controller along with the 5 s tick. Three other sites call it as they
+always did (`play`, `retirePlaybackPredecessor`, `closePlayer`). (2) `armStall`
+re-arms the sampling timers after such a stop, because those timers are the
+stall detector AND the presenter's only evidence and nothing recreated them on
+an in-place re-attach. (3) Classes that were full screen are an indicator or a
+banner now — the point of the migration, and a visible change: a failed change,
+an explained "not yet", an automatic downshift, a control hold. (4) `sign_in` is
+a new action (defensive — `api()` already ends the session on a 401). (5) The
+`waiting` handler defers to any fault with actions, not only to a prompt. (6)
+`.ploading.failed` hides the spinner, which no rule ever did. (7) The
+`pollSessionHealth` copy refresh is gone.
+
+Three fixture/reducer commits are separate and cherry-pickable, because Apple
+and Android need them: `client_preparing` (the table had no row for an ordinary
+staged start), `media_owner_lost_410` becoming `context: any` (a 410 on create
+is a real answer and it is the row that carries the position), and the reducer's
+evidence gate — M0 gated plain `presenting` on the run of presentation
+postdating the fault, so a `media_waiting` raised over a picture that never
+stopped could never be retired at all.
+
+`make web-check` does not pass, and does not pass on `main` either:
+`tests/web/live-tv.test.js`, `tests/web/layout-containment.test.js` and
+`tests/web/page-read-budget.test.js` fail identically at `6e66c136`. Every other
+test in that target passes on this branch. And the fence is a ratchet against
+the spellings it knows, not a proof: it knows more of them than it did, each
+with a must-trip fixture line, but it cannot see a write it was never taught.
 
 ## The error overlay and the picture disagree, on every client
 
