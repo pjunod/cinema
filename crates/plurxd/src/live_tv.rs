@@ -4386,13 +4386,20 @@ async fn wait_for_startup(
         // Registered before the state is read, so a publication between the two
         // cannot be missed.
         let notified = session.changed.notified();
-        if let Some(result) = session
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .startup
-            .clone()
-        {
+        let now = tokio::time::Instant::now();
+        let verdict = {
+            let state = session
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            startup_waiter_verdict(
+                &state,
+                session.started,
+                now + Duration::from_secs(2),
+                session.tuner_bytes.load(Ordering::Acquire),
+            )
+        };
+        if let Some(result) = verdict {
             return result.map(|mut provisional| {
                 if recovered {
                     provisional.outcome = LiveTvStartOutcome::Recovered;
@@ -4400,30 +4407,40 @@ async fn wait_for_startup(
                 provisional
             });
         }
-        let now = tokio::time::Instant::now();
-        // The same decision the producer makes, plus the two seconds that let
-        // the producer's own verdict reach this waiter first -- a caller should
-        // hear why a start failed, not just that it timed out.
-        if let Some(reason) = startup_overdue(
-            session.started,
-            now + Duration::from_secs(2),
-            session.tuner_bytes.load(Ordering::Acquire),
-            session
-                .state
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .publication
-                .as_ref()
-                .map_or(0, |publication| publication.listed),
-        ) {
-            return Err(LiveTvError::StartupTimeout(reason));
-        }
         // Waiting in slices rather than to the deadline: the budget can grow
         // while this request is parked, and a wait pinned to the budget in
         // force when it began would refuse a channel that started feeding a
         // moment later.
         let _ = tokio::time::timeout(STARTUP_BUDGET_REVIEW, notified).await;
     }
+}
+
+/// Snapshot the producer's answer and publication under one lock. Once the
+/// gate is satisfied, the producer may be awaiting its serving fence before it
+/// installs the provisional; that interval is not a startup timeout, and can
+/// never produce the impossible "2 segments, but not 2" verdict.
+fn startup_waiter_verdict(
+    state: &LiveTvSessionState,
+    started: tokio::time::Instant,
+    review_at: tokio::time::Instant,
+    tuner_bytes: u64,
+) -> Option<Result<LiveTvProvisional, LiveTvError>> {
+    if let Some(result) = &state.startup {
+        return Some(result.clone());
+    }
+    if state.publication.as_ref().is_some_and(startup_publishable) {
+        return None;
+    }
+    startup_overdue(
+        started,
+        review_at,
+        tuner_bytes,
+        state
+            .publication
+            .as_ref()
+            .map_or(0, |publication| publication.listed),
+    )
+    .map(|reason| Err(LiveTvError::StartupTimeout(reason)))
 }
 
 /// A live-TV request id is 128 bits written as 32 lower-case hex characters,
@@ -9196,6 +9213,8 @@ Output #0, hls, to 'index.m3u8':
             b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4,\nsegment-000001.ts\n#EXT-X-ENDLIST\n"
                 .as_slice(),
             b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:4,\n".as_slice(),
+            b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1,\nsegment-000001.ts\n"
+                .as_slice(),
             b"#EXTM3U\n#EXTINF:4,\nsegment-000001.ts\n".as_slice(),
             b"#EXTM3U\n#EXT-X-TARGETDURATION:0\n#EXT-X-MEDIA-SEQUENCE:1\n#EXTINF:1.0,\nsegment-000001.ts\n"
                 .as_slice(),
@@ -9232,6 +9251,31 @@ Output #0, hls, to 'index.m3u8':
         assert!(startup_publishable(&inventory(2, 2.0, 1, 2)));
         assert!(!startup_publishable(&inventory(2, 4.0, 3, 2)));
         assert!(startup_publishable(&inventory(3, 7.0, 3, 3)));
+
+        let temp = crate::test_tempdir().expect("startup verdict root");
+        let session = test_session(temp.path().join("startup-verdict"), 1);
+        let mut state = session.state.lock().expect("session state");
+        state.publication = Some(inventory(2, 2.0, 1, 2));
+        assert!(
+            startup_waiter_verdict(
+                &state,
+                session.started,
+                session.started + STARTUP_FEEDING_TIMEOUT + Duration::from_secs(2),
+                4_000_000,
+            )
+            .is_none(),
+            "a publishable inventory awaiting its serving fence is not overdue"
+        );
+        state.publication = Some(inventory(1, 1.0, 1, 1));
+        assert!(matches!(
+            startup_waiter_verdict(
+                &state,
+                session.started,
+                session.started + STARTUP_FEEDING_TIMEOUT + Duration::from_secs(2),
+                4_000_000,
+            ),
+            Some(Err(LiveTvError::StartupTimeout(_)))
+        ));
     }
 
     #[test]

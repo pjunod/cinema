@@ -326,9 +326,13 @@ def await_first_segment(client, playlist_url, deadline_seconds):
                 name = segments[-1]
                 code, chunk = client.raw(urljoin(playlist_url, name), timeout=30)
                 if code == 200 and chunk:
+                    assert len(durations) == len(segments), (
+                        "playlist lists %d segments but %d EXTINF durations"
+                        % (len(segments), len(durations)))
+                    selected_duration = durations[-1]
                     average = sum(durations) / len(durations) if durations else 0.0
                     return (time.monotonic() - started, sequence, segments, durations,
-                            target_duration, average, name, chunk)
+                            target_duration, selected_duration, average, name, chunk)
         time.sleep(0.25)
     raise AssertionError("no playable segment within %ds of starting the session"
                          % deadline_seconds)
@@ -434,9 +438,15 @@ def select_channel(client, wanted):
 def run_via(client, mine, evidence, out):
     """Exercise the public relay without changing the running cluster."""
     ingress = client.api("/server")["node_id"]
-    owner = client.api("/settings")["live_tv_owner_node_id"]
+    settings = client.api("/settings")
+    owner = settings["live_tv_owner_node_id"]
     assert ingress != owner, (
         "--via must name a non-owner ingress; %s is the configured Live TV owner" % ingress)
+    assert settings.get("live_tv_enabled") is True, (
+        "--via requires Live TV to be enabled on the running cluster")
+    assert settings.get("live_tv_device_ipv4") == mine.device, (
+        "--device %s does not match the owner's configured HDHomeRun %s"
+        % (mine.device, settings.get("live_tv_device_ipv4")))
     channel = select_channel(client, mine.channel)
     request_id = secrets.token_hex(16)
     asked_at = time.monotonic()
@@ -462,12 +472,23 @@ def run_via(client, mine, evidence, out):
         "viewer_code": refusal.code if refusal else None,
         "seconds_to_answer": round(answer_seconds, 3),
         "same_owner_session": (
-            state.get("state") == "active" if answer_seconds > START_EXCHANGE_ATTEMPT else None),
+            True if answer_seconds > START_EXCHANGE_ATTEMPT
+            and state.get("state") == "active" else None),
+        "owner_cancelled_when_first_waiter_left": None,
         "first_listed_segment_seconds": None,
         "first_listed_segment_observation": (
             "not observable through the public ingress before its start answer"),
     }
     evidence["relay_outcome"] = outcome
+    if not outcome["outlived_first_attempt"]:
+        evidence["not_exercisable"]["relay_second_attempt"] = (
+            "the start answered in %.3fs, before the 20s first exchange ended; this run did "
+            "not exercise attempt 2 or StartupWaiter::drop" % answer_seconds)
+    elif state.get("state") != "active":
+        evidence["not_exercisable"]["relay_session_continuity"] = (
+            "the start crossed 20s but owner state %s/%s does not prove whether attempt 2 "
+            "joined or the first waiter's departure cancelled the session"
+            % (state.get("state"), state.get("code")))
 
     if refusal is not None:
         (out / "hardware.json").write_text(json.dumps(evidence, indent=2) + "\n")
@@ -483,15 +504,18 @@ def run_via(client, mine, evidence, out):
         assert_copy_delivery(started)
     capability = started["session_id"]
     try:
-        (waited, sequence, segments, durations, target_duration, average,
-         name, chunk) = await_first_segment(
+        (waited, sequence, segments, durations, target_duration, segment_seconds,
+         average, name, chunk) = await_first_segment(
             client, absolute_playlist_url(client, started), SEGMENT_DEADLINE)
-        observed_bitrate = round(len(chunk) * 8 / average) if average > 0 else None
+        observed_bitrate = (
+            round(len(chunk) * 8 / segment_seconds) if segment_seconds > 0 else None)
         outcome.update({
             "seconds_waiting_after_answer": round(waited, 3),
             "first_media_sequence": sequence,
             "listed_segments_at_observation": len(segments),
             "segment_durations_seconds": durations,
+            "selected_segment_duration_seconds": segment_seconds,
+            "average_listed_segment_duration_seconds": average,
             "target_duration_seconds": target_duration,
             "observed_segment_bitrate_bps": observed_bitrate,
             "first_segment_name": name,
@@ -504,10 +528,11 @@ def run_via(client, mine, evidence, out):
         raise AssertionError(
             "the ATSC 3.0 copy start answered in %.1fs (>16s): stop for a relay-budget ruling; "
             "do not increase a timeout" % answer_seconds)
-    print("PASS relayed start via %s answered in %.1fs (%s first 20s attempt); evidence: %s"
-          % (ingress, answer_seconds,
-             "outlived" if outcome["outlived_first_attempt"] else "within",
-             out / "hardware.json"))
+    print("PASS relayed start via %s answered in %.1fs; evidence: %s"
+          % (ingress, answer_seconds, out / "hardware.json"))
+    if not outcome["outlived_first_attempt"]:
+        print("  NOT EXERCISABLE relay_second_attempt: %s"
+              % evidence["not_exercisable"]["relay_second_attempt"])
     return 0
 
 
@@ -867,7 +892,8 @@ def main(argv):
 
         playlist_url = absolute_playlist_url(client, started)
         (waited, sequence, segments, durations, target_duration, segment_seconds,
-         name, chunk) = await_first_segment(client, playlist_url, SEGMENT_DEADLINE)
+         average_segment_seconds, name, chunk) = await_first_segment(
+            client, playlist_url, SEGMENT_DEADLINE)
         startup = time.monotonic() - asked_at
 
         segment_path = out / "first-segment.ts"
@@ -900,6 +926,7 @@ def main(argv):
             "segment_durations_seconds": durations,
             "target_duration_seconds": target_duration,
             "segment_seconds": round(segment_seconds, 3),
+            "average_listed_segment_seconds": round(average_segment_seconds, 3),
             "first_segment_bytes": len(chunk),
             "observed_segment_bitrate_bps": (
                 round(len(chunk) * 8 / segment_seconds) if segment_seconds > 0 else None),
@@ -927,11 +954,25 @@ def main(argv):
             raise AssertionError(
                 "the ATSC 3.0 copy start answered in %.1fs (>16s): stop for a relay-budget "
                 "ruling; do not increase a timeout" % accept_seconds)
-        # Configured output_height is a ceiling, not a promise to upscale: an SD
-        # channel legitimately arrives shorter. Exceeding it is the defect.
-        assert int(video[0].get("height") or 0) <= 720, (
-            "output_height was configured to 720 and the published segment carries %r"
-            % video[0].get("height"))
+        if mine.copy:
+            delivery_output = (started.get("delivery") or {}).get("output") or {}
+            assert video[0].get("codec_name") == "hevc" and audio[0].get("codec_name") == "ac3", (
+                "--copy selected HEVC/AC-3 but the published segment is %s/%s"
+                % (video[0].get("codec_name"), audio[0].get("codec_name")))
+            assert int(video[0].get("height") or 0) == int(delivery_output.get("height") or 0), (
+                "the copied segment height %r does not match the frozen delivery output %r"
+                % (video[0].get("height"), delivery_output.get("height")))
+            source_height = evidence.get("source", {}).get("video_height")
+            if source_height is not None:
+                assert int(video[0].get("height") or 0) == int(source_height), (
+                    "a copy route changed source height %r to %r"
+                    % (source_height, video[0].get("height")))
+        else:
+            # The legacy bodiless profile uses the configured output-height
+            # ceiling. Playback-aware copy deliberately preserves the source.
+            assert int(video[0].get("height") or 0) <= 720, (
+                "output_height was configured to 720 and the encoded segment carries %r"
+                % video[0].get("height"))
 
         # --- the device's own account of who holds its tuners ----------------
         try:
