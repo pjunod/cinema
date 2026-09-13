@@ -613,33 +613,84 @@ private fun ImmersivePlaybackEffect() {
 }
 
 /**
- * A real failure state. The rescue in [Controller] has already been spent by
- * the time this shows, so the viewer gets the reason and a way out — never a
- * frozen black surface with a stream that will not come back.
+ * A blocking surface the viewer has to answer: the `exhausted` prompt or a
+ * `stopped` terminal (PLAYBACK-SURFACE-CONTRACT.md §3.1).
+ *
+ * Opaque, because the player behind it is stopped by the time this is drawn —
+ * the recovery owner stops it before raising, and the presenter refuses to
+ * render the fault at all otherwise. The transparent version of this view over
+ * a stream that was still playing is the defect the contract exists to close.
  */
 @Composable
 private fun PlaybackFailed(
-    message: String,
-    onRetry: (() -> Unit)?,
-    onExit: () -> Unit,
+    fault: PlaybackFault,
+    onAction: (SurfaceAction) -> Unit,
 ) {
-    val retryFocusRequester = remember { FocusRequester() }
-    RequestInitialFocus(retryFocusRequester, enabled = onRetry != null)
+    val firstFocusRequester = remember { FocusRequester() }
+    // Force transcode is the web's diagnosed-stall affordance; no Android owner
+    // offers it, so it is dropped rather than drawn as a button that does
+    // nothing.
+    val actions = fault.actions.filter { it != SurfaceAction.ForceTranscode }
+    RequestInitialFocus(firstFocusRequester, enabled = actions.isNotEmpty())
     Column(
-        Modifier.fillMaxSize(),
+        Modifier.fillMaxSize().background(Color.Black),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(message, color = Color.White)
+        fault.title?.let { title ->
+            Text(title, color = Color.White, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.size(8.dp))
+        }
+        fault.detail?.let { detail -> Text(detail, color = Color.White) }
         Spacer(Modifier.size(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (onRetry != null) {
+            actions.forEachIndexed { index, action ->
                 TvButton(
-                    onClick = onRetry,
-                    modifier = Modifier.focusRequester(retryFocusRequester),
-                ) { Text("Retry") }
+                    onClick = { onAction(action) },
+                    modifier = if (index == 0) {
+                        Modifier.focusRequester(firstFocusRequester)
+                    } else {
+                        Modifier
+                    },
+                ) { Text(surfaceActionLabel(action)) }
             }
-            TvButton(onClick = onExit) { Text("Back") }
+        }
+    }
+}
+
+/** Today's words for each action, moved rather than rewritten. */
+private fun surfaceActionLabel(action: SurfaceAction): String = when (action) {
+    SurfaceAction.KeepWaiting -> "Keep waiting"
+    SurfaceAction.Retry -> "Retry"
+    SurfaceAction.Close -> "Back"
+    SurfaceAction.SignIn -> "Sign in"
+    SurfaceAction.ForceTranscode -> "Force transcode"
+}
+
+/** The ledger's `surface_kind`. */
+private fun surfaceKindLabel(surface: PlaybackSurface): String = when (surface) {
+    is PlaybackSurface.None -> "None"
+    is PlaybackSurface.Indicator -> "Indicator"
+    is PlaybackSurface.Banner -> "Banner"
+    is PlaybackSurface.Blocking -> "Blocking"
+}
+
+/**
+ * The ledger's `surface_history`: newest first, so "what was that overlay" is
+ * answered by the first entry.
+ */
+private fun surfaceHistoryLine(rows: List<SurfaceLedgerRow>): String? {
+    if (rows.isEmpty()) return null
+    return rows.asReversed().joinToString("  |  ") { row ->
+        buildString {
+            append(row.cls.wire).append(" · ").append(row.source)
+            append(" · raised ").append(row.raisedAtMs).append(" ms → ")
+            append(row.clearedAtMs?.let { "${it} ms (${row.clearedBy ?: "cleared"})" } ?: "open")
+            if (row.disagreed) append(" · disagreement")
+            append(" · rate ").append(row.playerAtRaise.rate)
+            append(", ").append(row.playerAtRaise.positionMs).append(" ms")
+            append(", presenting ").append(row.playerAtRaise.presenting)
+            append(", stopped_by_owner ").append(row.playerAtRaise.stoppedByOwner)
         }
     }
 }
@@ -671,7 +722,6 @@ private fun PlayerContent(
         context.packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
     val scope = rememberCoroutineScope()
     val preferences by vm.preferences.collectAsStateWithLifecycle()
-    var playFailure by remember { mutableStateOf<String?>(null) }
     val controller = remember(plan) {
         // The decision and its session body must describe the same quality,
         // even if the stored preference changes between request and compose.
@@ -688,9 +738,15 @@ private fun PlayerContent(
             initialAudioOffsetMs = audioOffsetMs,
             retainedAudio = retainedAudio,
             retainedSubtitle = retainedSubtitle,
-            onError = { playFailure = it },
         )
     }
+    // The one surface, projected from the player by the presenter.
+    val surface by controller.surface.collectAsStateWithLifecycle()
+    // The input contract's `failed` state: a blocking surface with an answer
+    // the viewer has to give. A full-screen progress surface covers pixels,
+    // not routing (PLAYBACK-SURFACE-CONTRACT.md §4).
+    val blockingFault = surface.fault?.takeIf { surface.entersFailedRouting }
+    val bannerFault = (surface as? PlaybackSurface.Banner)?.fault
     val surfaceFocusRequester = remember { FocusRequester() }
     // Which grades this panel can show. Probed once per playback: it is a
     // property of the cable, and this screen owns one HDMI route for its life.
@@ -787,7 +843,7 @@ private fun PlayerContent(
     }
 
     fun inputState(): PlayerInputState = when {
-        playFailure != null -> PlayerInputState.Failed
+        blockingFault != null -> PlayerInputState.Failed
         panel == PlayerPanel.Info && statsMode != PlaybackStatsMode.Mini -> PlayerInputState.Info
         panel != null && panel != PlayerPanel.Info -> PlayerInputState.Menu
         // Chrome-hidden outranks the timeline flag. `hide` removes Controls
@@ -1117,20 +1173,15 @@ private fun PlayerContent(
             delay(500)
         }
     }
-    LaunchedEffect(controller.playbackNotice) {
-        val notice = controller.playbackNotice ?: return@LaunchedEffect
-        delay(5_000)
-        if (controller.playbackNotice == notice) controller.clearPlaybackNotice()
-    }
     LaunchedEffect(controller) {
         while (true) {
             delay(10_000)
             if (isPlaying) vm.reportProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs)
         }
     }
-    LaunchedEffect(lastInteraction, isPlaying, panel, pendingMs, playFailure) {
+    LaunchedEffect(lastInteraction, isPlaying, panel, pendingMs, blockingFault) {
         val miniInfo = panel == PlayerPanel.Info && statsMode == PlaybackStatsMode.Mini
-        if (isPlaying && (panel == null || miniInfo) && pendingMs == null && playFailure == null) {
+        if (isPlaying && (panel == null || miniInfo) && pendingMs == null && blockingFault == null) {
             delay(PlayerInputPolicy.HIDE_AFTER_MS)
             applyOutcome(
                 PlayerInputPolicy.route(
@@ -1226,7 +1277,7 @@ private fun PlayerContent(
             )
         }
 
-        if (!isInPip && playFailure == null) {
+        if (!isInPip && blockingFault == null) {
             Box(
                 Modifier.fillMaxSize().focusProperties { canFocus = false }.clickable(
                     interactionSource = remember { MutableInteractionSource() },
@@ -1261,7 +1312,7 @@ private fun PlayerContent(
             }
         }
 
-        if (!isInPip && controlsVisible && playFailure == null && activeMarker != null && pendingMs == null &&
+        if (!isInPip && controlsVisible && blockingFault == null && activeMarker != null && pendingMs == null &&
             !(preferences.autoSkip && activeMarker.isAutoSkipEligible)
         ) {
             TvButton(
@@ -1283,7 +1334,7 @@ private fun PlayerContent(
         }
 
         val miniInfo = panel == PlayerPanel.Info && statsMode == PlaybackStatsMode.Mini
-        if (!isInPip && controlsVisible && (panel == null || miniInfo) && playFailure == null) {
+        if (!isInPip && controlsVisible && (panel == null || miniInfo) && blockingFault == null) {
             Controls(
                 title = plan.title,
                 subtitle = plan.subtitle,
@@ -1362,7 +1413,7 @@ private fun PlayerContent(
             )
         }
 
-        when (if (isInPip || playFailure != null) null else panel) {
+        when (if (isInPip || blockingFault != null) null else panel) {
             PlayerPanel.Tracks -> TrackMenu(
                 player = controller.player,
                 serverAudio = plan.audio,
@@ -1433,17 +1484,34 @@ private fun PlayerContent(
             null -> Unit
         }
 
-        playFailure?.let { message ->
+        blockingFault?.let { fault ->
             PlaybackFailed(
-                message = message,
-                onRetry = {
-                    onReload(controller.prepareViewerRetry(), "fallback", playbackIntent.desiredQuality)
+                fault = fault,
+                onAction = { action ->
+                    // The reducer clears the fault the action belonged to; the
+                    // EFFECT of the action is the recovery owner's.
+                    controller.surfaceAction(action)
+                    when (action) {
+                        SurfaceAction.KeepWaiting -> controller.keepWaiting()
+                        SurfaceAction.Retry -> onReload(
+                            controller.prepareViewerRetry(),
+                            "fallback",
+                            playbackIntent.desiredQuality,
+                        )
+                        SurfaceAction.Close -> onExit()
+                        // The credential the server refused is the one this app
+                        // is holding; dropping it lands on the sign-in screen.
+                        SurfaceAction.SignIn -> {
+                            vm.logout()
+                            onExit()
+                        }
+                        SurfaceAction.ForceTranscode -> Unit
+                    }
                 },
-                onExit = onExit,
             )
         }
 
-        controller.playbackNotice?.let { notice ->
+        (bannerFault?.detail ?: bannerFault?.title)?.let { notice ->
             Text(
                 text = notice,
                 color = Color.White,
@@ -1859,6 +1927,11 @@ private fun PlayerInfo(
     onDismiss: () -> Unit,
 ) {
     val player = controller.player
+    // The ledger's SURFACE section. The history ring is not Compose state; the
+    // collected surface is, and every row in the ring arrives with a surface
+    // change, so reading it here recomposes with the answer.
+    val surface by controller.surface.collectAsStateWithLifecycle()
+    val surfaceFault = surface.fault
     val selectedAudio = player.audioFormat?.let(::audioLabel)
         ?: plan.audio.firstOrNull { it.index == controller.selectedAudio }?.let(::serverAudioLabel)
         ?: plan.audio.firstOrNull { it.default }?.let(::serverAudioLabel)
@@ -1935,6 +2008,13 @@ private fun PlayerInfo(
             sessionStatus = controller.sessionStatus,
             playerState = playerStateLabel(player),
             control = controller.currentSessionId?.let { "Client reporting active" },
+            surfaceKind = surfaceKindLabel(surface),
+            surfaceClass = surfaceFault?.cls?.wire,
+            surfaceSource = surfaceFault?.source,
+            surfaceIds = surfaceFault?.let { fault ->
+                "${fault.attached} / ${fault.intent?.toString() ?: "—"}"
+            },
+            surfaceHistory = surfaceHistoryLine(controller.surfaceHistory),
         ),
         reasons = plan.reasons,
         mode = mode,
@@ -1991,6 +2071,12 @@ internal data class PlaybackInfoDetails(
     val sessionStatus: PlaybackSessionStatus? = null,
     val playerState: String = "Unknown",
     val control: String? = null,
+    /** SURFACE: what is drawn over the picture, and why (contract §5). */
+    val surfaceKind: String = "None",
+    val surfaceClass: String? = null,
+    val surfaceSource: String? = null,
+    val surfaceIds: String? = null,
+    val surfaceHistory: String? = null,
 )
 
 internal data class PlaybackWaitPresentation(
@@ -2813,6 +2899,30 @@ internal fun playbackInfoRows(
         InfoRow("published_end", "Published end", "SERVER", setOf(PlaybackStatsMode.Debug), status?.published_end_ms?.let { "$it ms" }),
         InfoRow("fetched_end", "Fetched end", "SERVER", setOf(PlaybackStatsMode.Debug), status?.fetched_end_ms?.let { "$it ms" }),
         InfoRow("control", "Control", "SERVER", StandardAndDebug, details.control),
+        InfoRow("surface_kind", "Surface", "SURFACE", StandardAndDebug, details.surfaceKind),
+        InfoRow("surface_class", "Fault", "SURFACE", StandardAndDebug, details.surfaceClass),
+        InfoRow(
+            "surface_source",
+            "Source",
+            "SURFACE",
+            setOf(PlaybackStatsMode.Debug),
+            details.surfaceSource,
+        ),
+        InfoRow(
+            "surface_ids",
+            "Attached/intent",
+            "SURFACE",
+            setOf(PlaybackStatsMode.Debug),
+            details.surfaceIds,
+        ),
+        InfoRow(
+            "surface_history",
+            "History",
+            "SURFACE",
+            setOf(PlaybackStatsMode.Debug),
+            details.surfaceHistory,
+            placement = "notes",
+        ),
     )
 }
 
@@ -2822,7 +2932,15 @@ internal fun playbackInfoSections(
     mode: PlaybackStatsMode,
 ): List<PlaybackStatSection> {
     val rows = playbackInfoRows(details, reasons).filter { mode in it.modes && it.value != null }
-    return listOf("PLAYBACK", "SOURCE", "NOW DECODING", "BUFFERING / DELIVERY", "NETWORK", "SERVER").map { section ->
+    return listOf(
+        "PLAYBACK",
+        "SOURCE",
+        "NOW DECODING",
+        "BUFFERING / DELIVERY",
+        "NETWORK",
+        "SERVER",
+        "SURFACE",
+    ).map { section ->
         PlaybackStatSection(
             section,
             rows.filter { it.section == section }.flatMap { row ->

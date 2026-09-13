@@ -81,6 +81,11 @@ class PlaybackInfoContractTest {
         ),
         playerState = "Playing",
         control = "node-a · active",
+        surfaceKind = "Blocking",
+        surfaceClass = "stopped",
+        surfaceSource = "owner_stopped",
+        surfaceIds = "3 / —",
+        surfaceHistory = "stopped · owner_stopped · raised 1000 ms → open",
     )
 
     @Test
