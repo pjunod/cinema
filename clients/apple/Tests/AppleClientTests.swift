@@ -3865,6 +3865,161 @@ final class AppleClientTests: XCTestCase {
         XCTAssertTrue(model.entersFailedRouting)
     }
 
+    // MARK: - The banner is not a dead end
+
+    /// §3.1's `banner` is "a notice strip with **the fault's actions**", and
+    /// `refused` is the class whose entire point is that the predecessor keeps
+    /// playing while the change the viewer asked for did not. A sentence with
+    /// no Try again is the outcome physical recipe (b) forbids.
+    func testARefusedBannerOffersTheActionThatReIssuesTheChange() throws {
+        let origin = ContinuousClock.now
+        var model = PlaybackSurfaceModel()
+        model.apply(.attach(1), now: origin)
+        model.apply(
+            PlaybackSurfaceModel.raise(
+                source: "change_failed", context: .change, attached: 1, intent: 7,
+                title: "Playback could not start", detail: "the transcoder is busy"
+            ),
+            now: origin
+        )
+        let surface = model.surface
+        XCTAssertEqual(surface.cls, .refused)
+        XCTAssertEqual(surface.kind, .banner)
+        XCTAssertEqual(
+            PlayerView.renderedActions(for: surface), [.retry],
+            "a refusal the viewer can answer is the whole of what this class offers"
+        )
+        XCTAssertEqual(
+            PlayerView.bannerMessage(for: surface), "the transcoder is busy",
+            "the server's own sentence, not the client's heading"
+        )
+        // And Close is NOT invented for it: the picture behind a banner is the
+        // viewer's film, and a Close here ends playback that is fine.
+        XCTAssertFalse(PlayerView.renderedActions(for: surface).contains(.close))
+        XCTAssertEqual(
+            PlayerView.failureActions(for: surface), [.retry, .close],
+            "the guaranteed way out belongs to the full screen, and still does"
+        )
+        // One renderer and one label source, so Try Again cannot come to mean
+        // two things.
+        let view = try playerViewSource()
+        XCTAssertEqual(
+            view.components(separatedBy: "failureActionButton(action)").count - 1, 2,
+            "the banner and the full screen draw actions through the same button"
+        )
+        XCTAssertTrue(view.contains("Self.renderedActions(for: surface)"))
+        XCTAssertFalse(
+            view.contains("Text(message)\n            .font"),
+            "the banner is no longer a bare Text with no way out"
+        )
+    }
+
+    /// §3.2's demotion keeps the fault's actions precisely so the viewer still
+    /// gets the specific recovery when the buffer drains — and it rewrites the
+    /// title, so the strip has to say the picture came back rather than repeat
+    /// what failed.
+    func testADemotedBannerSaysPlaybackRecoveredAndKeepsItsActions() {
+        let origin = ContinuousClock.now
+        var model = PlaybackSurfaceModel()
+        model.apply(.attach(1), now: origin)
+        model.apply(
+            PlaybackSurfaceModel.raise(
+                source: "media_owner_lost_410", context: .attached, attached: 1,
+                positionMs: 42_000, detail: "this stream is no longer running"
+            ),
+            now: origin
+        )
+        model.apply(
+            PlaybackSurfaceModel.raise(
+                source: "owner_stopped", context: .attached, attached: 1, playerStopped: true
+            ),
+            now: origin
+        )
+        XCTAssertEqual(model.currentFault?.cls, .stopped, "the owner's stop promoted it")
+        // …and then the picture moves anyway. §3.2: the picture wins.
+        model.apply(.presenting(true, attached: 1), now: origin.advanced(by: .seconds(1)))
+        let surface = model.surface
+        XCTAssertEqual(surface.cls, .degraded)
+        XCTAssertEqual(surface.kind, .banner)
+        XCTAssertTrue(surface.isDemoted)
+        XCTAssertEqual(
+            PlayerView.bannerMessage(for: surface), PlaybackSurfaceModel.recoveredTitle,
+            "the strip says the picture came back, not the thing that failed"
+        )
+        XCTAssertEqual(
+            surface.detail, "this stream is no longer running",
+            "and the failure sentence is still on the fault for the ledger"
+        )
+        XCTAssertEqual(
+            PlayerView.renderedActions(for: surface), [.retry, .close],
+            "the whole point of the demotion is that the fault's actions survive it"
+        )
+        // Both are the FAULT's, carried through the promotion to `stopped` and
+        // then through the demotion — not a Close this banner invented. The
+        // presenter does not second-guess the owner about what a fault offers;
+        // §3.1 says actions are a property of the fault. `refused` above proves
+        // the other half: a banner adds nothing of its own.
+        XCTAssertEqual(surface.actions, [.retry, .close])
+        XCTAssertEqual(surface.positionMs, 42_000, "and reopens where the viewer was")
+    }
+
+    /// One fault, one overlay. The banner was gated on "not blocked" rather
+    /// than on the kind, so an `indicator` drew the in-chrome capsule AND the
+    /// strip at once.
+    func testAnIndicatorDrawsTheCapsuleAndNotTheBannerText() throws {
+        let origin = ContinuousClock.now
+        var model = PlaybackSurfaceModel()
+        model.apply(.attach(1), now: origin)
+        model.apply(.presenting(true, attached: 1), now: origin)
+        // Raised a second into a run of presentation that began BEFORE it:
+        // `recovering` retires on presentation that POSTDATES the raise, so a
+        // rung raised in the same instant as the evidence is swept by it. An
+        // indicator is what a rung over an already-moving picture looks like.
+        model.apply(
+            PlaybackSurfaceModel.raise(
+                source: "owner_recovery_step", context: .attached, attached: 1,
+                detail: "Dolby Vision did not start. Retrying…"
+            ),
+            now: origin.advanced(by: .seconds(1))
+        )
+        let surface = model.surface
+        XCTAssertEqual(surface.kind, .indicator, "the picture is presenting behind it")
+        XCTAssertEqual(PlayerController.progressRender(for: surface), .indicator)
+        // The view asks for the banner by KIND, and an indicator is not one.
+        let view = try playerViewSource()
+        let start = try XCTUnwrap(view.range(of: "private var playbackBannerSurface: PlaybackSurface? {"))
+        let end = try XCTUnwrap(
+            view.range(of: "\n    }\n", range: start.upperBound..<view.endIndex)
+        )
+        let body = String(view[start.upperBound..<end.lowerBound])
+        XCTAssertTrue(
+            body.contains("guard surface.kind == .banner else { return nil }"),
+            "the strip is the banner kind and nothing else"
+        )
+        XCTAssertFalse(
+            body.contains("isPlaybackBlocked"),
+            "asking whether the viewer was blocked is what drew two overlays for one fault"
+        )
+        // Every kind, and exactly one render each.
+        for cls in PlaybackFault.Class.allCases {
+            for kind in PlaybackSurface.Kind.allCases {
+                let probe = PlaybackSurface(
+                    kind: kind,
+                    fault: kind == .none ? nil : PlaybackFault(
+                        cls: cls, source: "owner_recovery_step", attached: 1,
+                        raisedAt: origin, detail: "why", playerStopped: true
+                    )
+                )
+                let drawsBanner = kind == .banner
+                let drawsProgress = PlayerController.progressRender(for: probe) != nil
+                XCTAssertFalse(
+                    drawsBanner && drawsProgress,
+                    "\(kind) × \(cls) draws two overlays for one fault"
+                )
+            }
+        }
+    }
+
     /// The adapter, pinned — because the reducer cannot pin this.
     ///
     /// `.inert` returns before the reducer's switch, so a model test fed inert
