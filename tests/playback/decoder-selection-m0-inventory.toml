@@ -80,7 +80,7 @@ obligation = "replace substring latching with bounded selected-stream diagnostic
 id = "process.live_tv_graph_probe"
 kind = "support_process"
 source = "crates/plurxd/src/live_tv.rs"
-anchor = "async fn run_graph_probe(\n    ffmpeg: &str,"
+anchor = "async fn run_graph_probe(\n    encoder: Encoder,"
 obligation = "bind graph readiness to exact build, device, encoder, renderer, and output surface without qualifying arbitrary media"
 
 [[surfaces]]
