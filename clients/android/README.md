@@ -20,8 +20,13 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `89` — native viewer parity across phone, foldable,
-> and TV. Build 89 gives Live TV the web page's proportions on Google TV and on
+> Status: **v0.3.0**, build `90` — native viewer parity across phone, foldable,
+> and TV. Build 90 adds recording and reminders to the guide: every cell offers
+> Record, Record series and Remind me beside Watch, the grid marks what is
+> already asked for from one marks read per visible window rather than a lookup
+> per cell, a Recordings row sits on Home and plays finished captures through
+> the ordinary VOD path, and armed reminders are mirrored into `AlarmManager`
+> so a sleeping phone still fires. Build 89 gives Live TV the web page's proportions on Google TV and on
 > the phone: one explicit ten-foot type scale, one 24 dp toolbar, a guide whose
 > slot width is derived from the width it is given so two hours always fit, a
 > 310 dp On now column beside a focusable picture whose Select is fullscreen,
