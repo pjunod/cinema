@@ -1,10 +1,13 @@
 # Playback surface contract — the overlay is a projection of the player, not a message
 
-**Status:** ruled 2026-09-13, ready to build (§9) · **Investigated at:**
-`main` @ `10f2afe6` · **Source of truth once built:**
-`tests/playback/playback-surface-contract.json` · **Kept honest by:**
-`tests/playback/playback-surface-contract.test.js` (web), a fixture test per
-native client, and `scripts/playback-surface-fence` (see §5)
+**Status:** v2, 2026-09-13 — ruled (§9), reviewed
+([review](PLAYBACK-SURFACE-CONTRACT-REVIEW.md) ·
+[response](PLAYBACK-SURFACE-CONTRACT-REVIEW-RESPONSE.md)), ready to build
+([implementation](PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md)) ·
+**Investigated at:** `main` @ `10f2afe6`, evidence re-checked at `a124876` ·
+**Source of truth once built:** `tests/playback/playback-surface-contract.json` ·
+**Kept honest by:** `tests/playback/playback-surface-contract.test.js` (web), a
+fixture test per native client, and `scripts/playback-surface-fence` (§5)
 
 Companion to [PLAYER-INPUT-CONTRACT.md](PLAYER-INPUT-CONTRACT.md) (what a
 press does) — this is *what the viewer is shown when playback is not simply
@@ -12,10 +15,20 @@ playing, on every client, and when it goes away*. Same shape as that contract,
 for the same reason: the fault surfaces diverged per client because every
 call site answered the question for itself.
 
-The one-sentence version: **a failure-shaped event becomes a typed fault, the
-fault's severity picks the surface, a blocking surface is only ever shown over
-a player the presenter itself has stopped, and evidence that the picture is
-moving retires any fault that claimed it wasn't.**
+The one-sentence version: **recovery owns the player and the presenter owns
+the pixels — a failure-shaped event becomes a typed fault, the fault's class
+picks the surface, a blocking surface is rendered only over a player its
+recovery owner has already stopped, and the player's own presentation
+evidence retires any fault that claimed the picture wasn't moving.**
+
+What changed in v2 (after the adversarial review): the presenter has **no
+side effects**. v1 had it pause the player when raising a blocking surface,
+which made the overlay a recovery actor and contradicted the thesis. Now the
+recovery owner — the client's existing ladder — stops the player when it
+declares exhaustion, and the presenter merely renders that. Faults carry two
+identities (attached media, requested intent), evidence is each client's
+existing presentation proof rather than a bare clock, and the source table has
+a precedence rule.
 
 ---
 
@@ -34,11 +47,11 @@ symptom Paul described:
 
 | Missing property | Symptom |
 |---|---|
-| Raising a blocking surface does not stop the player | overlay over a moving picture |
-| Progress evidence does not retire the surface | overlay stays after playback resumed |
-| A fault carries no severity or generation | "not yet" answers, automatic quality changes and stale refusals all get the same full screen |
+| Raising a blocking surface is not tied to the player being stopped | overlay over a moving picture |
+| Presentation evidence does not retire the surface | overlay stays after playback resumed |
+| A fault carries no class, no identity, no generation | "not yet" answers, automatic quality changes and stale refusals all get the same full screen |
 
-The fix is therefore not to patch the call sites — there are 37 on the web, 12
+The fix is therefore not to patch the call sites — there are 35 on the web, 12
 on Apple, 8 on Android — but to take the decision away from them, the way the
 input contract took key handling away from the views.
 
@@ -46,25 +59,28 @@ input contract took key handling away from the views.
 
 ## 2. What the code does today
 
-Every claim below was checked against the source at `10f2afe6`. Line numbers
-will drift; the function names will not.
+Every claim below was checked against the source at `10f2afe6` and re-checked
+by the adversarial review at `a124876`. Line numbers are from `10f2afe6` and
+will drift; the function names will not. "Reachable" means the mechanism
+exists and its guards can pass, not that every reported incident took it.
 
 ### 2.1 Web — `#ploading` is loading, buffering, failure and prompt in one element
 
 - The only full-screen surface is `#ploading` (`index.html:3404`, CSS 535-537).
   `setLoading(on,text,sub,actionHtml)` (`index.html:10998`) paints text into
-  it directly from **37 call sites**; severity exists only as an ad-hoc
+  it directly from **35 call sites**; severity exists only as an ad-hoc
   combination of "buttons present", a `failed` class (added at exactly four
   sites: 4076, 6994, 10962, 11611) and `PLAYER.stallPrompt`. No CSS rule
   targets `.ploading.failed` — the spinner keeps spinning on every failure.
 - **A fatal hls.js error never pauses the video.** hls.js only calls
-  `stopLoad()`; the handler (`6984-6995`) paints "Still preparing this
-  stream…" or "Playback failed to start (fragLoadError)" while the `<video>`
-  plays out up to 30 s of forward buffer. No `stallPrompt` is set, so when the
-  buffer drains `waiting` repaints "Buffering…" (which also strips `failed`,
-  `11002`), `persistentWait` reopens 8 s later and `playing` clears
-  everything. Net: error over a moving picture → silently becomes
-  Buffering → resumes.
+  `stopLoad()`; the generic and explained branches of the handler
+  (`6984-6995`) paint "Still preparing this stream…" or "Playback failed to
+  start (fragLoadError)" while the `<video>` plays out up to 30 s of forward
+  buffer. Neither sets `stallPrompt`, so when the buffer drains `waiting`
+  repaints "Buffering…" (which also strips `failed`, `11002`) and
+  `persistentWait` may reopen 8 s later — the recovering-stall branch
+  (`6933`) and `persistentWait`'s own guards (`3932-3936`) take other paths,
+  so the sequence is reachable, not universal.
 - **A failed stream change is sticky over a playing predecessor.**
   `executePlaybackMediaChange` deliberately keeps the predecessor playing
   until the create succeeds (`9513-9515`) and, on failure, retains
@@ -73,8 +89,10 @@ will drift; the function names will not.
   `waiting` (11527) and the progress tick all return early: "Playback could
   not reconnect." sits over a stream that is still playing until Try again or
   Close. `failPreparation` (`9039`) has the same shape.
-- **`STREAM_FAILURE` is time-keyed, not generation-keyed.** Every ≥400 body
-  hls.js sees is recorded (`6793`), including a segment 503 that hls.js then
+- **`STREAM_FAILURE` is time-keyed, not attempt-keyed.** Every ≥400 response
+  with a legible `{code|error, message}` body that hls.js sees is recorded
+  (`6793`; `parseStreamFailure` rejects malformed or empty bodies,
+  `playback-policy.js:695-706`), including a segment 503 that hls.js then
   retries successfully. `attachHls` clears it on every attach (`6746-6748`)
   and `LEVEL_LOADED` clears only *retryable* codes (`clearStreamFailureFor`,
   `6680-6685`); a VOD playlist is never reloaded, a terminal 4xx is never
@@ -88,8 +106,10 @@ will drift; the function names will not.
   HEVC and `STALL_MIN_MS=350` exists for exactly that — but the `waiting`
   handler (`11526-11535`) paints "Buffering…" full-screen in the same tick,
   before the wait has lasted anything; only the *counting* is debounced.
-- **Automatic quality changes dim the whole picture.** Every non-direct seek,
-  Auto downshift, decode rescue and subtitle burn goes through
+- **Session-opening changes dim the whole picture.** Direct-play and VOD
+  seeks are native (`v.currentTime=`, `11768`) and paint nothing; every
+  change that opens a session — a seek on a growing session, an Auto
+  downshift, a decode rescue, a subtitle burn — goes through
   `executePlaybackMediaChange`, which paints "Preparing the stream…" over the
   still-playing predecessor (`9515`).
 - The `failed` input state is read back *from the DOM class*
@@ -104,43 +124,52 @@ will drift; the function names will not.
   `failureView` (`PlayerView.swift:1447-1477`) shows on `failed`; the red
   banner shows `playbackNotice ?? playbackError ?? pip.errorMessage`
   (`PlayerView.swift:1038`) whenever `!failed`.
-- `fail(_:)` (`PlayerController.swift:4758-4766`) is the writer for every
-  decision, create and readiness failure. It never pauses the player, and it
-  chooses the blocking surface with `failed = player.currentItem == nil ||
-  error is PlaybackPreparationError` — "is an item attached", not "is the
-  player stopped". The other blocking writers — `handleItemFailure`
-  (`5240`), the stall `.stop` (`4258`), the server `terminal` (`4389`), the
-  repeated early end (`5032`) and the HDR rung (`5942`) — do
-  `player.pause()` first: Apple already has the pause-before-block property
-  on those paths, and lacks it only here.
-- **The 15 s readiness deadline is a full-screen stop over a running
+- `fail(_:)` (`PlayerController.swift:4758-4766`) is the writer for decision,
+  create and readiness failures. It never pauses the player, and it chooses
+  the blocking surface with `failed = player.currentItem == nil || error is
+  PlaybackPreparationError` — "is an item attached", not "is the player
+  stopped". The other blocking writers — `handleItemFailure` (`5240`), the
+  stall `.stop` (`4258`), the server `terminal` (`4389`), the repeated early
+  end (`5032`) and the HDR rung (`5942`) — do `player.pause()` first: Apple
+  already has the stop-before-block property on those paths, and lacks it
+  only in `fail()`. Node-failover readiness errors are swallowed rather than
+  surfaced (`5384` at `a124876`).
+- **A readiness deadline can become a full-screen stop over a running
   player.** `awaitItemReady` (`6073-6086`) throws
-  `PlaybackPreparationError.timedOut`; `reopen()`'s catch (`3284-3292`) and
-  `load()`'s (`3248-3256`) call `fail()`, which sets `failed = true` because
-  the error is a `PlaybackPreparationError` — while `player.play()` (`3655`)
-  stands. Scope, precisely: the deadline is on `seekWhenReady`, i.e. every
-  VOD resume or seek and every copy session whose keyframe lead-in needs a
-  seek (`sessionAttachSeekMs`); a fresh VOD start is bounded separately
-  (`shouldBoundFreshStartReadiness`, `1625-1632`) and walks the
-  compatibility ladder before failing; a transcode's origin equals its
-  request, so a cold transcode never hits it. On the paths that do, an item
-  that readies after 15 s plays behind a black view; the periodic observer
-  keeps advancing `currentMs` and Now Playing; the recovery monitor is off
-  (`!failed`, `4125`).
-- **Nothing clears `playbackError` on progress.** The only clear sites are
-  `start`/`startOffline` (2141, 2245), `restartInitialDecision` (3152),
-  `retryAfterPlaybackFailure` (2447), `open()` entry (3356) and post-attach
-  (2368, 3718). The periodic observer (`4916-4988`) touches neither field. A
+  `PlaybackPreparationError.timedOut` after 15 s; `reopen()`'s catch
+  (`3284-3292`) and `load()`'s (`3248-3256`) call `fail()`, which sets
+  `failed = true` because the error is a `PlaybackPreparationError` — while
+  `player.play()` (`3655`) stands. Scope: the deadline is on `seekWhenReady`
+  (every resume or seek that is *not* a native in-item seek — native VOD seeks
+  go through `player.seek` without it, `2673` at `a124876` — and every copy
+  session whose keyframe lead-in needs a seek) and on
+  `shouldBoundFreshStartReadiness` (`1625-1632`: a fresh VOD start from 0
+  that resumes playback, transcodes included), where
+  `retryAfterReadinessTimeout` walks the compatibility ladder *before*
+  `fail()`. On the paths that reach `fail()`, an item that readies after the
+  deadline plays behind a black view; the periodic observer keeps advancing
+  `currentMs` and Now Playing; the recovery monitor is off (`!failed`,
+  `4125`).
+- **Nothing clears `playbackError` on progress.** `playbackError = nil` is
+  written only by `start`/`startOffline` (2141, 2245),
+  `restartInitialDecision` (3152), `retryAfterPlaybackFailure` (2447) and
+  `open()` entry (3356); the post-attach sites (2368, 3718) clear `failed`
+  only. The periodic observer (`4916-4988`) touches neither field. A
   session-create failure during a seek or quality change leaves "Server
   returned 503" in the banner over a stream `restoreAfterFailedChange`
   (`3766-3782`) has resumed — until the next `open()`, which may be never.
-- **Refusal bodies are discarded.** `PlurxAPI.check` (`PlurxAPI.swift:192-205`)
-  decodes `{code,message}` only for 409. A 503 `startup_timeout` or
+- **Refusal bodies are discarded, and AVFoundation never had them.**
+  `PlurxAPI.check` (`PlurxAPI.swift:192-205`) decodes `{code,message}` only
+  for 409 — that covers session *create*. Playlist and segment refusals are
+  fetched by AVFoundation, which surfaces only the status code through the
+  item's error log (`errorStatusCode`), never the body; `handleItemFailure`
+  reads that log (`5141`). So a 503 `startup_timeout` or
   `media_owner_transition` — documented as "retry" in
   [`PLAYBACK.md`](../PLAYBACK.md) — reaches the viewer as `APIError.http(503)`
-  ("Server returned 503") on create, or as AVFoundation's generic
-  `item.error` text after the item fails; 410 `media_owner_lost` is 4xx →
-  straight to fatal with its `film_position_ms` unread.
+  ("Server returned 503") on create, or, after the item fails, as a transport
+  class that tries failover and the established-HDR retry (`5300`) before
+  becoming terminal with AVFoundation's generic text. 410 `media_owner_lost`
+  is 4xx → fatal, its `film_position_ms` unread.
 - The iOS lock-screen `playCommand` (`6898-6906`) calls `player.play()`
   directly and resumes audio under the failure view; `togglePlayPause` is
   routed and correctly `ignore`d in `.failed`.
@@ -148,28 +177,33 @@ will drift; the function names will not.
   `PlayerSurface.swift:176-180`) clears on a later PiP start, on
   `isPictureInPicturePossible` and on `toggle()` — PiP events, never
   playback ones.
+- The pre-start black-frame ladder (`handleBlackFrameDecodeFailure`, `6092`
+  at `a124876`) exhausts by *doing nothing*: audio keeps playing over a
+  black picture with no surface at all. Progress in the clock is not
+  progress in the picture there.
 
-### 2.3 Android — `playFailure` is set nine ways and cleared none
+### 2.3 Android — `playFailure` is set eight ways and cleared none
 
 - `playFailure` is `remember { mutableStateOf<String?>(null) }`
   (`PlayerScreen.kt:674`), written by `onError = { playFailure = it }`
-  (`691`) from nine Controller sites, and **never set back to null** — the
+  (`691`) from eight Controller sites, and **never set back to null** — the
   only dismissal is `PlayerContent` leaving composition (Retry → reload,
   or Exit). `onError` is `(String) -> Unit` (`Controller.kt:130`): no
-  severity, code, retryability or "player still running" bit crosses it.
+  class, code, retryability or "player still running" bit crosses it.
 - `PlaybackFailed` (`PlayerScreen.kt:621-645`) is a transparent
   `Column(fillMaxSize)` with no background: the video keeps rendering behind
   the text. It is blocking only by gating — chrome and tap surface removed,
   input state `Failed`, in which the contract routes play/pause to `ignore`
   — so the viewer cannot even pause the stream still playing beneath it.
-- **`Fail` never pauses, and the stall watchdog restarts the stream under
+- **`Fail` never pauses, and the stall watchdog can restart the stream under
   the overlay.** `onPlayerError` → `PlaybackErrorAction.Fail` → `onError`
   (`653-661`) leaves `playWhenReady` true; `stallWatchdogJob` (`816-846`) is
   cancelled only in `release()`. ExoPlayer sits in `STATE_IDLE` with a frozen
-  position, `openStallTracker` fires after 8 s, `onStall` (`1428-1460`)
-  passes every guard and calls `restartAt`/`reopenAfterStall`. Playback
-  resumes; `playFailure` stays. This is the literal "stopped and then
-  resumed even though the overlay is still there".
+  position; if the app is foreground with no pending seek (`825-826`), the
+  tracker fires after 8 s, `onStall` (`1428-1460`) checks intent and budget
+  and calls `restartAt`/`reopenAfterStall`. Playback resumes; `playFailure`
+  stays. Reachable, not inevitable — and the literal shape of "stopped and
+  then resumed even though the overlay is still there".
 - Paths B–G (session create failed `1281`, stall reopen failed `1544`,
   terminal verdict `1337`, sessionless second stall `1444`, budget exhausted
   `1457`, target deadline `2174`) never stop ExoPlayer at all; B in
@@ -177,20 +211,21 @@ will drift; the function names will not.
 - **Refusal bodies are never read.** A playlist/segment 503 becomes
   `ERROR_CODE_IO_BAD_HTTP_STATUS` after ExoPlayer's default retries, is
   tried once on another ingress if the cluster has one
-  (`retryMediaOnNextNode`, `553`), and then goes to `Fail` ("Playback
-  stopped (ERROR_CODE_IO_BAD_HTTP_STATUS)."); the web
-  shows "Still preparing this stream…" for the same answer. Session-create
-  exceptions are not classified (`AppViewModel.kt:791-798`).
-  `BEHIND_LIVE_WINDOW` (1002) also goes to `Fail` (`PlaybackPolicy.kt:77`).
-- No test references `onError`, `playFailure`, `playbackNotice` or
-  `PlaybackFailed`.
+  (`retryMediaOnNextNode`, `553`), may take the established-HDR retry
+  (`PlaybackPolicy.kt:72`), and then goes to `Fail` ("Playback stopped
+  (ERROR_CODE_IO_BAD_HTTP_STATUS)."); the web shows "Still preparing this
+  stream…" for the same answer. Session-create exceptions are not classified
+  (`AppViewModel.kt:791-798`). `BEHIND_LIVE_WINDOW` (1002) also reaches
+  `Fail` (`PlaybackPolicy.kt:77`).
+- No Android test references `onError`, `playFailure`, `playbackNotice` or
+  `PlaybackFailed` (Apple's `AppleClientTests` does pin `playbackNotice`).
 - **Field evidence, 2026-09-13.** Paul's Android tablet, mid-film: "Playback
   stopped (ERROR_CODE_IO_BAD_HTTP_STATUS)." with Retry / Back, the picture
   visibly still playing behind the transparent overlay
-  ([photo](../img/android-bad-http-status-overlay-20260913.jpg)). That is
-  path A end to end: an HTTP refusal whose body was never read, `Fail`
-  without a pause, and the stall watchdog's restart under a `playFailure`
-  nothing can clear.
+  ([photo](../img/android-bad-http-status-overlay-20260913.jpg)). The
+  overlay and its transparency are what the photo proves; the watchdog
+  restart is the plausible reason the picture moves, not a logged one — the
+  Surface ledger (§5) exists so the next photo comes with its cause.
 
 ### 2.4 The common shape
 
@@ -198,281 +233,332 @@ will drift; the function names will not.
  TODAY                                     PROPOSED
  ─────                                     ────────
  event ──▶ call site decides ──▶ view      event ──▶ ADAPTER ──▶ PRESENTER ──▶ SURFACE
-           text · full-screen?             (raw → fault)  (fault × player evidence
-           buttons? failed flag?                          → surface; pauses player
-           (37 / 12 / 8 sites)                            for blocking; clears on
-                                                          progress; generation-keyed)
- player ──▶ nothing ties the two            player ──▶ evidence ───┘
+           text · full-screen?             (raw → fault    (pure: faults ×      #ploading / banner /
+           buttons? failed flag?            + identities)   evidence → surface)  failureView / indicator
+           (35 / 12 / 8 sites)                                   ▲               rendered FROM state
+ player ──▶ progress callbacks exist,      RECOVERY OWNER ───────┘
+            but no site is told the       (ladders, budgets, pause/stop —
+            surface it painted is stale    unchanged; declares exhaustion)
 ```
 
 Nothing in the left column is a *wrong* decision in isolation — each site was
 written for one fault and is defensible for it. The defect is that the
-decision is made at the site, so the sites disagree, and none of them is
-told what the player did next.
+decision is made at the site, so the sites disagree, and no site learns that
+the surface it painted has gone stale.
 
 ---
 
 ## 3. The contract
 
-### 3.1 Faults — a closed set of classes, each with one severity
+### 3.0 Two owners, one rule each
 
-A **fault** is `{class, source, generation, at, title?, detail?, retryable?,
-position_ms?}`. `class` is one of the rows below; `source` is the raw event
-that produced it (§3.3), kept for the ledger; `generation` is the open
-generation / media-change epoch it was observed on. Severity is a property of
-the class, never chosen at the call site.
+**The recovery owner owns the player.** It is whatever code decides
+reopens, fallbacks, failover and budgets today — `persistentWait` and the
+hls.js/`<video>` error handlers on the web, `handleItemFailure` /
+`retrySameDeliveryAfterStall` / the compatibility ladder on Apple,
+`onPlayerError` / `onStall` / the target deadline on Android. Nothing about
+it changes in M0–M4. It gains exactly one obligation: **when it has nothing
+left to try, it stops the player and says so** (raises an `exhausted` fault)
+— which five of its six Apple paths already do (§2.2).
 
-| Class | Severity | Surface | Pauses player? | Cleared by |
+**The presenter owns the pixels.** It is a pure function of (faults,
+evidence, identities) → surface. It never pauses, resumes, reopens, cancels a
+timer or reports to the control plane. Every side effect v1 gave it is gone:
+that is the whole of the review's first and third blockers, and it is also
+what makes the reducer testable row by row.
+
+### 3.1 Faults — a closed set of classes
+
+A **fault** is:
+
+```
+{ class, source, attached: <media generation>, intent: <request id>,
+  raised_at, position_ms?, title?, detail?, actions: [...], expires? }
+```
+
+`class` is one of the rows below. `source` is the raw event that produced it
+(§3.3), kept for the ledger. `attached` is the media generation the fault is
+*about* (web `p._seekToken`/open attempt, Apple `openGeneration`, Android
+`mediaMutationEpoch`); `intent` is the viewer's request it belongs to, when
+it belongs to one (a seek, a quality change — web `controlSeek`, Apple
+`viewerActionEpoch`, Android `PlaybackIntent.sequence`). A fault about a
+*pending destination* has an `intent` and is retired only by that intent
+settling or being superseded; a fault about the *attached media* has no
+`intent` and is retired by that media's evidence. That distinction is the
+review's second blocker: a predecessor moving does not forgive a replacement
+that failed.
+
+| Class | Severity | Surface | Who stopped the player | Retired by |
 |---|---|---|---|---|
-| `preparing` | progress | spinner + stage text — full-screen while the picture is not moving (a cold start, a seek out of buffer); the small in-chrome indicator while it is (a change prepared behind a playing predecessor) | no | progress on this generation |
-| `buffering` | progress | same rule, and raised only once the wait has *lasted* `STALL_MIN_MS` (350 ms) — a frozen picture gets the full-screen spinner it gets today, a Safari segment boundary gets nothing | no | progress |
-| `recovering` | progress | same rule, with the reason ("Reconnecting…", "Switching quality…"): in-chrome while the predecessor still moves, full-screen once it does not | no | progress on the new generation |
-| `hold` | notice | banner, timed (30 s), server sentence | no | timer · progress |
-| `degraded` | notice | banner, timed (5 s): HDR-subtitle, PGS, PiP, Auto downshift, subtitle fell back | no | timer |
-| `refused` | notice | banner, untimed: a change the viewer asked for could not be made and the previous stream continues ("Couldn't switch quality — still playing 1080p"); the viewer re-issues the change from the menu, no new control | no | next successful change · progress ≥ 10 s |
-| `stalled` | prompt | full-screen: "Playback is stalled." + Keep waiting / Try again / Close — raised only when the client's own ladder has nothing left to try | **yes** | user action · (progress ⇒ disagreement, §3.2) |
-| `stopped` | terminal | full-screen: title + server or client sentence + Try again / Close | **yes** | user action |
+| `preparing` | progress | spinner + stage text — full-screen while the attached picture is not presenting, in-chrome indicator while it is | nobody | presenting evidence on `attached` · intent settled |
+| `buffering` | progress | same rule; raised only once the wait has lasted `STALL_MIN_MS` (350 ms) | nobody | presenting evidence |
+| `recovering` | progress | same rule, with the reason ("Reconnecting…", "Switching quality…") | nobody | presenting evidence on the *new* attached generation · owner reports success |
+| `hold` | notice | banner, timed (30 s), server sentence | nobody | timer · presenting evidence |
+| `degraded` | notice | banner, timed (5 s) | nobody | timer |
+| `refused` | notice | banner, **untimed**, with actions: a viewer-requested change failed and the previous stream continues | nobody | intent superseded (a later change succeeds or the viewer asks again) · presenting evidence ≥ 10 s *of continuous playback* on `attached` |
+| `exhausted` | prompt | full-screen: "Playback is stalled." + Keep waiting / Try again / Close (plus Force transcode where the owner offers it) | **the owner, before raising** | user action only |
+| `stopped` | terminal | full-screen: title + sentence + Try again / Close (+ Sign in for 401/403) | **the owner, before raising** | user action only |
 
-Eight classes, and the table is exhaustive on purpose: a call site that
-cannot name its class has not understood its fault, and the fixture test will
-ask it to.
+`exhausted` replaces v1's `stalled`, and the rename is the point: it is raised
+by the recovery owner *after* its ladder and budgets are spent and *after* it
+has stopped the player, never by a deadline that still has a rung to try. On
+Apple that is the site of today's `.stop(terminal)`; on Android the two
+budget-exhausted `onError` calls (`1444`, `1457`) plus the target-deadline
+terminal (`2174`); on the web `showStallRecoveryFailure` and the
+`stallRecoveryAction === 'prompt'` branch. A readiness deadline that fires
+with rungs left (`retryAfterReadinessTimeout`, the Android target-deadline
+`recover`) raises `recovering`, not `exhausted`.
 
-Two things the table fixes by construction. A `progress` fault is
-full-screen exactly while the picture is *not moving* — so a frozen picture
-still gets the spinner it gets today, but "Preparing the stream…" over a
-playing predecessor becomes an indicator and a Safari segment boundary
-becomes nothing. And the only two classes that block are the two that stop
-the player, so the overlay and the picture cannot disagree unless something
-outside the presenter moves the player — which is the case §3.2 handles.
+**Keep waiting** is an action the *owner* implements, and the fixture only
+names it: web re-arms `armStall` and clears `recoveringStall`; Apple runs
+`retryAfterPlaybackFailure` (which resets `recoveryReopenBudget` and only
+that, `2447-2453`); Android resets `stallReopenBudget` and
+`sessionlessStallRecoveryUsed` and sets `playWhenReady = true`. Each is one
+more bounded attempt; a prompt that comes back is the ladder spent again, and
+that is the honest answer.
 
-**"Moving" and "progress" mean one thing:** the presentation clock advanced
-by at least `progress_min_ms` (500 ms) on the current generation while the
-element was not paused and not seeking — the quantity
-`playbackProgressTick.moved`, the Apple periodic observer's position delta
-and the Android stall tracker's `realPosition()` delta already compute.
-Events are never evidence: `canplay` fires on a paused player whenever the
-buffer fills, `onIsPlayingChanged` and `timeControlStatus` report intent,
-`onRenderedFirstFrame` is one frame. An event may make the presenter *look*;
-only the clock may make it *clear*.
-
-**What `stalled` means for the ladders.** Pausing disarms the detectors that
-would otherwise resolve the stall (Android's tracker resets on
-`playWhenReady = false`, `PlaybackTelemetry.kt:306-309`; Apple's detector
-needs `.waitingToPlayAtSpecifiedRate`; the web's progress watch reads
-`wantsPlayback`), which is why `stalled` may only be raised when the ladder
-is spent — at exactly the sites that show a prompt today. *Keep waiting*
-resets the recovery budget and grants one more reopen (what
-`retryAfterPlaybackFailure` already does on Apple with
-`recoveryReopenBudget.reset()`), then resumes; *Try again* is a fresh open at
-the saved position. A prompt that re-appears 8 s after Keep waiting is the
-ladder being spent again, and that is the honest answer.
+**Actions are a property of the fault, not the class.** The vocabulary is
+`keep_waiting · retry · close · force_transcode · sign_in`; the owner sets
+them when it raises. A fault demoted by the agreement rule (§3.2) keeps its
+actions in the banner, and the banner does **not** expire while an action is
+still valid — the 5 s `degraded` timer applies to notices with no actions.
 
 ### 3.2 The agreement rule
 
-> A blocking surface is shown only over a player the presenter has stopped.
-> Progress under a blocking surface is a **disagreement**, and a disagreement
-> is resolved in favour of the picture.
+> A blocking surface is rendered only over a player its recovery owner has
+> stopped. If the attached media presents progress while a blocking surface
+> is up, that is a **disagreement**, and it is resolved in favour of the
+> picture.
 
-Concretely: raising `stalled` or `stopped` pauses the player *before* the
-view repaints, in each client's own terms — and the pause has to be one the
-watchdogs recognise, or they restart the stream under the overlay, which is
-today's Android symptom moved: on the web `pausePlaybackInternally` keeps
-`wantsPlayback` true and the progress watch (`11229`) keeps ageing, so the
-presenter also sets a `surfaceHold` flag that `playbackProgressTick` and
-`beginWait` treat like `wantsPlayback === false` for the generation (a
-viewer pause must **not** be reported to the control plane, so
-`wantsPlayback` itself is left alone); Apple `player.pause()` already
-disarms the detectors; Android `playWhenReady = false` already resets the
-tracker. If the presenter
-nevertheless receives progress evidence for the current generation while a
-blocking surface is up — the iOS lock-screen `playCommand`, the Android stall
-watchdog, a browser autoplay policy, a bug — it demotes the fault to a
-`degraded` notice reading "Playback recovered", clears the blocking surface,
-and logs `surface_disagreement {class, source, generation, position_ms}` to
-the client log and the ledger (§5). The demoted notice keeps the fault's
-data and its action: a `media_owner_lost` still carries `film_position_ms`
-and its Try again, so when the outside `play()` drains the buffer 30 s later
-the viewer gets the specific reopen, not a generic stall. The viewer sees the
-picture they are already watching, with a banner, and the disagreement is
-attributable rather than mysterious.
+The presenter checks, not enforces: `exhausted`/`stopped` faults carry
+`player_stopped: true` from the owner, and the fixture refuses a blocking
+class without it. If evidence nevertheless arrives on the same `attached`
+generation — the iOS lock-screen `playCommand` (`6898`), a browser autoplay
+policy, a bug — the presenter demotes the fault to `degraded` ("Playback
+recovered"), keeps its actions and data (a `media_owner_lost` still carries
+`film_position_ms` and its Try again, so when the buffer drains the viewer
+gets the specific reopen), clears the blocking surface, and emits
+`surface_disagreement {class, source, attached, intent, position_ms}` to the
+client log and the ledger (§5). No timer is cancelled and nothing is
+re-paused: the owner's detectors are what will catch the next stall, and they
+are running because the owner never stopped them — the presenter has nothing
+to release.
 
-The rule deliberately does not try to *prevent* every outside `play()`. It
-makes the outcome correct whichever side moves first, which is the property
-none of the three clients has today.
+Ruled 2026-09-13: the picture wins. The alternative — re-pausing to make the
+overlay true — is the one that fights the lock screen.
 
 ### 3.3 Sources — what each raw event becomes
 
-The mapping lives in the fixture so all three clients agree. The table is the
-intent; the fixture is the contract.
+The mapping lives in the fixture so all three clients agree. Rows are
+evaluated in order and **the first matching row wins**; the two columns that
+disambiguate are *context* (start · attached playback · pending change) and
+*owner state* (rungs left · exhausted).
 
-Rows marked ▲ are the only three places this contract would change what the
-player *does* rather than what it shows. Ruled 2026-09-13: they are **not**
-part of the surface PRs — they land together as their own PR (M5 in §8)
-after the surface work, so M1–M3 stay behaviour-neutral. Until M5, each ▲
-row's class still applies to the outcome the client produces *today*: a
-create 503 that is not retried is `refused` (mid-play) or `stopped` (start),
-an hls.js network fatal with no `startLoad()` goes straight to the reopen
-step as `recovering`, and `BEHIND_LIVE_WINDOW` is `stopped`. Everything else
-maps an existing outcome to a class.
+| # | Raw event (context) | Class | Notes |
+|---|---|---|---|
+| 1 | Any refusal or error while the owner reports **exhausted** and has stopped the player | `stopped` | title from context; sentence = armed `terminal` verdict message if one exists **and the failure is not transport-class** (the existing exception, `PlayerController.swift:5327` at `a124876`, `Controller.kt:657`), else the client sentence |
+| 2 | Owner budget spent, picture frozen, owner stopped the player | `exhausted` | Keep waiting / Try again / Close; Force transcode on the web's diagnosed-stall path |
+| 3 | 401 / 403 on any playback request | `stopped` | `sign_in` action; keeps the status-based auth match the app has (`AppModel.swift:288`) |
+| 4 | 409 `vod_source_rescan_required`, 422 `vod_source_unsupported` / unsupported tracks, 501 `vod_transcode_unavailable` / `vod_subtitle_burn_unavailable` (start) | `stopped` | server sentence; no retry |
+| 5 | 503 `vod_disabled` (start) | `stopped` | server sentence; no retry — service is off, not building |
+| 6 | 503 `startup_timeout` / `media_owner_transition` / `vod_index_pending` / `vod_engine_unattested` on create (start) | `preparing` | "still building"; retry is the owner's (M5) — until M5 the owner's outcome is `stopped` with the server sentence |
+| 7 | Any create failure, decision timeout or cancelled request during a **pending change** (predecessor still attached) | `refused` | `intent` = the change; actions `retry` (re-issue the change); the predecessor keeps its own faults |
+| 8 | Playlist/segment 503 with a "not yet" code, attached playback | `recovering` | hls.js keeps `stopLoad()`; the owner's existing reopen is the recovery; natives see only the status code (§2.2) and take failover/HDR retry first |
+| 9 | 410 `media_owner_lost` | `recovering` while buffered media plays out, then `stopped` when the owner stops | D1's shape; `position_ms` from the body (web) or the last observed position (natives); Try again reopens there |
+| 10 | Control-plane `terminal` verdict | *(not a source)* | ruling D1: arms wording, never tears down; consumed by row 1 |
+| 11 | Control-plane `hold` / `retry_resource` | `hold` | unchanged |
+| 12 | Media `waiting` / `waitingToPlayAtSpecifiedRate` / `STATE_BUFFERING` after start, lasting ≥ 350 ms | `buffering` | |
+| 13 | Owner starts a reopen / rescue / fallback / node failover / compatibility step / `BEHIND_LIVE_WINDOW` recovery (M5) | `recovering` | reason text from the owner; Apple's "Dolby Vision did not start. Retrying…" is this class |
+| 14 | Readiness deadline fires with rungs left (`retryAfterReadinessTimeout`, Android target-deadline `recover`) | `recovering` | never a prompt while a rung remains |
+| 15 | Decoder failure after the ladder is spent; web probe verdicts ("looks blocked", "won't play"); Apple black-frame ladder spent | `stopped` (`exhausted` if the owner leaves audio running, so the viewer is told and offered Close) | closes the silent black-picture case (§2.2) |
+| 16 | Repeated early end at the same position < 95 % | `stopped` | unchanged |
+| 17 | Auto downshift, decode rescue, HDR-subtitle, PGS, PiP failure | `degraded` | notices, unchanged in copy |
+| 18 | Prepared-successor abandonment, `session_gone` on a successor's first exchange, telemetry / reporter / stats failures | (none) | log only — the incumbent is untouched; the fence keeps it so |
 
-| Raw event | Class | Notes |
-|---|---|---|
-| Session create 503 `startup_timeout` / `media_owner_transition` | `preparing` (retryable) | ▲ server is still building: retry create with backoff inside the existing startup budget, then `stalled`. Today: painted once, never retried (web `showSessionOpenFailure`; natives: exception) |
-| Playlist/segment 503 with the same codes | `preparing` | ▲ web: hls.js `stopLoad()` stays, then one `startLoad()` after backoff before the fatal path (there is no `startLoad(` call today); natives: read the body from the error, reopen on the same session |
-| 410 `media_owner_lost` | `stopped` | body carries `film_position_ms`; Try again reopens there |
-| Control-plane `terminal` verdict | *(not a source)* | ruling D1 (`M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md` §4.6): a verdict arms wording and never tears the player down — buffered media plays out. It is a **text override** on whichever `stopped` the client ladder raises later, exactly as `playbackControl.terminalVerdict?.message` is used today |
-| Control-plane `hold` / `retry_resource` | `hold` | unchanged: notice, never blocking |
-| Session create 4xx/5xx during a seek, quality, audio or subtitle change (predecessor still playing) | `refused` | today: sticky "could not reconnect" (web) / "Server returned 503" (Apple) / "couldn't start this stream" (Android) |
-| 409 `APIError.conflict` (session superseded by another device) | `stopped` | server sentence, as today; no retry offered |
-| 401 / 403 mid-play | `stopped` | with the sign-in affordance the app already has |
-| 404 `session_gone` on a successor's first exchange | `recovering` | the incumbent keeps playing; the successor is abandoned (`abandonPreparedReplacement`), which is log-only today and stays so |
-| Media `waiting` / `waitingToPlayAtSpecifiedRate` / `STATE_BUFFERING` after start | `buffering` | after 350 ms only |
-| Watchdog: persistent wait → automatic reopen / rescue / fallback / node failover (`retryMediaOnNextNode`) / compatibility ladder step | `recovering` | the picture stays if it is moving; Apple's "Dolby Vision did not start. Retrying…" banners are this class |
-| Watchdog: ladder spent, picture frozen | `stalled` | pauses; prompt |
-| hls.js fatal **network** on a playing stream | `recovering` | ▲ never "failed to start": one bounded `startLoad()` retry, then the existing reopen, then `stalled` |
-| hls.js fatal **media** on a copy path (first time) | `recovering` | the transcode rescue, unchanged, but as a progress surface |
-| `<video>` `error` / `AVPlayerItem.status == .failed` / `onPlayerError` after the client's ladder is spent; the web probe verdicts ("looks blocked", "won't play"); Apple's 6 s black-frame failure | `stopped` | decoder refused or nothing left to try |
-| Readiness deadline (Apple 15 s, web 20/40 s watchdog) with no frame yet | `stalled` | pauses, prompts — never `stopped` while the server may still publish |
-| `BEHIND_LIVE_WINDOW` (Android 1002) | `recovering` | ▲ `seekToDefaultPosition()` + `prepare()`, not `Fail` — the Media3-documented answer |
-| Repeated early end at the same position < 95 % | `stopped` | unchanged |
-| Auto downshift, decode rescue, HDR-subtitle, PGS, PiP failure | `degraded` | notices, unchanged in copy, no longer able to reach the overlay |
-| Prepared-replacement abandonment, telemetry / reporter / stats fetch failures | (none) | log only — already true on all three clients; the fence keeps it so |
+Rows 6, 8 and the `BEHIND_LIVE_WINDOW` clause of 13 name recovery steps the
+clients do not all perform today; those are **M5**, their own PR (ruled), and
+until M5 lands each client's owner produces whatever outcome it produces now
+and the presenter classifies *that*.
 
-### 3.4 Clearing — evidence, not hope
+### 3.4 Evidence — the player's own proof of presentation, not a clock
 
-The presenter consumes the progress evidence each client already produces
-and clears faults with it; it does not add a watchdog:
+"Presenting" means the client's existing presentation proof says so; the
+presenter adds no detector and never infers from an event:
 
-- **Web:** `playbackProgressTick`'s clock delta (`index.html:11216`),
-  sampled by `samplePlaybackPresentationClock` (`11537`). The gate
-  `playbackOwnsAttachedMedia()` stays for *automatic work*; it stops gating
-  *dismissal*, because progress on the attached generation is progress
-  whoever requested the next one. `playing`/`canplay` only prompt a look.
-- **Apple:** the periodic time observer's position delta
-  (`PlayerController.swift:4916`). A fault observed on generation N is
-  dropped when N is superseded, which is the existing
-  `isSuperseded(generation)` test.
-- **Android:** the stall tracker's own `realPosition()` samples
-  (`stallWatchdogJob`, `816`), keyed by `mediaMutationEpoch`;
-  `onRenderedFirstFrame` and `onIsPlayingChanged` only prompt a look.
+- **Web:** `playbackProgressTick.moved` (`index.html:11216`) — clock advance
+  *and*, where a frame counter exists, frame advance — on the attached
+  element, not hidden, not seeking, `wantsPlayback` true. `playing` and
+  `canplay` only prompt a look.
+- **Apple:** the periodic observer's position delta (`4916`) while
+  `!isChangingStream` and `rate > 0`, *and* for a not-yet-established item
+  the first-frame proof the black-frame ladder uses — audio advancing over a
+  black picture is not presenting.
+- **Android:** `presentedVideoFrame` / `realPosition()` advance on the
+  current `mediaMutationEpoch`, foreground, `playWhenReady` true.
 
-Generation keying replaces the 90 s `FAILURE_FRESH_MS` window: a refusal
-explains the generation it arrived on and nothing else. `closePlayer` clears
-every fault.
+A fault with an `intent` is never retired by evidence alone: the destination
+must settle (`markPlaybackControlSeekExecuted` / seek generation settled /
+`pendingSeek == null`) or be superseded. A fault about `attached` generation
+N is dropped the moment N is retired, which is the existing
+`playbackOwnsAttachedMedia` / `isSuperseded(generation)` / epoch test — that
+replaces the 90 s `FAILURE_FRESH_MS` window. A refusal hls.js already
+recovered from within the same attach is retired by the recovery
+(`FRAG_LOADED` for the same fragment), not by the next fatal.
+
+Remote and background presentation is declared, not guessed: AirPlay and
+PiP report presenting through the platform's own flags
+(`isExternalPlaybackActive`, `isPictureInPictureActive`, the web
+`webkitCurrentPlaybackTargetIsWireless`) and a hidden page samples nothing —
+a fault raised before the page was hidden is neither cleared nor promoted
+until it is visible again.
 
 ### 3.5 The fixture
 
 `tests/playback/playback-surface-contract.json`, in the shape of
-`player-input-contract.json`:
+`player-input-contract.json`, with cases that are **ordered event
+sequences**, not snapshots — the review's seventh finding:
 
 ```json
 {
-  "schema": 1,
+  "schema_version": 1,
   "classes": {
-    "stalled": {"severity": "prompt", "blocking": true, "pauses_player": true,
-                "clears_on": ["user"], "title": "Playback is stalled.",
-                "actions": ["keep_waiting", "retry", "close"]},
-    "preparing": {"severity": "progress", "blocking": "while_not_moving",
-                  "pauses_player": false, "clears_on": ["progress"]}
+    "exhausted": {"severity": "prompt", "blocking": true,
+                  "requires_player_stopped": true,
+                  "retired_by": ["user"], "title": "Playback is stalled.",
+                  "default_actions": ["keep_waiting", "retry", "close"]},
+    "refused":   {"severity": "notice", "blocking": false, "timed": false,
+                  "retired_by": ["intent_superseded", "progress_10s"],
+                  "default_actions": ["retry"]},
+    "preparing": {"severity": "progress", "blocking": "while_not_presenting",
+                  "retired_by": ["presenting", "intent_settled"]}
   },
-  "sources": {
-    "session_create_503_startup_timeout": {"class": "preparing", "retryable": true},
-    "hls_fatal_network_established":     {"class": "recovering"},
-    "behind_live_window":                {"class": "recovering"}
-  },
-  "timings": {"buffering_min_ms": 350, "progress_min_ms": 500,
-              "hold_notice_ms": 30000, "degraded_notice_ms": 5000,
-              "refused_clear_progress_ms": 10000},
+  "sources": [
+    {"id": "create_503_startup_timeout", "context": "start",
+     "class": "preparing", "retryable": true},
+    {"id": "create_failed_pending_change", "context": "change",
+     "class": "refused", "actions": ["retry"]},
+    {"id": "owner_exhausted", "context": "any", "class": "exhausted"}
+  ],
+  "actions": ["keep_waiting", "retry", "close", "force_transcode", "sign_in"],
+  "timings": {"buffering_min_ms": 350, "hold_notice_ms": 30000,
+              "degraded_notice_ms": 5000, "refused_progress_ms": 10000},
   "cases": [
-    {"name": "fatal network over a playing picture",
-     "given": {"fault": "hls_fatal_network_established", "moving": true},
-     "expect": {"surface": "indicator", "paused": false}},
-    {"name": "canplay on a paused stopped player is not progress",
-     "given": {"fault": "decoder_failed", "moving": false, "then": "canplay"},
-     "expect": {"surface": "blocking", "class": "stopped"}},
-    {"name": "stopped, then an outside play()",
-     "given": {"fault": "decoder_failed", "moving": false,
-               "then": "progress"},
-     "expect": {"surface": "banner", "class": "degraded",
-                "log": "surface_disagreement"}}
+    {"name": "a failed quality change never blocks the predecessor",
+     "events": [
+       {"t": 0,    "attach": "g1", "presenting": true},
+       {"t": 1000, "intent": "i7", "raise": "create_failed_pending_change"},
+       {"t": 2000, "presenting": true, "attached": "g1"},
+       {"t": 30000, "presenting": true, "attached": "g1"}],
+     "expect": [
+       {"at": 1000, "surface": "banner", "class": "refused", "actions": ["retry"]},
+       {"at": 30000, "surface": "banner", "class": "refused"}]},
+    {"name": "exhausted without a stopped player is refused by the fixture",
+     "events": [{"t": 0, "attach": "g1"},
+                {"t": 500, "raise": "owner_exhausted", "player_stopped": false}],
+     "expect": [{"at": 500, "error": "blocking_without_stop"}]},
+    {"name": "stopped, then an outside play() — the picture wins",
+     "events": [{"t": 0, "attach": "g1"},
+                {"t": 100, "raise": "decoder_failed", "player_stopped": true,
+                 "actions": ["retry", "close"]},
+                {"t": 5000, "presenting": true, "attached": "g1"}],
+     "expect": [{"at": 100, "surface": "blocking", "class": "stopped"},
+                {"at": 5000, "surface": "banner", "class": "degraded",
+                 "actions": ["retry", "close"], "log": "surface_disagreement"}]},
+    {"name": "canplay on a stopped player is not presenting",
+     "events": [{"t": 0, "attach": "g1"},
+                {"t": 100, "raise": "decoder_failed", "player_stopped": true},
+                {"t": 800, "event": "canplay"}],
+     "expect": [{"at": 800, "surface": "blocking", "class": "stopped"}]}
   ]
 }
 ```
 
-`cases` is the table every client's presenter is run against, row for row —
-the same discipline as the routing table. The doc's §3 tables are rendered
-from it by `scripts/player-contract-table` once that script learns a second
-fixture, so this page cannot drift from the contract.
+`cases` is the table every client's presenter is run against, row for row.
+The doc's §3 tables are rendered from the fixture by
+`scripts/player-contract-table` once it learns a second fixture, so this page
+cannot drift from the contract.
 
 ---
 
 ## 4. How a client implements it
 
-Three layers, and the middle one is the only one allowed to decide. It is
-the input contract's diagram with the nouns changed.
+Three layers, and the middle one is the only one allowed to decide *what is
+shown*. It is the input contract's diagram with the nouns changed.
 
 ```
  raw event ─────▶ ADAPTER ─────▶ PRESENTER ─────────────▶ SURFACE
  (hls.js ERROR,   raw → fault    pure reducer:            #ploading / banner /
-  item.status,    with source    (faults, evidence,        failureView / indicator
-  PlaybackExc.,   + generation   generation) → surface     rendered FROM state
-  503 body)                      + side effects (pause)
- player evidence ────────────────────┘
+  item.status,    + identities   (faults, evidence,        failureView / indicator
+  PlaybackExc.,   + actions      identities) → surface     rendered FROM state
+  503 body/code)                 + log entries only
+ evidence ───────────────────────────┘
+ RECOVERY OWNER ── ladders · budgets · pause · stop ── raises exhausted/stopped
+                   (unchanged; must stop before raising a blocking fault)
 ```
 
-- **Adapter** — the only code per client allowed to mention an hls.js
-  `details`, an `AVPlayerItem.status`, a `PlaybackException.errorCode`, an
-  HTTP status, or a refusal `code`. It turns them into a fault via the
-  fixture's `sources` table. On the natives this is also where the `{code,
-  message}` body finally gets read: Apple `PlurxAPI.check` decodes it for
-  every non-2xx (not only 409) into `APIError.refused(status, code,
-  message)`; Android reads `HttpDataSource.InvalidResponseCodeException.
-  responseBody` and the create-call body. The web already has
-  `parseStreamFailure`; it moves into the adapter unchanged.
-- **Presenter** — one pure reducer per client, no platform imports,
-  signature-equivalent to `present(state, event) → (state, effects)` where
-  `event` is a fault, progress evidence, a generation change or a user
-  action, and `effects` is at most `pause`, `log`, `clear`. Web: a new
-  `PlaybackPolicy.presentSurface` next to `routeInput`; Apple: a
-  `PlaybackSurfaceModel` value type published as **one** field on
-  `PlayerController` that replaces `failed`, `playbackError`,
+- **Adapter** — turns a raw outcome into a fault with identities via the
+  fixture's `sources`. On the natives this is also where the create-call
+  `{code,message}` body gets read: Apple `PlurxAPI.check` decodes it for
+  every non-2xx into `APIError.refused(status:code:message:position_ms:)`
+  **while keeping `.http(status)` for bodiless answers, so the status-based
+  auth match (`isSessionExpired`) and every existing retry matcher keep
+  working**; Android reads the create-call body in `createHlsSession` and
+  `HttpDataSource.InvalidResponseCodeException.responseBody` for
+  playlist/segment refusals. AVFoundation media refusals carry a status code
+  only (§2.2); the Apple adapter classifies on the code plus the session
+  status poll it already runs (`startStatusPolling`), and never claims a body
+  it cannot have. The web's `parseStreamFailure` moves in and grows a
+  `position_ms` field.
+- **Presenter** — one pure reducer per client, no platform imports, no
+  effects except log entries, signature-equivalent to
+  `present(state, event) → (state, log[])`, where `event` is a fault, an
+  evidence sample, a generation/intent change, a timer tick or a user
+  action. Web: `PlaybackPolicy.presentSurface` next to `routeInput`; Apple: a
+  `PlaybackSurfaceModel` value published as **one** field on
+  `PlayerController` replacing `failed`, `playbackError`,
   `playbackFailureTitle` and `playbackNotice`; Android: a `PlaybackSurface`
-  sealed class on a `StateFlow` that replaces `playFailure`,
-  `playbackNotice` and the `onError` string callback. Each is tested against
-  `cases`, row for row.
+  sealed class on a `StateFlow` replacing `playFailure`, `playbackNotice`
+  and the `onError` string callback. Each runs every `cases` sequence.
 - **Surface** — renders from the presenter's state and nothing else.
-  `setLoading()` becomes a private render function called from one place;
-  `failureView` and `PlaybackFailed` read the model; the input contract's
-  `failed` state is derived from the model — **only** `stalled` and
-  `stopped`, the two classes with actions — not from a DOM class. A
-  full-screen `preparing` is *not* `failed`: it keeps today's routing
-  (`back` hides, arrows skip), so no row of the routing table changes.
-  `PlaybackFailed` gets the black background it was always meant to have,
-  because the player behind it is now actually stopped.
+  `setLoading()` becomes the private render function of the web presenter's
+  output; `failureView` and `PlaybackFailed` read the model; `PlaybackFailed`
+  gets an opaque background because the player behind it is now stopped.
+  The input contract's `failed` state is **the presenter's "a blocking
+  surface with actions is up"**, not a DOM class — `exhausted` and `stopped`
+  only; a full-screen `preparing` keeps today's routing, and the
+  cross-product (surface × class × input) is pinned by a test so a change to
+  which prompts enter `failed` is a visible diff.
+- **Recovery owner** — unchanged code, one new obligation at each
+  exhaustion site: stop the player, then raise. Web: `pausePlaybackInternally`
+  + `stopPlayerTimers` at `showStallRecoveryFailure` and the prompt branch;
+  Apple: already `player.pause()` at five of six sites, `fail()` gains it for
+  the readiness-exhausted path only; Android: `playWhenReady = false` before
+  the three exhausted `onError` calls, which also resets the stall tracker
+  (`PlaybackTelemetry.kt:306-309`) — the restart-under-overlay path closes
+  by construction.
 
-The rule that keeps the moles from coming back: **no fault text and no
-overlay mutation outside the presenter.** `scripts/playback-surface-fence`
-runs from `make validate-staged` beside `player-input-fence` and fails on
-**writes** — `setLoading(` / `classList.add("failed")` / `stallPrompt=`
-outside the web render function; assignments to `failed`, `playbackError`,
-`playbackNotice` outside `PlaybackSurfaceModel` on the `PlayerController`
-class; `onError(` calls and `playFailure =` outside the Android presenter —
-in the finite player's shipped files. Reads are free (the Android screen
-reads `playFailure` a dozen times to gate chrome, and should). The scan is
-scoped to the finite player: `LibraryChannels.swift`, the offline players and
-`OfflineDownloadManager.swift` have their own `playbackError`/`failed`
-fields and are outside this contract (§7); test trees are skipped, as the
-input fence skips them, because stubbing `setLoading` is how the web tests
-drive the shipped functions. Allowed regions are named with a reason beside
-their anchors.
+The rule that keeps the moles from coming back: **no surface write outside
+the presenter's render.** `scripts/playback-surface-fence` runs from `make
+validate-staged` beside `player-input-fence` and fails on **writes** — web:
+`setLoading(`, `classList.add("failed")`, `classList.remove(…"failed"…)`,
+`stallPrompt=`; Apple: assignments to `failed`, `playbackError`,
+`playbackFailureTitle`, `playbackNotice` on `PlayerController`; Android:
+`onError(` calls and assignments to `playFailure`, `playbackNotice` — in the
+finite player's shipped files, with the same allow-list-with-a-reason shape
+as the input fence, positive **and** negative fixtures (a file that must
+trip, a file that must not), and a scan that is spelling-complete for
+assignment, `+=`, bulk `Object.assign`/`apply`, and class toggles. The fence
+says nothing about *reading* raw errors: ladders, readiness code and
+diagnostics keep every `errorCode`, `status` and `details` reference they
+have. Scope is the finite player; `LibraryChannels.swift`,
+`OfflinePlayerScreen.kt`, `OfflineDownloadManager.swift` and the web reader
+are outside it (§7), and the web Library Channels path, which shares
+`play(...)`, is inside it because it shares the renderer.
 
-What does **not** change: the recovery ladders themselves (same-delivery
-reopen, node failover, compatibility fallback, Auto), the control-plane
-verdict semantics (D1 included), the stall detectors and their thresholds,
-the input routing table. Those decide *what the player does*; this contract
-decides only *what the viewer is told and when it goes away*. The three ▲
-rows in §3.3 are recovery changes and are deliberately kept out of the
-surface PRs (M5).
+What does **not** change: the recovery ladders, the control-plane verdict
+semantics (D1 included), the stall detectors and their thresholds, the
+budgets, the input routing table. M5 is the only PR that changes what the
+player does, and it is its own PR by ruling.
 
 ---
 
@@ -480,18 +566,21 @@ surface PRs (M5).
 
 Anything that dims the picture on Paul's Apple TV has to be answerable from
 inside the product. The presenter keeps a bounded ring (last 16) of
-`{class, source, generation, raised_at, cleared_at, cleared_by,
-player_at_raise: {rate, position_ms, presenting}}` and:
+`{class, source, attached, intent, session_id, attempt, raised_at,
+cleared_at, cleared_by, player_at_raise: {rate, position_ms, presenting,
+stopped_by_owner}}` and:
 
-- the **Playback debug ledger** on all three clients gets a *Surface*
-  section showing the current fault and the ring — so "what was that
+- the **Playback debug ledger** on all three clients gets a *SURFACE* section
+  (joins `tests/playback/playback-info-fields.json` as a new section with
+  `current_surface`, `current_fault`, `surface_history`) — "what was that
   overlay" has an answer without a log file;
 - the client log gets `surface_raised`, `surface_cleared` and
   `surface_disagreement` events with the same fields, so the server-side
-  session log can be joined to what the viewer saw;
-- `surface_disagreement` is the one to watch after the build lands: every
-  occurrence is a place where something outside the presenter moved the
-  player, and each should end as either a fixed call site or a documented
+  session log joins on `session_id`/`attempt`, not on a client-local
+  generation;
+- `surface_disagreement` is the one to watch after the build lands: each
+  occurrence is a place where something started the player after its owner
+  stopped it, and each ends as either a fixed call site or a documented
   exception (the lock-screen command, for one).
 
 Nothing here is gated. Per the standing ruling, if any part of this needs an
@@ -502,122 +591,117 @@ as proposed, nothing does.
 
 ## 6. What the migration closes, and two things it does not
 
-Closed by construction (the presenter cannot express them):
+Closed by construction (the presenter cannot express them, or the owner's
+new obligation forbids them):
 
-- **Web:** fatal-over-live-buffer (§2.1 second bullet); sticky "could not
-  reconnect" / refusal over a playing predecessor; stale `STREAM_FAILURE`
-  across generations and titles; "Preparing the stream…" full-screen for an
-  automatic downshift; undebounced "Buffering…" flashes; `failed` routing
-  reachable only from four sites; a 503 on create painted with no retry.
-- **Apple:** the 15 s readiness stop over a running player; "Server
-  returned 503" banner that only `open()` clears; `media_owner_lost` and
-  `startup_timeout` bodies discarded; the PiP error that only PiP can clear;
-  the lock-screen `play()` under a black view (now a logged disagreement
-  that resolves to the picture).
+- **Web:** fatal-over-live-buffer painted as "failed to start"; sticky
+  "could not reconnect" / refusal over a playing predecessor; stale
+  `STREAM_FAILURE` across attempts and titles; "Preparing the stream…"
+  full-screen for an automatic downshift; undebounced "Buffering…" flashes;
+  `failed` routing reachable only from four sites.
+- **Apple:** the readiness-exhausted stop over a running player; "Server
+  returned 503" banner that only `open()` clears; create refusal bodies
+  discarded; the PiP error that only PiP can clear; the lock-screen `play()`
+  under a black view (now a logged disagreement that resolves to the
+  picture); the silent black-picture exhaustion.
 - **Android:** `playFailure` never nulled; the stall watchdog restarting the
-  stream under the overlay; `Fail` without pause; transparent failure view
-  over a running player; refusal bodies unread; `BEHIND_LIVE_WINDOW` as
-  fatal; no test on any failure surface.
+  stream under the overlay; `Fail` without a stop at the exhausted sites;
+  transparent failure view over a running player; refusal bodies unread; no
+  test on any failure surface.
 
 Two findings from the same investigation are **separate defects** and are
 listed so they are not mistaken for this one:
 
-1. **Android copied-video seeks may never "land".** A non-VOD HLS session
-   attaches at local 0 (`MediaOrigin.kt:37-44`, `attachPositionMs = 0`) and
-   a progressive remux seek sets its item with no start position
-   (`Controller.kt:970-983`, `progressiveMediaOrigin.begin(uri, t)` then
-   `setMediaItem(MediaItem.fromUri(uri))`); in both cases the server's
-   origin is the *preceding keyframe* (`X-Plurx-Media-Origin-Ms` /
-   `media_origin_ms`, [`PLAYBACK.md`](../PLAYBACK.md) "Resume & progress")
-   and nothing seeks the item forward by the difference — Apple does, and so
-   does Android's own prepared-successor path (`successorAttachPositionMs`,
-   `Controller.kt:2428`); the seek path does not. `presentedVideoFrame`
-   (`PlaybackIntent.kt:143-157`) demands |position − target| ≤ 250 ms at the
-   first rendered frame, which fires once. So on a GOP of more than 250 ms
-   the landing check fails, the 8 s target deadline fires
-   `presentation-recovery`, the restart lands the same way, and the terminal
-   "couldn't reach the requested position" overlay goes up over a playing
-   stream. Structurally reachable on every seek and track switch of a copy
-   HLS or progressive remux session — which is why the "not yet confirmed
-   on a device" caveat matters: if it were that universal it would have been
-   reported as such, so something may be compensating that this reading
-   missed. §8 has the verification prompt; the check is mandatory before M3
-   is scoped. The fix is the Apple one: seek the attached item forward by
-   `requested − media_origin_ms`, as the successor path already does.
+1. **Android progressive-remux seeks may never "land".** Since
+   `live_presentation_removed` (`transcode.rs:17115` at `a124876`) every HLS
+   session is VOD and Android seeks those natively (`executeSeek`, `986`),
+   so the copy-HLS variant of this finding is retired. The progressive remux
+   path remains: a seek sets a new item with no start position
+   (`Controller.kt:970-983`) and the server's `X-Plurx-Media-Origin-Ms` is
+   the *preceding keyframe* (`stream.rs:2886-2896`) — unless the one-second
+   origin probe times out, in which case the server reports the requested
+   start (`stream.rs:55-70`) and the mismatch is hidden rather than absent.
+   Nothing in the seek path seeks the item forward by the difference; the
+   prepared-successor path does (`successorAttachPositionMs`, `2428`).
+   `presentedVideoFrame` (`PlaybackIntent.kt:143-157`) demands
+   |position − target| ≤ 250 ms at the first rendered frame, once. On a GOP
+   longer than 250 ms that check fails, the 8 s target deadline fires
+   `presentation-recovery`, and the second miss is the terminal "couldn't
+   reach the requested position" overlay. **Device evidence so far is
+   inconclusive**: the review's Google TV run (build 89, a 73 Mb/s remux)
+   seeking 0:36 → 11:14 produced a paused transport and, after resume,
+   "Playback stopped responding after retrying this stream." — the
+   sessionless-second-stall sentence, not the target-deadline one — with no
+   `playback_target_timeout` log captured. M6 is therefore gated on
+   measuring the achieved origin and first-frame position on a device
+   (§8), not on this reading.
 2. **Web progress-watch on a stalled frame counter.** `playbackProgressTick`
    (`index.html:11216-11264`) requires the frame count to advance when a
    counter exists; under AirPlay or iOS video-only fullscreen the clock
    advances while the counter does not, which would make `persistentWait`
    fire every 8 s on a playing film. Structurally reachable, unverified in a
-   browser; worth a check when the AirPlay path is next on a bench.
+   browser; §3.4's "declared, not guessed" rule for remote presentation is
+   the contract's answer, and the check belongs on the next AirPlay bench.
 
 ---
 
 ## 7. Non-goals
 
-- **No new watchdogs, thresholds or recovery steps in M0–M4.** Every
-  detector and budget stays where it is with the numbers it has. The three
-  ▲ rows in §3.3 are bounded retries one client already performs and
-  another dead-ends on; they are real fixes, and they get their own PR (M5)
-  precisely so the surface PRs can be reviewed as behaviour-neutral.
+- **No new watchdogs, thresholds, budgets or recovery steps in M0–M4.** The
+  recovery owner's one new obligation (stop before raising a blocking fault)
+  is the only change to what the player does, and at five of the six Apple
+  sites it is already true. The three recovery additions from v1 are M5,
+  their own PR, with the constraints the review set: an absolute deadline
+  and request identity on create retries, one shared hls.js retry budget
+  between the fatal-network and "not yet" rows with position preserved, and
+  a finite-timeline rule and retry limit for `BEHIND_LIVE_WINDOW` (Media3's
+  default-position recovery is a live-edge policy).
 - **No wording pass.** Copy moves into the fixture as it is today unless a
   sentence is wrong about the state (e.g. "failed to start" for a mid-film
   network fatal); a copy review is a later, separate change.
-- **No gate.** Nothing is switchable; per the standing ruling, a Developer
-  tab enable section would only be added if something needed one.
-- **Not the Live TV player.** `#live-tv-overlay` and the Live TV natives
-  have their own contract page; they join this fixture when their overlay
-  work resumes, not before.
-- **Not the Library Channels player, the Android offline player, or the
-  web reader.** `LibraryChannels.swift` and `OfflinePlayerScreen.kt` keep
-  their own `playbackError`/`failure` fields until a later pass; Apple
+- **No gate.** Nothing is switchable.
+- **Not the Live TV player.** `#live-tv-overlay` and the Live TV natives have
+  their own contract page; they join this fixture when their overlay work
+  resumes.
+- **Not the Library Channels players, the Android offline player, the
+  offline download manager, or the readers.** `LibraryChannels.swift`,
+  `OfflinePlayerScreen.kt` and `OfflineDownloadManager.swift` keep their own
+  `playbackError`/`failed`/`failure` fields until a later pass. Apple
   offline playback shares `PlayerController` and gets the model for free,
-  with `stalled` mapped to `stopped` there because there is no server to
-  keep waiting for.
+  with `exhausted` unreachable there (no server to keep waiting for) — its
+  owner raises `stopped`. The web Library Channels path shares the finite
+  player's renderer and is in scope.
 
 ---
 
 ## 8. Build plan
 
-Six PRs, fast lane until each is together, opened as drafts, adversarial
-review, findings, one full run, then merged — per
+Six PRs; the [implementation doc](PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md)
+carries the exact interfaces, ownership and acceptance commands. Fast lane
+until each is together, opened as a draft, adversarial review, findings, one
+full run, then merged — per
 [`DEVELOPMENT_PIPELINE.md`](../DEVELOPMENT_PIPELINE.md). M1–M3 are
-independent of each other and can run in parallel across sessions; each owns
-its client's files and `tests/playback/` rows tagged for it, nothing else.
-M5 and M6 follow M1–M3 and are the only two that change player behaviour.
+independent and can run in parallel; each owns its client's files and the
+fixture rows tagged for it. M5 and M6 follow and are the only two that
+change what the player does.
 
-| # | Scope | Acceptance |
+| # | Scope | Acceptance (summary — the implementation doc has the commands) |
 |---|---|---|
-| M0 | Fixture + this doc rendered from it + `scripts/player-contract-table` second fixture + `playback-surface-fence` (allow-listing every current site, so the fence lands red-free and the client PRs shrink its allow list to zero) | `make web-check` runs the fixture's `cases` against a reference reducer; `test_docs_index` green; fence green with its allow list |
-| M1 | Web: adapter (`parseStreamFailure` moves in, hls.js fatal network → `recovering` on the existing reopen path), `PlaybackPolicy.presentSurface`, `setLoading` demoted to render, input `failed` from the model, ledger section, log events | `web-policy.test.js` runs every `cases` row against the shipped `presentSurface` via `shippedSource()`; a mutation that removes the pause on `stopped` fails a test; Chrome + Safari smoke on a 4K remux with a mid-film network drop shows an indicator, not a black screen |
-| M2 | Apple: `PlurxAPI.check` decodes `{code,message}` for every non-2xx; `PlaybackSurfaceModel` replaces the four fields; `fail()` and the 12 writers raise faults; lock-screen command routed; PiP error joins the model | `AppleClientTests` runs `cases`; `make apple-test` on `mba` green; a 15 s readiness timeout on a cold transcode shows `stalled` with a paused player and resumes on Keep waiting when the server publishes |
-| M3 | Android: `PlaybackSurface` on a `StateFlow` replaces `playFailure`/`onError`; `Fail` pauses; the stall watchdog is told about the surface (it may raise `recovering`, never restart under `stopped`); refusal bodies read; `PlaybackFailed` opaque | `:app:testDebugUnitTest` runs `cases`; a test pins that `Fail` leaves `playWhenReady == false` and that a later `onIsPlayingChanged(true)` produces `surface_disagreement`, not a silent overlay |
-| M4 | Physical verification on the Apple TV, an iPhone and an Android TV: the three reproduction recipes below | Recorded in a `PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-<date>.md` beside this page; `surface_disagreement` count over a 30 min session is zero or every instance is explained |
-| M5 | The three ▲ recovery additions from §3.3, one PR: create-503 retry with backoff inside the startup budget (all three clients), one bounded hls.js `startLoad()` retry before the reopen step (web), `seekToDefaultPosition()` + `prepare()` on `BEHIND_LIVE_WINDOW` (Android) — each mapped to the class the fixture already names, so M5 changes what the player *does* and nothing about what it shows | A `cases` row per addition; a mutation that removes any one retry fails a test; the web-policy suite pins that `startLoad()` is called at most once per fatal |
-| M6 | Android keyframe landing (§6.1): seek the attached item forward by `requested − media_origin_ms` on copy-HLS and progressive-remux seeks, the way `successorAttachPositionMs` already does for a prepared successor — **after** recipe (c) confirms the defect on a device | `PlaybackIntentTest` gains a keyframe-origin case (target 90 000, origin 86 000 → lands); recipe (c) passes on the Android TV |
+| M0 | Fixture + doc rendered from it + `player-contract-table` second fixture + `playback-surface-fence` with a full allow list | reference reducer passes every `cases` sequence; index and fence green |
+| M1 | Web adapter + `PlaybackPolicy.presentSurface` + render + owner stops at its two exhausted sites + ledger/log | every `cases` row against the shipped reducer via `shippedSource()`; a mutation that lets `exhausted` render without `player_stopped` fails; injected mid-film fatal with 20 s of buffer → indicator, picture continues, reopen on drain |
+| M2 | Apple adapter (`PlurxAPI.check` `.refused` + `.http` kept) + `PlaybackSurfaceModel` + `fail()` stops on the readiness-exhausted path + lock-screen disagreement + PiP + black-frame exhaustion surfaced | `AppleClientTests` runs `cases`; `make apple-test` on `mba`; a fresh VOD transcode whose item never readies walks the ladder, then shows `exhausted` with `rate == 0`; lock-screen play under it → banner + `surface_disagreement` |
+| M3 | Android adapter (bodies read) + `PlaybackSurface` `StateFlow` + `playWhenReady = false` at the three exhausted sites + opaque `PlaybackFailed` + ledger | `testDebugUnitTest` runs `cases`; a test pins that each exhausted `onError` site leaves `playWhenReady == false` and that a later `realPosition()` advance on the same epoch (not `onIsPlayingChanged`) yields `surface_disagreement` |
+| M4 | Physical verification (Apple TV, iPhone, Android TV): the three recipes below, each with the ledger's `surface_history` captured | recorded in a `PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-<date>.md` beside this page; allowed outcomes are enumerated per recipe in the implementation doc, and a `surface_disagreement` is a pass only if its ledger row names a documented exception |
+| M5 | The three recovery additions, one PR, with the §7 constraints | a `cases` row per addition; mutation removing any one retry fails; hls.js retry-once pinned |
+| M6 | Android progressive-remux landing, **after** the device measurement in recipe (c) shows achieved origin ≠ requested by > 250 ms | `PlaybackIntentTest` keyframe-origin case; recipe (c) passes |
 
-Reproduction recipes for M4 (and for confirming today's behaviour before
-M1–M3 land): (a) play a 4K remux, pull the server's network for 5 s at
-minute 2 — today: full-screen error over a moving picture; (b) seek during a
-stream change on a cold NAS so the create 503s — today: sticky overlay over
-the predecessor; (c) Android, a title that plays as a remux (copy HLS with a
-sidecar subtitle, or the plain progressive remux), seek forward 10 min —
-expected today if §6.1 is right: a restart at ~8 s, a terminal overlay at
-~16 s, picture still moving.
-
-Prompt for the GPT session that has device access, for (c):
-
-> On the Android TV plurx client, current build, open a film that Playback
-> debug shows as `method: remux` (an H.264/HEVC file that direct-plays as a
-> remux; one with a sidecar `.srt` gives the copy-HLS variant — do both if
-> you can). Let it play 30 s, then seek forward 10 minutes with one press.
-> Watch for 25 s without touching anything. Report: did the picture come
-> back and where (position shown vs requested); did it restart again around
-> 8 s later; did an overlay reading "Playback couldn't reach the requested
-> position after retrying" appear while the picture was moving. Then open
-> Playback debug and copy the `target_ms` / `playback_target_timeout` lines
-> from the client log. Repeat once with a transcode-quality selection
-> (Auto → 1080p) to confirm it does not happen on a transcode session.
+Reproduction recipes (today's behaviour first, then M4): (a) play a 4K remux,
+pull the server's network for 5 s at minute 2 with ≥ 20 s buffered — today:
+full-screen error over a moving picture; (b) seek during a stream change on
+a cold NAS so the create 503s — today: sticky overlay over the predecessor;
+(c) Android, a title Playback debug shows as `Remux` with no session id (the
+progressive path), seek forward 10 min, and capture `playback_target_timeout`
+plus the achieved `X-Plurx-Media-Origin-Ms` from the client log.
 
 ---
 
@@ -625,14 +709,14 @@ Prompt for the GPT session that has device access, for (c):
 
 Ruled by Paul, 2026-09-13:
 
-1. **The eight classes and their surfaces (§3.1) — accepted.** A progress
-   fault is full-screen only while the picture is not moving; a readiness
-   timeout is `stalled` (prompt, paused), not `stopped`.
+1. **The classes and their surfaces (§3.1) — accepted.** A progress fault is
+   full-screen only while the attached picture is not presenting; a
+   readiness timeout with rungs left is `recovering`, and only a spent
+   owner raises the prompt.
 2. **The agreement rule (§3.2) — the picture wins.** A blocking surface
-   under which the player has started demotes to a banner and is logged as
-   `surface_disagreement`; the presenter never re-pauses to make the overlay
-   true.
+   under which the player has started demotes to a banner (keeping its
+   actions) and is logged as `surface_disagreement`; nothing re-pauses.
 3. **Android keyframe landing (§6.1) — its own PR, M6,** after the device
-   check in §8 confirms it.
-4. **The three ▲ recovery additions (§3.3) — their own PR, M5,** after the
-   surface PRs, so M1–M3 are reviewable as behaviour-neutral.
+   measurement.
+4. **The three recovery additions — their own PR, M5,** after the surface
+   PRs, so M1–M3 are reviewable as behaviour-neutral.

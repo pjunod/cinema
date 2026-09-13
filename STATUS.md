@@ -6,9 +6,11 @@ first.
 
 ## The error overlay and the picture disagree, on every client
 
-**Investigated 2026-09-13; proposal open as
+**Investigated 2026-09-13; contract v2 at
 [docs/clients/PLAYBACK-SURFACE-CONTRACT.md](docs/clients/PLAYBACK-SURFACE-CONTRACT.md),
-ruled the same day (§9) — ready to build, nothing built yet.** Paul reported a full-screen playback
+ruled, adversarially reviewed and answered, with the Opus build plan in
+[PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md](docs/clients/PLAYBACK-SURFACE-CONTRACT-IMPLEMENTATION.md)
+— ready to build, nothing built yet.** Paul reported a full-screen playback
 error while the picture keeps playing, or one that stays up after playback
 stopped and came back. It is one defect with three spellings: the blocking
 overlay is an imperative message channel — 40 `setLoading` sites on the web,
@@ -22,9 +24,12 @@ discard the server's `{code,message}` refusal bodies, so a 503 "not yet"
 reads as fatal.
 
 The proposal is a Playback Surface Contract in the input contract's shape:
-typed faults with a fixed severity, a blocking surface only over a player the
-presenter itself paused, progress evidence retires the fault, faults keyed to
-the open generation, a surface ledger in Playback debug, and a fence. Four
+typed faults with a fixed class, a blocking surface rendered only over a
+player its *recovery owner* has already stopped (the review's central
+finding — v1 had the presenter pause, which made the overlay a recovery
+actor), the player's own presentation evidence retires faults, two
+identities per fault (attached media, requested intent), a surface ledger in
+Playback debug, and a fence. Four
 surface PRs (fixture, web, Apple, Android), behaviour-neutral by ruling, then
 one PR for the three bounded recovery additions and one for a separate
 probable defect surfaced on the way — Android copied-video seeks never land
