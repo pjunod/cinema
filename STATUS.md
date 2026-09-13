@@ -4,6 +4,22 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Apple Live TV now distinguishes a stall and owns its fullscreen surface
+
+**[#300](http://192.168.4.7:3000/noirr/plurx/pulls/300), from
+`codex/live-tv-start-stall-apple` into `effort/live-tv-start-stall`; WIP while
+review and focused qualification run.** Apple build 153 publishes a debounced
+stall-only waiting state, truthful behind-the-edge and buffered measurements,
+and fullscreen-owned status copy. The tvOS fullscreen surface is now the
+reviewed telemetry strip, programme band, waiting tile, paused state, and
+five-action focus row; its reveal layer cannot take focus while controls or the
+guide are present. Info is a fixed two-column snapshot ledger with programme,
+channel, delivery, signal, and summed AVPlayer access-log facts. The iPhone
+surface, Live TV input routing, remote adapter, playback-surface fixture, wire
+shapes, timeouts, and feature-gate state are unchanged. The exact Apple TV,
+HDHomeRun, phone, and web physical prompt is in the PR body and remains required
+before the effort can be promoted to `main`.
+
 ## Android now lets each HLS playlist choose its live hold-back
 
 **PR #299, from `codex/live-tv-start-stall-android` into
