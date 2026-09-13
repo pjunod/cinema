@@ -1,7 +1,10 @@
 # Recording and reminders — implementation status and evidence
 
-**Status:** server and all three clients built on `effort/live-tv-dvr`;
-nothing has touched a tuner yet · **Base:** Forgejo `main` at `75edcb44` ·
+**Status:** server and all three clients built on `effort/live-tv-dvr`,
+reviewed and qualified, merging to `main`; nothing has touched a tuner yet ·
+**Base:** Forgejo `main` at `75edcb44` · **PR:**
+[#294](http://192.168.4.7:3000/noirr/plurx/pulls/294) ·
+[#295](http://192.168.4.7:3000/noirr/plurx/issues/295) ·
 **Updated:** 2026-09-13
 
 Companion to
@@ -73,16 +76,31 @@ occupying.
 
 | Scope | Evidence | State |
 |---|---|---|
-| `plurx-core` — `dvr.rs`, both Store backends, the contract scenarios | `cargo test -p plurx-core` DVR + contract cases green on SQLite; `make cluster-store-check` runs the same four scenarios on three voters | built |
-| `plurxd` — engine, routes, settings, Developer item, scan | `cargo clippy --workspace -D warnings` clean; the focused `plurxd` DVR and guide cases green | built |
-| Web · Apple · Android | `make web-check` (one pre-existing failure, below); no Swift or Android toolchain in the build container, so both native clients were verified by reading | built, unproved on a device |
+| `plurx-core` — `dvr.rs`, both Store backends, the contract scenarios | `cargo test -p plurx-core` DVR + `scan::recordings` unit cases and all four contract scenarios green on SQLite; `make cluster-store-check` runs the same four on three voters | built |
+| `plurxd` — engine, routes, settings, Developer item, scan | `cargo clippy --workspace --all-targets -D warnings` clean; 97 focused DVR, webhook, schedule, guide and Developer cases green | built |
+| Web · Apple · Android | every `make web-check` step green but the pre-existing one below; no Swift or Android toolchain in the build container, so both native clients were verified by reading | built, unproved on a device |
+| The repository's own contracts | `make operations-check` 325 green; `validation/mobile_versions.py` clean; `scripts/ui-baseline --self-host --check` 7,912 structural facts across 78 captures match the golden with no console or page errors | built |
+
+### The one adversarial review
+
+Reviewed once, at the point this branch opened its PR to `main`, as
+[DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) requires. Five P1s, ten
+P2s and three P3s; all addressed in `170b1e7d`, whose message carries the
+disposition of each. The severe one is worth naming here because no existing
+test could have caught it: every path a recording owned was built with
+`Path::with_extension`, which cuts at the *last* dot — and a basename ends
+`… - 7.1 - abcdef01`. Two sub-channels airing a programme called *News* at six
+would have written one file. The unit test asserted the `String` basename and
+never a built `PathBuf`, so the bug lived entirely in the gap between them.
 
 Three `plurxd` unit tests and one web test were **already red on `main` at
 `75edcb44`** and are untouched here: `live_tv_software_hls_argument_baseline_is_stable`,
 `live_hls_publishes_short_startup_segments_before_steady_cadence`,
-`one_tuner_get_runs_the_full_hls_lifecycle_and_stop_waits_for_cleanup`, and
+`one_tuner_get_runs_the_full_hls_lifecycle_and_stop_waits_for_cleanup` (all
+three want an `ffprobe` the build container does not configure), and
 `tests/web/layout-containment.test.js` (whose five offending declarations are
-byte-identical in the merge base).
+byte-identical in the merge base — verified by running the test against a
+pristine `main` checkout).
 
 ## What remains unproved
 
