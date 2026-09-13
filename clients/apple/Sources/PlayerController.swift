@@ -5605,6 +5605,21 @@ final class PlayerController: ObservableObject {
         present(.presenting(presenting, attached: attached))
     }
 
+    #if DEBUG
+    /// Test seam, Debug-only and never in a shipped binary: declare that a
+    /// frame has been presented for this playback.
+    ///
+    /// `surfaceContext` is `.start` until one has, and the only producer is
+    /// `sampleSurfacePresentation`, which needs a decoded picture, a moving
+    /// position and a settled stream. A headless XCTest has none of the three
+    /// — an AVPlayerItem over a playlist URL nothing serves never readies, so
+    /// `isChangingStream` never clears and the periodic observer returns
+    /// early. Without this the `.change` and `.attached` halves of every
+    /// context-sensitive rule are unreachable from a unit test. It sets one
+    /// piece of evidence and decides nothing.
+    func noteFramePresentedForTesting() { surfaceHasPresented = true }
+    #endif
+
     /// A `Duration` as whole milliseconds, for the ledger and the log.
     nonisolated static func milliseconds(_ duration: Duration) -> Int {
         let components = duration.components

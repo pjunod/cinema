@@ -415,9 +415,17 @@ final class PlayerOperationOwnershipTests: XCTestCase {
         decisions.resolve(0, with: .success((try coldDecision(), caps)))
         try await waitUntil("the first session") { creates.attempts.count == 1 }
         XCTAssertEqual(waits.waits.count, 1, "the cold start armed its deadline")
+        // The picture the viewer is watching, which is what makes the next
+        // create a CHANGE rather than a start. `surfaceContext` is `.start`
+        // until a frame has presented, and a headless test cannot decode one:
+        // the item over a playlist URL nothing serves never readies, so
+        // `isChangingStream` never clears and the periodic observer — the one
+        // producer of presentation evidence — returns before it samples.
+        controller.noteFramePresentedForTesting()
+        // A warm quality change is a PREPARED replacement: it reuses the
+        // decision it already has and posts the successor create straight
+        // away, so there is no second decision request to wait for here.
         controller.selectQuality(720)
-        try await waitUntil("the quality decision") { decisions.requests.count == 2 }
-        decisions.resolve(1, with: .success((try coldDecision(), caps)))
         try await waitUntil("the change's create") { creates.attempts.count == 2 }
         // Nothing new is armed, and nothing is retried: the change keeps its
         // banner and the picture behind it keeps playing.
