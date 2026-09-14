@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["6b6c6ddd"]
+points = []
+checks = []
+reason = "Evidence metadata only: this commit adds `validation/regressions.d/1938f643-record-on-air.toml` and changes nothing else. The audit reads it as corrective because its subject names the defect the row is about, so it needs a row of its own; there is no behaviour here for a test to hold. The work it documents is pinned by `an on-air programme offers all four verbs, not just Watch` in `tests/web/live-tv.test.js`, named in that row."
+ignore = true
