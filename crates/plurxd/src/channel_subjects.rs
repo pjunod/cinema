@@ -661,6 +661,20 @@ async fn process_inner(
         job.state = "complete".into();
         return Ok(());
     }
+    if job.classifier_profile.is_none() {
+        if let Some(previous) = state
+            .store
+            .subject_job(JobQuery::Profile {
+                owner: job.owner_user_id,
+                subject: job.subject_digest.clone(),
+                now: now(),
+            })
+            .await
+            .map_err(unavailable)?
+        {
+            job.classifier_profile = previous.classifier_profile;
+        }
+    }
     let provider = ollama::Ollama::configured().map_err(unavailable)?;
     let profile_result = provider.profile().await;
     match &profile_result {
@@ -681,7 +695,11 @@ async fn process_inner(
         })
         .cloned()
         .collect::<Vec<_>>();
-    if !immediate.is_empty() && job.published_ms.is_none() {
+    job.counts = counts(&candidates, &initial);
+    job.selection_count = immediate.len();
+    if !immediate.is_empty()
+        && (job.published_ms.is_none() || job.counts.processed == job.counts.total)
+    {
         if let Some(id) = &job.channel_id {
             if let Some(channel) = state
                 .store
@@ -704,6 +722,11 @@ async fn process_inner(
                 }
             }
         }
+    }
+    if job.counts.processed == job.counts.total {
+        job.state = "complete".into();
+        job.error = profile_result.err();
+        return Ok(());
     }
     if let Err(error) = profile_result {
         job.state = "waiting_for_provider".into();
