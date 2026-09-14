@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b3106eb5"]
+points = ["cluster.auth"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+reason = "A node already on the v36 shape could not join a v37 cluster: schema_migration_action listed every additive predecessor except the one the DVR schema was added on top of, so the match fell through to the error arm and the join was refused as an unknown schema version. Two retained assertions in the store's own tests hold it. The ladder check requires DVR_SCHEMA_MIGRATION_SOURCE to equal LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION and to sit exactly one step below DVR_SCHEMA_VERSION, and requires AUTH_SCHEMA_MIGRATION_SOURCE plus 32 to be AUTH_SCHEMA_VERSION - so adding a schema without admitting its predecessor leaves the step count short and fails there rather than on a node that will not start. The predecessor case requires a compatibility row at DVR_SCHEMA_MIGRATION_SOURCE to resolve to MigrateFrom that same version rather than to the error arm, which is the exact refusal. Both run in the local and hosted Rust gates, and the joining behaviour they describe is exercised across real nodes by cluster-auth."
