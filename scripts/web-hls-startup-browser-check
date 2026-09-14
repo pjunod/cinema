@@ -1,0 +1,193 @@
+#!/usr/bin/env python3
+"""Exercise the shipped web player against a delayed HLS manifest in Chromium."""
+
+import argparse
+import hashlib
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+WEB = ROOT / "crates" / "plurxd" / "src" / "web"
+MANIFEST_REFUSALS = 8
+TIMEOUT_MS = 38_000
+
+
+def find_browser(explicit):
+    if explicit:
+        return explicit
+    for candidate in (
+        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+        Path("/usr/bin/google-chrome"),
+        Path("/usr/bin/chromium"),
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    root = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers"))
+    for pattern in (
+        "chromium-*/chrome-linux/chrome",
+        "chromium_headless_shell-*/chrome-linux/headless_shell",
+    ):
+        found = sorted(root.glob(pattern)) if root.is_dir() else []
+        if found:
+            return str(found[-1])
+    return None
+
+
+def make_fixture(directory):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is required to build the deterministic HLS fixture")
+    subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=320x180:r=25:d=3",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-g", "25",
+            "-c:a", "aac", "-b:a", "64k", "-shortest",
+            "-f", "hls", "-hls_time", "1", "-hls_playlist_type", "vod",
+            "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
+            "-hls_segment_filename", str(directory / "seg%d.m4s"),
+            str(directory / "index.m3u8"),
+        ],
+        check=True,
+    )
+    digest = hashlib.sha256()
+    for path in sorted(directory.iterdir()):
+        digest.update(path.name.encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+class FixtureServer(ThreadingHTTPServer):
+    def __init__(self, fixture):
+        super().__init__(("127.0.0.1", 0), Handler)
+        self.fixture = fixture
+        self.manifest_requests = 0
+        self.lock = threading.Lock()
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def reply(self, status, body=b"", content_type="application/octet-stream"):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        route = self.path.split("?", 1)[0]
+        assets = {
+            "/assets/playback-policy.js": WEB / "playback-policy.js",
+            "/assets/playback-control.js": WEB / "playback-control.js",
+            "/assets/reader.js": WEB / "reader.js",
+            "/assets/hls.min.js": WEB / "hls.min.js",
+            "/assets/live-tv.js": WEB / "live-tv.js",
+            "/assets/library-channels.js": WEB / "library-channels.js",
+            "/assets/cluster-panel.js": WEB / "cluster-panel.js",
+        }
+        if route == "/":
+            return self.reply(200, (WEB / "index.html").read_bytes(), "text/html; charset=utf-8")
+        if route in assets:
+            return self.reply(200, assets[route].read_bytes(), "text/javascript; charset=utf-8")
+        if route == "/delayed/index.m3u8":
+            with self.server.lock:
+                self.server.manifest_requests += 1
+                ordinal = self.server.manifest_requests
+            if ordinal <= MANIFEST_REFUSALS:
+                body = json.dumps({
+                    "code": "startup_timeout",
+                    "message": "the deterministic fixture is still starting",
+                }).encode()
+                return self.reply(503, body, "application/json")
+            return self.reply(200, (self.server.fixture / "index.m3u8").read_bytes(), "application/vnd.apple.mpegurl")
+        fixture = self.server.fixture / route.removeprefix("/delayed/")
+        if route.startswith("/delayed/") and fixture.is_file():
+            return self.reply(200, fixture.read_bytes())
+        self.reply(404, b"not found", "text/plain")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--browser", default=None)
+    args = parser.parse_args()
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        print("SKIP  playwright is not installed; web HLS startup browser evidence unavailable")
+        return 0
+
+    with tempfile.TemporaryDirectory(prefix="plurx-hls-startup-") as raw:
+        fixture = Path(raw)
+        fixture_hash = make_fixture(fixture)
+        server = FixtureServer(fixture)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        console = []
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(
+                    executable_path=find_browser(args.browser),
+                    args=["--no-sandbox", "--disable-dev-shm-usage", "--autoplay-policy=no-user-gesture-required"],
+                )
+                page = browser.new_page()
+                page.on("console", lambda message: console.append(f"{message.type}: {message.text}"))
+                page.goto(f"http://127.0.0.1:{server.server_port}/", wait_until="load")
+                page.wait_for_function("() => typeof attachHls === 'function' && window.Hls")
+                page.evaluate("""
+                    () => {
+                      const video=document.getElementById('video');
+                      video.muted=true;
+                      PLAYER={method:'transcode',source:{video_codec:'h264'},started:false,
+                        wantsPlayback:true,controlIntentGeneration:1,attemptId:'browser-check',
+                        bufSegSecs:4,marks:{},abr:{},offset:0,bookOffset:0,mediaAttachment:null};
+                      attachHls(video,'/delayed/index.m3u8',0.75);
+                    }
+                """)
+                page.wait_for_function(
+                    """() => {
+                      const video=document.getElementById('video');
+                      return PLAYER && PLAYER.hlsStartup &&
+                        PLAYER.hlsStartup.dispatches >= 9 && video.currentTime >= 0.5 &&
+                        !video.paused && video.readyState >= 2;
+                    }""",
+                    timeout=TIMEOUT_MS,
+                )
+                result = page.evaluate("""() => ({
+                  position:document.getElementById('video').currentTime,
+                  readyState:document.getElementById('video').readyState,
+                  dispatches:PLAYER.hlsStartup.dispatches,
+                  manifestState:PLAYER.hlsStartup.manifestState,
+                  retryState:PLAYER.hlsStartup.retry.state,
+                  hlsVersion:Hls.version,
+                  browser:navigator.userAgent,
+                })""")
+                browser.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    if server.manifest_requests < 9 or result["position"] < 0.5:
+        print("FAIL  delayed-manifest recovery did not present at the requested position")
+        print(json.dumps(result, indent=2))
+        return 1
+    print("PASS  shipped page recovered after the stock manifest ladder and presented media")
+    print(f"      manifest requests: {server.manifest_requests}; first observed position: {result['position']:.3f}s")
+    print(f"      fixture sha256: {fixture_hash}; hls.js: {result['hlsVersion']}")
+    print(f"      browser: {result['browser']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

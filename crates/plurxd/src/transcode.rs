@@ -7996,6 +7996,10 @@ pub enum SegmentOpenError {
 pub(crate) enum SegmentPublication {
     Ready(SegmentFile),
     Missing(Option<MediaResponseOwner>),
+    /// The object was found for this exact owner, but its metadata could not
+    /// be inspected. Absence and corrupt bytes are both stronger claims than
+    /// the storage layer can make in this state.
+    Unavailable(MediaResponseOwner),
     Pending(MediaResponseOwner),
     Failed(PlaylistPublicationError),
 }
@@ -17729,6 +17733,21 @@ impl TranscodeManager {
             })
     }
 
+    pub(crate) async fn vod_segment_before(
+        &self,
+        session_id: &str,
+        name: &str,
+        deadline: Instant,
+    ) -> Option<VodResponsePublication<Option<crate::vodserve::SegmentReady>>> {
+        self.vod
+            .segment_before(session_id, name, Some(deadline))
+            .await
+            .map(|publication| VodResponsePublication {
+                result: publication.result,
+                owner: MediaResponseOwner(MediaResponseOwnerKind::Vod(publication.owner)),
+            })
+    }
+
     /// True for an attached VOD capability or one still in the slow
     /// resurrection preparation window. Lease loss uses this classification
     /// to close the stable release generation before a late attachment.
@@ -23891,7 +23910,16 @@ impl TranscodeManager {
         session_id: &str,
         name: &str,
     ) -> Result<SegmentPublication, SegmentOpenError> {
-        let deadline = Instant::now() + SEGMENT_WAIT;
+        self.segment_for_publication_before(session_id, name, Instant::now() + SEGMENT_WAIT)
+            .await
+    }
+
+    pub(crate) async fn segment_for_publication_before(
+        self: &Arc<Self>,
+        session_id: &str,
+        name: &str,
+        deadline: Instant,
+    ) -> Result<SegmentPublication, SegmentOpenError> {
         // Guard against path traversal: segment names are `segNNNNN.ts` only.
         if !is_safe_segment(name) {
             return Ok(SegmentPublication::Missing(None));
@@ -24063,12 +24091,12 @@ impl TranscodeManager {
                     None => match file.metadata().await {
                         Ok(metadata) => metadata.len(),
                         Err(_) => {
-                            return Ok(SegmentPublication::Missing(Some(MediaResponseOwner(
+                            return Ok(SegmentPublication::Unavailable(MediaResponseOwner(
                                 MediaResponseOwnerKind::Rolling {
                                     session: Arc::clone(&session),
                                     producer_attempt,
                                 },
-                            ))));
+                            )));
                         }
                     },
                 };
@@ -24247,6 +24275,7 @@ impl TranscodeManager {
     /// Compatibility facade for internal probes and older tests. HTTP serving
     /// uses [`Self::segment_for_publication`] so negative outcomes retain their
     /// exact response owner and typed failure classification.
+    #[cfg(test)]
     pub async fn segment(
         self: &Arc<Self>,
         session_id: &str,
@@ -24257,6 +24286,7 @@ impl TranscodeManager {
             .map(|outcome| match outcome {
                 SegmentPublication::Ready(file) => Some(file),
                 SegmentPublication::Missing(_)
+                | SegmentPublication::Unavailable(_)
                 | SegmentPublication::Pending(_)
                 | SegmentPublication::Failed(_) => None,
             })
