@@ -14574,6 +14574,9 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              -- conversion ledger.
              DROP TRIGGER IF EXISTS cache_publication_generation_guard;
              DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard;
+             DROP TABLE IF EXISTS dvr_reminders;
+             DROP TABLE IF EXISTS dvr_recordings;
+             DROP TABLE IF EXISTS dvr_rules;
              DROP TRIGGER IF EXISTS offline_recovery_guard;
              DROP TRIGGER IF EXISTS library_channel_session_recipes_request_delete;
              DROP TABLE IF EXISTS library_channel_session_recipes;

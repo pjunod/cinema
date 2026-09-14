@@ -1748,6 +1748,69 @@ final class LiveTvTests: XCTestCase {
         XCTAssertFalse(source.contains("onDismiss: { if mayRelease"))
     }
 
+    /// The cover's reveal layer takes every direction through
+    /// `onMoveCommand`, so while it holds focus the engine never sees one.
+    /// `focusable(false)` does not relocate focus until the next focus
+    /// update, and the adapter stays attached meanwhile — so the layer can
+    /// still hold focus for a moment after the overlay is back.
+    ///
+    /// It used to assert `.fullscreenHidden` through that moment, and
+    /// `fullscreenHidden` answers every direction *and* Select with `reveal`.
+    /// So the moment never ended: each press re-showed an overlay that was
+    /// already up, focus never left a transparent view, nothing highlighted
+    /// and nothing activated. Reporting the real state routes those presses
+    /// to `focusControl`, which `applyLiveOutcome` refuses so the framework
+    /// moves focus off.
+    ///
+    /// Select is asserted too, because the layer dispatches it through
+    /// `onTapGesture`; a directions-only test would miss a table that gave
+    /// `fullscreenHidden × select` a real outcome.
+    func testTheRevealLayerReportsTheStateItIsInRatherThanTheOneItWants() throws {
+        let presses: [LiveTvContractInput] = [.left, .right, .up, .down, .select]
+        for state in LiveTvInputState.allCases {
+            let everyPressReveals = presses.allSatisfy {
+                LiveTvInputRouting.route(surface: .tenFoot, state: state, input: $0) == .reveal
+            }
+            XCTAssertEqual(
+                everyPressReveals,
+                state == .fullscreenHidden,
+                "\(state.rawValue): only the state with nothing else on screen may eat every press"
+            )
+        }
+        let testsDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        let source = try String(
+            contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
+            encoding: .utf8)
+        XCTAssertFalse(
+            source.contains("state: { .fullscreenHidden }"),
+            "the reveal adapter must report liveInputState, never assert a state it cannot know"
+        )
+        XCTAssertEqual(
+            source.components(separatedBy: "detail == nil, live.playing, !live.paused").count - 1,
+            2,
+            """
+            `detail` belongs in BOTH auto-hide guards, entry and post-sleep. \
+            In one only, a programme sheet opened during those four seconds \
+            still lets the chrome hide underneath it
+            """
+        )
+        // Both directions of the overlay change defer past the update that
+        // inserts the view they then want focused, because tvOS drops an
+        // assignment aimed at a view that does not exist yet. Undeferred, the
+        // reveal assignment was dropped and focus stayed on the layer - and
+        // having not changed, it never tripped the bounce in
+        // `onChange(of: focusedControl)`. The hide direction already deferred;
+        // these are its two guards, one per direction.
+        XCTAssertTrue(
+            source.contains("guard fullscreen, overlayVisible else { return }"),
+            "revealing the overlay must wait for its buttons before naming one"
+        )
+        XCTAssertTrue(
+            source.contains("guard fullscreen, !overlayVisible, !temporaryGuide,"),
+            "hiding it must wait for the reveal layer before naming that"
+        )
+    }
+
     func testTheTenFootSurfaceKeepsSomethingFocusableWhileTheOverlayIsHidden() throws {
         // tvOS delivers move/exit/playPause only to the focused view and its
         // ancestors, and PlayerSurfaceView refuses focus — so once the overlay
@@ -1758,7 +1821,13 @@ final class LiveTvTests: XCTestCase {
             contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
             encoding: .utf8)
         XCTAssertTrue(source.contains(".focused($focusedControl, equals: FocusTarget.reveal)"))
-        XCTAssertTrue(source.contains("focusedControl = visible ? .guide : .reveal"))
+        // Was `focusedControl = visible ? .guide : .reveal`, which the
+        // rebuilt surface split into the two branches of
+        // `onChange(of: overlayVisible)` and retargeted to `.play`. This
+        // assertion had been failing on main ever since: the fast lane
+        // compiles the Apple target and does not run it.
+        XCTAssertTrue(source.contains(".focusable(!overlayVisible && !temporaryGuide)"))
+        XCTAssertTrue(source.contains("focusedControl = .reveal"))
         // Tuning stays inside the selected browse layout. The viewer chooses
         // fullscreen explicitly with Return to live or by selecting the
         // already-playing channel.
