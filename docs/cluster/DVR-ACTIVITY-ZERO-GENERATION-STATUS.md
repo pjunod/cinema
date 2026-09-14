@@ -1,6 +1,6 @@
 # DVR Activity generation zero — repair status
 
-**Status:** review complete · qualification pending · **Updated:** 2026-09-14 ·
+**Status:** reviewed · local qualification complete · hosted fast lane next · **Updated:** 2026-09-14 ·
 **Base:** `0b2490839112` · **Branch:**
 `codex/fix-dvr-activity-zero-generation`
 
@@ -25,7 +25,7 @@ addressed, so the final candidate consumes the fast lane once.
 | D02 · correct the peer contract | complete | Removed only the invalid `serving_generation > 0` predicate; the field is an unsigned fence token and zero is its healthy initial epoch | Complete |
 | D03 · retain the failure | complete | `initial_dvr_serving_generation_is_a_valid_peer_snapshot` serializes the real peer shape and requires the decoder to answer it | Complete |
 | D04 · adversarial review | complete | The single review of `decada4790d8` found no concrete correctness, security, coverage, documentation, or workflow defect; it retained the lack of a multi-daemon case as residual risk | Complete |
-| D05 · qualification and promotion | ready | No test suite ran before the review | Focused regression and fast lane pass on the reviewed candidate, then the pull request merges |
+| D05 · qualification and promotion | in progress | Pinned formatting, compile, Clippy, and the focused regression pass; pull request #315 is the authoritative hosted receipt | Exact-head fast lane passes, then the pull request merges |
 
 ## Root cause — a valid initial epoch was treated as absent
 
@@ -57,8 +57,9 @@ while another voter displayed `sent an invalid response` for `nynuc`.
 
 | Evidence | State | Receipt |
 |---|---|---|
-| Pinned compiler | ready | `rustc 1.97.1 (8bab26f4f 2026-07-14)` and `cargo 1.97.1` are available through `rustup run 1.97.1` |
+| Pinned compiler | complete | `rustc 1.97.1 (8bab26f4f 2026-07-14)` and `cargo 1.97.1`; `cargo check -p plurxd --all-targets --locked` passed |
 | Adversarial review | complete | One pass against `decada4790d8`; no concrete findings and no second review requested |
-| Focused regression | waiting | Run once on the reviewed candidate |
-| Fast lane | waiting | Apply `fast-lane` only after review findings are resolved |
-| Main merge | waiting | Merge only after the fast lane is green |
+| Static validation | complete | `cargo fmt --all -- --check` and `cargo clippy -p plurxd --all-targets --locked -- -D warnings` passed; Clippy's two current-main DVR style findings were corrected in this batch |
+| Focused regression | complete | `cargo test --locked -p plurxd --bin plurxd initial_dvr_serving_generation_is_a_valid_peer_snapshot`: 1 passed, 0 failed, 2,245 filtered out |
+| Fast lane | ready | Forgejo pull request #315 is the exact-head authority; making it ready starts the single hosted run |
+| Main merge | waiting | Merge only after pull request #315's exact-head fast lane is green |
