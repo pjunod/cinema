@@ -1964,3 +1964,15 @@ source = "clients/android/app/build.gradle.kts"
 source_anchor = "versionCode = 98"
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "def test_android_counter_the_target_already_ships_fails_against_the_target"
+
+[[fixes]]
+# The review correction spans web and Apple. This retained regression covers
+# channel naming through the shipped editor handlers; the other dispositions
+# have the compile and manual fixture evidence recorded in the UI ledger.
+# Do not interpret this anchor as unit coverage of every visual correction.
+id = "web.usability-review-complete-channel-name"
+commits = ["28bb4723"]
+source = "crates/plurxd/src/web/index.html"
+source_anchor = "function lcStep(step){"
+test = "tests/web/library-channels.test.js"
+test_anchor = "channel naming waits for the complete subject and preserves a chosen name"

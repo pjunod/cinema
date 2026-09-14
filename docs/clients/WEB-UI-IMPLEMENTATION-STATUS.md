@@ -86,3 +86,13 @@ production failures or evidence of live playback. Android remains source-only;
 large-text, player, offline recovery and further native editor scenarios remain
 explicit follow-ups in the mobile audit. Merge does not deploy a server image
 or publish the Apple application.
+
+## Promotion attempt
+
+PR317 became ready at candidate `28bb4723`. Forgejo did not emit a ready
+event, so reopening the unchanged PR triggered run 2081. It stopped at
+`history-check` before any unit tests: the corrective client commit lacked
+its required `tests/client-fixes.toml` entry. The follow-up adds that entry
+and one retained channel-name regression. A second workflow attempt is
+required; no test suite is being repeated. The retained channel test belongs
+to the web suite and is not claimed as executed by the smaller fast lane.
