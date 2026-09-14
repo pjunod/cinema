@@ -1845,22 +1845,26 @@ precisely when the node is being worked on.
 
 ### 17.0 Recording
 
-The DVR writes intent and reads rows. No route here touches a tuner, a file or
-a disk, and none waits on the owner node: the owner's own loop reads the same
-replicated rows and is the only writer of `recording` and the terminal states.
-That is why `DELETE` on a live recording answers `202 {pending: true}` — the
-capture stops when the owner's next tick closes the file, and a client that
-means to watch the freed tuner polls the row until it leaves `recording`.
+The DVR mutation routes write intent; they do not open tuners or files. The
+owner loop reads those replicated rows and is the only writer of `recording`
+and terminal states. Runtime reads join the durable row to a bounded owner
+observation. `DELETE` on a live recording therefore answers `202 {pending:
+true}`: acceptance is visible as `Stop requested`, and closure is a later
+owner fact.
 
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | GET | `/api/v1/dvr/status` | bearer | Switch, root, free space against the floor, tuner slots and reserve, next start |
+| GET | `/api/v1/dvr/overview` | bearer | Bounded versioned foreground projection: exact counts, at most 64 active rows, owner observation age, next capture and server-calculated capabilities. `availability` is `complete`, `partial` or `unavailable`; missing counts are `null`, never an invented zero. Admins alone receive diagnostics |
 | GET | `/api/v1/dvr/recordings` | bearer | Rows; `?state=` filters by name, `?after=` and `?limit=` page. Excludes `deleted` unless named |
 | POST | `/api/v1/dvr/recordings` | bearer | Record one airing: `{channel_id, airing_start}` copies the programme from the guide, or `{channel_id, capture_start, capture_end, title}` records a fixed span with no guide at all |
 | GET | `/api/v1/dvr/recordings/{id}` | bearer | One row, with `item_id`/`file_id` once the scan has linked it |
+| GET | `/api/v1/dvr/recordings/{id}/events` | bearer | Newest lifecycle events first with `?before=&limit=`; mutually exclusive `?after=` returns ascending incremental events. Carries `next`, `history_complete` and `truncated_before_sequence` |
+| POST | `/api/v1/dvr/recordings/{id}/attention/ack` | bearer | Monotonically marks one recording reviewed through `{"through_sequence":N}` for this user. It changes neither media nor recording state |
 | DELETE | `/api/v1/dvr/recordings/{id}` | bearer | Planned → cancelled, durably. Recording → records the stop request, `202 {pending}`. Finished → deleted with its file, and only with `?delete_file=1` |
 | POST | `/api/v1/dvr/recordings/{id}/restore` | bearer | Cancelled → scheduled. The only way back; rule expansion never does it |
-| GET | `/api/v1/dvr/schedule` | bearer | The plan for `?days=<1..14>`, with a conflict count. `?cancelled=1` keeps skipped rows visible so they can be restored |
+| GET | `/api/v1/dvr/schedule` | bearer | Legacy `?days=<1..14>` remains. Windowed readers default to now −12 h through now +12 h and may supply `from`, `to` (at most 24 hours), repeated `channel_id` (at most 64), `after`, and `limit` (at most 100); rows order by `(capture_start,id)`, `next` pages, and `conflicts` remains exact for the whole requested scope |
+| GET | `/api/v1/dvr/attention` | bearer | Per-user paginated projection with `rows`, opaque `next` and exact `total`; unresolved current conditions precede unreviewed historical outcomes. The cursor carries its section, exclusive key and both first-page upper watermarks, so new incidents appear on a refreshed first page rather than inside an in-progress traversal |
 | GET | `/api/v1/dvr/rules` | bearer | Series rules, in priority order |
 | POST | `/api/v1/dvr/rules` | bearer | Create; `from_airing` fills mode, value and channel from a guide cell |
 | PUT | `/api/v1/dvr/rules/order` | admin | Renumber every rule. The order decides who gets a tuner when two rules want one |
@@ -1871,8 +1875,17 @@ means to watch the freed tuner polls the row until it leaves `recording`.
 | DELETE | `/api/v1/dvr/reminders/{id}` | bearer | Own only |
 | POST | `/api/v1/dvr/reminders/{id}/ack` | bearer | Fired → acked, so a second device does not show it again |
 
-Typed error codes here: `dvr_disabled`, `airing_unknown`, `airing_past`,
-`rule_limit`, `reminder_limit`, `delete_file_required`.
+Typed error codes here include `dvr_disabled`, `airing_unknown`, `airing_past`,
+`rule_limit`, `reminder_limit`, `delete_file_required` and
+`invalid_attention_sequence`. Malformed history, attention and schedule
+cursors are typed 400 responses rather than empty pages.
+
+Runtime observation expires after 20 seconds. `attempt_bytes_written` and
+`write_bps` count successful application writes in the current attempt; they
+are not decoded-video, filesystem-sync or playable-duration claims. A
+`total_bytes_written` value exists only when the owner knows the distinct
+prior-attempt baseline. Every response in this block is private and
+`no-store`.
 
 The session routes take no account bearer at all, and an `Authorization`
 header on them is ignored. Two consequences follow: their capability values

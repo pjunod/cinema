@@ -2650,6 +2650,9 @@ pub(crate) struct LiveTvManager {
     graph_cache: tokio::sync::Mutex<Option<CachedGraphProbe>>,
     source_formats: StdMutex<HashMap<SourceFormatKey, CachedSourceFormat>>,
     registry: Arc<StdMutex<LiveTvRegistry>>,
+    /// Owner-sampled during the DVR loop. Public overview reads this atomic;
+    /// they never stat the recording filesystem themselves.
+    dvr_storage_free_bytes: AtomicU64,
     scratch_claims: StdMutex<HashSet<PathBuf>>,
     scratch_sweep_gate: tokio::sync::Mutex<()>,
     metrics: Arc<LiveTvMetrics>,
@@ -2689,6 +2692,7 @@ impl LiveTvManager {
             graph_cache: tokio::sync::Mutex::new(None),
             source_formats: StdMutex::new(HashMap::new()),
             registry: Arc::clone(&metrics.registry),
+            dvr_storage_free_bytes: AtomicU64::new(u64::MAX),
             scratch_claims: StdMutex::new(HashSet::new()),
             scratch_sweep_gate: tokio::sync::Mutex::new(()),
             metrics,

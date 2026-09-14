@@ -28,13 +28,13 @@ presentation contract around them.
 | Package | State | Evidence or next boundary |
 |---|---|---|
 | S00 isolated base and compiler | complete | independent clone at `28ae8163`; pinned Rust 1.97.1 workspace check passed before Rust edits |
-| S01 blank-list repair | built; final evidence pending | web, Apple and Android decode the real `{rows, next}` envelope; web preserves stale rows and exposes Load more; regression fixtures written but not run |
+| S01 blank-list repair | built; final evidence pending | web, Apple and Android decode the real `{rows, next}` envelope, preserve stale rows and expose independent Load more controls; regression fixtures written but not run |
 | S02 capture observation and overview | built; compile passed | successful-write sampling, five-second rate window, bounded peer observations, shared Activity/overview projection and `/api/v1/dvr/overview`; focused fixtures written but not run |
-| S03 lifecycle ledger and attention | built; compile passed | append-only SQLite v59 / replicated v39 migrations; atomic and owner-fenced events, bounded pages/pruning, legacy provenance and per-user acknowledgments; no tests run yet |
+| S03 lifecycle ledger and attention | built; compile passed | append-only SQLite v59 / replicated v39 migrations; atomic and owner-fenced events, bounded pages/pruning, recovery-gap provenance, legacy outcomes, per-user acknowledgments and section/watermark-stable attention traversal; no tests run yet |
 | S04 web layouts and controller | built; compile passed | one scope-aware poller feeds chrome, Live TV and Recordings; exact-airing player context, canonical `#/recordings`, six task tabs, mobile detail, real event history and Activity projection |
 | S05 Apple clients | built; source type-check passed | additive overview/event/attention decoders; one foreground profile controller; iOS/tvOS Recordings root, capture activity, immediate details, history, manual/skipped/rules/reminders and exact-airing player/guide context; device builds remain pending because this host exposes no simulator runtime |
 | S06 Android clients | built; compile passed | additive overview/event/attention decoders; one lifecycle-owned profile controller; phone/Google TV Recordings root, capture activity, immediate detail/history, manual/skipped/rules/reminders, exact-airing context and named stop/delete confirmations; physical D-pad evidence remains pending |
-| S07 review and promotion | queued | merge current `main`, obtain one adversarial code review, address it, mark the draft PR ready and let the fast lane run once |
+| S07 review and promotion | ready to start | integration audit complete; merge current `main`, obtain one adversarial code review, address it, mark the draft PR ready and let the fast lane run once |
 
 ## Decisions made while implementing
 
@@ -56,6 +56,25 @@ presentation contract around them.
    does not ship SwiftUI's `DatePicker`, so its existing channel-and-time task
    uses explicit start-delay and duration choices; iOS keeps exact date/time
    selection. Both submit the same server contract.
+6. **Use one bounded schedule window on every new surface.** Upcoming defaults
+   to the twelve hours before and after now, caps the window at 24 hours, and
+   owns a cursor separate from Saved and Needs attention. The legacy 14-day
+   query remains compatible for older clients.
+
+## Current compile evidence — no test lane spent
+
+- `rustup run 1.97.1 cargo check -p plurxd --all-targets` passes on the
+  integrated Rust tree.
+- Android `:app:compileDebugKotlin` passes; its two volume-icon deprecation
+  warnings predate this effort.
+- Direct Swift type-checks pass for both `arm64-apple-ios17.0` and
+  `arm64-apple-tvos17.0`. The full Xcode build still stops in asset compilation
+  because this host has no simulator runtimes; no Swift error was emitted.
+- `scripts/js-check` accepts both shipped inline script blocks.
+
+No unit or UI test command has run. The shared web/Apple/Android fixture and
+focused Rust cases remain deliberately unexecuted until the one adversarial
+review is addressed, as requested.
 
 ## Evidence limits — green source is not a hardware claim
 

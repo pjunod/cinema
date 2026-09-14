@@ -126,6 +126,8 @@ targets:
         buildPhase: resources
       - path: ../../tests/playback/live-tv-start-cases.json
         buildPhase: resources
+      - path: ../../tests/playback/dvr-visibility-cases.json
+        buildPhase: resources
     dependencies:
       - target: plurx-iOS
     settings:
@@ -153,6 +155,8 @@ targets:
       - path: ../../tests/playback/live-tv-guide-cases.json
         buildPhase: resources
       - path: ../../tests/playback/live-tv-start-cases.json
+        buildPhase: resources
+      - path: ../../tests/playback/dvr-visibility-cases.json
         buildPhase: resources
     dependencies:
       - target: plurx-tvOS

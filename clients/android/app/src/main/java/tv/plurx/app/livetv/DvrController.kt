@@ -23,12 +23,15 @@ import kotlinx.coroutines.sync.withLock
 data class DvrScreenState(
     val status: DvrStatus? = null,
     val overview: DvrOverview? = null,
+    val overviewReceivedAtNanos: Long? = null,
     val overviewError: String? = null,
     val marks: DvrGuideMarks = DvrGuideMarks.EMPTY,
     /** The plan, cancelled rows included, so Scheduled can offer Restore. */
     val schedule: List<DvrRecording> = emptyList(),
+    val scheduleNext: String? = null,
     val conflicts: Int = 0,
     val library: List<DvrRecording> = emptyList(),
+    val libraryNext: String? = null,
     val rules: List<DvrRule> = emptyList(),
     val attention: List<DvrAttentionProjection> = emptyList(),
     val attentionTotal: Int = 0,
@@ -51,17 +54,18 @@ data class DvrScreenState(
     val holders: List<DvrHolder> = emptyList(),
 )
 
+internal fun DvrScreenState.overviewIsFresh(nowNanos: Long = System.nanoTime()): Boolean {
+    val received = overviewReceivedAtNanos ?: return false
+    val elapsedMs = ((nowNanos - received).coerceAtLeast(0) / 1_000_000).coerceAtMost(20_001)
+    return overview?.isFresh(elapsedMs) == true
+}
+
 internal fun DvrScreenState.indicatorLabel(): String? {
     val sample = overview ?: return null
-    if (!sample.fresh) return if (sample.counts.active > 0) "Status unavailable" else null
-    return buildList {
-        fun append(count: Int?, label: String) { if (count != null && count > 0) add("$count $label") }
-        append(sample.counts.recording, "recording")
-        append(sample.counts.starting, "starting")
-        append(sample.counts.reconnecting, "reconnecting")
-        append(sample.counts.finishing, "finishing")
-        append(sample.counts.unconfirmed, "unconfirmed")
-    }.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+    val received = overviewReceivedAtNanos ?: return null
+    val elapsedMs = ((System.nanoTime() - received).coerceAtLeast(0) / 1_000_000)
+        .coerceAtMost(20_001)
+    return sample.indicatorText(elapsedMs)
 }
 
 class DvrController(
@@ -77,6 +81,7 @@ class DvrController(
     private var observationFailures = 0
     private var lastActiveIds = emptySet<String>()
     private var lastMarksAt = 0L
+    private var scheduleWindow: Pair<Long, Long>? = null
 
     /**
      * The switch, the root and the slots. Deliberately not the schedule: the
@@ -126,7 +131,11 @@ class DvrController(
         try {
             val overview = api.overview()
             val identity = overview.active.mapTo(mutableSetOf()) { it.recording_id }
-            mutableState.value = mutableState.value.copy(overview = overview, overviewError = null)
+            mutableState.value = mutableState.value.copy(
+                overview = overview,
+                overviewReceivedAtNanos = System.nanoTime(),
+                overviewError = null,
+            )
             observationFailures = 0
             val now = System.currentTimeMillis()
             if (identity != lastActiveIds || now - lastMarksAt >= MARK_REFRESH_MS) {
@@ -148,10 +157,14 @@ class DvrController(
     fun refreshMarks() {
         scope.launch {
             try {
-                val schedule = api.schedule(cancelled = true)
+                val now = System.currentTimeMillis() / 1_000
+                val window = (now - 43_200) to (now + 43_200)
+                scheduleWindow = window
+                val schedule = api.schedule(window.first, window.second)
                 val reminders = api.reminders()
                 mutableState.value = mutableState.value.copy(
                     schedule = schedule.rows,
+                    scheduleNext = schedule.next,
                     conflicts = schedule.conflicts,
                     reminders = reminders,
                     marks = DvrGuideMarks(schedule.rows, reminders),
@@ -164,16 +177,55 @@ class DvrController(
         }
     }
 
-    fun refreshLibrary() {
+    fun refreshSchedule(more: Boolean = false) {
         scope.launch {
             try {
-                mutableState.value = mutableState.value.copy(
-                    library = api.recordings(listOf("recording", "done", "partial", "failed", "missed")),
+                if (!more) {
+                    val now = System.currentTimeMillis() / 1_000
+                    scheduleWindow = (now - 43_200) to (now + 43_200)
+                }
+                val window = scheduleWindow ?: return@launch
+                val current = mutableState.value
+                val after = if (more) current.scheduleNext ?: return@launch else null
+                val page = api.schedule(window.first, window.second, after)
+                val rows = if (more) current.schedule + page.rows else page.rows
+                val merged = rows.distinctBy { it.id }
+                    .sortedWith(compareBy<DvrRecording> { it.capture_start }.thenBy { it.id })
+                mutableState.value = current.copy(
+                    schedule = merged,
+                    scheduleNext = page.next,
+                    conflicts = page.conflicts,
+                    marks = DvrGuideMarks(merged, current.reminders),
                 )
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
                 report(error)
+            }
+        }
+    }
+
+    fun refreshLibrary(more: Boolean = false) {
+        scope.launch {
+            try {
+                val current = mutableState.value
+                val page = api.recordingsPage(
+                    listOf("done", "partial"),
+                    if (more) current.libraryNext else null,
+                )
+                val rows = if (more) current.library + page.rows else page.rows
+                mutableState.value = mutableState.value.copy(
+                    library = rows.distinctBy { it.id }
+                        .sortedWith(compareByDescending<DvrRecording> { it.airing_start }.thenByDescending { it.id }),
+                    libraryNext = page.next,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                mutableState.value = mutableState.value.copy(
+                    busy = false,
+                    message = "Showing the last saved recordings. ${error.message ?: dvrMessage("dvr_unreachable")}",
+                )
             }
         }
     }

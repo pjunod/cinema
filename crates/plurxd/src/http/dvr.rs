@@ -21,12 +21,12 @@ use axum::response::Response;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use plurx_core::dvr::{
-    is_first_run, normalise_title, DvrAttentionRow, DvrEvent, DvrEventInput, DvrInsertOutcome,
-    DvrKeepMode, DvrMatchMode, DvrOrigin, DvrRecording, DvrRecordingFilter, DvrReminder,
-    DvrReminderState, DvrRule, DvrState, DvrStatePatch, DvrTransition, DVR_EVENT_PAGE_DEFAULT,
-    DVR_EVENT_PAGE_MAX, DVR_LEAD_MAX_S, DVR_MATCH_VALUE_MAX, DVR_MIN_USEFUL_S, DVR_PAD_MAX_S,
-    DVR_RECORDINGS_LIST_PAGE, DVR_REMINDERS_PER_USER_MAX, DVR_RULES_MAX, DVR_RULE_NAME_MAX,
-    DVR_SCHEDULE_DAYS_MAX,
+    is_first_run, normalise_title, DvrAttentionRow, DvrAttentionSection, DvrEvent, DvrEventInput,
+    DvrInsertOutcome, DvrKeepMode, DvrMatchMode, DvrOrigin, DvrRecording, DvrRecordingFilter,
+    DvrReminder, DvrReminderState, DvrRule, DvrState, DvrStatePatch, DvrTransition,
+    DVR_EVENT_PAGE_DEFAULT, DVR_EVENT_PAGE_MAX, DVR_LEAD_MAX_S, DVR_MATCH_VALUE_MAX,
+    DVR_MIN_USEFUL_S, DVR_PAD_MAX_S, DVR_RECORDINGS_LIST_PAGE, DVR_REMINDERS_PER_USER_MAX,
+    DVR_RULES_MAX, DVR_RULE_NAME_MAX, DVR_SCHEDULE_DAYS_MAX,
 };
 use plurx_core::store::keys;
 use serde::{Deserialize, Serialize};
@@ -311,12 +311,21 @@ pub(crate) async fn collect_overview(
         .values()
         .map(|sample| sample.observation_age_ms)
         .max();
-    let attention = state
-        .store
-        .list_dvr_attention(viewer_id, None, 1)
-        .await
-        .map(|(_, total)| total.max(0) as usize)
-        .unwrap_or_else(|_| rows.iter().filter(|row| attention_worthy(row)).count());
+    let attention = match (
+        state
+            .store
+            .list_dvr_attention(viewer_id, DvrAttentionSection::Current, None, None, 1)
+            .await,
+        state
+            .store
+            .list_dvr_attention(viewer_id, DvrAttentionSection::Historical, None, None, 1)
+            .await,
+    ) {
+        (Ok((_, current)), Ok((_, historical))) => {
+            current.saturating_add(historical).max(0) as usize
+        }
+        _ => rows.iter().filter(|row| attention_worthy(row)).count(),
+    };
     let now_s = server_now_ms / 1_000;
     let mut active_rows = rows
         .iter()
@@ -340,65 +349,65 @@ pub(crate) async fn collect_overview(
         unconfirmed: Some(0),
         attention: Some(attention),
     };
-    let active = active_rows
-        .into_iter()
-        .take(DVR_OVERVIEW_ACTIVE_MAX)
-        .map(|row| {
-            let observation = observations.remove(row.id.as_str()).filter(|sample| {
-                sample.channel_id == row.channel_id
-                    && sample.airing_start == row.airing_start
-                    && sample.attempt == row.attempt
-                    && sample.observation_age_ms <= DVR_OBSERVATION_FRESH_MS
-            });
-            let (label, detail) = display_state(row, observation, server_now_ms);
-            match label.as_str() {
-                "Recording" => counts.recording = counts.recording.map(|value| value + 1),
-                "Starting" => counts.starting = counts.starting.map(|value| value + 1),
-                "Reconnecting" => counts.reconnecting = counts.reconnecting.map(|value| value + 1),
-                "Finishing" => counts.finishing = counts.finishing.map(|value| value + 1),
-                "Status unavailable" | "Waiting to start" => {
-                    counts.unconfirmed = counts.unconfirmed.map(|value| value + 1)
-                }
-                _ => {}
+    let mut active = Vec::with_capacity(active_total.min(DVR_OVERVIEW_ACTIVE_MAX));
+    for (index, row) in active_rows.into_iter().enumerate() {
+        let observation = observations.remove(row.id.as_str()).filter(|sample| {
+            sample.channel_id == row.channel_id
+                && sample.airing_start == row.airing_start
+                && sample.attempt == row.attempt
+                && sample.observation_age_ms <= DVR_OBSERVATION_FRESH_MS
+        });
+        let (label, detail) = display_state(row, observation, server_now_ms);
+        match label.as_str() {
+            "Recording" => counts.recording = counts.recording.map(|value| value + 1),
+            "Starting" => counts.starting = counts.starting.map(|value| value + 1),
+            "Reconnecting" => counts.reconnecting = counts.reconnecting.map(|value| value + 1),
+            "Finishing" => counts.finishing = counts.finishing.map(|value| value + 1),
+            "Status unavailable" | "Waiting to start" => {
+                counts.unconfirmed = counts.unconfirmed.map(|value| value + 1)
             }
-            let last_confirmed_bytes = observation.map(|sample| sample.attempt_bytes_written);
-            let total_bytes_written = observation.and_then(|sample| {
-                sample
-                    .prior_attempt_bytes
-                    .and_then(|prior| prior.checked_add(sample.attempt_bytes_written))
-            });
-            let can_edit_rule = row.rule_id.as_ref().is_some_and(|rule_id| {
-                is_admin || rule_owners.get(rule_id).copied() == Some(viewer_id)
-            });
-            DvrActiveProjection {
-                recording_id: row.id.clone(),
-                channel_id: row.channel_id.clone(),
-                airing_start: row.airing_start,
-                title: row.title.clone(),
-                episode_title: row.episode_title.clone(),
-                guide_number: row.guide_number.clone(),
-                channel_name: row.channel_name.clone(),
-                durable_state: row.state,
-                state_reason: row.state_reason.clone(),
-                airing_end: row.airing_end,
-                capture_start: row.capture_start,
-                capture_end: row.capture_end,
-                stop_requested_at_ms: row.stop_requested_at_ms,
-                last_confirmed_bytes,
-                total_bytes_written,
-                observation: observation.cloned(),
-                display_state: label,
-                display_detail: detail,
-                can_stop: row.state == DvrState::Recording,
-                can_skip: row.state.is_pending(),
-                can_restore: row.state == DvrState::Cancelled && row.capture_end > now_s,
-                can_delete: row.state.is_terminal() && row.state != DvrState::Deleted,
-                can_edit_rule,
-                can_reorder_rules: is_admin,
-                can_view_diagnostics: is_admin,
-            }
-        })
-        .collect();
+            _ => {}
+        }
+        if index >= DVR_OVERVIEW_ACTIVE_MAX {
+            continue;
+        }
+        let last_confirmed_bytes = observation.map(|sample| sample.attempt_bytes_written);
+        let total_bytes_written = observation.and_then(|sample| {
+            sample
+                .prior_attempt_bytes
+                .and_then(|prior| prior.checked_add(sample.attempt_bytes_written))
+        });
+        let can_edit_rule = row.rule_id.as_ref().is_some_and(|rule_id| {
+            is_admin || rule_owners.get(rule_id).copied() == Some(viewer_id)
+        });
+        active.push(DvrActiveProjection {
+            recording_id: row.id.clone(),
+            channel_id: row.channel_id.clone(),
+            airing_start: row.airing_start,
+            title: row.title.clone(),
+            episode_title: row.episode_title.clone(),
+            guide_number: row.guide_number.clone(),
+            channel_name: row.channel_name.clone(),
+            durable_state: row.state,
+            state_reason: row.state_reason.clone(),
+            airing_end: row.airing_end,
+            capture_start: row.capture_start,
+            capture_end: row.capture_end,
+            stop_requested_at_ms: row.stop_requested_at_ms,
+            last_confirmed_bytes,
+            total_bytes_written,
+            observation: observation.cloned(),
+            display_state: label,
+            display_detail: detail,
+            can_stop: row.state == DvrState::Recording,
+            can_skip: row.state.is_pending(),
+            can_restore: row.state == DvrState::Cancelled && row.capture_end > now_s,
+            can_delete: row.state.is_terminal() && row.state != DvrState::Deleted,
+            can_edit_rule,
+            can_reorder_rules: is_admin,
+            can_view_diagnostics: is_admin,
+        });
+    }
     let next_capture_start = rows
         .iter()
         .filter(|row| row.state == DvrState::Scheduled && row.capture_start > now_s)
@@ -412,9 +421,9 @@ pub(crate) async fn collect_overview(
         recording_transports: runtime
             .as_ref()
             .map(|snapshot| snapshot.recording_transports),
-        storage_free_bytes: (live_tv.owner_node_id == state.node_id)
-            .then(|| crate::live_tv::free_space_bytes(&DvrConfig::from_snapshot(&settings).root))
-            .flatten(),
+        storage_free_bytes: runtime
+            .as_ref()
+            .and_then(|snapshot| snapshot.storage_free_bytes),
     });
     DvrOverview {
         version: 1,
@@ -950,12 +959,39 @@ pub(crate) struct EventsQuery {
 
 #[derive(Serialize)]
 pub(crate) struct EventsPage {
-    rows: Vec<DvrEvent>,
+    rows: Vec<DvrEventView>,
     #[serde(skip_serializing_if = "Option::is_none")]
     next: Option<String>,
     history_complete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     truncated_before_sequence: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct DvrEventView {
+    recording_id: String,
+    sequence: i64,
+    event_id: String,
+    kind: String,
+    occurred_at_ms: i64,
+    attempt: Option<i64>,
+    reason_code: Option<String>,
+    facts: serde_json::Value,
+}
+
+impl From<DvrEvent> for DvrEventView {
+    fn from(event: DvrEvent) -> Self {
+        Self {
+            recording_id: event.recording_id,
+            sequence: event.sequence,
+            event_id: event.event_id,
+            kind: event.kind,
+            occurred_at_ms: event.occurred_at_ms,
+            attempt: event.attempt,
+            reason_code: event.reason_code,
+            facts: event.facts,
+        }
+    }
 }
 
 fn sequence_cursor(value: Option<&str>, name: &str) -> Result<Option<i64>, ApiError> {
@@ -1012,7 +1048,7 @@ pub(crate) async fn recording_events(
         (head.pruned_through_sequence > 0).then_some(head.pruned_through_sequence)
     });
     Ok(Json(EventsPage {
-        rows: page.rows,
+        rows: page.rows.into_iter().map(DvrEventView::from).collect(),
         next,
         history_complete,
         truncated_before_sequence,
@@ -1096,30 +1132,66 @@ impl From<DvrAttentionRow> for AttentionProjection {
     }
 }
 
-fn parse_attention_cursor(raw: Option<&str>) -> Result<Option<(i64, &str)>, ApiError> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum AttentionCursorSection {
+    Current,
+    Historical,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+struct AttentionCursor {
+    version: u8,
+    section: AttentionCursorSection,
+    after_at_ms: i64,
+    after_id: String,
+    current_upper: Option<(i64, String)>,
+    historical_upper: Option<(i64, String)>,
+}
+
+fn invalid_attention_cursor() -> ApiError {
+    ApiError::typed(
+        StatusCode::BAD_REQUEST,
+        "invalid_cursor",
+        "invalid attention cursor",
+    )
+}
+
+fn parse_attention_cursor(raw: Option<&str>) -> Result<Option<AttentionCursor>, ApiError> {
     let Some(raw) = raw else { return Ok(None) };
-    let (at, id) = raw.split_once(':').ok_or_else(|| {
-        ApiError::typed(
-            StatusCode::BAD_REQUEST,
-            "invalid_cursor",
-            "invalid attention cursor",
-        )
-    })?;
-    let at = at.parse::<i64>().map_err(|_| {
-        ApiError::typed(
-            StatusCode::BAD_REQUEST,
-            "invalid_cursor",
-            "invalid attention cursor",
-        )
-    })?;
-    if id.is_empty() {
-        return Err(ApiError::typed(
-            StatusCode::BAD_REQUEST,
-            "invalid_cursor",
-            "invalid attention cursor",
-        ));
+    if raw.len() > 2_048 || raw.len() % 2 != 0 {
+        return Err(invalid_attention_cursor());
     }
-    Ok(Some((at, id)))
+    let bytes = raw
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text = std::str::from_utf8(pair).map_err(|_| invalid_attention_cursor())?;
+            u8::from_str_radix(text, 16).map_err(|_| invalid_attention_cursor())
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let cursor: AttentionCursor =
+        serde_json::from_slice(&bytes).map_err(|_| invalid_attention_cursor())?;
+    if cursor.version != 1
+        || cursor.after_id.is_empty()
+        || cursor
+            .current_upper
+            .as_ref()
+            .is_some_and(|(_, id)| id.is_empty())
+        || cursor
+            .historical_upper
+            .as_ref()
+            .is_some_and(|(_, id)| id.is_empty())
+    {
+        return Err(invalid_attention_cursor());
+    }
+    Ok(Some(cursor))
+}
+
+fn encode_attention_cursor(cursor: &AttentionCursor) -> Result<String, ApiError> {
+    let bytes = serde_json::to_vec(cursor)
+        .map_err(|_| ApiError::Internal("could not encode attention cursor".to_owned()))?;
+    Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
 }
 
 pub(crate) async fn attention(
@@ -1132,16 +1204,111 @@ pub(crate) async fn attention(
         .unwrap_or(DVR_EVENT_PAGE_DEFAULT)
         .clamp(1, DVR_EVENT_PAGE_MAX);
     let cursor = parse_attention_cursor(query.after.as_deref())?;
-    let (rows, total) = state
-        .store
-        .list_dvr_attention(user.id, cursor, limit)
-        .await?;
-    let next = (rows.len() as i64 >= limit)
-        .then(|| {
-            rows.last()
-                .map(|row| format!("{}:{}", row.latest_attention_at_ms, row.recording.id))
-        })
-        .flatten();
+    let mut rows = Vec::with_capacity(limit as usize);
+    let mut next_section = AttentionCursorSection::Current;
+    let mut current_upper = cursor
+        .as_ref()
+        .and_then(|value| value.current_upper.clone());
+    let mut historical_upper = cursor
+        .as_ref()
+        .and_then(|value| value.historical_upper.clone());
+    let current_total;
+    let historical_total;
+
+    // Freeze both section ceilings when traversal starts. Historical rows
+    // must not appear midway through a long current-condition traversal just
+    // because a new failure happened after page one was served.
+    if cursor.is_none() {
+        let (top, _) = state
+            .store
+            .list_dvr_attention(user.id, DvrAttentionSection::Historical, None, None, 1)
+            .await?;
+        historical_upper = top
+            .first()
+            .map(|row| (row.latest_attention_at_ms, row.recording.id.clone()));
+    }
+
+    if !matches!(
+        cursor.as_ref().map(|value| value.section),
+        Some(AttentionCursorSection::Historical)
+    ) {
+        let current_after = cursor
+            .as_ref()
+            .map(|value| (value.after_at_ms, value.after_id.as_str()));
+        let (page, total) = state
+            .store
+            .list_dvr_attention(
+                user.id,
+                DvrAttentionSection::Current,
+                current_after,
+                current_upper.as_ref().map(|(at, id)| (*at, id.as_str())),
+                limit,
+            )
+            .await?;
+        current_total = total;
+        if current_upper.is_none() {
+            current_upper = page
+                .first()
+                .map(|row| (row.latest_attention_at_ms, row.recording.id.clone()));
+        }
+        rows.extend(page);
+    } else {
+        current_total = state
+            .store
+            .list_dvr_attention(user.id, DvrAttentionSection::Current, None, None, 1)
+            .await?
+            .1;
+    }
+
+    if rows.len() < limit as usize {
+        next_section = AttentionCursorSection::Historical;
+        let historical_after = cursor.as_ref().and_then(|value| {
+            matches!(value.section, AttentionCursorSection::Historical)
+                .then_some((value.after_at_ms, value.after_id.as_str()))
+        });
+        let remaining = limit.saturating_sub(rows.len() as i64);
+        let (page, total) = state
+            .store
+            .list_dvr_attention(
+                user.id,
+                DvrAttentionSection::Historical,
+                historical_after,
+                historical_upper.as_ref().map(|(at, id)| (*at, id.as_str())),
+                remaining,
+            )
+            .await?;
+        historical_total = total;
+        if historical_upper.is_none() {
+            historical_upper = page
+                .first()
+                .map(|row| (row.latest_attention_at_ms, row.recording.id.clone()));
+        }
+        rows.extend(page);
+    } else {
+        historical_total = state
+            .store
+            .list_dvr_attention(user.id, DvrAttentionSection::Historical, None, None, 1)
+            .await?
+            .1;
+    }
+
+    let next = if rows.len() as i64 >= limit {
+        rows.last()
+            .map(|row| {
+                encode_attention_cursor(&AttentionCursor {
+                    version: 1,
+                    section: next_section,
+                    after_at_ms: row.latest_attention_at_ms,
+                    after_id: row.recording.id.clone(),
+                    current_upper,
+                    historical_upper,
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let total = current_total.saturating_add(historical_total);
     Ok(Json(AttentionPage {
         rows: rows.into_iter().map(Into::into).collect(),
         next,
@@ -1339,30 +1506,85 @@ pub(crate) async fn restore_recording(
 
 // ---- schedule -------------------------------------------------------------
 
-#[derive(Deserialize)]
-pub(crate) struct ScheduleQuery {
-    days: Option<i64>,
-    cancelled: Option<u8>,
-}
-
 #[derive(Serialize)]
 pub(crate) struct DvrSchedule {
     /// How many rows have no tuner. The number the UI puts on the Scheduled
     /// chip, so a viewer learns about a clash without opening the list.
     conflicts: usize,
     rows: Vec<DvrRecording>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next: Option<String>,
 }
 
 pub(crate) async fn schedule(
     _user: AuthUser,
     State(state): State<AppState>,
-    Query(query): Query<ScheduleQuery>,
+    Query(query): Query<Vec<(String, String)>>,
 ) -> Result<Json<DvrSchedule>, ApiError> {
-    let days = query
-        .days
+    let value = |name: &str| {
+        query
+            .iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value)
+    };
+    let number = |name: &str| -> Result<Option<i64>, ApiError> {
+        value(name)
+            .map(|raw| {
+                raw.parse::<i64>()
+                    .map_err(|_| ApiError::BadRequest(format!("invalid {name}")))
+            })
+            .transpose()
+    };
+    let filtered = query.iter().any(|(key, _)| {
+        matches!(
+            key.as_str(),
+            "from" | "to" | "channel_id" | "after" | "limit"
+        )
+    });
+    let days = number("days")?
         .unwrap_or(DVR_SCHEDULE_DAYS_MAX)
         .clamp(1, DVR_SCHEDULE_DAYS_MAX);
-    let horizon = now_seconds() + days * 86_400;
+    let now = now_seconds();
+    let from = number("from")?.unwrap_or_else(|| if filtered { now - 43_200 } else { now });
+    let to = number("to")?.unwrap_or_else(|| {
+        if filtered {
+            from + 86_400
+        } else {
+            now + days * 86_400
+        }
+    });
+    if filtered && (to <= from || to - from > 86_400) {
+        return Err(ApiError::BadRequest(
+            "schedule window must be positive and no longer than 24 hours".into(),
+        ));
+    }
+    let channels = query
+        .iter()
+        .filter(|(key, _)| key == "channel_id")
+        .map(|(_, value)| value.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if channels.len() > 64 {
+        return Err(ApiError::BadRequest(
+            "a schedule window accepts at most 64 channels".into(),
+        ));
+    }
+    let after = value("after")
+        .map(|cursor| {
+            let (start, id) = cursor
+                .split_once(':')
+                .ok_or_else(|| ApiError::BadRequest("invalid schedule cursor".into()))?;
+            let start = start
+                .parse::<i64>()
+                .map_err(|_| ApiError::BadRequest("invalid schedule cursor".into()))?;
+            if id.is_empty() {
+                return Err(ApiError::BadRequest("invalid schedule cursor".into()));
+            }
+            Ok((start, id))
+        })
+        .transpose()?;
+    let limit = number("limit")?
+        .unwrap_or(DVR_EVENT_PAGE_DEFAULT)
+        .clamp(1, 100) as usize;
     let mut states = vec![
         DvrState::Scheduled,
         DvrState::Conflict,
@@ -1370,24 +1592,53 @@ pub(crate) async fn schedule(
         DvrState::Stale,
         DvrState::Recording,
     ];
-    if query.cancelled == Some(1) {
+    if value("cancelled").is_some_and(|value| value == "1") || filtered {
         // Skip stays visible and reversible: a viewer who skipped the wrong
         // episode needs to find it again to restore it.
         states.push(DvrState::Cancelled);
     }
-    let rows = state
+    if filtered {
+        states.extend([
+            DvrState::Done,
+            DvrState::Partial,
+            DvrState::Failed,
+            DvrState::Missed,
+        ]);
+    }
+    let mut rows = state
         .store
         .list_dvr_recordings_in(&states)
         .await?
         .into_iter()
-        .filter(|row| row.capture_start <= horizon)
+        .filter(|row| {
+            row.capture_start < to
+                && (!filtered || row.capture_end > from)
+                && (channels.is_empty() || channels.contains(row.channel_id.as_str()))
+        })
         .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.capture_start
+            .cmp(&right.capture_start)
+            .then(left.id.cmp(&right.id))
+    });
+    let conflicts = rows
+        .iter()
+        .filter(|row| row.state == DvrState::Conflict)
+        .count();
+    if let Some((start, id)) = after {
+        rows.retain(|row| (row.capture_start, row.id.as_str()) > (start, id));
+    }
+    let next = if filtered && rows.len() > limit {
+        rows.truncate(limit);
+        rows.last()
+            .map(|row| format!("{}:{}", row.capture_start, row.id))
+    } else {
+        None
+    };
     Ok(Json(DvrSchedule {
-        conflicts: rows
-            .iter()
-            .filter(|row| row.state == DvrState::Conflict)
-            .count(),
+        conflicts,
         rows,
+        next,
     }))
 }
 
@@ -1923,5 +2174,24 @@ mod visibility_tests {
         let scheduled = row(DvrState::Scheduled);
         let now = scheduled.capture_start.saturating_mul(1_000);
         assert_eq!(display_state(&scheduled, None, now).0, "Waiting to start");
+    }
+
+    #[test]
+    fn attention_cursor_round_trips_section_and_both_watermarks() {
+        let cursor = AttentionCursor {
+            version: 1,
+            section: AttentionCursorSection::Historical,
+            after_at_ms: 1_789_000_000_123,
+            after_id: "recording-7".into(),
+            current_upper: Some((1_789_000_001_000, "recording-2".into())),
+            historical_upper: Some((1_789_000_000_900, "recording-9".into())),
+        };
+        let encoded = encode_attention_cursor(&cursor).expect("cursor encodes");
+        assert!(!encoded.contains("recording"));
+        assert_eq!(
+            parse_attention_cursor(Some(&encoded)).expect("cursor parses"),
+            Some(cursor)
+        );
+        assert!(parse_attention_cursor(Some("not-hex")).is_err());
     }
 }

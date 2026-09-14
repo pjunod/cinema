@@ -19,8 +19,10 @@ final class DvrController: ObservableObject {
     @Published private(set) var overviewError: String?
     @Published private(set) var marks = DvrMarks()
     @Published private(set) var schedule: [DvrRecording] = []
+    @Published private(set) var scheduleNext: String?
     @Published private(set) var conflicts = 0
     @Published private(set) var library: [DvrRecording] = []
+    @Published private(set) var libraryNext: String?
     @Published private(set) var rules: [DvrRule] = []
     /// Reminders the server has fired and nobody has acknowledged yet.
     @Published private(set) var due: [DvrReminder] = []
@@ -54,8 +56,10 @@ final class DvrController: ObservableObject {
     private var overviewLoading = false
     private var overviewQueued = false
     private var overviewFailures = 0
+    private var overviewReceivedAtUptime: TimeInterval?
     private var lastScheduleRead = Date.distantPast
     private var lastActiveIdentity = Set<String>()
+    private var scheduleWindow: (from: Int, to: Int)?
 
     var enabled: Bool { status?.enabled ?? false }
 
@@ -65,20 +69,19 @@ final class DvrController: ObservableObject {
     }
 
     var indicatorLabel: String? {
-        guard let overview else { return nil }
-        guard overview.fresh else {
-            return overview.counts.active > 0 ? "Status unavailable" : nil
-        }
-        var facts: [String] = []
-        func append(_ count: Int?, _ label: String) {
-            if let count, count > 0 { facts.append("\(count) \(label)") }
-        }
-        append(overview.counts.recording, "recording")
-        append(overview.counts.starting, "starting")
-        append(overview.counts.reconnecting, "reconnecting")
-        append(overview.counts.finishing, "finishing")
-        append(overview.counts.unconfirmed, "unconfirmed")
-        return facts.isEmpty ? nil : facts.joined(separator: " · ")
+        guard let overview, let age = overviewClientAgeMs else { return nil }
+        return overview.indicatorText(clientAgeMs: age)
+    }
+
+    var overviewFresh: Bool {
+        guard let overview, let age = overviewClientAgeMs else { return false }
+        return overview.isFresh(clientAgeMs: age)
+    }
+
+    private var overviewClientAgeMs: UInt64? {
+        guard let received = overviewReceivedAtUptime else { return nil }
+        let elapsed = max(0, ProcessInfo.processInfo.systemUptime - received)
+        return UInt64(elapsed * 1_000)
     }
 
     /// The one reminder the overlay is showing, if any.
@@ -120,9 +123,13 @@ final class DvrController: ObservableObject {
             scopeGeneration &+= 1
             status = nil
             overview = nil
+            overviewReceivedAtUptime = nil
             overviewError = nil
             schedule = []
+            scheduleNext = nil
+            scheduleWindow = nil
             library = []
+            libraryNext = nil
             rules = []
             attention = []
             selectedRecording = nil
@@ -164,12 +171,7 @@ final class DvrController: ObservableObject {
     func refresh() async {
         guard let api else { return }
         let generation = scopeGeneration
-        if let plan = try? await api.schedule(days: 14, cancelled: true),
-           generation == scopeGeneration {
-            schedule = plan.rows
-            conflicts = plan.conflicts
-            lastScheduleRead = Date()
-        }
+        await loadSchedule()
         if let rows = try? await api.reminders(), generation == scopeGeneration {
             reminders = rows
             due = rows.filter { $0.state == .fired }
@@ -178,6 +180,33 @@ final class DvrController: ObservableObject {
         #if os(iOS)
         await LocalReminders.shared.mirror(reminders)
         #endif
+    }
+
+    /// One bounded 24-hour schedule window. Upcoming owns its cursor; loading
+    /// more never advances Saved or Needs attention.
+    func loadSchedule(more: Bool = false) async {
+        guard let api else { return }
+        let generation = scopeGeneration
+        if !more {
+            let now = Int(Date().timeIntervalSince1970)
+            scheduleWindow = (now - 43_200, now + 43_200)
+        }
+        guard let window = scheduleWindow else { return }
+        let after = more ? scheduleNext : nil
+        if more && after == nil { return }
+        do {
+            let plan = try await api.schedule(from: window.from, to: window.to, after: after)
+            guard generation == scopeGeneration else { return }
+            let combined = more ? schedule + plan.rows : plan.rows
+            schedule = Array(Dictionary(grouping: combined, by: \.id).values.compactMap(\.first))
+                .sorted { ($0.captureStart, $0.id) < ($1.captureStart, $1.id) }
+            scheduleNext = plan.next
+            conflicts = plan.conflicts
+            lastScheduleRead = Date()
+            marks = DvrMarks(schedule: schedule, reminders: reminders)
+        } catch {
+            message = "Showing the last schedule. \(error.localizedDescription)"
+        }
     }
 
     func refreshOverview() async {
@@ -195,6 +224,7 @@ final class DvrController: ObservableObject {
                 return
             }
             overview = fetched
+            overviewReceivedAtUptime = ProcessInfo.processInfo.systemUptime
             overviewError = nil
             overviewFailures = 0
             let identity = Set(fetched.active.map(\.recordingId))
@@ -217,19 +247,29 @@ final class DvrController: ObservableObject {
 
     /// Only the fired list, and only on the page's own thirty-second tick.
     ///
-    /// The marks are never polled, because a plan changes when somebody
-    /// changes it and every mutation re-reads for itself. A reminder is the
-    /// one thing here that becomes true on the server's clock rather than on
-    /// anybody's press, so nothing else on this page could ever notice it.
+    /// Marks are refreshed by the shared overview owner on its bounded
+    /// cadence. This narrower read exists because a fired reminder becomes
+    /// true on the server's clock and retains its independent delivery path.
     func refreshDue() async {
         guard let api else { return }
         guard let rows = try? await api.reminders(due: true) else { return }
         due = rows
     }
 
-    func loadLibrary() async {
+    func loadLibrary(more: Bool = false) async {
         guard let api else { return }
-        library = (try? await api.recordings(states: [.done, .partial])) ?? []
+        do {
+            let page = try await api.recordingsPage(
+                states: [.done, .partial],
+                after: more ? libraryNext : nil
+            )
+            let rows = more ? library + page.rows : page.rows
+            library = Array(Dictionary(grouping: rows, by: \.id).values.compactMap(\.first))
+                .sorted { ($0.airingStart, $0.id) > ($1.airingStart, $1.id) }
+            libraryNext = page.next
+        } catch {
+            message = "Showing the last saved recordings. \(error.localizedDescription)"
+        }
     }
 
     func loadAttention(more: Bool = false) async {
@@ -632,6 +672,7 @@ struct DvrRecordingsPanel: View {
     @State private var manualEnd = Date().addingTimeInterval(3_900)
     @State private var manualStartDelay = 5
     @State private var manualDuration = 60
+    @State private var confirmStop: DvrRecording?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -645,6 +686,9 @@ struct DvrRecordingsPanel: View {
             if let serverLine = serverLine { Text(serverLine).font(LiveTvType.tertiary).foregroundStyle(Palette.muted) }
             if let row = dvr.confirmFileDelete {
                 confirmation(row)
+            }
+            if let row = confirmStop {
+                stopConfirmation(row)
             }
             content
         }
@@ -666,7 +710,8 @@ struct DvrRecordingsPanel: View {
             case .saved: await dvr.loadLibrary()
             case .rules: await dvr.loadRules()
             case .attention: await dvr.loadAttention()
-            case .upcoming, .skipped, .reminders, .manual: await dvr.refresh()
+            case .upcoming, .skipped: await dvr.loadSchedule()
+            case .reminders, .manual: await dvr.refresh()
             }
         }
     }
@@ -747,6 +792,20 @@ struct DvrRecordingsPanel: View {
         .background(Palette.surface, in: RoundedRectangle(cornerRadius: 8))
     }
 
+    private func stopConfirmation(_ row: DvrRecording) -> some View {
+        HStack(spacing: 10) {
+            Text("Stop recording \(row.title)? Any captured portion will be kept. Watching continues.")
+                .font(LiveTvType.secondary).lineLimit(3)
+            DvrActionButton(label: "Stop recording", prominent: true) {
+                confirmStop = nil
+                Task { await dvr.delete(row) }
+            }
+            DvrActionButton(label: "Keep recording") { confirmStop = nil }
+        }
+        .padding(10)
+        .background(Palette.surface, in: RoundedRectangle(cornerRadius: 8))
+    }
+
     @ViewBuilder private var content: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 6) {
@@ -754,13 +813,30 @@ struct DvrRecordingsPanel: View {
                 case .saved:
                     if dvr.library.isEmpty { empty("Nothing recorded yet.") }
                     ForEach(dvr.library) { libraryRow($0) }
+                    if dvr.libraryNext != nil {
+                        DvrActionButton(label: "Load more") {
+                            Task { await dvr.loadLibrary(more: true) }
+                        }
+                    }
                 case .upcoming:
-                    if dvr.schedule.isEmpty { empty("Nothing is scheduled.") }
-                    ForEach(dvr.schedule.filter { $0.state != .cancelled }
-                        .sorted { ($0.captureStart, $0.id) < ($1.captureStart, $1.id) }) { scheduleRow($0) }
+                    let upcoming = dvr.schedule.filter {
+                        [.scheduled, .conflict, .withdrawn, .stale].contains($0.state)
+                    }.sorted { ($0.captureStart, $0.id) < ($1.captureStart, $1.id) }
+                    if upcoming.isEmpty { empty("Nothing is scheduled.") }
+                    ForEach(upcoming) { scheduleRow($0) }
+                    if dvr.scheduleNext != nil {
+                        DvrActionButton(label: "Load more") {
+                            Task { await dvr.loadSchedule(more: true) }
+                        }
+                    }
                 case .attention:
                     if dvr.attention.isEmpty { empty("Nothing needs review.") }
                     ForEach(dvr.attention) { scheduleRow($0.recording) }
+                    if dvr.attentionNext != nil {
+                        DvrActionButton(label: "Load more") {
+                            Task { await dvr.loadAttention(more: true) }
+                        }
+                    }
                 case .rules:
                     if dvr.rules.isEmpty {
                         empty("No series rules. Record series on a guide cell makes the first one.")
@@ -805,7 +881,7 @@ struct DvrRecordingsPanel: View {
                     .font(LiveTvType.tertiary).foregroundStyle(Palette.muted).lineLimit(1)
             }
             Spacer(minLength: 8)
-            if let itemId = row.itemId {
+            if let itemId = row.itemId, row.fileId != nil {
                 NavigationLink(value: Route.item(itemId)) { Text("Play") }
                     .buttonStyle(.plain)
             }
@@ -815,6 +891,7 @@ struct DvrRecordingsPanel: View {
 
     private func libraryDetail(_ row: DvrRecording) -> String {
         var facts = ["\(row.guideNumber) \(row.channelName)", liveTvTime(row.airingStart)]
+        if row.stoppedByUserId != nil { facts.append("Stopped early") }
         if let episode = row.episode { facts.append(episode) }
         if row.bytes > 0 {
             facts.append(ByteCountFormatter.string(fromByteCount: row.bytes, countStyle: .file))
@@ -867,7 +944,7 @@ struct DvrRecordingsPanel: View {
         switch row.state {
         case .recording:
             DvrActionButton(label: row.stopping ? "Stopping…" : "Stop") {
-                Task { await dvr.delete(row) }
+                confirmStop = row
             }
         case .cancelled:
             DvrActionButton(label: "Restore") { Task { await dvr.restore(row) } }
@@ -1000,7 +1077,7 @@ struct DvrRecordingsRootView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Recording activity, \(label)")
-            } else if dvr.overview?.fresh == true {
+            } else if dvr.overviewFresh {
                 Text("No active recordings")
                     .font(LiveTvType.secondary).foregroundStyle(Palette.muted)
             }
@@ -1027,7 +1104,7 @@ struct DvrCaptureActivityView: View {
             LazyVStack(alignment: .leading, spacing: 10) {
                 if let label = dvr.indicatorLabel {
                     Text(label).font(LiveTvType.title)
-                } else if dvr.overview?.fresh == true {
+                } else if dvr.overviewFresh {
                     Text("No active recordings").font(LiveTvType.title)
                 } else {
                     Text("Status unavailable").font(LiveTvType.title)
@@ -1085,6 +1162,7 @@ struct DvrCaptureActivityView: View {
 struct DvrRecordingDetailView: View {
     @ObservedObject private var dvr = DvrController.shared
     let recordingId: String
+    @State private var confirmStop: DvrRecording?
 
     var body: some View {
         ScrollView {
@@ -1099,6 +1177,17 @@ struct DvrRecordingDetailView: View {
                         }
                     }
                     actionRow(row)
+                    if let row = confirmStop {
+                        HStack(spacing: 10) {
+                            Text("Stop recording \(row.title)? Any captured portion will be kept. Watching continues.")
+                                .font(LiveTvType.secondary).lineLimit(3)
+                            DvrActionButton(label: "Stop recording", prominent: true) {
+                                confirmStop = nil
+                                Task { await dvr.delete(row) }
+                            }
+                            DvrActionButton(label: "Keep recording") { confirmStop = nil }
+                        }
+                    }
                     Divider()
                     Text("History").font(LiveTvType.primary)
                     if !dvr.selectedHistoryComplete {
@@ -1149,18 +1238,20 @@ struct DvrRecordingDetailView: View {
             row.state.label,
         ]
         if let reason = row.stateReason, !reason.isEmpty { facts.append(reason) }
-        if row.state.hasMedia && row.itemId == nil { facts.append("preparing playback") }
+        if row.state.hasMedia && (row.itemId == nil || row.fileId == nil) {
+            facts.append("preparing playback")
+        }
         return facts.joined(separator: " · ")
     }
 
     @ViewBuilder private func actionRow(_ row: DvrRecording) -> some View {
         HStack {
-            if let itemId = row.itemId, row.state.hasMedia {
+            if let itemId = row.itemId, row.fileId != nil, row.state.hasMedia {
                 NavigationLink(value: Route.item(itemId)) { Text("Play") }
             }
             if row.state == .recording {
                 DvrActionButton(label: row.stopping ? "Stopping…" : "Stop") {
-                    Task { await dvr.delete(row) }
+                    confirmStop = row
                 }
             } else if row.state == .cancelled {
                 DvrActionButton(label: "Restore") { Task { await dvr.restore(row) } }

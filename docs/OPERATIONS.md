@@ -4181,11 +4181,11 @@ and therefore resumes ordinary progress and notification behavior.
 
 ## Live TV (HDHomeRun) — the runbook
 
-Live TV plays one over-the-air tuner live. It records nothing. It is off on
-every install until an administrator turns it on, and it is always compiled —
-there is no build variant to install and no feature flag to rebuild with, so
-"is Live TV in this binary" is never the question. The question is always
-"is it enabled, and did readiness pass".
+Live TV plays over-the-air channels and can record unprotected channels to a
+configured filesystem. Viewing and recording are off on every install until
+an administrator turns each on, and both are always compiled: there is no
+build variant or code feature flag. Readiness is advisory; it explains what is
+met but never prevents an administrator from moving either enable switch.
 
 The whole surface is **Settings → Developer**. It is there in every build,
 including a shipped one, and every mutation on it requires administrator
@@ -4314,6 +4314,56 @@ shared deadline and retain the already useful bulk answer.
 Before it is enabled, expect exactly the enablement check to fail and every
 other one to pass. That state — "everything is ready except that it is off" —
 is what you want to see before step 4.
+
+### Recording: enable, observe and diagnose
+
+Settings → Developer → Recording is the enable surface. Set a recording root
+that the tuner owner can write and every serving node can read, choose how
+many tuner slots remain reserved for viewers, and inspect the named advisory
+checks. The switch remains operable when a check is unmet; a red row is an
+explanation of expected failure, not a hidden gate.
+
+```bash
+# Shared viewer-safe state. A complete idle recorder says active_total: 0.
+curl -s -H "Authorization: Bearer $TOKEN" $HOST/api/v1/dvr/overview
+
+# Durable plan and paginated outcomes.
+curl -s -H "Authorization: Bearer $TOKEN" "$HOST/api/v1/dvr/schedule?days=14&cancelled=1"
+curl -s -H "Authorization: Bearer $TOKEN" "$HOST/api/v1/dvr/recordings?state=done,partial&limit=50"
+
+# One recording's actual lifecycle; pass `next` back as `before` for older rows.
+curl -s -H "Authorization: Bearer $TOKEN" "$HOST/api/v1/dvr/recordings/<id>/events?limit=50"
+```
+
+Read the overview this way:
+
+| Field or label | What it proves |
+|---|---|
+| `Recording · data is being written` | The current owner reported a successful application write within ten seconds. It does not prove decoded or crash-durable media |
+| `Recording · no recent data` | The observation is fresh, but no recent successful sink write exists. Inspect the selected lifecycle and owner logs |
+| `Starting` / `Reconnecting` / `Finishing` | The owner explicitly reported that phase; frontend time never invents one |
+| `Stop requested` | The replicated intent was accepted. Wait for the owner to publish a terminal row before assuming the file closed or a tuner freed |
+| `Status unavailable` / `unconfirmed` | A durable recording row has no authoritative observation younger than 20 seconds. Do not read it as idle |
+| `availability: partial` | Some owner evidence is missing or bounded. Counts and visible rows retain unknowns instead of turning them into zero |
+| `active_truncated: true` | The bounded overview shows 64 rows; `active_total` and phase counts remain exact. Open the paginated destination |
+
+Written bytes are successful sink writes. The progress bar is elapsed padded
+capture window. Neither is playable duration. Playback appears only after the
+library scan attaches both `item_id` and `file_id`; until then the clients say
+`Recorded · preparing playback`.
+
+The durable event ledger keeps 30 days under a 100,000-row server ceiling and
+prunes at most 1,000 rows per maintenance pass. `history_complete: false` is
+honest provenance, not a request to synthesize missing events. Needs attention
+is per user: Mark reviewed advances that user's sequence only. Current
+conflicts and live capture problems remain until the condition resolves, and a
+newer actionable event resurfaces a reviewed recording.
+
+Stopping and deletion deliberately differ. Stop records intent and keeps any
+captured portion; it never retries with `delete_file=1`. Removing finalized
+media requires a second confirmation bound to that recording ID. If completion
+races an open Stop dialog and the server answers `delete_file_required`, close
+the dialog, refresh the row, and offer the separate delete action.
 
 ### What a session costs
 

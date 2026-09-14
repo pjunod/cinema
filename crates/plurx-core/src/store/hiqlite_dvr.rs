@@ -21,11 +21,11 @@ use hiqlite::{Param, Row};
 use super::hiqlite::{database_error, validate_sql, HiqliteAuthStore};
 use super::DvrStore;
 use crate::dvr::{
-    DvrAttentionRow, DvrEvent, DvrEventHead, DvrEventInput, DvrEventPage, DvrInsertOutcome,
-    DvrKeepMode, DvrMatchMode, DvrOrigin, DvrRecording, DvrRecordingFilter, DvrReminder,
-    DvrReminderState, DvrRule, DvrState, DvrStatePatch, DvrTransition, DVR_EVENT_PAGE_MAX,
-    DVR_EVENT_PRUNE_BATCH, DVR_EVENT_SCHEMA, DVR_EVENT_SERVER_MAX, DVR_RECORDINGS_LIST_PAGE,
-    DVR_REMINDERS_PER_USER_MAX, DVR_RULES_MAX, DVR_SCHEMA,
+    DvrAttentionRow, DvrAttentionSection, DvrEvent, DvrEventHead, DvrEventInput, DvrEventPage,
+    DvrInsertOutcome, DvrKeepMode, DvrMatchMode, DvrOrigin, DvrRecording, DvrRecordingFilter,
+    DvrReminder, DvrReminderState, DvrRule, DvrState, DvrStatePatch, DvrTransition,
+    DVR_EVENT_PAGE_MAX, DVR_EVENT_PRUNE_BATCH, DVR_EVENT_SCHEMA, DVR_EVENT_SERVER_MAX,
+    DVR_RECORDINGS_LIST_PAGE, DVR_REMINDERS_PER_USER_MAX, DVR_RULES_MAX, DVR_SCHEMA,
 };
 use crate::error::StoreError;
 
@@ -1563,6 +1563,26 @@ impl DvrStore for HiqliteAuthStore {
         Ok(counts.get(1).copied() == Some(1))
     }
 
+    async fn mark_dvr_history_gap(
+        &self,
+        recording_id: &str,
+        owner_node_id: &str,
+        attempt: i64,
+    ) -> Result<bool, StoreError> {
+        Ok(self
+            .client()
+            .execute(
+                "UPDATE dvr_event_heads SET history_has_gap=1
+                  WHERE recording_id=$1
+                    AND EXISTS(SELECT 1 FROM dvr_recordings r
+                         WHERE r.id=$2 AND r.state='recording'
+                           AND r.tuner_owner_node_id=$3 AND r.attempt=$4)",
+                params!(recording_id, recording_id, owner_node_id, attempt),
+            )
+            .await?
+            == 1)
+    }
+
     async fn list_dvr_events(
         &self,
         recording_id: &str,
@@ -1667,12 +1687,26 @@ impl DvrStore for HiqliteAuthStore {
     async fn list_dvr_attention(
         &self,
         user_id: i64,
+        section: DvrAttentionSection,
         after: Option<(i64, &str)>,
+        upper: Option<(i64, &str)>,
         limit: i64,
     ) -> Result<(Vec<DvrAttentionRow>, i64), StoreError> {
         let (after_at, after_id) = after.unwrap_or((i64::MAX, ""));
-        let condition = "(r.state IN ('conflict','withdrawn','stale') OR
-             COALESCE(h.latest_attention_sequence,0)>COALESCE(a.through_sequence,0))";
+        let (upper_at, upper_id) = upper.unwrap_or((i64::MAX, ""));
+        let current = "(r.state IN ('conflict','withdrawn','stale') OR
+             (r.state='recording' AND COALESCE(h.latest_attention_sequence,0)>0))";
+        let legacy = "h.recording_id IS NULL AND
+             (r.state IN ('failed','missed') OR
+              (r.state='partial' AND r.stopped_by_user_id IS NULL))";
+        let condition = match section {
+            DvrAttentionSection::Current => current.to_owned(),
+            DvrAttentionSection::Historical => format!(
+                "NOT ({current}) AND
+                 (COALESCE(h.latest_attention_sequence,0)>COALESCE(a.through_sequence,0)
+                  OR ({legacy}))"
+            ),
+        };
         let count_sql = format!(
             "SELECT COUNT(*) AS count FROM dvr_recordings r
                LEFT JOIN dvr_event_heads h ON h.recording_id=r.id
@@ -1694,6 +1728,8 @@ impl DvrStore for HiqliteAuthStore {
                LEFT JOIN dvr_event_heads h ON h.recording_id=r.id
                LEFT JOIN dvr_attention_acks a ON a.recording_id=r.id AND a.user_id=$1
               WHERE {condition}
+                AND (COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms)<$6 OR
+                    (COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms)=$7 AND r.id>=$8))
                 AND (COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms)<$2 OR
                     (COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms)=$3 AND r.id>$4))
               ORDER BY COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms) DESC,r.id
@@ -1708,7 +1744,10 @@ impl DvrStore for HiqliteAuthStore {
                     after_at,
                     after_at,
                     after_id,
-                    limit.clamp(1, DVR_EVENT_PAGE_MAX)
+                    limit.clamp(1, DVR_EVENT_PAGE_MAX),
+                    upper_at,
+                    upper_at,
+                    upper_id
                 ),
             )
             .await?;

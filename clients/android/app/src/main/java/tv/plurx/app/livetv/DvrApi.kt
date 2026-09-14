@@ -163,6 +163,7 @@ data class DvrSchedule(
     /** Rows with no tuner. The number the Scheduled chip carries. */
     val conflicts: Int = 0,
     val rows: List<DvrRecording> = emptyList(),
+    val next: String? = null,
 )
 
 @Serializable
@@ -260,7 +261,23 @@ data class DvrOverview(
     val next_capture_start: Long? = null,
     val diagnostics: DvrOverviewDiagnostics? = null,
 ) {
-    val fresh: Boolean get() = availability == "fresh" && (observation_age_ms ?: 0) <= 20_000
+    fun isFresh(clientAgeMs: Long = 0): Boolean {
+        val age = (observation_age_ms ?: 0).coerceAtLeast(0)
+        return availability != "unavailable" &&
+            (availability == "complete" || observation_age_ms != null) &&
+            age <= 20_000 - clientAgeMs.coerceIn(0, 20_001)
+    }
+
+    fun indicatorText(clientAgeMs: Long = 0): String? {
+        if (!isFresh(clientAgeMs)) return if (counts.active > 0) "Status unavailable" else null
+        return listOfNotNull(
+            counts.recording?.takeIf { it > 0 }?.let { "$it recording" },
+            counts.starting?.takeIf { it > 0 }?.let { "$it starting" },
+            counts.reconnecting?.takeIf { it > 0 }?.let { "$it reconnecting" },
+            counts.finishing?.takeIf { it > 0 }?.let { "$it finishing" },
+            counts.unconfirmed?.takeIf { it > 0 }?.let { "$it unconfirmed" },
+        ).takeIf { it.isNotEmpty() }?.joinToString(" · ")
+    }
 }
 
 @Serializable
@@ -410,7 +427,6 @@ class DvrApi(origin: String, private val token: String) {
          * web page is a failure rather than a read of unbounded length.
          */
         const val MAX_BODY_BYTES: Long = 1_048_576
-        const val SCHEDULE_DAYS_MAX: Int = 14
     }
 
     private val base = (Session.canonicalOrigin(origin) ?: throw DvrFailure("invalid_settings")).toHttpUrl()
@@ -478,12 +494,14 @@ class DvrApi(origin: String, private val token: String) {
         request(url("overview"), timeoutSeconds = 4).body,
     )
 
-    suspend fun schedule(days: Int = SCHEDULE_DAYS_MAX, cancelled: Boolean = false): DvrSchedule =
+    suspend fun schedule(from: Long, to: Long, after: String? = null): DvrSchedule =
         Net.json.decodeFromString(
             request(
                 url("schedule").newBuilder()
-                    .addQueryParameter("days", days.coerceIn(1, SCHEDULE_DAYS_MAX).toString())
-                    .apply { if (cancelled) addQueryParameter("cancelled", "1") }
+                    .addQueryParameter("from", from.toString())
+                    .addQueryParameter("to", to.toString())
+                    .addQueryParameter("limit", "100")
+                    .apply { after?.let { addQueryParameter("after", it) } }
                     .build(),
             ).body,
         )

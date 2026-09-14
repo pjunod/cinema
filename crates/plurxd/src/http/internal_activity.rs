@@ -88,6 +88,22 @@ pub enum PeerActivityOutcome {
 
 pub type SharedPeerActivity = Arc<[(String, PeerActivityOutcome)]>;
 
+fn age_dvr_observations(
+    mut outcome: PeerActivityOutcome,
+    elapsed: Duration,
+) -> PeerActivityOutcome {
+    let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    if let PeerActivityOutcome::Answered(snapshot) = &mut outcome {
+        if let Some(dvr) = &mut snapshot.dvr {
+            for observation in &mut dvr.observations {
+                observation.observation_age_ms =
+                    observation.observation_age_ms.saturating_add(elapsed_ms);
+            }
+        }
+    }
+    outcome
+}
+
 #[derive(Default)]
 struct PeerActivityReadGate {
     last_started: Option<tokio::time::Instant>,
@@ -218,7 +234,10 @@ impl PeerActivityClient {
         let mut gate = self.owner_reads.lock().await;
         if let Some((completed_at, outcome)) = gate.get(owner_node_id) {
             if completed_at.elapsed() <= ACTIVITY_SNAPSHOT_REUSE {
-                return Ok(outcome.clone());
+                return Ok(age_dvr_observations(
+                    outcome.clone(),
+                    completed_at.elapsed(),
+                ));
             }
         }
         let peer = self
@@ -275,13 +294,15 @@ async fn fetch_peer_activity(
     peer: ActivityPeer,
     deadline: tokio::time::Instant,
 ) -> PeerActivityOutcome {
-    if !peer.reachable {
+    let started = tokio::time::Instant::now();
+    let outcome = if !peer.reachable {
         PeerActivityOutcome::Unhealthy
     } else if let Some(http_base) = peer.http_base {
         client.snapshot(&peer.node_id, &http_base, deadline).await
     } else {
         PeerActivityOutcome::Unsupported
-    }
+    };
+    age_dvr_observations(outcome, started.elapsed())
 }
 
 async fn shared_peer_activity<R, RFut, T, F, Fut>(
@@ -300,7 +321,13 @@ where
     if let Some((completed_at, snapshot)) = &gate.completed {
         if now.saturating_duration_since(*completed_at) < ACTIVITY_SNAPSHOT_REUSE {
             record_aggregation(1);
-            return Ok(Arc::clone(snapshot));
+            let age = now.saturating_duration_since(*completed_at);
+            return Ok(snapshot
+                .iter()
+                .cloned()
+                .map(|(node, outcome)| (node, age_dvr_observations(outcome, age)))
+                .collect::<Vec<_>>()
+                .into());
         }
     }
     if let Some(last_started) = gate.last_started {
@@ -439,17 +466,19 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
                 && dvr.observed_sink_count >= dvr.observations.len()
                 && dvr.observations.iter().all(|observation| {
                     observation.owner_node_id == snapshot.node_id
+                        && !observation.recording_id.is_empty()
                         && observation.recording_id.len() <= 128
+                        && !observation.channel_id.is_empty()
                         && observation.channel_id.len() <= 256
+                        && observation.config_generation >= 0
+                        && observation.serving_generation > 0
+                        && observation.attempt >= 1
+                        && !observation.phase.is_empty()
                         && observation.phase.len() <= 32
                         && observation
                             .reason_code
                             .as_ref()
                             .is_none_or(|reason| reason.len() <= 64)
-                        && matches!(
-                            observation.phase.as_str(),
-                            "starting" | "writing" | "reconnecting" | "finishing"
-                        )
                 })
         })
         && snapshot.live_tv.iter().all(|live| {
@@ -763,6 +792,7 @@ fn attach_dvr_snapshot(
         truncated: source.truncated,
         observations: Vec::new(),
         recording_transports: source.recording_transports,
+        storage_free_bytes: source.storage_free_bytes,
     };
     snapshot.dvr = Some(bounded.clone());
     let base_bytes = serde_json::to_vec(snapshot)

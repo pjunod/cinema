@@ -121,6 +121,7 @@ pub(crate) struct DvrSink {
 
 #[derive(Debug)]
 struct DvrSinkObservation {
+    phase: &'static str,
     first_write_at_ms: Option<i64>,
     last_write_at: Option<std::time::Instant>,
     rate_samples: VecDeque<(std::time::Instant, u64)>,
@@ -138,8 +139,13 @@ struct LatchedDvrEvent {
 }
 
 impl DvrSinkObservation {
-    fn new() -> Self {
+    fn new(attempt: i64) -> Self {
         Self {
+            phase: if attempt > 1 {
+                "reconnecting"
+            } else {
+                "starting"
+            },
             first_write_at_ms: None,
             last_write_at: None,
             rate_samples: VecDeque::new(),
@@ -149,6 +155,9 @@ impl DvrSinkObservation {
     }
 
     fn successful_write(&mut self, now: std::time::Instant, at_ms: i64, total: u64) {
+        if self.phase != "finishing" {
+            self.phase = "writing";
+        }
         if self.first_write_at_ms.is_none() {
             self.first_write_at_ms = Some(at_ms);
             self.pending_events.push_back(LatchedDvrEvent {
@@ -168,6 +177,20 @@ impl DvrSinkObservation {
         {
             self.rate_samples.pop_front();
         }
+    }
+
+    fn begin_finishing(&mut self, at_ms: i64) {
+        if self.phase == "finishing" {
+            return;
+        }
+        self.phase = "finishing";
+        self.pending_events.push_back(LatchedDvrEvent {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            kind: "finishing",
+            occurred_at_ms: at_ms,
+            reason_code: None,
+            actionable: false,
+        });
     }
 
     fn write_bps(&self) -> Option<u64> {
@@ -208,6 +231,8 @@ pub(crate) struct DvrObservationSnapshot {
     pub(crate) truncated: bool,
     pub(crate) observations: Vec<DvrCaptureObservation>,
     pub(crate) recording_transports: usize,
+    #[serde(default)]
+    pub(crate) storage_free_bytes: Option<u64>,
 }
 
 impl DvrSink {
@@ -375,31 +400,28 @@ impl LiveTvManager {
             registry.transports.values().cloned().collect::<Vec<_>>()
         };
         let recording_transports = transports.len();
-        let observed_sink_count = transports
-            .iter()
-            .map(|transport| transport.live_sinks().len())
-            .sum();
         let now = std::time::Instant::now();
         let mut observations = Vec::new();
         for transport in transports {
             if !self.serving.is_current(transport.owner_serving_generation) {
                 continue;
             }
-            for sink in transport.live_sinks() {
+            let sinks = transport
+                .sinks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            for sink in sinks {
                 let sample = sink
                     .observation
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if sink.cancel.is_cancelled() && sample.phase != "finishing" {
+                    continue;
+                }
                 let last_write_age_ms = sample
                     .last_write_at
                     .map(|at| now.duration_since(at).as_millis() as u64);
-                let phase = if sample.first_write_at_ms.is_some() {
-                    "writing"
-                } else if sink.attempt > 1 {
-                    "reconnecting"
-                } else {
-                    "starting"
-                };
                 observations.push(DvrCaptureObservation {
                     recording_id: sink.recording_id.clone(),
                     channel_id: sink.channel_id.clone(),
@@ -408,7 +430,7 @@ impl LiveTvManager {
                     config_generation: transport.generation,
                     serving_generation: transport.owner_serving_generation,
                     attempt: sink.attempt,
-                    phase: phase.to_owned(),
+                    phase: sample.phase.to_owned(),
                     // The registry was inspected synchronously for this
                     // response. Write age is separate: no bytes for 15 s can
                     // be a fresh, unhealthy observation rather than stale
@@ -428,6 +450,7 @@ impl LiveTvManager {
                 .cmp(&right.recording_id)
                 .then(left.attempt.cmp(&right.attempt))
         });
+        let observed_sink_count = observations.len();
         let truncated = observations.len() > DVR_OBSERVATIONS_MAX;
         observations.truncate(DVR_OBSERVATIONS_MAX);
         DvrObservationSnapshot {
@@ -435,6 +458,10 @@ impl LiveTvManager {
             truncated,
             observations,
             recording_transports,
+            storage_free_bytes: match self.dvr_storage_free_bytes.load(Ordering::Relaxed) {
+                u64::MAX => None,
+                value => Some(value),
+            },
         }
     }
 
@@ -520,6 +547,10 @@ impl LiveTvManager {
             if let Ok((live_tv, dvr)) = self.dvr_configs().await {
                 let ours = live_tv.owner_node_id == self.node_id;
                 if ours && live_tv.enabled && dvr.enabled && self.serving.admit().is_some() {
+                    self.dvr_storage_free_bytes.store(
+                        crate::live_tv::free_space_bytes(&dvr.root).unwrap_or(u64::MAX),
+                        Ordering::Relaxed,
+                    );
                     if let Err(error) = self
                         .dvr_tick(&live_tv, &dvr, &events, &mut last_retention)
                         .await
@@ -530,6 +561,8 @@ impl LiveTvManager {
                         );
                     }
                 } else if !ours || !live_tv.enabled || !dvr.enabled {
+                    self.dvr_storage_free_bytes
+                        .store(u64::MAX, Ordering::Relaxed);
                     // Not this node's work any more, or switched off. Close
                     // what we hold rather than leaving a tuner occupied by a
                     // feature the operator has turned off.
@@ -567,7 +600,9 @@ impl LiveTvManager {
         let generation = live_tv.generation;
         let now = unix_seconds();
 
-        self.drain_dvr_observation_events().await?;
+        if let Err(error) = self.drain_dvr_observation_events().await {
+            tracing::warn!(%error, "could not persist pending DVR observations");
+        }
         self.dvr_recover(live_tv, dvr, events, generation, now)
             .await?;
         self.dvr_expand(live_tv, dvr, now).await?;
@@ -577,7 +612,9 @@ impl LiveTvManager {
         self.dvr_allocate(live_tv, dvr, generation, now).await?;
         self.dvr_start(live_tv, dvr, events, generation, now)
             .await?;
-        self.drain_dvr_observation_events().await?;
+        if let Err(error) = self.drain_dvr_observation_events().await {
+            tracing::warn!(%error, "could not persist pending DVR observations");
+        }
         self.dvr_finish(events, generation, now).await?;
         self.dvr_purge_deleted().await?;
         if now - *last_retention >= DVR_RETENTION_INTERVAL_S {
@@ -617,6 +654,15 @@ impl LiveTvManager {
         for row in rows {
             if live.contains(&row.id) {
                 continue;
+            }
+            if let Err(error) = self
+                .store
+                .mark_dvr_history_gap(&row.id, &self.node_id, row.attempt)
+                .await
+            {
+                // Provenance is advisory to the recovery path. A database
+                // hiccup must not consume the remaining capture window.
+                tracing::warn!(recording = %row.id, %error, "could not mark recovered DVR history incomplete");
             }
             // `started_at_ms`, never `created_at_ms`: the row was inserted by
             // expansion, possibly a fortnight before the capture opened, and a
@@ -931,6 +977,11 @@ impl LiveTvManager {
             // codec is the one thing a stopped recording would otherwise lack
             // that a completed one has.
             let facts = self.transport_source_facts(&row.channel_id);
+            if self.begin_finishing(&row.id) {
+                if let Err(error) = self.drain_dvr_observation_events().await {
+                    tracing::warn!(recording = %row.id, %error, "could not persist finishing event");
+                }
+            }
             self.stop_sink(&row.id).await;
             self.finish_row_with_facts(
                 &row,
@@ -943,6 +994,7 @@ impl LiveTvManager {
                 generation,
             )
             .await?;
+            self.close_finished_transports().await;
         }
         Ok(())
     }
@@ -1090,6 +1142,7 @@ impl LiveTvManager {
                     "the recording changed under its own start; closing the capture"
                 );
                 self.stop_sink(&row.id).await;
+                self.close_finished_transports().await;
                 continue;
             }
             tracing::info!(
@@ -1142,6 +1195,11 @@ impl LiveTvManager {
             // writes have not reached the kernel, and the concatenation below
             // would then copy a short part and unlink it — losing exactly the
             // end of every recording that finished normally.
+            if self.begin_finishing(&row.id) {
+                if let Err(error) = self.drain_dvr_observation_events().await {
+                    tracing::warn!(recording = %row.id, %error, "could not persist finishing event");
+                }
+            }
             self.stop_sink(&row.id).await;
             self.finish_row(&row, events, now, 0, None, "capture complete", generation)
                 .await?;
@@ -1302,7 +1360,7 @@ impl LiveTvManager {
             file: tokio::sync::Mutex::new(None),
             bytes: AtomicU64::new(0),
             prior_attempt_bytes: prior_attempt_bytes(&base, attempt).await,
-            observation: std::sync::Mutex::new(DvrSinkObservation::new()),
+            observation: std::sync::Mutex::new(DvrSinkObservation::new(attempt)),
             cancel: CancellationToken::new(),
         });
         let joined = {
@@ -1442,8 +1500,37 @@ impl LiveTvManager {
                 }
             }
         }
-        self.close_finished_transports().await;
         stopped
+    }
+
+    /// Publish the closure phase before removing a sink from the write fanout.
+    /// Its event is drained before file assembly starts, while the observation
+    /// remains in the registry until the terminal row is committed.
+    fn begin_finishing(&self, recording_id: &str) -> bool {
+        let transports = {
+            let registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry.transports.values().cloned().collect::<Vec<_>>()
+        };
+        for transport in transports {
+            let sinks = transport
+                .sinks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            for sink in sinks {
+                if sink.recording_id == recording_id {
+                    sink.observation
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .begin_finishing(unix_seconds().saturating_mul(1_000));
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn live_recording_ids(&self) -> HashSet<String> {
@@ -2364,7 +2451,7 @@ mod tests {
 
     #[test]
     fn write_rate_uses_successful_samples_from_one_five_second_window() {
-        let mut sample = DvrSinkObservation::new();
+        let mut sample = DvrSinkObservation::new(1);
         let start = std::time::Instant::now();
         sample.successful_write(start, 1_000, 100);
         assert_eq!(sample.write_bps(), None, "one write is not a rate");
@@ -2377,6 +2464,19 @@ mod tests {
             "a new attempt window never reuses a sample older than five seconds"
         );
         assert_eq!(sample.first_write_at_ms, Some(1_000));
+    }
+
+    #[test]
+    fn finishing_is_latched_before_late_writes_can_relabel_the_sink() {
+        let mut sample = DvrSinkObservation::new(2);
+        assert_eq!(sample.phase, "reconnecting");
+        sample.begin_finishing(2_000);
+        sample.successful_write(std::time::Instant::now(), 2_001, 512);
+        assert_eq!(sample.phase, "finishing");
+        assert_eq!(
+            sample.pending_events.front().map(|event| event.kind),
+            Some("finishing")
+        );
     }
 
     fn base(root: &str, title: &str, start: i64, number: &str, id: &str) -> PathBuf {

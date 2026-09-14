@@ -236,6 +236,9 @@ fun DvrRecordingsPanel(
     onChip: (DvrChip) -> Unit,
     onOpenItem: (Long) -> Unit,
     onOpenRecording: (String) -> Unit,
+    onMoreLibrary: () -> Unit = {},
+    onMoreAttention: () -> Unit = {},
+    onMoreUpcoming: () -> Unit = {},
     onStop: (String) -> Unit,
     onRestore: (String) -> Unit,
     onRuleEnabled: (String, Boolean) -> Unit,
@@ -291,15 +294,19 @@ fun DvrRecordingsPanel(
         }
         when (chip) {
             DvrChip.Saved -> DvrLibraryList(
-                dvr, now, onOpenItem, onOpenRecording, onStop, Modifier.weight(1f),
+                dvr, now, onOpenItem, onOpenRecording, onStop, onMoreLibrary, Modifier.weight(1f),
             )
             DvrChip.Upcoming -> DvrScheduleList(
-                dvr.schedule.filterNot { it.cancelled }, onOpenRecording,
+                dvr.schedule.filter { it.state in setOf("scheduled", "conflict", "withdrawn", "stale") }, onOpenRecording,
                 onStop, onRestore, Modifier.weight(1f),
+                hasMore = dvr.scheduleNext != null,
+                onMore = onMoreUpcoming,
             )
             DvrChip.Attention -> DvrScheduleList(
                 dvr.attention.map { it.recording }, onOpenRecording,
                 onStop, onRestore, Modifier.weight(1f),
+                hasMore = dvr.attentionNext != null,
+                onMore = onMoreAttention,
             )
             DvrChip.Rules -> DvrRulesList(
                 dvr, onRuleEnabled, onRuleNewOnly, onRuleDelete, onRuleMove, Modifier.weight(1f),
@@ -332,6 +339,7 @@ private fun DvrLibraryList(
     onOpenItem: (Long) -> Unit,
     onOpenRecording: (String) -> Unit,
     onStop: (String) -> Unit,
+    onMore: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val type = LiveTvTypography.current()
@@ -361,6 +369,11 @@ private fun DvrLibraryList(
                 }
             }
         }
+        if (dvr.libraryNext != null) {
+            item(key = "load-more") {
+                TvTextButton(onClick = onMore) { Text("Load more") }
+            }
+        }
     }
 }
 
@@ -371,6 +384,8 @@ private fun DvrScheduleList(
     onStop: (String) -> Unit,
     onRestore: (String) -> Unit,
     modifier: Modifier = Modifier,
+    hasMore: Boolean = false,
+    onMore: () -> Unit = {},
 ) {
     val type = LiveTvTypography.current()
     val sorted = remember(rows) { rows.sortedWith(compareBy<DvrRecording> { it.capture_start }.thenBy { it.id }) }
@@ -410,6 +425,11 @@ private fun DvrScheduleList(
                         compact = true,
                     ) { Text("Cancel", style = type.primary) }
                 }
+            }
+        }
+        if (hasMore) {
+            item(key = "load-more") {
+                TvTextButton(onClick = onMore) { Text("Load more") }
             }
         }
     }
@@ -585,7 +605,7 @@ fun DvrRecordingsScreen(
                 TvTextButton(onClick = onOpenActivity) { Text("● $label") }
             }
         }
-        if (state.overview?.fresh == true && state.indicatorLabel() == null) {
+        if (state.overviewIsFresh() && state.indicatorLabel() == null) {
             Text("No active recordings", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         state.overviewError?.takeIf { state.overview != null }?.let {
@@ -598,6 +618,9 @@ fun DvrRecordingsScreen(
             onChip = { chip = it },
             onOpenItem = onOpenItem,
             onOpenRecording = onOpenRecording,
+            onMoreLibrary = { controller.refreshLibrary(more = true) },
+            onMoreAttention = { controller.refreshAttention(more = true) },
+            onMoreUpcoming = { controller.refreshSchedule(more = true) },
             onStop = { id ->
                 val row = (state.schedule + state.library).firstOrNull { it.id == id }
                 val activeTitle = row?.takeIf { it.recording }?.title
@@ -668,7 +691,7 @@ fun DvrCaptureActivityScreen(
     Column(Modifier.fillMaxSize().padding(16.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             TvTextButton(onClick = onBack, modifier = Modifier.focusRequester(backFocus)) { Text("Back") }
-            Text(state.indicatorLabel() ?: if (state.overview?.fresh == true) "No active recordings" else "Status unavailable",
+            Text(state.indicatorLabel() ?: if (state.overviewIsFresh()) "No active recordings" else "Status unavailable",
                 style = MaterialTheme.typography.headlineMedium)
         }
         state.overview?.observation_age_ms?.let {
@@ -829,10 +852,15 @@ internal fun dvrRecordingDetail(row: DvrRecording, now: Long): String = buildStr
         }
         row.state == "partial" -> {
             append(" · Partial")
+            if (row.stopped_by_user_id != null) append(" · Stopped early")
             if (row.gap_s > 0) append(" · ${row.gap_s / 60} min gap")
             if (row.late_start_s > 0) append(" · started ${row.late_start_s} s late")
         }
-        row.state == "done" -> append(" · ${row.bytes / 1_000_000} MB")
+        row.state == "done" -> {
+            append(if (row.stopped_by_user_id != null) " · Stopped early" else " · Recorded")
+            if (row.bytes > 0) append(" · ${row.bytes / 1_000_000} MB")
+            if (row.item_id == null || row.file_id == null) append(" · preparing playback")
+        }
         else -> {
             append(" · ${row.state.replaceFirstChar { it.uppercase() }}")
             row.state_reason?.let { append(" · $it") }

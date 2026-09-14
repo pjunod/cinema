@@ -257,6 +257,12 @@ pub struct DvrAttentionRow {
     pub acknowledged_through_sequence: i64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DvrAttentionSection {
+    Current,
+    Historical,
+}
+
 /// How a rule decides a guide programme is one of its episodes.
 ///
 /// Two modes rather than one because the two guide sources differ in what

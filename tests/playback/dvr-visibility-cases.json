@@ -1,0 +1,100 @@
+{
+  "about": "One overview freshness and indicator contract for web, Apple, and Android. client_age_ms is monotonic time since receipt.",
+  "overviews": [
+    {
+      "case": "complete idle is a trustworthy zero",
+      "client_age_ms": 0,
+      "body": {
+        "version": 1,
+        "server_now_ms": 1789403040000,
+        "availability": "complete",
+        "runtime_supported": true,
+        "observation_age_ms": null,
+        "counts": {"recording": 0, "starting": 0, "reconnecting": 0, "finishing": 0, "unconfirmed": 0, "attention": 0},
+        "active_total": 0,
+        "active_truncated": false,
+        "active": [],
+        "next_capture_start": null,
+        "diagnostics": null
+      },
+      "fresh": true,
+      "indicator": null
+    },
+    {
+      "case": "mixed confirmed phases retain separate words",
+      "client_age_ms": 800,
+      "body": {
+        "version": 1,
+        "server_now_ms": 1789403040000,
+        "availability": "complete",
+        "runtime_supported": true,
+        "observation_age_ms": 1200,
+        "counts": {"recording": 1, "starting": 0, "reconnecting": 1, "finishing": 0, "unconfirmed": 0, "attention": 0},
+        "active_total": 2,
+        "active_truncated": false,
+        "active": [],
+        "next_capture_start": null,
+        "diagnostics": null
+      },
+      "fresh": true,
+      "indicator": "1 recording · 1 reconnecting"
+    },
+    {
+      "case": "a fresh truncated owner snapshot can mix known and unknown",
+      "client_age_ms": 2500,
+      "body": {
+        "version": 1,
+        "server_now_ms": 1789403040000,
+        "availability": "partial",
+        "runtime_supported": true,
+        "observation_age_ms": 500,
+        "counts": {"recording": 1, "starting": 0, "reconnecting": 0, "finishing": 0, "unconfirmed": 2, "attention": 0},
+        "active_total": 3,
+        "active_truncated": true,
+        "active": [],
+        "next_capture_start": null,
+        "diagnostics": null
+      },
+      "fresh": true,
+      "indicator": "1 recording · 2 unconfirmed"
+    },
+    {
+      "case": "an unreachable owner is not a fresh partial zero",
+      "client_age_ms": 0,
+      "body": {
+        "version": 1,
+        "server_now_ms": 1789403040000,
+        "availability": "partial",
+        "runtime_supported": true,
+        "observation_age_ms": null,
+        "counts": {"recording": 0, "starting": 0, "reconnecting": 0, "finishing": 0, "unconfirmed": 1, "attention": 0},
+        "active_total": 1,
+        "active_truncated": false,
+        "active": [],
+        "next_capture_start": null,
+        "diagnostics": null
+      },
+      "fresh": false,
+      "indicator": "Status unavailable"
+    },
+    {
+      "case": "client elapsed time expires retained owner evidence",
+      "client_age_ms": 19001,
+      "body": {
+        "version": 1,
+        "server_now_ms": 1789403040000,
+        "availability": "complete",
+        "runtime_supported": true,
+        "observation_age_ms": 1000,
+        "counts": {"recording": 1, "starting": 0, "reconnecting": 0, "finishing": 0, "unconfirmed": 0, "attention": 0},
+        "active_total": 1,
+        "active_truncated": false,
+        "active": [],
+        "next_capture_start": null,
+        "diagnostics": null
+      },
+      "fresh": false,
+      "indicator": "Status unavailable"
+    }
+  ]
+}

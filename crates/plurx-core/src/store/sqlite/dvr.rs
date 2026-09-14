@@ -11,10 +11,11 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use super::{conversion_err, SqliteStore};
 use crate::dvr::{
-    DvrAttentionRow, DvrEvent, DvrEventHead, DvrEventInput, DvrEventPage, DvrInsertOutcome,
-    DvrKeepMode, DvrMatchMode, DvrOrigin, DvrRecording, DvrReminder, DvrReminderState, DvrRule,
-    DvrState, DvrStatePatch, DvrTransition, DVR_EVENT_PAGE_MAX, DVR_EVENT_PRUNE_BATCH,
-    DVR_EVENT_SERVER_MAX, DVR_RECORDINGS_LIST_PAGE, DVR_REMINDERS_PER_USER_MAX, DVR_RULES_MAX,
+    DvrAttentionRow, DvrAttentionSection, DvrEvent, DvrEventHead, DvrEventInput, DvrEventPage,
+    DvrInsertOutcome, DvrKeepMode, DvrMatchMode, DvrOrigin, DvrRecording, DvrReminder,
+    DvrReminderState, DvrRule, DvrState, DvrStatePatch, DvrTransition, DVR_EVENT_PAGE_MAX,
+    DVR_EVENT_PRUNE_BATCH, DVR_EVENT_SERVER_MAX, DVR_RECORDINGS_LIST_PAGE,
+    DVR_REMINDERS_PER_USER_MAX, DVR_RULES_MAX,
 };
 use crate::error::StoreError;
 use crate::store::DvrStore;
@@ -954,6 +955,27 @@ impl DvrStore for SqliteStore {
         .await
     }
 
+    async fn mark_dvr_history_gap(
+        &self,
+        recording_id: &str,
+        owner_node_id: &str,
+        attempt: i64,
+    ) -> Result<bool, StoreError> {
+        let recording_id = recording_id.to_owned();
+        let owner_node_id = owner_node_id.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE dvr_event_heads SET history_has_gap = 1
+                  WHERE recording_id = ?1
+                    AND EXISTS(SELECT 1 FROM dvr_recordings r
+                         WHERE r.id = ?1 AND r.state = 'recording'
+                           AND r.tuner_owner_node_id = ?2 AND r.attempt = ?3)",
+                params![recording_id, owner_node_id, attempt],
+            )? == 1)
+        })
+        .await
+    }
+
     async fn list_dvr_events(
         &self,
         recording_id: &str,
@@ -1067,14 +1089,28 @@ impl DvrStore for SqliteStore {
     async fn list_dvr_attention(
         &self,
         user_id: i64,
+        section: DvrAttentionSection,
         after: Option<(i64, &str)>,
+        upper: Option<(i64, &str)>,
         limit: i64,
     ) -> Result<(Vec<DvrAttentionRow>, i64), StoreError> {
         let after = after.map(|(at, id)| (at, id.to_owned()));
+        let upper = upper.map(|(at, id)| (at, id.to_owned()));
         let limit = limit.clamp(1, DVR_EVENT_PAGE_MAX);
         self.with_read(move |conn| {
-            let condition = "(r.state IN ('conflict','withdrawn','stale') OR
-                 COALESCE(h.latest_attention_sequence, 0) > COALESCE(a.through_sequence, 0))";
+            let current = "(r.state IN ('conflict','withdrawn','stale') OR
+                 (r.state='recording' AND COALESCE(h.latest_attention_sequence,0)>0))";
+            let legacy = "h.recording_id IS NULL AND
+                 (r.state IN ('failed','missed') OR
+                  (r.state='partial' AND r.stopped_by_user_id IS NULL))";
+            let condition = match section {
+                DvrAttentionSection::Current => current.to_owned(),
+                DvrAttentionSection::Historical => format!(
+                    "NOT ({current}) AND
+                     (COALESCE(h.latest_attention_sequence,0)>COALESCE(a.through_sequence,0)
+                      OR ({legacy}))"
+                ),
+            };
             let total: i64 = conn.query_row(
                 &format!("SELECT COUNT(*) FROM dvr_recordings r
                   LEFT JOIN dvr_event_heads h ON h.recording_id = r.id
@@ -1084,6 +1120,7 @@ impl DvrStore for SqliteStore {
                 |row| row.get(0),
             )?;
             let (after_at, after_id) = after.unwrap_or((i64::MAX, String::new()));
+            let (upper_at, upper_id) = upper.unwrap_or((i64::MAX, String::new()));
             let mut statement = conn.prepare(&format!(
                 "SELECT {RECORDING_COLS}, COALESCE(h.latest_attention_sequence, 0),
                         COALESCE(h.latest_attention_at_ms, r.finished_at_ms, r.updated_at_ms),
@@ -1092,6 +1129,9 @@ impl DvrStore for SqliteStore {
                    LEFT JOIN dvr_event_heads h ON h.recording_id = r.id
                    LEFT JOIN dvr_attention_acks a ON a.recording_id = r.id AND a.user_id = ?1
                   WHERE {condition}
+                    AND (COALESCE(h.latest_attention_at_ms, r.finished_at_ms, r.updated_at_ms) < ?5
+                     OR (COALESCE(h.latest_attention_at_ms, r.finished_at_ms, r.updated_at_ms) = ?5
+                         AND r.id >= ?6))
                     AND (COALESCE(h.latest_attention_at_ms, r.finished_at_ms, r.updated_at_ms) < ?2
                      OR (COALESCE(h.latest_attention_at_ms, r.finished_at_ms, r.updated_at_ms) = ?2
                          AND r.id > ?3))
@@ -1099,7 +1139,7 @@ impl DvrStore for SqliteStore {
                            r.id LIMIT ?4"
             ))?;
             let rows = statement
-                .query_map(params![user_id, after_at, after_id, limit], |row| {
+                .query_map(params![user_id, after_at, after_id, limit, upper_at, upper_id], |row| {
                     Ok(DvrAttentionRow {
                         recording: recording_from_row(row)?,
                         latest_attention_sequence: row.get(37)?,

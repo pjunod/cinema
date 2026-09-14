@@ -24,6 +24,24 @@ function shippedSource(name) {
 
 const pageDecoder = new Function(`${shippedSource("dvrRecordingsPage")}; return dvrRecordingsPage;`)();
 
+const overviewPresentation = new Function(
+  `${shippedSource("dvrOverviewFresh")}
+   ${shippedSource("dvrIndicatorText")}
+   return {fresh:dvrOverviewFresh,text:dvrIndicatorText};`,
+)();
+const overviewCases = JSON.parse(fs.readFileSync(
+  path.join(__dirname, "../playback/dvr-visibility-cases.json"), "utf8",
+)).overviews;
+
+test("shared overview cases preserve freshness and mixed phase words", () => {
+  for (const row of overviewCases) {
+    const receivedAt = 10_000;
+    const fresh = overviewPresentation.fresh(row.body, receivedAt, receivedAt + row.client_age_ms);
+    assert.equal(fresh, row.fresh, row.case);
+    assert.equal(overviewPresentation.text(row.body, fresh), row.indicator || "", row.case);
+  }
+});
+
 test("recording lists decode their page envelope and retain its cursor", () => {
   const row = {id: "rec-1", title: "Tidewater"};
   assert.deepEqual(pageDecoder({rows: [row], next: "cursor-1"}), {

@@ -151,6 +151,7 @@ struct DvrSchedule: Decodable, Sendable {
     /// a viewer learns about a clash without opening the list.
     let conflicts: Int
     let rows: [DvrRecording]
+    let next: String?
 }
 
 struct DvrRecordingsPage: Decodable, Sendable {
@@ -249,7 +250,30 @@ struct DvrOverview: Decodable, Equatable, Sendable {
     let nextCaptureStart: Int?
     let diagnostics: DvrOverviewDiagnostics?
 
-    var fresh: Bool { availability == "fresh" && (observationAgeMs ?? 0) <= 20_000 }
+    func isFresh(clientAgeMs: UInt64 = 0) -> Bool {
+        let age = (observationAgeMs ?? 0).addingReportingOverflow(clientAgeMs)
+        guard availability != "unavailable", !age.overflow, age.partialValue <= 20_000 else {
+            return false
+        }
+        return availability == "complete" || observationAgeMs != nil
+    }
+
+    func indicatorText(clientAgeMs: UInt64 = 0) -> String? {
+        guard isFresh(clientAgeMs: clientAgeMs) else {
+            return counts.active > 0 ? "Status unavailable" : nil
+        }
+        var parts: [String] = []
+        for (count, label) in [
+            (counts.recording, "recording"),
+            (counts.starting, "starting"),
+            (counts.reconnecting, "reconnecting"),
+            (counts.finishing, "finishing"),
+            (counts.unconfirmed, "unconfirmed"),
+        ] {
+            if let count, count > 0 { parts.append("\(count) \(label)") }
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
 }
 
 struct DvrEvent: Decodable, Identifiable, Equatable, Sendable {
@@ -494,8 +518,15 @@ final class DvrAPI: @unchecked Sendable {
     /// The plan, and with it the conflict count the Scheduled chip carries.
     /// Cancelled rows stay visible on request: a viewer who skipped the wrong
     /// episode has to be able to find it again to restore it.
-    func schedule(days: Int = 14, cancelled: Bool = false) async throws -> DvrSchedule {
-        let query = "?days=\(max(1, min(14, days)))" + (cancelled ? "&cancelled=1" : "")
+    func schedule(from: Int, to: Int, after: String? = nil) async throws -> DvrSchedule {
+        var components = URLComponents()
+        components.queryItems = [
+            URLQueryItem(name: "from", value: String(from)),
+            URLQueryItem(name: "to", value: String(to)),
+            URLQueryItem(name: "limit", value: "100"),
+        ]
+        if let after { components.queryItems?.append(URLQueryItem(name: "after", value: after)) }
+        let query = components.percentEncodedQuery.map { "?" + $0 } ?? ""
         return try decode(DvrSchedule.self, data: await request("dvr/schedule" + query).0)
     }
 

@@ -2220,6 +2220,16 @@ pub trait DvrStore: Send + Sync + 'static {
         event: &crate::dvr::DvrEventInput,
     ) -> Result<bool, StoreError>;
 
+    /// Record that an owner recovered a capture without its prior worker.
+    /// The owner/attempt predicate prevents a stale process from degrading a
+    /// newer attempt's provenance.
+    async fn mark_dvr_history_gap(
+        &self,
+        recording_id: &str,
+        owner_node_id: &str,
+        attempt: i64,
+    ) -> Result<bool, StoreError>;
+
     async fn list_dvr_events(
         &self,
         recording_id: &str,
@@ -2242,7 +2252,9 @@ pub trait DvrStore: Send + Sync + 'static {
     async fn list_dvr_attention(
         &self,
         user_id: i64,
+        section: crate::dvr::DvrAttentionSection,
         after: Option<(i64, &str)>,
+        upper: Option<(i64, &str)>,
         limit: i64,
     ) -> Result<(Vec<crate::dvr::DvrAttentionRow>, i64), StoreError>;
 
