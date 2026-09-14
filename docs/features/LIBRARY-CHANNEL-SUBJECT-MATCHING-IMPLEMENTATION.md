@@ -837,6 +837,10 @@ The private sample harness was corrected to use inherited series metadata,
 normalized genre/tag text and bounded fields as production does. Missing episode
 numbers are omitted so a placeholder cannot serve as evidence. Its observations
 are local engineering inspection, not independently labelled precision/recall.
+The final 48-title sample admitted 23 titles, marked three uncertain and left one
+unprocessed after bounded retries. It took 63.12 seconds, with first useful
+results after 9.37 seconds. Unprocessed metadata remains eligible for a later
+retry; it is not silently treated as a negative decision.
 
 All twelve adversarial findings were addressed by the author. Final gate status,
 review closure and the merged commit are maintained in
