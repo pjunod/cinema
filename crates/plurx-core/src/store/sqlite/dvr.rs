@@ -1073,8 +1073,7 @@ impl DvrStore for SqliteStore {
         let after = after.map(|(at, id)| (at, id.to_owned()));
         let limit = limit.clamp(1, DVR_EVENT_PAGE_MAX);
         self.with_read(move |conn| {
-            let condition = "(r.state = 'conflict' OR r.state IN ('failed','missed') OR
-                 (r.state = 'partial' AND r.stopped_by_user_id IS NULL) OR
+            let condition = "(r.state IN ('conflict','withdrawn','stale') OR
                  COALESCE(h.latest_attention_sequence, 0) > COALESCE(a.through_sequence, 0))";
             let total: i64 = conn.query_row(
                 &format!("SELECT COUNT(*) FROM dvr_recordings r

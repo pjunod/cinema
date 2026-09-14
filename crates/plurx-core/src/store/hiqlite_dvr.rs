@@ -505,7 +505,6 @@ struct AttentionRowRaw {
     latest_attention_sequence: i64,
     latest_attention_at_ms: i64,
     acknowledged_through_sequence: i64,
-    total_count: i64,
 }
 
 struct CountRow {
@@ -553,7 +552,6 @@ impl From<&mut Row<'_>> for AttentionRowRaw {
             latest_attention_sequence: row.get("latest_attention_sequence"),
             latest_attention_at_ms: row.get("attention_at_ms"),
             acknowledged_through_sequence: row.get("acknowledged_through_sequence"),
-            total_count: row.get("total_count"),
         }
     }
 }
@@ -1673,14 +1671,25 @@ impl DvrStore for HiqliteAuthStore {
         limit: i64,
     ) -> Result<(Vec<DvrAttentionRow>, i64), StoreError> {
         let (after_at, after_id) = after.unwrap_or((i64::MAX, ""));
-        let condition = "(r.state='conflict' OR r.state IN ('failed','missed') OR
-             (r.state='partial' AND r.stopped_by_user_id IS NULL) OR
+        let condition = "(r.state IN ('conflict','withdrawn','stale') OR
              COALESCE(h.latest_attention_sequence,0)>COALESCE(a.through_sequence,0))";
+        let count_sql = format!(
+            "SELECT COUNT(*) AS count FROM dvr_recordings r
+               LEFT JOIN dvr_event_heads h ON h.recording_id=r.id
+               LEFT JOIN dvr_attention_acks a ON a.recording_id=r.id AND a.user_id=$1
+              WHERE {condition}"
+        );
+        let total = self
+            .client()
+            .query_consistent_map::<CountRow, _>(count_sql, params!(user_id))
+            .await?
+            .into_iter()
+            .next()
+            .map_or(0, |row| row.count);
         let sql = format!(
             "SELECT {RECORDING_COLS},COALESCE(h.latest_attention_sequence,0) AS latest_attention_sequence,
                     COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms) AS attention_at_ms,
-                    COALESCE(a.through_sequence,0) AS acknowledged_through_sequence,
-                    COUNT(*) OVER() AS total_count
+                    COALESCE(a.through_sequence,0) AS acknowledged_through_sequence
                FROM dvr_recordings r
                LEFT JOIN dvr_event_heads h ON h.recording_id=r.id
                LEFT JOIN dvr_attention_acks a ON a.recording_id=r.id AND a.user_id=$1
@@ -1703,7 +1712,6 @@ impl DvrStore for HiqliteAuthStore {
                 ),
             )
             .await?;
-        let total = raw.first().map_or(0, |row| row.total_count);
         let rows = raw
             .into_iter()
             .map(|row| {
