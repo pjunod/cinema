@@ -37,8 +37,8 @@ services:
       # - /mnt/qnap/media/dv-conversion:/media-dv-conversion:rw
       # The DVR root. Recording needs somewhere to WRITE, and every media mount
       # above is read-only on purpose, so `dvr.enabled` cannot do anything until
-      # this exists — the Developer tab's "DVR root set and writable" row is
-      # what tells you it does not.
+      # this exists — the Developer tab's "The tuner owner can
+      # write to the DVR root" row is what tells you it does not.
       #
       # Two requirements, and the second is the one people miss:
       #   * writable (`:rw`) by the uid the container runs as (PUID:PGID), and

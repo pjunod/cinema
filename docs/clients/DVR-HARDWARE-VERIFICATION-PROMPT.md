@@ -31,8 +31,8 @@ something is not a result.
   create.** Every media mount plurx ships is read-only on purpose, so until a
   `:rw` bind exists in `docker-compose.override.yml` the DVR has nowhere to
   write and turning `dvr.enabled` on does nothing by itself. See
-  [`deploy/README.md`](../../deploy/README.md) — "Recording needs a writable DVR
-  root". It must also be the same underlying filesystem on every node, because
+  [`deploy/README.md`](../../deploy/README.md), under "Recording needs a
+  writable DVR root". It must also be the same underlying filesystem on every node, because
   the owner writes the capture and any node may serve it back; a path that
   exists on one node only is the single most likely way to get a confusing
   failure here, and §3 explains why the Developer card cannot catch that one
@@ -114,7 +114,9 @@ Three settings, not one — and the writable bind from §0 has to exist first, o
 none of the rest can work:
 
 - `dvr.root` — the **container** path of that bind (`/dvr` if you followed
-  `deploy/README.md`), not the host path.
+  `deploy/README.md`), not the host path. It needs **50 GB free**
+  (`dvr.free_floor_gb`); below the floor every row goes to `Conflict` and
+  nothing records, on a root that is present and writable.
 - `dvr.enabled` — on.
 - **`live_tv.max_sessions` — set it to `4`.** It defaults to **2**, and §4
   step 2's arithmetic assumes the FLEX 4K's four tuners. Leave it at 2 and the
