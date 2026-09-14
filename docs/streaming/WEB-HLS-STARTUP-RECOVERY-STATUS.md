@@ -1,6 +1,6 @@
 # Web HLS startup recovery — implementation status
 
-**Status:** implementation in progress · **Updated:** 2026-09-14 · **Base:**
+**Status:** locally qualified · hosted promotion pending · **Updated:** 2026-09-14 · **Base:**
 `11ca0573a33fe41214c7837690348d8290318127` · **Branch:**
 `codex/web-hls-startup-recovery`
 
@@ -23,11 +23,11 @@ the contributor contract forbids using CI as a compiler.
 
 | Work order | State | Current evidence | Exit condition |
 |---|---|---|---|
-| S01 · reproduce both defects | review-corrected, untested | Shipped-helper coverage separates unloaded-manifest and established-stream recovery; actual vendored-loader coverage and a delayed-manifest shipped-page browser check are wired into the fast lane | Exact-head controller and browser evidence pass |
-| S02 · bounded manifest recovery | review-corrected, untested | One attachment owns 40 s cold / 20 s seek time, one shared corrective credit, explicit stock manifest policy, a 16-send final boundary, pause/resume rules, final-send ownership, and loader destruction | Exact-head controller and policy contracts pass |
-| S03 · truthful diagnosis | review-corrected, untested | Failure evidence is attachment/resource/ordinal-bound and size-limited; terminal bodies preempt every retry; manifest, media, decoder, and presentation evidence are separate and telemetry omits capability URLs | Generated surface, controller, and browser contracts pass |
-| S04 · server phase attribution | review-corrected, compile-passed | Exact init inspection preserves pending, invalid, unsupported, unavailable, and producer/session terminal outcomes; storage uncertainty is distinct from absence; incomplete required HEVC records are invalid; the five-second outer bound remains | Focused HLS tests pass |
-| S05 · qualification and promotion | fast lane pending | The single adversarial review is complete and all nine findings are addressed by `38b423c9` | Exact-head fast lane, then merge |
+| S01 · reproduce both defects | qualified | Shipped-helper coverage separates unloaded-manifest and established-stream recovery; actual vendored-loader coverage and the delayed-manifest shipped-page browser check pass in the fast lane | Complete |
+| S02 · bounded manifest recovery | qualified | One attachment owns 40 s cold / 20 s seek time, one shared corrective credit, explicit stock manifest policy, a 16-send final boundary, pause/resume rules, final-send ownership, and loader destruction | Complete |
+| S03 · truthful diagnosis | qualified | Failure evidence is attachment/resource/ordinal-bound and size-limited; terminal bodies preempt every retry; manifest, media, decoder, and presentation evidence are separate and telemetry omits capability URLs | Complete |
+| S04 · server phase attribution | qualified | Exact init inspection preserves pending, invalid, unsupported, unavailable, and producer/session terminal outcomes; storage uncertainty is distinct from absence; incomplete required HEVC records are invalid; the five-second outer bound remains | Complete |
+| S05 · qualification and promotion | hosted gate pending | The single adversarial review is complete, all nine findings are addressed, and the local fast lane is green on code-and-test candidate `3e001430` | Promote the status-only descendant through the Main promotion gate, then merge |
 
 ## Standing decisions — safety evidence advises but never gates
 
@@ -48,8 +48,12 @@ the contributor contract forbids using CI as a compiler.
 
 | Evidence | State | Receipt |
 |---|---|---|
-| Rust 1.97.1 compiler baseline | passed | `cargo check -p plurxd --all-targets --locked` on base `11ca0573`; one pre-existing `AttemptChild::new` dead-code warning |
+| Rust 1.97.1 compiler and lint | passed | Pinned `cargo check -p plurxd --all-targets --locked` and `cargo clippy -p plurxd --all-targets --locked -- -D warnings`; formatting also passes |
 | Adversarial implementation review | complete | One pass against `3c3687a1`: four P1 and five P2 findings; no second review requested or run |
-| Review corrections | complete | `38b423c9` fixes terminal retry precedence, established retry ownership, target-position presentation proof, actual loader/browser coverage, resource-scoped evidence ordering, unavailable storage classification, required HEVC record classification, bounded typed bodies, and sanitized episode telemetry |
-| Fast lane | not run | Runs only after review corrections on the exact PR head |
-| Main merge | not run | Merge is allowed only if the reviewed head and green fast-lane head are identical |
+| Review corrections | complete | `38b423c9` through `daf858c6` fix terminal retry precedence, established retry ownership, target-position presentation proof, actual loader/browser coverage, resource-scoped evidence ordering, unavailable storage classification, required HEVC record classification, bounded typed bodies, sanitized episode telemetry, and exact response-delivery settlement |
+| Focused Rust regressions | passed | `cargo test -p plurxd --bin plurxd web_hls_startup_ --locked`: 3 passed, 0 failed, 2,232 filtered |
+| Web fast lane | passed | `make web-check` on `3e001430`: shipped policy/controller contracts, 26/26 Settings sections, 63/63 surface cases, 484 contrast pairs with no new failures, and actual vendored hls.js playback in Headless Chrome 152 |
+| Browser recovery receipt | passed | Eight typed manifest refusals, 9 manifest requests total, first observed position 0.764 s; fixture SHA-256 `a708543b1bb974a7cbb2889e9039c79eba95e44b5551354bbec5b7faf5ff4915`; hls.js 1.6.16 |
+| Policy and operations | passed | History and validation catalogs clean; 198 validation tests (1 skipped), 356 operations tests, and 4 documentation-index tests pass |
+| Main promotion gate | pending | The status-only descendant still needs the hosted Forgejo receipt on its exact head |
+| Main merge | pending | Merge is allowed only after that exact hosted head is green |
