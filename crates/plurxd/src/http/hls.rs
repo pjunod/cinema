@@ -10860,13 +10860,18 @@ async fn exact_hls_context_at(
                     return Err(HlsInitInspectionError::unavailable());
                 }
             };
+            // This open is an internal capability check even when the size
+            // alone rejects it. Settle the zero-body tracker explicitly so a
+            // deliberate oversized refusal is not logged as an abandoned
+            // client response.
+            let mut delivery = opened.delivery.into_internal_probe();
             if opened.len > INIT_INSPECTION_LIMIT_BYTES {
+                delivery.finish_without_body();
                 return Err(HlsInitInspectionError::invalid());
             }
             init.reserve(opened.len as usize);
             // No response body exists here — this is the playlist generator
             // reading `hvcC` for itself.
-            let mut delivery = opened.delivery.into_internal_probe();
             delivery.expect_at_most(opened.len);
             let started = Instant::now();
             let mut reader = opened.file.take(opened.len);
