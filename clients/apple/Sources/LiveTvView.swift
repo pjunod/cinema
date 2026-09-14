@@ -1362,18 +1362,19 @@ struct LiveTvGuideGrid: View {
                                 let mark = marks.mark(channelId: row.channel.id,
                                                       airingStart: cell.programme.start)
                                 Button {
-                                    #if os(iOS)
-                                    // On the phone a cell's actions live in
-                                    // the programme sheet, so every cell opens
-                                    // it — including the one on air, which is
-                                    // otherwise the only cell a viewer cannot
-                                    // record. The On now list keeps the
-                                    // one-tap path to the picture.
+                                    // A cell's actions live in the programme
+                                    // sheet, so every cell opens it — including
+                                    // the one on air, which is otherwise the
+                                    // only cell a viewer cannot record. The On
+                                    // now list keeps the one-tap path to the
+                                    // picture, and the sheet puts Watch first.
+                                    //
+                                    // This was `#if os(iOS)` and tvOS took the
+                                    // other branch, so the television — the
+                                    // surface the DVR acceptance starts from —
+                                    // was the one place a viewer could not
+                                    // record what they were watching.
                                     onFuture(row.channel, cell.programme)
-                                    #else
-                                    if cell.airing { onAiring(row.channel) }
-                                    else { onFuture(row.channel, cell.programme) }
-                                    #endif
                                 } label: {
                                     Text(cell.programme.title)
                                         .font(LiveTvType.cell).lineLimit(1)

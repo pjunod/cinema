@@ -4643,6 +4643,12 @@ function closeConnectQr(){
   if(target&&target.isConnected&&target.focus) target.focus();
 }
 function connectQrOpen(){ return !!document.getElementById("connectdialog"); }
+// The cell a popover was opened from, so closing it can hand the keyboard back.
+let LIVE_TV_POP_OPENER=null;
+function liveTvPopoverOpen(){
+  const pop=document.getElementById("live-tv-pop");
+  return !!(pop&&!pop.hidden);
+}
 // Capture Escape before layout-specific sheet handlers so one key closes only
 // the topmost modal, never it and something behind it. The edit dialog is
 // here rather than in its own listener for the same reason: two Escape
@@ -4650,7 +4656,8 @@ function connectQrOpen(){ return !!document.getElementById("connectdialog"); }
 window.addEventListener("keydown",e=>{
   if(e.key!=="Escape") return;
   if(connectQrOpen()){ e.preventDefault(); e.stopImmediatePropagation(); closeConnectQr(); return; }
-  if(document.getElementById("editwrap")){ e.preventDefault(); e.stopImmediatePropagation(); closeEdit(); }
+  if(document.getElementById("editwrap")){ e.preventDefault(); e.stopImmediatePropagation(); closeEdit(); return; }
+  if(liveTvPopoverOpen()){ e.preventDefault(); e.stopImmediatePropagation(); liveTvPopover(null); }
 },true);
 
 // ---- global activity indicator --------------------------------------------
@@ -16282,7 +16289,7 @@ function liveTvGridMarkup(visible,selected){
         style="left:${cell.left}px;width:${Math.max(cell.width-4,12)}px"
         title="${esc(cell.programme.title)} · ${esc(liveTvClock(cell.programme.start))}–${esc(liveTvClock(cell.programme.end))}"
         data-channel="${esc(row.channel.id)}" data-cell="${index}"
-        onclick="liveTvGridCell('${esc(row.channel.id)}',${index},${cell.airing})">${esc(cell.programme.title)}${liveTvMarks(row.channel.id,cell.programme,false)}</button>`;
+        onclick="liveTvGridCell('${esc(row.channel.id)}',${index})">${esc(cell.programme.title)}${liveTvMarks(row.channel.id,cell.programme,false)}</button>`;
     }).join("");
     const marker=ends===null?"":`<div class="lt-cell ends" style="left:${((ends-window.start)/slot)*px}px;width:150px">Guide data ends ${esc(liveTvClock(ends))}</div>`;
     return `<div class="lt-grow">
@@ -16359,8 +16366,15 @@ function liveTvSelect(id){
   watchLiveTv(index);
   renderLiveTvChannels();
 }
-function liveTvGridCell(channelId,index,airing){
-  if(airing){ liveTvSelect(channelId); return; }
+function liveTvGridCell(channelId,index){
+  // An airing cell used to tune the channel and return here, which predates
+  // this cell having verbs at all. It meant the popover — and with it Record,
+  // Record series and the tuner sentence — was reachable only on a FUTURE
+  // programme, so the one case a viewer asks for most, "record what I am
+  // watching", had no path on the web at all. `dvrAiringActions` has always
+  // answered for an on-air programme (`watch: "now"`, `record: "record"`), and
+  // the popover puts Watch first, so opening it costs one click and unlocks
+  // the other three verbs.
   // Index into the SAME array the cell came from. `gridLayout` clips to the
   // drawn window while the server deliberately ships an hour of backfill, so
   // indexing the unclipped `programmes` was reliably off by however many
@@ -16376,8 +16390,32 @@ function liveTvGridCell(channelId,index,airing){
 // is worse than an absent one.
 function liveTvPopover(row,channelId){
   let pop=document.getElementById("live-tv-pop");
-  if(!pop){ pop=document.createElement("div"); pop.id="live-tv-pop"; pop.className="lt-pop"; document.body.appendChild(pop); }
-  if(!row){ pop.hidden=true; return; }
+  if(!pop){
+    pop=document.createElement("div"); pop.id="live-tv-pop"; pop.className="lt-pop";
+    // It behaves as a modal — it takes the keyboard and closes on Escape — so
+    // it says it is one, the way the lightbox does. Without this a cell's
+    // verbs were a panel in the middle of the screen that a keyboard could
+    // only reach by tabbing past the whole page, and could not leave at all.
+    pop.setAttribute("role","dialog");
+    pop.setAttribute("aria-modal","true");
+    pop.tabIndex=-1;
+    pop.addEventListener("click",e=>{ if(e.target===pop) liveTvPopover(null); });
+    document.body.appendChild(pop);
+  }
+  if(!row){
+    pop.hidden=true;
+    // Hand the keyboard back to the cell that opened it. The grid re-renders
+    // on the guide poll, so the element may be gone; falling back to the grid
+    // keeps focus inside the page rather than dropping it on <body>.
+    const back=LIVE_TV_POP_OPENER&&document.contains(LIVE_TV_POP_OPENER)
+      ? LIVE_TV_POP_OPENER : document.getElementById("live-tv-grid");
+    LIVE_TV_POP_OPENER=null;
+    if(back&&back.focus) try{ back.focus(); }catch(_){}
+    return;
+  }
+  LIVE_TV_POP_OPENER=document.activeElement&&document.activeElement.classList
+    &&document.activeElement.classList.contains("lt-cell")?document.activeElement:null;
+  pop.setAttribute("aria-label",row.title||"Programme");
   const channel=liveTvChannelById(channelId);
   pop.innerHTML=`<h3>${esc(row.title)}</h3>
     <p>${esc(channel?channel.guide_number+" · "+channel.guide_name:"")} · ${esc(liveTvClock(row.start))}–${esc(liveTvClock(row.end))}${row.episode?" · "+esc(row.episode):""}</p>
@@ -16387,6 +16425,11 @@ function liveTvPopover(row,channelId){
     ${liveTvPopoverActions(row,channelId)}
     <div class="row"><button class="ghost sm" onclick="liveTvPopover(null)">Close</button></div>`;
   pop.hidden=false;
+  // Watch is the first button, so focusing it keeps the old one-Enter path to
+  // tuning: Enter on a cell, Enter again to watch.
+  const first=pop.querySelector("button");
+  if(first) try{ first.focus(); }catch(_){ try{ pop.focus(); }catch(__){} }
+  else try{ pop.focus(); }catch(_){}
   const box=pop.getBoundingClientRect();
   pop.style.left=`${Math.max(12,Math.min(window.innerWidth-box.width-12,(window.innerWidth-box.width)/2))}px`;
   pop.style.top=`${Math.max(12,(window.innerHeight-box.height)/2)}px`;

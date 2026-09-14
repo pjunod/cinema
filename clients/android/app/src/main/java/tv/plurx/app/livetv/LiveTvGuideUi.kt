@@ -497,7 +497,6 @@ fun LiveTvGuideGrid(
                                 dimensions = dimensions,
                                 playing = playingChannelId == row.channel.id && cell.airing,
                                 mark = marks.mark(row.channel.id, cell.programme.start, now),
-                                onAiring = onAiring,
                                 onFuture = onFuture,
                                 modifier = Modifier
                                     .liveTvGuideFocusTarget(target, requesters) {
@@ -552,7 +551,6 @@ private fun LiveTvGridCellButton(
     dimensions: LiveTvGridDimensions,
     playing: Boolean,
     mark: DvrCellMark,
-    onAiring: (LiveTvChannel) -> Unit,
     onFuture: (LiveTvChannel, LiveTvProgramme) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -569,7 +567,13 @@ private fun LiveTvGridCellButton(
             .height((dimensions.rowHeight.value - 6f).coerceAtLeast(18f).dp),
     ) {
         TvTextButton(
-            onClick = { if (cell.airing) onAiring(channel) else onFuture(channel, cell.programme) },
+            // Every cell opens its actions sheet, airing or not. Branching on
+            // `airing` here sent a live programme straight to `watch` and
+            // returned, so Record and Record series — which `DvrCellActions`
+            // has always offered for an on-air programme — were reachable only
+            // on a FUTURE cell. The sheet puts Watch first, so tuning is one
+            // more press and recording what you are watching is possible at all.
+            onClick = { onFuture(channel, cell.programme) },
             compact = true,
             modifier = modifier
                 .matchParentSize()

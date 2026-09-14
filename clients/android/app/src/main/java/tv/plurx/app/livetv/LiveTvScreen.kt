@@ -1095,8 +1095,9 @@ private fun LiveTvMobileSchedule(
                 Row(
                     Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 12.dp)
                         .clickable {
-                            if (airing && channel != null) onAiring(channel)
-                            else if (channel != null) onFuture(channel, programme)
+                            // Same rule as the grid: the sheet owns the verbs,
+                            // and Watch is the first of them.
+                            if (channel != null) onFuture(channel, programme)
                         },
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
