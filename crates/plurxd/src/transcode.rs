@@ -5148,6 +5148,10 @@ impl AttemptChild {
     /// takes the reader when the process ends: a child that is already dead
     /// when construction returns could otherwise reach that take before the
     /// reader was stored, and settle nothing at all.
+    // The production installer is itself retained behind runtime selection;
+    // test targets exercise this constructor directly and Clippy otherwise
+    // treats the production call chain as unreachable.
+    #[allow(dead_code)]
     fn new(
         producer_attempt: u64,
         mut child: Child,

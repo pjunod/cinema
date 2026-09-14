@@ -974,9 +974,12 @@
     if (now != null && failure.at != null && now - failure.at > FAILURE_FRESH_MS) {
       return null;
     }
-    const retryable =
-      hlsStartupResponseAction({ status: failure.status, code: failure.code }) === "retry" &&
-      (failure.code === "startup_timeout" || failure.status === 503);
+    // An owner transition remains hopeful viewer copy, but it is still an
+    // authoritative transport verdict: hls.js and the application must not
+    // retry that response behind the owner's handoff decision.
+    const retryable = failure.code === "media_owner_transition" ||
+      (hlsStartupResponseAction({ status: failure.status, code: failure.code }) === "retry" &&
+        (failure.code === "startup_timeout" || failure.status === 503));
     // The node serving this session died and nothing can take it over. That
     // is neither "still preparing" nor a startup failure — it happens to a
     // viewer who was already watching, and the honest sentence says the

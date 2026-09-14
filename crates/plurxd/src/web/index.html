@@ -7440,6 +7440,7 @@ function attachHls(video, playlistUrl, startAt){
         // hls.js budget: the picture is still moving, so one reload at the
         // current position is worth a try before the reopen path runs.
         if(explained.retryable
+          &&PlaybackPolicy.hlsStartupResponseAction(STREAM_FAILURE)==='retry'
           &&(refusal==="segment_503_not_yet"||hlsStartupIncomplete(PLAYER)))
           scheduleHlsNetworkRetry(video,PLAYER,d);
         toast(explained.retryable?"Still starting…":"Playback failed");
@@ -11756,9 +11757,13 @@ async function stallDiagnose(){
   // Contract §3.4: stop the player, then raise; §3.3 row 15 is the row these
   // probe verdicts belong to. The sentence and the buttons are unchanged.
   stopPlayerForExhaustion();
-  raisePlaybackSurface(hlsStartup?"startup_exhausted":"decoder_failed",{player_stopped:true,
-    title:verdict,detail:detail,
-    actions:hlsStartup?["close","retry"]:playbackStallActions(PLAYER)});
+  if(hlsStartup){
+    raisePlaybackSurface("startup_exhausted",{player_stopped:true,
+      title:verdict,detail:detail,actions:["close","retry"]});
+  }else{
+    raisePlaybackSurface("decoder_failed",{player_stopped:true,
+      title:verdict,detail:detail,actions:playbackStallActions(PLAYER)});
+  }
   toast(verdict);
 }
 // One deadline covers response headers, playlist body and the sample segment.

@@ -10676,6 +10676,7 @@ async fn exact_hls_context_before(
     }
 }
 
+#[derive(Debug)]
 enum HlsInitInspectionError {
     Response {
         status: StatusCode,

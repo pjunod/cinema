@@ -670,6 +670,7 @@ paths = [
   "docs/playback-control/**",
   "docs/streaming/PLAYBACK-CAPS-V2-*.md",
   "docs/streaming/STUTTER-4K.md",
+  "docs/streaming/WEB-HLS-STARTUP-RECOVERY-STATUS.md",
   "scripts/dv-evidence",
   "scripts/decoder-media-baseline",
   "scripts/verify-dv-timeline",

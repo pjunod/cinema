@@ -1067,7 +1067,7 @@ async function main() {
       shippedSource("queuePlaybackControlAcknowledgement"),
       shippedSource("destroyHlsInstance"),
       shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
-      "function cancelPreparedFirstFrame(){}",
+      "function cancelPreparedFirstFrame(){} function cancelHlsStartup(){}",
       shippedSource("rememberPlaybackTransportIntent"),shippedSource("pausePlaybackInternally"),
       shippedSource("resetPlaybackTransportEvents"),shippedSource("playbackTransportEvents"),
       shippedSource("setPlaybackMediaSource"),

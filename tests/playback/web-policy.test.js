@@ -3247,7 +3247,7 @@ test("the shipped progress tick reports the advance it measured, not that it ran
     "PLAYER", "document", "performance", "playbackSurfaceStep", "playbackSurfaceGeneration",
     "samplePlaybackPresentationClock", "streamHasVideo", "endWait", "clearStall",
     "finishStallRecovery", "persistentWait", "bufferRunway", "PERSISTENT_STALL_MS",
-    "playbackOwnsAttachedMedia",
+    "playbackOwnsAttachedMedia", "completeHlsStartup", "settlePlaybackControlSeek",
     [shippedSource("playbackProgressTick"), "return playbackProgressTick;"].join("\n"),
   );
   const player = { started: true, wantsPlayback: true, attemptId: "g1" };
@@ -3257,7 +3257,7 @@ test("the shipped progress tick reports the advance it measured, not that it ran
     player, { hidden: false }, { now: () => now },
     (event) => fed.push(event), (p) => (p && p.attemptId) || null,
     () => 0, () => false, () => {}, () => {}, () => {}, () => {}, () => 10, 8000,
-    () => true,
+    () => true, () => {}, () => {},
   );
 
   tick(video, player);            // first sample: the watch is seeded, nothing moved
@@ -3286,13 +3286,13 @@ test("a stream that starts again after the owner stopped it gets its sampler bac
   const armed = [];
   const build = new Function(
     "PLAYER", "document", "setTimeout", "clearStall", "stallDiagnose", "pbPosSec",
-    "armPlaybackSampling",
+    "armPlaybackSampling", "configureHlsStartupDeadline", "PlaybackPolicy",
     [shippedSource("armStall"), "return armStall;"].join("\n"),
   );
   const run = (player) => {
     armed.length = 0;
     build(player, { getElementById: () => ({ id: "video" }) }, () => 1, () => {}, () => {}, () => 0,
-      (v, p) => armed.push(p))(0);
+      (v, p) => armed.push(p), () => {}, policy)(0);
     return armed.length;
   };
   assert.equal(run({ samplingStopped: true }), 1,
@@ -3371,6 +3371,7 @@ asyncTest("the diagnosed-stall site stops before it raises", async () => {
     "PLAYER", "document", "TOKEN", "pbPosSec", "notifyPlaybackControl", "currentStreamFailureOverlay",
     "probePlaybackSource", "finishStallRecovery", "clientLog", "toast",
     "stopPlayerForExhaustion", "raisePlaybackSurface", "playbackOwnsAttachedMedia",
+    "hlsStartupIncomplete", "diagnoseHlsStartup", "abortHlsStartupLoaders", "performance",
     [shippedSource("playbackStallActions"), shippedSource("stallDiagnose"), "return stallDiagnose;"].join("\n"),
   );
   const player = { method: "remux", probeUrl: null, started: false };
@@ -3380,7 +3381,7 @@ asyncTest("the diagnosed-stall site stops before it raises", async () => {
     () => {}, () => {}, () => {},
     () => order.push("stop"),
     (source, fault) => { order.push("raise"); runs.push({ source, fault }); },
-    () => true,
+    () => true, () => false, () => ({}), () => {}, { now: () => 0 },
   )();
   assert.deepEqual(order, ["stop", "raise"],
     "a diagnosed stall stops the player before its verdict goes over it");
@@ -4424,6 +4425,7 @@ function carryHarness(player) {
     "prePlayPreview",
     "PLAY_OPEN_GATE",
     "cancelPendingSeek",
+    "cancelHlsStartup",
     [
       shippedBinding("let", "PREPLAY"),
       shippedSource("prePlaySelection"),
@@ -4462,6 +4464,7 @@ function carryHarness(player) {
     () => {},
     { invalidate() {} },
     () => { player._seekPending = null; player._seekPreview = null; },
+    () => {},
   );
 }
 
