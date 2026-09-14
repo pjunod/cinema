@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["b0036984"]
+points = []
+checks = []
+reason = "Validation metadata only: this commit records the retained DVR Activity runtime and documentation evidence in separate regressions.d fragments; it changes no runtime behavior."
+ignore = true

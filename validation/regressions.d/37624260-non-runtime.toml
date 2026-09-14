@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["37624260"]
+points = []
+checks = []
+reason = "Documentation only: this commit creates and indexes the DVR Activity generation-zero repair status page; it changes no runtime or validation behavior."
+ignore = true

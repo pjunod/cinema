@@ -197,10 +197,11 @@ fn display_state(
     {
         return (
             "Stop requested".to_owned(),
-            observation
-                .is_none()
-                .then_some("Recorder observation unavailable".to_owned())
-                .unwrap_or_default(),
+            if observation.is_none() {
+                "Recorder observation unavailable".to_owned()
+            } else {
+                String::new()
+            },
         );
     }
     let Some(sample) =
@@ -1656,7 +1657,7 @@ pub(crate) async fn schedule(
             from,
             to,
             &channel_ids,
-            after.map(|(start, id)| (start, id)),
+            after,
             if filtered {
                 limit as i64 + 1
             } else {

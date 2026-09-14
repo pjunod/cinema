@@ -471,7 +471,6 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
                         && !observation.channel_id.is_empty()
                         && observation.channel_id.len() <= 256
                         && observation.config_generation >= 0
-                        && observation.serving_generation > 0
                         && observation.attempt >= 1
                         && !observation.phase.is_empty()
                         && observation.phase.len() <= 32
@@ -957,6 +956,45 @@ mod tests {
         };
         assert!(snapshot_is_bounded(&snapshot, "node-b"));
         assert!(!snapshot_is_bounded(&snapshot, "node-c"));
+    }
+
+    #[test]
+    fn initial_dvr_serving_generation_is_a_valid_peer_snapshot() {
+        let snapshot = ActivitySnapshot {
+            node_id: "node-b".to_owned(),
+            deliveries: Vec::new(),
+            analysis: Vec::new(),
+            live_tv: Vec::new(),
+            dvr: Some(crate::live_tv::dvr::DvrObservationSnapshot {
+                observed_sink_count: 1,
+                truncated: false,
+                observations: vec![crate::live_tv::dvr::DvrCaptureObservation {
+                    recording_id: "recording-a".to_owned(),
+                    channel_id: "channel-a".to_owned(),
+                    airing_start: 1_789_000_800,
+                    owner_node_id: "node-b".to_owned(),
+                    config_generation: 0,
+                    serving_generation: 0,
+                    attempt: 1,
+                    phase: "writing".to_owned(),
+                    observation_age_ms: 0,
+                    last_write_age_ms: Some(250),
+                    first_write_at_ms: Some(1_789_000_000_000),
+                    attempt_bytes_written: 4_096,
+                    prior_attempt_bytes: Some(0),
+                    write_bps: Some(2_048),
+                    reason_code: None,
+                }],
+                recording_transports: 1,
+                storage_free_bytes: Some(1_000_000_000),
+            }),
+        };
+        let body = serde_json::to_vec(&snapshot).expect("snapshot JSON");
+
+        assert!(matches!(
+            decode_snapshot(&body, "node-b"),
+            PeerActivityOutcome::Answered(_)
+        ));
     }
 
     #[test]
