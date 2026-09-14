@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["5564faea"]
+points = ["live.dvr"]
+checks = ["rust-gate"]
+reason = "The retained Rust gate runs Clippy with warnings denied across every target; restoring either DVR expression makes the gate reject obfuscated_if_else or map_identity before promotion."
