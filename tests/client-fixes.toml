@@ -1950,3 +1950,17 @@ source = "crates/plurxd/src/web/index.html"
 source_anchor = "function paintRecordingsPage(){"
 test = "tests/web/dvr-visibility.test.js"
 test_anchor = "a failed Saved refresh keeps the last successful page and marks it stale"
+
+[[fixes]]
+# The promotion correction advances both native build counters above current
+# `main`; it changes no runtime behavior. This anchor uses Android's release
+# input and the merge-target collision case that rejects a branch counter equal
+# to the build already shipped by its target. Apple is checked by the sibling
+# case in the same suite and by the generated-claim sweep already anchored for
+# build-counter corrections above.
+id = "clients.dvr-promotion-clears-current-mobile-builds"
+commits = ["b914464b"]
+source = "clients/android/app/build.gradle.kts"
+source_anchor = "versionCode = 98"
+test = "tests/validation/test_mobile_versions.py"
+test_anchor = "def test_android_counter_the_target_already_ships_fails_against_the_target"
