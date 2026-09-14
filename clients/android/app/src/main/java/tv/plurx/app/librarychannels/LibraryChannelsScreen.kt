@@ -3,6 +3,14 @@
 package tv.plurx.app.librarychannels
 
 import android.view.ViewGroup
+import tv.plurx.app.data.SubjectPreview
+import tv.plurx.app.data.SubjectPreviewRequest
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.CancellationException
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
@@ -29,6 +37,9 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import tv.plurx.app.ui.components.TvButton as Button
 import tv.plurx.app.ui.components.TvTextButton as TextButton
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -287,6 +298,13 @@ private fun LibraryChannelEditor(
     var enabled by remember(channel) { mutableStateOf(restored?.enabled ?: channel?.enabled ?: true) }
     var movies by remember(channel) { mutableStateOf(initialRecipe.kinds.contains("movie")) }
     var episodes by remember(channel) { mutableStateOf(initialRecipe.kinds.contains("episode")) }
+    var subject by remember(channel) { mutableStateOf(initialRecipe.subject.jsonPrimitive.contentOrNull.orEmpty()) }
+    var subjectPreview by remember { mutableStateOf<SubjectPreview?>(null) }
+    var subjectJobId by remember(draftKey) { mutableStateOf(preferences.getString("$draftKey:subjectJob", null) ?: channel?.matching?.job_id) }
+    var subjectRecipe by remember(draftKey) { mutableStateOf(preferences.getString("$draftKey:subjectRecipe", null)?.let { runCatching { Json.decodeFromString<LibraryChannelRecipe>(it) }.getOrNull() } ?: channel?.recipe) }
+    var showAdvanced by rememberSaveable { mutableStateOf(false) }
+    var subjectFilter by remember { mutableStateOf("match") }
+    var subjectCursor by remember { mutableStateOf<String?>(null) }
     var genres by remember(channel) { mutableStateOf(initialRecipe.genres_any.joinToString(", ")) }
     var tags by remember(channel) { mutableStateOf(initialRecipe.tags_any.joinToString(", ")) }
     var keywords by remember(channel) { mutableStateOf(initialRecipe.keywords_any.joinToString(", ")) }
@@ -325,6 +343,7 @@ private fun LibraryChannelEditor(
         val min = yearMin.toIntOrNull()
         val max = yearMax.toIntOrNull()
         return old.copy(
+            subject = subject.trim().takeIf { it.isNotEmpty() }?.let { JsonPrimitive(java.text.Normalizer.normalize(it, java.text.Normalizer.Form.NFC)) } ?: JsonNull,
             library_ids = libraryIds,
             kinds = buildList { if (movies) add("movie"); if (episodes) add("episode") },
             genres_any = genresAny,
@@ -345,13 +364,43 @@ private fun LibraryChannelEditor(
             match_all_in_scope = matchAllInScope,
         )
     }
-    val valid = name.trim().isNotEmpty() && name.length <= 80 && description.length <= 500 && (movies || episodes)
-    val persistedDefinition = LibraryChannelDefinition(
-        name = name.trim(), description = description.trim(),
+    val valid = (name.isNotBlank() || (channel == null && subject.isNotBlank())) && name.length <= 80 && description.length <= 500 && subject.codePointCount(0, subject.length) <= 500 && (movies || episodes)
+    val trimmedSubject = subject.trim()
+    val effectiveName = name.trim().ifEmpty { if (channel == null) trimmedSubject.substring(0, trimmedSubject.offsetByCodePoints(0, minOf(80, trimmedSubject.codePointCount(0, trimmedSubject.length)))) else "" }
+    var saveAttempt by remember(draftKey) { mutableStateOf(preferences.getString("$draftKey:saveAttempt", null)?.let { runCatching { Json.decodeFromString<LibraryChannelDefinition>(it) }.getOrNull() }) }
+    val payload = LibraryChannelDefinition(
+        request_id = "",
+        name = effectiveName, description = description.trim(),
         visibility = if (canShare && shared) LibraryChannelVisibility.shared else LibraryChannelVisibility.personal,
         enabled = enabled, recipe = recipe(), preview_seed = previewSeed,
     )
+    val requestId = remember(payload) { if (restored?.copy(request_id = "") == payload) restored.request_id else java.util.UUID.randomUUID().toString() }
+    val persistedDefinition = payload.copy(request_id = requestId)
+    val currentRecipe = recipe()
+    val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
+    LaunchedEffect(channel?.id) {
+        if (channel != null && subjectJobId == null) {
+            runCatching { vm.api().libraryChannel(channel.id) }.getOrNull()?.let { fresh ->
+                if (fresh.recipe == recipe()) { subjectRecipe = fresh.recipe; subjectJobId = fresh.matching?.job_id }
+            }
+        }
+    }
+    LaunchedEffect(subjectJobId, subjectFilter, currentRecipe, subjectCursor, lifecycleState) {
+        if (!lifecycleState.isAtLeast(Lifecycle.State.STARTED)) return@LaunchedEffect
+        val id = subjectJobId ?: return@LaunchedEffect
+        if (currentRecipe != subjectRecipe) { subjectPreview = null; return@LaunchedEffect }
+        while (true) {
+            try {
+                val result = vm.api().subjectPreview(id, subjectFilter, subjectCursor)
+                subjectPreview = result; previewSeed = result.preview_seed
+                if (result.complete || result.state in listOf("failed", "cancelled", "superseded")) break
+                delay(if (result.state == "waiting_for_provider") 10000L else 2000L)
+            } catch (error: CancellationException) { throw error }
+            catch (error: Exception) { if (subjectCursor != null) subjectCursor = null; message = error.message; delay(10000) }
+        }
+    }
     SideEffect {
+        preferences.edit().putString("$draftKey:subjectJob", subjectJobId).putString("$draftKey:subjectRecipe", subjectRecipe?.let { Json.encodeToString(it) }).apply()
         preferences.edit().putString(draftKey, Json.encodeToString(persistedDefinition))
             .putInt("$draftKey:step", step).apply()
     }
@@ -363,11 +412,14 @@ private fun LibraryChannelEditor(
         Text(if (channel == null) "Make a channel" else "Edit channel", style = MaterialTheme.typography.headlineSmall)
         if (step == 0) {
         Text("1 · Content", style = MaterialTheme.typography.titleMedium)
+        OutlinedTextField(subject, { subject = it; subjectJobId = null; subjectPreview = null }, label = { Text("Subject — what belongs and what to exclude") }, modifier = Modifier.fillMaxWidth())
+        Text("Save now; matching continues in the background.")
+        TextButton(onClick = { subject = "Stand-up comedy performances and specials. Exclude sitcoms, comedy movies, talk shows, and documentaries about comedians."; genres = ""; tags = ""; keywords = ""; yearMin = ""; yearMax = ""; matchAllInScope = false; if (name.isBlank()) name = "Stand-up comedy" }) { Text("Stand-up comedy") }
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            TextButton(onClick = { genres = "Documentary"; keywords = "space, astronomy, mars"; matchAllInScope = false }) { Text("Space docs") }
-            TextButton(onClick = { genres = "Comedy"; yearMin = "1990"; yearMax = "1999"; matchAllInScope = false }) { Text("’90s comedy") }
-            TextButton(onClick = { genres = "Film Noir, Crime"; keywords = "noir"; matchAllInScope = false }) { Text("Film noir") }
-            TextButton(onClick = { genres = ""; tags = ""; keywords = ""; yearMin = ""; yearMax = ""; matchAllInScope = true }) { Text("All in scope") }
+            TextButton(onClick = { subject = "Documentaries about space exploration and astronomy."; genres = ""; keywords = ""; tags = ""; yearMin = ""; yearMax = ""; matchAllInScope = false }) { Text("Space docs") }
+            TextButton(onClick = { subject = "Comedy films and television episodes released between 1990 and 1999."; genres = ""; keywords = ""; tags = ""; yearMin = ""; yearMax = ""; matchAllInScope = false }) { Text("’90s comedy") }
+            TextButton(onClick = { subject = "Film noir crime stories with morally ambiguous characters and a dark, fatalistic style."; genres = ""; keywords = ""; tags = ""; yearMin = ""; yearMax = ""; matchAllInScope = false }) { Text("Film noir") }
+            TextButton(onClick = { subject = ""; genres = ""; tags = ""; keywords = ""; yearMin = ""; yearMax = ""; matchAllInScope = true }) { Text("All in scope") }
         }
         Row { Checkbox(movies, { movies = it }); Text("Movies", Modifier.padding(top = 12.dp)); Checkbox(episodes, { episodes = it }); Text("Episodes", Modifier.padding(top = 12.dp)) }
         Text("Libraries", style = MaterialTheme.typography.labelLarge)
@@ -379,12 +431,15 @@ private fun LibraryChannelEditor(
                 Text(library.name, Modifier.padding(top = 12.dp))
             }
         }
+        TextButton(onClick = { showAdvanced = !showAdvanced }) { Text(if (showAdvanced) "Hide advanced metadata filters" else "Advanced metadata filters") }
+        if (showAdvanced) {
         OutlinedTextField(genres, { genres = it }, label = { Text("Genres, comma separated") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(tags, { tags = it }, label = { Text("Tags, comma separated") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(keywords, { keywords = it }, label = { Text("Title keywords, comma separated") }, modifier = Modifier.fillMaxWidth())
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(yearMin, { yearMin = it }, label = { Text("From year") }, modifier = Modifier.weight(1f))
             OutlinedTextField(yearMax, { yearMax = it }, label = { Text("Through year") }, modifier = Modifier.weight(1f))
+        }
         }
         Text("Explicit titles and exclusions", style = MaterialTheme.typography.labelLarge)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -422,19 +477,38 @@ private fun LibraryChannelEditor(
             busy = true
             scope.launch {
                 try {
-                    preview = vm.api().previewLibraryChannel(LibraryChannelPreviewRequest(recipe(), preview_seed = previewSeed))
-                    previewSeed = preview?.preview_seed
+                    val captured = recipe()
+                    if (subject.isNotBlank()) {
+                        val result = vm.api().createSubjectPreview(SubjectPreviewRequest(captured, preview_seed = previewSeed))
+                        if (captured == recipe()) { subjectRecipe = captured; subjectPreview = result; subjectJobId = result.job_id; previewSeed = result.preview_seed; preview = null }
+                    } else {
+                        val result = vm.api().previewLibraryChannel(LibraryChannelPreviewRequest(captured, preview_seed = previewSeed))
+                        if (captured == recipe()) { preview = result; previewSeed = result.preview_seed; subjectPreview = null; subjectJobId = null }
+                    }
                     message = null
                 }
                 catch (error: Exception) { message = error.message }
                 finally { busy = false }
             }
         }) { Text("Preview matches") }
+        subjectPreview?.let { result ->
+            Text("${result.matched} matches; checked ${result.processed} of ${result.total}")
+            Text(if (result.complete) "Scan complete" else "Partial selection · ${result.state}")
+            result.error?.let { Text(it) }
+            Row { listOf("match" to "Matched", "uncertain" to "Uncertain", "no_match" to "Excluded").forEach { (value, label) -> TextButton(onClick = { subjectFilter = value; subjectCursor = null }) { Text(label) } } }
+            result.rows.forEach { row ->
+                Text(row.title); Text(row.reason, style = MaterialTheme.typography.bodySmall)
+                Row {
+                    TextButton(onClick = { row.item_id.toLongOrNull()?.let { includeItemIds = (includeItemIds + it).distinct(); excludeItemIds = excludeItemIds - it } }) { Text("Include") }
+                    TextButton(onClick = { row.item_id.toLongOrNull()?.let { excludeItemIds = (excludeItemIds + it).distinct() } }) { Text("Exclude") }
+                }
+            }
+            result.next_cursor?.let { cursor -> TextButton(onClick = { subjectCursor = cursor }) { Text("More results") } }
+        }
         preview?.let { result ->
             Text("${result.eligible_count} titles · ${result.repeat_description}")
-            result.first_ten.forEach { entry ->
-                val match = result.matches.firstOrNull { it.candidate.item_id == entry.item_id }
-                Text("${match?.candidate?.title ?: "Title ${entry.item_id}"} — ${match?.reasons?.joinToString(" · ") ?: "scheduled"}", style = MaterialTheme.typography.bodySmall)
+            result.matches.forEach { match ->
+                Text("${match.candidate.title} — ${match.reasons.joinToString(" · ")}", style = MaterialTheme.typography.bodySmall)
             }
         }
         }
@@ -455,28 +529,6 @@ private fun LibraryChannelEditor(
             Text("Personal channel · an administrator can make it shared", style = MaterialTheme.typography.bodySmall)
         }
         Row { Checkbox(enabled, { enabled = it }); Text("Enabled", Modifier.padding(top = 12.dp)) }
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(enabled = valid && !busy, onClick = {
-                busy = true
-                scope.launch {
-                    try {
-                        val definition = persistedDefinition
-                        if (channel == null) vm.api().createLibraryChannel(definition)
-                        else vm.api().updateLibraryChannel(channel.id, LibraryChannelUpdate(
-                            expected_revision = channel.revision,
-                            name = definition.name,
-                            description = definition.description,
-                            visibility = definition.visibility,
-                            enabled = definition.enabled,
-                            recipe = definition.recipe,
-                            preview_seed = definition.preview_seed,
-                        ))
-                        preferences.edit().remove(draftKey).remove("$draftKey:step").apply()
-                        onSaved()
-                    } catch (error: Exception) { message = error.message; busy = false }
-                }
-            }) { Text("Save") }
-        }
         channel?.let { existing ->
             Button(enabled = !busy, onClick = {
                 scope.launch {
@@ -496,12 +548,37 @@ private fun LibraryChannelEditor(
                 scope.launch {
                     runCatching { vm.api().deleteLibraryChannel(existing.id, existing.revision) }
                         .onSuccess {
-                            preferences.edit().remove(draftKey).remove("$draftKey:step").apply()
+                            preferences.edit().remove(draftKey).remove("$draftKey:step").remove("$draftKey:subjectJob").remove("$draftKey:subjectRecipe").remove("$draftKey:saveAttempt").apply()
                             onSaved()
                         }.onFailure { message = it.message }
                 }
             }) { Text("Delete channel") }
         }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(enabled = valid && !busy, onClick = {
+                busy = true
+                scope.launch {
+                    try {
+                        val definition = saveAttempt?.takeIf { it.copy(request_id = "", preview_seed = null) == persistedDefinition.copy(request_id = "", preview_seed = null) } ?: persistedDefinition
+                        saveAttempt = definition
+                        preferences.edit().putString("$draftKey:saveAttempt", Json.encodeToString(definition)).commit()
+                        if (channel == null) vm.api().createLibraryChannel(definition)
+                        else vm.api().updateLibraryChannel(channel.id, LibraryChannelUpdate(
+                            expected_revision = channel.revision,
+                            request_id = definition.request_id,
+                            name = definition.name,
+                            description = definition.description,
+                            visibility = definition.visibility,
+                            enabled = definition.enabled,
+                            recipe = definition.recipe,
+                            preview_seed = definition.preview_seed,
+                        ))
+                        preferences.edit().remove(draftKey).remove("$draftKey:step").remove("$draftKey:subjectJob").remove("$draftKey:subjectRecipe").remove("$draftKey:saveAttempt").apply()
+                        onSaved()
+                    } catch (error: Exception) { message = error.message; busy = false }
+                }
+            }) { Text("Save") }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (step > 0) TextButton(onClick = { step -= 1 }) { Text("Back") }

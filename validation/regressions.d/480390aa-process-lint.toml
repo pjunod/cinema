@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["480390aa"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The pinned Rust 1.97.1 Clippy loop found two baseline process cleanup map_err closures that returned the unchanged error and an uncalled production AttemptChild test constructor. inspect_err preserves cleanup and error propagation; cfg(test) limits the constructor to its existing test callers. Tracked formatting and workspace all-targets Clippy with denied warnings pass; no runtime behavior was changed."

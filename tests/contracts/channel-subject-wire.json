@@ -1,0 +1,108 @@
+{
+  "stored_subject": "stored subject",
+  "cases": [
+    {
+      "name": "missing",
+      "recipe": {
+        "version": 1,
+        "library_ids": [],
+        "kinds": [
+          "movie",
+          "episode"
+        ],
+        "genres_any": [],
+        "tags_any": [],
+        "keywords_any": [],
+        "year_min": null,
+        "year_max": null,
+        "include_item_ids": [],
+        "include_show_ids": [],
+        "exclude_item_ids": [],
+        "exclude_show_ids": [],
+        "ordering": "balanced_shuffle",
+        "include_specials": false,
+        "auto_refresh": true,
+        "match_all_in_scope": false
+      },
+      "expected_update_subject": "stored subject"
+    },
+    {
+      "name": "clear",
+      "recipe": {
+        "version": 1,
+        "library_ids": [],
+        "kinds": [
+          "movie",
+          "episode"
+        ],
+        "genres_any": [],
+        "tags_any": [],
+        "keywords_any": [],
+        "year_min": null,
+        "year_max": null,
+        "include_item_ids": [],
+        "include_show_ids": [],
+        "exclude_item_ids": [],
+        "exclude_show_ids": [],
+        "ordering": "balanced_shuffle",
+        "include_specials": false,
+        "auto_refresh": true,
+        "match_all_in_scope": false,
+        "subject": null
+      },
+      "expected_update_subject": null
+    },
+    {
+      "name": "set",
+      "recipe": {
+        "version": 1,
+        "library_ids": [],
+        "kinds": [
+          "movie",
+          "episode"
+        ],
+        "genres_any": [],
+        "tags_any": [],
+        "keywords_any": [],
+        "year_min": null,
+        "year_max": null,
+        "include_item_ids": [],
+        "include_show_ids": [],
+        "exclude_item_ids": [],
+        "exclude_show_ids": [],
+        "ordering": "balanced_shuffle",
+        "include_specials": false,
+        "auto_refresh": true,
+        "match_all_in_scope": false,
+        "subject": "Stand-up performances"
+      },
+      "expected_update_subject": "Stand-up performances"
+    },
+    {
+      "name": "empty",
+      "recipe": {
+        "version": 1,
+        "library_ids": [],
+        "kinds": [
+          "movie",
+          "episode"
+        ],
+        "genres_any": [],
+        "tags_any": [],
+        "keywords_any": [],
+        "year_min": null,
+        "year_max": null,
+        "include_item_ids": [],
+        "include_show_ids": [],
+        "exclude_item_ids": [],
+        "exclude_show_ids": [],
+        "ordering": "balanced_shuffle",
+        "include_specials": false,
+        "auto_refresh": true,
+        "match_all_in_scope": false,
+        "subject": ""
+      },
+      "expected_update_subject": null
+    }
+  ]
+}
