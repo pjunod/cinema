@@ -34,7 +34,7 @@ presentation contract around them.
 | S04 web layouts and controller | built; compile passed | one scope-aware poller feeds chrome, Live TV and Recordings; exact-airing player context, canonical `#/recordings`, six task tabs, mobile detail, real event history and Activity projection |
 | S05 Apple clients | built; source type-check passed | additive overview/event/attention decoders; one foreground profile controller; iOS/tvOS Recordings root, capture activity, immediate details, history, manual/skipped/rules/reminders and exact-airing player/guide context; device builds remain pending because this host exposes no simulator runtime |
 | S06 Android clients | built; compile passed | additive overview/event/attention decoders; one lifecycle-owned profile controller; phone/Google TV Recordings root, capture activity, immediate detail/history, manual/skipped/rules/reminders, exact-airing context and named stop/delete confirmations; physical D-pad evidence remains pending |
-| S07 review and promotion | review next | current `main` merged without conflict and the exact candidate recompiled; obtain one adversarial code review, address it, mark the draft PR ready and let the fast lane run once |
+| S07 review and promotion | review addressed; promotion next | one adversarial review completed against the current-base candidate; all eleven findings are remediated and the affected source compilers pass; mark PR #314 ready and spend the one fast-lane run next |
 
 ## Decisions made while implementing
 
@@ -60,6 +60,33 @@ presentation contract around them.
    to the twelve hours before and after now, caps the window at 24 hours, and
    owns a cursor separate from Saved and Needs attention. The legacy 14-day
    query remains compatible for older clients.
+7. **Keep internal recording topology out of normal attention views.** The
+   attention projection now omits filesystem paths, owner-node identity and
+   raw requesting/stopping user ids. It carries only the viewer-facing
+   `stopped_early` fact clients need to explain an intentional partial file.
+
+## Adversarial review — one pass, all findings addressed
+
+The requested single adversarial review ran after the integrated branch was
+current with `main`. Its six P1 and five P2 findings were handled as one batch:
+
+- foreground overview and filtered schedule reads now push their state,
+  24-hour window, ordering and limit into SQLite and replicated-store queries;
+  exact active/conflict totals remain separate from bounded row projections;
+- conditional Stop, Skip and Delete responses re-read a lost state race and
+  report the action that actually applies;
+- current attention ends when a conflict clears or a later retry/write event
+  resolves an interruption, while fresh runtime evidence adds stalled writes
+  to the overview attention count;
+- a finishing-event persistence failure marks history incomplete before a
+  row may become terminal, so a complete-looking ledger cannot silently lose
+  its last observation;
+- the narrow web detail layer stays absent until selection, restores focus on
+  close, and polling preserves focused controls and manual-form values;
+- Apple and Android retain explicitly loaded Upcoming pages across normal
+  refreshes and drain every forward lifecycle-event page before stopping;
+- Android recording details now confirm the immutable title and capture window
+  before Stop; replicated acknowledgement validation now matches SQLite.
 
 ## Current compile evidence — no test lane spent
 
@@ -71,10 +98,13 @@ presentation contract around them.
   `arm64-apple-tvos17.0`. The full Xcode build still stops in asset compilation
   because this host has no simulator runtimes; no Swift error was emitted.
 - `scripts/js-check` accepts both shipped inline script blocks.
+- The post-review Rust, Android, iOS, tvOS and inline-JavaScript source checks
+  all pass. Only the same pre-existing Apple concurrency warnings and Android
+  volume-icon deprecations remain.
 
 No unit or UI test command has run. The shared web/Apple/Android fixture and
-focused Rust cases remain deliberately unexecuted until the one adversarial
-review is addressed, as requested.
+focused Rust cases remain deliberately unexecuted until PR #314 is marked
+ready and the one fast lane owns the candidate, as requested.
 
 ## Evidence limits — green source is not a hardware claim
 

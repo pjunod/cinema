@@ -63,6 +63,8 @@ data class DvrRecording(
     val last_progress_ms: Long? = null,
     val stop_requested_at_ms: Long? = null,
     val stopped_by_user_id: Long? = null,
+    /** Public attention rows preserve the fact without returning a user id. */
+    val stopped_early: Boolean = false,
     val started_at_ms: Long? = null,
     /** Both arrive once the scan has linked the capture into the library. */
     val item_id: Long? = null,

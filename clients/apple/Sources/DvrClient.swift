@@ -130,6 +130,8 @@ struct DvrRecording: Decodable, Identifiable, Equatable, Sendable {
     let startedAtMs: Int64?
     let finishedAtMs: Int64?
     let stoppedByUserId: Int?
+    /// Public attention rows carry the fact without exposing a user id.
+    let stoppedEarly: Bool?
     let createdAtMs: Int64
     let updatedAtMs: Int64
 

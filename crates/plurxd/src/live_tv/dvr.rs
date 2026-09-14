@@ -655,6 +655,25 @@ impl LiveTvManager {
             if live.contains(&row.id) {
                 continue;
             }
+            let interruption = DvrEventInput {
+                // Stable across retries: an owner that could not recover on
+                // this tick must not add the same interruption every 15 s.
+                event_id: format!("worker-lost:{}:{}", row.id, row.attempt),
+                kind: "capture_interrupted".to_owned(),
+                occurred_at_ms: now.saturating_mul(1_000),
+                attempt: Some(row.attempt),
+                actor_user_id: None,
+                reason_code: Some("worker_lost".to_owned()),
+                facts_json: serde_json::json!({}).to_string(),
+                actionable: true,
+            };
+            if let Err(error) = self
+                .store
+                .append_dvr_observation_event(&row.id, &self.node_id, row.attempt, &interruption)
+                .await
+            {
+                tracing::warn!(recording = %row.id, %error, "could not persist worker-loss event");
+            }
             if let Err(error) = self
                 .store
                 .mark_dvr_history_gap(&row.id, &self.node_id, row.attempt)
@@ -977,10 +996,13 @@ impl LiveTvManager {
             // codec is the one thing a stopped recording would otherwise lack
             // that a completed one has.
             let facts = self.transport_source_facts(&row.channel_id);
-            if self.begin_finishing(&row.id) {
-                if let Err(error) = self.drain_dvr_observation_events().await {
-                    tracing::warn!(recording = %row.id, %error, "could not persist finishing event");
-                }
+            self.begin_finishing(&row.id);
+            if let Err(error) = self.drain_dvr_observation_events().await {
+                tracing::warn!(recording = %row.id, %error, "could not persist finishing event");
+                self.store
+                    .mark_dvr_history_gap(&row.id, &self.node_id, row.attempt)
+                    .await
+                    .map_err(store_error)?;
             }
             self.stop_sink(&row.id).await;
             self.finish_row_with_facts(
@@ -1195,10 +1217,13 @@ impl LiveTvManager {
             // writes have not reached the kernel, and the concatenation below
             // would then copy a short part and unlink it — losing exactly the
             // end of every recording that finished normally.
-            if self.begin_finishing(&row.id) {
-                if let Err(error) = self.drain_dvr_observation_events().await {
-                    tracing::warn!(recording = %row.id, %error, "could not persist finishing event");
-                }
+            self.begin_finishing(&row.id);
+            if let Err(error) = self.drain_dvr_observation_events().await {
+                tracing::warn!(recording = %row.id, %error, "could not persist finishing event");
+                self.store
+                    .mark_dvr_history_gap(&row.id, &self.node_id, row.attempt)
+                    .await
+                    .map_err(store_error)?;
             }
             self.stop_sink(&row.id).await;
             self.finish_row(&row, events, now, 0, None, "capture complete", generation)
@@ -1627,7 +1652,10 @@ impl LiveTvManager {
         let now_ms = unix_seconds().saturating_mul(1000);
         let (kind, actionable) = match (&patch, to) {
             (DvrStatePatch::Started { .. }, _) => ("attempt_started", false),
-            (DvrStatePatch::Reattempt { .. }, _) => ("retry_started", true),
+            // A successful reattach resolves an interruption. The earlier
+            // actionable event remains reviewable in historical attention;
+            // the recovery itself must not create a new current problem.
+            (DvrStatePatch::Reattempt { .. }, _) => ("retry_started", false),
             (_, DvrState::Conflict) => ("conflict", true),
             (_, DvrState::Withdrawn) => ("withdrawn", true),
             (_, DvrState::Cancelled) => ("cancelled", false),

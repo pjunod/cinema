@@ -195,9 +195,15 @@ final class DvrController: ObservableObject {
         let after = more ? scheduleNext : nil
         if more && after == nil { return }
         do {
-            let plan = try await api.schedule(from: window.from, to: window.to, after: after)
+            var plan = try await api.schedule(from: window.from, to: window.to, after: after)
+            let refreshTarget = more ? 0 : schedule.count
+            var refreshed = plan.rows
+            while !more, refreshed.count < refreshTarget, let cursor = plan.next {
+                plan = try await api.schedule(from: window.from, to: window.to, after: cursor)
+                refreshed += plan.rows
+            }
             guard generation == scopeGeneration else { return }
-            let combined = more ? schedule + plan.rows : plan.rows
+            let combined = more ? schedule + plan.rows : refreshed
             schedule = Array(Dictionary(grouping: combined, by: \.id).values.compactMap(\.first))
                 .sorted { ($0.captureStart, $0.id) < ($1.captureStart, $1.id) }
             scheduleNext = plan.next
@@ -323,12 +329,17 @@ final class DvrController: ObservableObject {
         else { return }
         do {
             async let refreshedRow = api.recording(row.id)
-            async let page = api.events(row.id, after: String(latest))
-            let (fetchedRow, fetchedPage) = try await (refreshedRow, page)
-            selectedRecording = fetchedRow
-            if !fetchedPage.rows.isEmpty {
+            var cursor: String? = String(latest)
+            var additions: [DvrEvent] = []
+            repeat {
+                let page = try await api.events(row.id, after: cursor)
+                additions += page.rows
+                cursor = page.next
+            } while cursor != nil
+            selectedRecording = try await refreshedRow
+            if !additions.isEmpty {
                 let known = Set(selectedEvents.map(\.eventId))
-                selectedEvents = fetchedPage.rows.reversed().filter { !known.contains($0.eventId) }
+                selectedEvents = additions.reversed().filter { !known.contains($0.eventId) }
                     + selectedEvents
             }
         } catch {
@@ -891,7 +902,7 @@ struct DvrRecordingsPanel: View {
 
     private func libraryDetail(_ row: DvrRecording) -> String {
         var facts = ["\(row.guideNumber) \(row.channelName)", liveTvTime(row.airingStart)]
-        if row.stoppedByUserId != nil { facts.append("Stopped early") }
+        if row.stoppedEarly == true || row.stoppedByUserId != nil { facts.append("Stopped early") }
         if let episode = row.episode { facts.append(episode) }
         if row.bytes > 0 {
             facts.append(ByteCountFormatter.string(fromByteCount: row.bytes, countStyle: .file))

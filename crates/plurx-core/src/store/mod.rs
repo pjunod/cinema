@@ -2143,6 +2143,25 @@ pub trait DvrStore: Send + Sync + 'static {
         states: &[crate::dvr::DvrState],
     ) -> Result<Vec<crate::dvr::DvrRecording>, StoreError>;
 
+    /// The bounded durable half of the foreground overview: rows that should
+    /// already be capturing, their exact total, and the next future start.
+    async fn dvr_overview_rows(
+        &self,
+        now_s: i64,
+        limit: i64,
+    ) -> Result<(Vec<crate::dvr::DvrRecording>, i64, Option<i64>), StoreError>;
+
+    /// One ascending, bounded schedule window plus its exact conflict total.
+    async fn list_dvr_schedule_window(
+        &self,
+        states: &[crate::dvr::DvrState],
+        from_s: i64,
+        to_s: i64,
+        channel_ids: &[String],
+        after: Option<(i64, &str)>,
+        limit: i64,
+    ) -> Result<(Vec<crate::dvr::DvrRecording>, i64), StoreError>;
+
     /// Applies only when the row is in one of `from` and, when
     /// `fence_generation` is given, the tuner configuration is still at that
     /// generation. Returns `false` otherwise, having written nothing.

@@ -519,6 +519,18 @@ impl From<&mut Row<'_>> for CountRow {
     }
 }
 
+struct OptionalStartRow {
+    capture_start: Option<i64>,
+}
+
+impl From<&mut Row<'_>> for OptionalStartRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            capture_start: row.get("capture_start"),
+        }
+    }
+}
+
 struct EventIdentityRow {
     recording_id: String,
     sequence: i64,
@@ -1252,6 +1264,105 @@ impl DvrStore for HiqliteAuthStore {
         .await
     }
 
+    async fn dvr_overview_rows(
+        &self,
+        now_s: i64,
+        limit: i64,
+    ) -> Result<(Vec<DvrRecording>, i64, Option<i64>), StoreError> {
+        let active = "state='recording' OR (state='scheduled' AND capture_start<=$1)";
+        let total = self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                format!("SELECT COUNT(*) AS count FROM dvr_recordings WHERE {active}"),
+                params!(now_s),
+            )
+            .await?
+            .first()
+            .map_or(0, |row| row.count);
+        let rows = read_recordings(
+            self,
+            format!(
+                "SELECT {RECORDING_COLS} FROM dvr_recordings WHERE {active} \
+                 ORDER BY capture_start,id LIMIT $2"
+            ),
+            params!(now_s, limit.clamp(1, DVR_RECORDINGS_LIST_PAGE)),
+        )
+        .await?;
+        let next = self
+            .client()
+            .query_consistent_map::<OptionalStartRow, _>(
+                "SELECT MIN(capture_start) AS capture_start FROM dvr_recordings \
+                 WHERE state='scheduled' AND capture_start>$1",
+                params!(now_s),
+            )
+            .await?
+            .first()
+            .and_then(|row| row.capture_start);
+        Ok((rows, total, next))
+    }
+
+    async fn list_dvr_schedule_window(
+        &self,
+        states: &[DvrState],
+        from_s: i64,
+        to_s: i64,
+        channel_ids: &[String],
+        after: Option<(i64, &str)>,
+        limit: i64,
+    ) -> Result<(Vec<DvrRecording>, i64), StoreError> {
+        if states.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+        let predicate = |binder: &mut Binder| {
+            let states = binder.bind_states(states);
+            let to = binder.bind(to_s);
+            let from = binder.bind(from_s);
+            let mut sql =
+                format!("state IN ({states}) AND capture_start<{to} AND capture_end>{from}");
+            if !channel_ids.is_empty() {
+                let channels = channel_ids
+                    .iter()
+                    .map(|id| binder.bind(id.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                sql.push_str(&format!(" AND channel_id IN ({channels})"));
+            }
+            sql
+        };
+        let mut count = Binder::default();
+        let count_predicate = predicate(&mut count);
+        let conflicts = self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                format!(
+                    "SELECT COUNT(*) AS count FROM dvr_recordings \
+                     WHERE {count_predicate} AND state='conflict'"
+                ),
+                count.values,
+            )
+            .await?
+            .first()
+            .map_or(0, |row| row.count);
+        let mut page = Binder::default();
+        let page_predicate = predicate(&mut page);
+        let (after_start, after_id) = after.unwrap_or((i64::MIN, ""));
+        let start = page.bind(after_start);
+        let start_tie = page.bind(after_start);
+        let id = page.bind(after_id);
+        let page_limit = page.bind(limit.clamp(1, DVR_RECORDINGS_LIST_PAGE.saturating_add(1)));
+        let rows = read_recordings(
+            self,
+            format!(
+                "SELECT {RECORDING_COLS} FROM dvr_recordings WHERE {page_predicate} \
+                 AND (capture_start>{start} OR (capture_start={start_tie} AND id>{id})) \
+                 ORDER BY capture_start,id LIMIT {page_limit}"
+            ),
+            page.values,
+        )
+        .await?;
+        Ok((rows, conflicts))
+    }
+
     /// Move a row to a new state, if it is still where the caller left it.
     ///
     /// The `SET` list is exactly `state`, `state_reason`, `updated_at_ms` and
@@ -1631,8 +1742,45 @@ impl DvrStore for HiqliteAuthStore {
         if through_sequence < 0 || !legacy_baseline.validate() {
             return Ok(None);
         }
+        let recording = read_recordings(
+            self,
+            format!("SELECT {RECORDING_COLS} FROM dvr_recordings WHERE id=$1"),
+            params!(recording_id),
+        )
+        .await?
+        .into_iter()
+        .next();
+        let Some(recording) = recording else {
+            return Ok(None);
+        };
+        let head = self
+            .client()
+            .query_consistent_map::<EventHeadRow, _>(
+                "SELECT recording_id,next_sequence,latest_attention_sequence,
+                        latest_attention_at_ms,history_started_at_ms,history_has_gap,
+                        pruned_through_sequence
+                   FROM dvr_event_heads WHERE recording_id=$1",
+                params!(recording_id),
+            )
+            .await?
+            .into_iter()
+            .next();
+        let create_legacy = through_sequence == 0 && head.is_none();
+        if create_legacy
+            && !matches!(recording.state, DvrState::Failed | DvrState::Missed)
+            && !(recording.state == DvrState::Partial && recording.stopped_by_user_id.is_none())
+        {
+            return Ok(None);
+        }
+        let target = if create_legacy { 1 } else { through_sequence };
+        if head
+            .as_ref()
+            .is_some_and(|head| target > head.next_sequence.saturating_sub(1))
+        {
+            return Ok(None);
+        }
         let mut statements = Vec::new();
-        if through_sequence == 0 {
+        if create_legacy {
             statements.extend([
                 ("INSERT OR IGNORE INTO dvr_event_heads
                   (recording_id,next_sequence,latest_attention_sequence,latest_attention_at_ms,
@@ -1660,17 +1808,15 @@ impl DvrStore for HiqliteAuthStore {
         statements.push((
             "INSERT INTO dvr_attention_acks
              (user_id,recording_id,through_sequence,acknowledged_at_ms)
-             SELECT $1,h.recording_id,
-                    CASE WHEN $2=0 THEN h.latest_attention_sequence ELSE $2 END,$3
+             SELECT $1,h.recording_id,$2,$3
                FROM dvr_event_heads h WHERE h.recording_id=$4
-                AND (CASE WHEN $2=0 THEN h.latest_attention_sequence ELSE $2 END)
-                    BETWEEN 0 AND h.next_sequence-1
+                AND $2 BETWEEN 0 AND h.next_sequence-1
              ON CONFLICT(user_id,recording_id) DO UPDATE SET
                through_sequence=MAX(through_sequence,excluded.through_sequence),
                acknowledged_at_ms=CASE WHEN excluded.through_sequence>through_sequence
                  THEN excluded.acknowledged_at_ms ELSE acknowledged_at_ms END"
                 .to_owned(),
-            params!(user_id, through_sequence, acknowledged_at_ms, recording_id),
+            params!(user_id, target, acknowledged_at_ms, recording_id),
         ));
         self.client()
             .txn(statements)
@@ -1695,7 +1841,11 @@ impl DvrStore for HiqliteAuthStore {
         let (after_at, after_id) = after.unwrap_or((i64::MAX, ""));
         let (upper_at, upper_id) = upper.unwrap_or((i64::MAX, ""));
         let current = "(r.state IN ('conflict','withdrawn','stale') OR
-             (r.state='recording' AND COALESCE(h.latest_attention_sequence,0)>0))";
+             (r.state='recording' AND COALESCE(h.latest_attention_sequence,0)>0
+              AND NOT EXISTS(SELECT 1 FROM dvr_events resolved
+                WHERE resolved.recording_id=r.id
+                  AND resolved.sequence>h.latest_attention_sequence
+                  AND resolved.kind IN ('retry_started','first_bytes_written'))))";
         let legacy = "h.recording_id IS NULL AND
              (r.state IN ('failed','missed') OR
               (r.state='partial' AND r.stopped_by_user_id IS NULL))";

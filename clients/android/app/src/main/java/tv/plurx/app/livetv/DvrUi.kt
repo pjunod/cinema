@@ -726,6 +726,7 @@ fun DvrRecordingDetailScreen(
     if (controller == null) { DvrUnavailable(onBack); return }
     val state by controller.state.collectAsStateWithLifecycle()
     val active = state.overview?.active?.any { it.recording_id == recordingId } == true
+    var confirmStop by remember(recordingId) { mutableStateOf(false) }
     val backFocus = remember { FocusRequester() }
     RequestInitialFocus(backFocus)
     LaunchedEffect(recordingId) { controller.selectRecording(recordingId) }
@@ -751,7 +752,7 @@ fun DvrRecordingDetailScreen(
                     TvTextButton(onClick = { onOpenItem(id) }) { Text("Play") }
                 }
                 when {
-                    row.recording -> TvTextButton(onClick = { controller.stop(row.id) }) { Text("Stop") }
+                    row.recording -> TvTextButton(onClick = { confirmStop = true }) { Text("Stop…") }
                     row.cancelled -> TvTextButton(onClick = { controller.restore(row.id) }) { Text("Restore") }
                 }
                 if (state.attention.any { it.recording.id == row.id }) {
@@ -779,6 +780,27 @@ fun DvrRecordingDetailScreen(
                 if (state.selectedEventsNext != null) {
                     item { TvTextButton(onClick = controller::loadOlderSelectedEvents) { Text("Load older history") } }
                 }
+            }
+            if (confirmStop) {
+                AlertDialog(
+                    onDismissRequest = { confirmStop = false },
+                    title = { Text("Stop recording ${row.title}?") },
+                    text = {
+                        Text(
+                            "Scheduled ${liveTvTime(row.capture_start)}–${liveTvTime(row.capture_end)}. " +
+                                "Any captured portion will be kept. Watching continues.",
+                        )
+                    },
+                    confirmButton = {
+                        TextButton(onClick = {
+                            confirmStop = false
+                            controller.stop(row.id)
+                        }) { Text("Stop recording") }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { confirmStop = false }) { Text("Keep recording") }
+                    },
+                )
             }
         }
     }
@@ -852,12 +874,12 @@ internal fun dvrRecordingDetail(row: DvrRecording, now: Long): String = buildStr
         }
         row.state == "partial" -> {
             append(" · Partial")
-            if (row.stopped_by_user_id != null) append(" · Stopped early")
+            if (row.stopped_early || row.stopped_by_user_id != null) append(" · Stopped early")
             if (row.gap_s > 0) append(" · ${row.gap_s / 60} min gap")
             if (row.late_start_s > 0) append(" · started ${row.late_start_s} s late")
         }
         row.state == "done" -> {
-            append(if (row.stopped_by_user_id != null) " · Stopped early" else " · Recorded")
+            append(if (row.stopped_early || row.stopped_by_user_id != null) " · Stopped early" else " · Recorded")
             if (row.bytes > 0) append(" · ${row.bytes / 1_000_000} MB")
             if (row.item_id == null || row.file_id == null) append(" · preparing playback")
         }

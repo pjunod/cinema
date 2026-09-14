@@ -160,10 +160,17 @@ class DvrController(
                 val now = System.currentTimeMillis() / 1_000
                 val window = (now - 43_200) to (now + 43_200)
                 scheduleWindow = window
-                val schedule = api.schedule(window.first, window.second)
+                val current = mutableState.value
+                var schedule = api.schedule(window.first, window.second)
+                val refreshed = schedule.rows.toMutableList()
+                while (refreshed.size < current.schedule.size && schedule.next != null) {
+                    schedule = api.schedule(window.first, window.second, schedule.next)
+                    refreshed += schedule.rows
+                }
                 val reminders = api.reminders()
                 mutableState.value = mutableState.value.copy(
-                    schedule = schedule.rows,
+                    schedule = refreshed.distinctBy { it.id }
+                        .sortedWith(compareBy<DvrRecording> { it.capture_start }.thenBy { it.id }),
                     scheduleNext = schedule.next,
                     conflicts = schedule.conflicts,
                     reminders = reminders,
@@ -274,11 +281,17 @@ class DvrController(
         scope.launch {
             try {
                 val row = api.recording(selected.id)
-                val page = api.events(selected.id, after = latest.toString())
+                var cursor: String? = latest.toString()
+                val additions = mutableListOf<DvrEvent>()
+                do {
+                    val page = api.events(selected.id, after = cursor)
+                    additions += page.rows
+                    cursor = page.next
+                } while (cursor != null)
                 val known = mutableState.value.selectedEvents.mapTo(mutableSetOf()) { it.event_id }
                 mutableState.value = mutableState.value.copy(
                     selectedRecording = row,
-                    selectedEvents = page.rows.asReversed().filterNot { it.event_id in known } +
+                    selectedEvents = additions.asReversed().filterNot { it.event_id in known } +
                         mutableState.value.selectedEvents,
                 )
             } catch (cancelled: CancellationException) {

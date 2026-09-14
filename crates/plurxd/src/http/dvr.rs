@@ -252,20 +252,13 @@ pub(crate) async fn collect_overview(
     };
     let live_tv = LiveTvConfig::from_snapshot(&settings, &state.node_id);
     state.live_tv.observe_config(&live_tv);
-    let states = [
-        DvrState::Scheduled,
-        DvrState::Conflict,
-        DvrState::Withdrawn,
-        DvrState::Stale,
-        DvrState::Recording,
-        DvrState::Done,
-        DvrState::Partial,
-        DvrState::Failed,
-        DvrState::Missed,
-        DvrState::Cancelled,
-    ];
-    let rows = match state.store.list_dvr_recordings_in(&states).await {
-        Ok(rows) => rows,
+    let now_s = server_now_ms / 1_000;
+    let (rows, active_total, next_capture_start) = match state
+        .store
+        .dvr_overview_rows(now_s, DVR_OVERVIEW_ACTIVE_MAX as i64)
+        .await
+    {
+        Ok(answer) => answer,
         Err(error) => {
             tracing::warn!(%error, "DVR overview could not read durable recordings");
             return unavailable_overview(server_now_ms);
@@ -326,21 +319,8 @@ pub(crate) async fn collect_overview(
         }
         _ => rows.iter().filter(|row| attention_worthy(row)).count(),
     };
-    let now_s = server_now_ms / 1_000;
-    let mut active_rows = rows
-        .iter()
-        .filter(|row| {
-            row.state == DvrState::Recording
-                || (row.state == DvrState::Scheduled && row.capture_start <= now_s)
-        })
-        .collect::<Vec<_>>();
-    active_rows.sort_by(|left, right| {
-        left.capture_start
-            .cmp(&right.capture_start)
-            .then(left.id.cmp(&right.id))
-    });
-    let active_total = active_rows.len();
-    let active_truncated = active_total > DVR_OVERVIEW_ACTIVE_MAX;
+    let active_total = active_total.max(0) as usize;
+    let active_truncated = active_total > rows.len();
     let mut counts = DvrOverviewCounts {
         recording: Some(0),
         starting: Some(0),
@@ -350,7 +330,8 @@ pub(crate) async fn collect_overview(
         attention: Some(attention),
     };
     let mut active = Vec::with_capacity(active_total.min(DVR_OVERVIEW_ACTIVE_MAX));
-    for (index, row) in active_rows.into_iter().enumerate() {
+    let mut runtime_attention = 0usize;
+    for row in &rows {
         let observation = observations.remove(row.id.as_str()).filter(|sample| {
             sample.channel_id == row.channel_id
                 && sample.airing_start == row.airing_start
@@ -358,6 +339,14 @@ pub(crate) async fn collect_overview(
                 && sample.observation_age_ms <= DVR_OBSERVATION_FRESH_MS
         });
         let (label, detail) = display_state(row, observation, server_now_ms);
+        if observation.is_some_and(|sample| {
+            sample.phase == "writing"
+                && sample
+                    .last_write_age_ms
+                    .is_some_and(|age| age > DVR_WRITE_HEALTHY_MS)
+        }) {
+            runtime_attention += 1;
+        }
         match label.as_str() {
             "Recording" => counts.recording = counts.recording.map(|value| value + 1),
             "Starting" => counts.starting = counts.starting.map(|value| value + 1),
@@ -367,9 +356,6 @@ pub(crate) async fn collect_overview(
                 counts.unconfirmed = counts.unconfirmed.map(|value| value + 1)
             }
             _ => {}
-        }
-        if index >= DVR_OVERVIEW_ACTIVE_MAX {
-            continue;
         }
         let last_confirmed_bytes = observation.map(|sample| sample.attempt_bytes_written);
         let total_bytes_written = observation.and_then(|sample| {
@@ -408,11 +394,14 @@ pub(crate) async fn collect_overview(
             can_view_diagnostics: is_admin,
         });
     }
-    let next_capture_start = rows
-        .iter()
-        .filter(|row| row.state == DvrState::Scheduled && row.capture_start > now_s)
-        .map(|row| row.capture_start)
-        .min();
+    if active_truncated {
+        counts.unconfirmed = counts
+            .unconfirmed
+            .map(|value| value.saturating_add(active_total.saturating_sub(rows.len())));
+    }
+    counts.attention = counts
+        .attention
+        .map(|value| value.saturating_add(runtime_attention));
     let diagnostics = is_admin.then(|| DvrOverviewDiagnostics {
         owner_node_id: live_tv.owner_node_id.clone(),
         recording_sinks: runtime
@@ -1115,16 +1104,45 @@ pub(crate) struct AttentionPage {
 
 #[derive(Serialize)]
 pub(crate) struct AttentionProjection {
-    recording: DvrRecording,
+    recording: PublicDvrRecording,
     latest_attention_sequence: i64,
     latest_attention_at_ms: i64,
     acknowledged_through_sequence: i64,
 }
 
+/// A normal viewer needs programme and capture facts, never storage topology
+/// or the database identities of the people who scheduled and stopped it.
+pub(crate) struct PublicDvrRecording(DvrRecording);
+
+impl Serialize for PublicDvrRecording {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut value = serde_json::to_value(&self.0).map_err(serde::ser::Error::custom)?;
+        if let Some(recording) = value.as_object_mut() {
+            let stopped_early = recording
+                .get("stopped_by_user_id")
+                .is_some_and(|value| !value.is_null());
+            recording.insert("stopped_early".to_owned(), stopped_early.into());
+            for private in [
+                "requested_by_user_id",
+                "tuner_owner_node_id",
+                "path",
+                "stop_requested_by_user_id",
+                "stopped_by_user_id",
+            ] {
+                recording.remove(private);
+            }
+        }
+        value.serialize(serializer)
+    }
+}
+
 impl From<DvrAttentionRow> for AttentionProjection {
     fn from(row: DvrAttentionRow) -> Self {
         Self {
-            recording: row.recording,
+            recording: PublicDvrRecording(row.recording),
             latest_attention_sequence: row.latest_attention_sequence,
             latest_attention_at_ms: row.latest_attention_at_ms,
             acknowledged_through_sequence: row.acknowledged_through_sequence,
@@ -1344,107 +1362,132 @@ pub(crate) async fn delete_recording(
 ) -> Result<Response, ApiError> {
     use axum::response::IntoResponse;
 
-    let row = state
+    let mut row = state
         .store
         .get_dvr_recording(&id)
         .await?
         .ok_or(ApiError::NotFound("no such recording"))?;
     let at_ms = now_ms();
-    match row.state {
-        state_value if state_value.is_pending() => {
-            let event = lifecycle_event(
-                "cancelled",
-                at_ms,
-                Some(row.attempt),
-                Some(user.id),
-                Some("cancelled"),
-                serde_json::json!({}),
-                false,
-            );
-            state
-                .store
-                .transition_dvr_recording_with_event(
-                    &DvrTransition {
-                        id: &id,
-                        from: DvrState::PENDING,
-                        to: DvrState::Cancelled,
-                        reason: Some("cancelled"),
-                        patch: DvrStatePatch::None,
-                        fence_generation: None,
-                        now_ms: at_ms,
-                    },
-                    &event,
-                )
-                .await?;
-            Ok(StatusCode::NO_CONTENT.into_response())
-        }
-        DvrState::Recording => {
-            let event = lifecycle_event(
-                "stop_requested",
-                at_ms,
-                Some(row.attempt),
-                Some(user.id),
-                None,
-                serde_json::json!({}),
-                false,
-            );
-            let requested = state
-                .store
-                .request_dvr_stop_with_event(&id, at_ms, user.id, &event)
-                .await?
-                .ok_or(ApiError::NotFound("no such recording"))?;
-            Ok((
-                StatusCode::ACCEPTED,
-                Json(StopPending {
-                    pending: true,
-                    requested_at: requested.stop_requested_at_ms.unwrap_or(at_ms),
-                    requested_by_user_id: requested.stop_requested_by_user_id,
-                }),
-            )
-                .into_response())
-        }
-        DvrState::Deleted => Ok(StatusCode::NO_CONTENT.into_response()),
-        _terminal => {
-            if query.delete_file != Some(1) {
-                return Err(ApiError::typed(
+    // State only moves forward under the owner, but a restore can move a
+    // cancelled row back to scheduled. Re-read a lost conditional write and
+    // act on what is true now instead of reporting the stale action.
+    for _ in 0..4 {
+        match row.state {
+            state_value if state_value.is_pending() => {
+                let event = lifecycle_event(
+                    "cancelled",
+                    at_ms,
+                    Some(row.attempt),
+                    Some(user.id),
+                    Some("cancelled"),
+                    serde_json::json!({}),
+                    false,
+                );
+                let changed = state
+                    .store
+                    .transition_dvr_recording_with_event(
+                        &DvrTransition {
+                            id: &id,
+                            from: DvrState::PENDING,
+                            to: DvrState::Cancelled,
+                            reason: Some("cancelled"),
+                            patch: DvrStatePatch::None,
+                            fence_generation: None,
+                            now_ms: at_ms,
+                        },
+                        &event,
+                    )
+                    .await?;
+                if changed {
+                    return Ok(StatusCode::NO_CONTENT.into_response());
+                }
+            }
+            DvrState::Recording => {
+                let event = lifecycle_event(
+                    "stop_requested",
+                    at_ms,
+                    Some(row.attempt),
+                    Some(user.id),
+                    None,
+                    serde_json::json!({}),
+                    false,
+                );
+                let Some(requested) = state
+                    .store
+                    .request_dvr_stop_with_event(&id, at_ms, user.id, &event)
+                    .await?
+                else {
+                    return Err(ApiError::NotFound("no such recording"));
+                };
+                if requested.state == DvrState::Recording
+                    && requested.stop_requested_at_ms.is_some()
+                {
+                    return Ok((
+                        StatusCode::ACCEPTED,
+                        Json(StopPending {
+                            pending: true,
+                            requested_at: requested.stop_requested_at_ms.unwrap_or(at_ms),
+                            requested_by_user_id: requested.stop_requested_by_user_id,
+                        }),
+                    )
+                        .into_response());
+                }
+                row = requested;
+                continue;
+            }
+            DvrState::Deleted => return Ok(StatusCode::NO_CONTENT.into_response()),
+            _terminal => {
+                if query.delete_file != Some(1) {
+                    return Err(ApiError::typed(
                     StatusCode::CONFLICT,
                     "delete_file_required",
                     "this recording has a file; repeat the request with ?delete_file=1 to remove it",
                 ));
+                }
+                let event = lifecycle_event(
+                    "deleted",
+                    at_ms,
+                    Some(row.attempt),
+                    Some(user.id),
+                    Some("deleted_by_request"),
+                    serde_json::json!({"delete_file": true}),
+                    false,
+                );
+                let changed = state
+                    .store
+                    .transition_dvr_recording_with_event(
+                        &DvrTransition {
+                            id: &id,
+                            from: &[
+                                DvrState::Done,
+                                DvrState::Partial,
+                                DvrState::Failed,
+                                DvrState::Missed,
+                                DvrState::Cancelled,
+                            ],
+                            to: DvrState::Deleted,
+                            reason: Some("deleted by request"),
+                            patch: DvrStatePatch::None,
+                            fence_generation: None,
+                            now_ms: at_ms,
+                        },
+                        &event,
+                    )
+                    .await?;
+                if changed {
+                    return Ok(StatusCode::NO_CONTENT.into_response());
+                }
             }
-            let event = lifecycle_event(
-                "deleted",
-                at_ms,
-                Some(row.attempt),
-                Some(user.id),
-                Some("deleted_by_request"),
-                serde_json::json!({"delete_file": true}),
-                false,
-            );
-            state
-                .store
-                .transition_dvr_recording_with_event(
-                    &DvrTransition {
-                        id: &id,
-                        from: &[
-                            DvrState::Done,
-                            DvrState::Partial,
-                            DvrState::Failed,
-                            DvrState::Missed,
-                            DvrState::Cancelled,
-                        ],
-                        to: DvrState::Deleted,
-                        reason: Some("deleted by request"),
-                        patch: DvrStatePatch::None,
-                        fence_generation: None,
-                        now_ms: at_ms,
-                    },
-                    &event,
-                )
-                .await?;
-            Ok(StatusCode::NO_CONTENT.into_response())
         }
+        row = state
+            .store
+            .get_dvr_recording(&id)
+            .await?
+            .ok_or(ApiError::NotFound("no such recording"))?;
     }
+    Err(ApiError::Conflict(
+        "the recording changed while the request was being applied; retry".into(),
+    ))
 }
 
 /// The only way back from a cancel, and deliberately explicit: rule expansion
@@ -1561,7 +1604,7 @@ pub(crate) async fn schedule(
     let channels = query
         .iter()
         .filter(|(key, _)| key == "channel_id")
-        .map(|(_, value)| value.as_str())
+        .map(|(_, value)| value.clone())
         .collect::<std::collections::BTreeSet<_>>();
     if channels.len() > 64 {
         return Err(ApiError::BadRequest(
@@ -1605,29 +1648,22 @@ pub(crate) async fn schedule(
             DvrState::Missed,
         ]);
     }
-    let mut rows = state
+    let channel_ids = channels.into_iter().collect::<Vec<_>>();
+    let (mut rows, conflicts) = state
         .store
-        .list_dvr_recordings_in(&states)
-        .await?
-        .into_iter()
-        .filter(|row| {
-            row.capture_start < to
-                && (!filtered || row.capture_end > from)
-                && (channels.is_empty() || channels.contains(row.channel_id.as_str()))
-        })
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        left.capture_start
-            .cmp(&right.capture_start)
-            .then(left.id.cmp(&right.id))
-    });
-    let conflicts = rows
-        .iter()
-        .filter(|row| row.state == DvrState::Conflict)
-        .count();
-    if let Some((start, id)) = after {
-        rows.retain(|row| (row.capture_start, row.id.as_str()) > (start, id));
-    }
+        .list_dvr_schedule_window(
+            &states,
+            from,
+            to,
+            &channel_ids,
+            after.map(|(start, id)| (start, id)),
+            if filtered {
+                limit as i64 + 1
+            } else {
+                DVR_RECORDINGS_LIST_PAGE
+            },
+        )
+        .await?;
     let next = if filtered && rows.len() > limit {
         rows.truncate(limit);
         rows.last()
@@ -1636,7 +1672,7 @@ pub(crate) async fn schedule(
         None
     };
     Ok(Json(DvrSchedule {
-        conflicts,
+        conflicts: conflicts.max(0) as usize,
         rows,
         next,
     }))

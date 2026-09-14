@@ -747,6 +747,80 @@ impl DvrStore for SqliteStore {
         .await
     }
 
+    async fn dvr_overview_rows(
+        &self,
+        now_s: i64,
+        limit: i64,
+    ) -> Result<(Vec<DvrRecording>, i64, Option<i64>), StoreError> {
+        let limit = limit.clamp(1, DVR_RECORDINGS_LIST_PAGE);
+        self.with_read(move |conn| {
+            let active = "state = 'recording' OR (state = 'scheduled' AND capture_start <= ?1)";
+            let total = conn.query_row(
+                &format!("SELECT COUNT(*) FROM dvr_recordings WHERE {active}"),
+                [now_s],
+                |row| row.get(0),
+            )?;
+            let mut statement = conn.prepare(&format!(
+                "SELECT {RECORDING_COLS} FROM dvr_recordings WHERE {active} \
+                 ORDER BY capture_start, id LIMIT ?2"
+            ))?;
+            let rows = statement
+                .query_map(params![now_s, limit], recording_from_row)?
+                .collect::<Result<Vec<_>, _>>()?;
+            let next = conn.query_row(
+                "SELECT MIN(capture_start) FROM dvr_recordings \
+                 WHERE state = 'scheduled' AND capture_start > ?1",
+                [now_s],
+                |row| row.get(0),
+            )?;
+            Ok((rows, total, next))
+        })
+        .await
+    }
+
+    async fn list_dvr_schedule_window(
+        &self,
+        states: &[DvrState],
+        from_s: i64,
+        to_s: i64,
+        channel_ids: &[String],
+        after: Option<(i64, &str)>,
+        limit: i64,
+    ) -> Result<(Vec<DvrRecording>, i64), StoreError> {
+        let states = state_json(states)?;
+        let channels = serde_json::to_string(channel_ids)
+            .map_err(|error| StoreError::Database(error.to_string()))?;
+        let (after_start, after_id) = after
+            .map(|(start, id)| (start, id.to_owned()))
+            .unwrap_or((i64::MIN, String::new()));
+        let limit = limit.clamp(1, DVR_RECORDINGS_LIST_PAGE.saturating_add(1));
+        self.with_read(move |conn| {
+            let window = "state IN (SELECT value FROM json_each(?1)) \
+                AND capture_start < ?2 AND capture_end > ?3 \
+                AND (json_array_length(?4) = 0 OR channel_id IN (SELECT value FROM json_each(?4)))";
+            let conflicts = conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM dvr_recordings WHERE {window} AND state = 'conflict'"
+                ),
+                params![states, to_s, from_s, channels],
+                |row| row.get(0),
+            )?;
+            let mut statement = conn.prepare(&format!(
+                "SELECT {RECORDING_COLS} FROM dvr_recordings WHERE {window} \
+                 AND (capture_start > ?5 OR (capture_start = ?5 AND id > ?6)) \
+                 ORDER BY capture_start, id LIMIT ?7"
+            ))?;
+            let rows = statement
+                .query_map(
+                    params![states, to_s, from_s, channels, after_start, after_id, limit],
+                    recording_from_row,
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((rows, conflicts))
+        })
+        .await
+    }
+
     /// One statement, so that the state the caller expected and the generation
     /// it planned under are both still true at the instant of the write.
     ///
@@ -1099,7 +1173,11 @@ impl DvrStore for SqliteStore {
         let limit = limit.clamp(1, DVR_EVENT_PAGE_MAX);
         self.with_read(move |conn| {
             let current = "(r.state IN ('conflict','withdrawn','stale') OR
-                 (r.state='recording' AND COALESCE(h.latest_attention_sequence,0)>0))";
+                 (r.state='recording' AND COALESCE(h.latest_attention_sequence,0)>0
+                  AND NOT EXISTS(SELECT 1 FROM dvr_events resolved
+                    WHERE resolved.recording_id=r.id
+                      AND resolved.sequence>h.latest_attention_sequence
+                      AND resolved.kind IN ('retry_started','first_bytes_written'))))";
             let legacy = "h.recording_id IS NULL AND
                  (r.state IN ('failed','missed') OR
                   (r.state='partial' AND r.stopped_by_user_id IS NULL))";

@@ -551,7 +551,7 @@
   .dvr-manual{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;padding:16px}
   .dvr-manual label{display:grid;gap:5px;font-size:12px;color:var(--muted)}.dvr-manual .wide{grid-column:1/-1}
   @media(max-width:760px){.dvr-layout{display:block}.dvr-detail{position:fixed;inset:0;z-index:70;border:0;border-radius:0;
-      overflow:auto;padding:20px}.dvr-detail[hidden]{display:none}.dvr-manual{grid-template-columns:1fr}}
+      overflow:auto;padding:20px}.dvr-detail[hidden],.dvr-detail.empty-detail{display:none}.dvr-manual{grid-template-columns:1fr}}
 
   /* The due-reminder overlay. Lower-left so it never covers the player's own
      controls, and buttons only — it adds no key handler, because the Live TV
@@ -17568,7 +17568,7 @@ function dvrOverviewRows(){
 }
 function dvrSavedLabel(row){
   if(!["done","partial"].includes(row.state))return DVR_STATE_LABEL[row.state]||row.state||"Recording";
-  if(row.stopped_by_user_id!=null)return row.state==="partial"||row.gap_s>0||row.late_start_s>0
+  if(row.stopped_early===true||row.stopped_by_user_id!=null)return row.state==="partial"||row.gap_s>0||row.late_start_s>0
     ?"Stopped early · incomplete":"Stopped early";
   if(row.state==="partial"||row.gap_s>0||row.late_start_s>0)return "Incomplete";
   return row.item_id&&row.file_id?"Recorded":"Recorded · preparing playback";
@@ -17606,21 +17606,28 @@ function dvrDetailMarkup(){
   const attention=DVR_PAGE.rows.find(raw=>(raw.recording||raw).id===row.id);
   const through=attention&&attention.latest_attention_sequence!=null?attention.latest_attention_sequence:0;
   const events=DVR_PAGE.events.map(event=>`<div class="dvr-event"><b>${esc(dvrEventLabel(event.kind))}</b>${event.reason_code?`<small>${esc(event.reason_code.replace(/_/g," "))}</small>`:""}<time>${new Date(event.occurred_at_ms).toLocaleString()}</time></div>`).join("");
-  return `<aside class="dvr-detail" aria-label="Recording details"><div class="row" style="justify-content:space-between"><h2 style="margin:0">${esc(row.title)}</h2><button class="ghost sm" onclick="closeDvrDetail()">Close</button></div>
+  return `<aside class="dvr-detail" role="dialog"${matchMedia("(max-width:760px)").matches?' aria-modal="true"':""} aria-label="Recording details"><div class="row" style="justify-content:space-between"><h2 style="margin:0">${esc(row.title)}</h2><button class="ghost sm" data-dvr-focus="detail-close" onclick="closeDvrDetail()">Close</button></div>
     <p><span class="pill">${esc(dvrSavedLabel(row))}</span></p>${liveTvRecordingLine(row)}
     <dl><dt>Airing</dt><dd>${new Date(row.airing_start*1000).toLocaleString()} – ${new Date(row.airing_end*1000).toLocaleTimeString()}</dd><dt>Capture window</dt><dd>${new Date(row.capture_start*1000).toLocaleString()} – ${new Date(row.capture_end*1000).toLocaleString()}</dd><dt>Written</dt><dd>${fmtBytes(row.bytes)||"No confirmed bytes"}</dd><dt>Attempts / gaps</dt><dd>${row.attempt||0} attempt${row.attempt===1?"":"s"} · ${row.gap_s||0}s known gap</dd></dl>
     ${DVR_PAGE.detailError?`<div class="clrefusal">${esc(DVR_PAGE.detailError)}</div>`:""}
     <h3>Lifecycle history</h3>${!DVR_PAGE.historyComplete?`<p class="hint">${DVR_PAGE.truncatedBefore?`Earlier events were pruned through sequence ${DVR_PAGE.truncatedBefore}.`:"Detailed history was not collected for all of this recording."}</p>`:""}${events||'<p class="muted">No detailed events were collected.</p>'}
-    ${DVR_PAGE.eventsNext?`<button class="ghost sm" onclick="loadOlderDvrEvents()">Load older events</button>`:""}
-    <div class="row" style="margin-top:14px">${DVR_PAGE.tab==="attention"?`<button onclick="reviewDvrRecording(${through})">Mark reviewed</button>`:""}${row.state==="recording"&&!row.stop_requested_at_ms?`<button onclick="liveTvStopRecording(${esc(JSON.stringify(row.id))},${esc(JSON.stringify(row.title))})">Stop recording…</button>`:""}${row.item_id&&row.file_id?`<a class="ghost sm" href="#/item/${row.item_id}">Play recording</a>`:""}</div></aside>`;
+    ${DVR_PAGE.eventsNext?`<button class="ghost sm" data-dvr-focus="detail-more" onclick="loadOlderDvrEvents()">Load older events</button>`:""}
+    <div class="row" style="margin-top:14px">${DVR_PAGE.tab==="attention"?`<button data-dvr-focus="detail-review" onclick="reviewDvrRecording(${through})">Mark reviewed</button>`:""}${row.state==="recording"&&!row.stop_requested_at_ms?`<button data-dvr-focus="detail-stop" onclick="liveTvStopRecording(${esc(JSON.stringify(row.id))},${esc(JSON.stringify(row.title))})">Stop recording…</button>`:""}${row.item_id&&row.file_id?`<a class="ghost sm" data-dvr-focus="detail-play" href="#/item/${row.item_id}">Play recording</a>`:""}</div></aside>`;
 }
 function paintRecordingsPage(){
   if(!location.hash.startsWith("#/recordings"))return;
   const main=document.getElementById("main");if(!main)return;
-  const focus=document.activeElement&&document.activeElement.closest&&document.activeElement.closest("[data-recording-id]");
+  const active=document.activeElement;
+  const focus=active&&active.closest&&active.closest("[data-recording-id]");
   const focusId=focus&&focus.dataset.recordingId;
+  const focusKey=active&&(active.dataset&&active.dataset.dvrFocus||active.id)||null;
+  const selection=active&&typeof active.selectionStart==="number"?[active.selectionStart,active.selectionEnd]:null;
+  const fields=new Map([...main.querySelectorAll("input[id],select[id],textarea[id]")].map(field=>[field.id,field.value]));
   main.innerHTML=`<div class="dvr-page-head"><div><h1>Recordings</h1><p class="sub">Plans, recorder evidence, saved programmes and what needs review.</p></div><a class="ghost sm" href="#/activity">Compact activity</a></div>${dvrSummaryMarkup()}${dvrTabsMarkup()}${dvrOverviewRows()}<h2 class="section">${esc((DVR_TABS.find(([id])=>id===DVR_PAGE.tab)||[])[1]||"Recordings")}</h2><div class="dvr-layout"><section>${dvrPageRowsMarkup()}</section>${dvrDetailMarkup()}</div>`;
-  if(focusId){const again=main.querySelector(`[data-recording-id="${CSS.escape(focusId)}"] .dvr-row-button`);if(again)again.focus({preventScroll:true});}
+  for(const [id,value] of fields){const field=document.getElementById(id);if(field)field.value=value;}
+  const again=focusKey?(document.getElementById(focusKey)||main.querySelector(`[data-dvr-focus="${CSS.escape(focusKey)}"]`))
+    :focusId&&main.querySelector(`[data-recording-id="${CSS.escape(focusId)}"] .dvr-row-button`);
+  if(again){again.focus({preventScroll:true});if(selection&&again.setSelectionRange){try{again.setSelectionRange(...selection)}catch(error){}}}
 }
 async function selectDvrDetail(id){
   DVR_PAGE.selectedId=id;DVR_PAGE.detailBusy=true;DVR_PAGE.detailError=null;paintRecordingsPage();
@@ -17631,7 +17638,7 @@ async function selectDvrDetail(id){
     DVR_PAGE.historyComplete=!!page.history_complete;DVR_PAGE.truncatedBefore=page.truncated_before_sequence||null;
     scheduleDvrHistoryRefresh();
   }catch(e){DVR_PAGE.detailError=e&&e.message||"Recording details could not be loaded";}
-  finally{DVR_PAGE.detailBusy=false;if(DVR_PAGE.selectedId===id)paintRecordingsPage();}
+  finally{DVR_PAGE.detailBusy=false;if(DVR_PAGE.selectedId===id){paintRecordingsPage();if(matchMedia("(max-width:760px)").matches){const close=document.querySelector('[data-dvr-focus="detail-close"]');if(close)close.focus();}}}
 }
 function scheduleDvrHistoryRefresh(){
   clearTimeout(DVR_PAGE.historyTimer);DVR_PAGE.historyTimer=null;
@@ -17653,7 +17660,7 @@ async function refreshDvrHistory(id){
   }catch(e){DVR_PAGE.detailError=e&&e.message||"Lifecycle refresh failed";paintRecordingsPage();}
   scheduleDvrHistoryRefresh();
 }
-function closeDvrDetail(){DVR_PAGE.selectedId=null;DVR_PAGE.selected=null;DVR_PAGE.events=[];paintRecordingsPage();const row=document.querySelector(`[data-recording-id] .dvr-row-button`);if(row)row.focus();}
+function closeDvrDetail(){const id=DVR_PAGE.selectedId;DVR_PAGE.selectedId=null;DVR_PAGE.selected=null;DVR_PAGE.events=[];paintRecordingsPage();const row=id&&document.querySelector(`[data-recording-id="${CSS.escape(id)}"] .dvr-row-button`);if(row)row.focus();}
 async function loadOlderDvrEvents(){
   if(!DVR_PAGE.selectedId||!DVR_PAGE.eventsNext)return;
   try{const page=await api(`/dvr/recordings/${encodeURIComponent(DVR_PAGE.selectedId)}/events?limit=50&before=${encodeURIComponent(DVR_PAGE.eventsNext)}`);const seen=new Set(DVR_PAGE.events.map(e=>e.event_id));DVR_PAGE.events=DVR_PAGE.events.concat((page.rows||[]).filter(e=>!seen.has(e.event_id)));DVR_PAGE.eventsNext=page.next||null;paintRecordingsPage();}catch(e){toast(e.message);}
