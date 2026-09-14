@@ -110,7 +110,7 @@ jobs:
     name: effort Windows compile
     needs: [scope, preflight]
     if: needs.scope.outputs.rust == 'true'
-    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    runs-on: [self-hosted, Linux, X64, lab, general]
     timeout-minutes: 15
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -122,6 +122,13 @@ jobs:
         with:
           lane: effort-windows
       - uses: ./.github/actions/windows-cross
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
   web_static:
     name: effort web static contracts
