@@ -7,11 +7,12 @@ struct LibraryView: View {
     @State private var items: [Item] = []
     @State private var sort: LibrarySort = .title
     @State private var filter: WatchFilter = .all
+    @State private var query = ""
     @State private var loading = true
     @State private var error: String?
 
     private var visibleItems: [Item] {
-        items.filter { AppModel.matches($0, filter: filter) }
+        items.filter { AppModel.matches($0, filter: filter) && (query.isEmpty || $0.title.localizedCaseInsensitiveContains(query)) }
     }
 
     private var sorts: [LibrarySort] {
@@ -28,6 +29,11 @@ struct LibraryView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 summary
+                TextField("Find a title in this library", text: $query)
+                    #if os(iOS)
+                    .textFieldStyle(.roundedBorder)
+                    #endif
+                    .accessibilityLabel("Find a title in this library")
                 stateContent
             }
             .padding(.horizontal, screenHPad)
@@ -57,6 +63,9 @@ struct LibraryView: View {
                 }
             }
             Spacer()
+            if filter != .all || !query.isEmpty {
+                Button("Clear filters") { filter = .all; query = "" }
+            }
         }
         .padding(.top, 8)
     }
@@ -75,9 +84,9 @@ struct LibraryView: View {
             .frame(maxWidth: .infinity)
         } else if visibleItems.isEmpty {
             ContentUnavailableView(
-                filter == .all ? "This library is empty" : "No matching titles",
+                filter == .all && query.isEmpty ? "This library is empty" : "No matching titles",
                 systemImage: "rectangle.stack",
-                description: filter == .all ? nil : Text("Try a different watch filter.")
+                description: filter == .all && query.isEmpty ? nil : Text("Clear the title or watch filter to see more.")
             )
             .frame(maxWidth: .infinity)
         } else {

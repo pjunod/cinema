@@ -243,15 +243,14 @@ struct LandscapeCard: View {
             .font(.headline.weight(.semibold))
             #endif
             .foregroundColor(Palette.onBg)
-            .lineLimit(1)
+            .lineLimit(2)
 
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
+        VStack(alignment: .leading, spacing: 5) {
             let detail = continueWatchingDetail(item)
             if !detail.isEmpty {
                 Text(detail)
-                    .lineLimit(1)
+                    .lineLimit(2)
             }
-            Spacer(minLength: 8)
             if let remaining = continueWatchingTimeRemaining(item) {
                 Text(remaining)
                     .lineLimit(1)
@@ -259,7 +258,7 @@ struct LandscapeCard: View {
                     .multilineTextAlignment(.trailing)
             }
         }
-        .font(.system(.caption2, design: .rounded).weight(.medium))
+        .font(.system(.caption, design: .rounded).weight(.medium))
         .foregroundColor(Palette.muted)
     }
 

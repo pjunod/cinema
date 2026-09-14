@@ -22,6 +22,8 @@ current system · **open** — work in progress or awaiting a decision ·
 **done** — closed out, kept for history. Accurate as of 2026-09-07; when a
 row and a doc's own `**Status:**` header disagree, the doc wins.
 
+Mobile UI work: [Apple build 159 notes](apple-builds/317-ui-usability.md) · [Mobile and TV usability audit](clients/MOBILE-UI-USABILITY-AUDIT.md) — **open**.
+
 ## Find it fast
 
 | You want to know… | Read |

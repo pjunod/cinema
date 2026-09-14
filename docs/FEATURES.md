@@ -16,6 +16,26 @@ works. Scope and phase gates live in [REQUIREMENTS.md](REQUIREMENTS.md) and
 
 ---
 
+## Browsing and recording usability
+
+The three web layouts share playback-first movie, episode and series pages.
+Series pages offer the current continuation episode; Home includes readable
+continuation cards, browsing shortcuts and recent saved recordings. Search
+puts exact title matches first and groups remaining results by media kind.
+Library browsing exposes title, library and watch filters with a clear reset.
+
+Activity places viewer sessions alongside recording activity, keeps idle
+background work compact and separates running jobs from queued work. Analysis
+cause groups explicitly describe the current page. Developer settings explain
+enablement prerequisites as advice without disabling the enable controls.
+
+Apple clients share series continuation across iPhone, iPad and Apple TV.
+Home links to recording activity from the existing shared observation. Touch
+recording filters use a native menu; television filters scroll within a focus
+section and recording cards use a visible focus treatment. The
+[mobile usability record](clients/MOBILE-UI-USABILITY-AUDIT.md) describes
+this slice and its remaining device-coverage limits.
+
 ## 1. Libraries & scanning — "find my media and keep up with it"
 
 **What it does:** turns folders of files into browsable movies, shows, anime,

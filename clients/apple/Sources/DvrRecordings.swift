@@ -687,13 +687,24 @@ struct DvrRecordingsPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
+            #if os(tvOS)
+            ScrollView(.horizontal) {
+                HStack(spacing: 12) {
+                    ForEach(DvrRecordingsChip.allCases) { entry in chipButton(entry) }
+                }.padding(12)
+            }.tvNavigationFocusSection()
+            #else
+            Picker("Recording view", selection: $chip) {
                 ForEach(DvrRecordingsChip.allCases) { entry in
-                    chipButton(entry)
+                    Text(entry.label).tag(entry)
                 }
-                Spacer(minLength: 8)
-                if let summary = summary { Text(summary).font(LiveTvType.tertiary).foregroundStyle(Palette.muted) }
             }
+            .pickerStyle(.menu)
+            .frame(minHeight: 44)
+            .tint(Palette.accent)
+            .accessibilityLabel("Recording view")
+            #endif
+            if let summary { Text(summary).font(LiveTvType.tertiary).foregroundStyle(Palette.muted) }
             if let serverLine = serverLine { Text(serverLine).font(LiveTvType.tertiary).foregroundStyle(Palette.muted) }
             if let row = dvr.confirmFileDelete {
                 confirmation(row)
@@ -1143,7 +1154,11 @@ struct DvrCaptureActivityView: View {
                         .padding(12)
                         .background(Palette.surface, in: RoundedRectangle(cornerRadius: 8))
                     }
+                    #if os(tvOS)
+                    .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
+                    #else
                     .buttonStyle(.plain)
+                    #endif
                 }
             }
             .padding()

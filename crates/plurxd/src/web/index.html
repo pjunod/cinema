@@ -3347,6 +3347,20 @@
   .lc-preview{position:sticky;top:16px;align-self:start}.lc-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
   .lc-following #ptimeline,.lc-following #pbback,.lc-following #pbforward{display:none!important}
   @media(max-width:760px){.lc-editor{grid-template-columns:minmax(0,1fr)}.lc-preview{position:static}.lc-programme{grid-template-columns:76px minmax(0,1fr)}.lc-programme>button{grid-column:2}.lc-grid{grid-template-columns:minmax(0,1fr)}}
+/* Viewing hierarchy shared by every layout; colors inherit the chosen theme. */
+.watch-page{max-width:1180px;margin:0 auto;min-width:0}.watch-hero{position:relative;isolation:isolate;display:grid;grid-template-columns:150px minmax(0,1fr);gap:28px;padding:24px 0;margin-bottom:24px}.watch-backdrop{position:absolute;inset:0;z-index:-1;background-size:cover;background-position:center;opacity:.12;border-radius:var(--radius)}.watch-poster{width:150px}.watch-poster .art{width:100%;border-radius:var(--radius)}.watch-heading h1{margin:8px 0 14px;font-size:36px;line-height:1.15}.watch-heading .overview{max-width:750px;margin:0 0 14px}.watch-kicker{font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)}.watch-more summary,.watch-media summary{cursor:pointer;font-weight:600;padding:12px 0}.watch-more .actions{margin-top:8px}.watch-resume{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(240px,1fr);gap:24px;margin:18px 0 28px}.watch-resume-main,.watch-preferences{border:1px solid var(--line);background:var(--panel);border-radius:var(--radius);padding:22px;min-width:0}.watch-resume-main{border-left:3px solid var(--accent)}.watch-resume-main h2{font-size:23px;margin:10px 0}.watch-resume-main .actions{margin-bottom:0}.watch-resume>p,.watch-resume>div:only-child{grid-column:1/-1}.watch-preferences h3{margin:0 0 12px}.watch-preferences .preplay{margin:0;border:0;padding:0}.watch-preferences select{max-width:100%;min-width:0}.watch-progress{height:4px;border-radius:4px;overflow:hidden;background:var(--line);margin:18px 0 14px}.watch-progress i{display:block;height:100%;background:var(--accent)}.watch-episodes{margin:26px 0}.watch-seasons{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:12px}.watch-seasons a{padding:18px;display:flex;flex-direction:column;gap:6px}.watch-seasons small{color:var(--muted)}.watch-media{border-top:1px solid var(--line);margin-top:12px}.watch-media .version{margin:12px 0}.watch-media .preplay{max-width:700px}.watch-admin>summary{color:var(--muted)}.watch-browse{display:flex;gap:10px;flex-wrap:wrap;margin:4px 0 22px}.watch-cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}.watch-card{border:1px solid var(--line);background:var(--panel);border-radius:var(--radius);overflow:hidden;min-width:0}.watch-art{display:block;aspect-ratio:16/9;background:var(--bg);overflow:hidden}.watch-art img{width:100%;height:100%;object-fit:cover}.watch-art>span{display:grid;place-items:center;height:100%;padding:16px;font-size:22px}.watch-card-body{padding:16px}.watch-card h3{margin:0;font-size:18px}.watch-card h3 a{color:var(--text)}.watch-card-body>p{font-size:13px;min-height:36px;margin:8px 0}.watch-card .cleft{font-size:13px;white-space:normal}.watch-card button{width:100%}.watch-next{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.watch-next article{display:flex;align-items:center;gap:16px;justify-content:space-between;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);padding:16px;min-width:0}.watch-next h3{font-size:16px;margin:0 0 5px}.watch-next button{flex-shrink:0}.watch-next>article:only-child{grid-column:1/-1}.watch-next .muted{font-size:13px}.watch-cards+.watch-more{margin-top:12px}.search-group{margin:28px 0}.search-group h2{font-size:19px}.search-group .meta .t,.search-group .meta .stxt{white-space:normal;overflow:visible;text-overflow:clip}.search-group .poster{align-self:start}.search-tools{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:16px 0}.search-tools label{display:flex;gap:8px;align-items:center;margin:0}.search-tools select{width:auto}
+@media(max-width:760px){.watch-hero{grid-template-columns:90px minmax(0,1fr);gap:16px;padding:12px 0}.watch-poster{width:90px}.watch-heading h1{font-size:27px}.watch-heading .overview{font-size:14px}.watch-resume{grid-template-columns:1fr;gap:12px}.watch-cards{grid-template-columns:repeat(2,minmax(0,1fr))}.watch-next{grid-template-columns:1fr}.watch-resume-main,.watch-preferences{padding:18px}.watch-next article{flex-wrap:wrap}.watch-seasons{grid-template-columns:repeat(2,minmax(0,1fr))}.watch-page .pagehead{margin-bottom:6px}.watch-card-body{padding:12px}}
+@media(max-width:480px){.watch-cards{grid-template-columns:1fr}.watch-art{aspect-ratio:2.2}.watch-card-body>p{min-height:0}.watch-kicker{letter-spacing:.5px}.watch-heading .watch-more .actions{flex-direction:column;align-items:stretch}.watch-browse .ghost{min-height:44px}.watch-resume .actions{flex-wrap:wrap}}
+
+.lc-editor{align-items:start;gap:24px}.lc-editor>section,.lc-editor>.lc-preview{min-width:0}.lc-editor textarea{width:100%;min-height:112px;resize:vertical;font:inherit;padding:14px;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:var(--radius)}.lc-editor .lc-steps{display:flex;gap:8px;margin-bottom:24px;flex-wrap:wrap}.lc-editor .lc-steps button{border-radius:6px;padding:10px 12px;min-height:44px}.lc-editor .lc-steps .on{color:var(--accent);border-color:var(--accent)}.lc-editor .lc-actions{gap:8px;flex-wrap:wrap}.lc-editor .lc-selected{margin:14px 0}.lc-editor .lc-selected b{font-size:13px;color:var(--muted)}.lc-editor details{margin:18px 0}.lc-editor details summary{cursor:pointer;font-weight:600;margin-bottom:12px}.lc-editor .lc-preview h2{font-size:24px}.lc-editor .lc-checks label{min-height:40px;align-items:center}.lc-editor .lc-checks input{flex-shrink:0}.lc-editor-footer{border-top:1px solid var(--line);padding-top:18px;margin-top:24px}.lc-editor .lc-intro{font-size:24px;margin:0 0 18px}.lc-empty-start{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin:22px 0}.lc-empty-start button{padding:22px;text-align:left}.lc-empty-start strong{display:block;font-size:18px;margin-bottom:8px}.lc-empty-start span{display:block;color:var(--muted);font-size:13px}@media(max-width:760px){.lc-editor{grid-template-columns:1fr}.lc-editor textarea,.lc-editor input,.lc-editor select{font-size:16px}.lc-editor .lc-steps{gap:4px}.lc-editor .lc-steps button{font-size:13px;padding:8px}}
+
+.activity-viewing{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(280px,1fr);gap:22px;align-items:start;margin-bottom:24px}.activity-viewer{display:flex;width:100%;align-items:center;gap:14px;text-align:left;border:1px solid var(--line);background:var(--panel);padding:16px;margin:0 0 10px}.activity-viewer.selected{border-color:var(--accent);background:var(--panel2)}.activity-viewer strong,.activity-viewer small{display:block}.activity-viewer strong{font-size:16px}.activity-viewer small{margin-top:4px;color:var(--muted)}.activity-viewer-mark{color:var(--accent)}.activity-viewer-state{font-size:12px;margin-left:auto;color:var(--muted)}.activity-viewer-detail{margin:0;min-width:0}.activity-viewer-detail h2{font-size:22px;margin:10px 0 18px}.activity-viewer-detail .specs{grid-template-columns:100px minmax(0,1fr)}.activity-viewer-detail summary{cursor:pointer;margin:14px 0}.activity-idle{padding:14px 18px;background:var(--panel);border-radius:var(--radius);color:var(--muted);margin-bottom:18px}.activity-idle details{margin:8px 0}.analysis-causes{padding:18px;border:1px solid var(--line);background:var(--panel);border-radius:var(--radius);margin:16px 0}.analysis-causes h2{font-size:18px;margin:0}.analysis-causes p{font-size:13px}.analysis-table .analysis-file{font-size:15px}.analysis-table .analysis-sub{overflow-wrap:anywhere}.analysis-table td{vertical-align:top}.analysis-summary-line{display:flex;gap:18px;flex-wrap:wrap;margin:14px 0}.analysis-summary-line>span{display:flex;gap:5px;align-items:baseline}.system-attention{padding:18px;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:var(--radius);margin:18px 0}.system-attention h2{font-size:19px;margin:0 0 8px}.system-attention p{margin:8px 0}.enable-advisory{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.enable-advisory>div{padding:15px;background:var(--panel2);border-radius:var(--radius)}.enable-advisory strong,.enable-advisory small{display:block}.enable-advisory small{color:var(--muted);margin-top:6px}@media(max-width:760px){.activity-viewing{grid-template-columns:1fr}.activity-viewer-state{white-space:normal}.search-tools{align-items:stretch}.search-tools label{flex-wrap:wrap;width:100%}.search-tools select,.search-tools input{max-width:100%;font-size:16px}.analysis-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.analysis-summary-line{gap:12px}}
+
+
+.mobile-search{display:none}@media(max-width:600px){header.top .mobile-search{display:inline-flex;width:40px;align-items:center;justify-content:center;font-size:22px}header.top:not(.search-open)>.search{display:none}header.top nav a{white-space:nowrap}header.top #activity{display:none}header.top .dvr-global{max-width:120px}header.top nav{padding-bottom:0;min-height:40px}header.top .topctl{gap:4px}}
+
+.watch-about-compact{display:none}@media(max-width:760px){.watch-about-wide{display:none}.watch-about-compact{display:block;margin:12px 0}.watch-about-compact summary{cursor:pointer;padding:8px 0}.watch-hero{grid-template-columns:70px minmax(0,1fr);gap:14px}.watch-poster{width:70px}}@media(max-width:600px){header.top nav{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;overflow:visible;gap:0}header.top nav a{padding:10px 4px;font-size:12px;text-align:center;white-space:normal;min-width:0}}
+@media(max-width:899px){[data-layout=theater]:has(.th-top .dvr-global.on){--th-top:100px}[data-layout=theater] .th-top{flex-wrap:wrap;padding-top:8px;padding-bottom:8px;gap:8px}[data-layout=theater] .th-top .dvr-global{order:4;max-width:100%;white-space:normal;margin-right:auto}[data-layout=theater] .th-top .dvr-global.on{flex-basis:100%;width:100%;justify-content:center}[data-layout=theater] .th-pills{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:calc(100% - 28px);border-radius:18px;gap:2px}[data-layout=theater] .th-pills a{text-align:center;padding:8px 4px;min-width:0;font-size:12px;white-space:normal}[data-layout=theater] main#main{padding-bottom:120px}[data-layout=catalog] .px-foot .dvr-global{order:5;max-width:100%;white-space:normal;flex-basis:100%}}
 </style>
 <script>
 // Theme engine. Runs in <head> before first paint so there's no flash of the
@@ -4571,14 +4585,14 @@ function classicChrome(active, inner){
   const admin = ME&&ME.is_admin ? `<a href="#/settings" class="${active==='settings'?'active':''}">Settings</a>`:"";
   const getapp = installAvailable() ? `<button class="ghost sm getappbtn" onclick="showInstall()" title="Install the ${APP_NAME} app">Get app</button>` : "";
   document.getElementById("app").innerHTML=`
-   <header class="top">
+   <header class="top${getQ()||searchFocus?' search-open':''}">
      <a href="#/" class="logo">${APP_NAME}</a>
      <nav><a href="#/" class="${active==='home'?'active':''}">Home</a><a href="#/live-tv" class="${active==='live-tv'?'active':''}">Live TV</a><a href="#/recordings" class="${active==='recordings'?'active':''}">Recordings</a><a href="#/library-channels" class="${active==='library-channels'?'active':''}">Library channels</a><a href="#/activity" class="${active==='activity'?'active':''}">Activity</a>${admin}</nav>
      <span class="spacer"></span>
      <button class="dvr-global" id="dvr-global" onclick="location.hash='#/activity'" aria-label="Recording status"></button>
      <span class="activity" id="activity" onclick="location.hash='#/activity'"></span>
      <input class="search" id="q" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
-     <div class="topctl">
+     <div class="topctl"><button class="ghost sm mobile-search" onclick="toggleMobileSearch()" aria-label="Search" aria-expanded="${!!(getQ()||searchFocus)}" aria-controls="q">⌕</button>
        <div style="position:relative">
          <button class="ghost sm lookbtn" onclick="toggleLookMenu(event)" title="Appearance — layout, theme, light or dark, poster size" aria-label="Appearance" aria-haspopup="menu"><span class="tsw"></span><span class="lookword">Appearance</span></button>
          <div class="amenu lookmenu" id="lookmenu"></div>
@@ -5126,7 +5140,7 @@ async function viewHome(generation=++PAGE_RENDER_GENERATION){
   const route=location.hash;
   const page={kind:"home",
     hubs:{continue_watching:[],next_up:[],recently_added:[]},
-    soon:{configured:false,entries:[]},libs:[],group:homeGroup(),sections:[],
+    soon:{configured:false,entries:[]},saved:[],savedPending:true,savedError:false,libs:[],group:homeGroup(),sections:[],
     hubsPending:true,previewsPending:true,soonPending:true,
     hubsError:false,previewsError:false,soonError:false};
   const current=()=>generation===PAGE_RENDER_GENERATION&&location.hash===route;
@@ -5170,6 +5184,7 @@ async function viewHome(generation=++PAGE_RENDER_GENERATION){
       return true; // even an empty roster paints the useful "No libraries" state
     }),
     region("soon",api("/coming-soon"),value=>{ page.soon=value; return !!(value.entries||[]).length; }),
+    region("saved",api("/dvr/recordings?state=done,partial"),value=>{page.saved=dvrRecordingsPage(value).rows;return page.saved.length>0;}),
   ]);
   if(!current()) return;
   setPagePhase(route,generation,"settled");
@@ -5218,13 +5233,13 @@ function classicHomeBody(p){
   let hubs=installBannerHtml(), soon="", previews="";
   // The first two rails pass watchCtx: those rows are about where you are in
   // something, so the card carries "23m left" / "watched Tuesday".
-  if(p.hubs.continue_watching.length){ hubs+=rail("Continue watching", p.hubs.continue_watching.map(i=>card(i,true)).join("")); }
-  if(p.hubs.next_up && p.hubs.next_up.length){ hubs+=rail("Next up", p.hubs.next_up.map(i=>card(i,true)).join("")); }
+  hubs+=viewingHubs(p);
+  
   if(p.hubs.recently_added.length){ hubs+=rail("Recently added", p.hubs.recently_added.map(i=>card(i)).join("")); }
   // Coming soon: what monarr expects. Absent entirely when nothing is paired
   // or monarr had nothing to say — an empty rail is worse than no rail.
   if(p.soon && p.soon.entries && p.soon.entries.length){
-    soon+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
+    soon+=rail("Coming soon · future releases", p.soon.entries.map(comingCard).join(""));
   }
   if(p.hubsError) hubs+=`<div class="hint">Home recommendations are unavailable right now.</div>`;
   if(p.previewsPending){
@@ -5242,6 +5257,7 @@ function classicHomeBody(p){
     previews+=`<div class="empty">No libraries yet.${ME.is_admin?' Add one in <a href="#/settings/libraries">Settings</a>.':''}</div>`;
   }
   return `<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
+    `<div data-home-region="saved" data-home-slot="saved">${homeSavedHtml(p)}</div>`+
     `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
     `<div data-home-region="previews" data-home-slot="previews">${previews}</div>`;
 }
@@ -5498,7 +5514,7 @@ function classicLibraryShell(m){
       <select onchange="LIB_SORT=this.value;${m.reload}">
         ${libOpt("title","Title (A–Z)",sort)}${libOpt("added","Recently added",sort)}${libOpt("recorded","Date recorded",sort)}${libOpt("year","Year",sort)}${libOpt("resolution","Resolution",sort)}</select>
       <span class="lbl" style="margin-left:8px">Show</span>
-      <select onchange="LIB_FILTER=this.value;${m.reload}">
+      <select data-library-watch-filter aria-label="Watch status" onchange="LIB_FILTER=this.value;${m.reload}">
         ${libOpt("all","Everything",LIB_FILTER)}${libOpt("unwatched","Unwatched",LIB_FILTER)}${libOpt("inprogress","In progress",LIB_FILTER)}${libOpt("watched","Watched",LIB_FILTER)}</select>
       <span class="lbl" style="margin-left:8px">Per page</span>
       <select onchange="setPerPage(this.value);libGoPage(0)">
@@ -5543,11 +5559,14 @@ async function libraryView(o){
   // Every entry here is a fresh listing — a different library, a new sort, a
   // new filter — and page 3 of a list you have just reordered is not a place.
   // Paging itself does not come through here; `libGoPage` redraws in place.
-  LIB_PAGE_AT=0;
+  LIB_PAGE_AT=0;LIB_SCOPE="";LIB_FIND="";
   const sort=o.sort;
   setOrigin(o.href,o.title);
   document.getElementById("main").innerHTML=
     layoutRegion("library","shell",{kind:"library",title:o.title,href:o.href,sort,reload:o.reload});
+  const viewLibs=(await libsCached()).filter(l=>o.libIds.some(id=>String(id)===String(l.id)));
+  if(LIB_LOAD!==gen)return;
+  document.getElementById("libbody").insertAdjacentHTML("beforebegin",libraryBrowseTools(viewLibs));
 
   let all=[], total=0;
   const draw=(done)=>{
@@ -5560,6 +5579,8 @@ async function libraryView(o){
     // the unwatched ones" — which is why an unwatched film could be missing
     // from a list of unwatched films.
     if(LIB_FILTER!=="all") items=items.filter(it=>matchWatch(it,LIB_FILTER));
+    if(LIB_SCOPE)items=items.filter(it=>String(it.library_id)===LIB_SCOPE);
+    if(LIB_FIND.trim())items=items.filter(it=>(it.title||"").toLocaleLowerCase().includes(LIB_FIND.trim().toLocaleLowerCase()));
     const shown=items.length;
     LIB_VIEW={draw, done, shown};
     const pages=libPageCount(shown);
@@ -5633,12 +5654,97 @@ async function viewCategory(key){
   });
 }
 async function viewSearch(q){
+  const generation=PAGE_RENDER_GENERATION,route=location.hash;
   layoutChrome("home",`<div class="empty">Searching…</div>`);
   const r=await api(`/search?q=${encodeURIComponent(q)}`);
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!==route)return;
   setOrigin(`#/search/${encodeURIComponent(q)}`,`Search “${q}”`);
+  SEARCH_DATA={query:q,results:r.results||[],route};
   const head=pageHead([{href:"#/",label:"Home"},{label:`Search “${q}”`}],`Results for “${q}”`);
-  document.getElementById("main").innerHTML=`${head}${grid(r.results)}`;
+  const kinds=[...new Set(SEARCH_DATA.results.map(it=>it.kind).filter(Boolean))];
+  document.getElementById("main").innerHTML=`${head}<div class="search-tools"><span id="search-result-count" class="muted" aria-live="polite"></span><label>Type <select id="search-kind" onchange="paintSearchResults()"><option value="all">All types</option>${kinds.map(k=>`<option value="${esc(k)}">${esc(k==='show'?'Series':k)}</option>`).join('')}</select></label></div><div id="search-results"></div>`;
+  paintSearchResults();
 }
+// Shared viewing surfaces use the same playback calls and track selections in
+// every layout. Administrative detail remains reachable below the watch action.
+function playItem(id){AUTOPLAY=String(id);if(location.hash===`#/item/${id}`)viewItem(id);else location.hash=`#/item/${id}`;}
+function viewingKind(p){return ["movie","episode","show","season"].includes(p.item.kind);}
+function viewingEpisodeLabel(it){
+  return [it.season_number!=null?`S${it.season_number}`:"",it.episode_number!=null?`E${it.episode_number}`:""].join(" · ");
+}
+function viewingCard(it,next=false){
+  const id=exactWireId(it),title=it.show_title||it.title;
+  const detail=it.kind==="episode"?[viewingEpisodeLabel(it),it.title].filter(Boolean).join(" · "):[it.year,it.recorded_at?`Recorded ${fmtDate(it.recorded_at)}`:""].filter(Boolean).join(" · ");
+  const pct=Math.max(0,Math.min(100,progressPct(it.watch)||0));
+  const image=it.backdrop||it.poster;
+  const playable=["movie","episode","video","audiobook"].includes(it.kind);
+  return `<article class="watch-card"><a class="watch-art" href="#/item/${id}" aria-label="Details for ${esc(title)}">${image?`<img loading="lazy" src="${esc(tok(image))}" alt="">`:`<span>${esc(title)}</span>`}</a><div class="watch-card-body"><h3><a href="#/item/${id}">${esc(title)}</a></h3><p class="muted">${esc(detail)}</p>${watchLine(it,true)}<div class="watch-progress" role="progressbar" aria-label="Watched" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}"><i style="width:${pct}%"></i></div>${playable?`<button class="${next?'ghost':'btnplay'}" onclick='playItem(${esc(JSON.stringify(id))})'>▶ ${next?'Play episode':'Resume'}</button>`:`<a class="ghost" href="#/item/${id}">Continue</a>`}</div></article>`;
+}
+function viewingHubs(p){
+  const cont=p.hubs.continue_watching||[],next=p.hubs.next_up||[];
+  const resumeIds=new Set(cont.map(exactWireId));
+  const nextRows=next.filter(it=>!resumeIds.has(exactWireId(it)));
+  return `<nav class="watch-browse" aria-label="Browse your library"><a class="ghost" href="#/category/movie">Movies</a><a class="ghost" href="#/category/show">TV</a><a class="ghost" href="#/category/book">Books</a><a class="ghost" href="#/recordings">Recordings</a></nav>`+
+    (cont.length?`<h2 class="section">Continue watching</h2><div class="watch-cards">${cont.slice(0,6).map(it=>viewingCard(it)).join("")}</div>${cont.length>6?`<details class="watch-more"><summary>More in progress (${cont.length-6})</summary><div class="watch-cards">${cont.slice(6).map(it=>viewingCard(it)).join("")}</div></details>`:""}`:"")+
+    (nextRows.length?`<h2 class="section">Next episode</h2><div class="watch-next">${nextRows.map(it=>`<article><div><h3><a href="#/item/${exactWireId(it)}">${esc(it.show_title||it.title)}</a></h3><span class="muted">${esc([viewingEpisodeLabel(it),it.title].filter(Boolean).join(" · "))}</span></div><button class="ghost" onclick='playItem(${esc(JSON.stringify(exactWireId(it)))})'>▶ Play episode</button></article>`).join("")}</div>`:"");
+}
+function viewingMore(p){
+  const it=p.item;
+  return `<details class="watch-more"><summary>More actions</summary><div class="actions">${watchControls(it)}${["movie","show","episode"].includes(it.kind)?`<button class="ghost" onclick='makeLibraryChannelFromItem(${esc(JSON.stringify(exactWireId(it)))},${esc(JSON.stringify(it.kind))},${esc(JSON.stringify(it.title))})'>Make a channel</button>`:""}${ME&&ME.is_admin?`<button class="ghost" onclick='refreshArtwork(${esc(JSON.stringify(exactWireId(it)))},this)'>Refresh artwork</button>`:""}</div></details>`;
+}
+function viewingItemBody(p){
+  const it=p.item, file=p.playable;
+  const trail=[{href:"#/",label:"Home"}].concat(NAV_ORIGIN?[NAV_ORIGIN]:[]).concat(p.ancestors.map(a=>({href:`#/item/${exactWireId(a)}`,label:a.title}))).concat([{label:it.title}]);
+  const years=p.years?`${p.years.from}${p.years.to>p.years.from?'–'+p.years.to:''}`:"";
+  const count=it.rollup&&it.rollup.leaves?`${it.rollup.watched} of ${it.rollup.leaves} watched`:"";
+  let content="";
+  if(file){
+    const duration=file.duration_ms||p.runtime||0, remaining=Math.max(0,duration-p.resume);
+    const pct=duration?Math.max(0,Math.min(100,p.resume/duration*100)):0;
+    content=`<section class="watch-resume"><div class="watch-resume-main"><span class="watch-kicker">${p.resume?'Continue watching':'Watch now'}</span><h2>${esc(it.kind==='episode'?it.title:'Watch this movie')}</h2><p class="muted">${esc([it.kind==='episode'?viewingEpisodeLabel(it):"",remaining?`${fmtDur(remaining)}${p.resume?' left':''}`:""].filter(Boolean).join(" · "))}</p>${p.resume?`<div class="watch-progress" role="progressbar" aria-label="Watched" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}"><i style="width:${pct}%"></i></div>`:""}<div class="actions"><button class="btnplay" onclick='${playCall(p,file,p.playStart)}'>▶ ${p.resume?'Resume':'Play'}${it.kind==='episode'?' episode':''}</button>${p.resume?`<button class="ghost" onclick='${playCall(p,file,0)}'>Start over</button>`:""}</div></div><div class="watch-preferences"><h3>Playback preferences</h3>${prePlayPickers(file)||'<p class="muted">The server will select the available tracks.</p>'}</div></section>`;
+  }else if(p.files.length){
+    content=`<div class="filemissing">No file is currently available. Check the library location or choose another version below.</div>`;
+  }else if(["show","season"].includes(it.kind)){
+    content=`<section class="watch-resume" id="series-continue" aria-live="polite"><p class="muted">Finding your next episode…</p></section>`;
+  }
+  if(p.children.length){
+    const seasons=p.children.some(c=>c.kind==='season');
+    content+=`<section class="watch-episodes"><h2>${esc(p.childLabel)}</h2>${seasons?`<div class="watch-seasons">${p.children.map(c=>`<a class="ghost" href="#/item/${exactWireId(c)}"><strong>${esc(c.title)}</strong><small>${c.rollup&&c.rollup.leaves?`${c.rollup.watched} of ${c.rollup.leaves} watched`:'View episodes'}</small></a>`).join("")}</div>`:`<div class="eplist">${p.children.map(episodeRow).join("")}</div>`}</section>`;
+  }
+  if(p.files.length)content+=`<details class="watch-media"><summary>Media information${p.files.length>1?` · ${p.files.length} versions`:''}</summary>${p.files.map(f=>`<section class="version"><div class="vh">${specBadges(f)}${!f.available?'<span class="missbadge">Missing</span>':p.multi?`<button class="ghost sm" onclick='${playCall(p,f,p.resume)}'>Play this version</button>`:""}</div>${specBlock(f,{pickers:false,analysis:false})}${p.multi&&f.available&&f!==file?prePlayPickers(f):""}${f.missing_path&&ME&&ME.is_admin?`<p class="problem">${esc(f.missing_path)}</p>`:""}${unprobedNote(f,it.id)}</section>`).join("")}</details>${ME&&ME.is_admin?`<details class="watch-media watch-admin"><summary>Preparation and diagnostics</summary><p class="muted">Preparation status describes this file's delivery options. A failed preparation does not by itself determine whether playback can start.</p>${p.files.map(f=>analysisFileControl(f)+dvFileActionMount(f)).join("")}</details>`:""}`;
+  return `<div class="watch-page">${pageHead(trail)}<div class="watch-hero">${it.backdrop?`<div class="watch-backdrop" style="background-image:url(${esc(tok(it.backdrop))})"></div>`:""}<div class="watch-poster">${artHtml(it)}</div><div class="watch-heading"><div class="watch-kicker">${esc([years,it.kind==='show'?'Series':it.kind,count].filter(Boolean).join(" · "))}</div><h1>${esc(it.title)}</h1>${it.overview?`<p class="overview watch-about-wide">${esc(it.overview)}</p><details class="watch-about-compact"><summary>About this title</summary><p class="overview">${esc(it.overview)}</p></details>`:""}${viewingMore(p)}</div></div>${content}</div>`;
+}
+// Fetch season summaries with bounded concurrency. Resolve by IDs, never by a
+// show's name. The hub wins when present; the fallback mirrors next-up order
+// for shows outside the hub's bounded twenty-row window.
+async function loadSeriesContinuation(p,generation){
+  const current=()=>generation===PAGE_RENDER_GENERATION&&location.hash===`#/item/${p.id}`;
+  const slot=()=>document.getElementById('series-continue');
+  try{
+    const seasons=p.children.filter(c=>c.kind==='season');
+    const parents=new Set((seasons.length?seasons:[p.item]).map(exactWireId));
+    const hubs=await api('/hubs');if(!current())return;
+    let episodeCount=p.children.filter(c=>c.kind==='episode').length;
+    let target=[...(hubs.continue_watching||[]),...(hubs.next_up||[])].find(it=>parents.has(String(it.parent_id)));
+    if(!target){
+      let episodes=p.children.filter(c=>c.kind==='episode');
+      for(let at=0;at<seasons.length;at+=3){
+        const batch=await Promise.all(seasons.slice(at,at+3).map(c=>api(`/items/${exactWireId(c)}`)));
+        if(!current())return;episodes.push(...batch.flatMap(d=>d.children||[]).filter(c=>c.kind==='episode'));
+      }
+      episodeCount=episodes.length;
+      const order=it=>(it.season_number||0)*100000+(it.episode_number||0);
+      const last=Math.max(-1,...episodes.filter(it=>it.watch&&it.watch.watched).map(order));
+      target=episodes.filter(it=>it.watch&&!it.watch.watched&&it.watch.position_ms>0).sort((a,b)=>(b.watch.updated_at||0)-(a.watch.updated_at||0))[0]
+        ||episodes.filter(it=>!(it.watch&&(it.watch.watched||it.watch.position_ms>0))&&order(it)>last).sort((a,b)=>order(a)-order(b))[0];
+    }
+    if(!current()||!slot())return;
+    if(!target){slot().innerHTML=episodeCount?'<div><h2>You’re all caught up</h2><p class="muted">Browse the seasons below to rewatch an episode.</p></div>':'<div><h2>No episodes yet</h2><p class="muted">Episodes will appear here once they have been added to the library.</p></div>';return;}
+    const duration=itemDurMs(target),resume=target.watch&&!target.watch.watched&&target.watch.position_ms>3000?target.watch.position_ms:0;
+    slot().innerHTML=`<div class="watch-resume-main"><span class="watch-kicker">${resume?'Continue watching':'Next episode'}</span><h2>${esc(target.title)}</h2><p class="muted">${esc([viewingEpisodeLabel(target),duration?`${fmtDur(Math.max(0,duration-resume))}${resume?' left':''}`:""].filter(Boolean).join(' · '))}</p>${resume&&duration?`<div class="watch-progress"><i style="width:${Math.min(100,resume/duration*100)}%"></i></div>`:""}<div class="actions"><button class="btnplay" onclick='playItem(${esc(JSON.stringify(exactWireId(target)))})'>▶ ${resume?'Resume episode':'Play episode'}</button><a class="ghost" href="#/item/${exactWireId(target)}">Episode details</a></div></div>`;
+  }catch(error){if(current()&&slot())slot().innerHTML='<div><h2>Continue watching is unavailable</h2><p class="muted">Your seasons are still available below. Open an episode to play it.</p></div>';}
+}
+
 // ---- detail helpers -------------------------------------------------------
 function fmtChannels(n){ return n===8?"7.1":n===7?"6.1":n===6?"5.1":n===2?"2.0":n===1?"Mono":(n?n+"ch":""); }
 function fmtMbps(bps){ return bps? (bps>=1000000? (bps/1000000).toFixed(bps>=10000000?0:1)+" Mb/s" : Math.round(bps/1000)+" kb/s") : ""; }
@@ -5916,7 +6022,7 @@ function trackFactRow(label, tracks, selectedIndex, chip, note, collapse=false){
   }
   return `<dt>${label}</dt><dd>${chips}${note?`<div class="langnote">${esc(note)}</div>`:""}</dd>`;
 }
-function specBlock(f){
+function specBlock(f,options={}){
   const vid=[f.video_codec&&f.video_codec.toUpperCase(),(f.width&&f.height)?`${f.width}×${f.height}`:null,(f.hdr_format||f.hdr),f.bit_depth?`${f.bit_depth}-bit`:null,fmtMbps(f.bitrate)].filter(Boolean).join(" · ");
   const file=[f.container&&f.container.toUpperCase(),fmtSize(f.size),fmtDur(f.duration_ms)].filter(Boolean).join(" · ");
   const auds=f.audio_streams||[], subs=f.subtitle_streams||[];
@@ -5959,7 +6065,7 @@ function specBlock(f){
     ${audRow}
     ${subRow}
     ${hlsRow}
-    <dt>File</dt><dd class="fn">${esc(f.filename)}${file?" · "+esc(file):""}</dd></dl>${prePlayPickers(f)}${analysis}`;
+    <dt>File</dt><dd class="fn">${esc(f.filename)}${file?" · "+esc(file):""}</dd></dl>${options.pickers===false?"":prePlayPickers(f)}${options.analysis===false?"":analysis}`;
 }
 function analysisFileControl(f){
   if(!ME||!ME.is_admin||!f.available||!f.video_codec) return "";
@@ -6562,7 +6668,9 @@ async function viewItem(id){
   const generation=PAGE_RENDER_GENERATION;
   layoutChrome("home",`<div class="empty">Loading…</div>`);
   const page=await loadItem(id);
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!==`#/item/${id}`)return;
   document.getElementById("main").innerHTML=layoutView("item",page);
+  if(["show","season"].includes(page.item.kind))loadSeriesContinuation(page,generation);
   DV_FILE_PAGE_FILES=page.files||[];
   hydrateDvFileActions(DV_FILE_PAGE_FILES).then(active=>{
     if(active&&generation===PAGE_RENDER_GENERATION&&location.hash.startsWith("#/item/")) armDvFilePoll(DV_FILE_PAGE_FILES,generation);
@@ -6579,6 +6687,7 @@ async function viewItem(id){
 }
 // Classic's item body — byte-for-byte what this app has always emitted.
 function classicItemBody(p){
+  if(viewingKind(p))return viewingItemBody(p);
   const d={files:p.files, ancestors:p.ancestors, children:p.children};
   const it=p.item, id=p.id, editable=p.editable;
   const channelBtn=["movie","show","episode"].includes(it.kind)
@@ -14650,8 +14759,8 @@ function analysisVerdictLine(value){
       `${ready} built in the last 24 hours against ${plural(claimed,'job')} picked up, with ${plural(health.lease_losses_since_start||0,'lost lease')} and ${health.attempt_limit_24h||0} out of retries. Last index built ${age}.`],
     healthy:["ready","The index queue is producing",
       `${ready} built in the last 24 hours. Last index built ${age}.`],
-    idle:["cancelled","The index queue is idle",
-      "Nothing waiting, nothing picked up and nothing built in 24 hours — either the library is fully indexed or discovery is turned off."],
+    idle:["cancelled","No index completions reported in the last 24 hours",
+      "This health sample reports no claims or completions. Queued and running counts below describe retained work and can differ from this sample."],
   }[health.verdict];
   if(!said) return "";
   const [tone,title,detail]=said;
@@ -14662,7 +14771,7 @@ function analysisSummaryCard(value,context="activity"){
   const headline=s.available===false?"Analysis status is unavailable"
     :!s.enabled?"Analysis is paused"
     :attention?`${attention} recent result${attention===1?' needs':'s need'} attention`
-    :active?`${active} analysis job${active===1?'':'s'} in progress`
+    :active?`${active} unfinished analysis job${active===1?'':'s'}`
     :s.ready?"Recent analysis results look healthy":"No recent analysis results";
   const detail=s.available===false?"Activity is still available. Refresh or open the workspace to retry analysis health separately."
     :!s.enabled?"Existing indexes still serve, but new VOD HLS indexes will not be built."
@@ -14674,7 +14783,9 @@ function analysisSummaryCard(value,context="activity"){
   return `<div class="analysis-brief">${analysisVerdictLine(value&&value.summary?value.summary:value)}<div class="analysis-brief-head"><div><h2>${esc(headline)}</h2><p>${esc(detail)}</p></div>
       <div class="analysis-actions"><a class="ghost sm" href="#/analysis">Open workspace</a>${context==="activity"?`<button class="ghost sm" onclick="openAnalysisSettings()">Settings</button>`:""}</div></div>
     <div class="analysis-brief-status">
-      <span class="analysis-state running">${active} working</span>
+      <span class="analysis-state running">${s.available===false?"—":s.running??"—"} running</span>
+      <span class="analysis-state queued">${s.available===false?"—":s.queued??"—"} queued</span>
+      <span class="analysis-state submitted">${s.available===false?"—":s.submitted??"—"} submitted</span>
       <span class="analysis-state failed">${attention} recent attention</span>
       <span class="analysis-state cancelled">${expected} recent expected</span>
       <span class="analysis-state ready">${s.ready||0} recent ready</span>
@@ -14886,14 +14997,14 @@ function paintAnalysis(snapshot){
   const rows=pageRows.map(row=>{
     const owner=row.owner_node_id||row.target_node_id||"";
     const attempt=row.attempts||0, lease=row.lease_expires_ms||0, retryAt=row.not_before_ms||0;
-    const pipeline=row.pipeline_version?` · pipeline ${esc(row.pipeline_version)}`:"";
+    
     const key=analysisRowKey(row), action=analysisAction(row), displayState=row.durable_state||row.state;
     const actionLabel={retry:"Retry",rebuild:"Rebuild",analyze_current:"Analyze current file"}[action]||"";
     const title=row.item_id?`<a data-analysis-focus="item:${esc(key)}" href="#/item/${row.item_id}">${esc(row.title||`File ${row.file_id}`)}</a>`:esc(row.title||`File ${row.file_id}`);
     const priorityLabel=({normal:"Normal",forced:"Forced",foreground:"Foreground"})[row.priority]||row.priority||"Normal";
     const triggerLabel=({admin:"Admin",background:"Background",foreground:"Foreground"})[row.trigger]||row.trigger||"Background";
     const details=[
-      ["Request",row.request_id],["Worker job",row.job_id],
+      ["File",row.file_id],["Request",row.request_id],["Worker job",row.job_id],
       ["Target node",analysisNodeDetail(nodeNames,row.target_node_id)],
       ["Owner",analysisNodeDetail(nodeNames,row.owner_node_id)],
       ["Lease",lease?(lease>snapshot.now_ms?`expires in ${Math.ceil((lease-snapshot.now_ms)/1000)}s`:"expired"):null],
@@ -14904,7 +15015,7 @@ function paintAnalysis(snapshot){
     ].filter(([,value])=>value!=null&&value!=="");
     const errorHtml=analysisErrors(row).map(error=>analysisErrorHtml(error.code,error.stage)).join("");
     return `<tr>
-      <td><span class="analysis-file">${title}</span><div class="analysis-sub">File ${row.file_id} · Priority ${esc(priorityLabel)} · Trigger ${esc(triggerLabel)}${pipeline}</div></td>
+      <td><span class="analysis-file">${title}</span><div class="analysis-sub">${esc(row.component==='skip_markers'?'Timeline markers':'Media index')}</div></td>
       <td><span class="analysis-state ${esc(displayState)}">${esc(analysisStateLabel(displayState))}</span><div class="analysis-phase">${esc(analysisPhase(row))}</div>${errorHtml}${analysisAttemptHistoryHtml(row)}
         <details class="analysis-diag" data-analysis-key="${esc(key)}"${open.has(key)?" open":""}><summary data-analysis-focus="details:${esc(key)}">Technical details</summary><div class="analysis-diag-grid">
           ${details.map(([label,value])=>`<b>${esc(label)}</b><span>${esc(value)}</span>`).join("")}
@@ -14922,11 +15033,12 @@ function paintAnalysis(snapshot){
       <div class="analysis-actions"><span class="analysis-live ${ANALYSIS_VIEW.auto?'':'paused'}" role="status" aria-live="polite">${ANALYSIS_VIEW.auto?'Summary auto-refreshing':'Summary auto-refresh paused'}</span><button class="ghost sm" data-analysis-focus="auto" aria-pressed="${ANALYSIS_VIEW.auto}" onclick="toggleAnalysisAuto()">${ANALYSIS_VIEW.auto?'Pause':'Resume'}</button><button class="ghost sm" data-analysis-focus="refresh" onclick="refreshAnalysisNow(this)">Refresh history</button><button class="ghost sm" data-analysis-focus="settings" onclick="openAnalysisSettings()">Settings</button></div></div>
     ${summaryWarning}
     ${!snapshot.enabled?`<div class="clrefusal"><b>New analysis is paused.</b> Existing VOD HLS indexes still serve. Open <button class="ghost sm" data-analysis-focus="paused-settings" onclick="openAnalysisSettings()">Analysis settings</button> to enable the queue.</div>`:""}
-    <div class="analysis-metrics"><div class="analysis-metric ${working?'warn':''}"><span class="n">${working}</span><span class="k">Working now</span></div><div class="analysis-metric ${attention?'bad':''}"><span class="n">${attention}</span><span class="k">Recent attention</span></div><div class="analysis-metric"><span class="n">${expected}</span><span class="k">Recent expected</span></div><div class="analysis-metric good"><span class="n">${counts.ready||0}</span><span class="k">Recent ready</span></div><div class="analysis-metric"><span class="n">${counts.total||0}</span><span class="k">Summary window</span></div></div>
+    <div class="analysis-metrics"><div class="analysis-metric ${working?'warn':''}"><span class="n">${counts.available===false?"—":counts.running??"—"}</span><span class="k">Running</span></div><div class="analysis-metric"><span class="n">${counts.available===false?"—":counts.queued??"—"}</span><span class="k">Queued</span></div><div class="analysis-metric ${attention?'bad':''}"><span class="n">${attention}</span><span class="k">Recent attention</span></div><div class="analysis-metric"><span class="n">${expected}</span><span class="k">Recent expected</span></div><div class="analysis-metric good"><span class="n">${counts.ready||0}</span><span class="k">Recent ready</span></div><div class="analysis-metric"><span class="n">${counts.total||0}</span><span class="k">Summary window</span></div></div>
     <div class="analysis-sub">Summary metrics include all active work and up to ${counts.terminal_window||8192} recent terminal worker results. The selected filter count below is exact across retained history.</div>
     <div class="analysis-controls"><div class="analysis-search"><input id="analysis-search" data-analysis-focus="search" aria-label="Search analysis work" placeholder="Search title, file, node id, or error…" value="${esc(ANALYSIS_VIEW.query)}" oninput="setAnalysisQuery(this.value)"></div>
-      <div class="analysis-filters">${filterButton("all","All")}${filterButton("working","Working")}${filterButton("attention","Attention")}${filterButton("expected","Expected")}${filterButton("ready","Ready")}</div>
+      <div class="analysis-filters">${filterButton("all","All")}${filterButton("working","Unfinished")}${filterButton("attention","Attention")}${filterButton("expected","Expected")}${filterButton("ready","Ready")}</div>
       ${ANALYSIS_VIEW.filter==="attention"&&pageRows.some(analysisCanRetry)?`<button class="ghost sm" data-analysis-focus="retry-page" onclick="retryFailedAnalysis()">Retry this page</button><button class="ghost sm" data-analysis-focus="reopen-all" onclick="reopenFailedAnalysis(this)">Reopen everything failed…</button>`:`<span></span>`}</div>
+    ${analysisAttentionGroups(pageRows)}
     ${rows?`<div class="analysis-table-wrap"><table class="analysis-table"><thead><tr><th scope="col">File</th><th scope="col">Analysis</th><th scope="col">Node / updated</th><th scope="col">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`
       :`<div class="empty">${ANALYSIS_VIEW.query||ANALYSIS_VIEW.filter!=="all"?"No analysis work matches these filters.":"Nothing has been queued yet. Use Analyze now on a video’s detail page."}</div>`}
     <div class="analysis-pages"><span>Showing ${shownFrom}–${shownTo} of ${filteredTotal}</span><div class="row"><label>Rows <select data-analysis-focus="page-size" onchange="setAnalysisPageSize(this.value)">${[10,25,50,100].map(size=>`<option value="${size}"${ANALYSIS_VIEW.pageSize===size?' selected':''}>${size}</option>`).join("")}</select></label><button class="ghost sm" data-analysis-focus="previous" ${ANALYSIS_VIEW.page<=1?'disabled':''} onclick="setAnalysisPage(${ANALYSIS_VIEW.page-1})">Previous</button><span>Page ${ANALYSIS_VIEW.page} of ${pages}</span><button class="ghost sm" data-analysis-focus="next" ${!snapshot.next_cursor?'disabled':''} onclick="setAnalysisPage(${ANALYSIS_VIEW.page+1})">Next</button></div></div>`;
@@ -14935,6 +15047,46 @@ function paintAnalysis(snapshot){
     if(target){ target.focus(); if(selection){try{target.setSelectionRange(selection[0],selection[1]);}catch(error){}} }
   }
 }
+let ACTIVITY_VIEWING_ID=null;
+function selectActivityViewing(id){ACTIVITY_VIEWING_ID=id;if(ACTIVITY_SNAPSHOT)paintActivityBody(ACTIVITY_SNAPSHOT,ACTIVITY_DVR.rows,ACTIVITY_DVR);}
+function activityWatchingHtml(deliveries,live,names,sessions,opened){
+  const entries=deliveries.map(de=>({key:`delivery:${de.session_id||de.request_id||[de.node_id,de.item_id,de.started_unix].join(':')}`,title:de.title||'Untitled stream',subtitle:de.user||'Viewer unavailable',de}));
+  for(const row of live||[])entries.push({key:`live:${row.session_id||row.id||[row.owner_node_id,row.user,row.channel_number].join(':')}`,title:row.programme_title||row.channel_name||'Live television',subtitle:[row.user,row.channel_name].filter(Boolean).join(' · '),live:row});
+  if(!entries.length)return '<div class="activity-idle">No viewers reported by the responding nodes.</div>';
+  const selected=entries.find(e=>e.key===ACTIVITY_VIEWING_ID)||entries[0];ACTIVITY_VIEWING_ID=selected.key;
+  const cards=entries.map(e=>`<button class="activity-viewer ${selected===e?'selected':''}" data-activity-view="${esc(e.key)}" aria-pressed="${selected===e}" onclick='selectActivityViewing(${esc(JSON.stringify(e.key))})'><span class="activity-viewer-mark" aria-hidden="true">▶</span><span><strong>${esc(e.title)}</strong><small>${esc(e.subtitle)}</small></span><span class="activity-viewer-state">${e.live?'Live TV':esc(e.de.method?.replace(/_/g,' ')||'Watching')}</span></button>`).join('');
+  const de=selected.de,row=selected.live;
+  const detail=de?`${de.item_id?`<a class="ghost sm" href="#/item/${de.item_id}">Title details</a>`:''}<dl class="specs"><dt>Viewer</dt><dd>${esc(de.user||'Unavailable')}</dd><dt>Serving node</dt><dd>${activityNodeCell(names,de.node_id)}</dd><dt>Started</dt><dd>${fmtAgo(de.started_unix)}</dd></dl>${activityStreamCell(de,sessions[de.session_id],opened)}${ME&&ME.is_admin&&de.session_id?`<button class="ghost sm" onclick='stopSession(${esc(JSON.stringify(de.session_id))})'>Stop playback</button>`:''}`
+    :`<dl class="specs"><dt>Viewer</dt><dd>${esc(row.user||'Unavailable')}</dd><dt>Channel</dt><dd>${esc([row.channel_number,row.channel_name].filter(Boolean).join(' · '))}</dd><dt>Serving node</dt><dd>${activityNodeCell(names,row.owner_node_id)}</dd><dt>State</dt><dd>${esc(row.state||'Unavailable')}</dd><dt>Duration</dt><dd>${esc(Math.round((row.age_seconds||0)/60))} minutes</dd></dl><details><summary>Delivery details</summary><p>${esc(row.encoder||'Encoder unavailable')}${row.output_height?` · ${esc(row.output_height)}p`:''}</p></details><a class="ghost sm" href="#/live-tv">Open Live TV</a>`;
+  return `<div class="activity-viewing"><div>${cards}</div><aside class="card activity-viewer-detail"><span class="watch-kicker">Watching</span><h2>${esc(selected.title)}</h2>${detail}</aside></div>`;
+}
+function analysisAttentionGroups(rows){
+  const groups=new Map();
+  for(const row of rows){for(const code of new Set(analysisErrors(row).map(e=>e.code).filter(Boolean))){groups.set(code,(groups.get(code)||0)+1);}}
+  if(!groups.size)return '';
+  return `<section class="analysis-causes"><h2>Problems on this page</h2><p class="muted">These counts cover the displayed rows. Search a cause to inspect its retained history.</p><div class="row">${[...groups].map(([code,count])=>`<button class="ghost" data-analysis-focus="cause:${esc(code)}" onclick='setAnalysisQuery(${esc(JSON.stringify(code))})'>${esc(analysisErrorInfo(code).title)} · ${count}</button>`).join('')}</div></section>`;
+}
+let SEARCH_DATA=null;
+function paintSearchResults(){
+  if(!SEARCH_DATA||location.hash!==SEARCH_DATA.route)return;
+  const {query,results}=SEARCH_DATA;
+  const scope=document.getElementById('search-kind')?.value||'all';
+  const list=scope==='all'?results:results.filter(it=>it.kind===scope);
+  const equal=it=>String(it.title||'').trim().toLocaleLowerCase()===query.trim().toLocaleLowerCase();
+  const exact=list.filter(equal),other=list.filter(it=>!equal(it));
+  const groups=[['Exact title matches',exact],...['show','movie','episode','book','audiobook','video','photo','folder'].map(kind=>[({show:'Series',movie:'Movies',episode:'Episodes',book:'Books',audiobook:'Audiobooks',video:'Videos',photo:'Photos',folder:'Folders'})[kind],other.filter(it=>it.kind===kind)])];
+  const known=new Set(groups.flatMap(([,items])=>items));const remaining=other.filter(it=>!known.has(it));if(remaining.length)groups.push(['Other results',remaining]);
+  document.getElementById('search-results').innerHTML=groups.filter(([,items])=>items.length).map(([name,items])=>`<section class="search-group"><h2>${name} <span class="muted">· ${items.length}</span></h2>${grid(items)}</section>`).join('')||'<div class="empty">No matching titles. Try another search term or choose All types.</div>';
+  document.getElementById('search-result-count').textContent=`${list.length} result${list.length===1?'':'s'}`;
+}
+function libraryBrowseTools(libs){
+  return `<div class="search-tools"><label>Library <select id="library-scope" onchange="setLibraryScope(this.value)"><option value="">All libraries in this view</option>${libs.map(l=>`<option value="${l.id}">${esc(l.name)}</option>`).join('')}</select></label><label>Find <input id="library-find" type="search" placeholder="Title…" oninput="setLibraryFind(this.value)"></label><label>Posters <select onchange="setIconSize(this.value)">${POSTER_SIZES.map(size=>`<option value="${size[0]}"${posterSize()===size[0]?' selected':''}>${esc(size[1])}</option>`).join('')}</select></label><button class="ghost sm" onclick="clearLibraryBrowse()">Clear filters</button></div>`;
+}
+let LIB_SCOPE='',LIB_FIND='';
+function setLibraryScope(value){LIB_SCOPE=value;LIB_PAGE_AT=0;if(LIB_VIEW)LIB_VIEW.draw(LIB_VIEW.done);}
+function setLibraryFind(value){LIB_FIND=value;LIB_PAGE_AT=0;if(LIB_VIEW)LIB_VIEW.draw(LIB_VIEW.done);}
+function clearLibraryBrowse(){LIB_SCOPE='';LIB_FIND='';LIB_FILTER='all';LIB_PAGE_AT=0;for(const id of ['library-scope','library-find']){const el=document.getElementById(id);if(el)el.value='';}document.querySelectorAll('[data-library-watch-filter]').forEach(el=>el.value='all');if(LIB_VIEW)LIB_VIEW.draw(LIB_VIEW.done);}
+
 let ACTIVITY_DETAIL_BUSY=0, ACTIVITY_SNAPSHOT=null;
 const ACTIVITY_DVR={rows:[],next:null,loaded:false,error:null,loading:false};
 const DVR_SHARED={overview:null,error:null,receivedAt:0,busy:null,queued:false,timer:null,
@@ -15323,28 +15475,18 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
   paintActivity(detailActivitySummary(d,dels,recording));
   const missing=activityNodeFailures(d);
   const nodeNames=d.node_hostnames||{};
-  const attributed=dels.some(de=>de.node_id);
   const sessionsById=Object.fromEntries((d.sessions||[]).map(se=>[se.id,se]));
   // Disclosures the reader opened survive the repaint. `#main` is read here,
   // before the new markup replaces it, and nothing else on this page is.
   const m=document.getElementById("main"); if(!m) return;
   const dvrUi=dvrRememberUi(m);
+  const activityFocus=document.activeElement?.dataset?.activityView;
   const open=new Set([...m.querySelectorAll("details.stream-diag[open]")].map(el=>el.dataset.stream));
   // And the disclosure a keyboard reader is standing on: `innerHTML=` below
   // destroys the focused summary, so it is found again after the paint.
   const focusedDiag=document.activeElement&&document.activeElement.closest
     ?document.activeElement.closest("details.stream-diag"):null;
   const focusKey=focusedDiag?focusedDiag.dataset.stream:null;
-  const rows=dels.map(de=>{
-    const se=de.session_id?sessionsById[de.session_id]:null;
-    return `<tr>
-      <td><b><a href="#/item/${de.item_id}">${esc(de.title)}</a></b></td>
-      <td>${esc(de.user)}</td>
-      ${attributed?`<td>${activityNodeCell(nodeNames,de.node_id)}</td>`:""}
-      <td class="stream-cell">${activityStreamCell(de,se,open)}</td>
-      <td class="muted">${fmtAgo(de.started_unix)}${de.idle_seconds>30?`<div>idle ${Math.round(de.idle_seconds)}s</div>`:''}</td>
-      <td style="text-align:right">${(ME&&ME.is_admin&&de.session_id)?`<button class="ghost sm" onclick="stopSession(${esc(JSON.stringify(de.session_id))})">Stop</button>`:''}</td></tr>`;
-  }).join("");
   const scans=d.scans.map(sc=>`<tr><td style="width:200px"><b>${esc(sc.library)}</b></td><td class="muted">${statusText(sc.status)}</td></tr>`).join("");
   const t=d.trakt||{};
   const trakt = t.configured
@@ -15381,26 +15523,23 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
       <td style="text-align:right">${ME&&ME.is_admin?`<button class="ghost sm" onclick="stopOfflinePackage(${esc(JSON.stringify(ow.id))})">Stop</button>`:''}</td></tr>`;
   }).join("");
   m.innerHTML=`<div class="dvr-page-head"><div><h1>Activity</h1><p class="sub">What’s playing, recording and happening on your server.</p></div></div>
+    <h2 class="section">Happening now · Watching</h2>
+    ${missing.length?`<div class="clrefusal" role="status"><b>Activity is incomplete</b> ${esc(missing.map(node=>activityNodeFailureText(node,nodeNames)).join("; "))}. Viewers on these nodes may be missing.</div>`:""}
+    ${activityWatchingHtml(dels,d.live_tv,nodeNames,sessionsById,open)}
     ${dvrActivityRows(recording,nodeNames,dvrState)}
-    <h2 class="section" style="margin-top:24px">Now playing</h2>
-    ${missing.length?`<div class="clrefusal" role="status" aria-live="polite"><b>Activity is incomplete</b>
-      ${esc(missing.map(node=>activityNodeFailureText(node,nodeNames)).join("; "))}. Streams on those nodes may be missing from this page.</div>`:""}
-    ${dels.length
-      ? `<table class="np"><thead><tr><th>Title</th><th>User</th>${attributed?"<th>Node</th>":""}<th>Stream</th><th>Started</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
-      : `<div class="empty">Nothing streaming right now. Every delivery is listed here — direct play, remux and both HLS kinds.</div>`}
-    ${liveTvActivityRows(d.live_tv,nodeNames)}
     ${d.analysis?`<h2 class="section">Content analysis</h2>${analysisSummaryCard(d.analysis,"activity")}${analysisLiveProgress(d.analysis,nodeNames)}`:""}
-    <h2 class="section">Pre-transcoding</h2>
-    ${produce}
-    <h2 class="section">Offline downloads</h2>
+    ${p?`<h2 class="section">Preparing media</h2>${produce}`:""}
+    ${offline.length
+      ? `<h2 class="section">Offline downloads</h2>`:""}
     ${offline.length
       ? `<table><thead><tr><th>Title</th><th>Profile</th><th>Work</th><th>Progress</th><th>Requested</th><th></th></tr></thead><tbody>${offlineRows}</tbody></table>`
-      : `<div class="empty">No offline packages are being prepared or sent right now.</div>`}
-    <h2 class="section">Library</h2>
-    ${d.scans.length? `<table><tbody>${scans}</tbody></table>` : `<div class="empty">No libraries yet.</div>`}
+      : ""}
+    ${d.scans.length? `<h2 class="section">Library scans</h2><table><tbody>${scans}</tbody></table>` : ""}
+    <div class="activity-idle">${[!d.scans.length?"No scans running":"",!p?"No media preparation running":"",!offline.length?"No downloads in progress":""].filter(Boolean).join(" · ")}</div>
     <h2 class="section">Trakt</h2>
     <div class="card">${trakt}</div>`;
   dvrRestoreUi(m,dvrUi);
+  if(activityFocus)[...m.querySelectorAll("[data-activity-view]")].find(el=>el.dataset.activityView===activityFocus)?.focus({preventScroll:true});
   if(focusKey!=null){
     const again=[...m.querySelectorAll("details.stream-diag")].find(el=>el.dataset.stream===focusKey);
     const summary=again&&again.querySelector("summary");
@@ -15545,7 +15684,7 @@ function currentScanStatus(st,lastScanAt){
 }
 function statusText(st,lastScanAt){
   st=currentScanStatus(st,lastScanAt);
-  if(!st) return "idle";
+  if(!st) return lastScanAt?`Last scan ${fmtAgo(lastScanAt)} · result unavailable`:"No scan result available";
   if(st.running){
     if(st.phase==="enriching") return "fetching metadata…";
     const p=st.progress;
@@ -16283,7 +16422,7 @@ function playbackPanel(settings){
   const vodMaterialize=Number(settings.vod_materialize_budget_secs)||30;
   const vodBlockedGets=Number(settings.vod_blocked_get_cap)||64;
   const active=SERVER&&Number.isFinite(SERVER.active_transcodes)?`<span class="pill">${SERVER.active_transcodes} active stream${SERVER.active_transcodes===1?"":"s"}</span>`:"";
-  const defaults=setCard(`${cardHead("Defaults for every player","Applied on web, Apple and Android when a title has more than one track. Anime dual-audio still prefers the original audio with subtitles.")}
+  const defaults=setCard(`${cardHead("Defaults for every player","All players · Applies to new playback on web, Apple and Android. Anime dual-audio still prefers the original audio with subtitles.")}
       <div class="setfields">
         <div><label for="pal">Audio language</label><select id="pal">${langOpts(settings.default_audio_lang)}</select></div>
         <div><label for="psl">Subtitle language</label><select id="psl">${langOpts(settings.default_sub_lang)}</select></div>
@@ -16294,10 +16433,10 @@ function playbackPanel(settings){
       </div>
       <div class="err" id="perr"></div>
       ${setCardFoot("savePlaybackDefaults")}`);
-  const streaming=setCard(`${cardHead("Streaming","Server-side delivery. Changes apply to the next session, not the ones playing now.",active)}
+  const streaming=setCard(`${cardHead("Streaming","Server delivery · Changes apply to new sessions. Existing playback keeps its current settings.",active)}
       ${togRow("pvod","VOD HLS — a fixed, seekable timeline","Preferred. Needs the file's analysis index; schedules and queue health are in Analysis.",settings.vod_presentation)}
       ${togRow("pvlr","Fall back to Live HLS when a VOD prerequisite is missing","The growing recovery stream. Off means a title without an index refuses to start.",settings.vod_live_recovery)}
-      ${togRow("pabr","Adjust Auto quality while playing","Off keeps the server's first Auto choice and the full manual quality menu, but makes no client-side rung changes or supply-stall restart. Off is the default until the Auto acceptance week is complete.",settings.playback_auto_abr)}
+      ${togRow("pabr","Adjust Auto quality while playing","Off keeps the server's first Auto choice and the full manual quality menu, but makes no client-side rung changes or supply-stall restart. Enable it to let Auto respond to changing playback conditions.",settings.playback_auto_abr)}
       <div class="setfields">
         <div><label for="pvws">VOD working set</label><select id="pvws" style="min-width:190px">${presetOpts([[String(2*1024**3),"2 GB"],[String(4*1024**3),"4 GB"],[String(8*1024**3),"8 GB — recommended"],[String(16*1024**3),"16 GB"],[String(32*1024**3),"32 GB"]],vodWorking)}</select></div>
         <div><label for="pvmb">Producer deadline</label><select id="pvmb" style="min-width:190px">${presetOpts([["30","30 seconds — recommended"],["45","45 seconds"],["60","60 seconds"]],vodMaterialize,v=>`${v} seconds`)}</select></div>
@@ -16322,7 +16461,7 @@ function playbackPanel(settings){
       ${togRow("autonext","Auto-play the next episode when one finishes","",autoNextOn(),'onchange="setAutoNext(this.checked)"')}
       <div class="tog"><span>Measured playback limits<small>When an original stream loses visible frames, this browser remembers that exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets <b>Auto</b> transcode it next time instead of stuttering first. A measurement expires after 30 days; <b>Quality → Original</b> always bypasses it.</small></span></div>
       <div class="row" id="dlrow">${decodeLimitsSummary()}</div>`,{local:true});
-  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${streaming}${local}`;
+  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${local}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}</details>`;
 }
 // Live TV owns its own media element and capability. It never enters PLAYER,
 // file progress, playback-control, watched state, autoskip, or Trakt.
@@ -18387,6 +18526,33 @@ function webHlsStartupRecoveryCard(){
       <p class="devcheck-note">Advisory only. Native-HLS playback continues to use the platform player; this card describes the hls.js/MSE path.</p>
       </div></details>`);
 }
+function uiEnableAdvisory(){
+  const browser=typeof CSS!=='undefined'&&CSS.supports('display','grid')&&typeof fetch==='function';
+  const libs=SETTINGS_DATA&&SETTINGS_DATA.libs;
+  const row=(title,state,detail)=>`<div><strong>${esc(title)} · ${esc(state)}</strong><small>${esc(detail)}</small></div>`;
+  return `<section class="card" id="ui-enable"><h2>Enable</h2><p>The updated browsing, continuation and activity layouts are enabled in this build. They need no rollout flag.</p><div class="enable-advisory">${row('Browser support',browser?'Met':'Not confirmed','Responsive layout and API support. This observation is advisory.')}${row('Signed-in account',ME?'Met':'Not confirmed','Watch state and recording visibility use the signed-in account.')}${row('Library data',Array.isArray(libs)?libs.length?'Available':'No libraries configured':'Not loaded','Readable files and accurate metadata make continuation and preview useful. Missing data is shown in context.')}${row('Playback and recording','Your saved choices','Use the controls below to enable recording, channel playback or quality handoff. Readiness results never override your choice.')}</div><p class="hint">Advisory only: unmet or unknown checks do not hide features or disable enable switches. Existing authorization, file availability and operational safety rules still apply.</p><nav class="watch-browse" aria-label="Enable controls"><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-recording')?.scrollIntoView({behavior:'smooth',block:'start'})">Recording ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-channels')?.scrollIntoView({behavior:'smooth',block:'start'})">Library channels ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-quality')?.scrollIntoView({behavior:'smooth',block:'start'})">Quality handoff ↓</a></nav></section>`;
+}
+function systemAttentionHtml(sys){
+  const storage=sys.storage||{}, mounts=(storage.mounts||[]).filter(m=>m.read_bps==null||m.cache_suspect);
+  const messages=mounts.map(m=>`<p><b>${esc((m.roots||[]).join(', ')||'Storage location')}</b><br>${esc(m.note||'No current read measurement is available.')} ${storage.measured_at?`<span class="muted">Observed ${fmtAgo(storage.measured_at)}.</span>`:''}</p>`);
+  if(!sys.ffmpeg_version)messages.push('<p><b>Media tools unavailable.</b> Scanning and transcoding need the configured FFmpeg executable.</p>');
+  if(sys.tone_map&&!sys.tone_map.ran&&sys.tone_map.verdicts?.some(v=>v.rejected))messages.push(`<p><b>HDR processing has unverified capabilities.</b> ${esc(sys.tone_map.verdicts.find(v=>v.rejected)?.rejected||'See the capability details below.')}</p>`);
+  return messages.length?`<section class="system-attention"><h2>Needs attention on this node</h2>${messages.join('')}<div class="row"><a class="ghost sm" href="#/settings/libraries">Review library locations</a><a class="ghost sm" href="#/settings/cluster">Cluster health</a></div></section>`:'';
+}
+function homeSavedHtml(p){
+  const rows=p.saved||[];
+  if(p.savedPending)return '';
+  if(p.savedError)return '<p class="hint">Recent recording history is unavailable. <a href="#/recordings/saved">Open recordings</a></p>';
+  if(!rows.length)return '';
+  return `<h2 class="section">Recently recorded <a class="muted" href="#/recordings/saved">· View all</a></h2><div class="watch-cards">${rows.slice(0,3).map(row=>`<article class="dvr-saved-card"><a class="dvr-saved-art" href="#/recordings/saved?selected=${encodeURIComponent(row.id)}"><small>${esc([row.guide_number,row.channel_name||'Recorded television'].filter(Boolean).join(' · '))}</small><strong>${esc(row.title)}</strong></a><div class="dvr-saved-body">${dvrStatusMarkup(dvrSavedLabel(row),row.state==='partial'?'warn':'done')}<p>${esc(new Date(row.airing_start*1000).toLocaleString())}</p>${row.item_id&&row.file_id?`<button class="ghost" onclick='playItem(${esc(JSON.stringify(String(row.item_id)))})'>▶ Watch recording</button>`:`<a class="ghost" href="#/recordings/saved?selected=${encodeURIComponent(row.id)}">Recording details</a>`}</div></article>`).join('')}</div>`;
+}
+function toggleMobileSearch(){
+  const top=document.querySelector('header.top');if(!top)return;
+  const open=!top.classList.contains('search-open');top.classList.toggle('search-open',open);
+  const button=top.querySelector('.mobile-search');if(button)button.setAttribute('aria-expanded',String(open));
+  if(open)document.getElementById('q')?.focus();
+}
+
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
     <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner and guide</span></a>
@@ -18418,10 +18584,10 @@ function developerPanel(settings,readiness){
       ${togRow("phs","Typeless sliding HLS","Changes the playlist format for new sessions only.",settings.hls_typeless_sliding)}
       <div class="err" id="dxerr" role="alert"></div>${setCardFoot("saveExperimental")}`);
   return `${setHead("Developer","Compatibility controls, experimental playback and device diagnostics.")}
-      ${destinations}
-      <div class="setsection"><h2>Recording</h2><p>Explicit enablement for capturing the tuner to a disk, with advisory deployment facts.</p></div>${dvrCard(settings,readiness)}
-      <div class="setsection"><h2>Library channels</h2><p>Explicit playback enablement with advisory deployment facts.</p></div>${libraryChannels}
-      <div class="setsection"><h2>Prepared quality handoff</h2><p>Explicit server and browser enablement with advisory safety evidence.</p></div>${preparedQualityCard(settings,readiness)}${browser}
+      ${destinations}${uiEnableAdvisory()}
+      <div class="setsection" id="enable-recording"><h2>Recording</h2><p>Explicit enablement for capturing the tuner to a disk, with advisory deployment facts.</p></div>${dvrCard(settings,readiness)}
+      <div class="setsection" id="enable-channels"><h2>Library channels</h2><p>Explicit playback enablement with advisory deployment facts.</p></div>${libraryChannels}
+      <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Explicit server and browser enablement with advisory safety evidence.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection"><h2>Playback surface contract</h2><p>Advisory verification status for the one fault contract every client renders. Nothing here is a switch.</p></div>${playbackSurfaceReadinessCard()}
       <div class="setsection"><h2>Web HLS startup recovery</h2><p>Always-on manifest recovery with advisory browser and server readiness.</p></div>${webHlsStartupRecoveryCard()}
       <div class="setsection"><h2>Compatibility</h2><p>Native server and protocol controls for compatible playback clients.</p></div>${windowsServerCard(settings,readiness)}${protocol}
@@ -18931,15 +19097,15 @@ function systemPanel(sys,playbackEvents){
   const enc=sys.encoders||{};
   const pills=[["NVENC",enc.nvenc],["QuickSync",enc.qsv],["VA-API",enc.vaapi],["VideoToolbox",enc.videotoolbox]]
     .map(([n,ok])=>`<span class="pill" style="${ok?'color:var(--good);border-color:var(--good)':''}">${n} ${ok?'✓':'—'}</span>`).join(" ");
-  return `${setHead("System",`${esc(sys.name)} · ${APP_NAME} ${esc(sys.version)}${buildTag(sys)} · up ${fmtUptime(sys.uptime_seconds)}`,pills)}<div class="card"><h2 class="section" style="margin-top:0">Server</h2>
+  return `${setHead("System",`${esc(sys.name)} · ${APP_NAME} ${esc(sys.version)}${buildTag(sys)} · up ${fmtUptime(sys.uptime_seconds)}`,pills)}${systemAttentionHtml(sys)}<div class="card"><h2 class="section" style="margin-top:0">This node</h2>
       <dl class="kvgrid system-grid">
         <dt>Data dir</dt><dd>${esc(sys.data_dir)}</dd>
         <dt>ffmpeg</dt><dd>${sys.ffmpeg_version?esc(sys.ffmpeg_version):`<span style="color:var(--bad)">not found at \`${esc(sys.ffmpeg)}\` — scanning and transcoding will fail</span>`}</dd>
         <dt>Transcoder</dt><dd>${esc(sys.encoder_selected)} <span class="muted">(preference: ${esc(sys.hwaccel_pref)})</span></dd>
         <dt>HDR tone-map</dt><dd>${toneMapHtml(sys.tone_map)}</dd>
         <dt>Storage</dt><dd>${storageHtml(sys.storage)}</dd>
-        <dt>Right now</dt><dd><div class="system-now">
-          <div class="system-now-counts">${sys.active_transcodes} active stream${sys.active_transcodes===1?'':'s'} · ${sys.libraries} librar${sys.libraries===1?'y':'ies'} · ${sys.users} user${sys.users===1?'':'s'}</div>
+        <dt>On this node</dt><dd><div class="system-now">
+          <div class="system-now-counts">${sys.active_transcodes} managed transcode/remux session${sys.active_transcodes===1?'':'s'} · ${sys.libraries} librar${sys.libraries===1?'y':'ies'} · ${sys.users} user${sys.users===1?'':'s'}</div>
         </div></dd>
         <dt>Waiting fetches</dt><dd>${blockedGetsHtml(sys.blocked_gets)}</dd>
       </dl></div>
@@ -19681,6 +19847,7 @@ function clusterPanel(d){
     <div class="clmetric"><strong>${reachable} / ${nodes.length}</strong><span>Fresh heartbeats</span></div>
     <div class="clmetric"><strong>${capacity?`${capacity.voting_nodes} · q${capacity.voting_quorum}`:"—"}</strong><span>Voters · quorum</span></div>`:""}</div>
     ${recoveryRequired?operations:""}
+    ${clustered?`<section class="cluster-card"><div id="cluster-operations">${clusterOperationsCard(d.clusterOps)}</div></section>`:""}
     <div class="cluster-board${roomForRoster?"":" clsolo"}"><div class="clcolumn">${clusterDatabasePanel(cluster,replication,capacity,d.clusterOps)}
       ${clustered?`<section class="cluster-card"><div class="clophead"><div><h3>Maintenance</h3>
         <p>Every action this screen can take, with its precondition already evaluated.</p></div></div>
@@ -19691,7 +19858,7 @@ function clusterPanel(d){
         <div class="row">${nodes.length?`<button class="ghost sm" id="clnodes-toggle" aria-controls="cluster-node-list" aria-expanded="true" onclick="toggleClusterNodes(this)">Collapse all</button>`:""}<button class="ghost sm" onclick="retryCluster()">Refresh nodes</button></div></div>
         ${roster}${statusFailure?`<div class="empty">The committed roster could not be read from this node.</div>
         <div class="row" style="margin-top:12px"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}</section>
-        ${clustered?`<section class="cluster-card"><div id="cluster-operations">${clusterOperationsCard(d.clusterOps)}</div></section>`:""}</div>`:""}</div>
+        </div>`:""}</div>
     ${clusterTroubleshootingPanel(cluster,d.clusterOps)}${clusterTransportRecoveryCard(d.developerReadiness)}</div>`;
 }
 function toggleClusterNodes(btn){
@@ -20811,10 +20978,10 @@ function catalogHomeBody(p){
   let hubs=installBannerHtml(), soon="", previews="";
   // watchCtx on the first two rails: those rows are about where you are in
   // something, so the card carries "23m left · ends ~10:45 PM".
-  if(hub("continue_watching").length) hubs+=rail("Continue watching", hub("continue_watching").map(i=>card(i,true)).join(""));
-  if(hub("next_up").length)           hubs+=rail("Next up",           hub("next_up").map(i=>card(i,true)).join(""));
+  hubs+=viewingHubs(p);
+  
   if(hub("recently_added").length)    hubs+=rail("Recently added",    hub("recently_added").map(i=>card(i)).join(""));
-  if(p.soon&&p.soon.entries&&p.soon.entries.length) soon+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
+  if(p.soon&&p.soon.entries&&p.soon.entries.length) soon+=rail("Coming soon · future releases", p.soon.entries.map(comingCard).join(""));
 
   if(p.hubsError) hubs+=`<div class="hint">Home recommendations are unavailable right now.</div>`;
   if(p.previewsPending){
@@ -20844,6 +21011,7 @@ function catalogHomeBody(p){
     previews+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings/libraries">Settings</a>.':""}</div>`;
   }
   return `<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
+    `<div data-home-region="saved" data-home-slot="saved">${homeSavedHtml(p)}</div>`+
     `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
     `<div data-home-region="previews" data-home-slot="previews">${previews}</div>`;
 }
@@ -21007,7 +21175,7 @@ function catalogLibraryShell(m){
       <select aria-label="Sort" onchange="LIB_SORT=this.value;${m.reload}">
         ${libOpt("title","Title (A–Z)",sort)}${libOpt("added","Recently added",sort)}${libOpt("recorded","Date recorded",sort)}${libOpt("year","Year",sort)}${libOpt("resolution","Resolution",sort)}</select>
       <span class="lbl" style="margin-left:8px">Show</span>
-      <select aria-label="Show" onchange="LIB_FILTER=this.value;${m.reload}">
+      <select data-library-watch-filter aria-label="Show" onchange="LIB_FILTER=this.value;${m.reload}">
         ${libOpt("all","Everything",LIB_FILTER)}${libOpt("unwatched","Unwatched",LIB_FILTER)}${libOpt("inprogress","In progress",LIB_FILTER)}${libOpt("watched","Watched",LIB_FILTER)}</select>
       <span class="lbl" style="margin-left:8px">Per page</span>
       <select aria-label="Per page" onchange="setPerPage(this.value);libGoPage(0)">
@@ -21043,6 +21211,7 @@ function catalogLibraryShell(m){
 // is on the page; the file-missing warning stays WITH the play lockup because
 // it is the answer to "can I play this", not a footnote.
 function catalogItemBody(p){
+  if(viewingKind(p))return viewingItemBody(p);
   const d={files:p.files, ancestors:p.ancestors, children:p.children};
   const it=p.item, id=p.id, editable=p.editable;
 
@@ -21415,12 +21584,12 @@ function theaterHomeBody(p){
 
   // watchCtx on the first two rails: those rows are about where you are in
   // something, so the card carries "23m left · ends ~10:45 PM".
-  if(hub("continue_watching").length) hubs+=rail("Continue watching", hub("continue_watching").map(i=>card(i,true)).join(""));
-  if(hub("next_up").length)           hubs+=rail("Next up",           hub("next_up").map(i=>card(i,true)).join(""));
+  hubs+=viewingHubs(p);
+  
   if(hub("recently_added").length)    hubs+=rail("Recently added",    hub("recently_added").map(i=>card(i)).join(""));
   // Coming soon: absent entirely when nothing is paired or monarr had nothing
   // to say — an empty rail is worse than no rail.
-  if(p.soon&&p.soon.entries&&p.soon.entries.length) soon+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
+  if(p.soon&&p.soon.entries&&p.soon.entries.length) soon+=rail("Coming soon · future releases", p.soon.entries.map(comingCard).join(""));
 
   if(p.hubsError) hubs+=`<div class="hint">Home recommendations are unavailable right now.</div>`;
   if(p.previewsPending){
@@ -21450,6 +21619,7 @@ function theaterHomeBody(p){
   }
   return `<div data-home-region="hubs" data-home-slot="hero">${hero}</div>`+
     `<div class="th-rails"><div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
+    `<div data-home-region="saved" data-home-slot="saved">${homeSavedHtml(p)}</div>`+
     `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
     `<div data-home-region="previews" data-home-slot="previews">${previews}</div></div>`;
 }
@@ -21485,7 +21655,7 @@ function theaterLibraryShell(m){
         <select aria-label="Sort" onchange="LIB_SORT=this.value;${m.reload}">
           ${libOpt("title","Title (A–Z)",sort)}${libOpt("added","Recently added",sort)}${libOpt("recorded","Date recorded",sort)}${libOpt("year","Year",sort)}${libOpt("resolution","Resolution",sort)}</select></span>
       <span class="th-cpair"><span class="lbl">Show</span>
-        <select aria-label="Show" onchange="LIB_FILTER=this.value;${m.reload}">
+        <select data-library-watch-filter aria-label="Show" onchange="LIB_FILTER=this.value;${m.reload}">
           ${libOpt("all","Everything",LIB_FILTER)}${libOpt("unwatched","Unwatched",LIB_FILTER)}${libOpt("inprogress","In progress",LIB_FILTER)}${libOpt("watched","Watched",LIB_FILTER)}</select></span>
       <span class="th-cpair"><span class="lbl">Per page</span>
         <select aria-label="Per page" onchange="setPerPage(this.value);libGoPage(0)">
@@ -21513,6 +21683,7 @@ function theaterLibraryShell(m){
 // the play lockup because it is the answer to "can I play this", not a
 // footnote.
 function theaterItemBody(p){
+  if(viewingKind(p))return viewingItemBody(p);
   const it=p.item;
 
   // Admin affordances. .th-admin is the hook the television surface hides them
@@ -22159,11 +22330,11 @@ async function refreshLibraryChannels(generation){
 }
 function libraryChannelsPaint(){
   const main=document.getElementById("main");if(!main)return;
-  if(LIBRARY_CHANNELS.editor){main.innerHTML=libraryChannelEditorHtml();return;}
+  if(LIBRARY_CHANNELS.editor){lcPaintEditor(main);return;}
   const channels=LIBRARY_CHANNELS.channels||[];
   const tools=`<button class="primary" onclick="openLibraryChannelEditor()">Create channel</button>${ME&&ME.is_admin?`<button class="ghost" onclick="toggleLibraryChannelManagement()">${LIBRARY_CHANNELS.management?'Leave management':'Manage all channels'}</button>`:""}`;
   if(!channels.length){
-    main.innerHTML=`${setHead("Library channels","Turn movies and episodes into a shared, always-on schedule.",tools)}<div class="empty">No Library channels yet.<br>Create one from a subject, a library, or selected titles. No tuner, metadata key, or AI service is required.</div>`;
+    main.innerHTML=`${setHead("Library channels","Turn movies and episodes into a shared, always-on schedule.",tools)}<div class="empty">No Library channels yet.<br>Start with an idea, then preview what will play.</div><div class="lc-empty-start">${[["space","Space documentaries","Explore your documentary collection"],["standup","Stand-up comedy","Comedy specials, ready to tune into"],["all","Your whole library","A rotation of titles you choose"]].map(([id,title,detail])=>`<button class="ghost" onclick="openLibraryChannelEditor().then(()=>lcPreset('${id}'))"><strong>${title}</strong><span>${detail}</span></button>`).join("")}</div>`;
     return;
   }
   const cards=channels.map(channel=>{
@@ -22194,10 +22365,18 @@ async function openLibraryChannelEditor(id=null){
   LIBRARY_CHANNELS.draft=draft;LIBRARY_CHANNELS.editor=true;
   try{LIBRARY_CHANNELS.libs=await api("/libraries");}catch(e){LIBRARY_CHANNELS.libs=[];}
   libraryChannelsPaint();
+  const selected=[...new Set(['include_item_ids','include_show_ids','exclude_item_ids','exclude_show_ids'].flatMap(key=>draft.recipe[key]||[]).map(String))];
+  draft.titleNames=draft.titleNames||{};
+  for(let at=0;at<selected.length;at+=4){
+    await Promise.allSettled(selected.slice(at,at+4).filter(key=>!draft.titleNames[key]).map(async key=>{
+      const result=await api(`/items/${encodeURIComponent(key)}`);draft.titleNames[key]=result.item.title;
+    }));
+    if(LIBRARY_CHANNELS.draft!==draft||!LIBRARY_CHANNELS.editor)return;
+  }
   if(LIBRARY_CHANNELS.draft.subjectPreview&&LIBRARY_CHANNELS.draft.subjectRecipe===JSON.stringify(LIBRARY_CHANNELS.draft.recipe)){
     const request=(LIBRARY_CHANNELS.previewRequest||0)+1;LIBRARY_CHANNELS.previewRequest=request;
     lcPollSubject(LIBRARY_CHANNELS.draft,request);
-  }else await previewLibraryChannel(false);
+  }else if(draft.id||draft.recipe.subject||draft.recipe.match_all_in_scope||draft.recipe.include_item_ids.length||draft.recipe.include_show_ids.length)await previewLibraryChannel(false);
   libraryChannelsPaint();
 }
 function closeLibraryChannelEditor(){
@@ -22236,7 +22415,13 @@ function lcReadEditor(){
   if(touched)draft.dirty=true;
   saveLibraryChannelDraft();
 }
-function lcStep(step){lcReadEditor();LIBRARY_CHANNELS.draft.step=step;saveLibraryChannelDraft();libraryChannelsPaint();}
+function lcStep(step){
+  lcReadEditor();const draft=LIBRARY_CHANNELS.draft;
+  if(LibraryChannelCore.STEPS.indexOf(step)>LibraryChannelCore.STEPS.indexOf(draft.step)){
+    draft.showValidation=true;if(Object.keys(lcEditorErrors(draft)).length){libraryChannelsPaint();return;}
+  }
+  draft.step=step;draft.showValidation=false;saveLibraryChannelDraft();libraryChannelsPaint();
+}
 async function previewLibraryChannel(paint=true){
   lcReadEditor();const draft=LIBRARY_CHANNELS.draft;if(!draft)return;
   const request=(LIBRARY_CHANNELS.previewRequest||0)+1;LIBRARY_CHANNELS.previewRequest=request;
@@ -22245,18 +22430,19 @@ async function previewLibraryChannel(paint=true){
     if(LIBRARY_CHANNELS.draft!==draft||LIBRARY_CHANNELS.previewRequest!==request)return false;
     lcReadEditor();return JSON.stringify(draft.recipe)===recipe;
   };
-  draft.preview=null;draft.previewError=null;
+  draft.preview=null;draft.previewError=null;draft.previewBusy=true;
+  if(paint)libraryChannelsPaint();
   try{
     if(draft.recipe.subject){
       const preview=await api("/library-channels/subject-previews",{method:"POST",body:{recipe:JSON.parse(recipe),request_id:newRequestId(),preview_seed:seed||draft.subjectPreview?.preview_seed||null}});
-      if(!current())return;draft.subjectSaved=false;draft.subjectPreview=preview;draft.subjectRecipe=recipe;
+      if(!current()){if(LIBRARY_CHANNELS.previewRequest===request)draft.previewBusy=false;return;}draft.previewBusy=false;draft.subjectSaved=false;draft.subjectPreview=preview;draft.subjectRecipe=recipe;
       saveLibraryChannelDraft();if(paint)libraryChannelsPaint();lcPollSubject(draft,request);return;
     }
     draft.subjectPreview=null;
     const preview=await api("/library-channels/preview",{method:"POST",body:{recipe:JSON.parse(recipe),limit:50,preview_seed:seed}});
-    if(!current())return;draft.preview=preview;
+    if(!current()){if(LIBRARY_CHANNELS.previewRequest===request)draft.previewBusy=false;return;}draft.previewBusy=false;draft.preview=preview;
   }
-  catch(error){if(!current())return;draft.previewError=error.message;}
+  catch(error){if(!current()){if(LIBRARY_CHANNELS.previewRequest===request)draft.previewBusy=false;return;}draft.previewBusy=false;draft.previewError=error.message;}
   saveLibraryChannelDraft();if(paint)libraryChannelsPaint();
 }
 async function lcPollSubject(draft,request,cursor=null){
@@ -22288,12 +22474,14 @@ async function lcSearchTitles(){
   catch(error){toast(error.message);}
 }
 function lcAddTitle(id,kind){
+  lcReadEditor();lcRememberTitle(id);
   const recipe=LIBRARY_CHANNELS.draft.recipe,key=kind==="show"?"include_show_ids":"include_item_ids";
   recipe[key.replace("include_","exclude_")]=recipe[key.replace("include_","exclude_")].filter(value=>String(value)!==String(id));
   if(!recipe[key].some(value=>String(value)===String(id)))recipe[key].push(String(id));
   LIBRARY_CHANNELS.draft.dirty=true;saveLibraryChannelDraft();previewLibraryChannel();
 }
 function lcExcludeTitle(id,kind){
+  lcReadEditor();lcRememberTitle(id);
   const recipe=LIBRARY_CHANNELS.draft.recipe,key=kind==="show"?"exclude_show_ids":"exclude_item_ids";
   recipe[key.replace("exclude_","include_")]=recipe[key.replace("exclude_","include_")].filter(value=>String(value)!==String(id));
   if(!recipe[key].some(value=>String(value)===String(id)))recipe[key].push(String(id));
@@ -22313,23 +22501,66 @@ function lcRemoveTitle(id,key){
   LIBRARY_CHANNELS.draft.recipe[key]=LIBRARY_CHANNELS.draft.recipe[key].filter(value=>String(value)!==String(id));
   LIBRARY_CHANNELS.draft.dirty=true;saveLibraryChannelDraft();previewLibraryChannel();
 }
+function lcEditorErrors(draft){
+  const errors=LibraryChannelCore.validateDraft(draft);
+  if(!draft.showValidation)return {};
+  if(draft.step==='content')return Object.fromEntries(Object.entries(errors).filter(([key])=>['subject','kinds'].includes(key)));
+  if(draft.step==='playback')return {};
+  return errors;
+}
+function lcSelectedTitles(recipe){
+  const names=LIBRARY_CHANNELS.draft.titleNames||{};
+  return ['include_item_ids','include_show_ids','exclude_item_ids','exclude_show_ids'].map(key=>{
+    const ids=recipe[key]||[];if(!ids.length)return '';
+    return `<div class="lc-selected"><b>${key.startsWith('exclude')?'Excluded':'Included'} ${key.includes('show')?'series':'titles'}</b><div class="lc-actions">${ids.map(id=>`<button class="ghost sm" onclick='lcRemoveTitle(${esc(JSON.stringify(String(id)))},${esc(JSON.stringify(key))})' aria-label="Remove ${esc(names[String(id)]||`item ${id}`)}">${esc(names[String(id)]||`Item ${id}`)} ×</button>`).join('')}</div></div>`;
+  }).join('');
+}
+function lcRememberTitle(id){
+  const d=LIBRARY_CHANNELS.draft;if(!d)return;
+  const items=[...(LIBRARY_CHANNELS.search||[]),...(d.subjectPreview?.rows||[]).map(r=>({id:r.item_id,title:r.title})),...(d.preview?.matches||[]).map(r=>r.candidate)];
+  const item=items.find(it=>exactWireId(it)===String(id));
+  if(item)(d.titleNames||(d.titleNames={}))[String(id)]=item.title;
+}
+function lcPaintEditor(main){
+  const focused=document.activeElement,id=focused&&main.contains(focused)?focused.id:null;
+  const selection=id&&typeof focused.selectionStart==='number'?[focused.selectionStart,focused.selectionEnd]:null;
+  const opened=[...main.querySelectorAll('.lc-editor details')].map(d=>d.open);
+  const search=main.querySelector('#lc-search')?.value;
+  main.innerHTML=libraryChannelEditorHtml();
+  if(search!=null&&main.querySelector('#lc-search'))main.querySelector('#lc-search').value=search;
+  main.querySelectorAll('.lc-editor details').forEach((d,i)=>{if(opened[i]!=null)d.open=opened[i];});
+  const again=id&&document.getElementById(id);if(again){again.focus({preventScroll:true});if(selection)try{again.setSelectionRange(...selection);}catch(e){}}
+}
+// Editing a recipe invalidates the visible preview immediately, without
+// repainting the form or moving the insertion point.
+document.addEventListener('input',event=>{
+  if(!event.target.closest||!event.target.closest('.lc-editor')||event.target.id==='lc-search')return;
+  const draft=LIBRARY_CHANNELS.draft;if(!draft)return;
+  const before=JSON.stringify(draft.recipe);lcReadEditor();
+  if(before!==JSON.stringify(draft.recipe)){
+    const preview=document.querySelector('.lc-preview');
+    if(preview)preview.innerHTML='<span class="pill">PREVIEW OUT OF DATE</span><h2>Your choices changed</h2><p>Update the preview to see matching titles for these choices.</p><button class="ghost" onclick="previewLibraryChannel()">Update preview</button>';
+  }
+});
+
 function libraryChannelEditorHtml(){
   const draft=LIBRARY_CHANNELS.draft,step=draft.step||"content",recipe=draft.recipe;
-  const steps=LibraryChannelCore.STEPS.map(name=>`<button class="pill ${name===step?'on':''}" onclick="lcStep('${name}')">${esc(name)}</button>`).join("");
+  const stepNames={content:"1 · Choose content",playback:"2 · Playback",channel:"3 · Name and create"};
+  const steps=LibraryChannelCore.STEPS.map(name=>`<button class="pill ${name===step?'on':''}" aria-current="${name===step?'step':'false'}" onclick="lcStep('${name}')">${stepNames[name]}</button>`).join("");
   const libs=(LIBRARY_CHANNELS.libs||[]).filter(lib=>lib.kind==="movies"||lib.kind==="shows").map(lib=>`<label><input type="checkbox" data-lc-library="${lib.id}" ${recipe.library_ids.some(id=>String(id)===String(lib.id))?'checked':''}>${esc(lib.name)}</label>`).join("")||"<span class=\"muted\">No movie or TV libraries.</span>";
   let fields="";
-  if(step==="content")fields=`<label for="lc-subject">Subject</label><textarea id="lc-subject" placeholder="Describe what belongs, and what to exclude">${esc(recipe.subject||"")}</textarea><p class="hint">Matches use library metadata. Save now; matching continues in the background.</p><div class="lc-actions"><button class="ghost sm" onclick="lcPreset('standup')">Stand-up comedy</button><button class="ghost sm" onclick="lcPreset('space')">Space documentaries</button><button class="ghost sm" onclick="lcPreset('nineties')">'90s comedy</button><button class="ghost sm" onclick="lcPreset('noir')">Film noir</button><button class="ghost sm" onclick="lcPreset('all')">All titles in scope</button></div><div class="lc-checks"><label><input id="lc-movies" type="checkbox" ${recipe.kinds.includes("movie")?'checked':''}>Movies</label><label><input id="lc-episodes" type="checkbox" ${recipe.kinds.includes("episode")?'checked':''}>Episodes</label><label><input id="lc-all" type="checkbox" ${recipe.match_all_in_scope?'checked':''}>All titles in scope</label></div><p class="hint">Choose matching rules here. Channel name and description are labels; they do not filter titles. Each populated filter must match; comma-separated values within a filter are alternatives.</p><h2 class="section">Libraries</h2><div class="lc-checks">${libs}</div><details><summary>Advanced metadata filters</summary><div class="formgrid"><div><label>Genres, comma separated</label><input id="lc-genres" value="${esc(recipe.genres_any.join(', '))}"></div><div><label>Tags, comma separated</label><input id="lc-tags" value="${esc(recipe.tags_any.join(', '))}"></div><div class="wide"><label>Subject keywords or phrases, comma separated</label><input id="lc-keywords" placeholder="stand-up, standup, stand up comedy" value="${esc(recipe.keywords_any.join(', '))}"><div class="hint">Matches text in title or overview, including series metadata. It does not infer a subject from meaning.</div></div><div><label>Year from</label><input id="lc-year-min" type="number" value="${recipe.year_min||''}"></div><div><label>Year through</label><input id="lc-year-max" type="number" value="${recipe.year_max||''}"></div></div></details><h2 class="section">Explicit titles and exclusions</h2><div class="row"><input id="lc-search" placeholder="Search movies, series, episodes"><button onclick="lcSearchTitles()">Search</button></div><div>${(LIBRARY_CHANNELS.search||[]).map(item=>`<span><button class="ghost sm" onclick="lcAddTitle('${esc(exactWireId(item))}','${esc(item.kind)}')">+ ${esc(item.title)}</button><button class="ghost sm" onclick="lcExcludeTitle('${esc(exactWireId(item))}','${esc(item.kind)}')">Exclude</button></span>`).join(' ')}</div><div class="hint">Included item IDs: ${recipe.include_item_ids.map(id=>`<button class="ghost sm" onclick="lcRemoveTitle('${id}','include_item_ids')">${id} ×</button>`).join(' ')||'none'}<br>Included series IDs: ${recipe.include_show_ids.map(id=>`<button class="ghost sm" onclick="lcRemoveTitle('${id}','include_show_ids')">${id} ×</button>`).join(' ')||'none'}<br>Excluded item IDs: ${recipe.exclude_item_ids.map(id=>`<button class="ghost sm" onclick="lcRemoveTitle('${id}','exclude_item_ids')">${id} ×</button>`).join(' ')||'none'}<br>Excluded series IDs: ${recipe.exclude_show_ids.map(id=>`<button class="ghost sm" onclick="lcRemoveTitle('${id}','exclude_show_ids')">${id} ×</button>`).join(' ')||'none'}</div>`;
+  if(step==="content")fields=`<h2 class="lc-intro">What should this channel play?</h2><label for="lc-subject">Subject</label><textarea id="lc-subject" placeholder="Describe what belongs, and what to exclude">${esc(recipe.subject||"")}</textarea><p class="hint">Describe your channel, or start with an idea below. Preview matching titles before you choose playback order.</p><div class="lc-actions"><button class="ghost sm" onclick="lcPreset('standup')">Stand-up comedy</button><button class="ghost sm" onclick="lcPreset('space')">Space documentaries</button><button class="ghost sm" onclick="lcPreset('nineties')">'90s comedy</button><button class="ghost sm" onclick="lcPreset('noir')">Film noir</button><button class="ghost sm" onclick="lcPreset('all')">All titles in scope</button></div><div class="lc-checks"><label><input id="lc-movies" type="checkbox" ${recipe.kinds.includes("movie")?'checked':''}>Movies</label><label><input id="lc-episodes" type="checkbox" ${recipe.kinds.includes("episode")?'checked':''}>Episodes</label><label><input id="lc-all" type="checkbox" ${recipe.match_all_in_scope?'checked':''}>All titles in scope</label></div><p class="hint">Use all titles in scope for a channel without subject matching. Fine-tune the selection below.</p><h2 class="section">Libraries</h2><div class="lc-checks">${libs}</div><details><summary>Advanced metadata filters</summary><div class="formgrid"><div><label>Genres, comma separated</label><input id="lc-genres" value="${esc(recipe.genres_any.join(', '))}"></div><div><label>Tags, comma separated</label><input id="lc-tags" value="${esc(recipe.tags_any.join(', '))}"></div><div class="wide"><label>Subject keywords or phrases, comma separated</label><input id="lc-keywords" placeholder="stand-up, standup, stand up comedy" value="${esc(recipe.keywords_any.join(', '))}"><div class="hint">Matches text in title or overview, including series metadata. It does not infer a subject from meaning.</div></div><div><label>Year from</label><input id="lc-year-min" type="number" value="${recipe.year_min||''}"></div><div><label>Year through</label><input id="lc-year-max" type="number" value="${recipe.year_max||''}"></div></div></details><h2 class="section">Explicit titles and exclusions</h2><div class="row"><input id="lc-search" placeholder="Search movies, series, episodes"><button onclick="lcSearchTitles()">Search</button></div><div>${(LIBRARY_CHANNELS.search||[]).map(item=>`<span><button class="ghost sm" onclick="lcAddTitle('${esc(exactWireId(item))}','${esc(item.kind)}')">+ ${esc(item.title)}</button><button class="ghost sm" onclick="lcExcludeTitle('${esc(exactWireId(item))}','${esc(item.kind)}')">Exclude</button></span>`).join(' ')}</div>${lcSelectedTitles(recipe)}`;
   else if(step==="playback")fields=`<div class="formgrid"><div><label>Order</label><select id="lc-order"><option value="balanced_shuffle" ${recipe.ordering==='balanced_shuffle'?'selected':''}>Balanced shuffle</option><option value="release_order" ${recipe.ordering==='release_order'?'selected':''}>Release year; keep episodes in order</option></select></div></div><div class="lc-checks"><label><input id="lc-specials" type="checkbox" ${recipe.include_specials?'checked':''}>Include specials</label><label><input id="lc-refresh" type="checkbox" ${recipe.auto_refresh?'checked':''}>Refresh automatically</label></div><div class="hint">Normal changes begin at the next full rotation. “Apply after this programme” is available after saving.</div>`;
   else fields=`<div class="formgrid"><div><label>Name (display only)</label><input id="lc-name" maxlength="80" value="${esc(draft.name)}"></div><div><label>Visibility</label><select id="lc-visibility"><option value="personal">Personal</option>${ME&&ME.is_admin?'<option value="shared" '+(draft.visibility==='shared'?'selected':'')+'>Shared</option>':''}</select></div><div class="wide"><label>Description (display only)</label><textarea id="lc-description" maxlength="500">${esc(draft.description)}</textarea></div></div><label><input id="lc-enabled" type="checkbox" ${draft.enabled?'checked':''}> Enable channel</label><div class="hint">Enablement is your explicit choice. Settings → Developer shows advisory Store, media, and client readiness without blocking it.</div>`;
   const preview=draft.preview;
   const subject=draft.subjectRecipe===JSON.stringify(recipe)&&draft.subjectPreview;
   const subjectHtml=subject?`<h2>${subject.matched} matches; checked ${subject.processed} of ${subject.total}</h2><p>${subject.complete?'Scan complete.':'Selection is partial; matching continues.'} ${esc(subject.state)}</p>${subject.error?`<p class="hint">${esc(subject.error)}</p>`:''}${draft.id?'<p class="hint">The existing schedule keeps playing until a replacement is available.</p>':''}<div class="lc-actions"><button onclick="lcSubjectFilter('match')">Matched</button><button onclick="lcSubjectFilter('uncertain')">Uncertain</button><button onclick="lcSubjectFilter('no_match')">Excluded</button>${draft.subjectSaved?"":'<button onclick="lcCancelSubject()">Cancel preview</button>'}</div>${(subject.rows||[]).map(row=>`<div class="lc-programme"><span>${esc(row.title)}<small>${esc(row.reason)}</small></span><button onclick="lcAddTitle('${esc(row.item_id)}','movie')">Include</button><button onclick="lcExcludeTitle('${esc(row.item_id)}','movie')">Exclude</button></div>`).join('')}${subject.next_cursor?'<button onclick="lcSubjectPage()">More results</button>':''}`:null;
-  const previewHtml=subjectHtml||(preview?`<h2>${preview.eligible_count} eligible title${preview.eligible_count===1?'':'s'}</h2><p>${esc(preview.repeat_description)}</p>${preview.excluded_count?`<p class="hint">${preview.excluded_count} candidates excluded by eligibility or recipe rules.</p>`:""}<h3>Matching titles</h3><p class="hint">A sample of the selection, before playback ordering.</p>${(preview.matches||[]).slice(0,10).map(match=>`<div class="lc-programme"><span>${esc(match.candidate.title)}</span><small>${esc((match.reasons||[]).join(' · '))}</small></div>`).join('')}`:`<div class="empty">${esc(draft.previewError||'Preview the recipe to see its schedule.')}</div>`);
-  const errors=LibraryChannelCore.validateDraft(draft),errorHtml=Object.entries(errors).map(([field,message])=>`<div class="err">${esc(field)}: ${esc(message)}</div>`).join('');
-  return `${setHead(draft.id?"Edit channel":"Create channel","Three resumable steps; your draft is scoped to this server and account.",'<button class="ghost" onclick="closeLibraryChannelEditor()">Close</button>')}<div class="lc-editor"><section class="card"><div class="lc-steps">${steps}</div>${fields}${errorHtml}<div class="lc-actions"><button class="ghost" onclick="previewLibraryChannel()">Refresh preview</button>${step!=="content"?`<button class="ghost" onclick="lcStep('${LibraryChannelCore.nextStep(step,-1)}')">Back</button>`:''}${step!=="channel"?`<button onclick="lcStep('${LibraryChannelCore.nextStep(step,1)}')">Next</button><button class="primary" onclick="saveLibraryChannel()">Save</button>`:`<button class="primary" onclick="saveLibraryChannel()">${draft.id?'Save':'Create'}</button>`}${draft.id?'<button class="ghost" onclick="deleteLibraryChannel()">Delete</button>':''}</div><div class="err" id="lc-error"></div></section><aside class="card lc-preview"><span class="pill">PREVIEW</span>${previewHtml}</aside></div>`;
+  const previewHtml=draft.previewBusy?`<div class="empty" role="status">Updating your preview…</div>`:subjectHtml||(preview?`<h2>${preview.eligible_count} eligible title${preview.eligible_count===1?'':'s'}</h2><p>${esc(preview.repeat_description)}</p>${preview.excluded_count?`<p class="hint">${preview.excluded_count} candidates excluded by eligibility or recipe rules.</p>`:""}<h3>Matching titles</h3><p class="hint">A sample of the selection, before playback ordering.</p>${(preview.matches||[]).slice(0,10).map(match=>`<div class="lc-programme"><span>${esc(match.candidate.title)}</span><small>${esc((match.reasons||[]).join(' · '))}</small></div>`).join('')}`:`<div class="empty">${esc(draft.previewError||'Choose a subject or scope, then update the preview to see matching titles and time before repeats.')}</div>`);
+  const errors=lcEditorErrors(draft),errorHtml=Object.entries(errors).map(([field,message])=>`<div class="err">${esc(field)}: ${esc(message)}</div>`).join('');
+  return `${setHead(draft.id?"Edit channel":"Create channel","Choose content, set playback, then name your channel. Your draft stays on this browser for this account.",'<button class="ghost" onclick="closeLibraryChannelEditor()">Close</button>')}<div class="lc-editor"><section class="card"><div class="lc-steps">${steps}</div>${fields}${errorHtml}<div class="lc-actions lc-editor-footer"><button class="ghost" onclick="previewLibraryChannel()">Update preview</button>${step!=="content"?`<button class="ghost" onclick="lcStep('${LibraryChannelCore.nextStep(step,-1)}')">Back</button>`:''}${step!=="channel"?`<button onclick="lcStep('${LibraryChannelCore.nextStep(step,1)}')">Next: ${step==='content'?'playback':'name and create'} →</button>`:`<button class="primary" onclick="saveLibraryChannel()">${draft.id?'Save channel':'Create channel'}</button>`}${draft.id?'<button class="ghost" onclick="deleteLibraryChannel()">Delete</button>':''}</div><div class="err" id="lc-error"></div></section><aside class="card lc-preview"><span class="pill">PREVIEW</span>${previewHtml}</aside></div>`;
 }
 async function saveLibraryChannel(){
-  lcReadEditor();const draft=LIBRARY_CHANNELS.draft,fields=LibraryChannelCore.validateDraft(draft);
+  lcReadEditor();const draft=LIBRARY_CHANNELS.draft;draft.showValidation=true;const fields=LibraryChannelCore.validateDraft(draft);
   if(Object.keys(fields).length){libraryChannelsPaint();return;}
   const payload=JSON.stringify({name:draft.name,description:draft.description,visibility:draft.visibility,enabled:draft.enabled,recipe:draft.recipe,revision:draft.expected_revision});
   if(draft.savePayload!==payload){draft.request_id=newRequestId();draft.savePayload=payload;draft.saveBody=null;}

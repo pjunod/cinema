@@ -94,11 +94,19 @@ struct SearchView: View {
             guard !Task.isCancelled else { return }
             searching = true
             error = nil
-            results = try await model.search(trimmed)
+            let found = try await model.search(trimmed)
+            guard !Task.isCancelled, query.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed else { return }
+            results = found.sorted { left, right in
+                let leftExact = left.title.localizedCaseInsensitiveCompare(trimmed) == .orderedSame
+                let rightExact = right.title.localizedCaseInsensitiveCompare(trimmed) == .orderedSame
+                if leftExact != rightExact { return leftExact }
+                return left.title.localizedStandardCompare(right.title) == .orderedAscending
+            }
             hasSearched = true
         } catch is CancellationError {
             return
         } catch {
+            guard !Task.isCancelled, query.trimmingCharacters(in: .whitespacesAndNewlines) == trimmed else { return }
             self.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             hasSearched = true
         }
