@@ -999,7 +999,18 @@ mod tests {
         assert!(why.contains("the CPU chain"), "wrong rejection: {why}");
     }
 
-    use std::os::unix::process::ExitStatusExt;
+    fn exit_status(code: u32) -> std::process::ExitStatus {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw((code as i32) << 8)
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(code)
+        }
+    }
 
     /// ffmpeg and ffprobe replaced by output captured from real runs, so every
     /// decision made *about* that output is exercised — including the
@@ -1016,7 +1027,7 @@ mod tests {
 
     fn ok_output(stdout: &str) -> Result<std::process::Output, String> {
         Ok(std::process::Output {
-            status: std::process::ExitStatus::from_raw(0),
+            status: exit_status(0),
             stdout: stdout.as_bytes().to_vec(),
             stderr: Vec::new(),
         })
@@ -1024,8 +1035,7 @@ mod tests {
 
     fn failed_output(stderr: &str) -> Result<std::process::Output, String> {
         Ok(std::process::Output {
-            // Exit code 1, encoded the way `wait()` reports it.
-            status: std::process::ExitStatus::from_raw(1 << 8),
+            status: exit_status(1),
             stdout: Vec::new(),
             stderr: stderr.as_bytes().to_vec(),
         })

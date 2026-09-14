@@ -6117,6 +6117,7 @@ mod startup_tests {
 
     /// SIGTERM is what `docker stop` sends, and it has to start the drain
     /// rather than kill the process mid-stream.
+    #[cfg(unix)]
     #[tokio::test]
     async fn sigterm_starts_the_drain() {
         // Registering our own stream first replaces the default terminate

@@ -7429,7 +7429,12 @@ mod tests {
             .await
             .expect("original bytes");
         let file = tokio::fs::File::open(&path).await.expect("held original");
+        #[cfg(unix)]
         let owned = duplicate_hash_file(&file, "delayed owned descriptor")
+            .expect("duplicate before scheduling");
+        #[cfg(windows)]
+        let owned = duplicate_hash_file(&file, "delayed owned descriptor")
+            .await
             .expect("duplicate before scheduling");
 
         drop(file);
@@ -8761,6 +8766,7 @@ mod tests {
         .is_some());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn orphan_scratch_cleanup_recovers_a_crash_inside_the_private_anchor() {
         let root = crate::test_tempdir().expect("orphan scratch private-anchor root");

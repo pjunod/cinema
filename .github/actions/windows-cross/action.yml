@@ -12,6 +12,14 @@ runs:
         if ! cargo xwin --version 2>/dev/null | grep -Fq '0.23.1'; then
           cargo install cargo-xwin --version 0.23.1 --locked
         fi
+        {
+          echo "XWIN_ARCH=x86_64"
+          echo "XWIN_CRT_VERSION=14.44.17.14"
+          echo "XWIN_HTTP_RETRIES=8"
+          echo "XWIN_SDK_VERSION=10.0.26100"
+          echo "XWIN_VARIANT=desktop"
+          echo "XWIN_VERSION=17"
+        } >> "$GITHUB_ENV"
         tool_dir="$RUNNER_TEMP/plurx-windows-toolchain"
         mkdir -p "$tool_dir"
         expose_tool_dir=false
@@ -33,6 +41,6 @@ runs:
       env:
         AWS_LC_SYS_NO_ASM: "1"
       run: >-
-        cargo xwin build --workspace --locked
+        cargo xwin build --workspace --all-targets --locked
         --exclude plurx-cluster-check
         --target x86_64-pc-windows-msvc

@@ -2579,8 +2579,7 @@ mod tests {
         let replacement = directory.path().join("replacement");
         std::fs::write(&path, b"engine-a").expect("write original");
         std::fs::write(&replacement, b"engine-b").expect("write replacement");
-        let expected = engine_object_version(&std::fs::metadata(&path).expect("metadata"))
-            .expect("object version");
+        let expected = engine_path_version(&path).expect("object version");
         let objects = vec![(path.clone(), expected)];
         assert!(engine_objects_are_current(&objects));
         std::fs::remove_file(&path).expect("unlink original");
