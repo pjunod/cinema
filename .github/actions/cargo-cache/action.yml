@@ -82,7 +82,7 @@ runs:
         # thing that answers "can the janitor reclaim enough here?". Three
         # refusals on `gha-nuc4-general-01` on 2026-09-08 all said `18G
         # available` and none of them carried a cache figure.
-        if [ -n "${RUNNER_TOOL_CACHE:-}" ]; then
+        if [ -d "${RUNNER_TOOL_CACHE:-}" ]; then
           "$GITHUB_WORKSPACE/scripts/ci-runner-cache-audit" \
             "$(dirname -- "$RUNNER_TOOL_CACHE")" 20 || true
         fi
@@ -118,8 +118,12 @@ runs:
         # is what a self-hosted runner gets, always. The hosted service is for
         # hosted runners, which evict on their own, and for the rare self-hosted
         # runner that exposes no tool cache to put a bounded cache in.
+        # Container jobs inherit the host runner's RUNNER_TOOL_CACHE value,
+        # but Forgejo does not mount that host path into the container. Treat
+        # an unavailable path like a hosted runner instead of trying to
+        # canonicalize storage that cannot exist in this filesystem namespace.
         if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] \
-          || [ -z "${RUNNER_TOOL_CACHE:-}" ]; then
+          || [ ! -d "${RUNNER_TOOL_CACHE:-}" ]; then
           target_dir="$GITHUB_WORKSPACE/target"
           echo "CARGO_TARGET_DIR=$target_dir" >> "$GITHUB_ENV"
           echo "local=false" >> "$GITHUB_OUTPUT"
