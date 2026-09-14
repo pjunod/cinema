@@ -511,6 +511,43 @@ fn require_direct_probe_executable(file: &std::fs::File) -> Result<(), DecodeFac
     }
 }
 
+#[cfg(windows)]
+fn require_direct_probe_executable(file: &std::fs::File) -> Result<(), DecodeFactError> {
+    use std::os::windows::fs::FileExt;
+
+    let metadata = file
+        .metadata()
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    if !metadata.is_file() || metadata.len() < 64 || metadata.len() > MAX_PROBE_EXECUTABLE_BYTES {
+        return Err(DecodeFactError::ProbeIdentity(
+            "configured FFprobe is not a bounded PE executable".to_owned(),
+        ));
+    }
+    let mut dos = [0_u8; 64];
+    file.seek_read(&mut dos, 0)
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    if dos[..2] != *b"MZ" {
+        return Err(DecodeFactError::ProbeIdentity(
+            "configured FFprobe does not have a PE DOS header".to_owned(),
+        ));
+    }
+    let pe_offset = u32::from_le_bytes(dos[0x3c..0x40].try_into().expect("four bytes")) as u64;
+    if pe_offset.saturating_add(6) > metadata.len() {
+        return Err(DecodeFactError::ProbeIdentity(
+            "configured FFprobe has a truncated PE header".to_owned(),
+        ));
+    }
+    let mut pe = [0_u8; 6];
+    file.seek_read(&mut pe, pe_offset)
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    if pe[..4] != *b"PE\0\0" || u16::from_le_bytes([pe[4], pe[5]]) != 0x8664 {
+        return Err(DecodeFactError::ProbeIdentity(
+            "configured FFprobe must be an x64 PE executable".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn require_self_contained_linux_elf(file: &std::fs::File) -> Result<(), DecodeFactError> {
     use std::os::unix::fs::FileExt;
@@ -621,9 +658,29 @@ fn resolve_executable(bin: &str) -> Result<PathBuf, DecodeFactError> {
         .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))
 }
 
-#[cfg(not(unix))]
-fn resolve_executable(_bin: &str) -> Result<PathBuf, DecodeFactError> {
-    Err(DecodeFactError::UnsupportedPlatform)
+#[cfg(windows)]
+fn resolve_executable(bin: &str) -> Result<PathBuf, DecodeFactError> {
+    let candidate = Path::new(bin);
+    let mut candidates = Vec::new();
+    if candidate.components().count() > 1 {
+        candidates.push(candidate.to_owned());
+    } else {
+        for directory in std::env::var_os("PATH")
+            .into_iter()
+            .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        {
+            candidates.push(directory.join(candidate));
+            if candidate.extension().is_none() {
+                candidates.push(directory.join(format!("{bin}.exe")));
+            }
+        }
+    }
+    let resolved = candidates
+        .into_iter()
+        .find(|path| path.metadata().is_ok_and(|metadata| metadata.is_file()))
+        .ok_or_else(|| DecodeFactError::ProbeIdentity("executable is not on PATH".to_owned()))?;
+    std::fs::canonicalize(resolved)
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))
 }
 
 #[cfg(unix)]
@@ -2274,6 +2331,39 @@ fn copy_executable(
     Ok(())
 }
 
+#[cfg(windows)]
+fn copy_executable(
+    source: &std::fs::File,
+    snapshot: &mut std::fs::File,
+) -> Result<(), DecodeFactError> {
+    use std::os::windows::fs::FileExt;
+
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut offset = 0_u64;
+    loop {
+        let read = source
+            .seek_read(&mut buffer, offset)
+            .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        offset = offset
+            .checked_add(u64::try_from(read).expect("buffer length fits u64"))
+            .ok_or_else(|| DecodeFactError::ProbeIdentity("executable size overflow".to_owned()))?;
+        if offset > MAX_PROBE_EXECUTABLE_BYTES {
+            return Err(DecodeFactError::ProbeIdentity(
+                "executable exceeded identity limit".to_owned(),
+            ));
+        }
+        snapshot
+            .write_all(&buffer[..read])
+            .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    }
+    snapshot
+        .sync_all()
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))
+}
+
 #[cfg(target_os = "linux")]
 fn snapshot_executable(source: &std::fs::File) -> Result<ExecutableSnapshot, DecodeFactError> {
     use std::os::fd::{AsRawFd, FromRawFd};
@@ -2332,9 +2422,18 @@ fn snapshot_executable(source: &std::fs::File) -> Result<ExecutableSnapshot, Dec
     Ok(ExecutableSnapshot { file, _path: path })
 }
 
-#[cfg(not(unix))]
-fn snapshot_executable(_source: &std::fs::File) -> Result<ExecutableSnapshot, DecodeFactError> {
-    Err(DecodeFactError::UnsupportedPlatform)
+#[cfg(windows)]
+fn snapshot_executable(source: &std::fs::File) -> Result<ExecutableSnapshot, DecodeFactError> {
+    let mut snapshot = tempfile::Builder::new()
+        .prefix("plurx-ffprobe-")
+        .suffix(".exe")
+        .tempfile()
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    copy_executable(source, snapshot.as_file_mut())?;
+    let path = snapshot.into_temp_path();
+    let file = std::fs::File::open(&path)
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    Ok(ExecutableSnapshot { file, _path: path })
 }
 
 #[cfg(target_os = "linux")]
@@ -2343,6 +2442,11 @@ fn snapshot_execution_path(_snapshot: &ExecutableSnapshot) -> PathBuf {
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
+fn snapshot_execution_path(snapshot: &ExecutableSnapshot) -> PathBuf {
+    snapshot.path().to_owned()
+}
+
+#[cfg(windows)]
 fn snapshot_execution_path(snapshot: &ExecutableSnapshot) -> PathBuf {
     snapshot.path().to_owned()
 }
@@ -2477,16 +2581,81 @@ async fn held_probe_file_identity_within(
     .await
 }
 
-#[cfg(not(unix))]
-fn probe_file_identity(_path: &Path) -> Result<ProbeFileIdentity, DecodeFactError> {
-    Err(DecodeFactError::UnsupportedPlatform)
+#[cfg(windows)]
+fn probe_file_identity(path: &Path) -> Result<ProbeFileIdentity, DecodeFactError> {
+    let file = plurx_core::fs_secure::open_read_nofollow_blocking(path)
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    probe_file_identity_from_file(&file)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 fn probe_file_identity_from_file(
-    _file: &std::fs::File,
+    file: &std::fs::File,
 ) -> Result<ProbeFileIdentity, DecodeFactError> {
-    Err(DecodeFactError::UnsupportedPlatform)
+    use std::os::windows::fs::FileExt;
+
+    let metadata = file
+        .metadata()
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    let held = plurx_core::fs_secure::std_file_identity(file)
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    if !metadata.is_file() || held.size == 0 || held.size > MAX_PROBE_EXECUTABLE_BYTES {
+        return Err(DecodeFactError::ProbeIdentity(
+            "executable size is outside the bounded identity envelope".to_owned(),
+        ));
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut offset = 0_u64;
+    while offset < held.size {
+        let read = file
+            .seek_read(&mut buffer, offset)
+            .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        offset = offset
+            .checked_add(u64::try_from(read).expect("buffer length fits u64"))
+            .ok_or_else(|| DecodeFactError::ProbeIdentity("executable size overflow".to_owned()))?;
+    }
+    let after = plurx_core::fs_secure::std_file_identity(file)
+        .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?;
+    if offset != held.size || after != held {
+        return Err(DecodeFactError::ProbeChanged);
+    }
+    let (modified_seconds, modified_nanoseconds) = system_time_parts(
+        metadata
+            .modified()
+            .map_err(|error| DecodeFactError::ProbeIdentity(error.to_string()))?,
+    );
+    Ok(ProbeFileIdentity {
+        bytes: held.size,
+        modified_seconds,
+        modified_nanoseconds,
+        changed_seconds: held.changed_seconds,
+        changed_nanoseconds: held.changed_nanoseconds,
+        device: held.device,
+        inode: held.inode ^ held.inode_high.rotate_left(1),
+        content_digest: hex::encode(hasher.finalize()),
+    })
+}
+
+#[cfg(windows)]
+fn system_time_parts(value: std::time::SystemTime) -> (i64, i64) {
+    match value.duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => (
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
+            i64::from(duration.subsec_nanos()),
+        ),
+        Err(error) => {
+            let duration = error.duration();
+            (
+                -i64::try_from(duration.as_secs()).unwrap_or(i64::MAX),
+                -i64::from(duration.subsec_nanos()),
+            )
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -2495,6 +2664,8 @@ async fn probe_version(
     configured_path: &Path,
     launch_mode: ProbeLaunchMode,
 ) -> Result<Vec<u8>, DecodeFactError> {
+    #[cfg(not(test))]
+    let _ = configured_path;
     probe_version_with_deadline(executable, configured_path, launch_mode, VERSION_DEADLINE).await
 }
 
@@ -2653,13 +2824,56 @@ async fn probe_version_with_deadline_on(
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 async fn probe_version(
-    _executable: &Arc<ExecutableSnapshot>,
-    _configured_path: &Path,
+    executable: &Arc<ExecutableSnapshot>,
+    configured_path: &Path,
     _launch_mode: ProbeLaunchMode,
 ) -> Result<Vec<u8>, DecodeFactError> {
-    Err(DecodeFactError::UnsupportedPlatform)
+    #[cfg(not(test))]
+    let _ = configured_path;
+    let permit = tokio::time::timeout(VERSION_DEADLINE, version_gate().acquire_owned())
+        .await
+        .map_err(|_| DecodeFactError::Deadline)?
+        .map_err(|_| DecodeFactError::CacheInvariant)?;
+    let before = probe_file_identity_from_file(executable.as_file())?;
+    let mut command = tokio::process::Command::new(snapshot_execution_path(executable));
+    #[cfg(test)]
+    command.env("PLURX_TEST_PROBE_PATH", configured_path);
+    command
+        .arg("-version")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)
+        .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
+    let stdout = child.stdout.take().ok_or(DecodeFactError::MissingPipe)?;
+    let outcome = tokio::time::timeout(VERSION_DEADLINE, async {
+        tokio::join!(read_bounded(stdout, MAX_VERSION_BYTES), child.wait())
+    })
+    .await;
+    let (stdout, status) = match outcome {
+        Ok(outcome) => outcome,
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(DecodeFactError::Deadline);
+        }
+    };
+    drop(permit);
+    let stdout = stdout?;
+    let status = status.map_err(|error| DecodeFactError::Read(error.to_string()))?;
+    let after = probe_file_identity_from_file(executable.as_file())?;
+    if before != after {
+        return Err(DecodeFactError::ProbeChanged);
+    }
+    if stdout.1 || stdout.0.is_empty() || !status.success() {
+        return Err(DecodeFactError::ProbeIdentity(
+            "bounded version probe failed".to_owned(),
+        ));
+    }
+    Ok(stdout.0)
 }
 
 /// Bounded FIFO cache. The preparation path supplies the exact FFprobe build
@@ -2899,6 +3113,7 @@ impl std::error::Error for DecodeFactError {}
 #[derive(Debug)]
 struct DecodeSourceObservation {
     identity: DecodeSourceIdentity,
+    #[cfg(unix)]
     executable: bool,
 }
 
@@ -2987,15 +3202,64 @@ async fn source_observation_with_probe_gate(
     Ok((observation?, probe_gate))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn source_observation_windows(
+    source: &std::fs::File,
+) -> Result<DecodeSourceObservation, DecodeFactError> {
+    let identity = plurx_core::fs_secure::std_file_identity(source)
+        .map_err(|error| DecodeFactError::SourceMetadata(error.to_string()))?;
+    let body = serde_json::json!({
+        "bytes": identity.size,
+        "changed_seconds": identity.changed_seconds,
+        "changed_nanoseconds": identity.changed_nanoseconds,
+        "device": identity.device,
+        "inode": identity.inode,
+        "inode_high": identity.inode_high,
+    });
+    let identity =
+        DecodeSourceIdentity::from_sha256(hex::encode(Sha256::digest(body.to_string().as_bytes())))
+            .map_err(|error| DecodeFactError::SourceMetadata(error.to_string()))?;
+    Ok(DecodeSourceObservation { identity })
+}
+
+#[cfg(windows)]
 async fn source_observation_with_probe_gate(
-    _source: Arc<std::fs::File>,
-    _probe_gate: tokio::sync::OwnedSemaphorePermit,
-    _budget: Duration,
-    _cancelled: Option<&tokio_util::sync::CancellationToken>,
-    _delay: Duration,
+    source: Arc<std::fs::File>,
+    probe_gate: tokio::sync::OwnedSemaphorePermit,
+    budget: Duration,
+    cancelled: Option<&tokio_util::sync::CancellationToken>,
+    delay: Duration,
 ) -> Result<(DecodeSourceObservation, tokio::sync::OwnedSemaphorePermit), DecodeFactError> {
-    Err(DecodeFactError::UnsupportedPlatform)
+    if budget.is_zero() {
+        return Err(DecodeFactError::Deadline);
+    }
+    let started = std::time::Instant::now();
+    let identity_permit = tokio::select! {
+        biased;
+        _ = wait_for_cancellation(cancelled) => return Err(DecodeFactError::Cancelled),
+        permit = tokio::time::timeout(budget, identity_gate().acquire_owned()) => {
+            permit
+                .map_err(|_| DecodeFactError::Deadline)?
+                .map_err(|_| DecodeFactError::CacheInvariant)?
+        }
+    };
+    let remaining = budget.saturating_sub(started.elapsed());
+    let mut task = tokio::task::spawn_blocking(move || {
+        let _identity_permit = identity_permit;
+        if !delay.is_zero() {
+            std::thread::sleep(delay);
+        }
+        Ok::<_, DecodeFactError>((source_observation_windows(&source)?, probe_gate))
+    });
+    tokio::select! {
+        biased;
+        _ = wait_for_cancellation(cancelled) => Err(DecodeFactError::Cancelled),
+        result = tokio::time::timeout(remaining, &mut task) => {
+            result
+                .map_err(|_| DecodeFactError::Deadline)?
+                .map_err(|error| DecodeFactError::SourceMetadata(error.to_string()))?
+        }
+    }
 }
 
 async fn read_bounded<R>(mut reader: R, limit: usize) -> Result<(Vec<u8>, bool), DecodeFactError>
@@ -3219,26 +3483,39 @@ async fn collect(
             .collect();
         return Err(DecodeFactError::Failed(status.code(), reason));
     }
-    let before = observation.identity.clone();
-    let json: serde_json::Value = serde_json::from_slice(&stdout.0)
+    parse_collected_facts(&stdout.0, observation.identity, catalog, selected_stream)
+}
+
+fn parse_collected_facts(
+    stdout: &[u8],
+    source_identity: DecodeSourceIdentity,
+    catalog: Option<&DecodeCatalogMetadata>,
+    selected_stream: ProbeStreamSelection,
+) -> Result<DecodeFacts, DecodeFactError> {
+    let json: serde_json::Value = serde_json::from_slice(stdout)
         .map_err(|error| DecodeFactError::InvalidJson(error.to_string()))?;
     match selected_stream {
         ProbeStreamSelection::FirstPlayable => match catalog {
-            Some(catalog) => DecodeFacts::from_ffprobe_json_with_catalog(&json, before, catalog),
-            None => DecodeFacts::from_ffprobe_json(&json, before),
+            Some(catalog) => {
+                DecodeFacts::from_ffprobe_json_with_catalog(&json, source_identity, catalog)
+            }
+            None => DecodeFacts::from_ffprobe_json(&json, source_identity),
         },
         ProbeStreamSelection::LegacyVideoOrdinal(ordinal) => {
             let index = absolute_video_ordinal(&json, ordinal).ok_or_else(|| {
                 DecodeFactError::InvalidFacts("legacy video stream is missing".to_owned())
             })?;
-            legacy_ordinal_facts(&json, before, index, catalog)
+            legacy_ordinal_facts(&json, source_identity, index, catalog)
         }
         ProbeStreamSelection::Absolute(index) => {
             match catalog.filter(|_| first_playable_video_index(&json) == Some(index)) {
-                Some(catalog) => {
-                    DecodeFacts::from_ffprobe_json_at_with_catalog(&json, before, index, catalog)
-                }
-                None => DecodeFacts::from_ffprobe_json_at(&json, before, index),
+                Some(catalog) => DecodeFacts::from_ffprobe_json_at_with_catalog(
+                    &json,
+                    source_identity,
+                    index,
+                    catalog,
+                ),
+                None => DecodeFacts::from_ffprobe_json_at(&json, source_identity, index),
             }
         }
     }
@@ -3310,16 +3587,106 @@ pub(crate) fn first_playable_video_index(json: &serde_json::Value) -> Option<u32
         .and_then(|index| u32::try_from(index).ok())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 async fn collect(
-    _probe: &DecodeProbeIdentity,
-    _source: DecodeFactCollectionSource,
-    _catalog: Option<&DecodeCatalogMetadata>,
-    _selected_stream: ProbeStreamSelection,
-    _budget: Duration,
-    _cancelled: Option<&tokio_util::sync::CancellationToken>,
+    probe: &DecodeProbeIdentity,
+    source: DecodeFactCollectionSource,
+    catalog: Option<&DecodeCatalogMetadata>,
+    selected_stream: ProbeStreamSelection,
+    budget: Duration,
+    cancelled: Option<&tokio_util::sync::CancellationToken>,
 ) -> Result<DecodeFacts, DecodeFactError> {
-    Err(DecodeFactError::UnsupportedPlatform)
+    let _ = probe.launch_mode;
+    let DecodeFactCollectionSource {
+        handle,
+        observation,
+        offset_permit,
+    } = source;
+    let launch_deadline = std::time::Instant::now() + budget.min(PROBE_DEADLINE);
+    let source_path = plurx_core::fs_secure::std_file_path(&handle)
+        .map_err(|error| DecodeFactError::SourceMetadata(error.to_string()))?;
+    if source_observation_windows(&handle)?.identity != observation.identity {
+        return Err(DecodeFactError::ProbeChanged);
+    }
+    let arguments = [
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_entries",
+        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,bits_per_raw_sample,avg_frame_rate,r_frame_rate,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_side_data=side_data_type",
+        "-show_streams",
+    ];
+    let mut command =
+        tokio::process::Command::new(snapshot_execution_path(&probe.executable_snapshot));
+    command
+        .args(arguments)
+        .arg(&source_path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)
+        .map_err(|error| DecodeFactError::Spawn(error.to_string()))?;
+    let stdout = child.stdout.take().ok_or(DecodeFactError::MissingPipe)?;
+    let stderr = child.stderr.take().ok_or(DecodeFactError::MissingPipe)?;
+    let remaining = launch_deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        terminate_windows_probe(&mut child).await;
+        return Err(DecodeFactError::Deadline);
+    }
+    let outcome = tokio::select! {
+        biased;
+        _ = wait_for_cancellation(cancelled) => {
+            terminate_windows_probe(&mut child).await;
+            return Err(DecodeFactError::Cancelled);
+        }
+        result = tokio::time::timeout(remaining, async {
+            tokio::join!(
+                read_bounded(stdout, MAX_PROBE_STDOUT_BYTES),
+                read_bounded(stderr, MAX_PROBE_STDERR_BYTES),
+                child.wait(),
+            )
+        }) => result,
+    };
+    let (stdout, stderr, status) = match outcome {
+        Ok(result) => result,
+        Err(_) => {
+            terminate_windows_probe(&mut child).await;
+            return Err(DecodeFactError::Deadline);
+        }
+    };
+    drop(offset_permit);
+    let stdout = stdout?;
+    let stderr = stderr?;
+    let status = status.map_err(|error| DecodeFactError::Read(error.to_string()))?;
+    if stdout.1 || stderr.1 {
+        return Err(DecodeFactError::OversizedOutput);
+    }
+    if !status.success() {
+        let reason = String::from_utf8_lossy(&stderr.0)
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("FFprobe gave no reason")
+            .chars()
+            .take(512)
+            .collect();
+        return Err(DecodeFactError::Failed(status.code(), reason));
+    }
+    if source_observation_windows(&handle)?.identity != observation.identity {
+        return Err(DecodeFactError::ProbeChanged);
+    }
+    parse_collected_facts(&stdout.0, observation.identity, catalog, selected_stream)
+}
+
+#[cfg(windows)]
+async fn terminate_windows_probe(child: &mut tokio::process::Child) {
+    if let Some(pid) = child.id() {
+        let _ =
+            crate::process_control::signal(pid, crate::process_control::ProcessSignal::Terminate);
+    }
+    let _ = child.wait().await;
 }
 
 #[cfg(test)]

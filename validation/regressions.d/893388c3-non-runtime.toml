@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["893388c3"]
+points = []
+checks = []
+reason = "This CI-only correction selects the disposable Cargo cache path when a container cannot access the host runner tool cache; it changes no runtime behavior."
+ignore = true

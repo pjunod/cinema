@@ -73,12 +73,15 @@ replacement = "typed producer facts entering the actor; only prepublication and 
 
 [[symbols]]
 id = "supervisor-registration"
-pattern = "AttemptChild::new\\("
+pattern = "AttemptChild::new(?:_with_job)?\\("
 # 20 -> 22 with M5c3: two test-only predecessor children. The retry executor
 # terminates the exact failed attempt before it clears scratch, so both
 # recovery-budget regressions need a child bound to that attempt or the
 # transaction fails before reaching what they are about. Both are killed or
 # reaped by the fixture. No production supervisor was added.
+# Windows keeps those same 22 supervisors and changes two production
+# registrations to `new_with_job`, which retains the kill-on-close Job Object
+# beside the child until the exact attempt has been reaped.
 expected_occurrences = 22
 kind = "process_owner"
 replacement = "retained as the sole OS-child supervisor, registered before publication"
@@ -86,7 +89,10 @@ replacement = "retained as the sole OS-child supervisor, registered before publi
 [[symbols]]
 id = "physical-flow-signal"
 pattern = "child\\.signal\\("
-expected_occurrences = 7
+# 7 -> 3 for Windows portability: the four raw Unix signal sends moved behind
+# `process_control::signal`. The remaining three sites are AttemptChild calls
+# that retain exact actor attempt/revision authorization and acknowledgement.
+expected_occurrences = 3
 kind = "process_action"
 replacement = "retained behind exact actor attempt/revision authorization and acknowledgement"
 
@@ -1226,6 +1232,9 @@ expected_occurrences = 9
 # The retained namespaced tasks are actor/executor, exact-attempt cleanup, or
 # typed reader owners; the remaining task/timer/process counts are reviewed
 # lifecycle and race fixtures rather than producer-policy side channels.
+# Windows adds nine bounded `spawn_blocking` owners for handle-based identity
+# and filesystem work. Every JoinHandle is awaited by its caller; timeout paths
+# retain or abort-and-await the task before the surrounding owner returns.
 
 [[module_structures]]
 id = "namespaced-task-spawn"
@@ -1447,7 +1456,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # and rename, discard_persisted's remove) that move one bounded file operation
 # off the runtime, and one tokio::spawn in the retire path. None of them selects
 # a recipe, publishes a response, or starts a tuner.
-expected_occurrences = 498
+# +1 Windows service startup-checkpoint thread. It exits when readiness or
+# shutdown is published and owns no media producer.
+expected_occurrences = 508
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1480,6 +1491,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # expressions became one shared `command.spawn()` inside the blocking launch
 # owner counted above. The named seccomp supervisor is unchanged and joined.
 # 41 -> 42 with abb872ba: the Unix-only zero-progress eviction regression
+# Windows routes seven former `.spawn()` call sites through the shared
+# `spawn_job_owned` function so assignment to the Job Object happens before a
+# child can execute. The retained child and job are awaited by the same owner.
 # launches `sleep 60` as a fake running producer. It transfers the child to
 # ProducerSlot, then awaits driver_pass; the capacity-hold Terminate step
 # calls Child::kill().await (kill plus reap) before asserting Absent. The child
@@ -1509,7 +1523,9 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # caller before its ownership is released.
 # +1 for the live source ffprobe child. It reads the finite replay sample,
 # is kill-on-drop, and is explicitly killed and reaped on timeout.
-expected_occurrences = 54
+# 47 -> 41: seven direct child spawns now enter `spawn_job_owned`; the one new
+# service checkpoint thread accounts for the net reduction of six.
+expected_occurrences = 41
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -1543,6 +1559,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # handler's bounded background recorder while the fixture waits for the exact
 # prewarm proof; it owns no process or producer.
 # +11 M5b: conversion deadlines and cancellation/race fixtures. Production
+# Windows adds seven bounded deadline/permit waits around executable identity,
+# secure handle work, diagnostics, and service shutdown. They bound existing
+# owners and do not create detached producers.
 # subprocess and hash deadlines are paired with kill-on-drop or a bounded
 # residual-I/O permit; every test-only timer is awaited by its fixture.
 # +6 with M7 R-M2's bounded subtitle materialization acceptance: two shipped
@@ -1797,7 +1816,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +3 for the start-publication race regression: two awaited fixture deadlines
 # bound the start future and one short sleep advances the locked inventory
 # fixture. They are test-only, stay owned by the test task, and launch no child.
-expected_occurrences = 750
+# +3 bounded Windows service/install waits: startup polling, checkpoint
+# publication, and the existing drain contract's new pending-state cadence.
+expected_occurrences = 760
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1888,7 +1909,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # production command with a finite synthetic input instead of constructing a
 # second command. The same bounded child remains, but one duplicate constructor
 # is gone.
-expected_occurrences = 106
+# Windows adds three command constructors for the held-path version probe,
+# fragment-index pipe, and centralized job-owned command wrappers. Each command
+# is handed immediately to a bounded output/status owner or `spawn_job_owned`.
+# +2 Windows held-path commands for permanent-DV ffprobe and conversion. Both
+# are bounded and Job-owned before they can execute.
+expected_occurrences = 111
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -2077,7 +2103,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +2 for the Live TV reliability lane, both spawn_blocking file writes in
 # GuideCache rather than child processes. The pattern cannot tell them apart, so
 # the count is reviewed here instead.
-expected_occurrences = 326
+# Windows removes nineteen direct `.spawn()`, `.output()`, and `.status()`
+# calls by funnelling them through Job Object-aware helpers. This is ownership
+# consolidation, not a reduction in child termination or reap coverage.
+# 307 -> 300: seven direct spawn/output launch sites now route through the one
+# reviewed suspended-spawn/Job-assignment owner.
+expected_occurrences = 300
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -2155,7 +2186,12 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +3 for finite Live TV source observation: ordinary ffprobe wait plus timeout
 # start-kill and wait. All three address the same retained child before the
 # replay sample and session scratch can be released.
-expected_occurrences = 355
+# Windows adds nine explicit waits/start-kills in the shared job-owned output
+# and status helpers and in bounded probe cleanup. All address retained children
+# and complete before their Job Object guard can leave scope.
+# +1 service install status poll; it waits only for the SCM state transition
+# and cannot own or detach a media child.
+expected_occurrences = 365
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -2182,7 +2218,12 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # 39 -> 42: the bounded helper sends SIGKILL to its owned process group from
 # explicit cleanup and Drop, and its descendant regression checks that the
 # total wall-time owner cannot be held open by a background child.
-expected_occurrences = 42
+# 42 -> 43 for the one cross-platform process-control dispatch owned by
+# AttemptChild. It targets that supervisor's retained, unreaped child; the
+# platform module performs the OS-specific signal operation synchronously.
+# Two additional matches are the shared job-owned wrapper declarations/calls;
+# neither is a raw unowned process lifecycle operation.
+expected_occurrences = 45
 
 [[module_structures]]
 id = "kill-on-drop-construction"
@@ -2227,13 +2268,19 @@ pattern = "kill_on_drop\\s*\\("
 # 69 -> 68 with the same Live TV graph-probe correction: the probe reuses the
 # production command's kill-on-drop child, so the duplicate probe-only call is
 # gone while cancellation protection remains on the one process that runs.
-expected_occurrences = 68
+# Windows adds two last-resort cancellation fences to the held-path probe and
+# fragment-index pipe; normal completion and timeout still explicitly reap.
+# +1 Windows held-path ffprobe. Job ownership is primary; kill-on-drop is the
+# cancellation backstop while its bounded readers and wait are joined.
+expected_occurrences = 71
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
-pattern = "AttemptChild::new\\s*\\("
+pattern = "AttemptChild::new(?:_with_job)?\\s*\\("
 # 20 -> 22 with M5c3; the module-wide twin of `supervisor-registration`, and
 # the same two test-only predecessor children.
+# The Windows constructor variant is included because it is the same exact
+# attempt supervisor with an additional retained Job Object guard.
 expected_occurrences = 22
 
 [[module_structures]]

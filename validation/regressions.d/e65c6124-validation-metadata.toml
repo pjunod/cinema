@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["e65c6124"]
+points = []
+checks = []
+reason = "This commit only records the three adversarial-correction coverage mappings in separate regressions.d fragments; it does not change runtime behavior."
+ignore = true

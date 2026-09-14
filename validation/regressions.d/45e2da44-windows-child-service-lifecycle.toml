@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["45e2da44"]
+points = ["live-tv.integration"]
+checks = ["rust-gate"]
+reason = "The retained Live TV and process-owner regressions exercise bounded probe teardown, long-lived FFmpeg cleanup, graph-probe completion, cancellation, and graceful server drain; the affected-surface fast lane additionally compiles the service and Job Object ownership paths for Windows MSVC."

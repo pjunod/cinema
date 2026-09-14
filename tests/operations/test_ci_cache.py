@@ -87,6 +87,13 @@ class CiCacheContractCase(unittest.TestCase):
         # a runner cache server that evicts nothing.
         self.assertIn('"${RUNNER_ENVIRONMENT:-}" = github-hosted', action)
         self.assertIn('[ -z "${RUNNER_TOOL_CACHE:-}" ]', action)
+        self.assertIn('[ ! -d "$RUNNER_TOOL_CACHE" ]', action)
+        self.assertIn(
+            'RUNNER_TOOL_CACHE="$GITHUB_WORKSPACE/.runner-tool-cache"', action
+        )
+        self.assertIn(
+            'echo "RUNNER_TOOL_CACHE=$RUNNER_TOOL_CACHE" >> "$GITHUB_ENV"', action
+        )
         self.assertNotIn('"$EXECUTION_MODE"', action)
         self.assertNotIn('"$PERSISTENT_ELIGIBLE"', action)
         self.assertNotIn("inputs.execution-mode", action)

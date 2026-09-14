@@ -82,7 +82,7 @@ runs:
         # thing that answers "can the janitor reclaim enough here?". Three
         # refusals on `gha-nuc4-general-01` on 2026-09-08 all said `18G
         # available` and none of them carried a cache figure.
-        if [ -n "${RUNNER_TOOL_CACHE:-}" ]; then
+        if [ -d "${RUNNER_TOOL_CACHE:-}" ]; then
           "$GITHUB_WORKSPACE/scripts/ci-runner-cache-audit" \
             "$(dirname -- "$RUNNER_TOOL_CACHE")" 20 || true
         fi
@@ -118,6 +118,18 @@ runs:
         # is what a self-hosted runner gets, always. The hosted service is for
         # hosted runners, which evict on their own, and for the rare self-hosted
         # runner that exposes no tool cache to put a bounded cache in.
+        # Container jobs inherit the host runner's RUNNER_TOOL_CACHE value,
+        # but Forgejo does not mount that host path into the container. Keep
+        # those self-hosted jobs on a bounded local cache by selecting a
+        # job-scoped root inside the workspace. Propagate the effective value
+        # so the post-job finalizer validates the same filesystem namespace.
+        if [ -n "${RUNNER_TOOL_CACHE:-}" ] \
+          && [ ! -d "$RUNNER_TOOL_CACHE" ]; then
+          RUNNER_TOOL_CACHE="$GITHUB_WORKSPACE/.runner-tool-cache"
+          mkdir -p "$RUNNER_TOOL_CACHE"
+          export RUNNER_TOOL_CACHE
+          echo "RUNNER_TOOL_CACHE=$RUNNER_TOOL_CACHE" >> "$GITHUB_ENV"
+        fi
         if [ "${RUNNER_ENVIRONMENT:-}" = github-hosted ] \
           || [ -z "${RUNNER_TOOL_CACHE:-}" ]; then
           target_dir="$GITHUB_WORKSPACE/target"

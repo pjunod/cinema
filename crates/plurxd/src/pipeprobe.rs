@@ -190,7 +190,8 @@ impl Tools for Spawn {
         args: Vec<String>,
         stdout: Stdout,
     ) -> Result<std::process::Output, String> {
-        tokio::process::Command::new(ffmpeg_bin())
+        let mut command = tokio::process::Command::new(ffmpeg_bin());
+        command
             .args(&args)
             .stdin(std::process::Stdio::null())
             .stdout(match stdout {
@@ -198,16 +199,16 @@ impl Tools for Spawn {
                 Stdout::Inherit => std::process::Stdio::inherit(),
                 Stdout::Capture => std::process::Stdio::piped(),
             })
-            .stderr(std::process::Stdio::piped())
-            .output()
+            .stderr(std::process::Stdio::piped());
+        crate::process_control::output_job_owned(&mut command)
             .await
             .map_err(|e| format!("could not run ffmpeg: {e}"))
     }
 
     async fn ffprobe(&self, args: Vec<String>) -> Result<std::process::Output, String> {
-        tokio::process::Command::new(ffprobe_bin())
-            .args(&args)
-            .output()
+        let mut command = tokio::process::Command::new(ffprobe_bin());
+        command.args(&args);
+        crate::process_control::output_job_owned(&mut command)
             .await
             .map_err(|e| format!("could not run ffprobe: {e}"))
     }

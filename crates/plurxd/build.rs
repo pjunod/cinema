@@ -38,6 +38,23 @@ fn main() {
         .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=PLURX_BUILD={build}");
     println!("cargo:rustc-env=PLURX_BUILT_AT={}", built_at());
+    embed_windows_manifest();
+}
+
+fn embed_windows_manifest() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        return;
+    }
+    let manifest = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("Cargo always sets CARGO_MANIFEST_DIR"),
+    )
+    .join("plurxd.manifest");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    println!("cargo:rustc-link-arg-bin=plurxd=/MANIFEST:EMBED");
+    println!(
+        "cargo:rustc-link-arg-bin=plurxd=/MANIFESTINPUT:{}",
+        manifest.display()
+    );
 }
 
 /// Compile time as `YYYY-MM-DDTHH:MM:SSZ`.

@@ -194,6 +194,7 @@ impl SourceFence {
     /// come from the same `fstat` the object version is built from, so this
     /// adds no syscall to the hot path beyond the one already there.
     pub(crate) fn drift(&self) -> Option<String> {
+        #[cfg(unix)]
         let metadata = match self.handle.metadata() {
             Ok(metadata) => metadata,
             // A fence whose own descriptor cannot be stated is not evidence
@@ -206,7 +207,11 @@ impl SourceFence {
                 ))
             }
         };
-        let current = match object_version(&metadata) {
+        #[cfg(unix)]
+        let current = object_version(&metadata);
+        #[cfg(windows)]
+        let current = windows_object_version(&self.handle);
+        let current = match current {
             Ok(version) => version,
             Err(error) => return Some(format!("the source identity could not be read: {error}")),
         };
@@ -268,24 +273,49 @@ pub(crate) async fn open_source_fence(
     file: &MediaFile,
     expected_object_version: Option<&str>,
 ) -> Result<SourceFence, String> {
-    let source = tokio::fs::File::open(&file.path)
+    #[cfg(unix)]
+    {
+        let source = tokio::fs::File::open(&file.path)
+            .await
+            .map_err(|error| format!("opening {}: {error}", file.path.display()))?;
+        let metadata = source
+            .metadata()
+            .await
+            .map_err(|error| format!("fstat {}: {error}", file.path.display()))?;
+        let object_version = object_version(&metadata)?;
+        if let Some(expected) = expected_object_version {
+            scanner_identity_matches(&metadata, file)?;
+            if expected != object_version {
+                return Err("source changed after cluster index resolution".to_owned());
+            }
+        }
+        Ok(SourceFence {
+            handle: source.into_std().await,
+            object_version,
+        })
+    }
+    #[cfg(windows)]
+    {
+        let path = file.path.clone();
+        let source = tokio::task::spawn_blocking(move || {
+            plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+        })
         .await
+        .map_err(|error| format!("opening source task failed: {error}"))?
         .map_err(|error| format!("opening {}: {error}", file.path.display()))?;
-    let metadata = source
-        .metadata()
-        .await
-        .map_err(|error| format!("fstat {}: {error}", file.path.display()))?;
-    let object_version = object_version(&metadata)?;
-    if let Some(expected) = expected_object_version {
+        let metadata = source
+            .metadata()
+            .map_err(|error| format!("stating {}: {error}", file.path.display()))?;
         scanner_identity_matches(&metadata, file)?;
-        if expected != object_version {
+        let object_version = windows_object_version(&source)?;
+        if expected_object_version.is_some_and(|expected| expected != object_version) {
             return Err("source changed after cluster index resolution".to_owned());
         }
+        Ok(SourceFence {
+            handle: source,
+            object_version,
+        })
     }
-    Ok(SourceFence {
-        handle: source.into_std().await,
-        object_version,
-    })
 }
 
 pub(crate) fn cache_root(cache_dir: &Path) -> PathBuf {
@@ -603,15 +633,35 @@ pub(crate) async fn attest_source(
     memo: Option<&FragmentIndexSourceObservation>,
     progress: &(dyn Fn(u64) + Sync),
 ) -> Result<AttestedSource, String> {
+    #[cfg(unix)]
     let mut source = tokio::fs::File::open(&file.path)
         .await
         .map_err(|error| format!("opening {}: {error}", file.path.display()))?;
+    #[cfg(windows)]
+    let source_handle = {
+        let path = file.path.clone();
+        tokio::task::spawn_blocking(move || {
+            plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+        })
+        .await
+        .map_err(|error| format!("opening source task failed: {error}"))?
+        .map_err(|error| format!("opening {}: {error}", file.path.display()))?
+    };
+    #[cfg(windows)]
+    let mut source = tokio::fs::File::from_std(
+        source_handle
+            .try_clone()
+            .map_err(|error| format!("cloning held source {}: {error}", file.path.display()))?,
+    );
     let before = source
         .metadata()
         .await
         .map_err(|error| format!("fstat {}: {error}", file.path.display()))?;
     scanner_identity_matches(&before, file)?;
+    #[cfg(unix)]
     let version = object_version(&before)?;
+    #[cfg(windows)]
+    let version = windows_object_version(&source_handle)?;
     let source_sha256 = if let Some(memo) = memo.filter(|memo| {
         memo.node_id == node_id
             && memo.file_id == file.id
@@ -628,7 +678,11 @@ pub(crate) async fn attest_source(
             .await
             .map_err(|error| format!("re-fstat {}: {error}", file.path.display()))?;
         scanner_identity_matches(&after, file)?;
-        if object_version(&after)? != version {
+        #[cfg(unix)]
+        let after_version = object_version(&after)?;
+        #[cfg(windows)]
+        let after_version = windows_object_version(&source_handle)?;
+        if after_version != version {
             return Err("source changed while its digest was read".to_owned());
         }
         digest
@@ -638,7 +692,10 @@ pub(crate) async fn attest_source(
         .await
         .map_err(|error| format!("rewinding {}: {error}", file.path.display()))?;
     Ok(AttestedSource {
+        #[cfg(unix)]
         handle: source.into_std().await,
+        #[cfg(windows)]
+        handle: source_handle,
         observation: FragmentIndexSourceObservation {
             node_id: node_id.to_owned(),
             file_id: file.id,
@@ -652,11 +709,29 @@ pub(crate) async fn attest_source(
 }
 
 pub(crate) async fn inspect_source(file: &MediaFile) -> Result<String, String> {
-    let metadata = tokio::fs::metadata(&file.path)
+    #[cfg(unix)]
+    {
+        let metadata = tokio::fs::metadata(&file.path)
+            .await
+            .map_err(|error| format!("stat {}: {error}", file.path.display()))?;
+        scanner_identity_matches(&metadata, file)?;
+        object_version(&metadata)
+    }
+    #[cfg(windows)]
+    {
+        let path = file.path.clone();
+        let source = tokio::task::spawn_blocking(move || {
+            plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+        })
         .await
-        .map_err(|error| format!("stat {}: {error}", file.path.display()))?;
-    scanner_identity_matches(&metadata, file)?;
-    object_version(&metadata)
+        .map_err(|error| format!("opening source task failed: {error}"))?
+        .map_err(|error| format!("opening {}: {error}", file.path.display()))?;
+        let metadata = source
+            .metadata()
+            .map_err(|error| format!("stating {}: {error}", file.path.display()))?;
+        scanner_identity_matches(&metadata, file)?;
+        windows_object_version(&source)
+    }
 }
 
 pub(crate) fn source_still_matches(
@@ -666,8 +741,12 @@ pub(crate) fn source_still_matches(
     let metadata = source
         .metadata()
         .map_err(|error| format!("re-fstat attested source: {error}"))?;
+    #[cfg(unix)]
+    let version = object_version(&metadata)?;
+    #[cfg(windows)]
+    let version = windows_object_version(source)?;
     Ok(metadata.len() == observation.source_size.max(0) as u64
-        && object_version(&metadata)? == observation.object_version)
+        && version == observation.object_version)
 }
 
 fn scanner_identity_matches(metadata: &std::fs::Metadata, file: &MediaFile) -> Result<(), String> {
@@ -698,17 +777,18 @@ fn object_version(metadata: &std::fs::Metadata) -> Result<String, String> {
     ))
 }
 
-#[cfg(not(unix))]
-fn object_version(metadata: &std::fs::Metadata) -> Result<String, String> {
-    let modified = metadata
-        .modified()
-        .map_err(|error| format!("reading source modification time: {error}"))?
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| format!("source modification time precedes unix epoch: {error}"))?;
+#[cfg(windows)]
+fn windows_object_version(file: &std::fs::File) -> Result<String, String> {
+    let identity = plurx_core::fs_secure::std_file_identity(file)
+        .map_err(|error| format!("reading Windows source FileIdInfo: {error}"))?;
     Ok(format!(
-        "{ATTESTATION_REGIME}:{}:{}",
-        metadata.len(),
-        modified.as_nanos()
+        "{ATTESTATION_REGIME}:{}:{}:{}:{}:{}:{}",
+        identity.device,
+        identity.inode,
+        identity.inode_high,
+        identity.size,
+        identity.changed_seconds,
+        identity.changed_nanoseconds
     ))
 }
 
@@ -1269,8 +1349,12 @@ mod tests {
         let dir = tempfile::tempdir().expect("version dir");
         let path = dir.path().join("versioned.bin");
         std::fs::write(&path, b"versioned").expect("write");
+        #[cfg(unix)]
         let version =
             object_version(&std::fs::metadata(&path).expect("stat")).expect("object version");
+        #[cfg(windows)]
+        let version = windows_object_version(&std::fs::File::open(&path).expect("open"))
+            .expect("object version");
         assert!(
             version.starts_with(&format!("{ATTESTATION_REGIME}:")),
             "object_version must be regime-scoped, got {version}"
