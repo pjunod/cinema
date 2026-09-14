@@ -23,19 +23,20 @@ the contributor contract forbids using CI as a compiler.
 
 | Work order | State | Current evidence | Exit condition |
 |---|---|---|---|
-| S01 · reproduce both defects | inspecting | Current `main` still calls `startLoad(position)` after a fatal unloaded manifest and still maps a successful playlist-only probe to `decoder_failed` | Retained vendored-library and shipped-executor regressions reject both old behaviors |
-| S02 · bounded manifest recovery | not started | Current attachment and hls.js ownership paths identified | One attachment owns the absolute deadline, one shared corrective credit, at most 16 manifest sends, and complete cancellation |
-| S03 · truthful diagnosis | not started | Current refusal capture and playback-surface fixtures identified | Playlist, media, presentation, decoder, authentication, and terminal causes remain distinct |
-| S04 · server phase attribution | not started | `exact_hls_context` and its three publication callers identified | Pending, invalid, unsupported, unavailable, terminal, and authority outcomes map to typed fenced responses |
+| S01 · reproduce both defects | implemented, untested | Shipped-helper coverage drives unloaded-manifest and established-stream recovery separately; the contract asserts the vendored loader's final-send seam | Deferred fast lane rejects `startLoad` on an unloaded manifest and playlist-only decoder diagnosis |
+| S02 · bounded manifest recovery | implemented, untested | One attachment owns 40 s cold / 20 s seek time, one shared corrective credit, explicit stock manifest policy, a 16-send final boundary, pause/resume rules, and loader destruction | Review accepts ownership/cancellation; deferred controller and policy contracts pass |
+| S03 · truthful diagnosis | implemented, untested | Failure evidence is attachment/ordinal-bound; auth and typed terminal bodies preempt stock retry; manifest, media, and presentation exhaustion have different copy and the startup surface has only Close/Try again | Review accepts precedence; generated surface contract and browser contracts pass |
+| S04 · server phase attribution | implemented, untested | Exact init inspection returns fenced `startup_timeout`, `hls_init_invalid`, `hls_init_unsupported`, or `init_inspection_unavailable`; producer/session terminal responses survive; five-second outer bound remains | Rust compile and deferred focused HLS tests pass |
 | S05 · qualification and promotion | deferred | No test result is claimed during implementation | One adversarial review, addressed findings, exact-head fast lane, then merge |
 
 ## Standing decisions — safety evidence advises but never gates
 
 1. **No feature gate will be added.** Startup recovery is correctness work on
    the existing web HLS path, not an optional code path.
-2. **Developer settings will explain enablement only if a user control is
-   needed.** Any prerequisite reading will be met · not met · not observable
-   and advisory; it will never override the saved choice.
+2. **Developer settings reports readiness without controlling it.** The new
+   always-on recovery card reports the loader seam, bounded policy, init
+   inspection, and presentation evidence. It has no switch and nothing reads
+   the card to decide whether recovery runs.
 3. **The existing recovery owner remains authoritative.** The loader adapter
    may admit, abort, and report transport work; it may not reopen sessions,
    select quality, or present an error on its own.

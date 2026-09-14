@@ -3414,8 +3414,19 @@ impl VodServe {
         session_id: &str,
         name: &str,
     ) -> Option<VodPublication<Option<SegmentReady>>> {
+        self.segment_before(session_id, name, None).await
+    }
+
+    /// Resolve a segment without allowing its blocked-GET allowance to run
+    /// past a caller's response-publication deadline.
+    pub(crate) async fn segment_before(
+        &self,
+        session_id: &str,
+        name: &str,
+        deadline: Option<Instant>,
+    ) -> Option<VodPublication<Option<SegmentReady>>> {
         let publication = self.session_rendition(session_id).await?;
-        let (rendition, budget, delivery) = match publication.result {
+        let (rendition, mut budget, delivery) = match publication.result {
             Ok(found) => found,
             Err(error) => {
                 return Some(VodPublication {
@@ -3424,6 +3435,9 @@ impl VodServe {
                 })
             }
         };
+        if let Some(deadline) = deadline {
+            budget = budget.min(deadline.saturating_duration_since(Instant::now()));
+        }
         let owner = publication.owner;
         if name == INIT_NAME {
             return Some(VodPublication {

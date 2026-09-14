@@ -17728,6 +17728,21 @@ impl TranscodeManager {
             })
     }
 
+    pub(crate) async fn vod_segment_before(
+        &self,
+        session_id: &str,
+        name: &str,
+        deadline: Instant,
+    ) -> Option<VodResponsePublication<Option<crate::vodserve::SegmentReady>>> {
+        self.vod
+            .segment_before(session_id, name, Some(deadline))
+            .await
+            .map(|publication| VodResponsePublication {
+                result: publication.result,
+                owner: MediaResponseOwner(MediaResponseOwnerKind::Vod(publication.owner)),
+            })
+    }
+
     /// True for an attached VOD capability or one still in the slow
     /// resurrection preparation window. Lease loss uses this classification
     /// to close the stable release generation before a late attachment.
@@ -23890,7 +23905,16 @@ impl TranscodeManager {
         session_id: &str,
         name: &str,
     ) -> Result<SegmentPublication, SegmentOpenError> {
-        let deadline = Instant::now() + SEGMENT_WAIT;
+        self.segment_for_publication_before(session_id, name, Instant::now() + SEGMENT_WAIT)
+            .await
+    }
+
+    pub(crate) async fn segment_for_publication_before(
+        self: &Arc<Self>,
+        session_id: &str,
+        name: &str,
+        deadline: Instant,
+    ) -> Result<SegmentPublication, SegmentOpenError> {
         // Guard against path traversal: segment names are `segNNNNN.ts` only.
         if !is_safe_segment(name) {
             return Ok(SegmentPublication::Missing(None));
@@ -24246,6 +24270,7 @@ impl TranscodeManager {
     /// Compatibility facade for internal probes and older tests. HTTP serving
     /// uses [`Self::segment_for_publication`] so negative outcomes retain their
     /// exact response owner and typed failure classification.
+    #[cfg(test)]
     pub async fn segment(
         self: &Arc<Self>,
         session_id: &str,

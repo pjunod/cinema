@@ -1039,11 +1039,23 @@ or "HDR …" reason is a real, up-front transcode verdict.
 
 A transcode session is not ready the moment it is created. Its first media
 playlist appears when ffmpeg has published enough of one, and the server holds
-the request open until then rather than answering "not found" — because the
-client's patience is asymmetric. Verified against the vendored hls.js: a slow
-first byte is waited on indefinitely (`manifestLoadPolicy.maxTimeToFirstByteMs:
-Infinity`, 20 s per attempt, two timeout retries), while an error response
-spends one of a single error retry and then goes fatal.
+the request open until then rather than answering "not found". The web client
+now gives manifest loading its own explicit policy: 10 s to first byte, 12 s
+total load, seven HTTP retries on a 1/2/4-second capped backoff, and one timeout
+retry after 1 s. Fragment policy is unchanged.
+
+One startup attachment owns an absolute deadline (40 s cold, 20 s after a seek),
+one application corrective credit, and a ceiling of 16 actual manifest sends.
+If no manifest was parsed, the corrective action calls `loadSource` with the
+captured current URL; an established stream keeps the narrower
+`startLoad(currentTime)` recovery. Pause cancels all live startup loaders while
+the absolute deadline continues to age. Resume uses the same credit, never a
+fresh episode. Close, replacement, and deadline exhaustion destroy both stock
+and application retry work.
+
+`playing`, a parsed manifest, and media bytes are progress facts, not completion.
+Startup retires only after the media clock advances and, when the browser
+exposes a frame counter, a frame advances too. That same evidence owns TTFF.
 
 ### The playlist wait is the startup-recovery budget
 
@@ -1101,7 +1113,7 @@ and logged, on a headless box they were not sitting at. The first verdict wins;
 a later reader that merely notices the flag never overwrites it.
 
 The web player captures that body at the transport (`xhrSetup`, `load`
-listener) because hls.js's `ERROR` event carries only the response line —
+listener plus a stock-loader final-send adapter) because hls.js's `ERROR` event carries only the response line —
 `{code: status, text: statusText}` — and drops the body. `PlaybackPolicy`
 `parseStreamFailure` / `streamFailureOverlay` turn it into the overlay's two
 lines, and a `startup_timeout` is shown as **"Still preparing this stream…"**
@@ -1111,6 +1123,15 @@ to the hls.js instance forever: when an in-instance retry emits
 immediately. An unrelated later fatal can therefore never inherit a 503 that
 playback already recovered from; a successful level reload does not erase a
 terminal refusal from some other request.
+
+The loader adapter inspects a completed manifest refusal before hls.js decides
+to retry it. Authentication and structured terminal/owner failures therefore
+win over the library's generic 5xx policy. Its final send boundary rechecks
+attachment ownership, pause/cancel state, deadline, and the 16-send ceiling;
+timers that became stale while XHR setup was asynchronous cannot leak a request.
+An exhausted startup reports whether the manifest, media, or presentation was
+missing. It does not relabel unknown presentation failure as decoder failure,
+and the HLS startup diagnostic never fetches the playlist a second time.
 
 A burn preflight is earlier than that transport. Its 501 comes from the
 session-creation `POST`, before `attachHls` creates an XHR, so the shared API

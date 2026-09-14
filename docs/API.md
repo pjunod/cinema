@@ -1180,6 +1180,12 @@ used only when `SUPPLEMENTAL-CODECS` is declared, because advertising that
 from a version-7 master makes AVPlayer reject an otherwise valid Profile
 8.1/8.4 rendition.
 
+Before a master is published, plurx reads the exact initialization object for
+that session and validates its fMP4/HEVC codec description. The inspection is
+part of the existing five-second response-publication budget and is fenced to
+the same owner as the playlist response. It never falls back to scanner-guessed
+codec metadata when the published init cannot support that claim.
+
 `GET /hls/{session}/{segment}` serves `init.mp4`, `segNNNNN.ts` or
 `segNNNNN.m4s` and nothing else. Content types follow Apple's HLS authoring
 profile — `.ts` → `video/mp2t`, `.m4s` → `video/iso.segment` — because
@@ -1190,12 +1196,17 @@ Segments carry `ETag`, `Accept-Ranges: bytes` and `Cache-Control: private,
 max-age=3600, immutable`, and honour `Range`. `If-Range` is stricter than
 `If-None-Match`: only an exact **strong** entity-tag authorizes a partial
 representation, and weak tags, dates and malformed values all fall back to a
-complete 200. `init.mp4` is only ever read up to 1 MiB; a larger init reports
-a skipped inspection rather than a truncated response.
+complete 200. `init.mp4` inspection is bounded at 1 MiB. A larger, short, or
+malformed init is an invalid publication rather than a truncated response or a
+best-effort success.
 
 | Status | Code | Meaning |
 |---|---|---|
 | 404 | — | `segment not found` |
+| 502 | `hls_init_invalid` | Published init bytes are malformed, incomplete, oversized, or missing a required codec record; terminal for this session |
+| 502 | `hls_init_unsupported` | The init is valid fMP4 but its codec/sample-entry layout is unsupported; terminal for this session |
+| 503 | `startup_timeout` | The session's initialization media is still pending inside the bounded playlist publication window |
+| 503 | `init_inspection_unavailable` | Storage or inspection capacity could not provide a trustworthy init reading; a bounded retry is reasonable |
 | 503 | `segment_pending` | still being produced; retry shortly |
 | 503 | `response_snapshot_capacity` / `response_publication_timeout` | node-side capacity |
 | 503 | `media_owner_transition` | a successor may still arrive |
