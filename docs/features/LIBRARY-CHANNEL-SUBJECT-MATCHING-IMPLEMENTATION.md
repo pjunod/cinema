@@ -1,6 +1,6 @@
 # Library channel subjects — build useful matching without a research project
 
-**Status:** single review complete; repairs and focused validation in progress; not shipped · **Written:**
+**Status:** implementation complete; final promotion tracked in PR #313; not deployed; not shipped · **Written:**
 2026-09-14 · **Executes:** Paul's request for reliable subject selection,
 short delivery, advisory Developer requirements, and the current fast lane.
 
@@ -674,7 +674,7 @@ existing history convention.
 
 | Package | State on 2026-09-14 | Evidence to fill during implementation |
 |---|---|---|
-| P1 | Implemented; quality observation deferred until review | Own clone `/private/tmp/plurx-subject-matching-20260914`; base `fd70676b`. Rust 1.97.1 compiler loop, tracked formatting/Clippy/JavaScript syntax hook pass. Subject presence compatibility and editor repairs integrated. Local `qwen3:4b` installed. No tests run yet. |
+| P1 | Complete | Own clone `/private/tmp/plurx-subject-matching-20260914`; base `fd70676b`. Rust 1.97.1 compiler loop, tracked formatting/Clippy/JavaScript syntax hook pass. Subject presence compatibility and editor repairs integrated. Local `qwen3:4b` installed. No tests run yet. |
 | P2 | Implemented; focused regressions written | SQLite migration 58 / Hiqlite 38; shared job/cache SQL, global renewable claim, revision and publication fences, exact metadata/profile cache keys, bounded retention. Preview create acknowledges without catalogue or inference work. Saved definitions queue durably. |
 | P3 | Implemented; integration compilation in progress | Web, Apple and Android subject editors, progress/results/manual overrides, shared wire fixture. Apple build 157: iOS and tvOS compile passed. Android build 97: app and JVM test sources compile passed. No behavior tests run yet. |
 | P4 | Review complete; final validation in progress | One adversarial review of `394d03f2` found 12 issues, repaired as author. Main `11ca0573` integrated. [Draft PR #313](http://192.168.4.7:3000/noirr/plurx/pulls/313); one adversarial review next, then repairs and final fast-lane qualification. No deployment authorized. |
@@ -795,7 +795,7 @@ calls: 24 admissions, 23 true positives, 24 labelled positives, seven uncertain;
 **95.8% precision, 95.8% recall, zero prohibited stand-up admissions**. First
 useful results arrived after 11.23 seconds; the full finite cold run took 62.18
 seconds. One false admission and one missed positive remain; these metrics do
-not claim whole-library accuracy. No model or prompt adjustment was needed.
+not claim whole-library accuracy. The baseline met the numerical targets; the real sample prompted the one allowed prompt correction.
 
 Host: Mac15,9 / Apple M3 Max, 64 GiB RAM; Ollama reported 5.1 GB loaded, 100% GPU,
 16,384-token context. Artifact digest:
@@ -816,8 +816,30 @@ node --test tests/web/library-channels.test.js
 ```
 
 The finite fixture's false admission was a space-fiction title; its missed
-positive was a space documentary with weaker evidence. The precision/recall
-thresholds passed without tuning. A full 5,800-title production cold scan,
+positive was a space documentary with weaker evidence. The baseline precision/recall
+thresholds passed; the correction below improved content-format precision. A full 5,800-title production cold scan,
 production-host throughput, and physical-device playback are not inferred from
 this 48-pair development observation. Those deployment measurements remain
 operator observations; they neither disable the feature nor block authoring.
+
+
+### Final prompt and promotion candidate
+
+The one allowed prompt correction explicitly distinguishes recorded performances
+from fictional plots, interviews and talk-show guests, and documentaries from
+space fiction. On the same independently labelled 48 pairs it produced **100%
+accepted-positive precision, 95.8% recall, five uncertain, zero invalid rows and
+zero prohibited stand-up admissions**, in eight calls over 50.74 seconds. First
+useful results: 8.13 seconds. The model artifact is unchanged; final prompt/profile
+suffix: `1bf4d5c1411216fee770744c51706310c828a954b6132ede970a009b078f4231`.
+
+The private sample harness was corrected to use inherited series metadata,
+normalized genre/tag text and bounded fields as production does. Missing episode
+numbers are omitted so a placeholder cannot serve as evidence. Its observations
+are local engineering inspection, not independently labelled precision/recall.
+
+All twelve adversarial findings were addressed by the author. Final gate status,
+review closure and the merged commit are maintained in
+[PR #313](http://192.168.4.7:3000/noirr/plurx/pulls/313), which is the authoritative
+live promotion receipt. Release uploads, deployment and physical-device/full-
+library performance observations are separate from this implementation merge.

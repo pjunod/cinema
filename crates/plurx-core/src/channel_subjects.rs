@@ -176,13 +176,16 @@ impl Metadata {
             "year".into(),
             c.year.map(|v| v.to_string()).unwrap_or_default(),
         );
-        fields.insert(
-            "episode_identity".into(),
-            format!(
-                "season {:?}, episode {:?}",
-                c.season_number, c.episode_number
-            ),
-        );
+        if c.season_number.is_some() || c.episode_number.is_some() {
+            fields.insert(
+                "episode_identity".into(),
+                format!(
+                    "season {}, episode {}",
+                    c.season_number.map(|v| v.to_string()).unwrap_or_default(),
+                    c.episode_number.map(|v| v.to_string()).unwrap_or_default()
+                ),
+            );
+        }
         Self {
             fields,
             missing_overview: c.overview.trim().is_empty(),
@@ -440,6 +443,10 @@ mod tests {
     #[test]
     fn subject_model_evidence_cannot_invent_quotes() {
         let metadata = Metadata::from_candidate(&candidate());
+        assert!(
+            !metadata.fields.contains_key("episode_identity"),
+            "absent episode numbers cannot be admission evidence"
+        );
         let mut d = SubjectDecision {
             verdict: Verdict::Match,
             reason: "A performance".into(),
