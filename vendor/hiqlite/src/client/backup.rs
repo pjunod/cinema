@@ -130,7 +130,7 @@ impl Client {
                 #[cfg(unix)]
                 let size = Some(meta.size());
                 #[cfg(not(unix))]
-                let size = None;
+                let size = Some(meta.len());
 
                 res.push(BackupListing {
                     name,

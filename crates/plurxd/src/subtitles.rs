@@ -906,15 +906,14 @@ pub(crate) async fn ensure_burn_file(
         file,
         index,
         limits,
-        move |tmp, file, index| async move {
+        move |tmp, _file, index| async move {
             let source = extractor_source;
             let mut command = tokio::process::Command::new(ffmpeg_bin());
             crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.handle, 3)]);
-            let input = if cfg!(unix) {
-                Path::new("/dev/fd/3")
-            } else {
-                file.path.as_path()
-            };
+            #[cfg(unix)]
+            let input = PathBuf::from("/dev/fd/3");
+            #[cfg(windows)]
+            let input = crate::ffmpeg::windows_source_path(&source.handle)?;
             command
                 .args([
                     "-hide_banner",
@@ -924,7 +923,7 @@ pub(crate) async fn ensure_burn_file(
                     "-start_at_zero",
                     "-i",
                 ])
-                .arg(input)
+                .arg(&input)
                 .args([
                     "-map",
                     &format!("0:s:{index}"),
@@ -941,6 +940,8 @@ pub(crate) async fn ensure_burn_file(
                 ])
                 .arg("pipe:1")
                 .stdin(std::process::Stdio::null());
+            #[cfg(windows)]
+            crate::ffmpeg::verify_windows_source_path(&source.handle, &input)?;
             let (status, diagnostics) =
                 crate::ffmpeg::BoundedDiagnosticChild::spawn_piped_output(&mut command)
                     .map_err(|error| format!("starting burn-track extraction: {error}"))?
@@ -1320,9 +1321,16 @@ async fn extract_vtt_window(
     let end = anchor_seconds
         .saturating_add(bounded_window_seconds(window_seconds))
         .saturating_add(WINDOW_SLACK_SECONDS);
-    let out = tokio::process::Command::new(ffmpeg_bin())
+    let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
+    #[cfg(unix)]
+    let input = PathBuf::from("/dev/fd/3");
+    #[cfg(windows)]
+    let input = crate::ffmpeg::windows_source_path(&source.handle)?;
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.handle, 3)]);
+    command
         .args(["-hide_banner", "-loglevel", "error", "-i"])
-        .arg(&file.path)
+        .arg(&input)
         .args([
             "-ss",
             &anchor_seconds.to_string(),
@@ -1338,8 +1346,10 @@ async fn extract_vtt_window(
         // Same reason as the whole-track extractor: the bound is a kill, not
         // merely a stopped wait, or a wedged ffmpeg keeps the stalled mount
         // open after the future is dropped.
-        .kill_on_drop(true)
-        .output()
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    crate::ffmpeg::verify_windows_source_path(&source.handle, &input)?;
+    let out = crate::process_control::output_job_owned(&mut command)
         .await
         .map_err(|e| format!("spawning subtitle window extraction: {e}"))?;
     if !out.status.success() {
@@ -1593,9 +1603,16 @@ pub(crate) fn peak_window_flights_for_test(session: &str) -> usize {
 }
 
 async fn extract_vtt(tmp: &Path, file: &MediaFile, index: i64) -> Result<(), String> {
-    let out = tokio::process::Command::new(ffmpeg_bin())
+    let source = crate::fragment_index_cluster::open_source_fence(file, None).await?;
+    #[cfg(unix)]
+    let input = PathBuf::from("/dev/fd/3");
+    #[cfg(windows)]
+    let input = crate::ffmpeg::windows_source_path(&source.handle)?;
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.handle, 3)]);
+    command
         .args(["-hide_banner", "-loglevel", "error", "-i"])
-        .arg(&file.path)
+        .arg(&input)
         .args(["-map", &format!("0:s:{index}"), "-f", "webvtt"])
         .arg(tmp)
         .stdin(std::process::Stdio::null())
@@ -1603,8 +1620,10 @@ async fn extract_vtt(tmp: &Path, file: &MediaFile, index: i64) -> Result<(), Str
         // future; without `kill_on_drop` that drop would merely stop waiting
         // and leave the wedged ffmpeg holding the stalled mount open. This is
         // what makes the bound an actual kill.
-        .kill_on_drop(true)
-        .output()
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    crate::ffmpeg::verify_windows_source_path(&source.handle, &input)?;
+    let out = crate::process_control::output_job_owned(&mut command)
         .await
         .map_err(|e| format!("spawning subtitle extraction: {e}"))?;
     if !out.status.success() {

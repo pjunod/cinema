@@ -581,7 +581,7 @@ pub async fn build(
         Ok(pass) => pass,
         Err(reason) => return IndexOutcome::Unsupported(reason),
     };
-    build_with_args(file, pass, None, runtime_cache, budget, None).await
+    build_with_args(file, pass, None, None, runtime_cache, budget, None).await
 }
 
 /// Build from the exact file descriptor whose complete digest was observed.
@@ -605,6 +605,7 @@ pub async fn build_from_attested_file(
         file,
         pass,
         Some(source.as_raw_fd()),
+        None,
         runtime_cache,
         budget,
         None,
@@ -634,6 +635,7 @@ where
         file,
         pass,
         Some(source.as_raw_fd()),
+        None,
         runtime_cache,
         budget,
         Some(Arc::new(progress)),
@@ -641,22 +643,39 @@ where
     .await
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 #[allow(dead_code)]
 pub async fn build_from_attested_file(
     file: &MediaFile,
-    _source: &std::fs::File,
+    source: &std::fs::File,
     video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
-    build(file, video, runtime_cache, budget).await
+    let path = match crate::ffmpeg::windows_source_path(source) {
+        Ok(path) => path,
+        Err(reason) => return IndexOutcome::Unsupported(reason),
+    };
+    let pass = match index_pass(file, video, Some(&path.to_string_lossy())) {
+        Ok(pass) => pass,
+        Err(reason) => return IndexOutcome::Unsupported(reason),
+    };
+    build_with_args(
+        file,
+        pass,
+        None,
+        Some((source, &path)),
+        runtime_cache,
+        budget,
+        None,
+    )
+    .await
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 pub async fn build_from_attested_file_with_progress<F>(
     file: &MediaFile,
-    _source: &std::fs::File,
+    source: &std::fs::File,
     video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
     budget: Duration,
@@ -665,7 +684,11 @@ pub async fn build_from_attested_file_with_progress<F>(
 where
     F: Fn(u64, i64, usize) + Send + Sync + 'static,
 {
-    let pass = match index_pass(file, video, None) {
+    let path = match crate::ffmpeg::windows_source_path(source) {
+        Ok(path) => path,
+        Err(reason) => return IndexOutcome::Unsupported(reason),
+    };
+    let pass = match index_pass(file, video, Some(&path.to_string_lossy())) {
         Ok(pass) => pass,
         Err(reason) => return IndexOutcome::Unsupported(reason),
     };
@@ -673,6 +696,7 @@ where
         file,
         pass,
         None,
+        Some((source, &path)),
         runtime_cache,
         budget,
         Some(Arc::new(progress)),
@@ -685,6 +709,7 @@ async fn build_with_args(
     file: &MediaFile,
     pass: IndexPass,
     source_fd: Option<SourceFd>,
+    source_handoff: Option<(&std::fs::File, &Path)>,
     runtime_cache: &Path,
     budget: Duration,
     progress: Option<SharedIndexProgress>,
@@ -724,18 +749,27 @@ async fn build_with_args(
             });
         }
     }
-    let mut child = match command
+    #[cfg(not(unix))]
+    let _ = source_fd;
+    command
         .args(&args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-    {
-        Ok(child) => child,
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    if let Some((source, path)) = source_handoff {
+        if let Err(reason) = crate::ffmpeg::verify_windows_source_path(source, path) {
+            return IndexOutcome::Truncated { reason, rows: 0 };
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = source_handoff;
+    let (mut child, _child_job) = match crate::process_control::spawn_job_owned(&mut command) {
+        Ok(owned) => owned,
         Err(error) => {
             return IndexOutcome::Truncated {
-                reason: format!("spawning the index pipe: {error}"),
+                reason: format!("spawning the job-owned index pipe: {error}"),
                 rows: 0,
             }
         }

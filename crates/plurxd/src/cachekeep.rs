@@ -458,7 +458,9 @@ async fn quarantine_and_remove(candidate: &OrphanCandidate) -> bool {
     if let Err(error) =
         plurx_core::fs_secure::rename_child(&candidate.parent, &candidate.name, &quarantine).await
     {
-        if error.kind() != std::io::ErrorKind::NotFound {
+        if plurx_core::fs_secure::is_sharing_violation(&error) {
+            tracing::debug!(dir = %candidate.path.display(), "cache: Windows handle is still in use; retrying next sweep");
+        } else if error.kind() != std::io::ErrorKind::NotFound {
             tracing::warn!(dir = %candidate.path.display(), %error, "cache: could not quarantine directory");
         }
         return error.kind() == std::io::ErrorKind::NotFound;
@@ -516,7 +518,11 @@ async fn quarantine_and_remove(candidate: &OrphanCandidate) -> bool {
                         &candidate.name,
                     )
                     .await;
-                    tracing::warn!(dir = %candidate.path.display(), child, %error, "cache: bounded assembly cleanup failed; preserving staging bytes");
+                    if plurx_core::fs_secure::is_sharing_violation(&error) {
+                        tracing::debug!(dir = %candidate.path.display(), child, "cache: Windows assembly handle is still in use; retrying next sweep");
+                    } else {
+                        tracing::warn!(dir = %candidate.path.display(), child, %error, "cache: bounded assembly cleanup failed; preserving staging bytes");
+                    }
                     return false;
                 }
             }
@@ -548,12 +554,20 @@ async fn quarantine_and_remove(candidate: &OrphanCandidate) -> bool {
                 &candidate.name,
             )
             .await;
-            tracing::warn!(
-                dir = %candidate.path.display(),
-                %error,
-                ?restored,
-                "cache: bounded quarantine removal failed; preserving bytes"
-            );
+            if plurx_core::fs_secure::is_sharing_violation(&error) {
+                tracing::debug!(
+                    dir = %candidate.path.display(),
+                    ?restored,
+                    "cache: Windows handle is still in use; retrying next sweep"
+                );
+            } else {
+                tracing::warn!(
+                    dir = %candidate.path.display(),
+                    %error,
+                    ?restored,
+                    "cache: bounded quarantine removal failed; preserving bytes"
+                );
+            }
             false
         }
     }

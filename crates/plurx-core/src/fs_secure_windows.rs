@@ -21,29 +21,47 @@ use windows_sys::Wdk::Storage::FileSystem::{
 use windows_sys::Win32::Foundation::{
     RtlNtStatusToDosError, HANDLE, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE, UNICODE_STRING,
 };
+use windows_sys::Win32::Security::Authorization::{
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
+    SE_FILE_OBJECT,
+};
+use windows_sys::Win32::Security::{
+    EqualSid, GetTokenInformation, SetFileSecurityW, TokenUser, DACL_SECURITY_INFORMATION,
+    OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+    TOKEN_QUERY, TOKEN_USER,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FileBasicInfo, FileDispositionInfoEx, FileIdBothDirectoryInfo,
     FileIdBothDirectoryRestartInfo, FileIdInfo, FileRenameInfoEx, FileStandardInfo,
-    FlushFileBuffers, GetFileInformationByHandleEx, SetFileInformationByHandle, DELETE,
-    FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
-    FILE_ATTRIBUTE_TEMPORARY, FILE_BASIC_INFO, FILE_DISPOSITION_FLAG_DELETE,
-    FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_ON_CLOSE,
-    FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO,
-    FILE_ID_INFO, FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES,
+    FlushFileBuffers, GetFileInformationByHandleEx, GetFinalPathNameByHandleW,
+    GetVolumeInformationByHandleW, SetFileInformationByHandle, DELETE, FILE_APPEND_DATA,
+    FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT, FILE_ATTRIBUTE_TEMPORARY, FILE_BASIC_INFO,
+    FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE,
+    FILE_DISPOSITION_FLAG_ON_CLOSE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+    FILE_DISPOSITION_INFO_EX, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_ID_BOTH_DIR_INFO, FILE_ID_INFO,
+    FILE_INFO_BY_HANDLE_CLASS, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
     FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_STANDARD_INFO,
-    OPEN_EXISTING, SYNCHRONIZE,
+    OPEN_EXISTING, SYNCHRONIZE, VOLUME_NAME_DOS,
 };
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
 const ERROR_FILE_EXISTS: i32 = 80;
 const ERROR_ALREADY_EXISTS: i32 = 183;
 const ERROR_NO_MORE_FILES: i32 = 18;
+const ERROR_SHARING_VIOLATION: i32 = 32;
 const MAX_DIRECTORY_ENTRIES: usize = 120_100;
 const MAX_DIRECTORY_DEPTH: usize = 4;
 
 fn invalid_path(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
+}
+
+/// Stock ffmpeg omits FILE_SHARE_DELETE. A file it still has open is live,
+/// not corrupt; Windows cleanup leaves it in the sweep set for a later pass.
+pub fn is_sharing_violation(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(ERROR_SHARING_VIOLATION)
 }
 
 fn child_name(name: &str) -> io::Result<OsString> {
@@ -125,6 +143,117 @@ fn reject_reparse(handle: HANDLE) -> io::Result<()> {
     } else {
         Ok(())
     }
+}
+
+fn require_current_process_owner(file: &File) -> io::Result<()> {
+    let mut owner: PSID = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: output pointers are valid and the returned descriptor is freed
+    // with LocalFree after its embedded owner SID has been compared.
+    let status = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle().cast(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION,
+            &raw mut owner,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &raw mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(io::Error::from_raw_os_error(status as i32));
+    }
+    let result = (|| {
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: GetCurrentProcess is a valid pseudo-handle and `token` is a
+        // writable output slot closed below.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let token_result = (|| {
+            let mut bytes = 0_u32;
+            // The first call intentionally asks Windows for the required size.
+            unsafe {
+                GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &raw mut bytes)
+            };
+            if bytes < std::mem::size_of::<TOKEN_USER>() as u32 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut storage = vec![0_u64; (bytes as usize).div_ceil(8)];
+            // SAFETY: the aligned storage is writable for the exact byte count
+            // requested by the preceding GetTokenInformation call.
+            if unsafe {
+                GetTokenInformation(
+                    token,
+                    TokenUser,
+                    storage.as_mut_ptr().cast(),
+                    bytes,
+                    &raw mut bytes,
+                )
+            } == 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: a successful TokenUser query initializes TOKEN_USER at
+            // the beginning of the aligned buffer.
+            let current = unsafe { &*storage.as_ptr().cast::<TOKEN_USER>() };
+            if unsafe { EqualSid(owner, current.User.Sid) } == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "scratch directory is not owned by the current Windows account",
+                ));
+            }
+            Ok(())
+        })();
+        // SAFETY: OpenProcessToken returned this owned token handle.
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(token) };
+        token_result
+    })();
+    // SAFETY: GetSecurityInfo allocated the descriptor with LocalAlloc.
+    unsafe { windows_sys::Win32::Foundation::LocalFree(descriptor.cast()) };
+    result
+}
+
+fn harden_owned_directory(path: &Path) -> io::Result<()> {
+    // Protected DACL: full control for SYSTEM and for the object's owner, with
+    // inheritance to every scratch/cache descendant and no inherited ACEs.
+    let sddl = OsStr::new("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: the SDDL is NUL-terminated and the returned descriptor is freed
+    // after SetFileSecurityW consumes it.
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &raw mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let wide = wide_nul(path)?;
+    let ok = unsafe {
+        SetFileSecurityW(
+            wide.as_ptr(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor,
+        )
+    };
+    let result = if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    };
+    // SAFETY: the conversion function allocated this descriptor with
+    // LocalAlloc and no references survive this call.
+    unsafe { windows_sys::Win32::Foundation::LocalFree(descriptor.cast()) };
+    result
 }
 
 fn open_root(path: &Path) -> io::Result<File> {
@@ -308,6 +437,43 @@ fn file_identity(file: &File) -> io::Result<FileIdentity> {
     handle_identity(file.as_raw_handle().cast())
 }
 
+pub fn std_file_identity(file: &File) -> io::Result<FileIdentity> {
+    file_identity(file)
+}
+
+pub fn std_file_path(file: &File) -> io::Result<PathBuf> {
+    let handle = file.as_raw_handle().cast();
+    // SAFETY: a null output buffer with size zero asks Windows for the
+    // required UTF-16 capacity. The handle remains live for both calls.
+    let required = unsafe {
+        GetFinalPathNameByHandleW(
+            handle,
+            std::ptr::null_mut(),
+            0,
+            FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+        )
+    };
+    if required == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut wide = vec![0_u16; required as usize + 1];
+    // SAFETY: `wide` is writable for the supplied length and the handle is
+    // unchanged from the successful sizing call.
+    let written = unsafe {
+        GetFinalPathNameByHandleW(
+            handle,
+            wide.as_mut_ptr(),
+            wide.len() as u32,
+            FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+        )
+    };
+    if written == 0 || written as usize >= wide.len() {
+        return Err(io::Error::last_os_error());
+    }
+    wide.truncate(written as usize);
+    Ok(PathBuf::from(OsString::from_wide(&wide)))
+}
+
 pub fn async_file_identity(file: &tokio::fs::File) -> io::Result<FileIdentity> {
     handle_identity(file.as_raw_handle().cast())
 }
@@ -352,9 +518,47 @@ pub fn open_directory_nofollow_blocking(path: &Path) -> io::Result<File> {
     open_path(path, true)
 }
 
+pub fn require_mutable_volume_blocking(path: &Path) -> io::Result<()> {
+    let directory = open_directory_nofollow_blocking(path)?;
+    let mut filesystem = [0_u16; 32];
+    // SAFETY: `filesystem` is a writable UTF-16 buffer and the remaining
+    // optional outputs are deliberately null. The directory handle stays live.
+    if unsafe {
+        GetVolumeInformationByHandleW(
+            directory.as_raw_handle().cast(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            filesystem.as_mut_ptr(),
+            filesystem.len() as u32,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let end = filesystem
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(filesystem.len());
+    let name = String::from_utf16_lossy(&filesystem[..end]);
+    if name.eq_ignore_ascii_case("NTFS") || name.eq_ignore_ascii_case("ReFS") {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "mutable plurx storage requires NTFS or ReFS on Windows; {path:?} is on {name}"
+            ),
+        ))
+    }
+}
+
 #[derive(Clone)]
 pub struct SecureDirectory {
     file: Arc<File>,
+    path: Arc<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -366,10 +570,11 @@ pub struct SecureChildMetadata {
 
 impl SecureDirectory {
     pub async fn open(path: &Path) -> io::Result<Self> {
-        let path = path.to_owned();
+        let path = std::path::absolute(path)?;
         tokio::task::spawn_blocking(move || {
             Ok(Self {
                 file: Arc::new(open_directory_nofollow_blocking(&path)?),
+                path: Arc::new(path),
             })
         })
         .await
@@ -378,6 +583,14 @@ impl SecureDirectory {
 
     pub fn raw_handle(&self) -> HANDLE {
         self.file.as_raw_handle().cast()
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn identity_blocking(&self) -> io::Result<FileIdentity> {
+        file_identity(&self.file)
     }
 
     pub async fn identity(&self) -> io::Result<FileIdentity> {
@@ -404,9 +617,11 @@ impl SecureDirectory {
     pub async fn open_child_directory(&self, name: &str) -> io::Result<Self> {
         let parent = Arc::clone(&self.file);
         let name = child_name(name)?;
+        let path = self.path.join(&name);
         tokio::task::spawn_blocking(move || {
             Ok(Self {
                 file: Arc::new(open_directory_child(&parent, &name)?),
+                path: Arc::new(path),
             })
         })
         .await
@@ -416,6 +631,7 @@ impl SecureDirectory {
     pub async fn create_child_directory(&self, name: &str) -> io::Result<Self> {
         let parent = Arc::clone(&self.file);
         let name = child_name(name)?;
+        let path = self.path.join(&name);
         tokio::task::spawn_blocking(move || {
             let file = match create_directory_child_blocking(&parent, &name) {
                 Ok(file) => file,
@@ -426,6 +642,7 @@ impl SecureDirectory {
             };
             Ok(Self {
                 file: Arc::new(file),
+                path: Arc::new(path),
             })
         })
         .await
@@ -1293,7 +1510,10 @@ fn clear_owned_scratch(
     expected_marker: &[u8],
     protected: &[FileIdentity],
 ) -> io::Result<()> {
-    let directory = open_directory_nofollow_blocking(path)?;
+    let path = std::path::absolute(path)?;
+    let directory = open_directory_nofollow_blocking(&path)?;
+    require_current_process_owner(&directory)?;
+    harden_owned_directory(&path)?;
     let root = file_identity(&directory)?;
     if protected.iter().any(|identity| identity.same_inode(root)) {
         return Err(io::Error::other(
@@ -1366,16 +1586,27 @@ fn clear_owned_scratch(
                 MAX_DIRECTORY_DEPTH,
             )?;
             let mut removed = 0;
-            remove_tree(
+            let removed = remove_tree(
                 &file,
                 &mut removed,
                 MAX_DIRECTORY_ENTRIES,
                 0,
                 MAX_DIRECTORY_DEPTH,
-            )?;
+            );
+            if let Err(error) = removed {
+                if is_sharing_violation(&error) {
+                    continue;
+                }
+                return Err(error);
+            }
         }
         drop(file);
-        unlink_child_blocking(&directory, &child)?;
+        if let Err(error) = unlink_child_blocking(&directory, &child) {
+            if is_sharing_violation(&error) {
+                continue;
+            }
+            return Err(error);
+        }
     }
     Ok(())
 }

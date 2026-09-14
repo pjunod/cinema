@@ -20,6 +20,10 @@ fn invalid_path(message: &'static str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, message)
 }
 
+pub fn is_sharing_violation(_error: &io::Error) -> bool {
+    false
+}
+
 fn component_name(component: Component<'_>) -> io::Result<CString> {
     match component {
         Component::Normal(name) => CString::new(name.as_bytes())
