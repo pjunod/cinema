@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["8dd2cde0"]
+points = ["core.media", "playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The permanent Windows MSVC all-target build compiles shared file-identity, hash ownership, engine attestation, process supervision, and VOD test code. Portable fixtures use platform APIs while tests that intrinsically require POSIX signals, procfs, raw file descriptors, or Unix rename durability remain explicitly Unix-only."

@@ -315,6 +315,15 @@ fn file_identity(file: &File) -> io::Result<FileIdentity> {
     })
 }
 
+/// Return the stable identity of an already-open standard-library file.
+///
+/// Keeping this entry point identical to the Windows implementation lets
+/// callers compare held handles without reaching through platform-specific
+/// metadata extension traits.
+pub fn std_file_identity(file: &File) -> io::Result<FileIdentity> {
+    file_identity(file)
+}
+
 #[allow(clippy::unnecessary_cast)]
 fn stat_device(stat: &libc::stat) -> u64 {
     // `dev_t` is already u64 on Linux but narrower on other supported Unix
