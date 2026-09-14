@@ -10846,6 +10846,9 @@ async fn exact_hls_context_at(
                         PlaylistError::SessionGone,
                     )));
                 }
+                Ok(crate::transcode::SegmentPublication::Unavailable(_)) => {
+                    return Err(HlsInitInspectionError::unavailable());
+                }
                 Ok(crate::transcode::SegmentPublication::Failed(error)) => {
                     return Err(HlsInitInspectionError::from_api_error(playlist_error(
                         session,
@@ -10901,6 +10904,18 @@ async fn exact_hls_context_at(
     };
     if !required_box {
         return Err(HlsInitInspectionError::invalid());
+    }
+    if matches!(sample_entry, "hvc1" | "dvh1") {
+        match plurx_core::fmp4::hevc_parameter_sets_complete(&parsed) {
+            Ok(true) => {}
+            Ok(false) | Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
+                return Err(HlsInitInspectionError::invalid());
+            }
+            Err(
+                plurx_core::fmp4::Fmp4Error::Unsupported(_)
+                | plurx_core::fmp4::Fmp4Error::MultipleHevcSampleEntries { .. },
+            ) => return Err(HlsInitInspectionError::unsupported()),
+        }
     }
     match plurx_core::fmp4::validate_hevc_sample_entries(&parsed) {
         Ok(plurx_core::fmp4::HevcSampleEntryLayout::Single) => {}
@@ -12740,6 +12755,22 @@ async fn segment_local_before(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "segment_pending",
                 "the segment is still being produced; retry shortly",
+            ));
+        }
+        Ok(crate::transcode::SegmentPublication::Unavailable(owner)) => {
+            authorize_attempt_status(
+                state,
+                session,
+                &owner,
+                segment_publication_kind(seg, None),
+                Some(seg),
+                response_publication_deadline_before(request_deadline),
+            )
+            .await?;
+            return Err(ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "segment_inspection_unavailable",
+                "the segment exists but its storage metadata is temporarily unavailable",
             ));
         }
         Ok(crate::transcode::SegmentPublication::Failed(error)) => {
@@ -22492,7 +22523,7 @@ mod tests {
     /// returned everything it asked for must not be reported as a response
     /// that ended early.
     #[tokio::test]
-    async fn a_playlist_time_init_probe_is_not_client_delivery_and_never_a_short_response() {
+    async fn web_hls_startup_init_probe_is_not_client_delivery_or_a_short_response() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "probe").await;
         // Past the inspection bound, so the read stops short of the file's
@@ -22534,7 +22565,7 @@ mod tests {
     /// `init.mp4` is indistinguishable from a client fetch that broke, which
     /// is the availability/delivery conflation this telemetry exists to end.
     #[tokio::test]
-    async fn a_failed_init_probe_is_tagged_as_internal_rather_than_a_client_fetch() {
+    async fn web_hls_startup_failed_init_probe_is_internal_and_unavailable() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "probe-error").await;
         tokio::fs::create_dir(dir.path().join("init.mp4"))
@@ -25343,7 +25374,7 @@ mod tests {
     /// A Dolby Vision declaration without its required configuration record
     /// is invalid rather than an invitation to advertise scanner guesses.
     #[tokio::test]
-    async fn a_dolby_vision_init_without_a_configuration_record_changes_nothing() {
+    async fn web_hls_startup_dolby_init_without_configuration_is_invalid() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "dv-nodvcc").await;
         let init = valid_hevc_init();

@@ -202,8 +202,16 @@ contracts before a browser lab:
 ```bash
 node --test tests/playback/web-policy.test.js
 node tests/playback/web-control.test.js
+scripts/web-hls-startup-browser-check
 cargo test -p plurxd --locked http::hls::tests
 ```
+
+The browser check serves the shipped page and vendored hls.js from an isolated
+loopback server. Its first eight manifest requests receive typed 503s, then a
+generated three-second fMP4 fixture becomes available. The receipt prints the
+fixture hash, hls.js and browser versions, actual manifest-request count, and
+the first observed media position; it does not contact a production server or
+reuse a cached production stream.
 
 The matrix is intentionally phase-aware. Exercise an immediate typed 503, a
 five-second held 503, readiness near 19 s and 30 s, a transport timeout mixed

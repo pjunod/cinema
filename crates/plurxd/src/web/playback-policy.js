@@ -695,8 +695,12 @@
   // `null` for anything that is not a legible refusal. Guessing would explain
   // the wrong failure with complete confidence, which is worse than the
   // generic sentence this replaces.
+  const STREAM_FAILURE_BODY_MAX_CHARS = 16_384;
+  const STREAM_FAILURE_MESSAGE_MAX_CHARS = 512;
+
   function parseStreamFailure({ status, body }) {
     if (!(status >= 400)) return null;
+    if (typeof body !== "string" || body.length > STREAM_FAILURE_BODY_MAX_CHARS) return null;
     let parsed = null;
     try {
       parsed = JSON.parse(body);
@@ -713,10 +717,13 @@
           ? parsed.error.trim()
           : null;
     if (!message) return null;
+    const boundedMessage = message.length > STREAM_FAILURE_MESSAGE_MAX_CHARS
+      ? `${message.slice(0, STREAM_FAILURE_MESSAGE_MAX_CHARS - 1)}\u2026`
+      : message;
     return {
       status,
       code: typeof parsed.code === "string" ? parsed.code : null,
-      message,
+      message: boundedMessage,
       // Where the film was when the server lost it. `media_owner_lost` is the
       // body that carries it, and it is what a Try again has to reopen at:
       // without it the viewer is sent back to the start of a film they were
@@ -887,6 +894,8 @@
     "media_owner_transition",
     "producer_failed",
     "producer_exited",
+    "producer_ended",
+    "session_gone",
     "session_failed",
     "vod_disabled",
     "vod_source_rescan_required",
@@ -1796,6 +1805,8 @@
     hlsRetryAllowed,
     HLS_STARTUP,
     HLS_STARTUP_TERMINAL_CODES,
+    STREAM_FAILURE_BODY_MAX_CHARS,
+    STREAM_FAILURE_MESSAGE_MAX_CHARS,
     hlsStartupResponseAction,
     hlsStartupSendAction,
     BEHIND_LIVE_WINDOW_CODE,

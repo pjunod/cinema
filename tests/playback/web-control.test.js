@@ -4760,9 +4760,9 @@ async function main() {
     assert.equal(h.stops(), 1, "and the player was stopped before it was raised");
   }
 
-  // T01-T17: the shipped startup owner and its final-send loader adapter.
-  // The policy arithmetic is covered in web-policy.test.js; this harness owns
-  // the state transitions and calls the real helper source from index.html.
+  // Fast state-machine coverage for the shipped startup owner. The stock
+  // loader and real-browser cases below are the acceptance evidence; this
+  // surrogate deliberately claims only the transitions it executes.
   function startupHarness({ manifestState = "unknown", deadlineMs = 40_000 } = {}) {
     return new Function("PlaybackPolicy", [
       "let now=0,STREAM_FAILURE=null;const timers=new Map();let nextTimer=0;",
@@ -4774,7 +4774,7 @@ async function main() {
       "const attachment={current:()=>true};const video={currentTime:91};",
       "const hls={loadSource(url){loads.push({url,at:now});},startLoad(at){starts.push({at,now});},stopLoad(){starts.push({stop:true,now});}};",
       `let PLAYER={hls,hlsRetryUsed:0,wantsPlayback:true,mediaAttachment:attachment,controlIntentGeneration:1,stallTimer:null};`,
-      `const episode={player:PLAYER,attachment,playlistUrl:'/captured/index.m3u8',hls,state:'active',manifestState:${JSON.stringify(manifestState)},mediaLoaded:false,startedAt:0,deadlineMs:${deadlineMs},dispatches:0,loaders:new Set(),latestFailure:null,retry:{state:'unused',dueMs:null,detail:null,timer:null}};PLAYER.hlsStartup=episode;`,
+      `const episode={player:PLAYER,attachment,playlistUrl:'/captured/index.m3u8',hls,state:'active',manifestState:${JSON.stringify(manifestState)},mediaLoaded:false,startedAt:0,deadlineMs:${deadlineMs},dispatches:0,loaders:new Set(),latestFailure:null,retry:{state:'unused',dueMs:null,detail:null,timer:null,intentGeneration:null}};PLAYER.hlsStartup=episode;`,
       "class StockLoader{constructor(){this.aborted=0;this.destroyed=0;this.reads=0;}openAndSendXhr(xhr,context){sends.push({xhr,context,at:now});}readystatechange(){this.reads++;}abort(){this.aborted++;}destroy(){this.destroyed++;}}",
       shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
       shippedSource("hlsStartupManifestRequest"),shippedSource("abortHlsStartupLoaders"),
@@ -4799,59 +4799,145 @@ async function main() {
     assert.equal(h.episode.retry.state,"reserved");
     h.advance(1_999);assert.equal(h.loads.length,0);
     h.advance(1);assert.deepEqual(h.loads,[{url:"/captured/index.m3u8",at:2_000}],
-      "T01/T02: an unloaded manifest reloads the captured URL after the shared delay");
+      "an unloaded manifest reloads the captured URL after the shared delay");
     assert.equal(h.episode.retry.state,"dispatched");
-    assert.equal(h.reserve("again"),false,"T10: the corrective credit is shared and one-shot");
+    assert.equal(h.reserve("again"),false,"the corrective credit is shared and one-shot");
   }
   {
     const h=startupHarness({manifestState:"parsed"});
     assert.equal(h.reserve("fragLoadError"),true);h.advance(2_000);
     assert.deepEqual(h.starts,[{at:91,now:2_000}],
-      "T09: an established stream resumes at the current player coordinate");
+      "an established stream resumes at the current player coordinate");
+  }
+  {
+    const h=startupHarness({manifestState:"parsed"});
+    h.setState("presenting");assert.equal(h.reserve("levelLoadError"),true);
+    h.pause();h.advance(2_000);
+    assert.equal(h.starts.filter(entry=>!entry.stop).length,0,
+      "a pause cancels an established-stream reservation before it can restart loading");
+    assert.equal(h.episode.retry.state,"cancelled",
+      "the shared established-stream credit remains spent after pause");
   }
   {
     const h=startupHarness({deadlineMs:2_000});
     assert.equal(h.reserve("network"),true);h.advance(2_000);
     assert.equal(h.loads.length,0);assert.equal(h.episode.state,"exhausted",
-      "T08/T11: the absolute boundary rejects a dispatch at the deadline");
+      "the absolute boundary rejects a dispatch at the deadline");
   }
   {
     const h=startupHarness();const loader=h.loader();
     for(let i=0;i<16;i++)h.send(loader);
     assert.equal(h.sends.length,16);h.send(loader);
     assert.equal(h.sends.length,16);assert.equal(h.episode.state,"exhausted",
-      "T06: the final transport gate enforces sixteen actual sends");
+      "the final transport gate enforces sixteen actual sends");
   }
   {
     const h=startupHarness();const loader=h.loader();
     h.pause();h.send(loader);
     assert.equal(h.sends.length,0);assert.ok(loader.aborted&&loader.destroyed,
-      "T12/T17: a paused async stock dispatch is destroyed before the wire");
+      "a paused dispatch is destroyed before the wire");
     h.resume();h.advance(0);assert.equal(h.loads.length,1,
-      "T13: unused credit becomes the one immediate corrective reload on resume");
+      "unused credit becomes the one immediate corrective reload on resume");
     h.pause();assert.equal(h.episode.state,"paused");
     h.resume();assert.equal(h.episode.state,"exhausted",
-      "T14: interrupting a dispatched corrective reload exhausts startup");
+      "interrupting a dispatched corrective reload exhausts startup");
   }
   {
     const h=startupHarness();const loader=h.loader();
     h.send(loader,503,JSON.stringify({code:"producer_failed",message:"ffmpeg exited"}));
-    assert.ok(loader.error,"T04: a terminal typed body reaches hls.js before stock retry");
+    assert.ok(loader.error,"a terminal typed body reaches hls.js before stock retry");
     assert.equal(h.episode.latestFailure.code,"producer_failed");
     const auth=h.loader();h.send(auth,401,"");
     assert.ok(auth.error);assert.match(h.episode.latestFailure.message,/Sign in/,
-      "T05: auth is terminal even without a typed body");
+      "auth is terminal even without a typed body");
   }
   {
     const h=startupHarness();const old=h.loader();h.setCurrent(false);h.send(old);
-    assert.equal(h.sends.length,0,"T16: a predecessor completion cannot dispatch");
+    assert.equal(h.sends.length,0,"a predecessor completion cannot dispatch");
     const current=startupHarness();current.complete();assert.equal(current.episode.state,"presenting",
-      "T07: only the presentation owner retires startup");
+      "only the presentation owner retires startup");
   }
 
   const VendoredHls=require("../../crates/plurxd/src/web/hls.min.js");
   assert.equal(typeof VendoredHls.DefaultConfig.loader.prototype.openAndSendXhr,"function",
-    "T03/T17: the vendored stock loader exposes the final-send seam the adapter wraps");
+    "the vendored stock loader exposes the final-send seam the adapter wraps");
+
+  async function actualVendoredLoaderCase({xhrSetup=null}={}){
+    const policy=require("../../crates/plurxd/src/web/playback-policy.js");
+    let now=0,nextTimer=0;
+    const timers=new Map(),sends=[],errors=[];
+    class FakeXHR{
+      constructor(){this.readyState=0;this.status=0;this.statusText="";this.responseText="";this.responseType="";this.listeners={};}
+      open(){this.readyState=1;}
+      setRequestHeader(){}
+      addEventListener(name,fn){this.listeners[name]=fn;}
+      send(){sends.push(this);}
+      abort(){this.aborted=true;}
+      answer(status,body=""){
+        this.status=status;this.statusText=String(status);this.responseText=body;
+        this.responseType="text";this.readyState=4;
+        if(this.onreadystatechange)this.onreadystatechange();
+        if(this.listeners.load)this.listeners.load();
+      }
+    }
+    const priorSelf=global.self;
+    global.self={performance:{now:()=>now},XMLHttpRequest:FakeXHR,
+      setTimeout(fn,ms){const id=++nextTimer;timers.set(id,{fn,at:now+ms});return id;},
+      clearTimeout(id){timers.delete(id);}};
+    const advance=ms=>{
+      now+=ms;
+      for(;;){
+        const due=[...timers].filter(([,timer])=>timer.at<=now)
+          .sort((a,b)=>a[1].at-b[1].at)[0];
+        if(!due)break;
+        timers.delete(due[0]);due[1].fn();
+      }
+    };
+    try{
+      const make=new Function("PlaybackPolicy","StockLoader","xhrSetup","errors",[
+        "let STREAM_FAILURE=null;const performance=self.performance;const setTimeout=self.setTimeout;const clearTimeout=self.clearTimeout;",
+        "function clientLog(){}function playbackContext(){return {};}function stallDiagnose(){return Promise.resolve();}function reportTtff(){}",
+        "function noteStreamFailure(status,body,evidence){const parsed=PlaybackPolicy.parseStreamFailure({status,body});if(!parsed)return null;Object.assign(parsed,{at:Date.now()},evidence||{});STREAM_FAILURE=parsed;return parsed;}",
+        "const attachment={current:()=>true};const video={currentTime:91};",
+        "const hls={loadSource(){},startLoad(){},stopLoad(){}};let PLAYER={hls,hlsRetryUsed:0,wantsPlayback:true,mediaAttachment:attachment,controlIntentGeneration:1};",
+        "const episode={player:PLAYER,attachment,playlistUrl:'/delayed/index.m3u8',hls,state:'active',manifestState:'unknown',mediaLoaded:false,decoderFailed:false,startedAt:0,deadlineMs:40000,dispatches:0,loaders:new Set(),latestFailure:null,retry:{state:'unused',dueMs:null,detail:null,timer:null,intentGeneration:null}};PLAYER.hlsStartup=episode;",
+        shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
+        shippedSource("hlsStartupManifestRequest"),shippedSource("abortHlsStartupLoaders"),
+        shippedSource("cancelHlsStartup"),shippedSource("completeHlsStartup"),
+        shippedSource("configureHlsStartupDeadline"),shippedSource("diagnoseHlsStartup"),
+        shippedSource("exhaustHlsStartup"),shippedSource("armHlsStartupRetry"),
+        shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
+        shippedSource("createHlsStartupLoader"),
+        "const Loader=createHlsStartupLoader(StockLoader,episode);const loader=new Loader({xhrSetup});",
+        "loader.load({type:'manifest',url:'/delayed/index.m3u8',responseType:'text'},",
+        " {loadPolicy:PlaybackPolicy.HLS_STARTUP.manifest_load_policy.default,timeout:10000},",
+        " {onSuccess(){},onProgress(){},onAbort(){},onTimeout(){errors.push('timeout');},onError(error){errors.push(error);}});",
+        "return {episode,loader,pause:()=>pauseHlsStartup(PLAYER)};",
+      ].join("\n"))(policy,VendoredHls.DefaultConfig.loader,xhrSetup,errors);
+      return {make,sends,errors,advance,restore:()=>{global.self=priorSelf;}};
+    }catch(error){global.self=priorSelf;throw error;}
+  }
+  {
+    const h=await actualVendoredLoaderCase();
+    try{
+      assert.equal(h.sends.length,1,"T01/T03: the actual vendored loader reaches the final-send adapter");
+      h.sends[0].answer(503,JSON.stringify({code:"producer_ended",message:"producer ended"}));
+      h.advance(20_000);
+      assert.equal(h.sends.length,1,"T08: a terminal typed 503 suppresses the stock retry timer");
+      assert.equal(h.errors.length,1,"T08: the terminal refusal reaches hls.js once");
+    }finally{h.restore();}
+  }
+  {
+    let releaseSetup;
+    const setup=new Promise(resolve=>{releaseSetup=resolve;});
+    const h=await actualVendoredLoaderCase({xhrSetup:()=>setup});
+    try{
+      assert.equal(h.sends.length,0,"T17: asynchronous xhrSetup has not crossed the final-send gate");
+      h.make.pause();releaseSetup();
+      await Promise.resolve();await Promise.resolve();await Promise.resolve();
+      assert.equal(h.sends.length,0,"T05/T17: pause destroys the actual loader before async setup can send");
+    }finally{h.restore();}
+  }
 
   process.stdout.write("PASS the M5 recovery additions: create retry, hls retry, shared budget\n");
   process.stdout.write("PASS web HLS startup recovery and final-send ownership\n");

@@ -7995,6 +7995,10 @@ pub enum SegmentOpenError {
 pub(crate) enum SegmentPublication {
     Ready(SegmentFile),
     Missing(Option<MediaResponseOwner>),
+    /// The object was found for this exact owner, but its metadata could not
+    /// be inspected. Absence and corrupt bytes are both stronger claims than
+    /// the storage layer can make in this state.
+    Unavailable(MediaResponseOwner),
     Pending(MediaResponseOwner),
     Failed(PlaylistPublicationError),
 }
@@ -24086,12 +24090,12 @@ impl TranscodeManager {
                     None => match file.metadata().await {
                         Ok(metadata) => metadata.len(),
                         Err(_) => {
-                            return Ok(SegmentPublication::Missing(Some(MediaResponseOwner(
+                            return Ok(SegmentPublication::Unavailable(MediaResponseOwner(
                                 MediaResponseOwnerKind::Rolling {
                                     session: Arc::clone(&session),
                                     producer_attempt,
                                 },
-                            ))));
+                            )));
                         }
                     },
                 };
@@ -24281,6 +24285,7 @@ impl TranscodeManager {
             .map(|outcome| match outcome {
                 SegmentPublication::Ready(file) => Some(file),
                 SegmentPublication::Missing(_)
+                | SegmentPublication::Unavailable(_)
                 | SegmentPublication::Pending(_)
                 | SegmentPublication::Failed(_) => None,
             })

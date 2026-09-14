@@ -6797,6 +6797,8 @@ function noteStreamFailure(status, body, evidence){
   // diagnosis. The attachment identity is checked by the caller; the ordinal
   // orders requests within that attachment.
   if(previous&&owned.attachment&&previous.attachment===owned.attachment
+    &&previous.resource===owned.resource
+    &&previous.request_ordinal!=null&&owned.request_ordinal!=null
     &&Number(previous.request_ordinal||0)>Number(owned.request_ordinal||0)) return previous;
   Object.assign(parsed,{at:Date.now()},owned);
   STREAM_FAILURE=parsed;
@@ -6913,7 +6915,8 @@ function cancelHlsStartup(player,reason){
 }
 function completeHlsStartup(player){
   const episode=player&&player.hlsStartup;
-  if(!episode||!hlsStartupCurrent(player,episode)||episode.state!=='active') return false;
+  if(!episode||!hlsStartupCurrent(player,episode)||episode.state!=='active'
+    ||player.controlSeek?.executed) return false;
   episode.state='presenting';
   clearTimeout(episode.retry.timer); episode.retry.timer=null;
   clearTimeout(player.stallTimer); player.stallTimer=null;
@@ -6968,11 +6971,14 @@ function armHlsStartupRetry(video,player,episode){
     episode.retry.timer=null;
     if(!hlsStartupCurrent(player,episode)) return cancelHlsStartup(player,'ownership_changed');
     if(episode.state==='paused') return;
+    if(episode.retry.intentGeneration!==(player.controlIntentGeneration||0)){
+      episode.retry.state='cancelled'; return;
+    }
     if(performance.now()>=episode.deadlineMs) return exhaustHlsStartup(player,'deadline');
     if(player.wantsPlayback===false) return pauseHlsStartup(player);
     episode.retry.state='dispatched'; player.hlsRetryUsed=1;
     const at=Math.max(0,Number(video&&video.currentTime)||0);
-    const missing=episode.manifestState!=='parsed';
+    const missing=episode.state!=='presenting'&&episode.manifestState!=='parsed';
     const action=missing?'reload_manifest':'resume_loading';
     clientLog(Object.assign({level:'info',event:'hls_retry',detail:episode.retry.detail,
       action,ordinal:episode.dispatches+1,
@@ -6989,7 +6995,14 @@ function armHlsStartupRetry(video,player,episode){
 }
 function pauseHlsStartup(player){
   const episode=player&&player.hlsStartup;
-  if(!episode||!hlsStartupCurrent(player,episode)||episode.state!=='active') return false;
+  if(!episode||!hlsStartupCurrent(player,episode)
+    ||!['active','presenting'].includes(episode.state)) return false;
+  if(episode.state==='presenting'){
+    if(episode.retry.state==='reserved') episode.retry.state='cancelled';
+    clearTimeout(episode.retry.timer); episode.retry.timer=null;
+    try{episode.hls.stopLoad()}catch(e){}
+    return true;
+  }
   episode.state='paused';
   clearTimeout(episode.retry.timer); episode.retry.timer=null;
   abortHlsStartupLoaders(episode);
@@ -7011,18 +7024,36 @@ function resumeHlsStartup(video,player){
     episode.retry.state='reserved'; episode.retry.dueMs=performance.now();
     episode.retry.detail='resume_after_startup_pause';
   }
+  if(episode.retry.state!=='reserved') return false;
+  episode.retry.intentGeneration=player.controlIntentGeneration||0;
   armHlsStartupRetry(video,player,episode);
   return true;
 }
 function createHlsStartupLoader(StockLoader,episode){
   return class PlurxStartupLoader extends StockLoader{
     constructor(config){ super(config); episode.loaders.add(this); this.plurxRequestOrdinal=0; }
-    load(context,config,callbacks){ this.plurxContext=context; return super.load(context,config,callbacks); }
+    load(context,config,callbacks){
+      this.plurxContext=context;
+      this.plurxIntentGeneration=episode.player.controlIntentGeneration||0;
+      return super.load(context,config,callbacks);
+    }
     openAndSendXhr(xhr,context,config){
       if(hlsStartupManifestRequest(context)){
+        const current=hlsStartupCurrent(episode.player,episode)
+          &&this.plurxIntentGeneration===(episode.player.controlIntentGeneration||0)
+          &&episode.player.wantsPlayback!==false;
+        // Presentation retires startup accounting, not the loader. Ordinary
+        // level refreshes still cross the same ownership/intent gate, but no
+        // longer consume the startup request ceiling.
+        if(episode.state==='presenting'){
+          if(current) return super.openAndSendXhr(xhr,context,config);
+          try{this.abort()}catch(e){}
+          try{this.destroy()}catch(e){}
+          return;
+        }
         const action=PlaybackPolicy.hlsStartupSendAction({state:episode.state,
           nowMs:performance.now(),deadlineMs:episode.deadlineMs,
-          dispatches:episode.dispatches,current:hlsStartupCurrent(episode.player,episode)});
+          dispatches:episode.dispatches,current});
         if(action!=='send'){
           if(action==='exhaust') exhaustHlsStartup(episode.player,'manifest_dispatch_limit');
           else if(action==='cancel') episode.state='cancelled';
@@ -7077,12 +7108,14 @@ function createHlsStartupLoader(StockLoader,episode){
 function scheduleHlsNetworkRetry(video,player,detail){
   if(!player||player.hls==null) return false;
   const episode=player.hlsStartup;
-  if(episode&&hlsStartupCurrent(player,episode)&&episode.state==='active'){
+  if(episode&&hlsStartupCurrent(player,episode)
+    &&['active','presenting'].includes(episode.state)){
     if(episode.retry.state!=='unused') return false;
     episode.retry.state='reserved';
     player.hlsRetryUsed=1;
     episode.retry.detail=String(detail&&detail.details||detail||'network');
     episode.retry.dueMs=performance.now()+PlaybackPolicy.HLS_RETRY.delay_ms;
+    episode.retry.intentGeneration=player.controlIntentGeneration||0;
     armHlsStartupRetry(video,player,episode);
     return true;
   }
@@ -7148,7 +7181,8 @@ function attachHls(video, playlistUrl, startAt){
       deadlineMs:performance.now()+PlaybackPolicy.HLS_STARTUP.cold_deadline_ms,
       dispatches:0,loaders:new Set(),latestFailure:null,
       intentGeneration:attachedPlayer.controlIntentGeneration||0,
-      retry:{state:'unused',dueMs:null,detail:null,timer:null}};
+      evidenceOrdinal:0,
+      retry:{state:'unused',dueMs:null,detail:null,timer:null,intentGeneration:null}};
     attachedPlayer.hlsStartup=startup;
     const observesCurrent=()=>attachment.current()&&attachedPlayer.hls===hls
       &&playbackOwnsAttachedMedia(attachedPlayer);
@@ -7178,7 +7212,8 @@ function attachHls(video, playlistUrl, startAt){
         x.addEventListener("load",()=>{
           if(observesCurrent()&&x.status>=400&&!x._plurxStartupObserved)
             noteStreamFailure(x.status,x.responseText,{attachment:attachedPlayer.mediaAttachment,
-              resource:/\.m3u8(?:\?|$)/i.test(String(x.responseURL||''))?'manifest':'media'});
+              resource:/\.m3u8(?:\?|$)/i.test(String(x.responseURL||''))?'manifest':'media',
+              request_ordinal:++startup.evidenceOrdinal});
         });
       }});
     const estimateSeed=PlaybackPolicy.bandwidthSeedBps({
@@ -7404,7 +7439,8 @@ function attachHls(video, playlistUrl, startAt){
         // A "not yet" the server explained is the other half of M5's shared
         // hls.js budget: the picture is still moving, so one reload at the
         // current position is worth a try before the reopen path runs.
-        if(refusal==="segment_503_not_yet"||hlsStartupIncomplete(PLAYER))
+        if(explained.retryable
+          &&(refusal==="segment_503_not_yet"||hlsStartupIncomplete(PLAYER)))
           scheduleHlsNetworkRetry(video,PLAYER,d);
         toast(explained.retryable?"Still starting…":"Playback failed");
         return;
@@ -8569,6 +8605,10 @@ function controlVerdictText(message){
 function supersedePlaybackControlIntent(p){
   if(!p) return 0;
   p.controlIntentGeneration=(p.controlIntentGeneration||0)+1;
+  const startup=p.hlsStartup;
+  if(startup&&startup.retry&&startup.retry.state==='reserved'){
+    clearTimeout(startup.retry.timer); startup.retry.timer=null;
+  }
   p.controlVerdict=null;
   p.controlVerdictExpiresAt=null;
   clearPlaybackControlWaiters(p);
@@ -11186,7 +11226,8 @@ function retirePlaybackPredecessor(p){
 // Attachment ownership is not command ownership: a native seek or Pause can
 // change the current command while this same decoder is still loading.
 function beginPlaybackMediaAttachment(p){
-  const token={};
+  const token={id:(p._mediaAttachmentOrdinal||0)+1};
+  p._mediaAttachmentOrdinal=token.id;
   p.mediaAttachment=token;
   // Where this attempt's generation takes the picture: every attach on every
   // route runs through here, and faults about any other generation are dropped.
@@ -11693,10 +11734,24 @@ async function stallDiagnose(){
     abortHlsStartupLoaders(episode);
     try{episode.hls.stopLoad()}catch(e){}
   }
-  console.warn("[cinema] playback stall diagnosis",{method:p.method,url,networkState:v&&v.networkState,readyState:v&&v.readyState,error:v&&v.error&&v.error.code,verdict});
+  const episode=hlsStartup?p.hlsStartup:null;
+  const now=performance.now();
+  console.warn("[cinema] playback stall diagnosis",{method:p.method,
+    resource_class:hlsStartup?"hls_startup":"playback_source",
+    networkState:v&&v.networkState,readyState:v&&v.readyState,
+    error:v&&v.error&&v.error.code,verdict});
   finishStallRecovery("failed",verdict);
-  clientLog({level:"warn",event:"stall",src:(url||"").split("?")[0],message:verdict,
-    detail:detail,control_trigger:controlTrigger});
+  clientLog({level:"warn",event:"stall",
+    resource_class:hlsStartup?"hls_startup":"playback_source",
+    attachment_id:p.mediaAttachment&&p.mediaAttachment.id,
+    manifest_loaded:!!(episode&&['loaded','parsed'].includes(episode.manifestState)),
+    media_loaded:!!(episode&&episode.mediaLoaded),
+    decoder_failed:!!(episode&&episode.decoderFailed),presenting:false,
+    request_count:episode?episode.dispatches:null,
+    app_retry_state:episode?episode.retry.state:null,
+    elapsed_ms:episode?Math.max(0,Math.round(now-episode.startedAt)):null,
+    remaining_ms:episode?Math.max(0,Math.round(episode.deadlineMs-now)):null,
+    message:verdict,detail:detail,control_trigger:controlTrigger});
   // A diagnosed stall is the owner out of rungs, and the verdict is its own.
   // Contract §3.4: stop the player, then raise; §3.3 row 15 is the row these
   // probe verdicts belong to. The sentence and the buttons are unchanged.
@@ -12295,8 +12350,9 @@ function playbackProgressTick(v,p){
   if(moved){
     watch.clock=clock; watch.frames=frames; watch.at=now;
     p.presentationAdvancedAt=now;
+    if(pending) settlePlaybackControlSeek(v,p,clock,frames);
     completeHlsStartup(p);
-    if(!pending){
+    if(!p.controlSeek){
       watch.fired=false;
       if(p.waitAt!=null){
         endWait(true);
