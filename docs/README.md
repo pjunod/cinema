@@ -229,6 +229,7 @@ failures.
 | [MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md](cluster/MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md) | Making admission an authorization decision. | open |
 | [NUC3_SNAPSHOT_CATCHUP_DIAGNOSIS.md](cluster/NUC3_SNAPSHOT_CATCHUP_DIAGNOSIS.md) | Why a live learner waited fifteen idle minutes. | open |
 | [ACTIVITY_PEER_READ_FIX_PLAN.md](cluster/ACTIVITY_PEER_READ_FIX_PLAN.md) | Coalescing peer-read bursts and reporting failures truthfully. | built |
+| [DVR-ACTIVITY-ZERO-GENERATION-STATUS.md](cluster/DVR-ACTIVITY-ZERO-GENERATION-STATUS.md) | Why remote Activity rejected a healthy recorder's initial serving epoch, and the repair's review and promotion state. | open |
 
 ---
 

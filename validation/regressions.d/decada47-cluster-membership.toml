@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["decada47"]
+points = ["cluster.membership"]
+checks = ["rust-gate"]
+reason = "The retained initial_dvr_serving_generation_is_a_valid_peer_snapshot Rust regression serializes the real authenticated peer snapshot with generation zero and requires the production decoder to answer it; restoring the rejected greater-than-zero predicate makes that check fail."
