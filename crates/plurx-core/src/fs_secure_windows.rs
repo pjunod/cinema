@@ -22,11 +22,11 @@ use windows_sys::Win32::Foundation::{
     RtlNtStatusToDosError, HANDLE, INVALID_HANDLE_VALUE, OBJ_CASE_INSENSITIVE, UNICODE_STRING,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1,
-    SE_FILE_OBJECT,
+    ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SetSecurityInfo,
+    SDDL_REVISION_1, SE_FILE_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    EqualSid, GetTokenInformation, SetFileSecurityW, TokenUser, DACL_SECURITY_INFORMATION,
+    EqualSid, GetSecurityDescriptorDacl, GetTokenInformation, TokenUser, DACL_SECURITY_INFORMATION,
     OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
     TOKEN_QUERY, TOKEN_USER,
 };
@@ -51,6 +51,7 @@ const ERROR_FILE_EXISTS: i32 = 80;
 const ERROR_ALREADY_EXISTS: i32 = 183;
 const ERROR_NO_MORE_FILES: i32 = 18;
 const ERROR_SHARING_VIOLATION: i32 = 32;
+const WRITE_DAC_ACCESS: u32 = 0x0004_0000;
 const MAX_DIRECTORY_ENTRIES: usize = 120_100;
 const MAX_DIRECTORY_DEPTH: usize = 4;
 
@@ -216,7 +217,7 @@ fn require_current_process_owner(file: &File) -> io::Result<()> {
     result
 }
 
-fn harden_owned_directory(path: &Path) -> io::Result<()> {
+fn harden_owned_handle(file: &File) -> io::Result<()> {
     // Protected DACL: full control for SYSTEM and for the object's owner, with
     // inheritance to every scratch/cache descendant and no inherited ACEs.
     let sddl = OsStr::new("D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)")
@@ -225,7 +226,7 @@ fn harden_owned_directory(path: &Path) -> io::Result<()> {
         .collect::<Vec<_>>();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     // SAFETY: the SDDL is NUL-terminated and the returned descriptor is freed
-    // after SetFileSecurityW consumes it.
+    // after SetSecurityInfo consumes its DACL.
     if unsafe {
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl.as_ptr(),
@@ -237,18 +238,40 @@ fn harden_owned_directory(path: &Path) -> io::Result<()> {
     {
         return Err(io::Error::last_os_error());
     }
-    let wide = wide_nul(path)?;
-    let ok = unsafe {
-        SetFileSecurityW(
-            wide.as_ptr(),
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+    let mut present = 0_i32;
+    let mut defaulted = 0_i32;
+    let mut dacl = std::ptr::null_mut();
+    // SAFETY: `descriptor` came from the successful conversion above and the
+    // output slots remain live for this call.
+    let obtained = unsafe {
+        GetSecurityDescriptorDacl(
             descriptor,
+            &raw mut present,
+            &raw mut dacl,
+            &raw mut defaulted,
         )
     };
-    let result = if ok == 0 {
+    let result = if obtained == 0 || present == 0 || dacl.is_null() {
         Err(io::Error::last_os_error())
     } else {
-        Ok(())
+        // SAFETY: the file handle is the already validated, no-reparse object;
+        // `dacl` remains owned by `descriptor` until this call completes.
+        let status = unsafe {
+            SetSecurityInfo(
+                file.as_raw_handle().cast(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null_mut(),
+            )
+        };
+        if status == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(status as i32))
+        }
     };
     // SAFETY: the conversion function allocated this descriptor with
     // LocalAlloc and no references survive this call.
@@ -394,6 +417,37 @@ fn open_path(path: &Path, directory: bool) -> io::Result<File> {
     } else {
         open_read_child_blocking(&current, &final_name)
     }
+}
+
+fn open_security_path(path: &Path, directory: bool) -> io::Result<File> {
+    let (root, mut names) = path_parts(path)?;
+    let final_name = names
+        .pop()
+        .ok_or_else(|| invalid_path("filesystem path has no filename"))?;
+    let mut current = open_root(&root)?;
+    for name in names {
+        current = open_directory_child(&current, &name)?;
+    }
+    open_relative(
+        &current,
+        &final_name,
+        FILE_READ_ATTRIBUTES | WRITE_DAC_ACCESS | SYNCHRONIZE,
+        FILE_OPEN,
+        if directory {
+            FILE_DIRECTORY_FILE
+        } else {
+            FILE_NON_DIRECTORY_FILE
+        },
+        FILE_ATTRIBUTE_NORMAL,
+    )
+}
+
+/// Protect one managed service object through the exact no-reparse handle.
+/// The resulting DACL grants full control only to SYSTEM and the object's
+/// owner; directory permissions inherit to all descendants.
+pub fn harden_private_path_blocking(path: &Path, directory: bool) -> io::Result<()> {
+    let file = open_security_path(path, directory)?;
+    harden_owned_handle(&file)
 }
 
 /// Stable Windows file identity. NTFS exposes a 64-bit file id; the second
@@ -1511,9 +1565,9 @@ fn clear_owned_scratch(
     protected: &[FileIdentity],
 ) -> io::Result<()> {
     let path = std::path::absolute(path)?;
-    let directory = open_directory_nofollow_blocking(&path)?;
+    let directory = open_security_path(&path, true)?;
     require_current_process_owner(&directory)?;
-    harden_owned_directory(&path)?;
+    harden_owned_handle(&directory)?;
     let root = file_identity(&directory)?;
     if protected.iter().any(|identity| identity.same_inode(root)) {
         return Err(io::Error::other(

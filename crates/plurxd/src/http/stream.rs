@@ -2178,7 +2178,8 @@ pub async fn direct(
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
     let file = load_file(&state, id).await?;
-    let served = serve_file_range(&file.path, &headers, &method).await;
+    let served =
+        serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64)).await;
     match &served {
         // Bytes are going out: this is the moment playback is real. Every
         // request in the storm reports, and the registry collapses them — the
@@ -2223,7 +2224,7 @@ pub async fn book_content(
     if item.kind != ItemKind::Book {
         return Err(ApiError::NotFound("book content"));
     }
-    serve_file_range(&file.path, &headers, &method).await
+    serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64)).await
 }
 
 // The caps fields are inlined (not `#[serde(flatten)]`ed) because axum's
@@ -2581,8 +2582,9 @@ pub(crate) async fn serve_file_range(
     path: &Path,
     headers: &HeaderMap,
     method: &Method,
+    expected_len: Option<u64>,
 ) -> Result<Response, ApiError> {
-    let mut fh = tokio::fs::File::open(path)
+    let mut fh = plurx_core::fs_secure::open_read_nofollow(path)
         .await
         .map_err(|_| ApiError::NotFound("file on disk"))?;
     let len = fh
@@ -2590,6 +2592,9 @@ pub(crate) async fn serve_file_range(
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?
         .len();
+    if expected_len.is_some_and(|expected| expected != len) {
+        return Err(ApiError::NotFound("file on disk"));
+    }
     let ctype = content_type(path);
 
     let range = if method == Method::GET {
@@ -3911,7 +3916,7 @@ mod tests {
             (Some("items=0-1"), StatusCode::OK, None, "0123456789"),
         ] {
             let headers = range.map(headers_with_range).unwrap_or_default();
-            let response = serve_file_range(&path, &headers, &Method::GET)
+            let response = serve_file_range(&path, &headers, &Method::GET, None)
                 .await
                 .expect("range response");
             assert_eq!(response.status(), status, "{range:?}");
@@ -3953,7 +3958,7 @@ mod tests {
                 StatusCode::RANGE_NOT_SATISFIABLE,
             ),
         ] {
-            let response = serve_file_range(&path, &headers, &Method::GET)
+            let response = serve_file_range(&path, &headers, &Method::GET, None)
                 .await
                 .expect("empty response");
             assert_eq!(response.status(), status);
@@ -3966,9 +3971,10 @@ mod tests {
         tokio::fs::write(&path, b"0123456789")
             .await
             .expect("populated fixture");
-        let response = serve_file_range(&path, &headers_with_range("bytes=99-"), &Method::HEAD)
-            .await
-            .expect("HEAD");
+        let response =
+            serve_file_range(&path, &headers_with_range("bytes=99-"), &Method::HEAD, None)
+                .await
+                .expect("HEAD");
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(response.headers()[header::CONTENT_LENGTH], "10");
         assert!(!response.headers().contains_key(header::CONTENT_RANGE));
@@ -3982,7 +3988,7 @@ mod tests {
                 header::IF_RANGE,
                 validator.parse().expect("If-Range fixture"),
             );
-            let response = serve_file_range(&path, &headers, &Method::GET)
+            let response = serve_file_range(&path, &headers, &Method::GET, None)
                 .await
                 .expect("If-Range response");
             assert_eq!(response.status(), StatusCode::OK);

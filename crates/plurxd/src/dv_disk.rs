@@ -215,13 +215,14 @@ async fn probe_tool(command: &str) -> ToolCapability {
 async fn bounded_tool_probe(
     command: &str,
 ) -> io::Result<(std::process::ExitStatus, Vec<u8>, Vec<u8>)> {
-    let mut child = tokio::process::Command::new(command)
+    let mut command = tokio::process::Command::new(command);
+    command
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()?;
+        .kill_on_drop(true);
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)?;
     let stdout = child
         .stdout
         .take()
@@ -1003,6 +1004,7 @@ fn metadata_identity(metadata: &std::fs::Metadata) -> Result<LocalMediaIdentity,
 }
 
 #[cfg(not(unix))]
+#[allow(dead_code)]
 fn metadata_identity(metadata: &std::fs::Metadata) -> Result<LocalMediaIdentity, String> {
     let modified = metadata
         .modified()
@@ -1587,8 +1589,7 @@ async fn probe_bound_with(
             Ok(())
         });
     }
-    let mut child = command
-        .spawn()
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)
         .map_err(|error| format!("starting ffprobe for {role}: {error}"))?;
     let stdout = child
         .stdout
@@ -1636,7 +1637,82 @@ async fn probe_bound_with(
     Ok(probe)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+async fn probe_bound(
+    media: &BoundMedia,
+    display_path: &Path,
+    role: &str,
+    loss: &CancellationToken,
+) -> Result<ProbeResult, String> {
+    require_held_unchanged(media, role).await?;
+    let held = media
+        .file
+        .try_clone()
+        .await
+        .map_err(|error| format!("duplicating held Windows media for {role}: {error}"))?
+        .into_std()
+        .await;
+    let path = plurx_core::fs_secure::std_file_path(&held)
+        .map_err(|error| format!("resolving held Windows media for {role}: {error}"))?;
+    let mut command = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin());
+    command
+        .args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            "-show_chapters",
+        ])
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)
+        .map_err(|error| format!("starting ffprobe for {role}: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("ffprobe stdout was not piped for {role}"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("ffprobe stderr was not piped for {role}"))?;
+    let probe = async move {
+        tokio::try_join!(
+            read_bounded_stream(stdout, MAX_MEDIA_PROBE_OUTPUT, "ffprobe stdout"),
+            read_bounded_stream(stderr, MAX_MEDIA_PROBE_OUTPUT, "ffprobe stderr"),
+            child.wait(),
+        )
+    };
+    let (stdout, stderr, status) = tokio::select! {
+        biased;
+        () = loss.cancelled() => return Err(format!("ffprobe for {role} cancelled after conversion lease loss")),
+        result = tokio::time::timeout(MEDIA_PROBE_TIMEOUT, probe) => {
+            result.map_err(|_| format!("ffprobe for {role} exceeded its deadline"))?
+                .map_err(|error| format!("reading bounded ffprobe result for {role}: {error}"))?
+        }
+    };
+    require_held_unchanged(media, role).await?;
+    if !status.success() {
+        return Err(format!(
+            "ffprobe failed for {role}: {}",
+            bounded_text(&stderr).trim()
+        ));
+    }
+    let json: serde_json::Value = serde_json::from_slice(&stdout)
+        .map_err(|error| format!("parsing ffprobe JSON for {role}: {error}"))?;
+    let mut probe = plurx_core::scan::probe::parse_probe_json(&json);
+    probe.container = display_path
+        .extension()
+        .and_then(OsStr::to_str)
+        .map(str::to_lowercase);
+    Ok(probe)
+}
+
+#[cfg(not(any(unix, windows)))]
 async fn probe_bound(
     _media: &BoundMedia,
     _display_path: &Path,
@@ -1644,7 +1720,7 @@ async fn probe_bound(
     _loss: &CancellationToken,
 ) -> Result<ProbeResult, String> {
     Err(format!(
-        "descriptor-bound ffprobe is unsupported for {role} on this platform"
+        "descriptor-bound ffprobe is unsupported for {role}"
     ))
 }
 
@@ -3843,10 +3919,30 @@ async fn restore_public_from_recovery_guard(
     if child_identity(scratch, PUBLIC_PROOF_FILE).await? != *expected {
         return Err("recovery guard changed before public restoration".to_owned());
     }
+    let staging_name = format!(".plurx-restore-{}.tmp", uuid::Uuid::new_v4());
     public_parent
-        .place_regular_child_from(scratch, PUBLIC_PROOF_FILE, public_name, expected.size)
+        .place_regular_child_from(scratch, PUBLIC_PROOF_FILE, &staging_name, expected.size)
         .await
-        .map_err(|error| format!("restoring public replacement from recovery guard: {error}"))?;
+        .map_err(|error| format!("staging public replacement from recovery guard: {error}"))?;
+    let installed = public_parent
+        .rename_child_noreplace(&staging_name, public_name)
+        .await
+        .map_err(|error| format!("restoring public replacement atomically: {error}"));
+    match installed {
+        Ok(true) => {}
+        Ok(false) => {
+            let _ = public_parent.unlink_child(&staging_name).await;
+            return Err("public replacement reappeared before atomic restoration".to_owned());
+        }
+        Err(error) => {
+            let _ = public_parent.unlink_child(&staging_name).await;
+            return Err(error);
+        }
+    }
+    public_parent
+        .sync()
+        .await
+        .map_err(|error| format!("syncing atomically restored replacement: {error}"))?;
     child_identity(public_parent, public_name).await
 }
 
@@ -5730,7 +5826,38 @@ async fn run_tool_with_bound_media(
     result
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+async fn run_tool_with_bound_media(
+    program: &str,
+    args: &[OsString],
+    media_argument: usize,
+    media: &BoundMedia,
+    role: &str,
+    loss: &CancellationToken,
+) -> Result<String, String> {
+    require_held_unchanged(media, role).await?;
+    let held = media
+        .file
+        .try_clone()
+        .await
+        .map_err(|error| format!("duplicating held Windows media for {role}: {error}"))?
+        .into_std()
+        .await;
+    let path = plurx_core::fs_secure::std_file_path(&held)
+        .map_err(|error| format!("resolving held Windows media for {role}: {error}"))?;
+    let mut child_args = args.to_vec();
+    *child_args
+        .get_mut(media_argument)
+        .ok_or_else(|| format!("{program} has no bound media argument for {role}"))? =
+        path.into_os_string();
+    let mut command = tokio::process::Command::new(program);
+    command.args(child_args);
+    let result = run_tool_command_with_timeout(program, command, loss, TOOL_RUN_TIMEOUT).await;
+    require_held_unchanged(media, role).await?;
+    result
+}
+
+#[cfg(not(any(unix, windows)))]
 async fn run_tool_with_bound_media(
     _program: &str,
     _args: &[OsString],
@@ -5740,7 +5867,7 @@ async fn run_tool_with_bound_media(
     _loss: &CancellationToken,
 ) -> Result<String, String> {
     Err(format!(
-        "descriptor-bound conversion tools are unsupported for {role} on this platform"
+        "descriptor-bound conversion tools are unsupported for {role}"
     ))
 }
 
@@ -5750,12 +5877,12 @@ async fn run_tool_command_with_timeout(
     loss: &CancellationToken,
     timeout: Duration,
 ) -> Result<String, String> {
-    let mut child = command
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
+        .kill_on_drop(true);
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)
         .map_err(|error| format!("starting {program}: {error}"))?;
     let stdout = child
         .stdout

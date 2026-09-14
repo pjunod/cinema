@@ -1485,6 +1485,8 @@ async fn boot(
     let serving_shutdown = state.serving.clone();
     let app = http::router(state);
     let listener = bind_listener(config.server.bind).await?;
+    #[cfg(windows)]
+    crate::windows_service::report_listener_ready()?;
     trigger_shutdown_registration_failpoint("after-listener-bind");
     let discovery_node_id =
         (!config.cluster.advertise_host.trim().is_empty()).then_some(node_id.as_str());
@@ -1808,6 +1810,15 @@ fn create_dirs_for_storage_with_protected(
 ) -> anyhow::Result<crate::state::Dirs> {
     let mut normalized = storage.clone();
     canonicalize_configured_dir(&mut normalized.data_dir, "data")?;
+    #[cfg(windows)]
+    plurx_core::fs_secure::harden_private_path_blocking(&normalized.data_dir, true).with_context(
+        || {
+            format!(
+                "protecting managed service data {} for owner and SYSTEM",
+                normalized.data_dir.display()
+            )
+        },
+    )?;
     if !normalized.cache_dir.as_os_str().is_empty() {
         canonicalize_configured_dir(&mut normalized.cache_dir, "persistent cache")?;
     }

@@ -580,13 +580,34 @@ fn available_space_bytes(path: &Path) -> anyhow::Result<u64> {
     Ok(u64::try_from(bytes).unwrap_or(u64::MAX))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn available_space_bytes(path: &Path) -> anyhow::Result<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let mut path = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    path.push(0);
+    let mut available = 0_u64;
+    // SAFETY: `path` is NUL terminated and `available` is a writable output.
+    if unsafe {
+        GetDiskFreeSpaceExW(
+            path.as_ptr(),
+            &raw mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(available)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn available_space_bytes(_path: &Path) -> anyhow::Result<u64> {
-    // The supported deployment targets are Unix. Refuse to guess on another
-    // platform until an equivalent real filesystem-space proof is wired.
     Err(crate::cli_exit(
         2,
-        "WAL backup free-space proof is not implemented on this platform",
+        "WAL backup free-space proof is unavailable",
     ))
 }
 
