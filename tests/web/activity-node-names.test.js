@@ -60,9 +60,7 @@ const BORROWED = [
   // Live TV rows are drawn by the same painter and name their owner node
   // through the same roster map, so they are borrowed rather than stubbed.
   "liveTvActivityRows",
-  // And so does a running capture: the tuner it holds belongs to a node, and
-  // that node is named from the same map or not at all.
-  "dvrActivityRows",
+  // DVR cards/details have a full-browser regression in dvr-ui.browser.cjs.
   "liveTvNowSeconds",
   "paintActivityBody",
 ];
@@ -77,6 +75,9 @@ const PRELUDE = `
   const document = { getElementById: (id) => (id === "main" ? main : null) };
   const ME = { is_admin: true };
   function paintActivity(acts){ PAINTED = acts; }
+  function dvrRememberUi(){ return {}; }
+  function dvrRestoreUi(){}
+  function dvrActivityRows(){ return ""; }
   function analysisSummaryCard(){ return "<div class=\\"analysis\\"></div>"; }
   function statusText(){ return "idle"; }
 `;

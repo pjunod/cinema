@@ -1,7 +1,8 @@
 # DVR visibility status — make capture state explain itself
 
-**Status:** promotion candidate · **Branch:** `effort/dvr-visibility` ·
-**Base:** Forgejo `main` merged through `f42a3ba6` · **Updated:** 2026-09-14
+**Status:** foundation merged; web fidelity follow-up built and reviewed ·
+**Branch:** `codex/dvr-ui-fidelity` · **Base:** `0b2490839` (PR #314) ·
+**Updated:** 2026-09-14
 
 Companion to [LIVE-TV-DVR-STATUS.md](LIVE-TV-DVR-STATUS.md) (what the shipped
 recorder already does),
@@ -9,7 +10,7 @@ recorder already does),
 and scheduler contract), and
 [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (the one-review fast
 lane) — this is the short answer to *what is being changed, what is already
-proved, and what remains before the DVR visibility effort reaches `main`?*
+proved, and what remains before the rendered design is delivered?*
 
 ## Outcome — recording evidence belongs wherever the programme appears
 
@@ -23,7 +24,64 @@ shared channel transports and finite-media playback path stay in place. The
 new work adds bounded observation, durable lifecycle history and one shared
 presentation contract around them.
 
-## Progress — one integrated candidate, one promotion run
+## Web fidelity follow-up — render the design in the product
+
+The merged foundation exposed the data but omitted much of the proposed
+presentation. This follow-up changes the shipped web page, using the existing
+DVR APIs. It does not change Rust, Apple, Android, recording storage or the
+scheduler. Deployment is a separate release step.
+
+| Surface | Implemented presentation |
+|---|---|
+| Live TV programme | Bordered recording panel beside the player, named state, confirmed bytes, elapsed capture bar, end time, Activity link and named Stop confirmation; unscheduled programmes offer Record programme and Record series |
+| Player and guide | Programme recording badge beside the player title; readable recording state in guide marks; exact channel/airing identity and explicitly named padding |
+| Other captures | Also recording strip above the guide, with programme, channel, state and link to that capture in Activity |
+| Activity | Selectable recording cards, desktop detail pane, write age/rate, attempts, event timeline and technical disclosure; Needs attention and Recent recordings appear before existing playback and background work |
+| Recordings | Compact counts and active-capture strip; Saved uses programme cards with Play only when a media item and file are linked; other task tabs and paged history remain available |
+| Phone | Cards stack; selecting a detail brings it above the card list and focuses Close; closing restores focus to the recording; navigation scrolls within its own row |
+
+**How to read it:** capture progress is elapsed wall-clock time within the
+capture window, not the duration of playable video. Byte counts describe
+successful writes. Rates are bytes per second. A stale overview or stale
+owner observation says Status unavailable and suppresses current write
+health. A durable recording row alone never proves that a recorder is
+writing. Changing channels or leaving Live TV does not stop recording.
+
+One adversarial review found four issues; all were addressed: delayed detail
+responses after navigation, detail polling after backgrounding, Live TV
+polling losing keyboard focus, and a stale schedule fallback claiming to
+record. The browser regression reproduces these cases. Native confirmations
+name the programme and known capture window; cancelling sends no mutation.
+
+**Validation:** the browser harness renders the actual shipped HTML and
+assets with intercepted fixture API responses. It checks Classic, Catalog
+and Theater at 1440, 390 and 320 px, dark/light rendering, no horizontal page
+overflow, selection, focus restoration, stale states, padding identity,
+linked playback, stop cancellation and preservation of the Live TV video
+node during status refresh. It does not prove live tuner capture or native
+client behavior. The player region is empty in fixture screenshots because
+there is no broadcast stream.
+
+```bash
+# Run with a local Playwright installation; no running plurxd is needed.
+node tests/web/dvr-ui.browser.cjs
+# Optional: point to an existing installation and save rendered evidence.
+PLAYWRIGHT_MODULE=/path/to/node_modules/playwright \
+DVR_SCREENSHOTS=/tmp/dvr-ui-evidence node tests/web/dvr-ui.browser.cjs
+
+# Focused state, Live TV and unchanged playback/activity regressions.
+node --test tests/web/dvr-visibility.test.js tests/web/live-tv.test.js \
+  tests/web/activity-node-names.test.js tests/web/layout-containment.test.js \
+  tests/web/nav-keyboard.test.js tests/web/player-dom.test.js \
+  tests/playback/player-input-contract.test.js
+scripts/js-check
+```
+
+These checks pass for this follow-up. Screenshots include Live TV, Activity,
+Saved, phone details and light mode. The earlier implementation record below
+explains the foundation; its compile results do not replace visual checks.
+
+## Foundation implementation record — original promotion packages
 
 | Package | State | Evidence or next boundary |
 |---|---|---|
