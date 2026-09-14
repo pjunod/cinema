@@ -5148,6 +5148,7 @@ impl AttemptChild {
     /// takes the reader when the process ends: a child that is already dead
     /// when construction returns could otherwise reach that take before the
     /// reader was stored, and settle nothing at all.
+    #[cfg(test)]
     fn new(
         producer_attempt: u64,
         mut child: Child,
