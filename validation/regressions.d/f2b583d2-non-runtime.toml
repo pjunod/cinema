@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["f2b583d2"]
+points = []
+checks = []
+reason = "This CI-only correction installs the Node runtime required by pinned Forgejo actions inside the isolated Windows cross-build containers; it changes no runtime behavior."
+ignore = true
