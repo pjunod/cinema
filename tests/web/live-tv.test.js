@@ -1310,6 +1310,111 @@ async function main() {
     }
   });
 
+  await test("an on-air cell reaches Record, and the handler has no airing branch", () => {
+    // The defect this pins: the grid's click handler tuned the channel and
+    // returned whenever the cell was airing, so the popover never opened and
+    // Record and Record series were reachable only on a FUTURE programme.
+    // "Record what I am watching" had no path on the web at all.
+    const now = 1_000_000;
+    const onAir = { title: "CBS Mornings", start: now - 600, end: now + 3000 };
+    const acts = liveTv.dvrAiringActions(onAir, null, null, now);
+    assert.equal(acts.watch, "now", "an airing programme can be tuned");
+    assert.equal(acts.record, "record", "and recorded — this is the case that was unreachable");
+    assert.equal(acts.series, true, "and a series rule can be made from it");
+    // A reminder about something already started is about the past; the route
+    // answers `airing_past`, so three verbs is the correct answer, not four.
+    assert.equal(acts.remind, null, "no reminder for something already on");
+
+    // Now the shipped handler itself. Compose it and RUN it for an airing
+    // cell, rather than pattern-matching the source: the previous version of
+    // this case asserted the old spelling (`if (airing)`) and a rewrite off
+    // `cell.airing` with an `else` restored the defect while still passing.
+    const handler = shell.slice(
+      shell.indexOf("function liveTvGridCell("),
+      shell.indexOf("function liveTvPopover("),
+    );
+    assert.ok(handler.includes("liveTvPopover("), "the handler opens the popover");
+    const calls = [];
+    const run = new Function(
+      "liveTvGridLayout", "liveTvPopover", "liveTvSelect",
+      `${handler}\nreturn liveTvGridCell;`,
+    )(
+      () => ({ rows: [{ channel: { id: "7.1" }, cells: [{ airing: true, programme: onAir }] }] }),
+      (row, channelId) => calls.push(["popover", row && row.title, channelId]),
+      id => calls.push(["select", id]),
+    );
+    run("7.1", 0);
+    assert.deepEqual(
+      calls, [["popover", "CBS Mornings", "7.1"]],
+      "an airing cell opens its popover and does not short-circuit to tuning",
+    );
+
+    // And the handler must not consult `airing` at all: every cell reaches the
+    // popover by the same path, whatever it is doing right now.
+    assert.doesNotMatch(
+      handler.replace(/\/\/[^\n]*/g, ""),
+      /\bairing\b/,
+      "no airing branch survives in the cell handler",
+    );
+  });
+
+  await test("the cell popover is a modal that a keyboard can leave", () => {
+    // Routing every cell through the popover is only an improvement if the
+    // popover can be dismissed. It could not: no role, no focus, and the one
+    // Escape listener did not know about it, so a keyboard user reached it by
+    // tabbing past the whole page and then could not get out.
+    const pop = shell.slice(
+      shell.indexOf("function liveTvPopover("),
+      shell.indexOf("function liveTvPaint("),
+    );
+    assert.match(pop, /setAttribute\("role","dialog"\)/, "it announces itself as a dialog");
+    assert.match(pop, /setAttribute\("aria-modal","true"\)/, "and as modal");
+    assert.match(pop, /\.focus\(\)/, "it takes the keyboard when it opens");
+    assert.match(pop, /LIVE_TV_POP_OPENER/, "and hands it back to the cell on close");
+    // Escape lives in the one capture listener that owns "close the topmost
+    // modal", beside the connect dialog and the edit dialog — two Escape
+    // handlers is how a key closes two things.
+    const esc = shell.slice(
+      shell.indexOf('window.addEventListener("keydown"'),
+      shell.indexOf('// ---- global activity indicator'),
+    );
+    assert.match(esc, /liveTvPopoverOpen\(\)/, "Escape closes the cell popover");
+    assert.match(esc, /liveTvPopover\(null\)/);
+  });
+
+  await test("no client's guide cell branches on airing — the defect was on all three", () => {
+    // The web was not alone. Android branched the same way
+    // (`if (cell.airing) onAiring(...) else onFuture(...)`), and Apple had
+    // already fixed the phone behind `#if os(iOS)` while tvOS kept the old
+    // branch — so the television, which is where the DVR acceptance starts,
+    // was the one surface that could not record what was on.
+    //
+    // This reads the shipped client sources because neither native suite can
+    // run here; it is a fence, not a substitute for their own tests.
+    const read = rel => fs.readFileSync(path.join(__dirname, "../..", rel), "utf8");
+
+    const androidCell = read("clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvGuideUi.kt");
+    const cellFn = androidCell.slice(androidCell.indexOf("    cell: LiveTvGridCell,"));
+    assert.match(cellFn, /onClick = \{ onFuture\(channel, cell\.programme\) \}/,
+      "Android's grid cell opens the actions sheet unconditionally");
+    assert.doesNotMatch(
+      cellFn.slice(0, cellFn.indexOf("\n}")).replace(/\/\/[^\n]*/g, ""),
+      /if \(cell\.airing\)/,
+      "no airing branch in Android's grid cell",
+    );
+
+    const apple = read("clients/apple/Sources/LiveTvView.swift");
+    assert.doesNotMatch(
+      apple.replace(/\/\/[^\n]*/g, ""),
+      /if cell\.airing \{ onAiring/,
+      "no airing branch in Apple's guide cell, on either platform",
+    );
+    assert.doesNotMatch(
+      apple, /#if os\(iOS\)\s*\n\s*onFuture\(row\.channel/,
+      "and the sheet is not reached only on the phone",
+    );
+  });
+
   await test("gridLayout places every cell where the shared cases say, and never overlaps", () => {
     const g = CASES.grid;
     const layout = liveTv.gridLayout(

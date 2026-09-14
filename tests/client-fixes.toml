@@ -1881,3 +1881,26 @@ source = "clients/apple/Sources/LiveTvView.swift"
 source_anchor = ".revealSurface,"
 test = "clients/apple/Tests/LiveTvTests.swift"
 test_anchor = "testTheRevealLayerReportsTheStateItIsInRatherThanTheOneItWants"
+
+[[fixes]]
+# The DVR shipped Record on all three clients and, on all three, it was
+# unreachable for a programme currently on the air — the case a viewer asks for
+# most, and the one the DVR acceptance opens with. Each guide cell branched on
+# `airing` and sent a live cell straight to tuning, returning before the surface
+# that holds the verbs was ever opened. Apple had already corrected the phone
+# behind `#if os(iOS)` and left tvOS on the old branch, so the television was
+# the worst affected.
+#
+# The anchor is Apple's unconditional call: restore the `#if` or the
+# `if cell.airing` branch and the fence below fails by name. It is a fence
+# rather than a behavioural test because neither native suite runs in the lane
+# that guards a merge — the Swift and Kotlin are compiled there, not executed —
+# so this reads all three shipped sources instead. What it does not hold: that
+# the sheet actually presents on a device, and that its first action tunes.
+# Those are §8's to answer on hardware.
+id = "clients.every-guide-cell-opens-its-actions"
+commits = ["fb7d4525"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = "// This was `#if os(iOS)` and tvOS took the"
+test = "tests/web/live-tv.test.js"
+test_anchor = "no client's guide cell branches on airing — the defect was on all three"
