@@ -533,23 +533,19 @@ mod tests {
     use super::*;
 
     /// Publishing a fixture that is already there must leave a reader holding
-    /// it completely undisturbed — including the parts of its metadata nobody
-    /// thinks of as content.
+    /// it completely undisturbed — including its platform file identity.
     ///
     /// This is the whole of the defect that turned four `vodserve` resurrection
     /// tests red in CI on a tree that was green here. `SourceFence::unchanged`
-    /// compares an object version built from device, inode, size, mtime *and
-    /// ctime*, and `rename` moves the ctime of the inode it unlinks even though
-    /// every other component is untouched and the open handle keeps reading the
-    /// same bytes. So the assertion below is deliberately on ctime rather than
-    /// on the bytes: the bytes never were the thing that broke.
+    /// compares an object version built from the platform's stable identity,
+    /// size, and change time. A replacement changes that identity even though
+    /// the open handle keeps reading the same bytes, so the assertion below uses
+    /// the production identity API rather than assuming Unix metadata fields.
     ///
     /// A second publisher enters through the same locked absence check as the
     /// first, so it cannot replace or relink the inode a reader already holds.
     #[test]
     fn republishing_a_fixture_leaves_a_held_reader_undisturbed() {
-        use std::os::unix::fs::MetadataExt;
-
         let dir = fixture_dir().join(
             scratch_path(Path::new(""), "publish-race")
                 .file_name()
@@ -562,7 +558,7 @@ mod tests {
         // The reader: an open handle plus the object version recorded from it,
         // exactly as a fence records one before a producer starts.
         let held = std::fs::File::open(&published).expect("holding the fixture open");
-        let before = held.metadata().expect("fstat");
+        let before = crate::fs_secure::std_file_identity(&held).expect("held identity before");
 
         // The second publisher, arriving after the first one finished.
         let built = publish_fixture_if_absent(&published, "fixture.mkv", |temporary| {
@@ -573,18 +569,10 @@ mod tests {
             "an existing fixture wins without another publication"
         );
 
-        let after = held.metadata().expect("fstat");
+        let after = crate::fs_secure::std_file_identity(&held).expect("held identity after");
         assert_eq!(
-            (before.dev(), before.ino(), before.size(), before.mtime()),
-            (after.dev(), after.ino(), after.size(), after.mtime()),
-            "these components survive a rename too, so they are not the proof"
-        );
-        assert_eq!(
-            (before.ctime(), before.ctime_nsec()),
-            (after.ctime(), after.ctime_nsec()),
-            "publishing must not unlink the inode a reader is holding: ctime is \
-             part of the object version a SourceFence compares, so moving it \
-             fails a producer with `source changed` for a source that did not"
+            before, after,
+            "publishing must not alter the object identity a reader is holding"
         );
         assert_eq!(
             std::fs::read(&published).expect("reading the published fixture"),
