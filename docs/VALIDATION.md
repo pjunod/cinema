@@ -130,11 +130,16 @@ executed with identical feature resolution.
 
 ### Windows compile, package, and native smoke
 
-Every Rust-affecting effort, fast-lane, and full workflow cross-builds
-`x86_64-pc-windows-msvc` with the repository-pinned Rust toolchain and
-`cargo-xwin`. `plurx-cluster-check` is excluded because its fault injector is
-Linux-specific; the server and shared workspace crates are not. The full CI
-lane also performs a release build and retains
+Every Rust-affecting effort, fast-lane, and full workflow cross-builds every
+normal and test target for `x86_64-pc-windows-msvc` with the
+repository-pinned Rust toolchain and `cargo-xwin`. The test binaries are linked
+but not executed because the lane runs in Linux; native execution belongs to
+the smoke harness below. `plurx-cluster-check` is excluded because its fault
+injector is Linux-specific; the server and shared workspace crates are not.
+The MSVC CRT/SDK download lives in the bounded persistent Cargo cache, and the
+30-minute timeout covers the first population of a fresh runner without making
+every later job download it again. The full CI lane also performs a release
+build and retains
 `plurxd-windows-x86_64.zip` plus its SHA-256 receipt. Cross-build success proves
 MSVC type and linkage compatibility, including the embedded long-path-aware
 manifest. It is not runtime evidence.
