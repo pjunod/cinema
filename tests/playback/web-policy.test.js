@@ -5589,6 +5589,19 @@ test("web HLS startup has one bounded manifest policy and terminal precedence", 
   assert.equal(policy.hlsStartupResponseAction({ status: 503 }), "retry",
     "a generic 503 may consume the bounded retry but is not called startup");
   assert.equal(policy.hlsStartupResponseAction({ status: 503, code: "startup_timeout" }), "retry");
+  assert.equal(
+    policy.parseStreamFailure({
+      status: 503,
+      body: JSON.stringify({ code: "startup_timeout", message: "x".repeat(900) }),
+    }).message.length,
+    policy.STREAM_FAILURE_MESSAGE_MAX_CHARS,
+    "retained server prose is bounded",
+  );
+  assert.equal(
+    policy.parseStreamFailure({ status: 503, body: "x".repeat(policy.STREAM_FAILURE_BODY_MAX_CHARS + 1) }),
+    null,
+    "oversized response bodies are not parsed as typed evidence",
+  );
 });
 
 test("the final manifest-send gate rejects pause, stale ownership, deadline and ceiling", () => {
