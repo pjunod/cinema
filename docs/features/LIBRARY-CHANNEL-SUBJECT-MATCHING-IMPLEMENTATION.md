@@ -1,6 +1,6 @@
 # Library channel subjects — build useful matching without a research project
 
-**Status:** P1–P3 implemented; completing integration before review; not shipped · **Written:**
+**Status:** P1–P3 implemented; final review pending; not shipped · **Written:**
 2026-09-14 · **Executes:** Paul's request for reliable subject selection,
 short delivery, advisory Developer requirements, and the current fast lane.
 
@@ -676,8 +676,8 @@ existing history convention.
 |---|---|---|
 | P1 | Implemented; quality observation deferred until review | Own clone `/private/tmp/plurx-subject-matching-20260914`; base `fd70676b`. Rust 1.97.1 compiler loop, tracked formatting/Clippy/JavaScript syntax hook pass. Subject presence compatibility and editor repairs integrated. Local `qwen3:4b` installed. No tests run yet. |
 | P2 | Implemented; focused regressions written | SQLite migration 58 / Hiqlite 38; shared job/cache SQL, global renewable claim, revision and publication fences, exact metadata/profile cache keys, bounded retention. Preview create acknowledges without catalogue or inference work. Saved definitions queue durably. |
-| P3 | Implemented; integration compilation in progress | Web, Apple and Android subject editors, progress/results/manual overrides, shared wire fixture; iOS and tvOS compilation passed, Android compilation passed before its final advanced-control adjustment. Counters will be claimed after current-main integration. |
-| P4 | Pending one final adversarial review | No review or tests yet. Main advanced to `11ca0573` during implementation; integrate before review. One main-bound draft PR, then one adversarial review, repairs and final fast-lane qualification. No deployment authorized. |
+| P3 | Implemented; integration compilation in progress | Web, Apple and Android subject editors, progress/results/manual overrides, shared wire fixture. Apple build 157: iOS and tvOS compile passed. Android build 97: app and JVM test sources compile passed. No behavior tests run yet. |
+| P4 | Pending one final adversarial review | No review or tests yet. Main `11ca0573` integrated. [Draft PR #313](http://192.168.4.7:3000/noirr/plurx/pulls/313); one adversarial review next, then repairs and final fast-lane qualification. No deployment authorized. |
 
 **Execution policy:** Paul explicitly confirmed on 2026-09-14 that his latest
 instructions supersede the older early-test/task-PR steps below. Compilation,

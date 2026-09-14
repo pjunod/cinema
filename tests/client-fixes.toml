@@ -1904,3 +1904,12 @@ source = "clients/apple/Sources/LiveTvView.swift"
 source_anchor = "// This was `#if os(iOS)` and tvOS took the"
 test = "tests/web/live-tv.test.js"
 test_anchor = "no client's guide cell branches on airing — the defect was on all three"
+
+
+[[fixes]]
+id = "web.library-channel-create-draft-and-preview-fences"
+commits = ["c1d80a47"]
+source = "crates/plurxd/src/web/index.html"
+source_anchor = "function libraryChannelDraftKey("
+test = "tests/web/library-channels.test.js"
+test_anchor = "Create never resumes an old edit ID, including legacy stored drafts"
