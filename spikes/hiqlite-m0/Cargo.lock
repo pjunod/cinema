@@ -2255,6 +2255,7 @@ dependencies = [
  "getrandom 0.2.17",
  "hex",
  "hmac",
+ "icu_normalizer",
  "kamadak-exif",
  "libc",
  "quick-xml 0.41.0",
