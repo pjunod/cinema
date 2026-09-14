@@ -21,6 +21,14 @@ TIMEOUT_MS = 38_000
 def find_browser(explicit):
     if explicit:
         return explicit
+    for candidate in (
+        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+        Path("/usr/bin/google-chrome"),
+        Path("/usr/bin/chromium"),
+    ):
+        if candidate.is_file():
+            return str(candidate)
     root = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers"))
     for pattern in (
         "chromium-*/chrome-linux/chrome",
