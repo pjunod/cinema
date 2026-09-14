@@ -112,7 +112,11 @@ Android release-counter increments and regression-history anchors for four
 corrective commits. Those mechanical promotion inputs are now Apple build 158,
 Android versionCode 98, two client-fix anchors and two runtime regression
 mappings; the next synchronization retries the same fast lane without another
-review or a local test cycle.
+review or a local test cycle. That retry accepted the history ledger and all
+198 CI-policy cases, then the operations inventory found the four new DVR
+routes were listed but the prose total still said 205. The corrected total is
+209; no product code changed and the following synchronization continues the
+same failure-fix lane.
 
 ## Evidence limits — green source is not a hardware claim
 
