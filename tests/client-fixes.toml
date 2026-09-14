@@ -1836,10 +1836,16 @@ test_anchor = "aSeekWindowIsTheClientPreparingRow"
 # — and that sweep is what went red before the fix: hand-edit any generated
 # copy again, or leave the two sides disagreeing, and the case named below
 # fails with the file and both numbers in its message.
+#
+# Anchored on the setting, not on a number. It read
+# `CURRENT_PROJECT_VERSION: "154"` until 2026-09-14, when the next Apple build
+# broke it - a row whose anchor is the very value the fix exists to let a
+# generator change is a row that fails on every Apple change forever. The key
+# is what must keep existing; its value is what `validation/apple_build` owns.
 id = "clients.build-counters-claimed-by-their-generators"
 commits = ["0f68b0a1"]
 source = "clients/apple/project.yml"
-source_anchor = "CURRENT_PROJECT_VERSION: \"154\""
+source_anchor = "CURRENT_PROJECT_VERSION:"
 test = "tests/operations/test_apple_build_claims.py"
 test_anchor = "def test_a_generated_next_build_satisfies_the_document_claim_sweep"
 
@@ -1859,3 +1865,19 @@ source = "clients/android/app/src/main/java/tv/plurx/app/livetv/DvrApi.kt"
 source_anchor = "internal fun dvrReorderBody(ids: List<String>): JsonObject ="
 test = "clients/android/app/src/test/java/tv/plurx/app/livetv/DvrUiTest.kt"
 test_anchor = "theReorderBodyCarriesTheIdsAsJsonStringsInOrder"
+
+[[fixes]]
+# The cover's transparent reveal layer takes every direction through
+# `onMoveCommand`, so the focus engine never sees one while it holds focus. It
+# reported a hardcoded `.fullscreenHidden`, the one state that answers every
+# press with `reveal` - so for as long as it held focus after the overlay came
+# back, each press re-showed an overlay that was already up. Nothing
+# highlighted and nothing activated. The anchor is the adapter's own state
+# closure, because that is the line that made the difference; an extraction
+# that moves the decision elsewhere should fail here.
+id = "apple.live-tv-reveal-layer-reports-its-real-state"
+commits = ["c7709372"]
+source = "clients/apple/Sources/LiveTvView.swift"
+source_anchor = ".revealSurface,"
+test = "clients/apple/Tests/LiveTvTests.swift"
+test_anchor = "testTheRevealLayerReportsTheStateItIsInRatherThanTheOneItWants"
