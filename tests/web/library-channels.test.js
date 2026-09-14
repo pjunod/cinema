@@ -28,7 +28,7 @@ function editor() {
       return {eligible_count: 1, matches: [], first_ten: [], preview_seed: "abc"};
     },
     confirm: () => true, toast: () => {}, PAGE_RENDER_GENERATION: 1,
-    newRequestId: () => "request", URLSearchParams, setTimeout: () => 0,
+    newRequestId: () => "request", URLSearchParams, setTimeout: () => 0, clearTimeout: () => {},
     esc: value => String(value).replaceAll("&", "&amp;").replaceAll("<", "&lt;")
       .replaceAll('"', "&quot;"),
     setHead: title => `<h1>${title}</h1>`,

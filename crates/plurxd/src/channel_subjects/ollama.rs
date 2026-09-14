@@ -231,6 +231,69 @@ mod tests {
             .is_empty());
     }
     #[tokio::test]
+    async fn subject_http_transport_bounds_profile_schema_and_provider_failures() {
+        use axum::{
+            routing::{get, post},
+            Json, Router,
+        };
+        let app = Router::new()
+            .route("/api/tags", get(|| async { Json(json!({"models":[{"name":"fixture:4b","digest":"a".repeat(64)}]})) }))
+            .route("/api/chat", post(|Json(body): Json<Value>| async move {
+                assert_eq!(body["think"], false);
+                assert_eq!(body["stream"], false);
+                assert_eq!(body["format"], schema());
+                assert_eq!(body["options"], options());
+                assert!(body.get("tools").is_none());
+                Json(json!({"done":true,"message":{"content":json!({"decisions":[row("b0")]}).to_string()}}))
+            }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("server") });
+        let provider = Ollama {
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(Duration::from_secs(1))
+                .build()
+                .expect("client"),
+            origin: format!("http://{address}").parse().expect("url"),
+            model: "fixture:4b".into(),
+        };
+        assert!(provider
+            .profile()
+            .await
+            .expect("profile")
+            .starts_with(&format!("ollama:{}:", "a".repeat(64))));
+        assert_eq!(
+            provider
+                .classify("Stand-up performances", &records())
+                .await
+                .expect("decisions")
+                .len(),
+            1
+        );
+        assert_eq!(
+            provider
+                .classify(&"x".repeat(INPUT_CHARS), &records())
+                .await
+                .expect_err("bounded input"),
+            "provider_input_too_large"
+        );
+        let missing = Ollama {
+            model: "absent".into(),
+            ..provider.clone()
+        };
+        assert_eq!(
+            missing.profile().await.expect_err("absent model"),
+            "provider_model_missing"
+        );
+        server.abort();
+        let _ = server.await;
+        assert!(provider.classify("Stand-up", &records()).await.is_err());
+    }
+
+    #[tokio::test]
     #[ignore = "finite live model observation; run once during final validation"]
     async fn subject_finite_quality_observation() {
         let fixtures: Value = serde_json::from_str(include_str!(
@@ -246,34 +309,54 @@ mod tests {
         let mut uncertain = 0;
         let mut prohibited = 0;
         let mut results = Vec::new();
+        let mut first_useful_seconds = None;
+        let mut calls = 0;
         for group in fixtures["groups"].as_array().expect("groups") {
             let subject = group["subject"].as_str().expect("subject");
-            for pair in group["pairs"].as_array().expect("pairs") {
-                let fields = serde_json::from_value(pair["fields"].clone()).expect("fields");
-                let metadata = Metadata {
-                    fields,
-                    missing_overview: false,
-                    truncated: false,
-                };
+            for chunk in group["pairs"].as_array().expect("pairs").chunks(BATCH_SIZE) {
+                let batch = chunk
+                    .iter()
+                    .enumerate()
+                    .map(|(index, pair)| {
+                        (
+                            format!("b{index}"),
+                            Metadata {
+                                fields: serde_json::from_value(pair["fields"].clone())
+                                    .expect("fields"),
+                                missing_overview: false,
+                                truncated: false,
+                            },
+                        )
+                    })
+                    .collect::<Vec<_>>();
                 let rows = provider
-                    .classify(subject, &[("b0".into(), metadata)])
+                    .classify(subject, &batch)
                     .await
                     .expect("classification");
-                let decision = rows.get("b0").expect("decision");
-                let expected = pair["expected"].as_str().expect("label");
-                positive += usize::from(expected == "match");
-                if decision.verdict == plurx_core::channel_subjects::Verdict::Match {
-                    accepted += 1;
-                    true_positive += usize::from(expected == "match");
-                    prohibited += usize::from(group["name"] == "standup" && expected == "no_match");
+                calls += 1;
+                for (index, pair) in chunk.iter().enumerate() {
+                    let decision = rows.get(&format!("b{index}")).expect("decision");
+                    if first_useful_seconds.is_none()
+                        && decision.verdict == plurx_core::channel_subjects::Verdict::Match
+                    {
+                        first_useful_seconds = Some(started.elapsed().as_secs_f64());
+                    }
+                    let expected = pair["expected"].as_str().expect("label");
+                    positive += usize::from(expected == "match");
+                    if decision.verdict == plurx_core::channel_subjects::Verdict::Match {
+                        accepted += 1;
+                        true_positive += usize::from(expected == "match");
+                        prohibited +=
+                            usize::from(group["name"] == "standup" && expected == "no_match");
+                    }
+                    uncertain += usize::from(
+                        decision.verdict == plurx_core::channel_subjects::Verdict::Uncertain,
+                    );
+                    results.push(json!({"subject":group["name"],"title":pair["fields"]["title"],"expected":expected,"decision":decision}));
                 }
-                uncertain += usize::from(
-                    decision.verdict == plurx_core::channel_subjects::Verdict::Uncertain,
-                );
-                results.push(json!({"subject":group["name"],"title":pair["fields"]["title"],"expected":expected,"decision":decision}));
             }
         }
-        let report = json!({"profile":profile,"elapsed_seconds":started.elapsed().as_secs_f64(),"pairs":results.len(),"accepted":accepted,"true_positive":true_positive,"positives":positive,"precision":true_positive as f64/accepted.max(1) as f64,"recall":true_positive as f64/positive.max(1) as f64,"uncertain":uncertain,"standup_prohibited_admissions":prohibited,"results":results});
+        let report = json!({"profile":profile,"calls":calls,"first_useful_seconds":first_useful_seconds,"elapsed_seconds":started.elapsed().as_secs_f64(),"pairs":results.len(),"accepted":accepted,"true_positive":true_positive,"positives":positive,"precision":true_positive as f64/accepted.max(1) as f64,"recall":true_positive as f64/positive.max(1) as f64,"uncertain":uncertain,"standup_prohibited_admissions":prohibited,"results":results});
         println!("{report}");
         if let Ok(path) = std::env::var("PLURX_SUBJECT_EVAL_OUTPUT") {
             std::fs::write(path, serde_json::to_vec_pretty(&report).expect("report"))
