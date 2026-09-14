@@ -20,13 +20,15 @@ pub(crate) struct Output {
 
 struct OwnedChild {
     child: Option<Child>,
+    _job: crate::process_control::ChildJob,
     #[cfg(unix)]
     process_group: Option<i32>,
 }
 
 impl OwnedChild {
-    fn new(child: Child) -> Self {
+    fn new(child: Child, job: crate::process_control::ChildJob) -> Self {
         Self {
+            _job: job,
             #[cfg(unix)]
             process_group: child.id().and_then(|pid| i32::try_from(pid).ok()),
             child: Some(child),
@@ -114,7 +116,7 @@ pub(crate) async fn output(
     #[cfg(unix)]
     command.process_group(0);
 
-    let mut child = command.spawn()?;
+    let (mut child, job) = crate::process_control::spawn_job_owned(&mut command)?;
     let stdout = child
         .stdout
         .take()
@@ -125,7 +127,7 @@ pub(crate) async fn output(
         .ok_or_else(|| io::Error::other("probe stderr was not piped"))?;
     let mut stdout = tokio::spawn(drain_capped(stdout, max_output_bytes));
     let mut stderr = tokio::spawn(drain_capped(stderr, max_output_bytes));
-    let mut child = OwnedChild::new(child);
+    let mut child = OwnedChild::new(child, job);
 
     let completed = tokio::time::timeout(wall_time, async {
         let status = child.wait().await?;

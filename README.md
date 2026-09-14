@@ -16,7 +16,9 @@ locally configured HDHomeRun tuner is supported and off by default. Recording
 it is not: plurx is not a DVR.
 
 > **Self-hosted and pre-1.0.** plurx runs on your LAN with no cloud dependency and
-> never phones home. Media mounts are **read-only by default**. The one explicit
+> never phones home. The server runs natively on Linux, macOS, and Windows x64;
+> Docker remains the recommended homelab path. Media mounts are **read-only by
+> default**. The one explicit
 > exception is admin-only, per-library Dolby Vision Profile 7 → 8.1 on-disk
 > conversion: it is Off by default and requires the writable-storage and backup
 > contract in [Operations](docs/OPERATIONS.md). Today plurx runs as a **single
@@ -112,9 +114,9 @@ work that turns additional nodes into measured read and application capacity,
 and
 [docs/cluster/CLUSTER-MEDIA-POOL-PLAN.md](docs/cluster/CLUSTER-MEDIA-POOL-PLAN.md) defining how
 those voters become one capability-aware transcode, cache, and failover pool,
-and [docs/features/WINDOWS-PORT-PLAN.md](docs/features/WINDOWS-PORT-PLAN.md) laying out what a
-native Windows server takes — the Unix surface inventoried, the decision per
-piece, and milestones from first compile to measured hardware transcode;
+and [docs/features/WINDOWS-PORT-STATUS.md](docs/features/WINDOWS-PORT-STATUS.md) recording the
+native Windows server implementation, release artifact, validation evidence,
+and still-unmeasured hardware receipts;
 client strategy in
 [docs/CLIENTS.md](docs/CLIENTS.md), with
 [docs/clients/APPLE-NATIVE-SUBTITLES-HANDOFF.md](docs/clients/APPLE-NATIVE-SUBTITLES-HANDOFF.md)

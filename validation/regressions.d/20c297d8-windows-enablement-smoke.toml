@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["20c297d8"]
+points = ["server.api"]
+checks = ["rust-gate"]
+reason = "The retained Developer readiness and settings regressions require an explicit saved switch whose advisory requirements never gate the write; the affected-surface fast lane also syntax-checks the embedded web application and Windows smoke contract."

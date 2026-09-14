@@ -105,6 +105,42 @@ jobs:
           cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
+  windows_compile:
+    name: effort Windows compile
+    needs: [scope, preflight]
+    if: needs.scope.outputs.rust == 'true'
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    container: ubuntu:26.04
+    timeout-minutes: 15
+    steps:
+      - name: Install Windows cross-build prerequisites
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get -o Acquire::Retries=3 update
+          apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+            build-essential ca-certificates clang cmake curl git lld llvm ninja-build nodejs pkg-config
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: effort-windows
+      - uses: ./.github/actions/windows-cross
+      - name: Enforce persistent Cargo bounds
+        if: always() && steps.cargo-cache.outputs.local == 'true'
+        uses: ./.github/actions/cargo-cache-finalize
+        with:
+          cache-root: ${{ steps.cargo-cache.outputs.cache-root }}
+          budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
+          last-used: ${{ steps.cargo-cache.outputs.last-used }}
+      - name: Restore persistent runner workspace ownership
+        if: always()
+        run: |
+          owner="$(stat -c '%u:%g' "$GITHUB_WORKSPACE")"
+          chown -R "$owner" "$GITHUB_WORKSPACE"
 
   web_static:
     name: effort web static contracts
@@ -194,6 +230,7 @@ jobs:
       - scope
       - preflight
       - rust_compile
+      - windows_compile
       - web_static
       - apple_compile
       - android_compile
@@ -205,12 +242,13 @@ jobs:
           SCOPE_RESULT: ${{ needs.scope.result }}
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           RUST_RESULT: ${{ needs.rust_compile.result }}
+          WINDOWS_RESULT: ${{ needs.windows_compile.result }}
           WEB_RESULT: ${{ needs.web_static.result }}
           APPLE_RESULT: ${{ needs.apple_compile.result }}
           ANDROID_RESULT: ${{ needs.android_compile.result }}
         run: |
           for result in \
-            "$SCOPE_RESULT" "$PREFLIGHT_RESULT" "$RUST_RESULT" \
+            "$SCOPE_RESULT" "$PREFLIGHT_RESULT" "$RUST_RESULT" "$WINDOWS_RESULT" \
             "$WEB_RESULT" "$APPLE_RESULT" "$ANDROID_RESULT"; do
             case "$result" in
               success|skipped) ;;

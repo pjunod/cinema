@@ -128,6 +128,38 @@ executed with identical feature resolution.
 
 ## Profiles — fast by default, deep when the environment can prove more
 
+### Windows compile, package, and native smoke
+
+Every Rust-affecting effort, fast-lane, and full workflow cross-builds
+`x86_64-pc-windows-msvc` with the repository-pinned Rust toolchain and
+`cargo-xwin`. `plurx-cluster-check` is excluded because its fault injector is
+Linux-specific; the server and shared workspace crates are not. The full CI
+lane also performs a release build and retains
+`plurxd-windows-x86_64.zip` plus its SHA-256 receipt. Cross-build success proves
+MSVC type and linkage compatibility, including the embedded long-path-aware
+manifest. It is not runtime evidence.
+
+`scripts/windows-smoke.ps1` is the native runtime harness. On a Windows x64
+host with the pinned Rust toolchain and FFmpeg 6, build the release workspace
+and run:
+
+```powershell
+scripts/windows-smoke.ps1 `
+  -Plurxd target/release/plurxd.exe `
+  -Ffmpeg C:\path\to\ffmpeg.exe `
+  -Ffprobe C:\path\to\ffprobe.exe `
+  -WorkRoot $env:TEMP\plurx-windows-smoke
+```
+
+The harness creates a fixture, boots a fresh server, creates an admin and
+library, waits for scan, reads an exact ranged direct-play response, starts
+software HLS, drives a control hold and resume, sends Ctrl-C, and refuses any
+leftover ffmpeg/ffprobe process. Register a real Forgejo runner before adding
+the workflow that invokes it; the runner fleet contract intentionally rejects
+an unschedulable label set. Retain both server logs with the eventual receipt.
+Do not replace that receipt with a cross-compile claim or put it in ordinary
+fan-out without the required runner.
+
 | Profile | Intended use | Additional evidence |
 |---|---|---|
 | `commit` | Pre-commit and ordinary local work | Mandatory Rust/catalog baseline; shared API wire check; web syntax, contrast, golden, and accessibility when affected |

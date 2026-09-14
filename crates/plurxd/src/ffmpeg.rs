@@ -16,6 +16,34 @@ use plurx_core::transcode::{
     output_size, EffectiveRateControl, Encoder, OutputGrade, Pacing, Pipeline,
 };
 
+/// Resolve a held Windows source handle to the path handed to stock ffmpeg.
+/// The caller retains the handle until the child has opened the path.
+#[cfg(windows)]
+pub(crate) fn windows_source_path(source: &std::fs::File) -> Result<std::path::PathBuf, String> {
+    plurx_core::fs_secure::std_file_path(source)
+        .map_err(|error| format!("resolving held Windows source path: {error}"))
+}
+
+/// Close D2's pathname handoff as far as stock ffmpeg permits: immediately
+/// before spawn, reopen without following reparse points and require the
+/// complete FileIdInfo identity to match the handle retained by plurxd.
+#[cfg(windows)]
+pub(crate) fn verify_windows_source_path(
+    source: &std::fs::File,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    let held = plurx_core::fs_secure::std_file_identity(source)
+        .map_err(|error| format!("stating held Windows source: {error}"))?;
+    let reopened = plurx_core::fs_secure::open_read_nofollow_blocking(path)
+        .map_err(|error| format!("reopening Windows source without reparse traversal: {error}"))?;
+    let current = plurx_core::fs_secure::std_file_identity(&reopened)
+        .map_err(|error| format!("stating reopened Windows source: {error}"))?;
+    if held != current {
+        return Err("Windows source changed before ffmpeg spawn".to_owned());
+    }
+    Ok(())
+}
+
 /// An override wins only when it names something. An empty `PLURX_FFMPEG=` is
 /// what a Compose file produces for an unset variable, and treating that as a
 /// binary called "" would fail every spawn with a confusing ENOENT.
@@ -25,14 +53,29 @@ fn resolve_bin(override_value: Option<String>, fallback: &str) -> String {
         .unwrap_or_else(|| fallback.to_owned())
 }
 
+fn default_bin(name: &str) -> String {
+    #[cfg(windows)]
+    {
+        if let Ok(executable) = std::env::current_exe() {
+            if let Some(directory) = executable.parent() {
+                let sibling = directory.join(format!("{name}.exe"));
+                if sibling.is_file() {
+                    return sibling.to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+    name.to_owned()
+}
+
 /// ffmpeg binary, overridable via `PLURX_FFMPEG` (jellyfin-ffmpeg / pinned path).
 pub fn ffmpeg_bin() -> String {
-    resolve_bin(std::env::var("PLURX_FFMPEG").ok(), "ffmpeg")
+    resolve_bin(std::env::var("PLURX_FFMPEG").ok(), &default_bin("ffmpeg"))
 }
 
 /// ffprobe binary, overridable via `PLURX_FFPROBE` (jellyfin-ffmpeg / pinned).
 pub fn ffprobe_bin() -> String {
-    resolve_bin(std::env::var("PLURX_FFPROBE").ok(), "ffprobe")
+    resolve_bin(std::env::var("PLURX_FFPROBE").ok(), &default_bin("ffprobe"))
 }
 
 /// Pass held source/sidecar capabilities into reserved child FDs. Duplicate
@@ -97,6 +140,7 @@ pub(crate) async fn drain_diagnostics(mut input: impl AsyncRead + Unpin) -> Stri
 /// detached diagnostic reader. Used by whole-track burn extraction.
 pub(crate) struct BoundedDiagnosticChild {
     child: Option<tokio::process::Child>,
+    child_job: Option<crate::process_control::ChildJob>,
     stdout: Option<tokio::process::ChildStdout>,
     stderr: Option<tokio::process::ChildStderr>,
     #[cfg(test)]
@@ -104,16 +148,16 @@ pub(crate) struct BoundedDiagnosticChild {
 }
 
 impl BoundedDiagnosticChild {
-    #[cfg(test)]
     pub fn spawn(command: &mut tokio::process::Command) -> std::io::Result<Self> {
-        let mut child = command
+        command
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+            .kill_on_drop(true);
+        let (mut child, child_job) = crate::process_control::spawn_job_owned(command)?;
         let stderr = child.stderr.take();
         Ok(Self {
             child: Some(child),
+            child_job: Some(child_job),
             stdout: None,
             stderr,
             #[cfg(test)]
@@ -125,15 +169,16 @@ impl BoundedDiagnosticChild {
     /// must consume it with [`Self::output_to_bounded_file`]; no subprocess
     /// ever receives a cache pathname it can grow past the enforced bound.
     pub fn spawn_piped_output(command: &mut tokio::process::Command) -> std::io::Result<Self> {
-        let mut child = command
+        command
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+            .kill_on_drop(true);
+        let (mut child, child_job) = crate::process_control::spawn_job_owned(command)?;
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         Ok(Self {
             child: Some(child),
+            child_job: Some(child_job),
             stdout,
             stderr,
             #[cfg(test)]
@@ -141,7 +186,6 @@ impl BoundedDiagnosticChild {
         })
     }
 
-    #[cfg(test)]
     pub async fn output(mut self) -> std::io::Result<(std::process::ExitStatus, String)> {
         let stderr = self
             .stderr
@@ -151,6 +195,7 @@ impl BoundedDiagnosticChild {
         let (status, diagnostics) = tokio::join!(child.wait(), drain_diagnostics(stderr));
         let status = status?;
         self.child.take(); // Successful wait, including nonzero exit, proves reap.
+        self.child_job.take();
         #[cfg(test)]
         if let Some(reaped) = self.reaped.take() {
             let _ = reaped.send(());
@@ -221,6 +266,7 @@ impl BoundedDiagnosticChild {
             .wait()
             .await?;
         self.child.take();
+        self.child_job.take();
         #[cfg(test)]
         if let Some(reaped) = self.reaped.take() {
             let _ = reaped.send(());
@@ -240,10 +286,12 @@ impl Drop for BoundedDiagnosticChild {
         let Some(mut child) = self.child.take() else {
             return;
         };
+        let child_job = self.child_job.take();
         let _ = child.start_kill();
         #[cfg(test)]
         let reaped = self.reaped.take();
         tokio::spawn(async move {
+            let _child_job = child_job;
             let result = child.wait().await;
             if let Err(ref error) = result {
                 tracing::warn!(%error, "reaping cancelled burn-track extraction failed");
@@ -282,9 +330,8 @@ impl EncodedExecutable {
     }
 
     pub fn is_current(&self) -> bool {
-        std::fs::metadata(&self.path)
+        engine_path_version(&self.path)
             .ok()
-            .and_then(|metadata| engine_object_version(&metadata).ok())
             .is_some_and(|version| version == self.object_version)
     }
 }
@@ -309,10 +356,48 @@ pub async fn ffmpeg_build() -> String {
 /// same-second pathname replacement from pairing fresh bytes with stale
 /// geometry, tracks, cadence, or color facts.
 pub(crate) async fn held_source_probe_json(source: &std::fs::File) -> Result<String, String> {
-    #[cfg(not(unix))]
+    #[cfg(windows)]
     {
-        let _ = source;
-        return Err("descriptor-bound source probing is unavailable on this platform".to_owned());
+        let held_identity = plurx_core::fs_secure::std_file_identity(source)
+            .map_err(|error| format!("reading held source identity: {error}"))?;
+        let source_path = plurx_core::fs_secure::std_file_path(source)
+            .map_err(|error| format!("resolving held source path: {error}"))?;
+        let reopened = plurx_core::fs_secure::open_read_nofollow_blocking(&source_path)
+            .map_err(|error| format!("reopening held source path: {error}"))?;
+        if plurx_core::fs_secure::std_file_identity(&reopened)
+            .map_err(|error| format!("reading reopened source identity: {error}"))?
+            != held_identity
+        {
+            return Err("held source path changed before FFprobe launch".to_owned());
+        }
+        let mut command = tokio::process::Command::new(ffprobe_bin());
+        command.args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            "-show_chapters",
+        ]);
+        command.arg(&source_path);
+        let output = bounded_command_output(command).await?;
+        if plurx_core::fs_secure::std_file_identity(source)
+            .map_err(|error| format!("re-reading held source identity: {error}"))?
+            != held_identity
+        {
+            return Err("held source changed during FFprobe".to_owned());
+        }
+        let current = plurx_core::fs_secure::open_read_nofollow_blocking(&source_path)
+            .map_err(|error| format!("reopening probed source path: {error}"))?;
+        if plurx_core::fs_secure::std_file_identity(&current)
+            .map_err(|error| format!("reading probed source identity: {error}"))?
+            != held_identity
+        {
+            return Err("held source path changed during FFprobe".to_owned());
+        }
+        return String::from_utf8(output.stdout)
+            .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"));
     }
     #[cfg(unix)]
     {
@@ -682,9 +767,8 @@ pub async fn fragment_index_engine_is_current() -> bool {
 
 fn engine_objects_are_current(objects: &[(std::path::PathBuf, String)]) -> bool {
     objects.iter().all(|(path, expected)| {
-        std::fs::metadata(path)
+        engine_path_version(path)
             .ok()
-            .and_then(|metadata| engine_object_version(&metadata).ok())
             .is_some_and(|current| &current == expected)
     })
 }
@@ -849,10 +933,7 @@ async fn font_render_engine_inner() -> FragmentIndexEngine {
     let mut objects = Vec::new();
     let mut object_digests = Vec::new();
     for path in paths {
-        match std::fs::metadata(&path)
-            .map_err(|error| format!("stat {}: {error}", path.display()))
-            .and_then(|metadata| engine_object_version(&metadata))
-        {
+        match engine_path_version(&path) {
             Ok(version) => {
                 let mut identity = Sha256::new();
                 identity.update(path.as_os_str().as_encoded_bytes());
@@ -896,7 +977,8 @@ async fn bounded_command_output_with_timeout(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
-    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let (mut child, child_job) =
+        crate::process_control::spawn_job_owned(&mut command).map_err(|error| error.to_string())?;
     let stdout = child
         .stdout
         .take()
@@ -906,6 +988,7 @@ async fn bounded_command_output_with_timeout(
         .take()
         .ok_or_else(|| "engine probe has no stderr".to_owned())?;
     let collect = async move {
+        let _child_job = child_job;
         let (stdout, stderr, status) =
             tokio::join!(read_bounded(stdout), read_bounded(stderr), child.wait());
         let status = status.map_err(|error| error.to_string())?;
@@ -940,8 +1023,23 @@ async fn read_bounded(input: impl AsyncRead + Unpin) -> Result<Vec<u8>, String> 
 }
 
 async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String), String> {
+    #[cfg(unix)]
     let metadata = tokio::fs::metadata(path)
         .await
+        .map_err(|error| format!("stat {}: {error}", path.display()))?;
+    #[cfg(windows)]
+    let source = {
+        let source_path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            plurx_core::fs_secure::open_read_nofollow_blocking(&source_path)
+        })
+        .await
+        .map_err(|error| format!("engine open task failed: {error}"))?
+        .map_err(|error| format!("open {}: {error}", path.display()))?
+    };
+    #[cfg(windows)]
+    let metadata = source
+        .metadata()
         .map_err(|error| format!("stat {}: {error}", path.display()))?;
     if metadata.len() > ENGINE_OBJECT_MAX_BYTES {
         return Err(format!(
@@ -949,10 +1047,20 @@ async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String),
             path.display()
         ));
     }
+    #[cfg(unix)]
     let version = engine_object_version(&metadata)?;
+    #[cfg(windows)]
+    let version = windows_engine_object_version(&source)?;
+    #[cfg(unix)]
     let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|error| format!("open {}: {error}", path.display()))?;
+    #[cfg(windows)]
+    let mut file = tokio::fs::File::from_std(
+        source
+            .try_clone()
+            .map_err(|error| format!("clone engine object {}: {error}", path.display()))?,
+    );
     let mut object = Sha256::new();
     let mut buffer = vec![0_u8; 256 * 1024];
     loop {
@@ -965,17 +1073,37 @@ async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String),
         }
         object.update(&buffer[..read]);
     }
+    #[cfg(unix)]
     let after = file
         .metadata()
         .await
         .map_err(|error| format!("re-stat {}: {error}", path.display()))?;
-    if engine_object_version(&after)? != version {
+    #[cfg(unix)]
+    let after_version = engine_object_version(&after)?;
+    #[cfg(windows)]
+    let after_version = windows_engine_object_version(&source)?;
+    if after_version != version {
         return Err(format!(
             "engine object {} changed while hashing",
             path.display()
         ));
     }
     Ok((object.finalize().to_vec(), version))
+}
+
+fn engine_path_version(path: &std::path::Path) -> Result<String, String> {
+    #[cfg(unix)]
+    {
+        let metadata =
+            std::fs::metadata(path).map_err(|error| format!("stat {}: {error}", path.display()))?;
+        engine_object_version(&metadata)
+    }
+    #[cfg(windows)]
+    {
+        let file = plurx_core::fs_secure::open_read_nofollow_blocking(path)
+            .map_err(|error| format!("open {}: {error}", path.display()))?;
+        windows_engine_object_version(&file)
+    }
 }
 
 #[cfg(unix)]
@@ -993,14 +1121,19 @@ fn engine_object_version(metadata: &std::fs::Metadata) -> Result<String, String>
     ))
 }
 
-#[cfg(not(unix))]
-fn engine_object_version(metadata: &std::fs::Metadata) -> Result<String, String> {
-    let modified = metadata
-        .modified()
-        .map_err(|error| error.to_string())?
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|error| error.to_string())?;
-    Ok(format!("{}:{}", metadata.len(), modified.as_nanos()))
+#[cfg(windows)]
+fn windows_engine_object_version(file: &std::fs::File) -> Result<String, String> {
+    let identity =
+        plurx_core::fs_secure::std_file_identity(file).map_err(|error| error.to_string())?;
+    Ok(format!(
+        "{}:{}:{}:{}:{}:{}",
+        identity.device,
+        identity.inode,
+        identity.inode_high,
+        identity.size,
+        identity.changed_seconds,
+        identity.changed_nanoseconds
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -1239,9 +1372,12 @@ async fn probe_dovi_reshape_graph(encoder: Encoder) -> bool {
         .args(encoder.encode_args(1_000, EffectiveRateControl::Vbr, false, None))
         .args(["-f", "null", "-"])
         .kill_on_drop(true);
-    tokio::time::timeout(Duration::from_secs(20), command.status())
-        .await
-        .is_ok_and(|result| result.is_ok_and(|status| status.success()))
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        crate::process_control::status_job_owned(&mut command),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok_and(|status| status.success()))
 }
 
 /// Can the Dolby Vision reshape run with this encoder on this build?
@@ -1349,7 +1485,11 @@ pub async fn has_dovi_passthrough() -> bool {
                 .args(["-c:v", "libx265"])
                 .args(["-x265-params", "hdr10=1:repeat-headers=1"])
                 .args(["-f", "null", "-"]);
-            let output = tokio::time::timeout(Duration::from_secs(20), command.output()).await;
+            let output = tokio::time::timeout(
+                Duration::from_secs(20),
+                crate::process_control::output_job_owned(&mut command),
+            )
+            .await;
             let Ok(Ok(output)) = output else {
                 tracing::warn!(
                     "ffmpeg could not run the Dolby Vision HDR10 passthrough renderer; the HDR10 rung will be refused"
@@ -1421,7 +1561,11 @@ pub async fn has_hdr10_passthrough() -> bool {
                     None,
                 ))
                 .args(["-f", "null", "-"]);
-            let output = tokio::time::timeout(Duration::from_secs(20), command.output()).await;
+            let output = tokio::time::timeout(
+                Duration::from_secs(20),
+                crate::process_control::output_job_owned(&mut command),
+            )
+            .await;
             let Ok(Ok(output)) = output else {
                 tracing::warn!(
                     "ffmpeg could not run the HDR10 passthrough encode; every HDR transcode on \
@@ -1477,9 +1621,12 @@ pub async fn has_hdr10_passthrough_qsv() -> bool {
                     None,
                 ))
                 .args(["-f", "null", "-"]);
-            let passed = tokio::time::timeout(Duration::from_secs(20), command.status())
-                .await
-                .is_ok_and(|result| result.is_ok_and(|status| status.success()));
+            let passed = tokio::time::timeout(
+                Duration::from_secs(20),
+                crate::process_control::status_job_owned(&mut command),
+            )
+            .await
+            .is_ok_and(|result| result.is_ok_and(|status| status.success()));
             if passed {
                 tracing::info!("ffmpeg proved the QSV Main10 encode for a plain HDR source");
             } else {
@@ -1529,7 +1676,10 @@ pub async fn has_dovi_passthrough_with(encoder: Encoder) -> bool {
                     None,
                 ))
                 .args(["-f", "null", "-"]);
-            let passed = tokio::time::timeout(Duration::from_secs(20), command.status())
+            let passed = tokio::time::timeout(
+                Duration::from_secs(20),
+                crate::process_control::status_job_owned(&mut command),
+            )
                 .await
                 .is_ok_and(|result| result.is_ok_and(|status| status.success()));
             if passed {
@@ -1569,10 +1719,13 @@ async fn dovi_probe_output(file: &MediaFile, apply: bool) -> Result<Vec<String>,
         .args(["-map", "0:v:0", "-frames:v", "3", "-an", "-vf"])
         .arg(filter)
         .args(["-f", "framemd5", "-"]);
-    let output = tokio::time::timeout(Duration::from_secs(30), command.output())
-        .await
-        .map_err(|_| "Dolby Vision pixel probe timed out".to_owned())?
-        .map_err(|error| format!("starting Dolby Vision pixel probe: {error}"))?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(30),
+        crate::process_control::output_job_owned(&mut command),
+    )
+    .await
+    .map_err(|_| "Dolby Vision pixel probe timed out".to_owned())?
+    .map_err(|error| format!("starting Dolby Vision pixel probe: {error}"))?;
     if !output.status.success() {
         return Err(format!(
             "Dolby Vision pixel probe exited {}: {}",
@@ -1754,11 +1907,9 @@ fn burst_probe_args() -> [&'static str; 14] {
 async fn probe_burst() -> Result<Duration, String> {
     let args = burst_probe_args();
     let start = std::time::Instant::now();
-    match tokio::process::Command::new(ffmpeg_bin())
-        .args(args)
-        .output()
-        .await
-    {
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    command.args(args);
+    match crate::process_control::output_job_owned(&mut command).await {
         Ok(out) if out.status.success() => Ok(start.elapsed()),
         Ok(out) => Err(format!("exited with {}", out.status)),
         Err(error) => Err(error.to_string()),

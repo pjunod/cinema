@@ -20,7 +20,9 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
-use std::fs::{File, OpenOptions};
+#[cfg(not(windows))]
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -350,6 +352,14 @@ impl CredentialKey {
             path: path.to_owned(),
             message,
         };
+        #[cfg(windows)]
+        crate::fs_secure::harden_private_path_blocking(path, false).map_err(|error| {
+            key_file(format!("cannot be protected for owner and SYSTEM: {error}"))
+        })?;
+        #[cfg(windows)]
+        let mut file = crate::fs_secure::open_read_nofollow_blocking(path)
+            .map_err(|error| key_file(format!("cannot be read securely: {error}")))?;
+        #[cfg(not(windows))]
         let mut file =
             File::open(path).map_err(|error| key_file(format!("cannot be read: {error}")))?;
 

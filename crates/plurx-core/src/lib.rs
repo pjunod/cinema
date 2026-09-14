@@ -16,6 +16,10 @@ pub mod error;
 pub mod fmp4;
 #[cfg(unix)]
 pub mod fs_secure;
+#[cfg(windows)]
+pub mod fs_secure_windows;
+#[cfg(windows)]
+pub use fs_secure_windows as fs_secure;
 pub mod library_channels;
 pub mod mediafacts;
 pub mod metadata;

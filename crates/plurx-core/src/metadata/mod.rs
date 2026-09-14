@@ -12,10 +12,14 @@ pub mod local;
 pub mod tmdb;
 
 use std::collections::{BTreeMap, HashSet};
+#[cfg(unix)]
 use std::ffi::CString;
+#[cfg(unix)]
 use std::fs::File;
 use std::io::Write;
+#[cfg(unix)]
 use std::os::fd::{FromRawFd, RawFd};
+#[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -110,12 +114,14 @@ const MAX_PROBLEMS: usize = 40;
 /// cancelled. The synchronous unlink is intentional: `Drop` cannot await,
 /// and leaving a partial file is worse than a tiny best-effort filesystem
 /// call during cancellation.
+#[cfg(unix)]
 struct UnpublishedArtwork {
     directory_fd: RawFd,
     name: CString,
     published: bool,
 }
 
+#[cfg(unix)]
 impl UnpublishedArtwork {
     fn new(directory_fd: RawFd, name: CString) -> Self {
         Self {
@@ -130,12 +136,44 @@ impl UnpublishedArtwork {
     }
 }
 
+#[cfg(unix)]
 impl Drop for UnpublishedArtwork {
     fn drop(&mut self) {
         if !self.published {
             unsafe {
                 libc::unlinkat(self.directory_fd, self.name.as_ptr(), 0);
             }
+        }
+    }
+}
+
+#[cfg(windows)]
+struct UnpublishedArtwork {
+    directory: crate::fs_secure::SecureDirectory,
+    name: String,
+    published: bool,
+}
+
+#[cfg(windows)]
+impl UnpublishedArtwork {
+    fn new(directory: crate::fs_secure::SecureDirectory, name: String) -> Self {
+        Self {
+            directory,
+            name,
+            published: false,
+        }
+    }
+
+    fn published(&mut self) {
+        self.published = true;
+    }
+}
+
+#[cfg(windows)]
+impl Drop for UnpublishedArtwork {
+    fn drop(&mut self) {
+        if !self.published {
+            let _ = self.directory.unlink_child_blocking(&self.name);
         }
     }
 }
@@ -232,7 +270,6 @@ async fn publish_artwork_with_reservation(
     let filename = reservation
         .target
         .file_name()
-        .filter(|name| !name.as_bytes().contains(&0))
         .ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -247,66 +284,102 @@ async fn publish_artwork_with_reservation(
             _slot: slot,
         } = reservation;
         let _slot = slot;
-        let filename = CString::new(filename.as_bytes()).map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "artwork filename contains a NUL byte",
-            )
-        })?;
-        let temporary = CString::new(format!(
-            ".{}.{}.tmp",
-            filename.to_string_lossy(),
-            uuid::Uuid::new_v4().simple()
-        ))
-        .map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "temporary artwork filename contains a NUL byte",
-            )
-        })?;
-        let raw = unsafe {
-            libc::openat(
-                directory.raw_fd(),
-                temporary.as_ptr(),
-                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-                0o600,
-            )
-        };
-        if raw < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-        let mut unpublished = UnpublishedArtwork::new(directory.raw_fd(), temporary);
-        let mut temporary_file = unsafe { File::from_raw_fd(raw) };
-        temporary_file.write_all(&bytes)?;
-        temporary_file.sync_all()?;
-        if let Some(before_publish) = before_publish {
-            before_publish();
-        }
-
-        let mut publication = state.lock().unwrap_or_else(|error| error.into_inner());
-        if publication.cancelled {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
-                "artwork publication was cancelled",
-            ));
-        }
-        if unsafe {
-            libc::renameat(
-                directory.raw_fd(),
-                unpublished.name.as_ptr(),
-                directory.raw_fd(),
-                filename.as_ptr(),
-            )
-        } != 0
+        #[cfg(unix)]
         {
-            return Err(std::io::Error::last_os_error());
+            let filename = CString::new(filename.as_bytes()).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "artwork filename contains a NUL byte",
+                )
+            })?;
+            let temporary = CString::new(format!(
+                ".{}.{}.tmp",
+                filename.to_string_lossy(),
+                uuid::Uuid::new_v4().simple()
+            ))
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "temporary artwork filename contains a NUL byte",
+                )
+            })?;
+            let raw = unsafe {
+                libc::openat(
+                    directory.raw_fd(),
+                    temporary.as_ptr(),
+                    libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC,
+                    0o600,
+                )
+            };
+            if raw < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut unpublished = UnpublishedArtwork::new(directory.raw_fd(), temporary);
+            let mut temporary_file = unsafe { File::from_raw_fd(raw) };
+            temporary_file.write_all(&bytes)?;
+            temporary_file.sync_all()?;
+            if let Some(before_publish) = before_publish {
+                before_publish();
+            }
+
+            let mut publication = state.lock().unwrap_or_else(|error| error.into_inner());
+            if publication.cancelled {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "artwork publication was cancelled",
+                ));
+            }
+            if unsafe {
+                libc::renameat(
+                    directory.raw_fd(),
+                    unpublished.name.as_ptr(),
+                    directory.raw_fd(),
+                    filename.as_ptr(),
+                )
+            } != 0
+            {
+                return Err(std::io::Error::last_os_error());
+            }
+            unpublished.published();
+            if unsafe { libc::fsync(directory.raw_fd()) } != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            publication.finished = true;
+            Ok(())
         }
-        unpublished.published();
-        if unsafe { libc::fsync(directory.raw_fd()) } != 0 {
-            return Err(std::io::Error::last_os_error());
+        #[cfg(windows)]
+        {
+            let filename = filename.to_str().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "artwork filename is not valid Unicode",
+                )
+            })?;
+            let temporary = format!(".{}.{}.tmp", filename, uuid::Uuid::new_v4().simple());
+            let mut unpublished = UnpublishedArtwork::new(directory.clone(), temporary.clone());
+            let mut temporary_file = directory.create_new_write_child_blocking(&temporary)?;
+            temporary_file.write_all(&bytes)?;
+            temporary_file.sync_all()?;
+            if let Some(before_publish) = before_publish {
+                before_publish();
+            }
+
+            let mut publication = state.lock().unwrap_or_else(|error| error.into_inner());
+            if publication.cancelled {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "artwork publication was cancelled",
+                ));
+            }
+            directory.rename_child_blocking(&temporary, filename)?;
+            unpublished.published();
+            publication.finished = true;
+            Ok(())
         }
-        publication.finished = true;
-        Ok(())
     })
     .await;
     drop(cancellation);

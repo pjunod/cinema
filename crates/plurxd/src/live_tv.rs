@@ -1311,6 +1311,7 @@ struct LiveTvSession {
 
 struct LiveTvProcess {
     child: tokio::process::Child,
+    _job: crate::process_control::ChildJob,
     // Copy and audio-only conversion intentionally own no video permit.
     _admission: Option<crate::transcode::LiveAdmission>,
     stderr: Option<tokio::task::JoinHandle<()>>,
@@ -2509,6 +2510,7 @@ fn private_webhook_host(host: &str) -> bool {
 /// A non-owner node answering `None` is the common case and not a fault: the
 /// DVR root is a mount the owner writes to, and a node that does not have it
 /// has nothing honest to say about its free space.
+#[cfg(unix)]
 pub(crate) fn free_space_bytes(path: &str) -> Option<u64> {
     if path.trim().is_empty() {
         return None;
@@ -2524,6 +2526,29 @@ pub(crate) fn free_space_bytes(path: &str) -> Option<u64> {
         stats
     };
     Some((stats.f_bsize as u64).saturating_mul(stats.f_bavail as u64))
+}
+
+#[cfg(windows)]
+pub(crate) fn free_space_bytes(path: &str) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let mut path = std::ffi::OsStr::new(path).encode_wide().collect::<Vec<_>>();
+    if path.is_empty() || path.contains(&0) {
+        return None;
+    }
+    path.push(0);
+    let mut available = 0u64;
+    // SAFETY: the path is NUL-terminated and `available` is writable for the
+    // duration of the read-only filesystem query.
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+            path.as_ptr(),
+            &raw mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then_some(available)
 }
 
 fn remaining_guide_budget(deadline: tokio::time::Instant) -> Result<Duration, LiveTvError> {
@@ -5244,7 +5269,8 @@ async fn run_live_session_inner(
             .as_ref()
             .and_then(crate::transcode::LiveAdmission::software_threads),
     )?;
-    let mut child = spawn_live_ffmpeg(&owner.system, &transcode_plan, &session.directory)?;
+    let (mut child, child_job) =
+        spawn_live_ffmpeg(&owner.system, &transcode_plan, &session.directory)?;
     let stdin = child.stdin.take();
     let source_format_changed = Arc::new(AtomicBool::new(false));
     let stderr = child.stderr.take().map(|stderr| {
@@ -5259,6 +5285,7 @@ async fn run_live_session_inner(
     let Some(stdin) = stdin else {
         *session.process.lock().await = Some(LiveTvProcess {
             child,
+            _job: child_job,
             _admission: admission,
             stderr,
         });
@@ -5448,6 +5475,7 @@ async fn run_live_session_inner(
     let _ = pump.await;
     *session.process.lock().await = Some(LiveTvProcess {
         child,
+        _job: child_job,
         _admission: admission,
         stderr,
     });
@@ -5761,9 +5789,10 @@ async fn probe_live_source(
     if let Some(path) = std::env::var_os("PATH") {
         command.env("PATH", path);
     }
-    let mut child = command.spawn().map_err(|error| {
-        LiveTvError::CodecUnsupported(format!("starting bounded source probe: {error}"))
-    })?;
+    let (mut child, _child_job) =
+        crate::process_control::spawn_job_owned(&mut command).map_err(|error| {
+            LiveTvError::CodecUnsupported(format!("starting bounded source probe: {error}"))
+        })?;
     let stdout = child.stdout.take().ok_or_else(|| {
         LiveTvError::StreamFailed("bounded source probe did not expose stdout".into())
     })?;
@@ -5860,10 +5889,9 @@ fn spawn_live_ffmpeg(
     system: &SystemInfo,
     plan: &LiveTvTranscodePlan,
     directory: &Path,
-) -> Result<tokio::process::Child, LiveTvError> {
+) -> Result<(tokio::process::Child, crate::process_control::ChildJob), LiveTvError> {
     let mut command = live_ffmpeg_command(system, plan, directory)?;
-    command
-        .spawn()
+    crate::process_control::spawn_job_owned(&mut command)
         .map_err(|error| LiveTvError::CodecUnsupported(format!("starting live-TV FFmpeg: {error}")))
 }
 
@@ -7292,10 +7320,13 @@ async fn run_graph_probe(
     let mut command =
         live_ffmpeg_command_for_input(system, &plan, directory, LiveTvFfmpegInput::GraphProbe)
             .map_err(|error| format!("could not build live-TV graph probe: {error}"))?;
-    let output = tokio::time::timeout(Duration::from_secs(20), command.output())
-        .await
-        .map_err(|_| "live-TV FFmpeg graph probe timed out".to_owned())?
-        .map_err(|error| format!("could not start live-TV FFmpeg probe: {error}"))?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        crate::process_control::output_job_owned(&mut command),
+    )
+    .await
+    .map_err(|_| "live-TV FFmpeg graph probe timed out".to_owned())?
+    .map_err(|error| format!("could not start live-TV FFmpeg probe: {error}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
@@ -8662,7 +8693,7 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
             Some(2),
         )
         .expect("prepare live-TV plan");
-        let mut child =
+        let (mut child, _child_job) =
             spawn_live_ffmpeg(&system, &plan, root.path()).expect("start exact production graph");
         let detected = Arc::new(AtomicBool::new(false));
         let stderr = tokio::spawn(capture_live_stderr(

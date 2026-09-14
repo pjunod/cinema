@@ -261,6 +261,8 @@ pub async fn set_path_access(path: &str, mode: u32) -> Result<(), Error> {
         use std::os::unix::fs::PermissionsExt;
         tokio::fs::set_permissions(&path, Permissions::from_mode(mode)).await?;
     }
+    #[cfg(not(target_family = "unix"))]
+    let _ = (path, mode); // The enclosing data-directory DACL is authoritative on Windows.
     Ok(())
 }
 

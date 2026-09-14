@@ -502,11 +502,21 @@ async fn prepare_stage(
 ) -> Result<(), OverlayError> {
     let mut cancellation = CancellationFlag::new();
     source_is_current(file).await?;
+    let source = crate::fragment_index_cluster::open_source_fence(file, None)
+        .await
+        .map_err(OverlayError::Unavailable)?;
+    #[cfg(unix)]
+    let input = PathBuf::from("/dev/fd/3");
+    #[cfg(windows)]
+    let input =
+        crate::ffmpeg::windows_source_path(&source.handle).map_err(OverlayError::Unavailable)?;
     let sup = stage.join("track.sup");
     let maximum_demux_bytes = MAX_TRACK_BYTES.to_string();
-    let output = tokio::process::Command::new(ffmpeg_bin())
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    crate::ffmpeg::inherit_file_descriptors(&mut command, &[(&source.handle, 3)]);
+    command
         .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
-        .arg(&file.path)
+        .arg(&input)
         .args([
             "-map",
             &format!("0:s:{index}"),
@@ -519,14 +529,19 @@ async fn prepare_stage(
         ])
         .arg(&sup)
         .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    crate::ffmpeg::verify_windows_source_path(&source.handle, &input)
+        .map_err(OverlayError::Unavailable)?;
+    let (status, diagnostics) = crate::ffmpeg::BoundedDiagnosticChild::spawn(&mut command)
+        .map_err(|error| OverlayError::Unavailable(format!("starting PGS demux: {error}")))?
         .output()
         .await
-        .map_err(|error| OverlayError::Unavailable(format!("starting PGS demux: {error}")))?;
-    if !output.status.success() {
+        .map_err(|error| OverlayError::Unavailable(format!("waiting for PGS demux: {error}")))?;
+    if !status.success() {
         return Err(OverlayError::Unavailable(format!(
             "PGS demux failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            diagnostics.trim()
         )));
     }
 

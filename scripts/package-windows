@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+target="${CARGO_TARGET_DIR:-$root/target}/x86_64-pc-windows-msvc/release"
+stage="$root/target/windows-package/plurx-windows-x86_64"
+archive="$root/target/windows-package/plurxd-windows-x86_64.zip"
+
+test -f "$target/plurxd.exe" || {
+  echo "missing release binary: $target/plurxd.exe" >&2
+  exit 1
+}
+
+rm -rf "$stage"
+mkdir -p "$stage"
+cp "$target/plurxd.exe" "$stage/plurxd.exe"
+cp "$root/plurx.example.toml" "$stage/plurx.example.toml"
+cp "$root/deploy/windows/README.md" "$stage/README.md"
+
+mkdir -p "$(dirname "$archive")"
+rm -f "$archive"
+(cd "$(dirname "$stage")" && zip -q -r "$archive" "$(basename "$stage")")
+sha256sum "$archive" > "$archive.sha256"
+printf '%s\n' "$archive"

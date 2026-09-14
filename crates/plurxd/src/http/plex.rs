@@ -279,7 +279,8 @@ pub async fn part(
         .get_file(file_id)
         .await?
         .ok_or(ApiError::NotFound("part"))?;
-    super::stream::serve_file_range(&file.path, &headers, &method).await
+    super::stream::serve_file_range(&file.path, &headers, &method, Some(file.size.max(0) as u64))
+        .await
 }
 
 /// GET /library/metadata/:key/thumb  and  /art — serve cached artwork.

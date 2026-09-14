@@ -9874,7 +9874,27 @@ fn available_storage_headroom_bytes(root: &Path) -> Option<u64> {
     )
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn available_storage_headroom_bytes(root: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let mut path = root.as_os_str().encode_wide().collect::<Vec<_>>();
+    path.push(0);
+    let mut available = 0_u64;
+    // SAFETY: `path` is NUL terminated and `available` is a writable output.
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            path.as_ptr(),
+            &raw mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then_some(available)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn available_storage_headroom_bytes(_root: &Path) -> Option<u64> {
     None
 }

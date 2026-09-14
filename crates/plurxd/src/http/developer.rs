@@ -164,6 +164,7 @@ pub(crate) async fn readiness(
 
     Ok(Json(DeveloperReadiness {
         items: vec![
+            windows_server(&state, convert_on),
             library_channels(&state, library_channels_on).await,
             dvr(&state, dvr_on, &live_tv, &dvr_config).await,
             cluster_transport_recovery(&state).await,
@@ -174,6 +175,89 @@ pub(crate) async fn readiness(
             dolby_vision_convert(convert_on),
         ],
     }))
+}
+
+fn windows_server(state: &AppState, enabled: bool) -> DeveloperEnableItem {
+    #[cfg(windows)]
+    let platform = DeveloperRequirement {
+        id: "native_runtime",
+        title: "Native Windows runtime",
+        status: RequirementStatus::Met,
+        evidence: "This process is the native x86_64-pc-windows-msvc server. Startup accepted its managed NTFS/ReFS storage roots and installed Windows process controls.".to_owned(),
+    };
+    #[cfg(not(windows))]
+    let platform = DeveloperRequirement {
+        id: "native_runtime",
+        title: "Native Windows runtime",
+        status: RequirementStatus::Unobservable,
+        evidence: format!(
+            "This node runs {}; Windows filesystem, Job Object, service-control, and long-path behavior must be read from a Windows node.",
+            std::env::consts::OS
+        ),
+    };
+
+    let runtime_status = if cfg!(windows) {
+        if state.system.ffmpeg_version.is_some() {
+            RequirementStatus::Met
+        } else {
+            RequirementStatus::Unmet
+        }
+    } else {
+        RequirementStatus::Unobservable
+    };
+    let hardware_status = |available| {
+        if !cfg!(windows) {
+            RequirementStatus::Unobservable
+        } else if available {
+            RequirementStatus::Met
+        } else {
+            RequirementStatus::Unmet
+        }
+    };
+    DeveloperEnableItem {
+        id: "windows_server",
+        title: "Windows server",
+        enabled: Some(enabled),
+        setting: Some("dolby_vision_convert"),
+        requirements: vec![
+            platform,
+            DeveloperRequirement {
+                id: "ffmpeg_runtime",
+                title: "Pinned FFmpeg runtime",
+                status: runtime_status,
+                evidence: if cfg!(windows) {
+                    state.system.ffmpeg_version.clone().map_or_else(
+                        || format!("{} did not answer the startup version probe; software transcode is unavailable.", state.system.ffmpeg),
+                        |version| format!("{} answered the startup probe: {version}", state.system.ffmpeg),
+                    )
+                } else {
+                    "Only a Windows node can prove the packaged jellyfin-ffmpeg runtime.".to_owned()
+                },
+            },
+            DeveloperRequirement {
+                id: "nvenc",
+                title: "NVIDIA NVENC",
+                status: hardware_status(state.system.encoders.nvenc),
+                evidence: if state.system.encoders.nvenc {
+                    "The startup encoder and forced-IDR probes admitted NVENC on this node."
+                        .to_owned()
+                } else {
+                    "NVENC was not admitted by this node's startup probes; software remains available.".to_owned()
+                },
+            },
+            DeveloperRequirement {
+                id: "qsv",
+                title: "Intel Quick Sync",
+                status: hardware_status(state.system.encoders.qsv),
+                evidence: if state.system.encoders.qsv {
+                    "The startup encoder and forced-IDR probes admitted Quick Sync on this node."
+                        .to_owned()
+                } else {
+                    "Quick Sync was not admitted by this node's startup probes; software remains available.".to_owned()
+                },
+            },
+        ],
+    }
 }
 
 /// Scheduled playback made entirely from the already-probed local catalogue.

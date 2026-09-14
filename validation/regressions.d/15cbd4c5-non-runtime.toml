@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["15cbd4c5"]
+points = []
+checks = []
+reason = "This CI-only correction restores persistent runner ownership after containerized Windows cross-builds; it changes no runtime behavior."
+ignore = true

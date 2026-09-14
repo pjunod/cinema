@@ -1676,11 +1676,130 @@ fn apply_and_observe_progress_line(
 /// Spawn an ffmpeg HLS transcode, draining its stderr (at `-loglevel error`)
 /// into the logs so a failure is visible instead of a silently dead session,
 /// and its stdout — which carries `-progress` telemetry — into `progress`.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct FfmpegDescriptors {
+    #[cfg(unix)]
     source: Option<std::os::fd::RawFd>,
+    #[cfg(unix)]
     output: Option<std::os::fd::RawFd>,
+    #[cfg(unix)]
     subtitle: Option<std::os::fd::RawFd>,
+    #[cfg(windows)]
+    handoffs: Vec<WindowsPathHandoff>,
+}
+
+#[cfg(windows)]
+#[derive(Clone)]
+struct WindowsPathHandoff {
+    role: &'static str,
+    path: std::path::PathBuf,
+    identity: plurx_core::fs_secure::FileIdentity,
+    directory: bool,
+}
+
+#[cfg(windows)]
+impl WindowsPathHandoff {
+    fn file(role: &'static str, file: &std::fs::File) -> Result<Self, String> {
+        Ok(Self {
+            role,
+            path: plurx_core::fs_secure::std_file_path(file)
+                .map_err(|error| format!("resolving held {role} path: {error}"))?,
+            identity: plurx_core::fs_secure::std_file_identity(file)
+                .map_err(|error| format!("reading held {role} identity: {error}"))?,
+            directory: false,
+        })
+    }
+
+    fn directory(
+        role: &'static str,
+        directory: &plurx_core::fs_secure::SecureDirectory,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            role,
+            path: directory.path().to_owned(),
+            identity: directory
+                .identity_blocking()
+                .map_err(|error| format!("reading held {role} identity: {error}"))?,
+            directory: true,
+        })
+    }
+
+    fn verify(&self) -> Result<(), String> {
+        let current = if self.directory {
+            plurx_core::fs_secure::directory_identity_nofollow_blocking(&self.path)
+        } else {
+            plurx_core::fs_secure::regular_file_identity_nofollow_blocking(&self.path)
+        }
+        .map_err(|error| format!("reopening held {} path: {error}", self.role))?;
+        if current == self.identity {
+            Ok(())
+        } else {
+            Err(format!(
+                "held {} path changed before ffmpeg launch",
+                self.role
+            ))
+        }
+    }
+}
+
+#[cfg(windows)]
+impl FfmpegDescriptors {
+    fn with_file(mut self, role: &'static str, file: &std::fs::File) -> Result<Self, String> {
+        self.handoffs.push(WindowsPathHandoff::file(role, file)?);
+        Ok(self)
+    }
+
+    fn with_directory(
+        mut self,
+        role: &'static str,
+        directory: &plurx_core::fs_secure::SecureDirectory,
+    ) -> Result<Self, String> {
+        self.handoffs
+            .push(WindowsPathHandoff::directory(role, directory)?);
+        Ok(self)
+    }
+
+    fn verify(&self) -> Result<(), String> {
+        self.handoffs
+            .iter()
+            .try_for_each(WindowsPathHandoff::verify)
+    }
+}
+
+#[cfg(windows)]
+fn windows_session_descriptors(session: &Session) -> Result<FfmpegDescriptors, String> {
+    let source = session
+        .source_handle
+        .as_ref()
+        .ok_or_else(|| "Windows session has no held media source".to_owned())?;
+    let output = session
+        .output_handle
+        .as_ref()
+        .ok_or_else(|| "Windows session has no held output directory".to_owned())?;
+    let mut descriptors = FfmpegDescriptors::default()
+        .with_file("media source", source)?
+        .with_directory("session output directory", output)?;
+    if let Some(subtitle) = session.subtitle_handle.as_ref() {
+        descriptors = descriptors.with_file("subtitle source", subtitle)?;
+    }
+    Ok(descriptors)
+}
+
+#[cfg(windows)]
+fn windows_offline_descriptors(
+    source: Option<&BoundPretranscodeSource>,
+    output: &plurx_core::fs_secure::SecureDirectory,
+    subtitle: Option<&std::fs::File>,
+) -> Result<FfmpegDescriptors, String> {
+    let mut descriptors =
+        FfmpegDescriptors::default().with_directory("offline output directory", output)?;
+    if let Some(source) = source {
+        descriptors = descriptors.with_file("media source", &source.handle)?;
+    }
+    if let Some(subtitle) = subtitle {
+        descriptors = descriptors.with_file("subtitle source", subtitle)?;
+    }
+    Ok(descriptors)
 }
 
 #[derive(Clone)]
@@ -1937,12 +2056,19 @@ impl DiagnosticObservation {
 /// exist without the reader that decides whether its output is trustworthy.
 struct ObservedFfmpeg {
     child: Child,
+    child_job: crate::process_control::ChildJob,
     diagnostics: crate::decoder_health::ObservedDiagnostics,
 }
 
 impl ObservedFfmpeg {
-    fn into_parts(self) -> (Child, crate::decoder_health::ObservedDiagnostics) {
-        (self.child, self.diagnostics)
+    fn into_parts(
+        self,
+    ) -> (
+        Child,
+        crate::process_control::ChildJob,
+        crate::decoder_health::ObservedDiagnostics,
+    ) {
+        (self.child, self.child_job, self.diagnostics)
     }
 }
 
@@ -2005,14 +2131,16 @@ fn spawn_ffmpeg(
             });
         }
     }
-    let mut child = command
+    #[cfg(windows)]
+    descriptors.verify()?;
+    command
         .args(&full)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("spawning ffmpeg: {e}"))?;
+        .kill_on_drop(true);
+    let (mut child, child_job) = crate::process_control::spawn_job_owned(&mut command)
+        .map_err(|e| format!("spawning job-owned ffmpeg: {e}"))?;
     // Built before the progress observer is moved into its own task: the sink
     // needs the actor handle and the attempt, and both live on the observer.
     let fault_sink = observation.fault_sink(&progress_observer);
@@ -2064,6 +2192,7 @@ fn spawn_ffmpeg(
     });
     Ok(ObservedFfmpeg {
         child,
+        child_job,
         diagnostics: crate::decoder_health::ObservedDiagnostics::new(
             observation.plan_digest,
             observation.contract_id,
@@ -2087,20 +2216,25 @@ fn spawn_ffmpeg_pipe(
     session_id: &str,
     progress_observer: FfmpegProgressObserver,
     runtime_cache: &std::path::Path,
+    descriptors: FfmpegDescriptors,
     observation: DiagnosticObservation,
 ) -> Result<(ObservedFfmpeg, tokio::process::ChildStdout), String> {
     let mut full: Vec<String> = vec!["-progress".into(), "pipe:2".into()];
     full.extend_from_slice(args);
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     configure_ffmpeg_runtime(&mut command, runtime_cache);
-    let mut child = command
+    #[cfg(windows)]
+    descriptors.verify()?;
+    #[cfg(unix)]
+    let _ = descriptors;
+    command
         .args(&full)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("spawning ffmpeg: {e}"))?;
+        .kill_on_drop(true);
+    let (mut child, child_job) = crate::process_control::spawn_job_owned(&mut command)
+        .map_err(|e| format!("spawning job-owned ffmpeg: {e}"))?;
     let stdout = child
         .stdout
         .take()
@@ -2138,6 +2272,7 @@ fn spawn_ffmpeg_pipe(
     Ok((
         ObservedFfmpeg {
             child,
+            child_job,
             diagnostics: crate::decoder_health::ObservedDiagnostics::new(
                 observation.plan_digest,
                 observation.contract_id,
@@ -4007,12 +4142,18 @@ async fn execute_prepublication_transcode_retry(
                         session.control.clone(),
                     ),
                     &retry.runtime_cache,
-                    FfmpegDescriptors {
-                        subtitle: session
-                            .subtitle_handle
-                            .as_ref()
-                            .map(std::os::fd::AsRawFd::as_raw_fd),
-                        ..FfmpegDescriptors::default()
+                    {
+                        #[cfg(unix)]
+                        let descriptors = FfmpegDescriptors {
+                            subtitle: session
+                                .subtitle_handle
+                                .as_ref()
+                                .map(std::os::fd::AsRawFd::as_raw_fd),
+                            ..FfmpegDescriptors::default()
+                        };
+                        #[cfg(windows)]
+                        let descriptors = windows_session_descriptors(&session)?;
+                        descriptors
                     },
                     retry.observation.clone(),
                 )
@@ -4149,7 +4290,13 @@ async fn execute_prepublication_copy_retry(
                         session.control.clone(),
                     ),
                     &retry.runtime_cache,
-                    FfmpegDescriptors::default(),
+                    {
+                        #[cfg(unix)]
+                        let descriptors = FfmpegDescriptors::default();
+                        #[cfg(windows)]
+                        let descriptors = windows_session_descriptors(&session)?;
+                        descriptors
+                    },
                     DiagnosticObservation::copy(sid),
                 )
                 .map_err(|error| format!("spawning immutable copy fallback: {error}"))
@@ -4975,7 +5122,7 @@ enum AttemptChildTerminal {
 
 enum AttemptChildCommand {
     Signal {
-        signal: libc::c_int,
+        signal: crate::process_control::ProcessSignal,
         reply: tokio::sync::oneshot::Sender<std::io::Result<bool>>,
     },
     Terminate {
@@ -5007,6 +5154,24 @@ impl AttemptChild {
         control: crate::playback_control::RollingControlHandle,
         diagnostics: Option<crate::decoder_health::ObservedDiagnostics>,
     ) -> Self {
+        let child_job = match crate::process_control::ChildJob::attach(&child) {
+            Ok(job) => Some(job),
+            Err(error) => {
+                let _ = child.start_kill();
+                tracing::error!(%error, "child could not be assigned to its process job");
+                None
+            }
+        };
+        Self::new_with_job(producer_attempt, child, child_job, control, diagnostics)
+    }
+
+    fn new_with_job(
+        producer_attempt: u64,
+        mut child: Child,
+        child_job: Option<crate::process_control::ChildJob>,
+        control: crate::playback_control::RollingControlHandle,
+        diagnostics: Option<crate::decoder_health::ObservedDiagnostics>,
+    ) -> Self {
         let pid = child.id();
         // Owned by the supervisor alone. Nothing else may take it: two owners
         // would race for one handle, and whoever won would decide whether the
@@ -5034,6 +5199,7 @@ impl AttemptChild {
         #[cfg(test)]
         let supervisor_terminate_pause = Arc::clone(&terminate_before_reap_pause);
         tokio::spawn(async move {
+            let _child_job = child_job;
             let mut command_open = true;
             let mut terminate_replies = Vec::new();
             let terminal = loop {
@@ -5056,8 +5222,11 @@ impl AttemptChild {
                         };
                         match command {
                             AttemptChildCommand::Signal { signal, reply } => {
-                                let flow_signal =
-                                    signal == libc::SIGSTOP || signal == libc::SIGCONT;
+                                let flow_signal = matches!(
+                                    signal,
+                                    crate::process_control::ProcessSignal::Suspend
+                                        | crate::process_control::ProcessSignal::Resume
+                                );
                                 let result = loop {
                                     let deferred = {
                                         let transition = control.lock_producer_transition();
@@ -5110,7 +5279,8 @@ impl AttemptChild {
                                                 control.finish_producer_flow_applied(
                                                     &transition,
                                                     producer_attempt,
-                                                    signal == libc::SIGSTOP,
+                                                    signal
+                                                        == crate::process_control::ProcessSignal::Suspend,
                                                     matches!(&result, Ok(true)),
                                                 );
                                             }
@@ -5130,7 +5300,11 @@ impl AttemptChild {
                                 let _ = reply.send(result);
                             }
                             AttemptChildCommand::Terminate { reply } => {
-                                match signal_owned_pid(pid, producer_attempt, libc::SIGKILL) {
+                                match signal_owned_pid(
+                                    pid,
+                                    producer_attempt,
+                                    crate::process_control::ProcessSignal::Terminate,
+                                ) {
                                     Ok(_) => {
                                         if let Some(reply) = reply {
                                             terminate_replies.push(reply);
@@ -5309,7 +5483,7 @@ impl AttemptChild {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
     }
 
-    async fn signal(&self, signal: libc::c_int) -> std::io::Result<bool> {
+    async fn signal(&self, signal: crate::process_control::ProcessSignal) -> std::io::Result<bool> {
         if self
             .terminal
             .lock()
@@ -5462,27 +5636,17 @@ impl Drop for AttemptChild {
 fn signal_owned_pid(
     pid: Option<u32>,
     producer_attempt: u64,
-    signal: libc::c_int,
+    signal: crate::process_control::ProcessSignal,
 ) -> std::io::Result<bool> {
     let Some(pid) = pid else {
         return Ok(false);
     };
-    let pid = i32::try_from(pid).map_err(|_| {
-        std::io::Error::other(format!(
-            "producer attempt {producer_attempt} pid does not fit pid_t"
-        ))
-    })?;
-    // SAFETY: this runs only in the task that owns the unreaped Child. The pid
-    // cannot be reused until this task's later try_wait returns a status.
-    if unsafe { libc::kill(pid, signal) } == 0 {
-        return Ok(true);
-    }
-    let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        Ok(false)
-    } else {
-        Err(error)
-    }
+    crate::process_control::signal(pid, signal).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("signaling producer attempt {producer_attempt}: {error}"),
+        )
+    })
 }
 
 struct PreparedSharedCacheRead {
@@ -5747,6 +5911,13 @@ struct Session {
     /// Keeping it for the session lifetime also lets a fallback child inherit
     /// the same bytes without reopening a replaceable pathname.
     subtitle_handle: Option<std::fs::File>,
+    /// Windows cannot hand stock ffmpeg a seekable kernel handle. Keep the
+    /// authorized source and output directory alive so every initial or retry
+    /// launch can revalidate its pathname against the exact held object.
+    #[cfg(windows)]
+    source_handle: Option<std::fs::File>,
+    #[cfg(windows)]
+    output_handle: Option<plurx_core::fs_secure::SecureDirectory>,
     /// Small authenticated inventory loaded once at offer time. Media objects
     /// are verified only when requested, not walked before playback starts.
     cache_manifest: Option<Arc<plurx_core::transcode::manifest::GenerationManifest>>,
@@ -6640,10 +6811,11 @@ impl Session {
                 child.producer_attempt
             ));
         }
-        let (candidate, diagnostics) = spawn()?.into_parts();
-        *slot = Some(AttemptChild::new(
+        let (candidate, child_job, diagnostics) = spawn()?.into_parts();
+        *slot = Some(AttemptChild::new_with_job(
             producer_attempt,
             candidate,
+            Some(child_job),
             self.control.clone(),
             Some(diagnostics),
         ));
@@ -6721,10 +6893,11 @@ impl Session {
             ));
         }
         let (observed, stdout) = spawn()?;
-        let (candidate, diagnostics) = observed.into_parts();
-        *slot = Some(AttemptChild::new(
+        let (candidate, child_job, diagnostics) = observed.into_parts();
+        *slot = Some(AttemptChild::new_with_job(
             producer_attempt,
             candidate,
+            Some(child_job),
             self.control.clone(),
             Some(diagnostics),
         ));
@@ -8260,13 +8433,41 @@ pub(crate) async fn probe_media_origin(source_path: &std::path::Path, start_seco
     if start_seconds <= 0.0 {
         return 0.0;
     }
-    let args =
-        plurx_core::transcode::keyframe_probe_args(&source_path.to_string_lossy(), start_seconds);
-    let probe = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin())
+    #[cfg(windows)]
+    let source = {
+        let path = source_path.to_owned();
+        let opened = tokio::task::spawn_blocking(move || {
+            plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+        })
+        .await;
+        let Ok(Ok(source)) = opened else {
+            tracing::warn!(start_seconds, "media-origin source could not be held");
+            return start_seconds;
+        };
+        source
+    };
+    #[cfg(windows)]
+    let input = match crate::ffmpeg::windows_source_path(&source) {
+        Ok(path) => path,
+        Err(error) => {
+            tracing::warn!(start_seconds, %error, "media-origin source path could not be resolved");
+            return start_seconds;
+        }
+    };
+    #[cfg(not(windows))]
+    let input = source_path.to_owned();
+    let args = plurx_core::transcode::keyframe_probe_args(&input.to_string_lossy(), start_seconds);
+    let mut command = tokio::process::Command::new(crate::ffmpeg::ffprobe_bin());
+    command
         .args(&args)
         .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    if let Err(error) = crate::ffmpeg::verify_windows_source_path(&source, &input) {
+        tracing::warn!(start_seconds, %error, "media-origin source changed before probe");
+        return start_seconds;
+    }
+    let probe = crate::process_control::output_job_owned(&mut command);
     let Ok(Ok(out)) = tokio::time::timeout(MEDIA_ORIGIN_PROBE_TIMEOUT, probe).await else {
         tracing::warn!(
             start_seconds,
@@ -9696,6 +9897,7 @@ pub struct LocalSourceSnapshot {
 }
 
 impl LocalSourceSnapshot {
+    #[cfg(unix)]
     fn from_metadata(metadata: &std::fs::Metadata) -> Self {
         use std::os::unix::fs::MetadataExt;
         Self {
@@ -9707,6 +9909,51 @@ impl LocalSourceSnapshot {
             device: metadata.dev(),
             inode: metadata.ino(),
         }
+    }
+
+    #[cfg(windows)]
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        use std::os::windows::fs::MetadataExt as _;
+
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .unwrap_or_default();
+        Self {
+            bytes: metadata.file_size(),
+            modified_secs: modified.as_secs().min(i64::MAX as u64) as i64,
+            modified_nanos: i64::from(modified.subsec_nanos()),
+            changed_secs: modified.as_secs().min(i64::MAX as u64) as i64,
+            changed_nanos: i64::from(modified.subsec_nanos()),
+            device: 0,
+            inode: metadata.creation_time() ^ metadata.last_write_time().rotate_left(17),
+        }
+    }
+
+    #[cfg(unix)]
+    fn from_file(file: &std::fs::File) -> std::io::Result<Self> {
+        file.metadata()
+            .map(|metadata| Self::from_metadata(&metadata))
+    }
+
+    #[cfg(windows)]
+    fn from_file(file: &std::fs::File) -> std::io::Result<Self> {
+        let metadata = file.metadata()?;
+        let identity = plurx_core::fs_secure::std_file_identity(file)?;
+        let modified = metadata
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(std::io::Error::other)?;
+        Ok(Self {
+            bytes: identity.size,
+            modified_secs: modified.as_secs().min(i64::MAX as u64) as i64,
+            modified_nanos: i64::from(modified.subsec_nanos()),
+            changed_secs: identity.changed_seconds,
+            changed_nanos: identity.changed_nanoseconds,
+            device: identity.device,
+            inode: identity.inode ^ identity.inode_high.rotate_left(1),
+        })
     }
 }
 
@@ -9921,12 +10168,7 @@ pub async fn pretranscode_source_snapshot(
     file: &plurx_core::domain::MediaFile,
     trusted_roots: &[std::path::PathBuf],
 ) -> Option<BoundPretranscodeSource> {
-    #[cfg(not(unix))]
-    {
-        let _ = (file, trusted_roots);
-        return None;
-    }
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     {
         // Resolve only the configured library root. Components beneath it are
         // untrusted media-library contents and remain subject to O_NOFOLLOW;
@@ -9972,7 +10214,7 @@ pub async fn pretranscode_source_snapshot(
         .ok()?
         .ok()?;
         let metadata = handle.metadata().ok()?;
-        let snapshot = LocalSourceSnapshot::from_metadata(&metadata);
+        let snapshot = LocalSourceSnapshot::from_file(&handle).ok()?;
         (metadata.is_file()
             && snapshot.bytes == file.size.max(0) as u64
             && snapshot.modified_secs == file.mtime)
@@ -9983,6 +10225,27 @@ pub async fn pretranscode_source_snapshot(
                 offset_gate: Arc::new(tokio::sync::Semaphore::new(1)),
             })
     }
+}
+
+#[cfg(windows)]
+async fn bind_windows_session_source(
+    file: &mut plurx_core::domain::MediaFile,
+) -> Result<std::fs::File, String> {
+    let path = file.path.clone();
+    let handle = tokio::task::spawn_blocking(move || {
+        plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+    })
+    .await
+    .map_err(|error| format!("joining Windows source open: {error}"))?
+    .map_err(|error| format!("opening Windows source without reparse points: {error}"))?;
+    let snapshot = LocalSourceSnapshot::from_file(&handle)
+        .map_err(|error| format!("reading held Windows source identity: {error}"))?;
+    if snapshot.bytes != file.size.max(0) as u64 || snapshot.modified_secs != file.mtime {
+        return Err("source no longer matches the scanner's size/mtime identity".to_owned());
+    }
+    file.path = plurx_core::fs_secure::std_file_path(&handle)
+        .map_err(|error| format!("resolving held Windows source path: {error}"))?;
+    Ok(handle)
 }
 
 async fn bound_source_snapshot(
@@ -9997,7 +10260,7 @@ async fn bound_source_snapshot(
             .metadata()
             .ok()
             .filter(|metadata| metadata.is_file())
-            .map(|metadata| LocalSourceSnapshot::from_metadata(&metadata))?;
+            .and_then(|_| LocalSourceSnapshot::from_file(&handle).ok())?;
         if handle_snapshot != expected {
             return None;
         }
@@ -10006,7 +10269,7 @@ async fn bound_source_snapshot(
             .metadata()
             .ok()
             .filter(|metadata| metadata.is_file())
-            .map(|metadata| LocalSourceSnapshot::from_metadata(&metadata))?;
+            .and_then(|_| LocalSourceSnapshot::from_file(&current).ok())?;
         (current_snapshot == expected).then_some(current_snapshot)
     })
     .await
@@ -11333,6 +11596,7 @@ async fn ensure_cache_directory(
 /// Free bytes the queue may safely promise on the cache filesystem. Keep a
 /// fixed emergency margin for SQLite/Raft logs, manifests, and foreground
 /// session scratch that can arrive immediately after the claim decision.
+#[cfg(unix)]
 fn available_cache_scratch_bytes(path: &std::path::Path) -> Option<i64> {
     const EMERGENCY_MARGIN: u128 = 512 * 1024 * 1024;
     use std::os::unix::ffi::OsStrExt;
@@ -11356,6 +11620,34 @@ fn available_cache_scratch_bytes(path: &std::path::Path) -> Option<i64> {
         .saturating_sub(EMERGENCY_MARGIN)
         .min(i64::MAX as u128);
     Some(bytes as i64)
+}
+
+#[cfg(windows)]
+fn available_cache_scratch_bytes(path: &std::path::Path) -> Option<i64> {
+    const EMERGENCY_MARGIN: u64 = 512 * 1024 * 1024;
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let mut path = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if path.is_empty() || path.contains(&0) {
+        return None;
+    }
+    path.push(0);
+    let mut available = 0u64;
+    // SAFETY: the path is NUL-terminated and `available` is writable for the
+    // duration of the read-only filesystem query.
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+            path.as_ptr(),
+            &raw mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then(|| {
+        available
+            .saturating_sub(EMERGENCY_MARGIN)
+            .min(i64::MAX as u64) as i64
+    })
 }
 
 /// One atomically published answer to the operator's requested rate control.
@@ -14482,6 +14774,10 @@ impl TranscodeManager {
             cached: true,
             _cache_reader: cache_reader,
             subtitle_handle: None,
+            #[cfg(windows)]
+            source_handle: None,
+            #[cfg(windows)]
+            output_handle: None,
             cache_manifest,
             cache_location: Some(cache_location),
             control,
@@ -16146,7 +16442,9 @@ impl TranscodeManager {
             // hardware is a second a viewer might want it. The value is
             // [`ProducerTuning::pacing`], which is `unpaced()` everywhere
             // except the one test that has to interrupt this encoder.
+            #[cfg(unix)]
             let mut descriptor_file;
+            #[cfg(unix)]
             let (ffmpeg_file, bound_source_fd) = if let Some(source) = &bound_source {
                 use std::os::fd::AsRawFd;
                 descriptor_file = file.clone();
@@ -16155,16 +16453,33 @@ impl TranscodeManager {
             } else {
                 (file, None)
             };
+            #[cfg(windows)]
+            let mut descriptor_file;
+            #[cfg(windows)]
+            let ffmpeg_file = if let Some(source) = &bound_source {
+                if bound_source_snapshot(Some(source)).await != Some(source.snapshot) {
+                    return Ok(None);
+                }
+                descriptor_file = file.clone();
+                descriptor_file.path = plurx_core::fs_secure::std_file_path(&source.handle)
+                    .map_err(|error| format!("resolving held Windows source path: {error}"))?;
+                &descriptor_file
+            } else {
+                file
+            };
             // Linux resolves descendants below a directory descriptor through
             // procfs. Darwin's fdesc filesystem reopens `/dev/fd/4` itself but
             // does not resolve `/dev/fd/4/child`; `spawn_ffmpeg` therefore
             // anchors the macOS child cwd to descriptor 4 and the muxer uses a
             // relative path. Both routes remain bound to the held directory.
+            #[cfg(unix)]
             let output_directory = if cfg!(target_os = "macos") {
                 part_name.clone()
             } else {
                 format!("/dev/fd/4/{part_name}")
             };
+            #[cfg(windows)]
+            let output_directory = temp.path().join(&part_name).to_string_lossy().into_owned();
             let execution = TranscodeExecution::from_options(
                 ffmpeg_file,
                 &part_opts,
@@ -16172,6 +16487,16 @@ impl TranscodeManager {
                 &output_directory,
             )
             .map_err(|error| error.to_string())?;
+            #[cfg(windows)]
+            let mut execution = execution;
+            #[cfg(windows)]
+            if let Some(subtitle) = subtitle_handle {
+                execution.subtitle_file = Some(
+                    plurx_core::fs_secure::std_file_path(subtitle).map_err(|error| {
+                        format!("resolving held Windows subtitle path: {error}")
+                    })?,
+                );
+            }
             let observation = DiagnosticObservation::for_plan(
                 plan,
                 &self.measured_decoders,
@@ -16185,16 +16510,26 @@ impl TranscodeManager {
             );
             let progress = Arc::new(Progress::new());
             let generation = progress.begin_attempt();
-            let (mut child, diagnostics) = spawn_ffmpeg(
+            let (mut child, _child_job, diagnostics) = spawn_ffmpeg(
                 &args,
                 encoder.label(),
                 hash,
                 FfmpegProgressObserver::offline(Arc::clone(&progress), generation),
                 &self.runtime_cache,
-                FfmpegDescriptors {
-                    source: bound_source_fd,
-                    output: Some(temp.raw_fd()),
-                    subtitle: subtitle_handle.map(std::os::fd::AsRawFd::as_raw_fd),
+                {
+                    #[cfg(unix)]
+                    let descriptors = FfmpegDescriptors {
+                        source: bound_source_fd,
+                        output: Some(temp.raw_fd()),
+                        subtitle: subtitle_handle.map(std::os::fd::AsRawFd::as_raw_fd),
+                    };
+                    #[cfg(windows)]
+                    let descriptors = windows_offline_descriptors(
+                        bound_source.as_deref(),
+                        &part_dir,
+                        subtitle_handle,
+                    )?;
+                    descriptors
                 },
                 observation.clone(),
             )?
@@ -17020,7 +17355,21 @@ impl TranscodeManager {
                 Some(&source_object_version),
             )
             .await?;
-            options.subtitle_file = Some("/dev/fd/5".into());
+            #[cfg(unix)]
+            {
+                options.subtitle_file = Some("/dev/fd/5".into());
+            }
+            #[cfg(windows)]
+            {
+                options.subtitle_file = Some(
+                    plurx_core::fs_secure::std_file_path(&subtitle).map_err(|error| {
+                        vod_refusal_error(
+                            "vod_decoder_plan_refused",
+                            format!("the held subtitle path could not be resolved: {error}"),
+                        )
+                    })?,
+                );
+            }
             Some(Arc::new(subtitle))
         } else {
             None
@@ -19004,6 +19353,8 @@ impl TranscodeManager {
         } else {
             audio_offset_ms.clamp(-15_000, 15_000)
         };
+        #[cfg(windows)]
+        let source_handle = bind_windows_session_source(&mut file).await?;
         let item_title = self
             .store
             .get_item(file.item_id)
@@ -19132,9 +19483,16 @@ impl TranscodeManager {
         // argv and stderr entirely by giving the scratch directory an
         // independent, process-private name.
         let dir = self.work_dir.join(format!("w-{}", uuid::Uuid::new_v4()));
+        #[cfg(windows)]
+        let dir = std::path::absolute(dir)
+            .map_err(|error| format!("resolving Windows session directory: {error}"))?;
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| format!("creating session dir: {e}"))?;
+        #[cfg(windows)]
+        let output_handle = plurx_core::fs_secure::SecureDirectory::open(&dir)
+            .await
+            .map_err(|error| format!("holding Windows session directory: {error}"))?;
         let mut start_settlement = PrepublicationStartSettlement::new(dir.clone());
 
         // Admission may have moved this session to software, which changes the
@@ -19155,6 +19513,13 @@ impl TranscodeManager {
         );
         if let Some(takeover) = takeover.as_ref() {
             opts.start_number = takeover.media_sequence;
+        }
+        #[cfg(windows)]
+        if let Some(subtitle) = subtitle_handle.as_ref() {
+            opts.subtitle_file = Some(
+                plurx_core::fs_secure::std_file_path(subtitle)
+                    .map_err(|error| format!("resolving held Windows subtitle path: {error}"))?,
+            );
         }
         // Admission is allowed to demote the encoder. That is a different
         // byte-producing decision, so it receives a fresh complete plan;
@@ -19502,6 +19867,10 @@ impl TranscodeManager {
             cached: false,
             _cache_reader: None,
             subtitle_handle,
+            #[cfg(windows)]
+            source_handle: Some(source_handle),
+            #[cfg(windows)]
+            output_handle: Some(output_handle),
             cache_manifest: None,
             cache_location: None,
             control,
@@ -19612,12 +19981,18 @@ impl TranscodeManager {
                         session.control.clone(),
                     ),
                     &self.runtime_cache,
-                    FfmpegDescriptors {
-                        subtitle: session
-                            .subtitle_handle
-                            .as_ref()
-                            .map(std::os::fd::AsRawFd::as_raw_fd),
-                        ..FfmpegDescriptors::default()
+                    {
+                        #[cfg(unix)]
+                        let descriptors = FfmpegDescriptors {
+                            subtitle: session
+                                .subtitle_handle
+                                .as_ref()
+                                .map(std::os::fd::AsRawFd::as_raw_fd),
+                            ..FfmpegDescriptors::default()
+                        };
+                        #[cfg(windows)]
+                        let descriptors = windows_session_descriptors(&session)?;
+                        descriptors
                     },
                     observation.clone(),
                 )
@@ -19754,6 +20129,8 @@ impl TranscodeManager {
         } else {
             audio_offset_ms.clamp(-15_000, 15_000)
         };
+        #[cfg(windows)]
+        let source_handle = bind_windows_session_source(&mut file).await?;
         // Copy-video sessions and transcodes must interpret an omitted audio
         // override identically. `/decision` marks the shared-policy pick as
         // default, so silently falling back to ffmpeg's first stream here can
@@ -19777,9 +20154,16 @@ impl TranscodeManager {
             .map(|takeover| takeover.provisional_session_id.clone())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let dir = self.work_dir.join(format!("w-{}", uuid::Uuid::new_v4()));
+        #[cfg(windows)]
+        let dir = std::path::absolute(dir)
+            .map_err(|error| format!("resolving Windows session directory: {error}"))?;
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| format!("creating session dir: {e}"))?;
+        #[cfg(windows)]
+        let output_handle = plurx_core::fs_secure::SecureDirectory::open(&dir)
+            .await
+            .map_err(|error| format!("holding Windows session directory: {error}"))?;
         let mut start_settlement = PrepublicationStartSettlement::new(dir.clone());
 
         // An ffmpeg capability, read from the daemon's own record of which
@@ -20026,6 +20410,10 @@ impl TranscodeManager {
             cached: false,
             _cache_reader: None,
             subtitle_handle: None,
+            #[cfg(windows)]
+            source_handle: Some(source_handle),
+            #[cfg(windows)]
+            output_handle: Some(output_handle),
             cache_manifest: None,
             cache_location: None,
             control,
@@ -20126,6 +20514,13 @@ impl TranscodeManager {
                             session.control.clone(),
                         ),
                         &self.runtime_cache,
+                        {
+                            #[cfg(unix)]
+                            let descriptors = FfmpegDescriptors::default();
+                            #[cfg(windows)]
+                            let descriptors = windows_session_descriptors(&session)?;
+                            descriptors
+                        },
                         DiagnosticObservation::copy(&session_id),
                     )
                 })
@@ -20155,7 +20550,13 @@ impl TranscodeManager {
                             session.control.clone(),
                         ),
                         &self.runtime_cache,
-                        FfmpegDescriptors::default(),
+                        {
+                            #[cfg(unix)]
+                            let descriptors = FfmpegDescriptors::default();
+                            #[cfg(windows)]
+                            let descriptors = windows_session_descriptors(&session)?;
+                            descriptors
+                        },
                         DiagnosticObservation::copy(&session_id),
                     )
                 })
@@ -24051,9 +24452,9 @@ impl TranscodeManager {
             | crate::playback_control::ProducerFlowIntentionOutcome::Rejected => return,
         }
         let signal = if want_suspend {
-            libc::SIGSTOP
+            crate::process_control::ProcessSignal::Suspend
         } else {
-            libc::SIGCONT
+            crate::process_control::ProcessSignal::Resume
         };
         let sent = {
             let child = session.child.lock().await;
@@ -25744,6 +26145,10 @@ fn test_session_with_control(
         cached: false,
         _cache_reader: None,
         subtitle_handle: None,
+        #[cfg(windows)]
+        source_handle: None,
+        #[cfg(windows)]
+        output_handle: None,
         cache_manifest: None,
         cache_location: None,
         control,
@@ -30138,14 +30543,17 @@ pub(crate) mod tests {
             None,
             "a newly admitted producer has no physical-flow acknowledgement"
         );
-        assert!(child.signal(libc::SIGSTOP).await.expect("supervised stop"));
+        assert!(child
+            .signal(crate::process_control::ProcessSignal::Suspend)
+            .await
+            .expect("supervised stop"));
         assert_eq!(
             control.producer_flow_applied_for_test(),
             Some((attempt, true)),
             "SIGSTOP is acknowledged for this attempt only after the supervisor's successful syscall"
         );
         assert!(child
-            .signal(libc::SIGCONT)
+            .signal(crate::process_control::ProcessSignal::Resume)
             .await
             .expect("supervised continue"));
         assert_eq!(
@@ -30192,7 +30600,7 @@ pub(crate) mod tests {
         assert!(control.reserve_producer_flow_capacity_for_test());
 
         {
-            let signal = child.signal(libc::SIGSTOP);
+            let signal = child.signal(crate::process_control::ProcessSignal::Suspend);
             tokio::pin!(signal);
             tokio::select! {
                 result = signal.as_mut() => panic!("full-capacity signal completed early: {result:?}"),
@@ -30230,7 +30638,7 @@ pub(crate) mod tests {
         assert!(control.reserve_producer_flow_capacity_for_test());
 
         {
-            let signal = child.signal(libc::SIGSTOP);
+            let signal = child.signal(crate::process_control::ProcessSignal::Suspend);
             tokio::pin!(signal);
             tokio::select! {
                 result = signal.as_mut() => panic!("full-capacity signal completed early: {result:?}"),
@@ -30267,7 +30675,11 @@ pub(crate) mod tests {
         child.pause_signal_after_flow_reservation(Arc::clone(&pause));
         let signal = {
             let child = Arc::clone(&child);
-            tokio::spawn(async move { child.signal(libc::SIGSTOP).await })
+            tokio::spawn(async move {
+                child
+                    .signal(crate::process_control::ProcessSignal::Suspend)
+                    .await
+            })
         };
 
         pause.wait();
@@ -30293,7 +30705,10 @@ pub(crate) mod tests {
         })
         .await
         .expect("actor-exit fence publishes retirement");
-        let sent = child.signal(libc::SIGCONT).await.expect("signal verdict");
+        let sent = child
+            .signal(crate::process_control::ProcessSignal::Resume)
+            .await
+            .expect("signal verdict");
         assert!(
             !sent,
             "no process signal can linearize after actor-task retirement"
@@ -30323,7 +30738,11 @@ pub(crate) mod tests {
         child.pause_signal_after_authorization(Arc::clone(&pause));
         let signal = {
             let child = Arc::clone(&child);
-            tokio::spawn(async move { child.signal(libc::SIGSTOP).await })
+            tokio::spawn(async move {
+                child
+                    .signal(crate::process_control::ProcessSignal::Suspend)
+                    .await
+            })
         };
 
         // The supervisor has authorized the exact attempt and still owns the
@@ -30372,7 +30791,7 @@ pub(crate) mod tests {
         );
         assert!(
             !child
-                .signal(libc::SIGCONT)
+                .signal(crate::process_control::ProcessSignal::Resume)
                 .await
                 .expect("retired signal verdict"),
             "no signal can land after the newer retirement fence"
@@ -36682,6 +37101,10 @@ pub(crate) mod tests {
             cached,
             _cache_reader: None,
             subtitle_handle: None,
+            #[cfg(windows)]
+            source_handle: None,
+            #[cfg(windows)]
+            output_handle: None,
             cache_manifest: None,
             cache_location: None,
             control,

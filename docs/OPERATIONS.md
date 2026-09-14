@@ -25,6 +25,9 @@ cd .. && make docker-up      # builds + starts, and stamps the commit so the ser
 # Bare metal — one binary, needs ffmpeg/ffprobe on PATH (and the optional conversion tools below)
 plurxd run            # serves :32400
 
+# Windows console mode (PowerShell)
+.\plurxd.exe run --config C:\ProgramData\plurx\plurx.toml
+
 # From source (development)
 cargo run -p plurxd   # or: make run
 ```
@@ -33,6 +36,31 @@ Open `http://<host>:32400`, create the admin account, add a library. Library
 paths you type in the UI are **container-side** paths under Docker (e.g.
 `/media/movies`), which must be mounted in your override file. Full deploy matrix
 (Unraid, TrueNAS/k8s, ports, GPU passthrough): [`deploy/README.md`](../deploy/README.md).
+
+### Windows paths and service mode
+
+The Windows ZIP is native x64, not a WSL wrapper. Windows 10 1809/Server 2019
+or newer is the floor. Put managed data, cache, and transcode scratch on NTFS
+or ReFS; read-only media libraries may be local or on SMB. Long-path awareness
+is embedded in `plurxd.exe`, so the scanner accepts paths beyond 260 characters
+when Windows policy and the backing filesystem do. Configure absolute paths in
+TOML. A service process has no useful interactive working directory.
+
+`plurxd.exe service install --config <absolute-path>` installs an automatic
+LocalSystem service and starts it. `service uninstall` requests a bounded
+graceful stop and removes the registration without deleting configuration or
+data. With no explicit data directory, service mode uses
+`%ProgramData%\plurx\data` rather than `C:\Windows\System32\data`.
+
+An explicit `PLURX_FFMPEG` or `PLURX_FFPROBE` still has highest precedence.
+Otherwise Windows checks beside `plurxd.exe` for the matching `.exe` before
+falling back to the service account's `PATH`. Settings → Developer reports
+native-runtime, ffmpeg, NVENC, and Quick Sync readiness as advisory facts;
+software fallback remains available and the report does not silently rewrite
+an operator choice.
+
+Installation, firewall, upgrade, and removal commands are in the
+[Windows deploy runbook](../deploy/README.md#run-as-a-service--windows).
 
 ### Permanent Dolby Vision Profile 7 → 8.1 conversion
 
