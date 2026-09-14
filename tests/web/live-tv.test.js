@@ -1688,9 +1688,10 @@ async function main() {
     assert.doesNotMatch(shipped("liveTvActivityRows"), /Stop/);
     assert.match(shipped("stopSession"), /\/activity\/sessions\//);
     assert.doesNotMatch(shipped("stopSession"), /dvr/);
-    assert.match(shipped("stopDvrRecording"), /\/dvr\/recordings\//);
-    assert.match(shipped("stopDvrRecording"), /state!=="recording"/,
-      "Stop polls the row until the owner's tick has actually closed the file");
+    assert.match(shipped("stopDvrRecording"), /liveTvStopRecording/);
+    assert.match(shipped("liveTvStopRecording"), /\/dvr\/recordings\//);
+    assert.doesNotMatch(shipped("stopDvrRecording"), /setTimeout/,
+      "Stop uses the shared Activity refresh rather than creating a second poller");
   });
 
   await test("a running capture describes itself for the row that can stop it", () => {
