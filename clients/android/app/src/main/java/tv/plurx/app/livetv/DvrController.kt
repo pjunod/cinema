@@ -7,27 +7,37 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 /**
  * Everything the Live TV screen knows about the DVR, in one place.
  *
- * It deliberately has two cadences. The **marks** — the schedule and the
- * reminders behind the glyphs on a guide cell — are read once when the guide
- * loads and again after every mutation, and never on a timer: nothing changes
- * them but this viewer's own presses and the owner's fifteen-second loop, and
- * a guide-sized answer repeated every half minute would be work nobody asked
- * for. The **due reminders** are a different, one-row-at-most read, and that
- * one does poll, because its whole job is to notice a moment passing while the
- * viewer sits still.
+ * It deliberately has two cadences. The lightweight **overview** follows the
+ * foreground five/30-second policy. The schedule/reminder **marks** rebuild
+ * only when the active identity changes, after a mutation, when a guide loads,
+ * or after the 30-second ceiling; guide cells never create their own timers.
+ * Due reminders retain their separate bounded poll because their whole job is
+ * to notice a moment passing while the viewer sits still.
  */
 data class DvrScreenState(
     val status: DvrStatus? = null,
+    val overview: DvrOverview? = null,
+    val overviewError: String? = null,
     val marks: DvrGuideMarks = DvrGuideMarks.EMPTY,
     /** The plan, cancelled rows included, so Scheduled can offer Restore. */
     val schedule: List<DvrRecording> = emptyList(),
     val conflicts: Int = 0,
     val library: List<DvrRecording> = emptyList(),
     val rules: List<DvrRule> = emptyList(),
+    val attention: List<DvrAttentionProjection> = emptyList(),
+    val attentionTotal: Int = 0,
+    val attentionNext: String? = null,
+    val selectedRecording: DvrRecording? = null,
+    val selectedEvents: List<DvrEvent> = emptyList(),
+    val selectedEventsNext: String? = null,
+    val selectedHistoryComplete: Boolean = false,
+    val selectedHistoryTruncatedBefore: Long? = null,
     /** Every reminder this viewer holds — what the alarm mirror reconciles against. */
     val reminders: List<DvrReminder> = emptyList(),
     val due: List<DvrReminder> = emptyList(),
@@ -41,6 +51,19 @@ data class DvrScreenState(
     val holders: List<DvrHolder> = emptyList(),
 )
 
+internal fun DvrScreenState.indicatorLabel(): String? {
+    val sample = overview ?: return null
+    if (!sample.fresh) return if (sample.counts.active > 0) "Status unavailable" else null
+    return buildList {
+        fun append(count: Int?, label: String) { if (count != null && count > 0) add("$count $label") }
+        append(sample.counts.recording, "recording")
+        append(sample.counts.starting, "starting")
+        append(sample.counts.reconnecting, "reconnecting")
+        append(sample.counts.finishing, "finishing")
+        append(sample.counts.unconfirmed, "unconfirmed")
+    }.takeIf { it.isNotEmpty() }?.joinToString(" · ")
+}
+
 class DvrController(
     private val api: DvrApi,
     private val scope: CoroutineScope,
@@ -48,6 +71,12 @@ class DvrController(
     private val mutableState = MutableStateFlow(DvrScreenState())
     val state = mutableState.asStateFlow()
     private var duePoll: Job? = null
+    private var observationPoll: Job? = null
+    private val overviewMutex = Mutex()
+    private val highFrequencySurfaces = mutableSetOf<String>()
+    private var observationFailures = 0
+    private var lastActiveIds = emptySet<String>()
+    private var lastMarksAt = 0L
 
     /**
      * The switch, the root and the slots. Deliberately not the schedule: the
@@ -61,6 +90,57 @@ class DvrController(
             runCatching { api.status() }.getOrNull()?.let { status ->
                 mutableState.value = mutableState.value.copy(status = status)
             }
+            refreshOverviewNow()
+        }
+    }
+
+    /** One application-scope foreground loop; screens only express cadence. */
+    fun startObservation() {
+        if (observationPoll?.isActive == true) return
+        observationPoll = scope.launch {
+            while (true) {
+                refreshOverviewNow()
+                val snapshot = mutableState.value.overview
+                val active = (snapshot?.counts?.active ?: 0) > 0 ||
+                    snapshot?.next_capture_start?.let { it <= System.currentTimeMillis() / 1000 + 30 } == true
+                val base = if (highFrequencySurfaces.isNotEmpty() || active) 5_000L else 30_000L
+                val backedOff = if (observationFailures == 0) base else
+                    (5_000L shl (observationFailures - 1).coerceAtMost(3)).coerceAtMost(30_000L)
+                delay(maxOf(base, backedOff))
+            }
+        }
+    }
+
+    fun stopObservation() {
+        observationPoll?.cancel()
+        observationPoll = null
+        duePoll?.cancel()
+        duePoll = null
+    }
+
+    fun setHighFrequency(surface: String, visible: Boolean) {
+        if (visible) highFrequencySurfaces += surface else highFrequencySurfaces -= surface
+    }
+
+    private suspend fun refreshOverviewNow() = overviewMutex.withLock {
+        try {
+            val overview = api.overview()
+            val identity = overview.active.mapTo(mutableSetOf()) { it.recording_id }
+            mutableState.value = mutableState.value.copy(overview = overview, overviewError = null)
+            observationFailures = 0
+            val now = System.currentTimeMillis()
+            if (identity != lastActiveIds || now - lastMarksAt >= MARK_REFRESH_MS) {
+                lastActiveIds = identity
+                lastMarksAt = now
+                refreshMarks()
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            observationFailures += 1
+            mutableState.value = mutableState.value.copy(
+                overviewError = error.message ?: dvrMessage("dvr_unreachable"),
+            )
         }
     }
 
@@ -90,6 +170,101 @@ class DvrController(
                 mutableState.value = mutableState.value.copy(
                     library = api.recordings(listOf("recording", "done", "partial", "failed", "missed")),
                 )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                report(error)
+            }
+        }
+    }
+
+    fun refreshAttention(more: Boolean = false) {
+        scope.launch {
+            try {
+                val current = mutableState.value
+                val page = api.attention(if (more) current.attentionNext else null)
+                mutableState.value = mutableState.value.copy(
+                    attention = if (more) current.attention + page.rows else page.rows,
+                    attentionTotal = page.total,
+                    attentionNext = page.next,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                report(error)
+            }
+        }
+    }
+
+    fun selectRecording(id: String) {
+        scope.launch {
+            try {
+                val row = api.recording(id)
+                val page = api.events(id)
+                mutableState.value = mutableState.value.copy(
+                    selectedRecording = row,
+                    selectedEvents = page.rows,
+                    selectedEventsNext = page.next,
+                    selectedHistoryComplete = page.history_complete,
+                    selectedHistoryTruncatedBefore = page.truncated_before_sequence,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                report(error)
+            }
+        }
+    }
+
+    fun refreshSelectedEvents() {
+        val selected = mutableState.value.selectedRecording ?: return
+        val latest = mutableState.value.selectedEvents.maxOfOrNull { it.sequence } ?: return
+        scope.launch {
+            try {
+                val row = api.recording(selected.id)
+                val page = api.events(selected.id, after = latest.toString())
+                val known = mutableState.value.selectedEvents.mapTo(mutableSetOf()) { it.event_id }
+                mutableState.value = mutableState.value.copy(
+                    selectedRecording = row,
+                    selectedEvents = page.rows.asReversed().filterNot { it.event_id in known } +
+                        mutableState.value.selectedEvents,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                mutableState.value = mutableState.value.copy(overviewError = error.message)
+            }
+        }
+    }
+
+    fun loadOlderSelectedEvents() {
+        val selected = mutableState.value.selectedRecording ?: return
+        val before = mutableState.value.selectedEventsNext ?: return
+        scope.launch {
+            try {
+                val page = api.events(selected.id, before = before)
+                mutableState.value = mutableState.value.copy(
+                    selectedEvents = mutableState.value.selectedEvents + page.rows,
+                    selectedEventsNext = page.next,
+                    selectedHistoryComplete = page.history_complete,
+                    selectedHistoryTruncatedBefore = page.truncated_before_sequence,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                report(error)
+            }
+        }
+    }
+
+    fun acknowledgeSelectedAttention() {
+        val selected = mutableState.value.selectedRecording ?: return
+        val latest = mutableState.value.selectedEvents.maxOfOrNull { it.sequence } ?: return
+        scope.launch {
+            try {
+                api.acknowledgeAttention(selected.id, latest)
+                refreshAttention()
+                mutableState.value = mutableState.value.copy(message = "Marked ${selected.title} reviewed.")
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
@@ -130,6 +305,9 @@ class DvrController(
     fun record(channelId: String, airingStart: Long) = mutate("Recording scheduled.") {
         api.record(channelId, airingStart)
     }
+
+    fun recordManual(channelId: String, start: Long, end: Long, title: String) =
+        mutate("Channel recording scheduled.") { api.recordManual(channelId.trim(), start, end, title) }
 
     /**
      * Two presses, not a form: the server fills the rule from the cell, and
@@ -175,6 +353,7 @@ class DvrController(
             }
             refreshMarks()
             refreshLibrary()
+            refreshOverviewNow()
         }
     }
 
@@ -221,6 +400,7 @@ class DvrController(
                 due = mutableState.value.due.filterNot { it.id == id },
             )
             refreshMarks()
+            refreshOverviewNow()
         }
     }
 
@@ -261,5 +441,6 @@ class DvrController(
 
     companion object {
         const val DUE_POLL_MS: Long = 30_000
+        const val MARK_REFRESH_MS: Long = 30_000
     }
 }

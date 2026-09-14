@@ -96,7 +96,7 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
             try {
                 val result = client.save(previous, change)
                 apply(result)
-                message = "Saved. Library channels are ${if (result.library_channels_enabled) "enabled" else "disabled"}; Live TV is ${if (result.live_tv_enabled) "enabled" else "disabled"}."
+                message = "Saved. Recording is ${if (result.dvr_enabled) "enabled" else "disabled"}; Library channels are ${if (result.library_channels_enabled) "enabled" else "disabled"}; Live TV is ${if (result.live_tv_enabled) "enabled" else "disabled"}."
             } catch (error: Exception) {
                 // Never retry an uncertain mutation with stale generation/CAS.
                 saved = null; readiness = null
@@ -134,6 +134,32 @@ fun LiveTvDeveloperScreen(origin: String, onBack: () -> Unit) {
                     finally { busy = false }
                 }
             }) { Text("Refresh Library channel readiness") }
+
+            Text("Recording · advisory enablement", style = MaterialTheme.typography.titleLarge)
+            Text("This switch remains available to the operator. The checks explain what safe capture needs; unmet or unobservable checks never disable or override it.")
+            Row {
+                Checkbox(
+                    checked = settings.dvr_enabled,
+                    onCheckedChange = { write(LiveTvSettingsChange.DvrEnabled(it)) },
+                    enabled = !busy,
+                    modifier = Modifier.tvFocusRing(),
+                )
+                Text("Enable recording", Modifier.padding(top = 12.dp))
+            }
+            Text("Recording root: ${settings.dvr_root.ifEmpty { "Not set" }}")
+            Text("Reserved tuner slots: ${settings.dvr_tuner_reserve}")
+            developerReadiness?.items?.firstOrNull { it.id == "dvr" }?.requirements?.forEach { requirement ->
+                Text("${when (requirement.status) { "met" -> "Met"; "unmet" -> "Needs attention"; else -> "Not observable" }}: ${requirement.title}")
+                Text(requirement.evidence, style = MaterialTheme.typography.bodySmall)
+            } ?: Text("Readiness is unavailable. That does not gate the enable switch.")
+            Button(enabled = !busy, onClick = {
+                busy = true
+                scope.launch {
+                    try { developerReadiness = (api ?: throw LiveTvFailure("invalid_settings")).developerReadiness() }
+                    catch (error: Exception) { message = failure(error) }
+                    finally { busy = false }
+                }
+            }) { Text("Refresh recording readiness") }
         }
         Text("HDHomeRun Live TV · runtime enablement", style = MaterialTheme.typography.titleLarge)
         Text("No special build is needed. Finish the tuner channel scan and reserve a stable private IPv4 address. Choose one reachable, committed voter as tuner owner; keep every serving node on a compatible plurx version.")

@@ -33,7 +33,7 @@ presentation contract around them.
 | S03 lifecycle ledger and attention | built; compile passed | append-only SQLite v59 / replicated v39 migrations; atomic and owner-fenced events, bounded pages/pruning, legacy provenance and per-user acknowledgments; no tests run yet |
 | S04 web layouts and controller | built; compile passed | one scope-aware poller feeds chrome, Live TV and Recordings; exact-airing player context, canonical `#/recordings`, six task tabs, mobile detail, real event history and Activity projection |
 | S05 Apple clients | built; source type-check passed | additive overview/event/attention decoders; one foreground profile controller; iOS/tvOS Recordings root, capture activity, immediate details, history, manual/skipped/rules/reminders and exact-airing player/guide context; device builds remain pending because this host exposes no simulator runtime |
-| S06 Android clients | queued | tolerant decoders, lifecycle-aware controller, Recordings navigation and stable D-pad focus |
+| S06 Android clients | built; compile passed | additive overview/event/attention decoders; one lifecycle-owned profile controller; phone/Google TV Recordings root, capture activity, immediate detail/history, manual/skipped/rules/reminders, exact-airing context and named stop/delete confirmations; physical D-pad evidence remains pending |
 | S07 review and promotion | queued | merge current `main`, obtain one adversarial code review, address it, mark the draft PR ready and let the fast lane run once |
 
 ## Decisions made while implementing

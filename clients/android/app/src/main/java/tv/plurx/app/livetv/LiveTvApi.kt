@@ -294,6 +294,9 @@ data class LiveTvStatus(
 @Serializable
 data class LiveTvSettings(
     val library_channels_enabled: Boolean = false,
+    val dvr_enabled: Boolean = false,
+    val dvr_root: String = "",
+    val dvr_tuner_reserve: Int = 0,
     val live_tv_enabled: Boolean = false,
     val live_tv_device_ipv4: String = "",
     val live_tv_owner_node_id: String = "",
@@ -419,6 +422,7 @@ sealed interface LiveTvSettingsChange {
     ) : LiveTvSettingsChange
     data class Enabled(val enabled: Boolean) : LiveTvSettingsChange
     data class LibraryChannelsEnabled(val enabled: Boolean) : LiveTvSettingsChange
+    data class DvrEnabled(val enabled: Boolean) : LiveTvSettingsChange
     data class FencedOwner(val owner: String, val cutoff: Long) : LiveTvSettingsChange
 
     fun body(generation: Long): JsonObject = buildJsonObject {
@@ -433,6 +437,7 @@ sealed interface LiveTvSettingsChange {
             }
             is Enabled -> put("live_tv_enabled", change.enabled)
             is LibraryChannelsEnabled -> put("library_channels_enabled", change.enabled)
+            is DvrEnabled -> put("dvr_enabled", change.enabled)
             is FencedOwner -> putJsonObject("live_tv_fenced_owner") {
                 put("owner_node_id", change.owner)
                 put("drain_before_generation", change.cutoff)

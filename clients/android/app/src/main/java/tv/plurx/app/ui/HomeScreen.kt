@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.LiveTv
 import androidx.compose.material.icons.filled.VideoLibrary
+import androidx.compose.material.icons.filled.RadioButtonChecked
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -84,6 +85,7 @@ fun HomeScreen(
     onOpenDownloads: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenLiveTv: () -> Unit = {},
+    onOpenRecordings: () -> Unit = {},
     onOpenLibraryChannels: () -> Unit = {},
 ) {
     val state by vm.home.collectAsStateWithLifecycle()
@@ -103,6 +105,7 @@ fun HomeScreen(
             onOpenDownloads = onOpenDownloads,
             onOpenSettings = onOpenSettings,
             onOpenLiveTv = onOpenLiveTv,
+            onOpenRecordings = onOpenRecordings,
             onOpenLibraryChannels = onOpenLibraryChannels,
         )
 
@@ -420,6 +423,7 @@ internal fun HomeTopBar(
     onOpenSettings: () -> Unit,
     safeInsets: WindowInsets = safeDisplayInsets(),
     onOpenLiveTv: () -> Unit = {},
+    onOpenRecordings: () -> Unit = {},
     onOpenLibraryChannels: () -> Unit = {},
 ) {
     val brand: @Composable () -> Unit = {
@@ -448,6 +452,9 @@ internal fun HomeTopBar(
         }
         TvIconButton(onClick = onOpenLiveTv) {
             Icon(Icons.Filled.LiveTv, contentDescription = "Live TV", tint = Muted)
+        }
+        TvIconButton(onClick = onOpenRecordings) {
+            Icon(Icons.Filled.RadioButtonChecked, contentDescription = "Recordings", tint = Muted)
         }
         TvIconButton(onClick = onOpenLibraryChannels) {
             Icon(Icons.Filled.VideoLibrary, contentDescription = "Library channels", tint = Muted)
