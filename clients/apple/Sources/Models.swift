@@ -38,6 +38,7 @@ struct Library: Codable, Identifiable, Hashable {
 }
 
 struct Watch: Codable, Hashable {
+    var updatedAt: Int? = nil
     var positionMs: Int?
     var durationMs: Int?
     var watched: Bool?
@@ -49,6 +50,7 @@ struct WatchRollup: Codable, Hashable {
 }
 
 struct Item: Codable, Identifiable, Hashable {
+    var parentId: Int? = nil
     let id: Int
     var libraryId: Int?
     let kind: String

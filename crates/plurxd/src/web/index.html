@@ -3360,7 +3360,7 @@
 .mobile-search{display:none}@media(max-width:600px){header.top .mobile-search{display:inline-flex;width:40px;align-items:center;justify-content:center;font-size:22px}header.top:not(.search-open)>.search{display:none}header.top nav a{white-space:nowrap}header.top #activity{display:none}header.top .dvr-global{max-width:120px}header.top nav{padding-bottom:0;min-height:40px}header.top .topctl{gap:4px}}
 
 .watch-about-compact{display:none}@media(max-width:760px){.watch-about-wide{display:none}.watch-about-compact{display:block;margin:12px 0}.watch-about-compact summary{cursor:pointer;padding:8px 0}.watch-hero{grid-template-columns:70px minmax(0,1fr);gap:14px}.watch-poster{width:70px}}@media(max-width:600px){header.top nav{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;overflow:visible;gap:0}header.top nav a{padding:10px 4px;font-size:12px;text-align:center;white-space:normal;min-width:0}}
-@media(max-width:899px){[data-layout=theater]:has(.th-top .dvr-global.on){--th-top:100px}[data-layout=theater] .th-top{flex-wrap:wrap;padding-top:8px;padding-bottom:8px;gap:8px}[data-layout=theater] .th-top .dvr-global{order:4;max-width:100%;white-space:normal;margin-right:auto}[data-layout=theater] .th-top .dvr-global.on{flex-basis:100%;width:100%;justify-content:center}[data-layout=theater] .th-pills{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:calc(100% - 28px);border-radius:18px;gap:2px}[data-layout=theater] .th-pills a{text-align:center;padding:8px 4px;min-width:0;font-size:12px;white-space:normal}[data-layout=theater] main#main{padding-bottom:120px}[data-layout=catalog] .px-foot .dvr-global{order:5;max-width:100%;white-space:normal;flex-basis:100%}}
+@media(max-width:899px){[data-layout=theater]:has(.th-top .dvr-global.on){--th-top:100px}[data-layout=theater] .th-top{flex-wrap:wrap;padding-top:4px;padding-bottom:4px;gap:8px}[data-layout=theater] .th-top .search{flex:1 1 80px;width:80px;min-width:0}[data-layout=theater] .th-top .dvr-global{order:4;max-width:100%;white-space:normal;margin-right:auto}[data-layout=theater] .th-top .dvr-global.on{flex-basis:100%;width:100%;justify-content:center}[data-layout=theater] .th-pills{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:calc(100% - 28px);border-radius:18px;gap:2px}[data-layout=theater] .th-pills a{text-align:center;padding:8px 4px;min-width:0;font-size:12px;white-space:normal}[data-layout=theater] main#main{padding-bottom:120px}[data-layout=catalog] .px-foot .dvr-global{order:5;max-width:100%;white-space:normal;flex-basis:100%}}
 </style>
 <script>
 // Theme engine. Runs in <head> before first paint so there's no flash of the
@@ -5706,6 +5706,8 @@ function viewingItemBody(p){
     content=`<div class="filemissing">No file is currently available. Check the library location or choose another version below.</div>`;
   }else if(["show","season"].includes(it.kind)){
     content=`<section class="watch-resume" id="series-continue" aria-live="polite"><p class="muted">Finding your next episode…</p></section>`;
+  }else if(["movie","episode"].includes(it.kind)){
+    content='<div class="filemissing"><h2>No media file available</h2><p>This title has no media file yet. Check its library location or return after the next scan.</p></div>';
   }
   if(p.children.length){
     const seasons=p.children.some(c=>c.kind==='season');
@@ -15051,7 +15053,7 @@ let ACTIVITY_VIEWING_ID=null;
 function selectActivityViewing(id){ACTIVITY_VIEWING_ID=id;if(ACTIVITY_SNAPSHOT)paintActivityBody(ACTIVITY_SNAPSHOT,ACTIVITY_DVR.rows,ACTIVITY_DVR);}
 function activityWatchingHtml(deliveries,live,names,sessions,opened){
   const entries=deliveries.map(de=>({key:`delivery:${de.session_id||de.request_id||[de.node_id,de.item_id,de.started_unix].join(':')}`,title:de.title||'Untitled stream',subtitle:de.user||'Viewer unavailable',de}));
-  for(const row of live||[])entries.push({key:`live:${row.session_id||row.id||[row.owner_node_id,row.user,row.channel_number].join(':')}`,title:row.programme_title||row.channel_name||'Live television',subtitle:[row.user,row.channel_name].filter(Boolean).join(' · '),live:row});
+  for(const [index,row] of (live||[]).entries())entries.push({key:`live:${row.session_id||row.id||[row.owner_node_id,row.user,row.channel_number,index].join(':')}`,title:row.programme_title||row.channel_name||'Live television',subtitle:[row.user,row.channel_name].filter(Boolean).join(' · '),live:row});
   if(!entries.length)return '<div class="activity-idle">No viewers reported by the responding nodes.</div>';
   const selected=entries.find(e=>e.key===ACTIVITY_VIEWING_ID)||entries[0];ACTIVITY_VIEWING_ID=selected.key;
   const cards=entries.map(e=>`<button class="activity-viewer ${selected===e?'selected':''}" data-activity-view="${esc(e.key)}" aria-pressed="${selected===e}" onclick='selectActivityViewing(${esc(JSON.stringify(e.key))})'><span class="activity-viewer-mark" aria-hidden="true">▶</span><span><strong>${esc(e.title)}</strong><small>${esc(e.subtitle)}</small></span><span class="activity-viewer-state">${e.live?'Live TV':esc(e.de.method?.replace(/_/g,' ')||'Watching')}</span></button>`).join('');
@@ -18544,7 +18546,7 @@ function homeSavedHtml(p){
   if(p.savedPending)return '';
   if(p.savedError)return '<p class="hint">Recent recording history is unavailable. <a href="#/recordings/saved">Open recordings</a></p>';
   if(!rows.length)return '';
-  return `<h2 class="section">Recently recorded <a class="muted" href="#/recordings/saved">· View all</a></h2><div class="watch-cards">${rows.slice(0,3).map(row=>`<article class="dvr-saved-card"><a class="dvr-saved-art" href="#/recordings/saved?selected=${encodeURIComponent(row.id)}"><small>${esc([row.guide_number,row.channel_name||'Recorded television'].filter(Boolean).join(' · '))}</small><strong>${esc(row.title)}</strong></a><div class="dvr-saved-body">${dvrStatusMarkup(dvrSavedLabel(row),row.state==='partial'?'warn':'done')}<p>${esc(new Date(row.airing_start*1000).toLocaleString())}</p>${row.item_id&&row.file_id?`<button class="ghost" onclick='playItem(${esc(JSON.stringify(String(row.item_id)))})'>▶ Watch recording</button>`:`<a class="ghost" href="#/recordings/saved?selected=${encodeURIComponent(row.id)}">Recording details</a>`}</div></article>`).join('')}</div>`;
+  return `<h2 class="section">Recently recorded <a class="muted" href="#/recordings/saved">· View all</a></h2><div class="watch-cards">${rows.slice(0,3).map(row=>`<article class="dvr-saved-card"><a class="dvr-saved-art" href="#/recordings/saved?selected=${encodeURIComponent(row.id)}"><small>${esc([row.guide_number,row.channel_name||'Recorded television'].filter(Boolean).join(' · '))}</small><strong>${esc(row.title)}</strong></a><div class="dvr-saved-body">${dvrStatusMarkup(dvrSavedLabel(row),row.state==='done'&&!row.stopped_early?'saved':'warning')}<p>${esc(new Date(row.airing_start*1000).toLocaleString())}</p>${row.item_id&&row.file_id?`<button class="ghost" onclick='playItem(${esc(JSON.stringify(String(row.item_id)))})'>▶ Watch recording</button>`:`<a class="ghost" href="#/recordings/saved?selected=${encodeURIComponent(row.id)}">Recording details</a>`}</div></article>`).join('')}</div>`;
 }
 function toggleMobileSearch(){
   const top=document.querySelector('header.top');if(!top)return;
@@ -22395,7 +22397,6 @@ function lcReadEditor(){
     if(document.getElementById(id)){touched=true;break;}
   if(document.getElementById("lc-subject")){
     draft.recipe.subject=(value("lc-subject")||"").trim().normalize("NFC")||null;
-    if(!draft.id&&!draft.name&&draft.recipe.subject)draft.name=Array.from(draft.recipe.subject).slice(0,80).join("");
   }
   if(document.getElementById("lc-name"))draft.name=value("lc-name")||"";
   if(document.getElementById("lc-description"))draft.description=value("lc-description")||"";
@@ -22420,6 +22421,7 @@ function lcStep(step){
   if(LibraryChannelCore.STEPS.indexOf(step)>LibraryChannelCore.STEPS.indexOf(draft.step)){
     draft.showValidation=true;if(Object.keys(lcEditorErrors(draft)).length){libraryChannelsPaint();return;}
   }
+  if(draft.step==="content"&&step!=="content"&&!draft.id&&!draft.name&&draft.recipe.subject)draft.name=Array.from(draft.recipe.subject).slice(0,80).join("");
   draft.step=step;draft.showValidation=false;saveLibraryChannelDraft();libraryChannelsPaint();
 }
 async function previewLibraryChannel(paint=true){

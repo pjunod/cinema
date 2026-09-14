@@ -663,38 +663,40 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Resolve a show or season to the episode its primary TV action should
-    /// play. Single-season servers may expose episodes directly under a show,
-    /// so that shape remains playable instead of becoming a dead detail page.
+    /// Prefer the current in-progress episode across the whole series before
+    /// searching unwatched episodes. A season's watched count cannot establish
+    /// that it contains the viewer's most recently played episode.
     func seriesPlayback(_ detail: ItemDetail) async -> PlayContext? {
-        switch detail.item.kind {
-        case "season":
-            return await playableEpisode(from: Self.orderedEpisodeCandidates(detail.children ?? []))
-        case "show":
-            let children = detail.children ?? []
-            let seasons = Self.orderedSeasonCandidates(children)
-            if seasons.isEmpty {
-                return await playableEpisode(from: Self.orderedEpisodeCandidates(children))
-            }
-            for season in seasons {
-                guard let seasonDetail = try? await itemDetail(season.id) else { continue }
-                if let target = await playableEpisode(
-                    from: Self.orderedEpisodeCandidates(seasonDetail.children ?? [])
-                ) {
-                    return target
-                }
-            }
-            return nil
-        default:
-            return nil
+        guard ["show", "season"].contains(detail.item.kind) else { return nil }
+        let children = detail.children ?? []
+        let seasons = Self.orderedSeasonCandidates(children)
+        let parentIDs = Set([detail.item.id] + seasons.map(\.id))
+        let recent = (try? await requireAPI().hubs()) ?? hubs
+        guard !Task.isCancelled else { return nil }
+        let current: [Item] = (recent.continueWatching ?? []).filter { candidate in
+            guard candidate.kind == "episode", let parentID = candidate.parentId,
+                  parentIDs.contains(parentID) else { return false }
+            return candidate.watch?.watched != true && (candidate.watch?.positionMs ?? 0) > 3_000
         }
+        if let target = await playableEpisode(from: Self.orderedEpisodeCandidates(current)) { return target }
+
+        // The hub is bounded; titles outside it still need the newest in-progress
+        // episode, including one in a season with zero completed episodes.
+        var episodes = children.filter { $0.kind == "episode" }
+        for season in seasons {
+            guard !Task.isCancelled else { return nil }
+            guard let seasonDetail = try? await itemDetail(season.id) else { continue }
+            episodes.append(contentsOf: seasonDetail.children ?? [])
+        }
+        guard !Task.isCancelled else { return nil }
+        return await playableEpisode(from: Self.orderedEpisodeCandidates(episodes))
     }
 
     static func orderedEpisodeCandidates(_ items: [Item]) -> [Item] {
         let episodes = items.filter { $0.kind == "episode" }
         let inProgress = episodes.filter {
             $0.watch?.watched != true && ($0.watch?.positionMs ?? 0) > 3_000
-        }
+        }.sorted { ($0.watch?.updatedAt ?? 0) > ($1.watch?.updatedAt ?? 0) }
         let unwatched = episodes.filter {
             $0.watch?.watched != true && ($0.watch?.positionMs ?? 0) <= 3_000
         }
@@ -723,8 +725,10 @@ final class AppModel: ObservableObject {
 
     private func playableEpisode(from episodes: [Item]) async -> PlayContext? {
         for episode in episodes {
+            guard !Task.isCancelled else { return nil }
             guard let detail = try? await itemDetail(episode.id),
-                  let file = detail.files?.first else { continue }
+                  let file = detail.files?.first(where: { $0.available != false }) else { continue }
+            guard !Task.isCancelled else { return nil }
             let playable = detail.item
             let durationMs = file.durationMs ?? playable.runtimeMs ?? episode.runtimeMs ?? 0
             let positionMs = playable.watch?.positionMs ?? episode.watch?.positionMs ?? 0

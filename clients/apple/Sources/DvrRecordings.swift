@@ -1133,7 +1133,7 @@ struct DvrCaptureActivityView: View {
                 }
                 if let age = dvr.overview?.observationAgeMs {
                     Text("DVR observed \(max(0, Int(age / 1_000))) seconds ago")
-                        .font(LiveTvType.tertiary).foregroundStyle(Palette.muted)
+                        .font(.subheadline).foregroundStyle(Palette.muted)
                 }
                 ForEach(dvr.overview?.active ?? []) { row in
                     NavigationLink {
@@ -1141,17 +1141,17 @@ struct DvrCaptureActivityView: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 5) {
                             HStack {
-                                Text(row.title).font(LiveTvType.primary).lineLimit(1)
+                                Text(row.title).font(.body.weight(.semibold)).lineLimit(2)
                                 Spacer()
-                                Text(row.displayState).font(LiveTvType.secondary)
+                                Text(row.displayState).font(.subheadline)
                             }
                             Text(activityDetail(row))
-                                .font(LiveTvType.tertiary).foregroundStyle(Palette.muted)
+                                .font(.subheadline).foregroundStyle(Palette.muted)
                             LiveTvProgressLine(value: row.progress(now: now), height: 3)
                                 .accessibilityLabel("Recording window elapsed")
                                 .accessibilityValue("\(Int(row.progress(now: now) * 100)) percent")
                         }
-                        .padding(12)
+                        .padding(18)
                         .background(Palette.surface, in: RoundedRectangle(cornerRadius: 8))
                     }
                     #if os(tvOS)
@@ -1165,6 +1165,9 @@ struct DvrCaptureActivityView: View {
         }
         .background(Palette.bg)
         .navigationTitle("Recording activity")
+        #if os(tvOS)
+        .preferredColorScheme(.dark)
+        #endif
         .task {
             while !Task.isCancelled {
                 now = Int(Date().timeIntervalSince1970)

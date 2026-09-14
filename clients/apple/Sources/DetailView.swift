@@ -2108,14 +2108,18 @@ struct DetailView: View {
     private func toggleWatched(_ item: Item, watched: Bool) async {
         watchBusy = true
         actionError = nil
+        let isSeries = item.kind == "show" || item.kind == "season"
+        if isSeries { seriesPlayback = nil; resolvingSeries = true }
         do {
             try await model.setWatched(itemId: item.id, watched: !watched)
             detail = try await model.itemDetail(item.id)
             await model.loadHome()
+            if isSeries, let detail { seriesPlayback = await model.seriesPlayback(detail) }
         } catch {
             actionError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
         watchBusy = false
+        if isSeries { resolvingSeries = false }
     }
 
     private var heroHeight: CGFloat {
@@ -2173,7 +2177,8 @@ struct DetailView: View {
                     makeChannelButton(item)
                 }
             }
-            .frame(maxWidth: hasPlayback ? .infinity : 220, alignment: .leading)
+            .fixedSize(horizontal: !hasPlayback, vertical: false)
+            .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             VStack(alignment: .leading, spacing: 10) {
                 if let file, item.isBook {
@@ -2215,6 +2220,7 @@ struct DetailView: View {
                         makeChannelButton(item)
                     }
                 }
+        .fixedSize(horizontal: !stacked, vertical: false)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
