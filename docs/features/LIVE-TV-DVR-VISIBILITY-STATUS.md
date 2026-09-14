@@ -31,8 +31,8 @@ presentation contract around them.
 | S01 blank-list repair | built; final evidence pending | web, Apple and Android decode the real `{rows, next}` envelope; web preserves stale rows and exposes Load more; regression fixtures written but not run |
 | S02 capture observation and overview | built; compile passed | successful-write sampling, five-second rate window, bounded peer observations, shared Activity/overview projection and `/api/v1/dvr/overview`; focused fixtures written but not run |
 | S03 lifecycle ledger and attention | built; compile passed | append-only SQLite v59 / replicated v39 migrations; atomic and owner-fenced events, bounded pages/pruning, legacy provenance and per-user acknowledgments; no tests run yet |
-| S04 web layouts and controller | built; commit checks pending | one scope-aware poller feeds chrome, Live TV and Recordings; exact-airing player context, canonical `#/recordings`, six task tabs, mobile detail, real event history and Activity projection |
-| S05 Apple clients | queued | tolerant decoders, one foreground controller, Recordings navigation and focus-safe details |
+| S04 web layouts and controller | built; compile passed | one scope-aware poller feeds chrome, Live TV and Recordings; exact-airing player context, canonical `#/recordings`, six task tabs, mobile detail, real event history and Activity projection |
+| S05 Apple clients | built; source type-check passed | additive overview/event/attention decoders; one foreground profile controller; iOS/tvOS Recordings root, capture activity, immediate details, history, manual/skipped/rules/reminders and exact-airing player/guide context; device builds remain pending because this host exposes no simulator runtime |
 | S06 Android clients | queued | tolerant decoders, lifecycle-aware controller, Recordings navigation and stable D-pad focus |
 | S07 review and promotion | queued | merge current `main`, obtain one adversarial code review, address it, mark the draft PR ready and let the fast lane run once |
 
@@ -52,6 +52,10 @@ presentation contract around them.
    while building because repository policy forbids using CI as a compiler.
    Focused and fast-lane tests run only after the adversarial review is
    addressed.
+5. **Keep the television manual timer operable without a date picker.** tvOS
+   does not ship SwiftUI's `DatePicker`, so its existing channel-and-time task
+   uses explicit start-delay and duration choices; iOS keeps exact date/time
+   selection. Both submit the same server contract.
 
 ## Evidence limits — green source is not a hardware claim
 

@@ -158,6 +158,141 @@ struct DvrRecordingsPage: Decodable, Sendable {
     let next: String?
 }
 
+/// One fresh sample from the recorder owner. `phase` deliberately remains a
+/// string: a newer owner may add a phase before this client ships, and an
+/// unknown observation must render as unknown rather than make the complete
+/// overview fail to decode.
+struct DvrCaptureObservation: Decodable, Equatable, Sendable {
+    let recordingId: String
+    let channelId: String
+    let airingStart: Int
+    let ownerNodeId: String
+    let configGeneration: Int64
+    let servingGeneration: UInt64
+    let attempt: Int
+    let phase: String
+    let observationAgeMs: UInt64
+    let lastWriteAgeMs: UInt64?
+    let firstWriteAtMs: Int64?
+    let attemptBytesWritten: UInt64
+    let priorAttemptBytes: UInt64?
+    let writeBps: UInt64?
+    let reasonCode: String?
+}
+
+struct DvrOverviewCounts: Decodable, Equatable, Sendable {
+    let recording: Int?
+    let starting: Int?
+    let reconnecting: Int?
+    let finishing: Int?
+    let unconfirmed: Int?
+    let attention: Int?
+
+    var active: Int {
+        [recording, starting, reconnecting, finishing, unconfirmed]
+            .compactMap { $0 }.reduce(0, +)
+    }
+}
+
+struct DvrOverviewDiagnostics: Decodable, Equatable, Sendable {
+    let ownerNodeId: String
+    let recordingSinks: Int?
+    let recordingTransports: Int?
+    let storageFreeBytes: UInt64?
+}
+
+struct DvrActiveRecording: Decodable, Identifiable, Equatable, Sendable {
+    var id: String { recordingId }
+    let recordingId: String
+    let channelId: String
+    let airingStart: Int
+    let title: String
+    let episodeTitle: String?
+    let guideNumber: String
+    let channelName: String
+    let durableState: DvrState
+    let stateReason: String?
+    let airingEnd: Int
+    let captureStart: Int
+    let captureEnd: Int
+    let stopRequestedAtMs: Int64?
+    let lastConfirmedBytes: UInt64?
+    let totalBytesWritten: UInt64?
+    let observation: DvrCaptureObservation?
+    let displayState: String
+    let displayDetail: String
+    let canStop: Bool
+    let canSkip: Bool
+    let canRestore: Bool
+    let canDelete: Bool
+    let canEditRule: Bool
+    let canReorderRules: Bool
+    let canViewDiagnostics: Bool
+
+    func progress(now: Int) -> Double {
+        let span = captureEnd - captureStart
+        guard span > 0 else { return 0 }
+        return min(max(Double(now - captureStart) / Double(span), 0), 1)
+    }
+}
+
+struct DvrOverview: Decodable, Equatable, Sendable {
+    let version: Int
+    let serverNowMs: Int64
+    let availability: String
+    let runtimeSupported: Bool
+    let observationAgeMs: UInt64?
+    let counts: DvrOverviewCounts
+    let activeTotal: Int?
+    let activeTruncated: Bool
+    let active: [DvrActiveRecording]
+    let nextCaptureStart: Int?
+    let diagnostics: DvrOverviewDiagnostics?
+
+    var fresh: Bool { availability == "fresh" && (observationAgeMs ?? 0) <= 20_000 }
+}
+
+struct DvrEvent: Decodable, Identifiable, Equatable, Sendable {
+    var id: String { eventId }
+    let recordingId: String
+    let sequence: Int64
+    let eventId: String
+    let kind: String
+    let occurredAtMs: Int64
+    let attempt: Int64?
+    let actorUserId: Int64?
+    let reasonCode: String?
+    // Facts are intentionally ignored by this first native presentation.
+    // JSONDecoder ignores the additive object, including values whose types a
+    // client cannot predict, while the typed fields above remain available.
+}
+
+struct DvrEventsPage: Decodable, Sendable {
+    let rows: [DvrEvent]
+    let next: String?
+    let historyComplete: Bool
+    let truncatedBeforeSequence: Int64?
+}
+
+struct DvrAttentionProjection: Decodable, Identifiable, Sendable {
+    var id: String { recording.id }
+    let recording: DvrRecording
+    let latestAttentionSequence: Int64
+    let latestAttentionAtMs: Int64
+    let acknowledgedThroughSequence: Int64
+}
+
+struct DvrAttentionPage: Decodable, Sendable {
+    let rows: [DvrAttentionProjection]
+    let next: String?
+    let total: Int
+}
+
+struct DvrAttentionAck: Decodable, Sendable {
+    let recordingId: String
+    let throughSequence: Int64
+}
+
 struct DvrSlots: Decodable, Sendable {
     let max: Int
     let reserve: Int
@@ -306,13 +441,14 @@ final class DvrAPI: @unchecked Sendable {
     /// would have, and a second Record on one airing is `200` rather than
     /// `201` without either being an error.
     private func request(_ path: String, method: String = "GET",
-                         body: Data? = nil) async throws -> (Data, Int) {
+                         body: Data? = nil, timeout: TimeInterval? = nil) async throws -> (Data, Int) {
         guard let base = Session.canonicalOrigin(origin),
               let url = URL(string: base + "/api/v1/" + path)
         else { throw DvrFailure(code: "dvr_unavailable") }
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = body
+        if let timeout { request.timeoutInterval = timeout }
         if body != nil { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         if let token { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
         let (data, response) = try await control.data(for: request)
@@ -351,6 +487,10 @@ final class DvrAPI: @unchecked Sendable {
         try decode(DvrStatus.self, data: await request("dvr/status").0)
     }
 
+    func overview() async throws -> DvrOverview {
+        try decode(DvrOverview.self, data: await request("dvr/overview", timeout: 4).0)
+    }
+
     /// The plan, and with it the conflict count the Scheduled chip carries.
     /// Cancelled rows stay visible on request: a viewer who skipped the wrong
     /// episode has to be able to find it again to restore it.
@@ -374,11 +514,60 @@ final class DvrAPI: @unchecked Sendable {
         try await recordingsPage(states: states).rows
     }
 
+    func recording(_ id: String) async throws -> DvrRecording {
+        try decode(DvrRecording.self, data: await request(
+            "dvr/recordings/" + LiveTvAPI.pathComponent(id)).0)
+    }
+
+    func events(_ id: String, before: String? = nil,
+                after: String? = nil, limit: Int = 50) async throws -> DvrEventsPage {
+        var query = [URLQueryItem(name: "limit", value: String(max(1, min(100, limit))))]
+        if let before { query.append(URLQueryItem(name: "before", value: before)) }
+        if let after { query.append(URLQueryItem(name: "after", value: after)) }
+        var components = URLComponents()
+        components.queryItems = query
+        let suffix = components.percentEncodedQuery.map { "?" + $0 } ?? ""
+        return try decode(DvrEventsPage.self, data: await request(
+            "dvr/recordings/" + LiveTvAPI.pathComponent(id) + "/events" + suffix).0)
+    }
+
+    func attention(after: String? = nil) async throws -> DvrAttentionPage {
+        let suffix = after.map {
+            var components = URLComponents()
+            components.queryItems = [URLQueryItem(name: "after", value: $0)]
+            return components.percentEncodedQuery.map { "?" + $0 } ?? ""
+        } ?? ""
+        return try decode(DvrAttentionPage.self,
+                          data: await request("dvr/attention" + suffix).0)
+    }
+
+    func acknowledgeAttention(_ id: String, through sequence: Int64) async throws -> DvrAttentionAck {
+        let body = try JSONSerialization.data(withJSONObject: ["through_sequence": sequence])
+        return try decode(DvrAttentionAck.self, data: await request(
+            "dvr/recordings/" + LiveTvAPI.pathComponent(id) + "/attention/ack",
+            method: "POST", body: body).0)
+    }
+
     /// Record one airing. Two people pressing Record on the same cell both
     /// wanted the same thing and both get it: the server answers `200` with
     /// the existing row rather than refusing the second.
     func record(channelId: String, airingStart: Int) async throws -> DvrRecording {
         let fields: [String: Any] = ["channel_id": channelId, "airing_start": airingStart]
+        let body = try JSONSerialization.data(withJSONObject: fields)
+        return try decode(DvrRecording.self,
+                          data: await request("dvr/recordings", method: "POST", body: body).0)
+    }
+
+    func record(channelId: String, captureStart: Int, captureEnd: Int,
+                title: String?) async throws -> DvrRecording {
+        var fields: [String: Any] = [
+            "channel_id": channelId,
+            "capture_start": captureStart,
+            "capture_end": captureEnd,
+        ]
+        if let title, !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            fields["title"] = title
+        }
         let body = try JSONSerialization.data(withJSONObject: fields)
         return try decode(DvrRecording.self,
                           data: await request("dvr/recordings", method: "POST", body: body).0)

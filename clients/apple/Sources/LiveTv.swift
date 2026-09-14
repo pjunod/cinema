@@ -356,6 +356,9 @@ struct LiveTvSignal: Decodable, Equatable, Sendable {
 
 struct LiveTvSettings: Decodable, Equatable, Sendable {
     let libraryChannelsEnabled: Bool
+    let dvrEnabled: Bool
+    let dvrRoot: String
+    let dvrTunerReserve: Int
     let liveTvEnabled: Bool
     let liveTvDeviceIpv4: String
     let liveTvOwnerNodeId: String
@@ -368,6 +371,9 @@ struct LiveTvSettings: Decodable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case libraryChannelsEnabled
+        case dvrEnabled
+        case dvrRoot
+        case dvrTunerReserve
         case liveTvEnabled
         case liveTvDeviceIpv4
         case liveTvOwnerNodeId
@@ -389,6 +395,9 @@ struct LiveTvSettings: Decodable, Equatable, Sendable {
             Bool.self,
             forKey: .libraryChannelsEnabled
         ) ?? false
+        dvrEnabled = try values.decodeIfPresent(Bool.self, forKey: .dvrEnabled) ?? false
+        dvrRoot = try values.decodeIfPresent(String.self, forKey: .dvrRoot) ?? ""
+        dvrTunerReserve = try values.decodeIfPresent(Int.self, forKey: .dvrTunerReserve) ?? 0
         liveTvEnabled = try values.decode(Bool.self, forKey: .liveTvEnabled)
         liveTvDeviceIpv4 = try values.decode(String.self, forKey: .liveTvDeviceIpv4)
         liveTvOwnerNodeId = try values.decode(String.self, forKey: .liveTvOwnerNodeId)
@@ -468,6 +477,7 @@ enum LiveTvSettingsChange {
     case configure(ipv4: String, owner: String, sessions: Int, height: Int, maxHeight: Int = 0)
     case enabled(Bool)
     case libraryChannelsEnabled(Bool)
+    case dvrEnabled(Bool)
     case fencedOwner(owner: String, cutoff: Int64)
 
     func body(generation: Int64) throws -> Data {
@@ -481,6 +491,7 @@ enum LiveTvSettingsChange {
             fields["live_tv_max_output_height"] = maxHeight
         case let .enabled(enabled): fields["live_tv_enabled"] = enabled
         case let .libraryChannelsEnabled(enabled): fields["library_channels_enabled"] = enabled
+        case let .dvrEnabled(enabled): fields["dvr_enabled"] = enabled
         case let .fencedOwner(owner, cutoff):
             fields["live_tv_fenced_owner"] = [
                 "owner_node_id": owner, "drain_before_generation": cutoff,

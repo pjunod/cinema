@@ -183,7 +183,7 @@ final class LiveTvPlayerController: ObservableObject {
         playing = true
         player.play()
         surfaceMessage = nil
-        message = "Playing live · no recording or rewind"
+        message = "Playing live"
         timeControlObservation = player.observe(
             \.timeControlStatus,
             options: [.initial, .new]
@@ -447,7 +447,7 @@ final class LiveTvPlayerController: ObservableObject {
         } else {
             player.play()
             pausedAt = nil
-            message = "Playing live · no recording or rewind"
+            message = "Playing live"
             surfaceMessage = nil
         }
     }
@@ -1682,9 +1682,9 @@ struct LiveTvView: View {
     @Environment(\.scenePhase) private var scenePhase
     let onLeave: () -> Void
     @ObservedObject private var live = LiveTvPlayerController.shared
-    /// Owned by the page rather than shared for the app's lifetime: it holds
-    /// no tuner and no file handle, so nothing is lost by rebuilding it.
-    @StateObject private var dvr = DvrController()
+    /// One authenticated profile cache shared with root Recordings. The app
+    /// shell owns its foreground polling lifecycle.
+    @ObservedObject private var dvr = DvrController.shared
     @StateObject private var pictureInPicture = PictureInPictureController()
     @State private var query = ""
     @State private var fullscreen = false
@@ -1699,6 +1699,7 @@ struct LiveTvView: View {
     @State private var overlayVisible = true
     @State private var temporaryGuide = false
     @State private var showingInfo = false
+    @State private var showingDvrActivity = false
     @State private var streamInfoPlayer: LiveTvPlayerFacts?
     @State private var showingMore = false
     @State private var showingLayout = false
@@ -1918,6 +1919,9 @@ struct LiveTvView: View {
         .sheet(item: $detail) { programme in
             programmeDetail(programme)
         }
+        .sheet(isPresented: $showingDvrActivity) {
+            NavigationStack { DvrCaptureActivityView() }
+        }
         .sheet(isPresented: $showingInfo) {
             #if os(tvOS)
             if let channel = live.watching, let player = streamInfoPlayer {
@@ -2022,7 +2026,7 @@ struct LiveTvView: View {
     /// as long as it is true, because a four-second toast cannot repeat itself
     /// when the same failure happens twice.
     static func isSteadyStateMessage(_ message: String) -> Bool {
-        message == "Playing live · no recording or rewind"
+        message == "Playing live" || message == "Playing live · no recording or rewind"
     }
 
     /// Both lines when both are true. A recording refusal and an unconfirmed
@@ -2093,6 +2097,7 @@ struct LiveTvView: View {
         let total = live.channels.count
         var parts = [shown == total ? "\(total) channels" : "\(shown) of \(total) channels"]
         if live.playing { parts.append("1 tuner in use") }
+        if let recordings = dvr.indicatorLabel { parts.append(recordings) }
         if let guide = live.guide, guide.freshness != "fresh" {
             parts.append(guide.freshness == "stale" ? "guide is stale" : "no guide data")
         }
@@ -2270,7 +2275,33 @@ struct LiveTvView: View {
     /// programmes and one tuner should learn that from the toolbar, not from
     /// an empty file the next morning.
     private var recordingsLabel: String {
-        dvr.conflicts > 0 ? "Recordings · \(dvr.conflicts)" : "Recordings"
+        if let label = dvr.indicatorLabel { return label }
+        return dvr.conflicts > 0 ? "Recordings · \(dvr.conflicts)" : "Recordings"
+    }
+
+    /// Exact-airing state wins. A different airing on the watched channel is
+    /// only described as channel context (head/tail padding); it never lends
+    /// its red badge or title to the programme currently on screen.
+    private func recordingContext(channel: LiveTvChannel,
+                                  programme: LiveTvProgramme?) -> String? {
+        if let programme,
+           let active = dvr.activeRecording(channelId: channel.id, airingStart: programme.start) {
+            return active.displayState
+        }
+        if let programme,
+           let planned = dvr.recording(channelId: channel.id, airingStart: programme.start) {
+            return planned.stopping ? "Stopping" : planned.state.label
+        }
+        guard let active = dvr.overview?.active.first(where: {
+            $0.channelId == channel.id && $0.captureStart <= now && now < $0.captureEnd
+        }) else { return nil }
+        if now < active.airingStart {
+            return "Recording early padding for \(active.title)"
+        }
+        if now >= active.airingEnd {
+            return "Recording \(active.title) · end padding · until \(liveTvTime(active.captureEnd))"
+        }
+        return nil
     }
 
     private func showRecordings() {
@@ -2320,12 +2351,18 @@ struct LiveTvView: View {
             .frame(maxWidth: .infinity)
             .frame(height: min(geometry.size.width * 9 / 16, geometry.size.height * 0.4))
             .overlay(alignment: .topLeading) {
-                Text("● LIVE · \(live.watching?.guideNumber ?? "") \(live.watching?.guideName ?? "")")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 8).padding(.vertical, 4)
-                    .background(.black.opacity(0.6), in: Capsule())
-                    .padding(10)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("● LIVE · \(live.watching?.guideNumber ?? "") \(live.watching?.guideName ?? "")")
+                    if let channel = live.watching,
+                       let context = recordingContext(channel: channel, programme: airing.now) {
+                        Label(context, systemImage: "record.circle.fill")
+                    }
+                }
+                .font(.system(size: 11, weight: .bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 8).padding(.vertical, 4)
+                .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 7))
+                .padding(10)
             }
             .overlay(alignment: .topTrailing) {
                 HStack(spacing: 14) {
@@ -2355,6 +2392,7 @@ struct LiveTvView: View {
         let detail = [
             airing.now.map { "\(liveTvTime($0.start))–\(liveTvTime($0.end))" },
             airing.now.flatMap { $0.end > now ? "\(max(0, ($0.end - now) / 60)) min left" : nil },
+            channel.flatMap { recordingContext(channel: $0, programme: airing.now) },
             airing.next.map { "Next: \($0.title)" }
         ].compactMap { $0 }.joined(separator: " · ")
         return HStack(spacing: 12) {
@@ -2685,6 +2723,15 @@ struct LiveTvView: View {
                             .background(.red, in: Capsule())
                     }
                     .padding(12)
+                    if let context = recordingContext(channel: watching,
+                                                      programme: live.airing(watching, now: now).now) {
+                        Label(context, systemImage: "record.circle.fill")
+                            .font(LiveTvType.secondary)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8).padding(.vertical, 4)
+                            .background(.black.opacity(0.65), in: Capsule())
+                            .padding(.leading, 12).padding(.top, 48)
+                    }
                 }
             }
             .overlay(alignment: .bottomTrailing) {
@@ -2737,6 +2784,10 @@ struct LiveTvView: View {
             }
             if let synopsis = programme?.synopsis {
                 Text(synopsis).font(LiveTvType.secondary).lineLimit(synopsisLines)
+            }
+            if let channel, let context = recordingContext(channel: channel, programme: programme) {
+                Label(context, systemImage: "record.circle.fill")
+                    .font(LiveTvType.secondary).foregroundStyle(Palette.accent)
             }
             if let channel { LiveTvFormatBadges(channel: channel) }
             // Reached the way anything above the grid is reached: up from the
@@ -3174,6 +3225,12 @@ struct LiveTvView: View {
                 Text(airing.now?.title ?? live.title ?? "Live television")
                     .font(LiveTvType.surfaceTitle)
                     .lineLimit(1)
+                if let channel,
+                   let context = recordingContext(channel: channel, programme: airing.now) {
+                    Label(context, systemImage: "record.circle.fill")
+                        .font(LiveTvType.surfaceBody)
+                        .foregroundStyle(Palette.accent)
+                }
                 let detail = [
                     airing.now?.episode,
                     airing.now?.episodeTitle,
@@ -3231,6 +3288,13 @@ struct LiveTvView: View {
                     .font(LiveTvType.surfaceMono)
                     .foregroundStyle(.white.opacity(0.6))
                     .lineLimit(2)
+            }
+            if dvr.indicatorLabel != nil {
+                Button { showingDvrActivity = true } label: {
+                    Label("Recording activity", systemImage: "record.circle")
+                }
+                .buttonStyle(LiveSurfacePillStyle())
+                .focusEffectDisabled()
             }
             liveSurfaceButtons
         }
@@ -3361,6 +3425,13 @@ struct LiveTvView: View {
                                 Text("\(liveTvTime(now.start))–\(liveTvTime(now.end))"
                                      + (airing.next.map { " · Next: \($0.title)" } ?? ""))
                                     .font(.caption2).opacity(0.85)
+                            }
+                            if let channel,
+                               let context = recordingContext(channel: channel, programme: airing.now) {
+                                Button { showingDvrActivity = true } label: {
+                                    Label(context, systemImage: "record.circle.fill")
+                                }
+                                .font(.caption.weight(.semibold))
                             }
                         }
                         Spacer()
@@ -3583,6 +3654,10 @@ struct LiveTvView: View {
                 Text(filters.joined(separator: " · ")).font(.caption2).foregroundStyle(Palette.muted)
             }
             if let channel = detailChannel {
+                if let context = recordingContext(channel: channel, programme: programme) {
+                    Label(context, systemImage: "record.circle.fill")
+                        .font(.caption.weight(.semibold)).foregroundStyle(Palette.accent)
+                }
                 programmeActions(channel, programme)
             }
             if let message = dvr.message {

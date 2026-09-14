@@ -4,6 +4,7 @@ enum HomeTab: Hashable {
     case home
     case libraries
     case liveTv
+    case recordings
     case libraryChannels
     case search
     case downloads
@@ -14,6 +15,7 @@ struct HomeView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab: HomeTab
+    @ObservedObject private var dvr = DvrController.shared
 
     init(initialTab: HomeTab = .home) {
         _selectedTab = State(initialValue: initialTab)
@@ -64,6 +66,11 @@ struct HomeView: View {
                 .tabItem { Label("Live TV", systemImage: "tv") }
                 .tag(HomeTab.liveTv)
 
+            NavigationStack { DvrRecordingsRootView().appDestinations() }
+                .tabItem { Label("Recordings", systemImage: "record.circle") }
+                .badge(dvr.overview?.counts.attention ?? 0)
+                .tag(HomeTab.recordings)
+
             NavigationStack { LibraryChannelsView().appDestinations() }
                 .tabItem { Label("Channels", systemImage: "play.rectangle.on.rectangle") }
                 .tag(HomeTab.libraryChannels)
@@ -88,6 +95,11 @@ struct HomeView: View {
             .tag(HomeTab.settings)
         }
         .tint(Palette.accent)
+        .task(id: dvrObservationIdentity) {
+            guard scenePhase == .active, model.phase == .ready else { return }
+            await dvr.observe(origin: model.origin, token: Session.shared.token,
+                              highFrequency: selectedTab == .liveTv || selectedTab == .recordings)
+        }
         .task {
             if model.phase == .ready && model.homeLoading {
                 await model.loadHome()
@@ -133,6 +145,10 @@ struct HomeView: View {
                 .tabItem { Label("Live TV", systemImage: "tv") }
                 .tag(HomeTab.liveTv)
 
+            DvrRecordingsRootView()
+                .tabItem { Label(recordingsTabLabel, systemImage: "record.circle") }
+                .tag(HomeTab.recordings)
+
             LibraryChannelsView()
                 .tabItem { Label("Channels", systemImage: "play.rectangle.on.rectangle") }
 
@@ -145,6 +161,11 @@ struct HomeView: View {
                 .tag(HomeTab.settings)
         }
         .tint(Palette.accent)
+        .task(id: dvrObservationIdentity) {
+            guard scenePhase == .active else { return }
+            await dvr.observe(origin: model.origin, token: Session.shared.token,
+                              highFrequency: selectedTab == .liveTv || selectedTab == .recordings)
+        }
         .task { if model.homeLoading { await model.loadHome() } }
         .onChange(of: scenePhase) { _, phase in
             // Coming back to a foregrounded app should not show yesterday's
@@ -157,6 +178,15 @@ struct HomeView: View {
         }
     }
     #endif
+
+    private var dvrObservationIdentity: String {
+        "\(model.origin)|\(Session.shared.token ?? "signed-out")|\(scenePhase == .active)|\(model.phase)|\(selectedTab)"
+    }
+
+    private var recordingsTabLabel: String {
+        guard let count = dvr.overview?.counts.attention, count > 0 else { return "Recordings" }
+        return "Recordings · \(count)"
+    }
 }
 
 private struct AppDestinations: ViewModifier {
