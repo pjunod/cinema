@@ -27,9 +27,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use plurx_core::dvr::{
-    recording_basename, recording_folder, DvrInsertOutcome, DvrKeepMode, DvrOrigin, DvrRecording,
-    DvrState, DvrStatePatch, DvrTransition, DVR_ATTEMPTS_MAX, DVR_MIN_USEFUL_S,
-    DVR_SCHEDULE_DAYS_MAX,
+    recording_basename, recording_folder, DvrEventInput, DvrInsertOutcome, DvrKeepMode, DvrOrigin,
+    DvrRecording, DvrState, DvrStatePatch, DvrTransition, DVR_ATTEMPTS_MAX, DVR_EVENT_PRUNE_BATCH,
+    DVR_EVENT_RETENTION_MS, DVR_MIN_USEFUL_S, DVR_SCHEDULE_DAYS_MAX,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -125,6 +125,16 @@ struct DvrSinkObservation {
     last_write_at: Option<std::time::Instant>,
     rate_samples: VecDeque<(std::time::Instant, u64)>,
     reason_code: Option<String>,
+    pending_events: VecDeque<LatchedDvrEvent>,
+}
+
+#[derive(Clone, Debug)]
+struct LatchedDvrEvent {
+    event_id: String,
+    kind: &'static str,
+    occurred_at_ms: i64,
+    reason_code: Option<String>,
+    actionable: bool,
 }
 
 impl DvrSinkObservation {
@@ -134,11 +144,21 @@ impl DvrSinkObservation {
             last_write_at: None,
             rate_samples: VecDeque::new(),
             reason_code: None,
+            pending_events: VecDeque::new(),
         }
     }
 
     fn successful_write(&mut self, now: std::time::Instant, at_ms: i64, total: u64) {
-        self.first_write_at_ms.get_or_insert(at_ms);
+        if self.first_write_at_ms.is_none() {
+            self.first_write_at_ms = Some(at_ms);
+            self.pending_events.push_back(LatchedDvrEvent {
+                event_id: uuid::Uuid::new_v4().to_string(),
+                kind: "first_bytes_written",
+                occurred_at_ms: at_ms,
+                reason_code: None,
+                actionable: false,
+            });
+        }
         self.last_write_at = Some(now);
         self.rate_samples.push_back((now, total));
         while self
@@ -418,6 +438,72 @@ impl LiveTvManager {
         }
     }
 
+    /// Persist latched sink facts away from the tuner pump. A failed Store
+    /// write leaves the event at the front of the queue with the same UUID so
+    /// the next tick retries idempotently.
+    async fn drain_dvr_observation_events(&self) -> Result<(), LiveTvError> {
+        let transports = {
+            let registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry.transports.values().cloned().collect::<Vec<_>>()
+        };
+        for transport in transports {
+            let sinks = transport
+                .sinks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            for sink in sinks {
+                loop {
+                    let pending = sink
+                        .observation
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .pending_events
+                        .front()
+                        .cloned();
+                    let Some(pending) = pending else { break };
+                    let event = DvrEventInput {
+                        event_id: pending.event_id.clone(),
+                        kind: pending.kind.to_owned(),
+                        occurred_at_ms: pending.occurred_at_ms,
+                        attempt: Some(sink.attempt),
+                        actor_user_id: None,
+                        reason_code: pending.reason_code.clone(),
+                        facts_json: serde_json::json!({
+                            "attempt_bytes_written": sink.bytes.load(Ordering::Acquire)
+                        })
+                        .to_string(),
+                        actionable: pending.actionable,
+                    };
+                    self.store
+                        .append_dvr_observation_event(
+                            &sink.recording_id,
+                            &self.node_id,
+                            sink.attempt,
+                            &event,
+                        )
+                        .await
+                        .map_err(store_error)?;
+                    let mut observation = sink
+                        .observation
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if observation
+                        .pending_events
+                        .front()
+                        .is_some_and(|event| event.event_id == pending.event_id)
+                    {
+                        observation.pending_events.pop_front();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The owner's recording loop.
     ///
     /// Owner-only by construction, like the guide loop, and holding no job
@@ -481,6 +567,7 @@ impl LiveTvManager {
         let generation = live_tv.generation;
         let now = unix_seconds();
 
+        self.drain_dvr_observation_events().await?;
         self.dvr_recover(live_tv, dvr, events, generation, now)
             .await?;
         self.dvr_expand(live_tv, dvr, now).await?;
@@ -490,11 +577,20 @@ impl LiveTvManager {
         self.dvr_allocate(live_tv, dvr, generation, now).await?;
         self.dvr_start(live_tv, dvr, events, generation, now)
             .await?;
+        self.drain_dvr_observation_events().await?;
         self.dvr_finish(events, generation, now).await?;
         self.dvr_purge_deleted().await?;
         if now - *last_retention >= DVR_RETENTION_INTERVAL_S {
             *last_retention = now;
             self.dvr_retain(now).await?;
+            self.store
+                .prune_dvr_events(
+                    now.saturating_mul(1000)
+                        .saturating_sub(DVR_EVENT_RETENTION_MS),
+                    DVR_EVENT_PRUNE_BATCH,
+                )
+                .await
+                .map_err(store_error)?;
         }
         Ok(())
     }
@@ -634,9 +730,20 @@ impl LiveTvManager {
                     rule.pad_end_s,
                     at_ms,
                 );
+                let event = DvrEventInput {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                    kind: "scheduled".to_owned(),
+                    occurred_at_ms: at_ms,
+                    attempt: None,
+                    actor_user_id: Some(rule.owner_user_id),
+                    reason_code: None,
+                    facts_json: serde_json::json!({"origin": "rule", "rule_id": rule.id})
+                        .to_string(),
+                    actionable: false,
+                };
                 match self
                     .store
-                    .insert_dvr_airing_if_absent(&row)
+                    .insert_dvr_airing_with_event(&row, &event)
                     .await
                     .map_err(store_error)?
                 {
@@ -1430,16 +1537,68 @@ impl LiveTvManager {
         patch: DvrStatePatch,
         fence_generation: Option<i64>,
     ) -> Result<bool, LiveTvError> {
+        let now_ms = unix_seconds().saturating_mul(1000);
+        let (kind, actionable) = match (&patch, to) {
+            (DvrStatePatch::Started { .. }, _) => ("attempt_started", false),
+            (DvrStatePatch::Reattempt { .. }, _) => ("retry_started", true),
+            (_, DvrState::Conflict) => ("conflict", true),
+            (_, DvrState::Withdrawn) => ("withdrawn", true),
+            (_, DvrState::Cancelled) => ("cancelled", false),
+            (_, DvrState::Done) => ("finished", false),
+            (
+                DvrStatePatch::Finished {
+                    stopped_by_user_id: Some(_),
+                    ..
+                },
+                DvrState::Partial,
+            ) => ("finished", false),
+            (_, DvrState::Partial) => ("finished", true),
+            (_, DvrState::Failed) => ("failed", true),
+            (_, DvrState::Missed) => ("missed", true),
+            (_, DvrState::Deleted) => ("deleted", false),
+            _ => ("schedule_changed", false),
+        };
+        let facts = match &patch {
+            DvrStatePatch::Finished { bytes, gap_s, .. } => {
+                serde_json::json!({"bytes": bytes, "gap_s": gap_s})
+            }
+            DvrStatePatch::Reattempt { attempt, gap_s } => {
+                serde_json::json!({"attempt": attempt, "gap_s": gap_s})
+            }
+            _ => serde_json::json!({}),
+        };
+        let event = DvrEventInput {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            kind: kind.to_owned(),
+            occurred_at_ms: now_ms,
+            attempt: match &patch {
+                DvrStatePatch::Started { attempt, .. }
+                | DvrStatePatch::Reattempt { attempt, .. } => Some(*attempt),
+                _ => None,
+            },
+            actor_user_id: match &patch {
+                DvrStatePatch::Finished {
+                    stopped_by_user_id, ..
+                } => *stopped_by_user_id,
+                _ => None,
+            },
+            reason_code: reason.map(str::to_owned),
+            facts_json: facts.to_string(),
+            actionable,
+        };
         self.store
-            .transition_dvr_recording(&DvrTransition {
-                id,
-                from,
-                to,
-                reason,
-                patch,
-                fence_generation,
-                now_ms: unix_seconds().saturating_mul(1000),
-            })
+            .transition_dvr_recording_with_event(
+                &DvrTransition {
+                    id,
+                    from,
+                    to,
+                    reason,
+                    patch,
+                    fence_generation,
+                    now_ms,
+                },
+                &event,
+            )
             .await
             .map_err(store_error)
     }
@@ -1724,10 +1883,21 @@ async fn pump_tuner_fanout(
                         %error,
                         "a recording's file could not be written; that capture is stopping"
                     );
-                    sink.observation
+                    let mut observation = sink
+                        .observation
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .reason_code = Some("disk_write_failed".to_owned());
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if observation.reason_code.is_none() {
+                        observation.pending_events.push_back(LatchedDvrEvent {
+                            event_id: uuid::Uuid::new_v4().to_string(),
+                            kind: "capture_interrupted",
+                            occurred_at_ms: unix_millis(),
+                            reason_code: Some("disk_write_failed".to_owned()),
+                            actionable: true,
+                        });
+                    }
+                    observation.reason_code = Some("disk_write_failed".to_owned());
+                    drop(observation);
                     drop(handle);
                     sink.cancel.cancel();
                 }
@@ -1736,10 +1906,21 @@ async fn pump_tuner_fanout(
                         recording = %sink.recording_id,
                         "a recording's file write stalled; that capture is stopping"
                     );
-                    sink.observation
+                    let mut observation = sink
+                        .observation
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .reason_code = Some("disk_write_timeout".to_owned());
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if observation.reason_code.is_none() {
+                        observation.pending_events.push_back(LatchedDvrEvent {
+                            event_id: uuid::Uuid::new_v4().to_string(),
+                            kind: "capture_interrupted",
+                            occurred_at_ms: unix_millis(),
+                            reason_code: Some("disk_write_timeout".to_owned()),
+                            actionable: true,
+                        });
+                    }
+                    observation.reason_code = Some("disk_write_timeout".to_owned());
+                    drop(observation);
                     drop(handle);
                     sink.cancel.cancel();
                 }

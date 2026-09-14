@@ -21,11 +21,12 @@ use axum::response::Response;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use plurx_core::dvr::{
-    is_first_run, normalise_title, DvrInsertOutcome, DvrKeepMode, DvrMatchMode, DvrOrigin,
-    DvrRecording, DvrRecordingFilter, DvrReminder, DvrReminderState, DvrRule, DvrState,
-    DvrStatePatch, DvrTransition, DVR_LEAD_MAX_S, DVR_MATCH_VALUE_MAX, DVR_MIN_USEFUL_S,
-    DVR_PAD_MAX_S, DVR_RECORDINGS_LIST_PAGE, DVR_REMINDERS_PER_USER_MAX, DVR_RULES_MAX,
-    DVR_RULE_NAME_MAX, DVR_SCHEDULE_DAYS_MAX,
+    is_first_run, normalise_title, DvrAttentionRow, DvrEvent, DvrEventInput, DvrInsertOutcome,
+    DvrKeepMode, DvrMatchMode, DvrOrigin, DvrRecording, DvrRecordingFilter, DvrReminder,
+    DvrReminderState, DvrRule, DvrState, DvrStatePatch, DvrTransition, DVR_EVENT_PAGE_DEFAULT,
+    DVR_EVENT_PAGE_MAX, DVR_LEAD_MAX_S, DVR_MATCH_VALUE_MAX, DVR_MIN_USEFUL_S, DVR_PAD_MAX_S,
+    DVR_RECORDINGS_LIST_PAGE, DVR_REMINDERS_PER_USER_MAX, DVR_RULES_MAX, DVR_RULE_NAME_MAX,
+    DVR_SCHEDULE_DAYS_MAX,
 };
 use plurx_core::store::keys;
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,12 @@ pub(crate) fn router() -> Router<AppState> {
             "/recordings/{id}",
             get(get_recording).delete(delete_recording),
         )
+        .route("/recordings/{id}/events", get(recording_events))
+        .route(
+            "/recordings/{id}/attention/ack",
+            post(acknowledge_attention),
+        )
+        .route("/attention", get(attention))
         .route("/recordings/{id}/restore", post(restore_recording))
         .route("/schedule", get(schedule))
         .route("/rules", get(list_rules).post(create_rule))
@@ -558,6 +565,27 @@ fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+fn lifecycle_event(
+    kind: &str,
+    occurred_at_ms: i64,
+    attempt: Option<i64>,
+    actor_user_id: Option<i64>,
+    reason_code: Option<&str>,
+    facts: serde_json::Value,
+    actionable: bool,
+) -> DvrEventInput {
+    DvrEventInput {
+        event_id: new_id(),
+        kind: kind.to_owned(),
+        occurred_at_ms,
+        attempt,
+        actor_user_id,
+        reason_code: reason_code.map(str::to_owned),
+        facts_json: serde_json::to_string(&facts).unwrap_or_else(|_| "{}".to_owned()),
+        actionable,
+    }
+}
+
 // ---- status ---------------------------------------------------------------
 
 #[derive(Serialize)]
@@ -733,7 +761,20 @@ pub(crate) async fn create_recording(
             "that programme has already finished, or has less than a minute left",
         ));
     }
-    match state.store.insert_dvr_airing_if_absent(&row).await? {
+    let event = lifecycle_event(
+        "scheduled",
+        at_ms,
+        None,
+        Some(user.id),
+        None,
+        serde_json::json!({"origin": row.origin.as_str(), "rule_id": row.rule_id}),
+        false,
+    );
+    match state
+        .store
+        .insert_dvr_airing_with_event(&row, &event)
+        .await?
+    {
         DvrInsertOutcome::Inserted => Ok((StatusCode::CREATED, Json(row))),
         DvrInsertOutcome::Exists(_) => {
             // One airing is one row, so an existing one is the answer rather
@@ -896,6 +937,214 @@ pub(crate) async fn get_recording(
 }
 
 #[derive(Deserialize)]
+pub(crate) struct EventsQuery {
+    before: Option<String>,
+    after: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct EventsPage {
+    rows: Vec<DvrEvent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next: Option<String>,
+    history_complete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    truncated_before_sequence: Option<i64>,
+}
+
+fn sequence_cursor(value: Option<&str>, name: &str) -> Result<Option<i64>, ApiError> {
+    value
+        .map(|raw| {
+            raw.parse::<i64>()
+                .ok()
+                .filter(|value| *value >= 0)
+                .ok_or_else(|| {
+                    ApiError::typed(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_cursor",
+                        format!("{name} must be a non-negative event sequence"),
+                    )
+                })
+        })
+        .transpose()
+}
+
+pub(crate) async fn recording_events(
+    _user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<EventsQuery>,
+) -> Result<Json<EventsPage>, ApiError> {
+    if query.before.is_some() && query.after.is_some() {
+        return Err(ApiError::typed(
+            StatusCode::BAD_REQUEST,
+            "ambiguous_cursor",
+            "before and after are mutually exclusive",
+        ));
+    }
+    if state.store.get_dvr_recording(&id).await?.is_none() {
+        return Err(ApiError::NotFound("no such recording"));
+    }
+    let before = sequence_cursor(query.before.as_deref(), "before")?;
+    let after = sequence_cursor(query.after.as_deref(), "after")?;
+    let limit = query
+        .limit
+        .unwrap_or(DVR_EVENT_PAGE_DEFAULT)
+        .clamp(1, DVR_EVENT_PAGE_MAX);
+    let page = state
+        .store
+        .list_dvr_events(&id, before, after, limit)
+        .await?;
+    let next = (page.rows.len() as i64 >= limit)
+        .then(|| page.rows.last().map(|event| event.sequence.to_string()))
+        .flatten();
+    let history_complete = page
+        .head
+        .as_ref()
+        .is_some_and(|head| !head.history_has_gap && head.pruned_through_sequence == 0);
+    let truncated_before_sequence = page.head.as_ref().and_then(|head| {
+        (head.pruned_through_sequence > 0).then_some(head.pruned_through_sequence)
+    });
+    Ok(Json(EventsPage {
+        rows: page.rows,
+        next,
+        history_complete,
+        truncated_before_sequence,
+    }))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AttentionAckRequest {
+    through_sequence: i64,
+}
+
+#[derive(Serialize)]
+pub(crate) struct AttentionAckResponse {
+    recording_id: String,
+    through_sequence: i64,
+}
+
+pub(crate) async fn acknowledge_attention(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(request): Json<AttentionAckRequest>,
+) -> Result<Json<AttentionAckResponse>, ApiError> {
+    let at_ms = now_ms();
+    let baseline = lifecycle_event(
+        "legacy_outcome",
+        at_ms,
+        None,
+        Some(user.id),
+        Some("history_not_collected"),
+        serde_json::json!({"baseline_created_at_ms": at_ms}),
+        true,
+    );
+    let through_sequence = state
+        .store
+        .acknowledge_dvr_attention(&id, user.id, request.through_sequence, at_ms, &baseline)
+        .await?
+        .ok_or_else(|| {
+            ApiError::typed(
+                StatusCode::BAD_REQUEST,
+                "invalid_attention_sequence",
+                "that sequence is not part of this recording's retained history",
+            )
+        })?;
+    Ok(Json(AttentionAckResponse {
+        recording_id: id,
+        through_sequence,
+    }))
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AttentionQuery {
+    after: Option<String>,
+    limit: Option<i64>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct AttentionPage {
+    rows: Vec<AttentionProjection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next: Option<String>,
+    total: i64,
+}
+
+#[derive(Serialize)]
+pub(crate) struct AttentionProjection {
+    recording: DvrRecording,
+    latest_attention_sequence: i64,
+    latest_attention_at_ms: i64,
+    acknowledged_through_sequence: i64,
+}
+
+impl From<DvrAttentionRow> for AttentionProjection {
+    fn from(row: DvrAttentionRow) -> Self {
+        Self {
+            recording: row.recording,
+            latest_attention_sequence: row.latest_attention_sequence,
+            latest_attention_at_ms: row.latest_attention_at_ms,
+            acknowledged_through_sequence: row.acknowledged_through_sequence,
+        }
+    }
+}
+
+fn parse_attention_cursor(raw: Option<&str>) -> Result<Option<(i64, &str)>, ApiError> {
+    let Some(raw) = raw else { return Ok(None) };
+    let (at, id) = raw.split_once(':').ok_or_else(|| {
+        ApiError::typed(
+            StatusCode::BAD_REQUEST,
+            "invalid_cursor",
+            "invalid attention cursor",
+        )
+    })?;
+    let at = at.parse::<i64>().map_err(|_| {
+        ApiError::typed(
+            StatusCode::BAD_REQUEST,
+            "invalid_cursor",
+            "invalid attention cursor",
+        )
+    })?;
+    if id.is_empty() {
+        return Err(ApiError::typed(
+            StatusCode::BAD_REQUEST,
+            "invalid_cursor",
+            "invalid attention cursor",
+        ));
+    }
+    Ok(Some((at, id)))
+}
+
+pub(crate) async fn attention(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    Query(query): Query<AttentionQuery>,
+) -> Result<Json<AttentionPage>, ApiError> {
+    let limit = query
+        .limit
+        .unwrap_or(DVR_EVENT_PAGE_DEFAULT)
+        .clamp(1, DVR_EVENT_PAGE_MAX);
+    let cursor = parse_attention_cursor(query.after.as_deref())?;
+    let (rows, total) = state
+        .store
+        .list_dvr_attention(user.id, cursor, limit)
+        .await?;
+    let next = (rows.len() as i64 >= limit)
+        .then(|| {
+            rows.last()
+                .map(|row| format!("{}:{}", row.latest_attention_at_ms, row.recording.id))
+        })
+        .flatten();
+    Ok(Json(AttentionPage {
+        rows: rows.into_iter().map(Into::into).collect(),
+        next,
+        total,
+    }))
+}
+
+#[derive(Deserialize)]
 pub(crate) struct DeleteRecordingQuery {
     delete_file: Option<u8>,
 }
@@ -931,24 +1180,45 @@ pub(crate) async fn delete_recording(
     let at_ms = now_ms();
     match row.state {
         state_value if state_value.is_pending() => {
+            let event = lifecycle_event(
+                "cancelled",
+                at_ms,
+                Some(row.attempt),
+                Some(user.id),
+                Some("cancelled"),
+                serde_json::json!({}),
+                false,
+            );
             state
                 .store
-                .transition_dvr_recording(&DvrTransition {
-                    id: &id,
-                    from: DvrState::PENDING,
-                    to: DvrState::Cancelled,
-                    reason: Some("cancelled"),
-                    patch: DvrStatePatch::None,
-                    fence_generation: None,
-                    now_ms: at_ms,
-                })
+                .transition_dvr_recording_with_event(
+                    &DvrTransition {
+                        id: &id,
+                        from: DvrState::PENDING,
+                        to: DvrState::Cancelled,
+                        reason: Some("cancelled"),
+                        patch: DvrStatePatch::None,
+                        fence_generation: None,
+                        now_ms: at_ms,
+                    },
+                    &event,
+                )
                 .await?;
             Ok(StatusCode::NO_CONTENT.into_response())
         }
         DvrState::Recording => {
+            let event = lifecycle_event(
+                "stop_requested",
+                at_ms,
+                Some(row.attempt),
+                Some(user.id),
+                None,
+                serde_json::json!({}),
+                false,
+            );
             let requested = state
                 .store
-                .request_dvr_stop(&id, at_ms, user.id)
+                .request_dvr_stop_with_event(&id, at_ms, user.id, &event)
                 .await?
                 .ok_or(ApiError::NotFound("no such recording"))?;
             Ok((
@@ -970,23 +1240,35 @@ pub(crate) async fn delete_recording(
                     "this recording has a file; repeat the request with ?delete_file=1 to remove it",
                 ));
             }
+            let event = lifecycle_event(
+                "deleted",
+                at_ms,
+                Some(row.attempt),
+                Some(user.id),
+                Some("deleted_by_request"),
+                serde_json::json!({"delete_file": true}),
+                false,
+            );
             state
                 .store
-                .transition_dvr_recording(&DvrTransition {
-                    id: &id,
-                    from: &[
-                        DvrState::Done,
-                        DvrState::Partial,
-                        DvrState::Failed,
-                        DvrState::Missed,
-                        DvrState::Cancelled,
-                    ],
-                    to: DvrState::Deleted,
-                    reason: Some("deleted by request"),
-                    patch: DvrStatePatch::None,
-                    fence_generation: None,
-                    now_ms: at_ms,
-                })
+                .transition_dvr_recording_with_event(
+                    &DvrTransition {
+                        id: &id,
+                        from: &[
+                            DvrState::Done,
+                            DvrState::Partial,
+                            DvrState::Failed,
+                            DvrState::Missed,
+                            DvrState::Cancelled,
+                        ],
+                        to: DvrState::Deleted,
+                        reason: Some("deleted by request"),
+                        patch: DvrStatePatch::None,
+                        fence_generation: None,
+                        now_ms: at_ms,
+                    },
+                    &event,
+                )
                 .await?;
             Ok(StatusCode::NO_CONTENT.into_response())
         }
@@ -996,7 +1278,7 @@ pub(crate) async fn delete_recording(
 /// The only way back from a cancel, and deliberately explicit: rule expansion
 /// will not do it, however many times the rule matches again.
 pub(crate) async fn restore_recording(
-    _user: AuthUser,
+    AuthUser(user): AuthUser,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<DvrRecording>, ApiError> {
@@ -1012,17 +1294,30 @@ pub(crate) async fn restore_recording(
             "that programme has already finished, or has less than a minute left",
         ));
     }
+    let at_ms = now_ms();
+    let event = lifecycle_event(
+        "restored",
+        at_ms,
+        Some(row.attempt),
+        Some(user.id),
+        None,
+        serde_json::json!({}),
+        false,
+    );
     let restored = state
         .store
-        .transition_dvr_recording(&DvrTransition {
-            id: &id,
-            from: &[DvrState::Cancelled],
-            to: DvrState::Scheduled,
-            reason: None,
-            patch: DvrStatePatch::None,
-            fence_generation: None,
-            now_ms: now_ms(),
-        })
+        .transition_dvr_recording_with_event(
+            &DvrTransition {
+                id: &id,
+                from: &[DvrState::Cancelled],
+                to: DvrState::Scheduled,
+                reason: None,
+                patch: DvrStatePatch::None,
+                fence_generation: None,
+                now_ms: at_ms,
+            },
+            &event,
+        )
         .await?;
     if !restored {
         return Err(ApiError::Conflict(

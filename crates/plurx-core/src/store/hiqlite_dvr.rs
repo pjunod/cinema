@@ -21,18 +21,29 @@ use hiqlite::{Param, Row};
 use super::hiqlite::{database_error, validate_sql, HiqliteAuthStore};
 use super::DvrStore;
 use crate::dvr::{
-    DvrInsertOutcome, DvrKeepMode, DvrMatchMode, DvrOrigin, DvrRecording, DvrRecordingFilter,
-    DvrReminder, DvrReminderState, DvrRule, DvrState, DvrStatePatch, DvrTransition,
-    DVR_RECORDINGS_LIST_PAGE, DVR_REMINDERS_PER_USER_MAX, DVR_RULES_MAX, DVR_SCHEMA,
+    DvrAttentionRow, DvrEvent, DvrEventHead, DvrEventInput, DvrEventPage, DvrInsertOutcome,
+    DvrKeepMode, DvrMatchMode, DvrOrigin, DvrRecording, DvrRecordingFilter, DvrReminder,
+    DvrReminderState, DvrRule, DvrState, DvrStatePatch, DvrTransition, DVR_EVENT_PAGE_MAX,
+    DVR_EVENT_PRUNE_BATCH, DVR_EVENT_SCHEMA, DVR_EVENT_SERVER_MAX, DVR_RECORDINGS_LIST_PAGE,
+    DVR_REMINDERS_PER_USER_MAX, DVR_RULES_MAX, DVR_SCHEMA,
 };
 use crate::error::StoreError;
 
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
-    client
-        .txn(migration_statements()?)
-        .await
-        .map_err(database_error)?;
+    let mut statements = migration_statements()?;
+    statements.extend(event_migration_statements()?);
+    client.txn(statements).await.map_err(database_error)?;
     Ok(())
+}
+
+pub(super) fn event_migration_statements() -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    split_schema_statements(DVR_EVENT_SCHEMA)
+        .into_iter()
+        .map(|statement| {
+            validate_sql(&statement)?;
+            Ok((statement, params!()))
+        })
+        .collect()
 }
 
 pub(super) fn migration_statements() -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
@@ -403,6 +414,150 @@ impl TryFrom<RecordingRow> for DvrRecording {
     }
 }
 
+struct EventRow {
+    recording_id: String,
+    sequence: i64,
+    event_id: String,
+    kind: String,
+    occurred_at_ms: i64,
+    attempt: Option<i64>,
+    actor_user_id: Option<i64>,
+    reason_code: Option<String>,
+    facts_json: String,
+}
+
+impl From<&mut Row<'_>> for EventRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            recording_id: row.get("recording_id"),
+            sequence: row.get("sequence"),
+            event_id: row.get("event_id"),
+            kind: row.get("kind"),
+            occurred_at_ms: row.get("occurred_at_ms"),
+            attempt: row.get("attempt"),
+            actor_user_id: row.get("actor_user_id"),
+            reason_code: row.get("reason_code"),
+            facts_json: row.get("facts_json"),
+        }
+    }
+}
+
+impl TryFrom<EventRow> for DvrEvent {
+    type Error = StoreError;
+
+    fn try_from(row: EventRow) -> Result<Self, Self::Error> {
+        Ok(Self {
+            recording_id: row.recording_id,
+            sequence: row.sequence,
+            event_id: row.event_id,
+            kind: row.kind,
+            occurred_at_ms: row.occurred_at_ms,
+            attempt: row.attempt,
+            actor_user_id: row.actor_user_id,
+            reason_code: row.reason_code,
+            facts: serde_json::from_str(&row.facts_json).map_err(|error| {
+                StoreError::Database(format!("invalid DVR event facts: {error}"))
+            })?,
+        })
+    }
+}
+
+struct EventHeadRow {
+    recording_id: String,
+    next_sequence: i64,
+    latest_attention_sequence: i64,
+    latest_attention_at_ms: Option<i64>,
+    history_started_at_ms: i64,
+    history_has_gap: i64,
+    pruned_through_sequence: i64,
+}
+
+impl From<&mut Row<'_>> for EventHeadRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            recording_id: row.get("recording_id"),
+            next_sequence: row.get("next_sequence"),
+            latest_attention_sequence: row.get("latest_attention_sequence"),
+            latest_attention_at_ms: row.get("latest_attention_at_ms"),
+            history_started_at_ms: row.get("history_started_at_ms"),
+            history_has_gap: row.get("history_has_gap"),
+            pruned_through_sequence: row.get("pruned_through_sequence"),
+        }
+    }
+}
+
+impl From<EventHeadRow> for DvrEventHead {
+    fn from(row: EventHeadRow) -> Self {
+        Self {
+            recording_id: row.recording_id,
+            next_sequence: row.next_sequence,
+            latest_attention_sequence: row.latest_attention_sequence,
+            latest_attention_at_ms: row.latest_attention_at_ms,
+            history_started_at_ms: row.history_started_at_ms,
+            history_has_gap: row.history_has_gap != 0,
+            pruned_through_sequence: row.pruned_through_sequence,
+        }
+    }
+}
+
+struct AttentionRowRaw {
+    recording: RecordingRow,
+    latest_attention_sequence: i64,
+    latest_attention_at_ms: i64,
+    acknowledged_through_sequence: i64,
+    total_count: i64,
+}
+
+struct CountRow {
+    count: i64,
+}
+
+impl From<&mut Row<'_>> for CountRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            count: row.get("count"),
+        }
+    }
+}
+
+struct EventIdentityRow {
+    recording_id: String,
+    sequence: i64,
+}
+
+impl From<&mut Row<'_>> for EventIdentityRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            recording_id: row.get("recording_id"),
+            sequence: row.get("sequence"),
+        }
+    }
+}
+
+struct AckRow {
+    through_sequence: i64,
+}
+
+impl From<&mut Row<'_>> for AckRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            through_sequence: row.get("through_sequence"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for AttentionRowRaw {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            recording: RecordingRow::from(&mut *row),
+            latest_attention_sequence: row.get("latest_attention_sequence"),
+            latest_attention_at_ms: row.get("attention_at_ms"),
+            acknowledged_through_sequence: row.get("acknowledged_through_sequence"),
+            total_count: row.get("total_count"),
+        }
+    }
+}
+
 struct ReminderRow {
     id: String,
     user_id: i64,
@@ -550,6 +705,82 @@ fn transition_statement(
         format!("UPDATE dvr_recordings SET {assignments} WHERE {predicate}"),
         binder.values,
     )
+}
+
+fn transition_event_statements(
+    transition: &DvrTransition<'_>,
+    event: &DvrEventInput,
+) -> Vec<(String, hiqlite::Params)> {
+    let mut head = Binder::default();
+    let occurred = head.bind(event.occurred_at_ms);
+    let id = head.bind(transition.id);
+    let states = head.bind_states(transition.from);
+    let mut predicate = format!("r.id={id} AND r.state IN ({states})");
+    if let Some(generation) = transition.fence_generation {
+        predicate.push_str(CONFIG_GENERATION_FENCE);
+        predicate.push_str(&head.bind(generation));
+    }
+    let head_sql = format!(
+        "INSERT OR IGNORE INTO dvr_event_heads
+         (recording_id,next_sequence,latest_attention_sequence,latest_attention_at_ms,
+          history_started_at_ms,history_has_gap,pruned_through_sequence)
+         SELECT r.id,1,0,NULL,{occurred},1,0 FROM dvr_recordings r WHERE {predicate}"
+    );
+
+    let mut insert = Binder::default();
+    let recording_id = insert.bind(transition.id);
+    let event_id = insert.bind(event.event_id.as_str());
+    let kind = insert.bind(event.kind.as_str());
+    let event_at = insert.bind(event.occurred_at_ms);
+    let attempt = insert.bind(event.attempt);
+    let actor = insert.bind(event.actor_user_id);
+    let reason = insert.bind(event.reason_code.as_deref());
+    let facts = insert.bind(event.facts_json.as_str());
+    let states = insert.bind_states(transition.from);
+    let mut predicate = format!(
+        "r.id={recording_id} AND r.state IN ({states}) AND
+         NOT EXISTS(SELECT 1 FROM dvr_events WHERE event_id={event_id})"
+    );
+    if let Some(generation) = transition.fence_generation {
+        predicate.push_str(CONFIG_GENERATION_FENCE);
+        predicate.push_str(&insert.bind(generation));
+    }
+    let insert_sql = format!(
+        "INSERT INTO dvr_events
+         (recording_id,sequence,event_id,kind,occurred_at_ms,attempt,actor_user_id,reason_code,facts_json)
+         SELECT {recording_id},h.next_sequence,{event_id},{kind},{event_at},{attempt},{actor},{reason},{facts}
+           FROM dvr_event_heads h JOIN dvr_recordings r ON r.id=h.recording_id
+          WHERE {predicate}"
+    );
+    let update_sql =
+        "UPDATE dvr_event_heads SET next_sequence=next_sequence+1,
+           latest_attention_sequence=CASE WHEN $1 THEN next_sequence ELSE latest_attention_sequence END,
+           latest_attention_at_ms=CASE WHEN $1 THEN $2 ELSE latest_attention_at_ms END
+         WHERE recording_id=$3 AND next_sequence=(SELECT sequence FROM dvr_events WHERE event_id=$4)"
+            .to_owned();
+    let (transition_sql, transition_params) = transition_statement(
+        transition.id,
+        transition.from,
+        transition.to,
+        transition.reason,
+        &transition.patch,
+        transition.fence_generation,
+        transition.now_ms,
+    );
+    vec![
+        (head_sql, head.values),
+        (insert_sql, insert.values),
+        (
+            update_sql,
+            params!(
+                event.actionable,
+                event.occurred_at_ms,
+                transition.id,
+                event.event_id.as_str()
+            ),
+        ),
+        (transition_sql, transition_params),
+    ]
 }
 
 /// Assemble one schedule page's `SELECT`, with its parameters. Extracted for
@@ -878,6 +1109,83 @@ impl DvrStore for HiqliteAuthStore {
             .ok_or_else(|| StoreError::Database(format!("unknown dvr state `{}`", existing.state)))
     }
 
+    async fn insert_dvr_airing_with_event(
+        &self,
+        row: &DvrRecording,
+        event: &DvrEventInput,
+    ) -> Result<DvrInsertOutcome, StoreError> {
+        if !event.validate() {
+            return Err(StoreError::Database(
+                "invalid DVR lifecycle event".to_owned(),
+            ));
+        }
+        let statements = vec![
+            (format!(
+                "INSERT INTO dvr_recordings ({RECORDING_COLS})
+                 SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
+                        $20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37
+                  WHERE NOT EXISTS(SELECT 1 FROM dvr_recordings
+                    WHERE channel_id=$5 AND airing_start=$8)"
+            ), params!(
+                row.id.as_str(), row.origin.as_str(), row.rule_id.as_deref(),
+                row.requested_by_user_id, row.channel_id.as_str(), row.guide_number.as_str(),
+                row.channel_name.as_str(), row.airing_start, row.airing_end, row.capture_start,
+                row.capture_end, row.title.as_str(), row.episode_title.as_deref(),
+                row.episode.as_deref(), row.synopsis.as_deref(), row.image_url.as_deref(),
+                row.original_air_date.as_deref(), row.series_id.as_deref(),
+                row.programme_id.as_deref(), row.state.as_str(), row.state_reason.as_deref(),
+                row.attempt, row.gap_s, row.late_start_s, row.tuner_owner_node_id.as_deref(),
+                row.path.as_deref(), row.bytes, row.last_progress_ms, row.stop_requested_at_ms,
+                row.stop_requested_by_user_id, row.item_id, row.file_id, row.started_at_ms,
+                row.finished_at_ms, row.stopped_by_user_id, row.created_at_ms, row.updated_at_ms
+            )),
+            ("INSERT OR IGNORE INTO dvr_event_heads
+              (recording_id,next_sequence,latest_attention_sequence,latest_attention_at_ms,
+               history_started_at_ms,history_has_gap,pruned_through_sequence)
+              SELECT $1,1,0,NULL,$2,0,0 FROM dvr_recordings WHERE id=$1".to_owned(),
+             params!(row.id.as_str(), event.occurred_at_ms)),
+            ("INSERT INTO dvr_events
+              (recording_id,sequence,event_id,kind,occurred_at_ms,attempt,actor_user_id,reason_code,facts_json)
+              SELECT $1,h.next_sequence,$2,$3,$4,$5,$6,$7,$8 FROM dvr_event_heads h
+               WHERE h.recording_id=$1 AND NOT EXISTS(SELECT 1 FROM dvr_events WHERE event_id=$2)".to_owned(),
+             params!(row.id.as_str(), event.event_id.as_str(), event.kind.as_str(),
+                 event.occurred_at_ms, event.attempt, event.actor_user_id,
+                 event.reason_code.as_deref(), event.facts_json.as_str())),
+            ("UPDATE dvr_event_heads SET next_sequence=next_sequence+1,
+                latest_attention_sequence=CASE WHEN $1 THEN next_sequence ELSE latest_attention_sequence END,
+                latest_attention_at_ms=CASE WHEN $1 THEN $2 ELSE latest_attention_at_ms END
+              WHERE recording_id=$3 AND next_sequence=(SELECT sequence FROM dvr_events WHERE event_id=$4)".to_owned(),
+             params!(event.actionable, event.occurred_at_ms, row.id.as_str(), event.event_id.as_str())),
+        ];
+        let counts = self
+            .client()
+            .txn(statements)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        if counts.first().copied() == Some(1) {
+            return Ok(DvrInsertOutcome::Inserted);
+        }
+        let existing = self
+            .client()
+            .query_consistent_map::<StateRow, _>(
+                "SELECT state FROM dvr_recordings WHERE channel_id=$1 AND airing_start=$2",
+                params!(row.channel_id.as_str(), row.airing_start),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                StoreError::Database(
+                    "dvr airing was neither inserted nor already present".to_owned(),
+                )
+            })?;
+        DvrState::parse(&existing.state)
+            .map(DvrInsertOutcome::Exists)
+            .ok_or_else(|| StoreError::Database(format!("unknown dvr state `{}`", existing.state)))
+    }
+
     async fn get_dvr_recording(&self, id: &str) -> Result<Option<DvrRecording>, StoreError> {
         Ok(read_recordings(
             self,
@@ -976,6 +1284,29 @@ impl DvrStore for HiqliteAuthStore {
         Ok(changed == 1)
     }
 
+    async fn transition_dvr_recording_with_event(
+        &self,
+        transition: &DvrTransition<'_>,
+        event: &DvrEventInput,
+    ) -> Result<bool, StoreError> {
+        if transition.from.is_empty() {
+            return Ok(false);
+        }
+        if !event.validate() {
+            return Err(StoreError::Database(
+                "invalid DVR lifecycle event".to_owned(),
+            ));
+        }
+        let counts = self
+            .client()
+            .txn(transition_event_statements(transition, event))
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(counts.last().copied() == Some(1))
+    }
+
     /// Two columns, and no others.
     ///
     /// A capture reports its size every thirty seconds while a viewer may press
@@ -1026,6 +1357,60 @@ impl DvrStore for HiqliteAuthStore {
         Ok(read_recordings(
             self,
             format!("SELECT {RECORDING_COLS} FROM dvr_recordings WHERE id = $1"),
+            params!(id),
+        )
+        .await?
+        .into_iter()
+        .next())
+    }
+
+    async fn request_dvr_stop_with_event(
+        &self,
+        id: &str,
+        at_ms: i64,
+        by_user: i64,
+        event: &DvrEventInput,
+    ) -> Result<Option<DvrRecording>, StoreError> {
+        if !event.validate() {
+            return Err(StoreError::Database(
+                "invalid DVR lifecycle event".to_owned(),
+            ));
+        }
+        let statements = vec![
+            ("INSERT OR IGNORE INTO dvr_event_heads
+              (recording_id,next_sequence,latest_attention_sequence,latest_attention_at_ms,
+               history_started_at_ms,history_has_gap,pruned_through_sequence)
+              SELECT id,1,0,NULL,$1,1,0 FROM dvr_recordings
+               WHERE id=$2 AND state='recording' AND stop_requested_at_ms IS NULL".to_owned(),
+             params!(event.occurred_at_ms, id)),
+            ("INSERT INTO dvr_events
+              (recording_id,sequence,event_id,kind,occurred_at_ms,attempt,actor_user_id,reason_code,facts_json)
+              SELECT r.id,h.next_sequence,$1,$2,$3,$4,$5,$6,$7
+                FROM dvr_recordings r JOIN dvr_event_heads h ON h.recording_id=r.id
+               WHERE r.id=$8 AND r.state='recording' AND r.stop_requested_at_ms IS NULL
+                 AND NOT EXISTS(SELECT 1 FROM dvr_events WHERE event_id=$1)".to_owned(),
+             params!(event.event_id.as_str(), event.kind.as_str(), event.occurred_at_ms,
+                 event.attempt, event.actor_user_id, event.reason_code.as_deref(),
+                 event.facts_json.as_str(), id)),
+            ("UPDATE dvr_event_heads SET next_sequence=next_sequence+1,
+                latest_attention_sequence=CASE WHEN $1 THEN next_sequence ELSE latest_attention_sequence END,
+                latest_attention_at_ms=CASE WHEN $1 THEN $2 ELSE latest_attention_at_ms END
+              WHERE recording_id=$3 AND next_sequence=(SELECT sequence FROM dvr_events WHERE event_id=$4)".to_owned(),
+             params!(event.actionable, event.occurred_at_ms, id, event.event_id.as_str())),
+            ("UPDATE dvr_recordings SET stop_requested_at_ms=$1,
+                stop_requested_by_user_id=$2,updated_at_ms=$1
+              WHERE id=$3 AND state='recording' AND stop_requested_at_ms IS NULL".to_owned(),
+             params!(at_ms, by_user, id)),
+        ];
+        self.client()
+            .txn(statements)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(read_recordings(
+            self,
+            format!("SELECT {RECORDING_COLS} FROM dvr_recordings WHERE id=$1"),
             params!(id),
         )
         .await?
@@ -1086,6 +1471,305 @@ impl DvrStore for HiqliteAuthStore {
             )
             .await?;
         Ok(changed == 1)
+    }
+
+    async fn link_dvr_recording_media_with_event(
+        &self,
+        recording_id: &str,
+        item_id: i64,
+        file_id: i64,
+        now_ms: i64,
+        event: &DvrEventInput,
+    ) -> Result<bool, StoreError> {
+        if !event.validate() {
+            return Err(StoreError::Database(
+                "invalid DVR lifecycle event".to_owned(),
+            ));
+        }
+        let statements = vec![
+            ("INSERT OR IGNORE INTO dvr_event_heads
+              (recording_id,next_sequence,latest_attention_sequence,latest_attention_at_ms,
+               history_started_at_ms,history_has_gap,pruned_through_sequence)
+              SELECT id,1,0,NULL,$1,1,0 FROM dvr_recordings
+               WHERE id=$2 AND (item_id IS NOT $3 OR file_id IS NOT $4)".to_owned(),
+             params!(event.occurred_at_ms, recording_id, item_id, file_id)),
+            ("INSERT INTO dvr_events
+              (recording_id,sequence,event_id,kind,occurred_at_ms,attempt,actor_user_id,reason_code,facts_json)
+              SELECT r.id,h.next_sequence,$1,$2,$3,$4,$5,$6,$7
+                FROM dvr_recordings r JOIN dvr_event_heads h ON h.recording_id=r.id
+               WHERE r.id=$8 AND (r.item_id IS NOT $9 OR r.file_id IS NOT $10)
+                 AND NOT EXISTS(SELECT 1 FROM dvr_events WHERE event_id=$1)".to_owned(),
+             params!(event.event_id.as_str(), event.kind.as_str(), event.occurred_at_ms,
+                 event.attempt, event.actor_user_id, event.reason_code.as_deref(),
+                 event.facts_json.as_str(), recording_id, item_id, file_id)),
+            ("UPDATE dvr_event_heads SET next_sequence=next_sequence+1,
+                latest_attention_sequence=CASE WHEN $1 THEN next_sequence ELSE latest_attention_sequence END,
+                latest_attention_at_ms=CASE WHEN $1 THEN $2 ELSE latest_attention_at_ms END
+              WHERE recording_id=$3 AND next_sequence=(SELECT sequence FROM dvr_events WHERE event_id=$4)".to_owned(),
+             params!(event.actionable, event.occurred_at_ms, recording_id, event.event_id.as_str())),
+            ("UPDATE dvr_recordings SET item_id=$1,file_id=$2,updated_at_ms=$3
+              WHERE id=$4 AND (item_id IS NOT $1 OR file_id IS NOT $2)".to_owned(),
+             params!(item_id, file_id, now_ms, recording_id)),
+        ];
+        let counts = self
+            .client()
+            .txn(statements)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(counts.last().copied() == Some(1))
+    }
+
+    async fn append_dvr_observation_event(
+        &self,
+        recording_id: &str,
+        owner_node_id: &str,
+        attempt: i64,
+        event: &DvrEventInput,
+    ) -> Result<bool, StoreError> {
+        if !event.validate() {
+            return Err(StoreError::Database(
+                "invalid DVR lifecycle event".to_owned(),
+            ));
+        }
+        let statements = vec![
+            ("INSERT OR IGNORE INTO dvr_event_heads
+              (recording_id,next_sequence,latest_attention_sequence,latest_attention_at_ms,
+               history_started_at_ms,history_has_gap,pruned_through_sequence)
+              SELECT id,1,0,NULL,$1,1,0 FROM dvr_recordings
+               WHERE id=$2 AND state='recording' AND tuner_owner_node_id=$3 AND attempt=$4".to_owned(),
+             params!(event.occurred_at_ms, recording_id, owner_node_id, attempt)),
+            ("INSERT INTO dvr_events
+              (recording_id,sequence,event_id,kind,occurred_at_ms,attempt,actor_user_id,reason_code,facts_json)
+              SELECT r.id,h.next_sequence,$1,$2,$3,$4,$5,$6,$7
+                FROM dvr_recordings r JOIN dvr_event_heads h ON h.recording_id=r.id
+               WHERE r.id=$8 AND r.state='recording' AND r.tuner_owner_node_id=$9 AND r.attempt=$10
+                 AND NOT EXISTS(SELECT 1 FROM dvr_events WHERE event_id=$1)".to_owned(),
+             params!(event.event_id.as_str(), event.kind.as_str(), event.occurred_at_ms,
+                 event.attempt, event.actor_user_id, event.reason_code.as_deref(),
+                 event.facts_json.as_str(), recording_id, owner_node_id, attempt)),
+            ("UPDATE dvr_event_heads SET next_sequence=next_sequence+1,
+                latest_attention_sequence=CASE WHEN $1 THEN next_sequence ELSE latest_attention_sequence END,
+                latest_attention_at_ms=CASE WHEN $1 THEN $2 ELSE latest_attention_at_ms END
+              WHERE recording_id=$3 AND next_sequence=(SELECT sequence FROM dvr_events WHERE event_id=$4)".to_owned(),
+             params!(event.actionable, event.occurred_at_ms, recording_id, event.event_id.as_str())),
+        ];
+        let counts = self
+            .client()
+            .txn(statements)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(counts.get(1).copied() == Some(1))
+    }
+
+    async fn list_dvr_events(
+        &self,
+        recording_id: &str,
+        before: Option<i64>,
+        after: Option<i64>,
+        limit: i64,
+    ) -> Result<DvrEventPage, StoreError> {
+        let heads = self.client().query_consistent_map::<EventHeadRow, _>(
+            "SELECT recording_id,next_sequence,latest_attention_sequence,latest_attention_at_ms,
+                    history_started_at_ms,history_has_gap,pruned_through_sequence
+               FROM dvr_event_heads WHERE recording_id=$1",
+            params!(recording_id),
+        ).await?;
+        let head = heads.into_iter().next().map(Into::into);
+        let limit = limit.clamp(1, DVR_EVENT_PAGE_MAX);
+        let (sql, values) =
+            if let Some(after) = after {
+                ("SELECT recording_id,sequence,event_id,kind,occurred_at_ms,attempt,actor_user_id,
+                    reason_code,facts_json FROM dvr_events
+               WHERE recording_id=$1 AND sequence>$2 ORDER BY sequence ASC LIMIT $3".to_owned(),
+             params!(recording_id, after, limit))
+            } else {
+                ("SELECT recording_id,sequence,event_id,kind,occurred_at_ms,attempt,actor_user_id,
+                    reason_code,facts_json FROM dvr_events
+               WHERE recording_id=$1 AND sequence<$2 ORDER BY sequence DESC LIMIT $3".to_owned(),
+             params!(recording_id, before.unwrap_or(i64::MAX), limit))
+            };
+        let rows = self
+            .client()
+            .query_consistent_map::<EventRow, _>(sql, values)
+            .await?
+            .into_iter()
+            .map(TryInto::try_into)
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(DvrEventPage { rows, head })
+    }
+
+    async fn acknowledge_dvr_attention(
+        &self,
+        recording_id: &str,
+        user_id: i64,
+        through_sequence: i64,
+        acknowledged_at_ms: i64,
+        legacy_baseline: &DvrEventInput,
+    ) -> Result<Option<i64>, StoreError> {
+        if through_sequence < 0 || !legacy_baseline.validate() {
+            return Ok(None);
+        }
+        let mut statements = Vec::new();
+        if through_sequence == 0 {
+            statements.extend([
+                ("INSERT OR IGNORE INTO dvr_event_heads
+                  (recording_id,next_sequence,latest_attention_sequence,latest_attention_at_ms,
+                   history_started_at_ms,history_has_gap,pruned_through_sequence)
+                  SELECT id,1,0,NULL,$1,1,0 FROM dvr_recordings
+                   WHERE id=$2 AND (state IN ('failed','missed') OR
+                         (state='partial' AND stopped_by_user_id IS NULL))".to_owned(),
+                 params!(legacy_baseline.occurred_at_ms, recording_id)),
+                ("INSERT INTO dvr_events
+                  (recording_id,sequence,event_id,kind,occurred_at_ms,attempt,actor_user_id,reason_code,facts_json)
+                  SELECT h.recording_id,h.next_sequence,$1,$2,$3,$4,$5,$6,$7
+                    FROM dvr_event_heads h WHERE h.recording_id=$8
+                     AND h.next_sequence=1
+                     AND NOT EXISTS(SELECT 1 FROM dvr_events WHERE event_id=$1)".to_owned(),
+                 params!(legacy_baseline.event_id.as_str(), legacy_baseline.kind.as_str(),
+                     legacy_baseline.occurred_at_ms, legacy_baseline.attempt,
+                     legacy_baseline.actor_user_id, legacy_baseline.reason_code.as_deref(),
+                     legacy_baseline.facts_json.as_str(), recording_id)),
+                ("UPDATE dvr_event_heads SET next_sequence=next_sequence+1,
+                    latest_attention_sequence=next_sequence,latest_attention_at_ms=$1
+                  WHERE recording_id=$2 AND next_sequence=(SELECT sequence FROM dvr_events WHERE event_id=$3)".to_owned(),
+                 params!(legacy_baseline.occurred_at_ms, recording_id, legacy_baseline.event_id.as_str())),
+            ]);
+        }
+        statements.push((
+            "INSERT INTO dvr_attention_acks
+             (user_id,recording_id,through_sequence,acknowledged_at_ms)
+             SELECT $1,h.recording_id,
+                    CASE WHEN $2=0 THEN h.latest_attention_sequence ELSE $2 END,$3
+               FROM dvr_event_heads h WHERE h.recording_id=$4
+                AND (CASE WHEN $2=0 THEN h.latest_attention_sequence ELSE $2 END)
+                    BETWEEN 0 AND h.next_sequence-1
+             ON CONFLICT(user_id,recording_id) DO UPDATE SET
+               through_sequence=MAX(through_sequence,excluded.through_sequence),
+               acknowledged_at_ms=CASE WHEN excluded.through_sequence>through_sequence
+                 THEN excluded.acknowledged_at_ms ELSE acknowledged_at_ms END"
+                .to_owned(),
+            params!(user_id, through_sequence, acknowledged_at_ms, recording_id),
+        ));
+        self.client()
+            .txn(statements)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(self.client().query_consistent_map::<AckRow, _>(
+            "SELECT through_sequence FROM dvr_attention_acks WHERE user_id=$1 AND recording_id=$2",
+            params!(user_id, recording_id),
+        ).await?.into_iter().next().map(|row| row.through_sequence))
+    }
+
+    async fn list_dvr_attention(
+        &self,
+        user_id: i64,
+        after: Option<(i64, &str)>,
+        limit: i64,
+    ) -> Result<(Vec<DvrAttentionRow>, i64), StoreError> {
+        let (after_at, after_id) = after.unwrap_or((i64::MAX, ""));
+        let condition = "(r.state='conflict' OR r.state IN ('failed','missed') OR
+             (r.state='partial' AND r.stopped_by_user_id IS NULL) OR
+             COALESCE(h.latest_attention_sequence,0)>COALESCE(a.through_sequence,0))";
+        let sql = format!(
+            "SELECT {RECORDING_COLS},COALESCE(h.latest_attention_sequence,0) AS latest_attention_sequence,
+                    COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms) AS attention_at_ms,
+                    COALESCE(a.through_sequence,0) AS acknowledged_through_sequence,
+                    COUNT(*) OVER() AS total_count
+               FROM dvr_recordings r
+               LEFT JOIN dvr_event_heads h ON h.recording_id=r.id
+               LEFT JOIN dvr_attention_acks a ON a.recording_id=r.id AND a.user_id=$1
+              WHERE {condition}
+                AND (COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms)<$2 OR
+                    (COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms)=$3 AND r.id>$4))
+              ORDER BY COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms) DESC,r.id
+              LIMIT $5"
+        );
+        let raw = self
+            .client()
+            .query_consistent_map::<AttentionRowRaw, _>(
+                sql,
+                params!(
+                    user_id,
+                    after_at,
+                    after_at,
+                    after_id,
+                    limit.clamp(1, DVR_EVENT_PAGE_MAX)
+                ),
+            )
+            .await?;
+        let total = raw.first().map_or(0, |row| row.total_count);
+        let rows = raw
+            .into_iter()
+            .map(|row| {
+                Ok(DvrAttentionRow {
+                    recording: row.recording.try_into()?,
+                    latest_attention_sequence: row.latest_attention_sequence,
+                    latest_attention_at_ms: row.latest_attention_at_ms,
+                    acknowledged_through_sequence: row.acknowledged_through_sequence,
+                })
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        Ok((rows, total))
+    }
+
+    async fn prune_dvr_events(&self, cutoff_ms: i64, limit: i64) -> Result<i64, StoreError> {
+        let counts = self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM dvr_events",
+                params!(),
+            )
+            .await?;
+        let total = counts.first().map_or(0, |row| row.count);
+        let aged = self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM dvr_events WHERE occurred_at_ms<$1",
+                params!(cutoff_ms),
+            )
+            .await?
+            .first()
+            .map_or(0, |row| row.count);
+        let remove = aged
+            .max(total.saturating_sub(DVR_EVENT_SERVER_MAX))
+            .min(limit.clamp(1, DVR_EVENT_PRUNE_BATCH));
+        if remove == 0 {
+            return Ok(0);
+        }
+        let victims = self
+            .client()
+            .query_consistent_map::<EventIdentityRow, _>(
+                "SELECT recording_id,sequence FROM dvr_events
+             ORDER BY occurred_at_ms,event_id LIMIT $1",
+                params!(remove),
+            )
+            .await?;
+        let mut statements = Vec::with_capacity(victims.len() * 2);
+        for victim in &victims {
+            statements.push((
+                "DELETE FROM dvr_events WHERE recording_id=$1 AND sequence=$2".to_owned(),
+                params!(victim.recording_id.as_str(), victim.sequence),
+            ));
+            statements.push((
+                "UPDATE dvr_event_heads SET history_has_gap=1,
+                pruned_through_sequence=MAX(pruned_through_sequence,$1) WHERE recording_id=$2"
+                    .to_owned(),
+                params!(victim.sequence, victim.recording_id.as_str()),
+            ));
+        }
+        self.client()
+            .txn(statements)
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(victims.len() as i64)
     }
 
     async fn list_dvr_reminders(

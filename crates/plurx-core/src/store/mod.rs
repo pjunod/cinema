@@ -2099,6 +2099,14 @@ pub trait DvrStore: Send + Sync + 'static {
         row: &crate::dvr::DvrRecording,
     ) -> Result<crate::dvr::DvrInsertOutcome, StoreError>;
 
+    /// Event-aware form of [`Self::insert_dvr_airing_if_absent`]. The event is
+    /// appended only when this transaction inserts the airing.
+    async fn insert_dvr_airing_with_event(
+        &self,
+        row: &crate::dvr::DvrRecording,
+        event: &crate::dvr::DvrEventInput,
+    ) -> Result<crate::dvr::DvrInsertOutcome, StoreError>;
+
     async fn get_dvr_recording(
         &self,
         id: &str,
@@ -2143,6 +2151,14 @@ pub trait DvrStore: Send + Sync + 'static {
         transition: &crate::dvr::DvrTransition<'_>,
     ) -> Result<bool, StoreError>;
 
+    /// Apply a conditional transition and allocate its event sequence in one
+    /// transaction. A rejected transition writes no event.
+    async fn transition_dvr_recording_with_event(
+        &self,
+        transition: &crate::dvr::DvrTransition<'_>,
+        event: &crate::dvr::DvrEventInput,
+    ) -> Result<bool, StoreError>;
+
     /// Writes `bytes` and `last_progress_ms`, and nothing else, ever.
     async fn progress_dvr_recording(
         &self,
@@ -2161,6 +2177,14 @@ pub trait DvrStore: Send + Sync + 'static {
         by_user: i64,
     ) -> Result<Option<crate::dvr::DvrRecording>, StoreError>;
 
+    async fn request_dvr_stop_with_event(
+        &self,
+        id: &str,
+        at_ms: i64,
+        by_user: i64,
+        event: &crate::dvr::DvrEventInput,
+    ) -> Result<Option<crate::dvr::DvrRecording>, StoreError>;
+
     /// Re-point pending rule rows at the rule that now owns them.
     async fn repoint_dvr_rule_rows(
         &self,
@@ -2176,6 +2200,54 @@ pub trait DvrStore: Send + Sync + 'static {
         file_id: i64,
         now_ms: i64,
     ) -> Result<bool, StoreError>;
+
+    async fn link_dvr_recording_media_with_event(
+        &self,
+        recording_id: &str,
+        item_id: i64,
+        file_id: i64,
+        now_ms: i64,
+        event: &crate::dvr::DvrEventInput,
+    ) -> Result<bool, StoreError>;
+
+    /// Append an owner observation once. The attempt and current owner are
+    /// checked in the same transaction so an abandoned worker cannot publish.
+    async fn append_dvr_observation_event(
+        &self,
+        recording_id: &str,
+        owner_node_id: &str,
+        attempt: i64,
+        event: &crate::dvr::DvrEventInput,
+    ) -> Result<bool, StoreError>;
+
+    async fn list_dvr_events(
+        &self,
+        recording_id: &str,
+        before: Option<i64>,
+        after: Option<i64>,
+        limit: i64,
+    ) -> Result<crate::dvr::DvrEventPage, StoreError>;
+
+    /// Advance one user's review position. A zero sequence may create the
+    /// supplied explicit legacy baseline for a pre-ledger terminal outcome.
+    async fn acknowledge_dvr_attention(
+        &self,
+        recording_id: &str,
+        user_id: i64,
+        through_sequence: i64,
+        acknowledged_at_ms: i64,
+        legacy_baseline: &crate::dvr::DvrEventInput,
+    ) -> Result<Option<i64>, StoreError>;
+
+    async fn list_dvr_attention(
+        &self,
+        user_id: i64,
+        after: Option<(i64, &str)>,
+        limit: i64,
+    ) -> Result<(Vec<crate::dvr::DvrAttentionRow>, i64), StoreError>;
+
+    /// Delete at most `limit` oldest rows outside the age/server ceilings.
+    async fn prune_dvr_events(&self, cutoff_ms: i64, limit: i64) -> Result<i64, StoreError>;
 
     async fn list_dvr_reminders(
         &self,

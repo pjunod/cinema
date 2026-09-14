@@ -92,7 +92,8 @@ const LIBRARY_CHANNELS_SCHEMA_VERSION: i64 = 35;
 const LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION: i64 = 36;
 const DVR_SCHEMA_VERSION: i64 = 37;
 const SUBJECT_SCHEMA_VERSION: i64 = 38;
-pub const AUTH_SCHEMA_VERSION: i64 = SUBJECT_SCHEMA_VERSION;
+const DVR_EVENT_SCHEMA_VERSION: i64 = 39;
+pub const AUTH_SCHEMA_VERSION: i64 = DVR_EVENT_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -131,6 +132,7 @@ const OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE: i64 = RECOVERY_EPOCH_SCHEM
 const LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE: i64 = OFFLINE_RECOVERY_CLAIM_SCHEMA_VERSION;
 const LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_CHANNELS_SCHEMA_VERSION;
 const DVR_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION;
+const DVR_EVENT_SCHEMA_MIGRATION_SOURCE: i64 = SUBJECT_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -2432,6 +2434,23 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(DVR_SCHEMA_VERSION, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(DVR_EVENT_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_dvr::event_migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 \
+                         WHERE singleton=1 AND schema_version=$3"
+                            .to_owned(),
+                        params!(
+                            DVR_EVENT_SCHEMA_VERSION,
+                            now,
+                            DVR_EVENT_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(DVR_EVENT_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -4190,7 +4209,10 @@ fn schema_migration_action(
         | LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE
         | LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE
         | DVR_SCHEMA_MIGRATION_SOURCE
-        | DVR_SCHEMA_VERSION => Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version)),
+        | DVR_SCHEMA_VERSION
+        | DVR_EVENT_SCHEMA_MIGRATION_SOURCE => {
+            Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
+        }
         version => Err(StoreError::Migration(format!(
             "cluster schema {version} cannot migrate to voter schema {}",
             supported.schema_version

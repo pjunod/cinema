@@ -145,6 +145,118 @@ CREATE UNIQUE INDEX IF NOT EXISTS dvr_reminders_user_airing
 CREATE INDEX IF NOT EXISTS dvr_reminders_due ON dvr_reminders(state, airing_start);
 "#;
 
+/// Append-only DVR lifecycle history and per-user review position.
+///
+/// This is a separate migration from [`DVR_SCHEMA`]: that schema shipped as
+/// SQLite v57 / replicated v37 and must remain byte-for-byte stable. Event
+/// sequence allocation is always performed in the same transaction as the
+/// event-producing state change.
+pub(crate) const DVR_EVENT_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS dvr_event_heads (
+    recording_id TEXT PRIMARY KEY REFERENCES dvr_recordings(id) ON DELETE CASCADE,
+    next_sequence INTEGER NOT NULL CHECK (next_sequence >= 1),
+    latest_attention_sequence INTEGER NOT NULL DEFAULT 0,
+    latest_attention_at_ms INTEGER,
+    history_started_at_ms INTEGER NOT NULL,
+    history_has_gap INTEGER NOT NULL DEFAULT 0 CHECK (history_has_gap IN (0,1)),
+    pruned_through_sequence INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS dvr_events (
+    recording_id TEXT NOT NULL REFERENCES dvr_recordings(id) ON DELETE CASCADE,
+    sequence INTEGER NOT NULL CHECK (sequence >= 1),
+    event_id TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL,
+    occurred_at_ms INTEGER NOT NULL,
+    attempt INTEGER,
+    actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+    reason_code TEXT,
+    facts_json TEXT NOT NULL CHECK (length(facts_json) <= 4096),
+    PRIMARY KEY (recording_id, sequence)
+) STRICT;
+CREATE INDEX IF NOT EXISTS dvr_events_recent
+    ON dvr_events(occurred_at_ms DESC, event_id DESC);
+
+CREATE TABLE IF NOT EXISTS dvr_attention_acks (
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    recording_id TEXT NOT NULL REFERENCES dvr_recordings(id) ON DELETE CASCADE,
+    through_sequence INTEGER NOT NULL CHECK (through_sequence >= 0),
+    acknowledged_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (user_id, recording_id)
+) STRICT;
+"#;
+
+pub const DVR_EVENT_PAGE_DEFAULT: i64 = 50;
+pub const DVR_EVENT_PAGE_MAX: i64 = 100;
+pub const DVR_EVENT_FACTS_MAX: usize = 4096;
+pub const DVR_EVENT_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
+pub const DVR_EVENT_SERVER_MAX: i64 = 100_000;
+pub const DVR_EVENT_PRUNE_BATCH: i64 = 1_000;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DvrEventInput {
+    pub event_id: String,
+    pub kind: String,
+    pub occurred_at_ms: i64,
+    pub attempt: Option<i64>,
+    pub actor_user_id: Option<i64>,
+    pub reason_code: Option<String>,
+    /// A bounded JSON object. It is persisted as supplied so replicated voters
+    /// never serialize a map in different orders.
+    pub facts_json: String,
+    pub actionable: bool,
+}
+
+impl DvrEventInput {
+    pub fn validate(&self) -> bool {
+        !self.event_id.is_empty()
+            && self.event_id.len() <= 128
+            && !self.kind.is_empty()
+            && self.kind.len() <= 64
+            && self.facts_json.len() <= DVR_EVENT_FACTS_MAX
+            && serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&self.facts_json)
+                .is_ok()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DvrEvent {
+    pub recording_id: String,
+    pub sequence: i64,
+    pub event_id: String,
+    pub kind: String,
+    pub occurred_at_ms: i64,
+    pub attempt: Option<i64>,
+    pub actor_user_id: Option<i64>,
+    pub reason_code: Option<String>,
+    pub facts: serde_json::Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DvrEventHead {
+    pub recording_id: String,
+    pub next_sequence: i64,
+    pub latest_attention_sequence: i64,
+    pub latest_attention_at_ms: Option<i64>,
+    pub history_started_at_ms: i64,
+    pub history_has_gap: bool,
+    pub pruned_through_sequence: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DvrEventPage {
+    pub rows: Vec<DvrEvent>,
+    pub head: Option<DvrEventHead>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DvrAttentionRow {
+    pub recording: DvrRecording,
+    pub latest_attention_sequence: i64,
+    pub latest_attention_at_ms: i64,
+    pub acknowledged_through_sequence: i64,
+}
+
 /// How a rule decides a guide programme is one of its episodes.
 ///
 /// Two modes rather than one because the two guide sources differ in what

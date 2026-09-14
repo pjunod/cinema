@@ -493,8 +493,18 @@ impl<'a> PublicationStore<'a> {
         file_id: i64,
         now_ms: i64,
     ) -> Result<bool, StoreError> {
+        let event = crate::dvr::DvrEventInput {
+            event_id: uuid::Uuid::new_v4().to_string(),
+            kind: "media_linked".to_owned(),
+            occurred_at_ms: now_ms,
+            attempt: None,
+            actor_user_id: None,
+            reason_code: None,
+            facts_json: serde_json::json!({"item_id": item_id, "file_id": file_id}).to_string(),
+            actionable: false,
+        };
         self.store
-            .link_dvr_recording_media(recording_id, item_id, file_id, now_ms)
+            .link_dvr_recording_media_with_event(recording_id, item_id, file_id, now_ms, &event)
             .await
     }
 
