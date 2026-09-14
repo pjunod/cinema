@@ -27,8 +27,8 @@ presentation contract around them.
 
 | Package | State | Evidence or next boundary |
 |---|---|---|
-| S00 isolated base and compiler | in progress | independent clone at `28ae8163`; pinned Rust 1.97.1 workspace check running before Rust edits |
-| S01 blank-list repair | queued | decode the real `{rows, next}` recordings envelope; preserve stale data and expose Load more |
+| S00 isolated base and compiler | complete | independent clone at `28ae8163`; pinned Rust 1.97.1 workspace check passed before Rust edits |
+| S01 blank-list repair | built; final evidence pending | web, Apple and Android decode the real `{rows, next}` envelope; web preserves stale rows and exposes Load more; regression fixtures written but not run |
 | S02 capture observation and overview | queued | bounded owner observations, shared projection and `/api/v1/dvr/overview` |
 | S03 lifecycle ledger and attention | queued | next SQLite/replicated migrations, atomic events, pagination, pruning and per-user acknowledgments |
 | S04 web layouts and controller | queued | shared poller, exact-airing marks, Activity master/detail and canonical `#/recordings` |
@@ -61,4 +61,3 @@ Siri Remote or Google TV focus, shared storage on every node, or two-client
 convergence. Those observations remain explicit follow-up evidence; this
 page will not turn a simulator, fixture or compiler result into a device
 claim.
-

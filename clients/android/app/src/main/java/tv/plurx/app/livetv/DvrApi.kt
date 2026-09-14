@@ -161,6 +161,12 @@ data class DvrSchedule(
 )
 
 @Serializable
+data class DvrRecordingsPage(
+    val rows: List<DvrRecording> = emptyList(),
+    val next: String? = null,
+)
+
+@Serializable
 data class DvrHolderSink(val recording_id: String, val title: String, val ends_at: Long)
 
 /** One channel whose transport is holding a tuner, and what is writing to it. */
@@ -345,7 +351,10 @@ class DvrApi(origin: String, private val token: String) {
      * `deleted`, which is the server's own default rather than a filter this
      * client invents.
      */
-    suspend fun recordings(states: List<String> = emptyList()): List<DvrRecording> =
+    suspend fun recordingsPage(
+        states: List<String> = emptyList(),
+        after: String? = null,
+    ): DvrRecordingsPage =
         Net.json.decodeFromString(
             request(
                 url("recordings").newBuilder()
@@ -353,10 +362,14 @@ class DvrApi(origin: String, private val token: String) {
                         if (states.isNotEmpty()) {
                             addQueryParameter("state", states.joinToString(","))
                         }
+                        if (after != null) addQueryParameter("after", after)
                     }
                     .build(),
             ).body,
         )
+
+    suspend fun recordings(states: List<String> = emptyList()): List<DvrRecording> =
+        recordingsPage(states).rows
 
     /**
      * Record one airing from the guide. Two viewers pressing Record on the same

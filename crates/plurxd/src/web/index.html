@@ -4298,6 +4298,7 @@ function clearLocalSession(expectedGeneration,notice){
   PAGE_RENDER_GENERATION++;
   clearInterval(PAGE_TIMER); PAGE_TIMER=null;
   ACTIVITY_SNAPSHOT=null; ACTIVITY_DETAIL_BUSY=0;
+  Object.assign(ACTIVITY_DVR,{rows:[],next:null,loaded:false,error:null,loading:false});
   SETTINGS=null; TRAKT=null; TRAKT_EDIT=false; SETTINGS_TICKING=null; SETTINGS_DATA={};
   SETTINGS_LOADED.clear(); SETTINGS_LOADS.clear();
   LOGS_RUN=null; CLUSTER_LOGS_RUN=null;
@@ -14079,7 +14080,7 @@ async function viewActivity(generation=++PAGE_RENDER_GENERATION){
     <h2 class="section">Library</h2><h2 class="section">Trakt</h2>`);
   setPagePhase("#/activity",generation,"shell");
   if(ACTIVITY_SNAPSHOT){
-    paintActivityBody(ACTIVITY_SNAPSHOT);
+    paintActivityBody(ACTIVITY_SNAPSHOT,ACTIVITY_DVR.rows,ACTIVITY_DVR);
     setPagePhase("#/activity",generation,"content");
   }
   await renderActivityBody(generation);
@@ -14544,6 +14545,17 @@ function paintAnalysis(snapshot){
   }
 }
 let ACTIVITY_DETAIL_BUSY=0, ACTIVITY_SNAPSHOT=null;
+const ACTIVITY_DVR={rows:[],next:null,loaded:false,error:null,loading:false};
+// `/dvr/recordings` deliberately has its own page envelope. Schedule is
+// `{conflicts,rows}` and rules are an array, so accepting any object with an
+// array somewhere inside it would hide a server/client contract mismatch.
+function dvrRecordingsPage(value){
+  if(!value||typeof value!=="object"||Array.isArray(value)||!Array.isArray(value.rows))
+    throw new Error("The recording list response is invalid.");
+  if(value.next!=null&&(typeof value.next!=="string"||value.next.length===0))
+    throw new Error("The recording list cursor is invalid.");
+  return {rows:value.rows,next:value.next||null};
+}
 function activityNodeFailures(d){
   return (d.activity_nodes||[]).filter(node=>node.status&&node.status!=="answered");
 }
@@ -14761,9 +14773,13 @@ async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
   // The running captures ride beside the detail read rather than after it:
   // `/activity` describes them in the pill's words but carries no recording
   // id, and a Stop without an id is a button that cannot be pressed.
-  let d, recording=[];
-  try{ [d,recording]=await Promise.all([api("/activity/detail"),
-    api("/dvr/recordings?state=recording").catch(()=>[])]); }
+  let detail,recording;
+  try{
+    [detail,recording]=await Promise.all([
+      api("/activity/detail"),
+      api("/dvr/recordings?state=recording").then(value=>({value}),error=>({error})),
+    ]);
+  }
   catch(e){
     if(e&&e.status===401) return;
     if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
@@ -14780,8 +14796,18 @@ async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
     setPagePhase("#/activity",generation,"content"); setPagePhase("#/activity",generation,"settled"); return;
   }
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
+  const d=detail;
   ACTIVITY_SNAPSHOT=d;
-  paintActivityBody(d,Array.isArray(recording)?recording:[]);
+  try{
+    if(recording.error) throw recording.error;
+    const page=dvrRecordingsPage(recording.value);
+    ACTIVITY_DVR.rows=page.rows; ACTIVITY_DVR.next=page.next;
+    ACTIVITY_DVR.loaded=true; ACTIVITY_DVR.error=null;
+  }catch(e){
+    ACTIVITY_DVR.error=e&&e.message?e.message:"The recording list could not be loaded.";
+  }
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
+  paintActivityBody(d,ACTIVITY_DVR.rows,ACTIVITY_DVR);
   setPageFailure("#/activity",generation,null);
   setPagePhase("#/activity",generation,"content");
   setPagePhase("#/activity",generation,"settled");
@@ -14789,7 +14815,7 @@ async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
     if(ACTIVITY_DETAIL_BUSY===generation) ACTIVITY_DETAIL_BUSY=0;
   }
 }
-function paintActivityBody(d,recording=[]){
+function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:null}){
   // S2's consumer check. This table read `d.sessions`, which is the transcode
   // manager's list — so it showed transcodes and HLS copy-remuxes (mislabelled
   // as transcodes) and missed direct play and progressive remux entirely. It
@@ -14867,7 +14893,7 @@ function paintActivityBody(d,recording=[]){
       ? `<table class="np"><thead><tr><th>Title</th><th>User</th>${attributed?"<th>Node</th>":""}<th>Stream</th><th>Started</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
       : `<div class="empty">Nothing streaming right now. Every delivery is listed here — direct play, remux and both HLS kinds.</div>`}
     ${liveTvActivityRows(d.live_tv,nodeNames)}
-    ${dvrActivityRows(recording,nodeNames)}
+    ${dvrActivityRows(recording,nodeNames,dvrState)}
     ${d.analysis?`<h2 class="section">Content analysis</h2>${analysisSummaryCard(d.analysis,"activity")}${analysisLiveProgress(d.analysis,nodeNames)}`:""}
     <h2 class="section">Pre-transcoding</h2>
     ${produce}
@@ -14905,11 +14931,14 @@ function liveTvActivityRows(rows,nodeNames){
 // and nothing else: `stopSession` and `DELETE /activity/sessions/{id}` are the
 // transcode and VOD verb, a Live TV viewer row has no Stop at all, and a
 // capture is neither of those things.
-function dvrActivityRows(rows,nodeNames){
-  if(!Array.isArray(rows)||rows.length===0) return "";
+function dvrActivityRows(rows,nodeNames,state={loaded:true,error:null,next:null}){
+  if(!Array.isArray(rows)) rows=[];
+  if(rows.length===0&&!state.error&&state.loaded) return "";
   const now=liveTvNowSeconds();
-  return `<h2 class="section">Recording</h2>
-    <div class="tbl"><table><thead><tr><th>Programme</th><th>Channel</th><th>Owner</th>
+  const notice=state.error
+    ?`<div class="clrefusal" role="status"><b>${state.loaded?"Recording status is stale":"Recording status is unavailable"}</b> ${esc(state.error)}</div>`
+    :"";
+  const table=rows.length?`<div class="tbl"><table><thead><tr><th>Programme</th><th>Channel</th><th>Owner</th>
       <th>Progress</th><th>Started</th><th></th></tr></thead><tbody>
       ${rows.map(row=>{
         const percent=Math.round(PlurxLiveTv.dvrCaptureProgress(row,now)*100);
@@ -14923,7 +14952,27 @@ function dvrActivityRows(rows,nodeNames){
           ?'<span class="muted">stopping…</span>'
           :`<button class="ghost sm" onclick="stopDvrRecording(${esc(JSON.stringify(row.id))})">Stop</button>`}</td></tr>`;
       }).join("")}
-    </tbody></table></div>`;
+    </tbody></table></div>`:`<div class="empty">No active recordings were confirmed.</div>`;
+  const more=state.next?`<div class="row" style="justify-content:flex-end"><button class="ghost sm" type="button" onclick="loadMoreActivityDvr()"${state.loading?" disabled":""}>${state.loading?"Loading…":"Load more"}</button></div>`:"";
+  return `<h2 class="section">Recording</h2>${notice}${table}${more}`;
+}
+async function loadMoreActivityDvr(){
+  if(!ACTIVITY_DVR.next||ACTIVITY_DVR.loading) return;
+  const generation=PAGE_RENDER_GENERATION, cursor=ACTIVITY_DVR.next;
+  ACTIVITY_DVR.loading=true;
+  try{
+    const page=dvrRecordingsPage(await api(`/dvr/recordings?state=recording&after=${encodeURIComponent(cursor)}`));
+    if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
+    const seen=new Set(ACTIVITY_DVR.rows.map(row=>row.id));
+    ACTIVITY_DVR.rows=ACTIVITY_DVR.rows.concat(page.rows.filter(row=>!seen.has(row.id)));
+    ACTIVITY_DVR.next=page.next; ACTIVITY_DVR.error=null; ACTIVITY_DVR.loaded=true;
+  }catch(e){
+    ACTIVITY_DVR.error=e&&e.message?e.message:"The next recording page could not be loaded.";
+  }finally{
+    ACTIVITY_DVR.loading=false;
+    if(generation===PAGE_RENDER_GENERATION&&location.hash==="#/activity"&&ACTIVITY_SNAPSHOT)
+      paintActivityBody(ACTIVITY_SNAPSHOT,ACTIVITY_DVR.rows,ACTIVITY_DVR);
+  }
 }
 // 202, not 204: the capture stops when the owner's next tick closes the file,
 // and only the owner may write the terminal state. So the button asks, and
@@ -15755,7 +15804,8 @@ const LIVE_TV={channels:[],serial:0,hls:null,timer:null,guideTimer:null,polling:
 // and again after every mutation — never polled, because nothing here changes
 // except when somebody presses something or a capture opens, and both of those
 // already reach the page.
-const LIVE_TV_DVR={status:null,schedule:null,reminders:[],library:null,rules:null,serial:0};
+const LIVE_TV_DVR={status:null,schedule:null,reminders:[],library:null,libraryNext:null,
+  libraryError:null,libraryLoading:false,rules:null,serial:0};
 function liveTvNow(){
   return performance.now();
 }
@@ -16870,13 +16920,34 @@ function liveTvSetRecordingsTab(tab){
   if(next==="library") liveTvLoadRecordings("library","/dvr/recordings?state=done,partial");
   if(next==="rules") liveTvLoadRecordings("rules","/dvr/rules");
 }
-async function liveTvLoadRecordings(key,path){
+async function liveTvLoadRecordings(key,path,append=false){
   const generation=PAGE_RENDER_GENERATION, route=location.hash;
-  let rows=null;
-  try{ rows=await api(path,{signal:AbortSignal.timeout(20000)}); }catch(e){ rows=null; }
+  if(key==="library") LIVE_TV_DVR.libraryLoading=true;
+  let answer=null, failure=null;
+  try{ answer=await api(path,{signal:AbortSignal.timeout(20000)}); }catch(e){ failure=e; }
   if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
-  LIVE_TV_DVR[key]=Array.isArray(rows)?rows:[];
+  if(key==="rules"){
+    // Rules intentionally remain an array. They do not inherit the recordings
+    // envelope merely because both lists happen to sit in one panel.
+    LIVE_TV_DVR.rules=Array.isArray(answer)?answer:[];
+  }else{
+    try{
+      if(failure) throw failure;
+      const page=dvrRecordingsPage(answer);
+      const prior=append&&Array.isArray(LIVE_TV_DVR.library)?LIVE_TV_DVR.library:[];
+      const seen=new Set(prior.map(row=>row.id));
+      LIVE_TV_DVR.library=prior.concat(page.rows.filter(row=>!seen.has(row.id)));
+      LIVE_TV_DVR.libraryNext=page.next; LIVE_TV_DVR.libraryError=null;
+    }catch(e){
+      LIVE_TV_DVR.libraryError=e&&e.message?e.message:"The recordings could not be loaded.";
+    }
+    LIVE_TV_DVR.libraryLoading=false;
+  }
   renderLiveTvChannels();
+}
+function liveTvLoadMoreRecordings(){
+  if(!LIVE_TV_DVR.libraryNext||LIVE_TV_DVR.libraryLoading) return;
+  return liveTvLoadRecordings("library",`/dvr/recordings?state=done,partial&after=${encodeURIComponent(LIVE_TV_DVR.libraryNext)}`,true);
 }
 const DVR_STATE_LABEL={scheduled:"Scheduled",conflict:"No tuner",withdrawn:"Withdrawn",stale:"Programme moved",
   recording:"Recording",done:"Recorded",partial:"Recorded with a gap",failed:"Failed",missed:"Missed",
@@ -16903,8 +16974,11 @@ function liveTvEmptyRecs(text){
 function liveTvLibraryRows(){
   const rows=LIVE_TV_DVR.library;
   if(rows===null) return liveTvEmptyRecs("Loading recordings…");
-  if(!rows.length) return liveTvEmptyRecs("Nothing has been recorded yet.");
-  return rows.map(row=>{
+  const notice=LIVE_TV_DVR.libraryError
+    ?`<div class="clrefusal" role="status"><b>${rows.length?"Showing the last successful recording list":"Recordings are unavailable"}</b> ${esc(LIVE_TV_DVR.libraryError)}</div>`
+    :"";
+  if(!rows.length) return notice||liveTvEmptyRecs("Nothing has been recorded yet.");
+  const list=rows.map(row=>{
     // A finished recording is an ordinary library item once the scan has
     // linked it, and it belongs on the ordinary item page — this list is a way
     // in, not a second player.
@@ -16914,6 +16988,9 @@ function liveTvLibraryRows(){
         ${row.state==="partial"?`<span class="why">${esc(row.state_reason||"Captured with a gap")}</span>`:""}</span>
       <span class="acts"><button type="button" onclick="liveTvDeleteRecording(${esc(JSON.stringify(row.id))},${esc(JSON.stringify(row.title))})">Delete</button></span></div>`;
   }).join("");
+  const more=LIVE_TV_DVR.libraryNext
+    ?`<div class="row" style="justify-content:flex-end"><button type="button" onclick="liveTvLoadMoreRecordings()"${LIVE_TV_DVR.libraryLoading?" disabled":""}>${LIVE_TV_DVR.libraryLoading?"Loading…":"Load more"}</button></div>`:"";
+  return notice+list+more;
 }
 function liveTvScheduleRows(){
   const schedule=LIVE_TV_DVR.schedule;

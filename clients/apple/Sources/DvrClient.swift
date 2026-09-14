@@ -153,6 +153,11 @@ struct DvrSchedule: Decodable, Sendable {
     let rows: [DvrRecording]
 }
 
+struct DvrRecordingsPage: Decodable, Sendable {
+    let rows: [DvrRecording]
+    let next: String?
+}
+
 struct DvrSlots: Decodable, Sendable {
     let max: Int
     let reserve: Int
@@ -354,11 +359,19 @@ final class DvrAPI: @unchecked Sendable {
         return try decode(DvrSchedule.self, data: await request("dvr/schedule" + query).0)
     }
 
+    func recordingsPage(states: [DvrState], after: String? = nil) async throws -> DvrRecordingsPage {
+        var query: [URLQueryItem] = states.isEmpty
+            ? []
+            : [URLQueryItem(name: "state", value: states.map(\.rawValue).joined(separator: ","))]
+        if let after { query.append(URLQueryItem(name: "after", value: after)) }
+        var components = URLComponents()
+        components.queryItems = query
+        return try decode(DvrRecordingsPage.self,
+                          data: await request("dvr/recordings" + (components.percentEncodedQuery.map { "?" + $0 } ?? "")).0)
+    }
+
     func recordings(states: [DvrState]) async throws -> [DvrRecording] {
-        let query = states.isEmpty
-            ? ""
-            : "?state=" + states.map(\.rawValue).joined(separator: ",")
-        return try decode([DvrRecording].self, data: await request("dvr/recordings" + query).0)
+        try await recordingsPage(states: states).rows
     }
 
     /// Record one airing. Two people pressing Record on the same cell both
