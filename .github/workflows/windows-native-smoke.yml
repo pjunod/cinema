@@ -1,0 +1,48 @@
+name: Windows native smoke
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-native-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Windows boot, playback, control, and teardown
+    runs-on: [self-hosted, Windows, X64, lab, ffmpeg-6]
+    timeout-minutes: 30
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      - name: Build the native server candidate
+        shell: pwsh
+        run: cargo build --workspace --release --locked --exclude plurx-cluster-check
+      - name: Resolve the pinned media tools
+        id: media
+        shell: pwsh
+        run: |
+          $ffmpeg = if ($env:PLURX_FFMPEG) { $env:PLURX_FFMPEG } else { (Get-Command ffmpeg.exe -ErrorAction Stop).Source }
+          $ffprobe = if ($env:PLURX_FFPROBE) { $env:PLURX_FFPROBE } else { (Get-Command ffprobe.exe -ErrorAction Stop).Source }
+          "ffmpeg=$ffmpeg" >> $env:GITHUB_OUTPUT
+          "ffprobe=$ffprobe" >> $env:GITHUB_OUTPUT
+      - name: Exercise native filesystem, HTTP, ffmpeg, and Job Object behavior
+        shell: pwsh
+        run: >-
+          scripts/windows-smoke.ps1
+          -Plurxd target/release/plurxd.exe
+          -Ffmpeg '${{ steps.media.outputs.ffmpeg }}'
+          -Ffprobe '${{ steps.media.outputs.ffprobe }}'
+          -WorkRoot "$env:RUNNER_TEMP/plurx-windows-smoke"
+      - name: Retain the native smoke transcript
+        if: always()
+        uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
+        with:
+          name: windows-native-smoke
+          path: |
+            ${{ runner.temp }}/plurx-windows-smoke/plurxd.stdout.log
+            ${{ runner.temp }}/plurx-windows-smoke/plurxd.stderr.log
+          if-no-files-found: warn
+          retention-days: 14
