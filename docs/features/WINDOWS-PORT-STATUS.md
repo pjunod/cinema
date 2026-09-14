@@ -67,9 +67,10 @@ behavior; those remain red until their native evidence is recorded above.
 
 ## 5. Known blockers — infrastructure, not hidden scope
 
-- No native Windows runner is currently registered in Forgejo. A manually
-  dispatched workflow and PowerShell smoke are ready for the first runner with
-  the `Windows`, `X64`, `lab`, and `ffmpeg-6` labels.
+- No native Windows runner is currently registered in Forgejo. The PowerShell
+  smoke harness is ready; add its manually dispatched workflow only after a
+  real runner with the `Windows`, `X64`, `lab`, and `ffmpeg-6` labels is
+  registered in `validation/runner-fleet.toml`.
 - An ARM Windows 11 VMware guest exists on the checkout host, but x64 emulation
   is not a substitute for the missing NVIDIA/Intel x64 hardware receipts. A
   headless start on 2026-09-13 stopped at VMware's encrypted-VM password

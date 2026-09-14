@@ -139,15 +139,26 @@ lane also performs a release build and retains
 MSVC type and linkage compatibility, including the embedded long-path-aware
 manifest. It is not runtime evidence.
 
-`.github/workflows/windows-native-smoke.yml` is the native runtime lane. It is
-manual until a self-hosted runner carries the labels `Windows`, `X64`, `lab`,
-and `ffmpeg-6`. On that runner, `scripts/windows-smoke.ps1` creates a fixture,
-boots a fresh server, creates an admin and library, waits for scan, reads an
-exact ranged direct-play response, starts software HLS, drives a control hold
-and resume, sends Ctrl-C, and refuses any leftover ffmpeg/ffprobe process. The
-workflow retains both server logs. Do not replace that receipt with a
-cross-compile claim; do not put this job in ordinary fan-out while no matching
-runner exists.
+`scripts/windows-smoke.ps1` is the native runtime harness. On a Windows x64
+host with the pinned Rust toolchain and FFmpeg 6, build the release workspace
+and run:
+
+```powershell
+scripts/windows-smoke.ps1 `
+  -Plurxd target/release/plurxd.exe `
+  -Ffmpeg C:\path\to\ffmpeg.exe `
+  -Ffprobe C:\path\to\ffprobe.exe `
+  -WorkRoot $env:TEMP\plurx-windows-smoke
+```
+
+The harness creates a fixture, boots a fresh server, creates an admin and
+library, waits for scan, reads an exact ranged direct-play response, starts
+software HLS, drives a control hold and resume, sends Ctrl-C, and refuses any
+leftover ffmpeg/ffprobe process. Register a real Forgejo runner before adding
+the workflow that invokes it; the runner fleet contract intentionally rejects
+an unschedulable label set. Retain both server logs with the eventual receipt.
+Do not replace that receipt with a cross-compile claim or put it in ordinary
+fan-out without the required runner.
 
 | Profile | Intended use | Additional evidence |
 |---|---|---|

@@ -298,10 +298,12 @@ Cache/scratch names are hashes and part numbers — already safe.
 Forgejo's permanent effort, fast-lane, and full workflows run the same pinned
 `cargo-xwin` MSVC build in an isolated Ubuntu container. Full CI also builds
 the release profile and retains the Windows ZIP plus its SHA-256 receipt.
-Native behavior is a separate manually dispatched workflow on a labeled
-self-hosted Windows x64 runner with pinned ffmpeg; keeping it manual avoids an
-unfillable queue until that runner exists. `plurx-cluster-check` stays excluded
-from Windows builds because its fault-injection harness is Linux-specific.
+Native behavior uses the checked-in PowerShell smoke harness. Add a separate
+manually dispatched workflow only after a self-hosted Windows x64 runner with
+pinned FFmpeg is registered; checking in an unschedulable job would create the
+same unfillable queue this separation is meant to avoid. `plurx-cluster-check`
+stays excluded from Windows builds because its fault-injection harness is
+Linux-specific.
 
 ## 5. Milestones
 
