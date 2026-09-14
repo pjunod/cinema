@@ -1,10 +1,14 @@
 # Web UI implementation — progress and decisions
 
-**Status:** reviewed; ready for fast lane · **Updated:** 2026-09-14 · **Branch:** `codex/ui-usability`
+**Status:** merged as 55a2fce0; native follow-up open · **Updated:** 2026-09-14 · **Branch:** `codex/ui-usability`
 
 Executes the approved [usability audit](WEB-UI-USABILITY-AUDIT.md).
 The [status page](WEB-UI-STATUS.html) is the visual companion to this ledger.
 Work uses a fresh agent-owned clone; no user checkout is modified. Draft PR: http://192.168.4.7:3000/noirr/plurx/pulls/317.
+
+PR317 is now merged. New device reports are tracked in the
+[native layout follow-up](NATIVE-LAYOUT-FOLLOWUP.md); the ledger below preserves
+the original implementation and review history.
 
 ## Delivery ledger
 

@@ -92,6 +92,7 @@ struct PosterCard: View {
             ZStack(alignment: .bottomLeading) {
                 AuthImage(
                     path: item.poster ?? item.backdrop,
+                    placeholderTitle: item.title,
                     targetSize: CGSize(width: width, height: width * 1.5)
                 )
                     .frame(width: width, height: width * 1.5)
@@ -125,7 +126,11 @@ struct PosterCard: View {
                 .font(.callout.weight(.semibold))
                 #endif
                 .foregroundColor(Palette.onBg)
+                #if os(tvOS)
+                .lineLimit(2, reservesSpace: true)
+                #else
                 .lineLimit(1)
+                #endif
             let metadata = cardShelfMetadata(item)
             if let episodeBadges = posterCardEpisodeSummaryBadges(item) {
                 if !metadata.isEmpty {
@@ -157,6 +162,7 @@ struct PosterCard: View {
             }
         }
         .frame(width: width, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     @ViewBuilder
@@ -500,6 +506,29 @@ func posterCardEpisodeSummaryBadges(_ item: Item) -> [ItemMetadataBadge]? {
     return episodeMediaSummaryBadges(item)
 }
 
+/// TV shelves measure every card's copy before reserving the row height.
+/// Small shelves can measure their mixed card heights eagerly. Large season
+/// shelves stay lazy so opening a daily show does not decode hundreds of images.
+private struct MediaShelf<Content: View>: View {
+    let spacing: CGFloat
+    let itemCount: Int
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        #if os(tvOS)
+        Group {
+            if itemCount <= 40 {
+                HStack(alignment: .top, spacing: spacing, content: content)
+            } else {
+                LazyHStack(alignment: .top, spacing: spacing, content: content)
+            }
+        }.padding(.vertical, 28)
+        #else
+        LazyHStack(alignment: .top, spacing: spacing, content: content)
+        #endif
+    }
+}
+
 struct MediaRow: View {
     @EnvironmentObject var model: AppModel
     let title: String
@@ -538,7 +567,7 @@ struct MediaRow: View {
                 .padding(.horizontal, screenHPad)
 
                 ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(alignment: .top, spacing: shelfSpacing) {
+                    MediaShelf(spacing: shelfSpacing, itemCount: items.count) {
                         ForEach(items) { item in
                             switch style {
                             case .poster:
@@ -573,9 +602,7 @@ struct MediaRow: View {
                         }
                     }
                     .padding(.horizontal, screenHPad)
-                    #if os(tvOS)
-                    .padding(.vertical, 18)
-                    #endif
+
                 }
             }
             .padding(.vertical, 10)
@@ -677,7 +704,7 @@ struct ComingSoonRow: View {
                     .foregroundColor(Palette.onBg)
                     .padding(.horizontal, screenHPad)
                 ScrollView(.horizontal, showsIndicators: false) {
-                    LazyHStack(alignment: .top, spacing: comingSoonSpacing) {
+                    MediaShelf(spacing: comingSoonSpacing, itemCount: entries.count) {
                         ForEach(entries) { entry in
                             if let itemId = entry.itemId {
                                 NavigationLink(value: Route.item(itemId)) {
@@ -690,9 +717,7 @@ struct ComingSoonRow: View {
                         }
                     }
                     .padding(.horizontal, screenHPad)
-                    #if os(tvOS)
-                    .padding(.vertical, 18)
-                    #endif
+
                 }
             }
             .padding(.vertical, 10)
@@ -718,6 +743,7 @@ private struct ComingSoonCard: View {
             ZStack(alignment: .bottomLeading) {
                 AuthImage(
                     path: entry.poster,
+                    placeholderTitle: entry.title,
                     targetSize: CGSize(width: width, height: width * 1.5)
                 )
                     .frame(width: width, height: width * 1.5)
@@ -738,13 +764,18 @@ private struct ComingSoonCard: View {
                 .font(.callout.weight(.semibold))
                 #endif
                 .foregroundColor(Palette.onBg)
+                #if os(tvOS)
+                .lineLimit(2, reservesSpace: true)
+                #else
                 .lineLimit(1)
+                #endif
             Text(entry.detail.isEmpty ? entry.kind.capitalized : entry.detail)
                 .font(.system(.caption, design: .monospaced))
                 .foregroundColor(Palette.muted)
                 .lineLimit(1)
         }
         .frame(width: width, alignment: .leading)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 

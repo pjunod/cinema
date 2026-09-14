@@ -4,6 +4,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -83,7 +84,10 @@ fun DvrCellActions(
         it.channel_id == channel.id && it.airing_start == programme.start && it.state == "armed"
     }
     Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        FlowRow(
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
             // On a future programme Watch and Remind me are deliberately the
             // same press. A viewer who reads "Watch at 8:00" and a viewer who
             // reads "Remind me" both want the same thing, and one reminder per
