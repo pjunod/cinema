@@ -128,6 +128,27 @@ executed with identical feature resolution.
 
 ## Profiles — fast by default, deep when the environment can prove more
 
+### Windows compile, package, and native smoke
+
+Every Rust-affecting effort, fast-lane, and full workflow cross-builds
+`x86_64-pc-windows-msvc` with the repository-pinned Rust toolchain and
+`cargo-xwin`. `plurx-cluster-check` is excluded because its fault injector is
+Linux-specific; the server and shared workspace crates are not. The full CI
+lane also performs a release build and retains
+`plurxd-windows-x86_64.zip` plus its SHA-256 receipt. Cross-build success proves
+MSVC type and linkage compatibility, including the embedded long-path-aware
+manifest. It is not runtime evidence.
+
+`.github/workflows/windows-native-smoke.yml` is the native runtime lane. It is
+manual until a self-hosted runner carries the labels `Windows`, `X64`, `lab`,
+and `ffmpeg-6`. On that runner, `scripts/windows-smoke.ps1` creates a fixture,
+boots a fresh server, creates an admin and library, waits for scan, reads an
+exact ranged direct-play response, starts software HLS, drives a control hold
+and resume, sends Ctrl-C, and refuses any leftover ffmpeg/ffprobe process. The
+workflow retains both server logs. Do not replace that receipt with a
+cross-compile claim; do not put this job in ordinary fan-out while no matching
+runner exists.
+
 | Profile | Intended use | Additional evidence |
 |---|---|---|
 | `commit` | Pre-commit and ordinary local work | Mandatory Rust/catalog baseline; shared API wire check; web syntax, contrast, golden, and accessibility when affected |

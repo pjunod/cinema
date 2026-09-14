@@ -1,8 +1,8 @@
 # Windows port — implementation plan
 
-**Status:** ready to build · **Target:** native `plurxd.exe` on Windows 10
-1809+/Server 2019+ x64, NTFS · **Baseline:** v0.2.7, `main` @ 2026-08-29 ·
-**Written:** 2026-08-29
+**Status:** built; native and hardware receipts remain · **Target:** native
+`plurxd.exe` on Windows 10 1809+/Server 2019+ x64, NTFS/ReFS · **Baseline:**
+v0.2.7, `main` @ 2026-08-29 · **Written:** 2026-08-29 · **Updated:** 2026-09-13
 
 Companion to [ARCHITECTURE.md](../ARCHITECTURE.md) (how the server is built),
 [SECURITY.md](../SECURITY.md) (the threat model the port must not silently
@@ -29,17 +29,17 @@ and Apple clients (they speak HTTP to the server), Docker Desktop/WSL2 as a
 stopgap (runs the Linux image today, software transcode only — WSL2 exposes
 neither `/dev/dri` nor NVENC to containers). The port is the server.
 
-**Read §6 (non-goals) before writing any code.** Several plausible
-"improvements" are explicitly out of scope, and one decision (§4 D2) needs
-Paul's sign-off before its milestone starts.
+**Read §6 (non-goals) before changing the implementation.** Several plausible
+"improvements" remain explicitly out of scope. The historical D2 approval and
+the receipts still owed are recorded in §8.
 
 ## 2. How to work this plan
 
-Milestone by milestone, one PR per milestone, in order — each milestone's
-acceptance check is a runnable command or observable fact, and a milestone is
-not done until its check passes. During development use the fast lane (`make
-unit`, `make validate-staged`); the full gate (`make check`, `make
-test-full`) runs once per milestone before its PR. Code references below
+This plan supplied milestone boundaries and acceptance facts. Execution used
+reviewable milestone commits and PRs into one `effort/windows-port` branch,
+then one adversarial review and one fast-lane qualification before promotion
+to `main`; [WINDOWS-PORT-STATUS.md](WINDOWS-PORT-STATUS.md) is the live ledger.
+Code references below
 (file, function, line) were taken from `main` on 2026-08-29 — **re-verify
 each against the tree at build time**; the shape is stable, the line numbers
 are not.
@@ -89,8 +89,7 @@ admission is gated by the boot probes (`plurxd/src/pipeprobe.rs`,
 ## 4. Decisions
 
 Each decision below is the contract for its milestone. The recommendation is
-chosen; alternatives are recorded so the executing agent doesn't relitigate
-them, and the one open sign-off is marked.
+chosen; alternatives are recorded so later changes do not relitigate them.
 
 ### D1 — fs_secure gets a Windows backend behind the same API
 
@@ -124,7 +123,7 @@ Use `windows-sys` for the bindings (add as a `[target.'cfg(windows)'.
 dependencies]` entry). Every `unsafe` block gets the same one-line SAFETY
 comment discipline the Unix side already has.
 
-### D2 — the ffmpeg I/O handoff ⚠ needs Paul's sign-off before M2
+### D2 — the ffmpeg I/O handoff (approved for M2)
 
 Today (Linux): plurxd holds validated descriptors and, in `pre_exec`, dups
 them to fixed child fds — source → 3 (`/dev/fd/3`), output directory → 4
@@ -296,14 +295,13 @@ Cache/scratch names are hashes and part numbers — already safe.
 
 ### D12 — CI: a Windows lane that gates
 
-Extend `ci.yml`: one `windows-2025` job (GitHub-hosted regardless of
-`CI_RUNNER_MODE` until the lab has a Windows runner) running `cargo build
---workspace --exclude plurx-cluster-check --target x86_64-pc-windows-msvc`
-plus the unit lane with Unix-only tests cfg-gated. Add
-`x86_64-pc-windows-msvc` to the release-build matrix (ci.yml ~601). A
-`.github/actions/ffmpeg` Windows variant installs the pinned jellyfin-ffmpeg
-build for the M2 smoke job. `plurx-cluster-check` stays excluded on Windows
-(§6).
+Forgejo's permanent effort, fast-lane, and full workflows run the same pinned
+`cargo-xwin` MSVC build in an isolated Ubuntu container. Full CI also builds
+the release profile and retains the Windows ZIP plus its SHA-256 receipt.
+Native behavior is a separate manually dispatched workflow on a labeled
+self-hosted Windows x64 runner with pinned ffmpeg; keeping it manual avoids an
+unfillable queue until that runner exists. `plurx-cluster-check` stays excluded
+from Windows builds because its fault-injection harness is Linux-specific.
 
 ## 5. Milestones
 
@@ -319,7 +317,7 @@ of the diff.
 plurx-cluster-check --target x86_64-pc-windows-msvc`; `make unit` and `make
 validate-staged` stay green on Linux; `make check` green at the PR gate.
 
-### M2 — it boots, scans, and plays (software) ⚠ blocked on D2 sign-off
+### M2 — it boots, scans, and plays (software)
 
 fs_secure Windows backend live end-to-end; D2 option 3 handoff; suspend/
 resume (D3); job objects (D4); sharing-violation sweeps (D5); one-voter
@@ -368,11 +366,11 @@ teaches us what Windows hardware validation actually costs.
 
 ## 6. Non-goals — guardrails, each with its reason
 
-- **No cluster voters on Windows.** hiqlite must *build* (single-voter
-  activation needs it) but multi-node membership is unvalidated there:
-  `plurx-cluster-check` — the only thing that proves cluster behavior — is
-  built on SIGSTOP fault injection and stays Linux-only. Joining a cluster
-  from a Windows node refuses with a clear error naming this document.
+- **No Windows rewrite of the Linux cluster fault injector.** Hiqlite and the
+  voter runtime build on Windows, and no feature gate refuses membership.
+  `plurx-cluster-check` remains Linux-only because its fault injection depends
+  on Unix process control. Native multi-voter behavior is therefore
+  unmeasured, not disabled or claimed proved.
 - **No MediaFoundation/DirectShow pipeline.** ffmpeg remains the only media
   engine; a second engine doubles every probe and every codec bug.
 - **No ARM64 Windows, no 32-bit.** Nobody has the hardware to validate them;
@@ -400,15 +398,14 @@ component walk (D1 — the junction case is the one Unix tests can't cover).
 version for Windows runners lives with the existing pins in
 `.github/actions/ffmpeg`.
 
-## 8. Open questions for Paul
+## 8. Resolved decisions and outstanding receipts
 
-1. **D2 sign-off** — accept path-handoff + identity re-verify + DACL'd
-   scratch as the documented Windows difference, or require the CRT
-   fd-passing spike first? M2 cannot start without this answer.
-2. **Hardware for M4** — which Windows box(es) with NVIDIA/Intel graphics
-   can run the probes? (An existing lab machine dual-booting counts; the
-   measurements are per-node anyway.)
-3. **Does M5 (AMF/AMD) get approved now or after M4's cost is known?**
-4. **Lab Windows runner or GitHub-hosted** for the permanent CI lane —
-   GitHub-hosted is the default in D12; a lab runner would match the
-   `CI_RUNNER_MODE` pattern and speed up the smoke job.
+1. **D2 is approved:** canonical path handoff, exact identity re-verification,
+   and protected scratch ACLs ship as the documented Windows difference. The
+   CRT fd-table spike is not on the release path.
+2. **M4 hardware remains outstanding:** NVIDIA and Intel Windows machines are
+   still needed for retained NVENC/QSV probe and segment-duration receipts.
+3. **M5 AMF remains deferred:** the plan marks it optional and separately
+   approved, so it is not silently added without AMD hardware evidence.
+4. **Forgejo is authoritative:** `cargo-xwin` is the permanent compiler lane;
+   the native workflow is ready for a labeled lab runner when one is attached.
