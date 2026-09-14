@@ -338,6 +338,10 @@ test("Developer owns experimental enablement and keeps readiness advisory", () =
       shippedSource("devStaticReq"), shippedSource("clusterTransportRecoveryCard"),
       shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
       shippedSource("playbackSurfaceReadinessCard"),
+      // #309's Compatibility section put a new card inside `developerPanel`.
+      // The panel is composed here from the shipped source, so a card it calls
+      // has to be composed too or the panel throws on the name.
+      shippedSource("windowsServerCard"),
       shippedSource("developerPanel"),
       shippedSource("liveTvPanel"),
       "return {developerPanel,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard};",
