@@ -530,6 +530,29 @@
     color:var(--text);cursor:pointer;padding:4px 9px;font-size:12px;font-family:inherit}
   .lt-rec button:hover{border-color:var(--accent)}
 
+  .dvr-global{display:none;align-items:center;gap:6px;border:1px solid var(--line);
+    border-radius:999px;padding:5px 9px;font-size:11.5px;color:var(--muted);cursor:pointer;
+    white-space:nowrap;background:var(--panel)}
+  .dvr-global.on{display:inline-flex}.dvr-global .rec-dot{width:7px;height:7px;border-radius:50%;
+    background:var(--bad);flex:none}.dvr-global.unavailable .rec-dot{background:var(--muted)}
+  .dvr-page-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  .dvr-tabs{display:flex;gap:5px;flex-wrap:wrap;margin:18px 0 14px}
+  .dvr-tabs a{padding:7px 11px;border:1px solid var(--line);border-radius:999px;color:var(--muted);
+    text-decoration:none;font-size:12px}.dvr-tabs a.on{color:var(--text);border-color:var(--accent);background:var(--panel2)}
+  .dvr-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin:12px 0 18px}
+  .dvr-summary>div{border:1px solid var(--line);border-radius:var(--radius);padding:12px;background:var(--panel)}
+  .dvr-summary b{display:block;font-size:19px}.dvr-summary span{font-size:11.5px;color:var(--muted)}
+  .dvr-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,.72fr);gap:16px;align-items:start}
+  .dvr-detail{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);padding:16px;position:sticky;top:72px}
+  .dvr-event{padding:9px 0;border-top:1px solid var(--line);font-size:12px}.dvr-event:first-child{border-top:0}
+  .dvr-event time,.dvr-event small{display:block;color:var(--muted);margin-top:2px}
+  .dvr-row-button{appearance:none;width:100%;text-align:left;border:0;background:transparent;color:inherit;
+    font:inherit;padding:0;cursor:pointer}.dvr-row-button:focus-visible{outline:2px solid var(--accent);outline-offset:4px}
+  .dvr-manual{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;padding:16px}
+  .dvr-manual label{display:grid;gap:5px;font-size:12px;color:var(--muted)}.dvr-manual .wide{grid-column:1/-1}
+  @media(max-width:760px){.dvr-layout{display:block}.dvr-detail{position:fixed;inset:0;z-index:70;border:0;border-radius:0;
+      overflow:auto;padding:20px}.dvr-detail[hidden]{display:none}.dvr-manual{grid-template-columns:1fr}}
+
   /* The due-reminder overlay. Lower-left so it never covers the player's own
      controls, and buttons only — it adds no key handler, because the Live TV
      adapter is the one place a key may be read on this page. */
@@ -4489,8 +4512,9 @@ function classicChrome(active, inner){
   document.getElementById("app").innerHTML=`
    <header class="top">
      <a href="#/" class="logo">${APP_NAME}</a>
-     <nav><a href="#/" class="${active==='home'?'active':''}">Home</a><a href="#/live-tv" class="${active==='live-tv'?'active':''}">Live TV</a><a href="#/library-channels" class="${active==='library-channels'?'active':''}">Library channels</a><a href="#/activity" class="${active==='activity'?'active':''}">Activity</a>${admin}</nav>
+     <nav><a href="#/" class="${active==='home'?'active':''}">Home</a><a href="#/live-tv" class="${active==='live-tv'?'active':''}">Live TV</a><a href="#/recordings" class="${active==='recordings'?'active':''}">Recordings</a><a href="#/library-channels" class="${active==='library-channels'?'active':''}">Library channels</a><a href="#/activity" class="${active==='activity'?'active':''}">Activity</a>${admin}</nav>
      <span class="spacer"></span>
+     <button class="dvr-global" id="dvr-global" onclick="location.hash='#/recordings'" aria-label="Recording status"></button>
      <span class="activity" id="activity" onclick="location.hash='#/activity'"></span>
      <input class="search" id="q" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
      <div class="topctl">
@@ -5107,7 +5131,9 @@ LAYOUTS.classic.views={
 // every route it has not converted — a missing renderer is normal, not an error.
 function layoutChrome(active, inner){
   const L=LAYOUTS[layoutId()];
-  return (L&&L.chrome?L.chrome:classicChrome)(active, inner);
+  const answer=(L&&L.chrome?L.chrome:classicChrome)(active, inner);
+  dvrPaintGlobal();
+  return answer;
 }
 function layoutView(name, page){
   const L=LAYOUTS[layoutId()];
@@ -14546,6 +14572,93 @@ function paintAnalysis(snapshot){
 }
 let ACTIVITY_DETAIL_BUSY=0, ACTIVITY_SNAPSHOT=null;
 const ACTIVITY_DVR={rows:[],next:null,loaded:false,error:null,loading:false};
+const DVR_SHARED={overview:null,error:null,receivedAt:0,busy:null,queued:false,timer:null,
+  serial:0,scope:null,lastLiveMarkRefresh:0,lastActiveKey:""};
+function dvrOverviewValid(value){
+  return value&&value.version===1&&["complete","partial","unavailable"].includes(value.availability)
+    &&Array.isArray(value.active)&&value.counts&&typeof value.counts==="object";
+}
+function dvrActiveKey(value){
+  return (value&&value.active||[]).map(row=>`${row.recording_id}:${row.display_state}:${row.observation&&row.observation.attempt||0}`).join("|");
+}
+function dvrSetOverview(value){
+  if(!dvrOverviewValid(value)) throw new Error("The DVR overview response is invalid.");
+  const prior=DVR_SHARED.lastActiveKey, next=dvrActiveKey(value);
+  DVR_SHARED.overview=value;DVR_SHARED.error=null;DVR_SHARED.receivedAt=performance.now();DVR_SHARED.lastActiveKey=next;
+  dvrPaintGlobal();
+  if(location.hash.startsWith("#/recordings")) paintRecordingsPage();
+  // Exact-airing marks come from the schedule document. When an active row
+  // appears or disappears, refresh that document at most once in 30 seconds;
+  // the five-second overview itself never refetches the guide provider.
+  if(location.hash==="#/live-tv"&&prior!==next&&Date.now()-DVR_SHARED.lastLiveMarkRefresh>30000){
+    DVR_SHARED.lastLiveMarkRefresh=Date.now();
+    loadLiveTvDvr(PAGE_RENDER_GENERATION,location.hash);
+  }
+}
+function dvrPaintGlobal(){
+  const mount=document.getElementById("dvr-global");if(!mount)return;
+  const value=DVR_SHARED.overview, counts=value&&value.counts||{};
+  const unavailable=!value||value.availability==="unavailable"||DVR_SHARED.error;
+  let text="";
+  if(unavailable&&value) text="Recording status unavailable";
+  else if(value){
+    const parts=[];
+    if(counts.recording)parts.push(`${counts.recording} recording`);
+    if(counts.starting)parts.push(`${counts.starting} starting`);
+    if(counts.reconnecting)parts.push(`${counts.reconnecting} reconnecting`);
+    if(counts.finishing)parts.push(`${counts.finishing} finishing`);
+    if(counts.unconfirmed)parts.push(`${counts.unconfirmed} unconfirmed`);
+    text=parts.join(" · ");
+  }
+  mount.className=`dvr-global${text?" on":""}${unavailable?" unavailable":""}`;
+  mount.innerHTML=text?`<span class="rec-dot"></span><span>${esc(text)}</span>`:"";
+  mount.title=value&&value.observation_age_ms!=null?`DVR observed ${Math.round(value.observation_age_ms/1000)} seconds ago`:"DVR status";
+}
+function dvrPollDelay(){
+  const value=DVR_SHARED.overview,counts=value&&value.counts||{};
+  const active=["recording","starting","reconnecting","finishing","unconfirmed"].some(key=>Number(counts[key])>0);
+  if(active)return 5000;
+  const start=value&&Number(value.next_capture_start);
+  return Number.isFinite(start)?Math.max(1000,Math.min(30000,start*1000-Date.now())):30000;
+}
+function dvrSchedulePoll(){
+  clearTimeout(DVR_SHARED.timer);DVR_SHARED.timer=null;
+  if(document.visibilityState==="hidden"||!TOKEN||!ME)return;
+  const route=location.hash||"#/";
+  if(route==="#/activity")return; // activity/detail already carries this projection
+  DVR_SHARED.timer=setTimeout(()=>dvrRefreshOverview(),dvrPollDelay());
+}
+async function dvrRefreshOverview(force=false){
+  if(!TOKEN||!ME||document.visibilityState==="hidden")return;
+  if(DVR_SHARED.busy){DVR_SHARED.queued=DVR_SHARED.queued||force;return DVR_SHARED.busy;}
+  const serial=++DVR_SHARED.serial,scope=TOKEN;
+  const request=api("/dvr/overview",{signal:AbortSignal.timeout(4000)}).then(value=>{
+    if(serial!==DVR_SHARED.serial||scope!==TOKEN)return;
+    dvrSetOverview(value);
+  }).catch(error=>{
+    if(serial!==DVR_SHARED.serial||scope!==TOKEN)return;
+    DVR_SHARED.error=error&&error.message||"DVR status could not be loaded";dvrPaintGlobal();
+    if(location.hash.startsWith("#/recordings"))paintRecordingsPage();
+  }).finally(()=>{
+    if(DVR_SHARED.busy===request)DVR_SHARED.busy=null;
+    if(DVR_SHARED.queued){DVR_SHARED.queued=false;dvrRefreshOverview(true);}else dvrSchedulePoll();
+  });
+  DVR_SHARED.busy=request;return request;
+}
+function dvrRouteChanged(route){
+  clearTimeout(DVR_SHARED.timer);DVR_SHARED.timer=null;
+  if(DVR_SHARED.scope!==TOKEN){
+    DVR_SHARED.scope=TOKEN;DVR_SHARED.overview=null;DVR_SHARED.error=null;DVR_SHARED.lastActiveKey="";
+    DVR_SHARED.serial++;
+  }
+  if(route==="#/activity")return;
+  if(route==="#/live-tv"||route.startsWith("#/recordings"))dvrRefreshOverview(true);
+  else dvrSchedulePoll();
+}
+document.addEventListener("visibilitychange",()=>{
+  if(document.visibilityState==="hidden"){clearTimeout(DVR_SHARED.timer);DVR_SHARED.timer=null;}
+  else dvrRouteChanged(location.hash||"#/");
+});
 // `/dvr/recordings` deliberately has its own page envelope. Schedule is
 // `{conflicts,rows}` and rules are an array, so accepting any object with an
 // array somewhere inside it would hide a server/client contract mismatch.
@@ -14770,15 +14883,11 @@ async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity"||document.visibilityState==="hidden"||ACTIVITY_DETAIL_BUSY===generation) return;
   ACTIVITY_DETAIL_BUSY=generation;
   try{
-  // The running captures ride beside the detail read rather than after it:
-  // `/activity` describes them in the pill's words but carries no recording
-  // id, and a Stop without an id is a button that cannot be pressed.
-  let detail,recording;
+  // `/activity/detail` carries the exact same bounded DVR projection as the
+  // Recordings controller. Activity must not start a duplicate overview poll.
+  let detail;
   try{
-    [detail,recording]=await Promise.all([
-      api("/activity/detail"),
-      api("/dvr/recordings?state=recording").then(value=>({value}),error=>({error})),
-    ]);
+    detail=await api("/activity/detail");
   }
   catch(e){
     if(e&&e.status===401) return;
@@ -14799,9 +14908,9 @@ async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
   const d=detail;
   ACTIVITY_SNAPSHOT=d;
   try{
-    if(recording.error) throw recording.error;
-    const page=dvrRecordingsPage(recording.value);
-    ACTIVITY_DVR.rows=page.rows; ACTIVITY_DVR.next=page.next;
+    if(d.dvr){dvrSetOverview(d.dvr);ACTIVITY_DVR.rows=d.dvr.active||[];}
+    else ACTIVITY_DVR.rows=[];
+    ACTIVITY_DVR.next=null;
     ACTIVITY_DVR.loaded=true; ACTIVITY_DVR.error=null;
   }catch(e){
     ACTIVITY_DVR.error=e&&e.message?e.message:"The recording list could not be loaded.";
@@ -14941,16 +15050,21 @@ function dvrActivityRows(rows,nodeNames,state={loaded:true,error:null,next:null}
   const table=rows.length?`<div class="tbl"><table><thead><tr><th>Programme</th><th>Channel</th><th>Owner</th>
       <th>Progress</th><th>Started</th><th></th></tr></thead><tbody>
       ${rows.map(row=>{
-        const percent=Math.round(PlurxLiveTv.dvrCaptureProgress(row,now)*100);
-        return `<tr data-dvr-recording="${esc(row.id)}">
-        <td><b>${esc(row.title)}</b>${row.episode_title?`<div class="muted">${esc(row.episode_title)}</div>`:""}</td>
+        const projected=!!row.recording_id;
+        const id=projected?row.recording_id:row.id;
+        const percent=projected?Math.round(Math.max(0,Math.min(1,(now-row.capture_start)/Math.max(1,row.capture_end-row.capture_start)))*100):Math.round(PlurxLiveTv.dvrCaptureProgress(row,now)*100);
+        const owner=projected&&row.observation?row.observation.owner_node_id:row.tuner_owner_node_id;
+        const detail=projected?row.display_detail:PlurxLiveTv.dvrRecordingDetail(row,now);
+        const bytes=projected?(row.total_bytes_written!=null?row.total_bytes_written:row.last_confirmed_bytes):row.bytes;
+        return `<tr data-dvr-recording="${esc(id)}">
+        <td><b><a href="#/recordings/upcoming?selected=${encodeURIComponent(id)}">${esc(row.title)}</a></b> <span class="pill">${esc(projected?row.display_state:"Recording")}</span>${row.episode_title?`<div class="muted">${esc(row.episode_title)}</div>`:""}</td>
         <td>${esc(row.guide_number)} · ${esc(row.channel_name)}</td>
-        <td>${esc(nodeNames[row.tuner_owner_node_id]||row.tuner_owner_node_id||"—")}</td>
-        <td>${percent}% <span class="muted">· ${esc(PlurxLiveTv.dvrRecordingDetail(row,now))}</span></td>
-        <td class="muted">${row.started_at_ms?fmtAgo(Math.round(row.started_at_ms/1000)):"—"}</td>
+        <td>${esc(nodeNames[owner]||owner||"—")}</td>
+        <td>${percent}% <span class="muted">· ${esc(detail)}${bytes!=null?` · ${esc(fmtBytes(bytes)||"0 B")} written`:""}</span></td>
+        <td class="muted">${projected&&row.observation&&row.observation.first_write_at_ms?fmtAgo(Math.round(row.observation.first_write_at_ms/1000)):"—"}</td>
         <td style="text-align:right">${row.stop_requested_at_ms
           ?'<span class="muted">stopping…</span>'
-          :`<button class="ghost sm" onclick="stopDvrRecording(${esc(JSON.stringify(row.id))})">Stop</button>`}</td></tr>`;
+          :`<button class="ghost sm" onclick="stopDvrRecording(${esc(JSON.stringify(id))})">Stop</button>`}</td></tr>`;
       }).join("")}
     </tbody></table></div>`:`<div class="empty">No active recordings were confirmed.</div>`;
   const more=state.next?`<div class="row" style="justify-content:flex-end"><button class="ghost sm" type="button" onclick="loadMoreActivityDvr()"${state.loading?" disabled":""}>${state.loading?"Loading…":"Load more"}</button></div>`:"";
@@ -14979,6 +15093,7 @@ async function loadMoreActivityDvr(){
 // then watches the row until it is no longer `recording` — which is also the
 // moment the tuner it was holding is free for somebody to watch.
 async function stopDvrRecording(id){
+  if(!confirm("Stop this recording? The captured part will be kept and marked as stopped early.")) return;
   try{ await api(`/dvr/recordings/${encodeURIComponent(id)}`,{method:"DELETE",raw:true}); }
   catch(e){ toast(e.message); return; }
   toast("Stopping — the tuner frees when the file closes");
@@ -15990,7 +16105,7 @@ async function viewLiveTv(generation=PAGE_RENDER_GENERATION){
   const route=location.hash;
   liveTvWireHost();
   LIVE_TV.selected=LIVE_TV.selected||liveTvPref("plurx_live_tv_last",null,null);
-  layoutChrome("live-tv",`<h1>Live TV</h1><p class="sub">Over-the-air channels from your HDHomeRun. Live only — no recording or rewind.</p>
+  layoutChrome("live-tv",`<h1>Live TV</h1><p class="sub">Over-the-air channels from your HDHomeRun, with exact-airing recording status.</p>
     <p id="live-tv-message" role="status" aria-live="polite">Loading channels…</p>
     <div id="live-tv-toolbar"></div>
     <div id="live-tv-body"></div>`);
@@ -16279,10 +16394,22 @@ function liveTvShowInfo(channel){
     <span class="eyebrow">On now</span>
     <h2>${row?esc(row.title):esc(channel.guide_name)}</h2>
     <div class="meta">${esc(channel.guide_number)} · ${esc(channel.guide_name)} · ${time}${episode?"<br>"+esc(episode):""}</div>
+    ${liveTvRecordingContext(channel,row)}
     <p class="synopsis">${row&&row.synopsis?esc(row.synopsis):"No programme description is available."}</p>
     <div data-live-tv-technical>${liveTvTechnicalDetails(channel,LIVE_TV.status)}</div>
     ${next}
   </aside>`;
+}
+function liveTvRecordingContext(channel,programme){
+  if(!channel)return "";
+  const active=DVR_SHARED.overview&&DVR_SHARED.overview.active||[];
+  const exact=programme&&active.find(row=>row.channel_id===channel.id&&row.airing_start===programme.start);
+  const row=exact||active.find(row=>row.channel_id===channel.id);
+  if(!row)return "";
+  const now=liveTvNowSeconds();
+  const padding=!exact?(now<row.airing_start?`early padding for ${row.title}`:`${row.title} · end padding`):row.display_detail;
+  const bytes=row.total_bytes_written!=null?fmtBytes(row.total_bytes_written):row.last_confirmed_bytes!=null?`${fmtBytes(row.last_confirmed_bytes)} this attempt`:null;
+  return `<p class="why" role="status"><b>${esc(row.display_state)}</b> · ${esc(padding||"")}${bytes?` · ${esc(bytes)} written`:""} · capture ends ${esc(liveTvClock(row.capture_end))} <a href="#/recordings/upcoming?selected=${encodeURIComponent(row.recording_id)}">Recording details</a></p>`;
 }
 function liveTvStageMarkup(channel,withTonight){
   const wide=liveTvPlayerSize()==="wide";
@@ -16790,8 +16917,9 @@ async function loadLiveTvDvr(generation,route){
 // the rest, so the only honest thing a client can do afterwards is read the
 // rows again rather than guess at the new state.
 async function liveTvDvrReload(){
-  if(location.hash!=="#/live-tv") return;
-  await loadLiveTvDvr(PAGE_RENDER_GENERATION,location.hash);
+  dvrRefreshOverview(true);
+  if(location.hash==="#/live-tv") await loadLiveTvDvr(PAGE_RENDER_GENERATION,location.hash);
+  else if(location.hash.startsWith("#/recordings")) await viewRecordings(++PAGE_RENDER_GENERATION);
 }
 // Built once per pair of documents rather than once per cell. A fortnight of
 // rules against a full lineup is thousands of cells, and rebuilding the index
@@ -16889,6 +17017,7 @@ function liveTvRestore(id){
 // A running capture stops when the owner's next tick closes the file, so the
 // route answers 202 and the row is still `recording` when this returns.
 function liveTvStopRecording(id){
+  if(!confirm("Stop this recording? The captured part will be kept and marked as stopped early.")) return;
   return liveTvDvrAct(()=>api(`/dvr/recordings/${encodeURIComponent(id)}`,{method:"DELETE",raw:true}),
     "Stopping — the tuner frees when the file closes");
 }
@@ -16912,13 +17041,11 @@ function liveTvRecordingsTab(){
   return liveTvPref("plurx_live_tv_recordings","",["","library","scheduled","rules"]);
 }
 function liveTvSetRecordingsTab(tab){
-  const next=liveTvRecordingsTab()===tab?"":tab;
-  liveTvSetPref("plurx_live_tv_recordings",next);
-  renderLiveTvChannels();
-  // The schedule is already on the page; these two are not, and only the
-  // segment somebody is looking at pays for a read.
-  if(next==="library") liveTvLoadRecordings("library","/dvr/recordings?state=done,partial");
-  if(next==="rules") liveTvLoadRecordings("rules","/dvr/rules");
+  // These shipped Live TV segments are compatibility aliases. Their single
+  // canonical destination now survives playback docking and can carry detail,
+  // history, pagination and attention without rebuilding the Live TV host.
+  liveTvSetPref("plurx_live_tv_recordings","");
+  location.hash=`#/recordings/${tab==="library"?"saved":tab==="scheduled"?"upcoming":tab}`;
 }
 async function liveTvLoadRecordings(key,path,append=false){
   const generation=PAGE_RENDER_GENERATION, route=location.hash;
@@ -17032,6 +17159,194 @@ function liveTvChannelLabel(channelId){
 // get to say it on their behalf.
 function liveTvDeleteRule(id){
   return liveTvDvrAct(()=>api(`/dvr/rules/${encodeURIComponent(id)}`,{method:"DELETE",raw:true}),"Rule deleted");
+}
+
+// ---- Recordings ----------------------------------------------------------
+const DVR_PAGE={tab:"upcoming",rows:[],next:null,total:0,loading:false,error:null,
+  selectedId:null,selected:null,events:[],eventsNext:null,historyComplete:false,truncatedBefore:null,
+  detailError:null,detailBusy:false,channels:[],historyTimer:null};
+const DVR_TABS=[["upcoming","Upcoming"],["saved","Saved"],["attention","Needs attention"],
+  ["rules","Series rules"],["manual","Manual recording"],["skipped","Skipped"]];
+function recordingsRouteTab(hash=location.hash){
+  const raw=(hash.split("/")[2]||"upcoming").split("?")[0];
+  return ({library:"saved",scheduled:"upcoming"})[raw]||
+    (DVR_TABS.some(([id])=>id===raw)?raw:"upcoming");
+}
+function recordingsRoute(){return `#/recordings/${DVR_PAGE.tab}`;}
+function dvrPagePath(tab,after){
+  const suffix=after?`&after=${encodeURIComponent(after)}`:"";
+  if(tab==="saved")return `/dvr/recordings?state=done,partial${suffix}`;
+  if(tab==="attention")return `/dvr/attention?limit=50${after?`&after=${encodeURIComponent(after)}`:""}`;
+  if(tab==="rules")return "/dvr/rules";
+  if(tab==="skipped")return `/dvr/recordings?state=cancelled${suffix}`;
+  return null;
+}
+async function viewRecordings(generation=PAGE_RENDER_GENERATION){
+  DVR_PAGE.tab=recordingsRouteTab();DVR_PAGE.error=null;DVR_PAGE.loading=true;
+  clearTimeout(DVR_PAGE.historyTimer);DVR_PAGE.historyTimer=null;
+  layoutChrome("recordings",`<div class="dvr-page-head"><div><h1>Recordings</h1>
+    <p class="sub">Plans, recorder evidence, saved programmes and what needs review.</p></div></div>
+    <div class="empty" aria-busy="true">Loading recordings…</div>`);
+  setPagePhase(location.hash,generation,"shell");
+  const read=path=>api(path,{signal:AbortSignal.timeout(20000)});
+  try{
+    const common=[read("/dvr/schedule?days=14&cancelled=1"),read("/dvr/reminders"),
+      read("/live-tv/channels").catch(()=>({channels:[]}))];
+    const path=dvrPagePath(DVR_PAGE.tab,null);
+    const [schedule,reminders,channels,answer]=await Promise.all([...common,path?read(path):Promise.resolve(null)]);
+    if(generation!==PAGE_RENDER_GENERATION||!location.hash.startsWith("#/recordings"))return;
+    LIVE_TV_DVR.schedule=schedule;LIVE_TV_DVR.reminders=Array.isArray(reminders)?reminders:[];
+    DVR_PAGE.channels=Array.isArray(channels.channels)?channels.channels:[];
+    if(DVR_PAGE.tab==="upcoming"){
+      DVR_PAGE.rows=(schedule.rows||[]).filter(row=>row.state!=="cancelled");DVR_PAGE.next=null;
+    }else if(DVR_PAGE.tab==="manual"){DVR_PAGE.rows=[];DVR_PAGE.next=null;
+    }else if(DVR_PAGE.tab==="rules"){
+      if(!Array.isArray(answer))throw new Error("The series-rule response is invalid.");
+      DVR_PAGE.rows=answer;DVR_PAGE.next=null;
+    }else if(DVR_PAGE.tab==="attention"){
+      if(!answer||!Array.isArray(answer.rows))throw new Error("The attention response is invalid.");
+      DVR_PAGE.rows=answer.rows;DVR_PAGE.next=answer.next||null;DVR_PAGE.total=Number(answer.total)||0;
+    }else{
+      const page=dvrRecordingsPage(answer);DVR_PAGE.rows=page.rows;DVR_PAGE.next=page.next;
+    }
+    DVR_PAGE.error=null;
+  }catch(e){DVR_PAGE.error=e&&e.message||"Recordings could not be loaded";}
+  finally{
+    DVR_PAGE.loading=false;
+    if(generation===PAGE_RENDER_GENERATION&&location.hash.startsWith("#/recordings")){
+      paintRecordingsPage();setPagePhase(location.hash,generation,"content");setPagePhase(location.hash,generation,"settled");
+      const selected=new URLSearchParams((location.hash.split("?")[1]||"")).get("selected");
+      if(selected&&DVR_PAGE.selectedId!==selected)selectDvrDetail(selected);
+    }
+  }
+}
+function dvrSummaryMarkup(){
+  const overview=DVR_SHARED.overview,counts=overview&&overview.counts||{};
+  const metric=(value,label)=>`<div><b>${value==null?"—":esc(String(value))}</b><span>${esc(label)}</span></div>`;
+  const availability=DVR_SHARED.error?`<div class="clrefusal" role="status"><b>Recording status is stale.</b> ${esc(DVR_SHARED.error)}</div>`
+    :overview&&overview.availability!=="complete"?`<div class="clrefusal" role="status"><b>Recorder evidence is ${esc(overview.availability)}.</b> Durable rows remain visible; missing owner observations are not treated as idle.</div>`:"";
+  return `${availability}<div class="dvr-summary">${metric(counts.recording,"Writing now")}${metric(counts.starting,"Starting")}${metric(counts.reconnecting,"Reconnecting")}${metric(counts.unconfirmed,"Status unavailable")}${metric(counts.attention,"Needs attention")}</div>`;
+}
+function dvrTabsMarkup(){
+  return `<nav class="dvr-tabs" aria-label="Recording sections">${DVR_TABS.map(([id,label])=>
+    `<a href="#/recordings/${id}" class="${DVR_PAGE.tab===id?'on':''}"${DVR_PAGE.tab===id?' aria-current="page"':''}>${esc(label)}${id==="attention"&&DVR_PAGE.total?` (${DVR_PAGE.total})`:""}</a>`).join("")}</nav>`;
+}
+function dvrOverviewRows(){
+  const rows=DVR_SHARED.overview&&DVR_SHARED.overview.active||[];
+  if(!rows.length)return "";
+  return `<h2 class="section">Active recordings and pending captures</h2><div class="lt-recs" style="height:auto">${rows.map(row=>{
+    const bytes=row.total_bytes_written!=null?fmtBytes(row.total_bytes_written):row.last_confirmed_bytes!=null?`${fmtBytes(row.last_confirmed_bytes)} this attempt`:"No confirmed bytes";
+    return `<div class="lt-rec"><button class="dvr-row-button" onclick="selectDvrDetail(${esc(JSON.stringify(row.recording_id))})"><b>${esc(row.title)}</b> <span class="pill">${esc(row.display_state)}</span>
+      <span class="meta">${esc(row.guide_number)} · ${esc(row.channel_name)} · ${esc(bytes||"No confirmed bytes")}</span><span class="why">${esc(row.display_detail||"")}</span></button>
+      <span class="acts">${row.can_stop&&!row.stop_requested_at_ms?`<button onclick="liveTvStopRecording(${esc(JSON.stringify(row.recording_id))})">Stop…</button>`:""}</span></div>`;
+  }).join("")}</div>${DVR_SHARED.overview.active_truncated?`<p class="hint">Showing ${rows.length} of ${DVR_SHARED.overview.active_total}. Open Upcoming for the complete paginated list.</p>`:""}`;
+}
+function dvrSavedLabel(row){
+  if(!["done","partial"].includes(row.state))return DVR_STATE_LABEL[row.state]||row.state||"Recording";
+  if(row.stopped_by_user_id!=null)return "Stopped early";
+  if(row.state==="partial"||row.gap_s>0||row.late_start_s>0)return "Incomplete";
+  return row.item_id&&row.file_id?"Recorded":"Recorded · preparing playback";
+}
+function dvrPageRowsMarkup(){
+  if(DVR_PAGE.loading)return liveTvEmptyRecs("Loading recordings…");
+  if(DVR_PAGE.error)return `<div class="clrefusal" role="status"><b>Showing the last successful data when available.</b> ${esc(DVR_PAGE.error)} <button class="ghost sm" onclick="viewRecordings(++PAGE_RENDER_GENERATION)">Retry</button></div>`;
+  if(DVR_PAGE.tab==="manual")return dvrManualMarkup();
+  if(!DVR_PAGE.rows.length)return liveTvEmptyRecs(DVR_PAGE.tab==="attention"?"Nothing needs review.":"Nothing in this section yet.");
+  const rows=DVR_PAGE.rows.map(raw=>{
+    const row=DVR_PAGE.tab==="attention"?raw.recording:raw;
+    if(DVR_PAGE.tab==="rules"){
+      const keep=row.keep_mode==="last_n"?`keep the last ${row.keep_value}`:row.keep_mode==="days"?`keep ${row.keep_value} days`:row.keep_mode==="until_watched"?"keep until watched":"keep everything";
+      return `<div class="lt-rec"><span><b>${esc(row.name)}</b>${row.enabled?"":' <span class="pill">off</span>'}<span class="meta">${esc(row.match_value)} · ${esc(keep)} · priority ${row.priority}</span></span><span class="acts"><button onclick="liveTvDeleteRule(${esc(JSON.stringify(row.id))})">Delete</button></span></div>`;
+    }
+    const state=DVR_PAGE.tab==="saved"?dvrSavedLabel(row):(DVR_STATE_LABEL[row.state]||row.state);
+    const actions=[];
+    if(row.state==="cancelled")actions.push(`<button onclick="liveTvRestore(${esc(JSON.stringify(row.id))})">Restore</button>`);
+    else if(row.state==="recording"&&!row.stop_requested_at_ms)actions.push(`<button onclick="liveTvStopRecording(${esc(JSON.stringify(row.id))})">Stop…</button>`);
+    else if(row.state==="done"||row.state==="partial")actions.push(`<button onclick="liveTvDeleteRecording(${esc(JSON.stringify(row.id))},${esc(JSON.stringify(row.title))})">Delete…</button>`);
+    const attention=DVR_PAGE.tab==="attention"?`<span class="why">Review event ${raw.latest_attention_sequence||"legacy outcome"}</span>`:"";
+    return `<div class="lt-rec" data-recording-id="${esc(row.id)}"><button class="dvr-row-button" onclick="selectDvrDetail(${esc(JSON.stringify(row.id))})"><b>${esc(row.title)}</b> <span class="pill">${esc(state)}</span>${liveTvRecordingLine(row)}${row.state_reason?`<span class="why">${esc(row.state_reason)}</span>`:""}${attention}</button><span class="acts">${row.item_id&&row.file_id?`<a class="ghost sm" href="#/item/${row.item_id}">Play</a>`:""}${actions.join("")}</span></div>`;
+  }).join("");
+  const more=DVR_PAGE.next?`<div class="row" style="justify-content:flex-end"><button class="ghost sm" onclick="loadMoreDvrPage()">Load more</button></div>`:"";
+  return `<div class="lt-recs" style="height:auto">${rows}</div>${more}`;
+}
+function dvrManualMarkup(){
+  const options=DVR_PAGE.channels.map(row=>`<option value="${esc(row.id)}">${esc(row.guide_number)} · ${esc(row.guide_name)}</option>`).join("");
+  return `<form class="dvr-manual lt-recs" style="height:auto" onsubmit="submitManualRecording(event)"><label class="wide">Channel<select id="dvr-manual-channel" required>${options}</select></label><label>Capture starts<input id="dvr-manual-start" type="datetime-local" required></label><label>Capture ends<input id="dvr-manual-end" type="datetime-local" required></label><label class="wide">Title<input id="dvr-manual-title" maxlength="200" required placeholder="Programme title"></label><div class="wide"><button type="submit">Schedule recording</button></div></form>`;
+}
+function dvrEventLabel(kind){return ({scheduled:"Scheduled",schedule_changed:"Schedule changed",conflict:"No tuner",withdrawn:"Withdrawn",cancelled:"Skipped",restored:"Restored",attempt_started:"Capture attempt started",first_bytes_written:"First bytes written",capture_interrupted:"Capture interrupted",retry_started:"Retry started",stop_requested:"Stop requested",finishing:"Finishing",finished:"Capture finished",failed:"Capture failed",missed:"Capture missed",media_linked:"Playback prepared",deleted:"Deleted",legacy_outcome:"Review baseline (earlier details were not collected)"})[kind]||`Recording event · ${String(kind||"unknown").replace(/_/g," ")}`;}
+function dvrDetailMarkup(){
+  const row=DVR_PAGE.selected;
+  if(!row)return `<aside class="dvr-detail empty-detail"><p class="muted">Choose a recording to see its exact capture window and lifecycle history.</p></aside>`;
+  const attention=DVR_PAGE.rows.find(raw=>(raw.recording||raw).id===row.id);
+  const through=attention&&attention.latest_attention_sequence!=null?attention.latest_attention_sequence:0;
+  const events=DVR_PAGE.events.map(event=>`<div class="dvr-event"><b>${esc(dvrEventLabel(event.kind))}</b>${event.reason_code?`<small>${esc(event.reason_code.replace(/_/g," "))}</small>`:""}<time>${new Date(event.occurred_at_ms).toLocaleString()}</time></div>`).join("");
+  return `<aside class="dvr-detail" aria-label="Recording details"><div class="row" style="justify-content:space-between"><h2 style="margin:0">${esc(row.title)}</h2><button class="ghost sm" onclick="closeDvrDetail()">Close</button></div>
+    <p><span class="pill">${esc(dvrSavedLabel(row))}</span></p>${liveTvRecordingLine(row)}
+    <dl><dt>Airing</dt><dd>${new Date(row.airing_start*1000).toLocaleString()} – ${new Date(row.airing_end*1000).toLocaleTimeString()}</dd><dt>Capture window</dt><dd>${new Date(row.capture_start*1000).toLocaleString()} – ${new Date(row.capture_end*1000).toLocaleString()}</dd><dt>Written</dt><dd>${fmtBytes(row.bytes)||"No confirmed bytes"}</dd><dt>Attempts / gaps</dt><dd>${row.attempt||0} attempt${row.attempt===1?"":"s"} · ${row.gap_s||0}s known gap</dd></dl>
+    ${DVR_PAGE.detailError?`<div class="clrefusal">${esc(DVR_PAGE.detailError)}</div>`:""}
+    <h3>Lifecycle history</h3>${!DVR_PAGE.historyComplete?`<p class="hint">${DVR_PAGE.truncatedBefore?`Earlier events were pruned through sequence ${DVR_PAGE.truncatedBefore}.`:"Detailed history was not collected for all of this recording."}</p>`:""}${events||'<p class="muted">No detailed events were collected.</p>'}
+    ${DVR_PAGE.eventsNext?`<button class="ghost sm" onclick="loadOlderDvrEvents()">Load older events</button>`:""}
+    <div class="row" style="margin-top:14px">${DVR_PAGE.tab==="attention"?`<button onclick="reviewDvrRecording(${through})">Mark reviewed</button>`:""}${row.state==="recording"&&!row.stop_requested_at_ms?`<button onclick="liveTvStopRecording(${esc(JSON.stringify(row.id))})">Stop recording…</button>`:""}${row.item_id&&row.file_id?`<a class="ghost sm" href="#/item/${row.item_id}">Play recording</a>`:""}</div></aside>`;
+}
+function paintRecordingsPage(){
+  if(!location.hash.startsWith("#/recordings"))return;
+  const main=document.getElementById("main");if(!main)return;
+  const focus=document.activeElement&&document.activeElement.closest&&document.activeElement.closest("[data-recording-id]");
+  const focusId=focus&&focus.dataset.recordingId;
+  main.innerHTML=`<div class="dvr-page-head"><div><h1>Recordings</h1><p class="sub">Plans, recorder evidence, saved programmes and what needs review.</p></div><a class="ghost sm" href="#/activity">Compact activity</a></div>${dvrSummaryMarkup()}${dvrTabsMarkup()}${dvrOverviewRows()}<h2 class="section">${esc((DVR_TABS.find(([id])=>id===DVR_PAGE.tab)||[])[1]||"Recordings")}</h2><div class="dvr-layout"><section>${dvrPageRowsMarkup()}</section>${dvrDetailMarkup()}</div>`;
+  if(focusId){const again=main.querySelector(`[data-recording-id="${CSS.escape(focusId)}"] .dvr-row-button`);if(again)again.focus({preventScroll:true});}
+}
+async function selectDvrDetail(id){
+  DVR_PAGE.selectedId=id;DVR_PAGE.detailBusy=true;DVR_PAGE.detailError=null;paintRecordingsPage();
+  try{
+    const [row,page]=await Promise.all([api(`/dvr/recordings/${encodeURIComponent(id)}`),api(`/dvr/recordings/${encodeURIComponent(id)}/events?limit=50`)]);
+    if(DVR_PAGE.selectedId!==id||!location.hash.startsWith("#/recordings"))return;
+    DVR_PAGE.selected=row;DVR_PAGE.events=page.rows||[];DVR_PAGE.eventsNext=page.next||null;
+    DVR_PAGE.historyComplete=!!page.history_complete;DVR_PAGE.truncatedBefore=page.truncated_before_sequence||null;
+    scheduleDvrHistoryRefresh();
+  }catch(e){DVR_PAGE.detailError=e&&e.message||"Recording details could not be loaded";}
+  finally{DVR_PAGE.detailBusy=false;if(DVR_PAGE.selectedId===id)paintRecordingsPage();}
+}
+function scheduleDvrHistoryRefresh(){
+  clearTimeout(DVR_PAGE.historyTimer);DVR_PAGE.historyTimer=null;
+  if(!DVR_PAGE.selected||DVR_PAGE.selected.state!=="recording"||document.visibilityState==="hidden")return;
+  const id=DVR_PAGE.selectedId;
+  DVR_PAGE.historyTimer=setTimeout(()=>refreshDvrHistory(id),5000);
+}
+async function refreshDvrHistory(id){
+  if(id!==DVR_PAGE.selectedId||!location.hash.startsWith("#/recordings"))return;
+  const after=DVR_PAGE.events.reduce((max,event)=>Math.max(max,Number(event.sequence)||0),0);
+  try{
+    const page=await api(`/dvr/recordings/${encodeURIComponent(id)}/events?limit=50&after=${after}`);
+    if(id!==DVR_PAGE.selectedId)return;
+    const seen=new Set(DVR_PAGE.events.map(event=>event.event_id));
+    const additions=(page.rows||[]).filter(event=>!seen.has(event.event_id));
+    DVR_PAGE.events=additions.reverse().concat(DVR_PAGE.events);
+    paintRecordingsPage();
+    if(page.next){DVR_PAGE.historyTimer=setTimeout(()=>refreshDvrHistory(id),0);return;}
+  }catch(e){DVR_PAGE.detailError=e&&e.message||"Lifecycle refresh failed";paintRecordingsPage();}
+  scheduleDvrHistoryRefresh();
+}
+function closeDvrDetail(){DVR_PAGE.selectedId=null;DVR_PAGE.selected=null;DVR_PAGE.events=[];paintRecordingsPage();const row=document.querySelector(`[data-recording-id] .dvr-row-button`);if(row)row.focus();}
+async function loadOlderDvrEvents(){
+  if(!DVR_PAGE.selectedId||!DVR_PAGE.eventsNext)return;
+  try{const page=await api(`/dvr/recordings/${encodeURIComponent(DVR_PAGE.selectedId)}/events?limit=50&before=${encodeURIComponent(DVR_PAGE.eventsNext)}`);const seen=new Set(DVR_PAGE.events.map(e=>e.event_id));DVR_PAGE.events=DVR_PAGE.events.concat((page.rows||[]).filter(e=>!seen.has(e.event_id)));DVR_PAGE.eventsNext=page.next||null;paintRecordingsPage();}catch(e){toast(e.message);}
+}
+async function reviewDvrRecording(through){
+  if(!DVR_PAGE.selectedId)return;
+  try{await api(`/dvr/recordings/${encodeURIComponent(DVR_PAGE.selectedId)}/attention/ack`,{method:"POST",body:{through_sequence:Number(through)||0}});toast("Marked reviewed");await viewRecordings(++PAGE_RENDER_GENERATION);}catch(e){toast(e.message);}
+}
+async function loadMoreDvrPage(){
+  const path=dvrPagePath(DVR_PAGE.tab,DVR_PAGE.next);if(!path)return;
+  try{const answer=await api(path);const page=DVR_PAGE.tab==="attention"?answer:dvrRecordingsPage(answer);const seen=new Set(DVR_PAGE.rows.map(raw=>(raw.recording||raw).id));DVR_PAGE.rows=DVR_PAGE.rows.concat((page.rows||[]).filter(raw=>!seen.has((raw.recording||raw).id)));DVR_PAGE.next=page.next||null;paintRecordingsPage();}catch(e){toast(e.message);}
+}
+async function submitManualRecording(event){
+  event.preventDefault();const channel=document.getElementById("dvr-manual-channel").value;
+  const start=Math.floor(new Date(document.getElementById("dvr-manual-start").value).getTime()/1000);
+  const end=Math.floor(new Date(document.getElementById("dvr-manual-end").value).getTime()/1000);
+  const title=document.getElementById("dvr-manual-title").value.trim();
+  if(!Number.isFinite(start)||!Number.isFinite(end)||end<=start){toast("Capture end must be after its start");return;}
+  try{const row=await api("/dvr/recordings",{method:"POST",body:{channel_id:channel,capture_start:start,capture_end:end,title}});toast("Scheduled to record");location.hash="#/recordings/upcoming";setTimeout(()=>selectDvrDetail(row.id),0);}catch(e){toast(e.message);}
 }
 
 // ---- the due-reminder overlay ---------------------------------------------
@@ -19869,6 +20184,7 @@ function catalogTabsHtml(active, homeOn){
   return `<nav class="px-tabs" aria-label="Sections">
     <a href="#/" data-tab="home"${on(homeOn)}>${catalogIcon("home")}<span>Home</span></a>
     <a href="#/library-channels" data-tab="library-channels"${on(active==="library-channels")}>${catalogIcon("film")}<span>Channels</span></a>
+    <a href="#/recordings" data-tab="recordings"${on(active==="recordings")}>${catalogIcon("act")}<span>Recordings</span></a>
     <button type="button" data-tab="libs" class="px-tab" aria-expanded="false" aria-controls="pxnav" onclick="catalogToggleLibs(event)">${catalogIcon("stack")}<span>Libraries</span></button>
     <button type="button" data-tab="search" class="px-tab" onclick="catalogFocusSearch(event)">${catalogIcon("search")}<span>Search</span></button>
     <a href="#/activity" data-tab="activity"${on(active==="activity")}>${catalogIcon("act")}<span>Activity</span></a>
@@ -19914,6 +20230,7 @@ function catalogChrome(active, inner){
          <nav class="px-nav" aria-label="Main">
            <a href="#/" class="${homeOn?"on":""}"${homeOn?' aria-current="page"':""}>${catalogIcon("home")}<span class="px-lbl">Home</span></a>
            <a href="#/live-tv" class="${active==="live-tv"?"on":""}"${active==="live-tv"?' aria-current="page"':""}>${catalogIcon("tv")}<span class="px-lbl">Live TV</span></a>
+           <a href="#/recordings" class="${active==="recordings"?"on":""}"${active==="recordings"?' aria-current="page"':""}>${catalogIcon("act")}<span class="px-lbl">Recordings</span></a>
            <a href="#/library-channels" class="${active==="library-channels"?"on":""}"${active==="library-channels"?' aria-current="page"':""}>${catalogIcon("film")}<span class="px-lbl">Library channels</span></a>
          </nav>
          <div id="pxlibs"></div>
@@ -19924,6 +20241,7 @@ function catalogChrome(active, inner){
          </nav>
        </div>
        <div class="px-foot">
+         <button class="dvr-global" id="dvr-global" onclick="location.hash='#/recordings'" aria-label="Recording status"></button>
          <span class="activity" id="activity" onclick="location.hash='#/activity'"></span>
          <div class="px-ctl">
            <div class="px-pop">
@@ -20407,6 +20725,7 @@ function theaterNavItems(active){
   const homeOn = active==="home" && (hash==="#/"||hash==="#"||hash==="");
   const items=[{tab:"home", href:"#/", label:"Home", on:homeOn},
                {tab:"live-tv", href:"#/live-tv", label:"Live TV", on:active==="live-tv"},
+               {tab:"recordings", href:"#/recordings", label:"Recordings", on:active==="recordings"},
                {tab:"library-channels", href:"#/library-channels", label:"Library channels", on:active==="library-channels"},
                {tab:"activity", href:"#/activity", label:"Activity", on:active==="activity"}];
   // Settings appears for admins only, and nowhere else in the shell — a
@@ -20431,6 +20750,7 @@ function theaterChrome(active, inner){
      <a href="#/" class="logo">${APP_NAME}</a>
      <nav class="th-nav" aria-label="Main">${theaterNavHtml(active)}</nav>
      <span class="spacer"></span>
+     <button class="dvr-global" id="dvr-global" onclick="location.hash='#/recordings'" aria-label="Recording status"></button>
      <span class="activity" id="activity" onclick="location.hash='#/activity'"></span>
      <input class="search" id="q" placeholder="Search…" aria-label="Search ${APP_NAME}" value="${esc(getQ())}">
      <div class="th-ctl">
@@ -21590,6 +21910,7 @@ function returnToLibraryChannel(){
 let PAGE_TIMER=null, PAGE_RENDER_GENERATION=0;
 function pagePhaseName(route){
   if(route==="#/live-tv") return "live-tv";
+  if(route.startsWith("#/recordings")) return "recordings";
   if(route==="#/library-channels") return "library-channels";
   if(route==="#/activity") return "activity";
   if(route==="#/analysis") return "analysis";
@@ -21650,6 +21971,7 @@ async function render(){
   // route change must not become a request.
   if(!DVR_REMINDER_TIMER) DVR_REMINDER_TIMER=setInterval(pollDvrReminders,30000);
   let h=location.hash||"#/";
+  if(!h.startsWith("#/recordings")){clearTimeout(DVR_PAGE.historyTimer);DVR_PAGE.historyTimer=null;}
   if(h!=="#/live-tv") liveTvLeaveRoute();
   if(!h.startsWith("#/read/")&&READER) destroyReader(true);
   // A join token is bearer authority, so leaving Settings drops the only
@@ -21668,6 +21990,7 @@ async function render(){
   // Item pages inherit the list you arrived from; everything else replaces it
   // (the list views re-set it as they render) or drops it.
   if(!h.startsWith("#/item/")) NAV_ORIGIN=null;
+  dvrRouteChanged(h);
   try{
     if(h.startsWith("#/read/")) await viewReader(h.split("/")[2],h.split("/")[3]);
     else if(h.startsWith("#/item/")) await viewItem(h.split("/")[2]);
@@ -21676,6 +21999,7 @@ async function render(){
     else if(h.startsWith("#/search/")) await viewSearch(decodeURIComponent(h.split("/")[2]||""));
     else if(h==="#/activity") await viewActivity(generation);
     else if(h==="#/live-tv") await viewLiveTv(generation);
+    else if(h.startsWith("#/recordings")) await viewRecordings(generation);
     else if(h==="#/library-channels") await viewLibraryChannels(generation);
     else if(h==="#/analysis") await viewAnalysis(generation);
     else if(isSettingsRoute(h)) await viewSettings(generation,!stayingInSettings);

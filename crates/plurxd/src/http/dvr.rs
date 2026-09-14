@@ -311,7 +311,12 @@ pub(crate) async fn collect_overview(
         .values()
         .map(|sample| sample.observation_age_ms)
         .max();
-    let attention = rows.iter().filter(|row| attention_worthy(row)).count();
+    let attention = state
+        .store
+        .list_dvr_attention(viewer_id, None, 1)
+        .await
+        .map(|(_, total)| total.max(0) as usize)
+        .unwrap_or_else(|_| rows.iter().filter(|row| attention_worthy(row)).count());
     let now_s = server_now_ms / 1_000;
     let mut active_rows = rows
         .iter()

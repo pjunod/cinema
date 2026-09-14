@@ -31,7 +31,7 @@ presentation contract around them.
 | S01 blank-list repair | built; final evidence pending | web, Apple and Android decode the real `{rows, next}` envelope; web preserves stale rows and exposes Load more; regression fixtures written but not run |
 | S02 capture observation and overview | built; compile passed | successful-write sampling, five-second rate window, bounded peer observations, shared Activity/overview projection and `/api/v1/dvr/overview`; focused fixtures written but not run |
 | S03 lifecycle ledger and attention | built; compile passed | append-only SQLite v59 / replicated v39 migrations; atomic and owner-fenced events, bounded pages/pruning, legacy provenance and per-user acknowledgments; no tests run yet |
-| S04 web layouts and controller | queued | shared poller, exact-airing marks, Activity master/detail and canonical `#/recordings` |
+| S04 web layouts and controller | built; commit checks pending | one scope-aware poller feeds chrome, Live TV and Recordings; exact-airing player context, canonical `#/recordings`, six task tabs, mobile detail, real event history and Activity projection |
 | S05 Apple clients | queued | tolerant decoders, one foreground controller, Recordings navigation and focus-safe details |
 | S06 Android clients | queued | tolerant decoders, lifecycle-aware controller, Recordings navigation and stable D-pad focus |
 | S07 review and promotion | queued | merge current `main`, obtain one adversarial code review, address it, mark the draft PR ready and let the fast lane run once |
