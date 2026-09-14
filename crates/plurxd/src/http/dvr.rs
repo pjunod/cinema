@@ -29,6 +29,7 @@ use plurx_core::dvr::{
 };
 use plurx_core::store::keys;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
@@ -38,6 +39,7 @@ use crate::state::AppState;
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
         .route("/status", get(status))
+        .route("/overview", get(overview))
         .route("/recordings", get(list_recordings).post(create_recording))
         .route(
             "/recordings/{id}",
@@ -53,6 +55,403 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/reminders/{id}/ack", post(ack_reminder))
         .layer(axum::extract::DefaultBodyLimit::max(64 * 1024))
         .layer(middleware::from_fn(private_no_store))
+}
+
+const DVR_OBSERVATION_FRESH_MS: u64 = 20_000;
+const DVR_WRITE_HEALTHY_MS: u64 = 10_000;
+const DVR_OVERVIEW_ACTIVE_MAX: usize = 64;
+
+#[derive(Clone, Serialize)]
+pub(crate) struct DvrOverviewCounts {
+    recording: Option<usize>,
+    starting: Option<usize>,
+    reconnecting: Option<usize>,
+    finishing: Option<usize>,
+    unconfirmed: Option<usize>,
+    attention: Option<usize>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct DvrOverviewDiagnostics {
+    owner_node_id: String,
+    recording_sinks: Option<usize>,
+    recording_transports: Option<usize>,
+    storage_free_bytes: Option<u64>,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct DvrActiveProjection {
+    recording_id: String,
+    channel_id: String,
+    airing_start: i64,
+    title: String,
+    episode_title: Option<String>,
+    guide_number: String,
+    channel_name: String,
+    durable_state: DvrState,
+    state_reason: Option<String>,
+    airing_end: i64,
+    capture_start: i64,
+    capture_end: i64,
+    stop_requested_at_ms: Option<i64>,
+    last_confirmed_bytes: Option<u64>,
+    total_bytes_written: Option<u64>,
+    observation: Option<crate::live_tv::dvr::DvrCaptureObservation>,
+    display_state: String,
+    display_detail: String,
+    can_stop: bool,
+    can_skip: bool,
+    can_restore: bool,
+    can_delete: bool,
+    can_edit_rule: bool,
+    can_reorder_rules: bool,
+    can_view_diagnostics: bool,
+}
+
+#[derive(Clone, Serialize)]
+pub(crate) struct DvrOverview {
+    version: u8,
+    server_now_ms: i64,
+    availability: &'static str,
+    runtime_supported: bool,
+    observation_age_ms: Option<u64>,
+    counts: DvrOverviewCounts,
+    active_total: Option<usize>,
+    active_truncated: bool,
+    active: Vec<DvrActiveProjection>,
+    next_capture_start: Option<i64>,
+    diagnostics: Option<DvrOverviewDiagnostics>,
+}
+
+fn unavailable_overview(server_now_ms: i64) -> DvrOverview {
+    DvrOverview {
+        version: 1,
+        server_now_ms,
+        availability: "unavailable",
+        runtime_supported: true,
+        observation_age_ms: None,
+        counts: DvrOverviewCounts {
+            recording: None,
+            starting: None,
+            reconnecting: None,
+            finishing: None,
+            unconfirmed: None,
+            attention: None,
+        },
+        active_total: None,
+        active_truncated: false,
+        active: Vec::new(),
+        next_capture_start: None,
+        diagnostics: None,
+    }
+}
+
+fn attention_worthy(row: &DvrRecording) -> bool {
+    matches!(
+        row.state,
+        DvrState::Conflict
+            | DvrState::Withdrawn
+            | DvrState::Stale
+            | DvrState::Failed
+            | DvrState::Missed
+    ) || (row.state == DvrState::Partial && (row.gap_s > 0 || row.late_start_s > 0))
+}
+
+fn display_state(
+    row: &DvrRecording,
+    observation: Option<&crate::live_tv::dvr::DvrCaptureObservation>,
+    server_now_ms: i64,
+) -> (String, String) {
+    if row.state != DvrState::Recording {
+        let label = match row.state {
+            DvrState::Scheduled if row.capture_start.saturating_mul(1_000) <= server_now_ms => {
+                "Waiting to start"
+            }
+            DvrState::Scheduled => "Scheduled",
+            DvrState::Conflict => "No tuner",
+            DvrState::Withdrawn => "Withdrawn",
+            DvrState::Stale => "Programme moved",
+            DvrState::Done if row.stopped_by_user_id.is_some() => "Stopped early",
+            DvrState::Done => "Recorded",
+            DvrState::Partial => "Incomplete",
+            DvrState::Failed => "Failed",
+            DvrState::Missed => "Missed",
+            DvrState::Cancelled => "Skipped",
+            DvrState::Deleted => "Deleted",
+            DvrState::Recording => unreachable!(),
+        };
+        return (
+            label.to_owned(),
+            row.state_reason.clone().unwrap_or_default(),
+        );
+    }
+    if row.stop_requested_at_ms.is_some()
+        && observation.is_none_or(|sample| sample.phase != "finishing")
+    {
+        return (
+            "Stop requested".to_owned(),
+            observation
+                .is_none()
+                .then_some("Recorder observation unavailable".to_owned())
+                .unwrap_or_default(),
+        );
+    }
+    let Some(sample) =
+        observation.filter(|sample| sample.observation_age_ms <= DVR_OBSERVATION_FRESH_MS)
+    else {
+        return (
+            "Status unavailable".to_owned(),
+            "No fresh observation from the recorder owner".to_owned(),
+        );
+    };
+    match sample.phase.as_str() {
+        "finishing" => ("Finishing".to_owned(), "Closing the capture".to_owned()),
+        "reconnecting" => (
+            "Reconnecting".to_owned(),
+            "A new capture attempt is starting".to_owned(),
+        ),
+        "starting" => ("Starting".to_owned(), "Waiting for first bytes".to_owned()),
+        "writing"
+            if sample
+                .last_write_age_ms
+                .is_some_and(|age| age <= DVR_WRITE_HEALTHY_MS) =>
+        {
+            ("Recording".to_owned(), "Data is being written".to_owned())
+        }
+        "writing" => (
+            "Recording".to_owned(),
+            "No recent data has been written".to_owned(),
+        ),
+        _ => (
+            "Status unavailable".to_owned(),
+            "The recorder reported an unknown phase".to_owned(),
+        ),
+    }
+}
+
+pub(crate) async fn collect_overview(
+    state: &AppState,
+    viewer_id: i64,
+    is_admin: bool,
+    peers: Option<&super::internal_activity::SharedPeerActivity>,
+) -> DvrOverview {
+    let server_now_ms = now_ms();
+    let settings = match state.store.settings_snapshot().await {
+        Ok(settings) => settings,
+        Err(error) => {
+            tracing::warn!(%error, "DVR overview could not read settings");
+            return unavailable_overview(server_now_ms);
+        }
+    };
+    let live_tv = LiveTvConfig::from_snapshot(&settings, &state.node_id);
+    state.live_tv.observe_config(&live_tv);
+    let states = [
+        DvrState::Scheduled,
+        DvrState::Conflict,
+        DvrState::Withdrawn,
+        DvrState::Stale,
+        DvrState::Recording,
+        DvrState::Done,
+        DvrState::Partial,
+        DvrState::Failed,
+        DvrState::Missed,
+        DvrState::Cancelled,
+    ];
+    let rows = match state.store.list_dvr_recordings_in(&states).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "DVR overview could not read durable recordings");
+            return unavailable_overview(server_now_ms);
+        }
+    };
+    let rules = state.store.list_dvr_rules().await.unwrap_or_default();
+    let rule_owners = rules
+        .into_iter()
+        .map(|rule| (rule.id, rule.owner_user_id))
+        .collect::<HashMap<_, _>>();
+
+    let (runtime, runtime_supported) = if live_tv.owner_node_id == state.node_id {
+        (Some(state.live_tv.capture_observation_snapshot()), true)
+    } else {
+        let owner = peers.and_then(|outcomes| {
+            outcomes.iter().find_map(|(node_id, outcome)| {
+                (node_id == &live_tv.owner_node_id).then_some(outcome)
+            })
+        });
+        match owner {
+            Some(super::internal_activity::PeerActivityOutcome::Answered(snapshot)) => {
+                (snapshot.dvr.clone(), snapshot.dvr.is_some())
+            }
+            _ => (None, true),
+        }
+    };
+    let runtime_complete = runtime.as_ref().is_some_and(|snapshot| !snapshot.truncated);
+    let mut observations = runtime
+        .as_ref()
+        .map(|snapshot| {
+            snapshot
+                .observations
+                .iter()
+                .filter(|sample| {
+                    sample.owner_node_id == live_tv.owner_node_id
+                        && sample.config_generation == live_tv.generation
+                })
+                .map(|sample| (sample.recording_id.as_str(), sample))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let observation_age_ms = observations
+        .values()
+        .map(|sample| sample.observation_age_ms)
+        .max();
+    let attention = rows.iter().filter(|row| attention_worthy(row)).count();
+    let now_s = server_now_ms / 1_000;
+    let mut active_rows = rows
+        .iter()
+        .filter(|row| {
+            row.state == DvrState::Recording
+                || (row.state == DvrState::Scheduled && row.capture_start <= now_s)
+        })
+        .collect::<Vec<_>>();
+    active_rows.sort_by(|left, right| {
+        left.capture_start
+            .cmp(&right.capture_start)
+            .then(left.id.cmp(&right.id))
+    });
+    let active_total = active_rows.len();
+    let active_truncated = active_total > DVR_OVERVIEW_ACTIVE_MAX;
+    let mut counts = DvrOverviewCounts {
+        recording: Some(0),
+        starting: Some(0),
+        reconnecting: Some(0),
+        finishing: Some(0),
+        unconfirmed: Some(0),
+        attention: Some(attention),
+    };
+    let active = active_rows
+        .into_iter()
+        .take(DVR_OVERVIEW_ACTIVE_MAX)
+        .map(|row| {
+            let observation = observations.remove(row.id.as_str()).filter(|sample| {
+                sample.channel_id == row.channel_id
+                    && sample.airing_start == row.airing_start
+                    && sample.attempt == row.attempt
+                    && sample.observation_age_ms <= DVR_OBSERVATION_FRESH_MS
+            });
+            let (label, detail) = display_state(row, observation, server_now_ms);
+            match label.as_str() {
+                "Recording" => counts.recording = counts.recording.map(|value| value + 1),
+                "Starting" => counts.starting = counts.starting.map(|value| value + 1),
+                "Reconnecting" => counts.reconnecting = counts.reconnecting.map(|value| value + 1),
+                "Finishing" => counts.finishing = counts.finishing.map(|value| value + 1),
+                "Status unavailable" | "Waiting to start" => {
+                    counts.unconfirmed = counts.unconfirmed.map(|value| value + 1)
+                }
+                _ => {}
+            }
+            let last_confirmed_bytes = observation.map(|sample| sample.attempt_bytes_written);
+            let total_bytes_written = observation.and_then(|sample| {
+                sample
+                    .prior_attempt_bytes
+                    .and_then(|prior| prior.checked_add(sample.attempt_bytes_written))
+            });
+            let can_edit_rule = row.rule_id.as_ref().is_some_and(|rule_id| {
+                is_admin || rule_owners.get(rule_id).copied() == Some(viewer_id)
+            });
+            DvrActiveProjection {
+                recording_id: row.id.clone(),
+                channel_id: row.channel_id.clone(),
+                airing_start: row.airing_start,
+                title: row.title.clone(),
+                episode_title: row.episode_title.clone(),
+                guide_number: row.guide_number.clone(),
+                channel_name: row.channel_name.clone(),
+                durable_state: row.state,
+                state_reason: row.state_reason.clone(),
+                airing_end: row.airing_end,
+                capture_start: row.capture_start,
+                capture_end: row.capture_end,
+                stop_requested_at_ms: row.stop_requested_at_ms,
+                last_confirmed_bytes,
+                total_bytes_written,
+                observation: observation.cloned(),
+                display_state: label,
+                display_detail: detail,
+                can_stop: row.state == DvrState::Recording,
+                can_skip: row.state.is_pending(),
+                can_restore: row.state == DvrState::Cancelled && row.capture_end > now_s,
+                can_delete: row.state.is_terminal() && row.state != DvrState::Deleted,
+                can_edit_rule,
+                can_reorder_rules: is_admin,
+                can_view_diagnostics: is_admin,
+            }
+        })
+        .collect();
+    let next_capture_start = rows
+        .iter()
+        .filter(|row| row.state == DvrState::Scheduled && row.capture_start > now_s)
+        .map(|row| row.capture_start)
+        .min();
+    let diagnostics = is_admin.then(|| DvrOverviewDiagnostics {
+        owner_node_id: live_tv.owner_node_id.clone(),
+        recording_sinks: runtime
+            .as_ref()
+            .map(|snapshot| snapshot.observed_sink_count),
+        recording_transports: runtime
+            .as_ref()
+            .map(|snapshot| snapshot.recording_transports),
+        storage_free_bytes: (live_tv.owner_node_id == state.node_id)
+            .then(|| crate::live_tv::free_space_bytes(&DvrConfig::from_snapshot(&settings).root))
+            .flatten(),
+    });
+    DvrOverview {
+        version: 1,
+        server_now_ms,
+        availability: if runtime_complete {
+            "complete"
+        } else {
+            "partial"
+        },
+        runtime_supported,
+        observation_age_ms,
+        counts,
+        active_total: Some(active_total),
+        active_truncated,
+        active,
+        next_capture_start,
+        diagnostics,
+    }
+}
+
+pub(crate) async fn overview(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<DvrOverview>, ApiError> {
+    let owner = state
+        .store
+        .settings_snapshot()
+        .await
+        .ok()
+        .map(|settings| LiveTvConfig::from_snapshot(&settings, &state.node_id).owner_node_id);
+    let peers = if state.cluster_advertisement && state.membership.is_replicated() {
+        match owner.filter(|owner| owner != &state.node_id) {
+            Some(owner) => state
+                .peer_activity
+                .owner_snapshot(&owner)
+                .await
+                .ok()
+                .map(|outcome| {
+                    std::sync::Arc::from(vec![(owner, outcome)].into_boxed_slice())
+                        as super::internal_activity::SharedPeerActivity
+                }),
+            None => None,
+        }
+    } else {
+        None
+    };
+    Ok(Json(
+        collect_overview(&state, user.id, user.is_admin, peers.as_ref()).await,
+    ))
 }
 
 /// A schedule is a person's own plan, and a reminder names what they intend to
@@ -1137,4 +1536,92 @@ pub(crate) fn dvr_setting_keys() -> [&'static str; 8] {
         keys::DVR_REMINDER_LEAD_S,
         keys::DVR_WEBHOOK_URL,
     ]
+}
+
+#[cfg(test)]
+mod visibility_tests {
+    use super::*;
+
+    fn row(state: DvrState) -> DvrRecording {
+        let mut row = recording_from_programme(
+            &ResolvedChannel {
+                id: "7.1".into(),
+                guide_number: "7.1".into(),
+                name: "WABC".into(),
+            },
+            &LiveTvProgramme {
+                start: 1_789_000_800,
+                end: 1_789_002_600,
+                title: "Kitchen Table".into(),
+                episode_title: None,
+                episode: None,
+                synopsis: None,
+                image_url: None,
+                original_air_date: None,
+                series_id: None,
+                programme_id: None,
+                is_new: None,
+                filters: Vec::new(),
+            },
+            DvrOrigin::Manual,
+            None,
+            Some(1),
+            60,
+            120,
+            0,
+        );
+        row.state = state;
+        row.attempt = 1;
+        row
+    }
+
+    fn observation(last_write_age_ms: Option<u64>) -> crate::live_tv::dvr::DvrCaptureObservation {
+        crate::live_tv::dvr::DvrCaptureObservation {
+            recording_id: "recording".into(),
+            channel_id: "7.1".into(),
+            airing_start: 1_789_000_800,
+            owner_node_id: "node-a".into(),
+            config_generation: 4,
+            serving_generation: 2,
+            attempt: 1,
+            phase: "writing".into(),
+            observation_age_ms: 0,
+            last_write_age_ms,
+            first_write_at_ms: Some(1_789_000_000_000),
+            attempt_bytes_written: 4_096,
+            prior_attempt_bytes: Some(0),
+            write_bps: Some(2_048),
+            reason_code: None,
+        }
+    }
+
+    #[test]
+    fn display_state_separates_freshness_from_write_health() {
+        let recording = row(DvrState::Recording);
+        let healthy = observation(Some(2_000));
+        assert_eq!(display_state(&recording, Some(&healthy), 0).0, "Recording");
+        assert!(display_state(&recording, Some(&healthy), 0)
+            .1
+            .contains("being written"));
+
+        let quiet = observation(Some(15_000));
+        assert_eq!(display_state(&recording, Some(&quiet), 0).0, "Recording");
+        assert!(display_state(&recording, Some(&quiet), 0)
+            .1
+            .contains("No recent data"));
+
+        let mut stale = healthy;
+        stale.observation_age_ms = DVR_OBSERVATION_FRESH_MS + 1;
+        assert_eq!(
+            display_state(&recording, Some(&stale), 0).0,
+            "Status unavailable"
+        );
+    }
+
+    #[test]
+    fn a_reached_clock_never_claims_that_capture_started() {
+        let scheduled = row(DvrState::Scheduled);
+        let now = scheduled.capture_start.saturating_mul(1_000);
+        assert_eq!(display_state(&scheduled, None, now).0, "Waiting to start");
+    }
 }

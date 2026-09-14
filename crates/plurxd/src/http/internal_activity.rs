@@ -32,6 +32,7 @@ const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 // Four rows, including worst-case six-byte JSON escapes for every bounded
 // string, fit this reservation even when deliveries saturate the response.
 const LIVE_TV_RESPONSE_RESERVE_BYTES: usize = 24 * 1024;
+const DVR_RESPONSE_RESERVE_BYTES: usize = 64 * 1024;
 // A saturated delivery list must not erase every analysis row from a peer's
 // Activity snapshot. Reserve one quarter of the shared wire budget whenever
 // progress exists; unused space remains available when it does not.
@@ -51,6 +52,10 @@ pub struct ActivitySnapshot {
     pub analysis: Vec<crate::state::AnalysisProgress>,
     #[serde(default)]
     pub(crate) live_tv: Vec<crate::live_tv::LiveTvActivity>,
+    /// Absent means this peer predates runtime DVR observations. A present,
+    /// empty snapshot means the peer supports them and currently owns no sink.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) dvr: Option<crate::live_tv::dvr::DvrObservationSnapshot>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -157,6 +162,8 @@ pub struct PeerActivityClient {
     membership: plurx_core::cluster::membership::MembershipManager,
     transport: PeerTransport,
     reads: Arc<tokio::sync::Mutex<PeerActivityReadGate>>,
+    owner_reads:
+        Arc<tokio::sync::Mutex<HashMap<String, (tokio::time::Instant, PeerActivityOutcome)>>>,
 }
 
 #[allow(dead_code)]
@@ -167,6 +174,7 @@ impl PeerActivityClient {
             transport: PeerTransport::new(membership.clone()),
             membership,
             reads: Arc::new(tokio::sync::Mutex::new(PeerActivityReadGate::default())),
+            owner_reads: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -197,6 +205,42 @@ impl PeerActivityClient {
             },
         )
         .await
+    }
+
+    /// Read only the configured recorder owner. The one-second result cache
+    /// and the held async lock make concurrent overview requests one physical
+    /// peer read without turning the lightweight DVR poll into an all-node
+    /// Activity fan-out.
+    pub async fn owner_snapshot(
+        &self,
+        owner_node_id: &str,
+    ) -> Result<PeerActivityOutcome, MembershipError> {
+        let mut gate = self.owner_reads.lock().await;
+        if let Some((completed_at, outcome)) = gate.get(owner_node_id) {
+            if completed_at.elapsed() <= ACTIVITY_SNAPSHOT_REUSE {
+                return Ok(outcome.clone());
+            }
+        }
+        let peer = self
+            .membership
+            .activity_peers()
+            .await?
+            .into_iter()
+            .find(|peer| peer.node_id == owner_node_id);
+        let outcome = match peer {
+            Some(peer) => {
+                let deadline = deadline_after(TIMEOUT);
+                fetch_peer_activity(self.clone(), peer, deadline).await
+            }
+            None => PeerActivityOutcome::Unsupported,
+        };
+        record_peer_outcome(&outcome);
+        gate.clear();
+        gate.insert(
+            owner_node_id.to_owned(),
+            (tokio::time::Instant::now(), outcome.clone()),
+        );
+        Ok(outcome)
     }
 
     async fn snapshot(
@@ -390,6 +434,24 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
         && snapshot.deliveries.len() <= MAX_DELIVERIES
         && snapshot.analysis.len() <= MAX_ANALYSIS_PROGRESS
         && snapshot.live_tv.len() <= 4
+        && snapshot.dvr.as_ref().is_none_or(|dvr| {
+            dvr.observations.len() <= crate::live_tv::dvr::DVR_OBSERVATIONS_MAX
+                && dvr.observed_sink_count >= dvr.observations.len()
+                && dvr.observations.iter().all(|observation| {
+                    observation.owner_node_id == snapshot.node_id
+                        && observation.recording_id.len() <= 128
+                        && observation.channel_id.len() <= 256
+                        && observation.phase.len() <= 32
+                        && observation
+                            .reason_code
+                            .as_ref()
+                            .is_none_or(|reason| reason.len() <= 64)
+                        && matches!(
+                            observation.phase.as_str(),
+                            "starting" | "writing" | "reconnecting" | "finishing"
+                        )
+                })
+        })
         && snapshot.live_tv.iter().all(|live| {
             live.owner_node_id == snapshot.node_id
                 && live.channel_number.len() <= 32
@@ -561,6 +623,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
     }
     let mut snapshot = bounded_snapshot(state.node_id.clone(), deliveries, analysis);
     snapshot.live_tv = state.live_tv.activities().into_iter().take(4).collect();
+    attach_dvr_snapshot(&mut snapshot, state.live_tv.capture_observation_snapshot());
     snapshot
 }
 
@@ -648,15 +711,19 @@ fn bounded_snapshot(
         deliveries: Vec::new(),
         analysis: Vec::new(),
         live_tv: Vec::new(),
+        dvr: None,
     };
     let mut encoded_bytes = serde_json::to_vec(&snapshot)
         .map(|encoded| encoded.len())
         .unwrap_or(MAX_RESPONSE_BYTES);
     let delivery_budget = if analysis.is_empty() {
-        MAX_RESPONSE_BYTES - LIVE_TV_RESPONSE_RESERVE_BYTES
+        MAX_RESPONSE_BYTES - LIVE_TV_RESPONSE_RESERVE_BYTES - DVR_RESPONSE_RESERVE_BYTES
     } else {
-        MAX_RESPONSE_BYTES
-            .saturating_sub(ANALYSIS_RESPONSE_RESERVE_BYTES + LIVE_TV_RESPONSE_RESERVE_BYTES)
+        MAX_RESPONSE_BYTES.saturating_sub(
+            ANALYSIS_RESPONSE_RESERVE_BYTES
+                + LIVE_TV_RESPONSE_RESERVE_BYTES
+                + DVR_RESPONSE_RESERVE_BYTES,
+        )
     };
     for delivery in deliveries.into_iter().take(MAX_DELIVERIES) {
         let Ok(encoded) = serde_json::to_vec(&delivery) else {
@@ -676,7 +743,8 @@ fn bounded_snapshot(
         };
         let separator = usize::from(!snapshot.analysis.is_empty());
         let added = encoded.len().saturating_add(separator);
-        if encoded_bytes.saturating_add(added) > MAX_RESPONSE_BYTES - LIVE_TV_RESPONSE_RESERVE_BYTES
+        if encoded_bytes.saturating_add(added)
+            > MAX_RESPONSE_BYTES - LIVE_TV_RESPONSE_RESERVE_BYTES - DVR_RESPONSE_RESERVE_BYTES
         {
             continue;
         }
@@ -684,6 +752,49 @@ fn bounded_snapshot(
         snapshot.analysis.push(progress);
     }
     snapshot
+}
+
+fn attach_dvr_snapshot(
+    snapshot: &mut ActivitySnapshot,
+    source: crate::live_tv::dvr::DvrObservationSnapshot,
+) {
+    let mut bounded = crate::live_tv::dvr::DvrObservationSnapshot {
+        observed_sink_count: source.observed_sink_count,
+        truncated: source.truncated,
+        observations: Vec::new(),
+        recording_transports: source.recording_transports,
+    };
+    snapshot.dvr = Some(bounded.clone());
+    let base_bytes = serde_json::to_vec(snapshot)
+        .map(|encoded| encoded.len())
+        .unwrap_or(MAX_RESPONSE_BYTES);
+    let limit = base_bytes
+        .saturating_add(DVR_RESPONSE_RESERVE_BYTES)
+        .min(MAX_RESPONSE_BYTES);
+    let mut encoded_bytes = base_bytes;
+    for observation in source
+        .observations
+        .into_iter()
+        .take(crate::live_tv::dvr::DVR_OBSERVATIONS_MAX)
+    {
+        let Ok(encoded) = serde_json::to_vec(&observation) else {
+            bounded.truncated = true;
+            continue;
+        };
+        let added = encoded
+            .len()
+            .saturating_add(usize::from(!bounded.observations.is_empty()));
+        if encoded_bytes.saturating_add(added) > limit {
+            bounded.truncated = true;
+            break;
+        }
+        encoded_bytes += added;
+        bounded.observations.push(observation);
+    }
+    if bounded.observations.len() < bounded.observed_sink_count {
+        bounded.truncated = true;
+    }
+    snapshot.dvr = Some(bounded);
 }
 
 #[allow(dead_code)]
@@ -812,6 +923,7 @@ mod tests {
             deliveries: Vec::new(),
             analysis: Vec::new(),
             live_tv: Vec::new(),
+            dvr: None,
         };
         assert!(snapshot_is_bounded(&snapshot, "node-b"));
         assert!(!snapshot_is_bounded(&snapshot, "node-c"));
@@ -1022,6 +1134,7 @@ mod tests {
             deliveries: Vec::new(),
             analysis: Vec::new(),
             live_tv: Vec::new(),
+            dvr: None,
         })
         .expect("snapshot JSON");
         assert_eq!(

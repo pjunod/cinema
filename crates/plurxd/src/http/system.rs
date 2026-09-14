@@ -4368,6 +4368,11 @@ pub async fn activity_detail(
     };
     let clustered = !matches!(peers, PeerActivityRead::LocalOnly);
     let live_tv = clustered_live_tv(state.live_tv.activities(), &peers);
+    let dvr_peers = match &peers {
+        PeerActivityRead::Peers(outcomes) => Some(outcomes),
+        PeerActivityRead::LocalOnly | PeerActivityRead::DirectoryUnavailable => None,
+    };
+    let dvr = super::dvr::collect_overview(&state, user.0.id, user.0.is_admin, dvr_peers).await;
     let deliveries = if clustered {
         serde_json::to_value(clustered_deliveries(&state.node_id, deliveries, &peers))
             .map_err(|error| ApiError::Internal(error.to_string()))?
@@ -4423,6 +4428,7 @@ pub async fn activity_detail(
             "note": trakt.note,
         },
         "live_tv": live_tv,
+        "dvr": dvr,
     });
     if clustered {
         response["activity_nodes"] = serde_json::to_value(activity_nodes(&state.node_id, &peers))
@@ -5241,6 +5247,7 @@ mod tests {
                                 programme_title: Some("City Beat".into()),
                                 delivery: None,
                             }],
+                            dvr: None,
                         },
                     ),
                 ),

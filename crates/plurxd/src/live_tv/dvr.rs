@@ -21,7 +21,7 @@
 //!   can never write into the bytes the new attempt is writing. Finishing
 //!   concatenates them in order and the gap is recorded rather than hidden.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -58,6 +58,8 @@ const REMINDER_RETENTION_S: i64 = 7 * 24 * 3600;
 /// the scanner. Past this, a row that still has no item is one the scan cannot
 /// place, and repeating the request cannot change that.
 const UNLINKED_SCAN_WINDOW_S: i64 = 24 * 3600;
+const DVR_WRITE_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+pub(crate) const DVR_OBSERVATIONS_MAX: usize = 64;
 
 /// One tuner GET, feeding every sink on its channel.
 pub(crate) struct DvrTransport {
@@ -102,6 +104,8 @@ impl DvrTransport {
 /// One recording's file within a transport.
 pub(crate) struct DvrSink {
     pub(crate) recording_id: String,
+    pub(crate) channel_id: String,
+    pub(crate) airing_start: i64,
     pub(crate) title: String,
     pub(crate) attempt: i64,
     /// `[capture_start, capture_end)`. Bytes outside it belong to a different
@@ -110,7 +114,80 @@ pub(crate) struct DvrSink {
     pub(crate) base: PathBuf,
     pub(crate) file: tokio::sync::Mutex<Option<tokio::fs::File>>,
     pub(crate) bytes: AtomicU64,
+    pub(crate) prior_attempt_bytes: Option<u64>,
+    observation: std::sync::Mutex<DvrSinkObservation>,
     pub(crate) cancel: CancellationToken,
+}
+
+#[derive(Debug)]
+struct DvrSinkObservation {
+    first_write_at_ms: Option<i64>,
+    last_write_at: Option<std::time::Instant>,
+    rate_samples: VecDeque<(std::time::Instant, u64)>,
+    reason_code: Option<String>,
+}
+
+impl DvrSinkObservation {
+    fn new() -> Self {
+        Self {
+            first_write_at_ms: None,
+            last_write_at: None,
+            rate_samples: VecDeque::new(),
+            reason_code: None,
+        }
+    }
+
+    fn successful_write(&mut self, now: std::time::Instant, at_ms: i64, total: u64) {
+        self.first_write_at_ms.get_or_insert(at_ms);
+        self.last_write_at = Some(now);
+        self.rate_samples.push_back((now, total));
+        while self
+            .rate_samples
+            .front()
+            .is_some_and(|(at, _)| now.duration_since(*at) > DVR_WRITE_RATE_WINDOW)
+        {
+            self.rate_samples.pop_front();
+        }
+    }
+
+    fn write_bps(&self) -> Option<u64> {
+        let (first_at, first_bytes) = self.rate_samples.front()?;
+        let (last_at, last_bytes) = self.rate_samples.back()?;
+        let elapsed_ms = last_at.duration_since(*first_at).as_millis() as u64;
+        (elapsed_ms > 0 && last_bytes > first_bytes).then(|| {
+            last_bytes
+                .saturating_sub(*first_bytes)
+                .saturating_mul(1_000)
+                / elapsed_ms
+        })
+    }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct DvrCaptureObservation {
+    pub(crate) recording_id: String,
+    pub(crate) channel_id: String,
+    pub(crate) airing_start: i64,
+    pub(crate) owner_node_id: String,
+    pub(crate) config_generation: i64,
+    pub(crate) serving_generation: u64,
+    pub(crate) attempt: i64,
+    pub(crate) phase: String,
+    pub(crate) observation_age_ms: u64,
+    pub(crate) last_write_age_ms: Option<u64>,
+    pub(crate) first_write_at_ms: Option<i64>,
+    pub(crate) attempt_bytes_written: u64,
+    pub(crate) prior_attempt_bytes: Option<u64>,
+    pub(crate) write_bps: Option<u64>,
+    pub(crate) reason_code: Option<String>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub(crate) struct DvrObservationSnapshot {
+    pub(crate) observed_sink_count: usize,
+    pub(crate) truncated: bool,
+    pub(crate) observations: Vec<DvrCaptureObservation>,
+    pub(crate) recording_transports: usize,
 }
 
 impl DvrSink {
@@ -264,6 +341,81 @@ impl LiveTvManager {
                 .then(left.title.cmp(&right.title))
         });
         out
+    }
+
+    /// Current owner-only capture evidence. Every age is derived from a
+    /// monotonic clock, and every byte/rate sample was recorded only after a
+    /// successful `write_all`; this never stats a file or touches the Store.
+    pub(crate) fn capture_observation_snapshot(&self) -> DvrObservationSnapshot {
+        let transports = {
+            let registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            registry.transports.values().cloned().collect::<Vec<_>>()
+        };
+        let recording_transports = transports.len();
+        let observed_sink_count = transports
+            .iter()
+            .map(|transport| transport.live_sinks().len())
+            .sum();
+        let now = std::time::Instant::now();
+        let mut observations = Vec::new();
+        for transport in transports {
+            if !self.serving.is_current(transport.owner_serving_generation) {
+                continue;
+            }
+            for sink in transport.live_sinks() {
+                let sample = sink
+                    .observation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let last_write_age_ms = sample
+                    .last_write_at
+                    .map(|at| now.duration_since(at).as_millis() as u64);
+                let phase = if sample.first_write_at_ms.is_some() {
+                    "writing"
+                } else if sink.attempt > 1 {
+                    "reconnecting"
+                } else {
+                    "starting"
+                };
+                observations.push(DvrCaptureObservation {
+                    recording_id: sink.recording_id.clone(),
+                    channel_id: sink.channel_id.clone(),
+                    airing_start: sink.airing_start,
+                    owner_node_id: self.node_id.clone(),
+                    config_generation: transport.generation,
+                    serving_generation: transport.owner_serving_generation,
+                    attempt: sink.attempt,
+                    phase: phase.to_owned(),
+                    // The registry was inspected synchronously for this
+                    // response. Write age is separate: no bytes for 15 s can
+                    // be a fresh, unhealthy observation rather than stale
+                    // owner evidence.
+                    observation_age_ms: 0,
+                    last_write_age_ms,
+                    first_write_at_ms: sample.first_write_at_ms,
+                    attempt_bytes_written: sink.bytes.load(Ordering::Acquire),
+                    prior_attempt_bytes: sink.prior_attempt_bytes,
+                    write_bps: sample.write_bps(),
+                    reason_code: sample.reason_code.clone(),
+                });
+            }
+        }
+        observations.sort_by(|left, right| {
+            left.recording_id
+                .cmp(&right.recording_id)
+                .then(left.attempt.cmp(&right.attempt))
+        });
+        let truncated = observations.len() > DVR_OBSERVATIONS_MAX;
+        observations.truncate(DVR_OBSERVATIONS_MAX);
+        DvrObservationSnapshot {
+            observed_sink_count,
+            truncated,
+            observations,
+            recording_transports,
+        }
     }
 
     /// The owner's recording loop.
@@ -1034,12 +1186,16 @@ impl LiveTvManager {
         // that remain after it undo themselves.
         let sink = Arc::new(DvrSink {
             recording_id: row.id.clone(),
+            channel_id: row.channel_id.clone(),
+            airing_start: row.airing_start,
             title: row.title.clone(),
             attempt,
             window: (row.capture_start, row.capture_end),
             base: base.clone(),
             file: tokio::sync::Mutex::new(None),
             bytes: AtomicU64::new(0),
+            prior_attempt_bytes: prior_attempt_bytes(&base, attempt).await,
+            observation: std::sync::Mutex::new(DvrSinkObservation::new()),
             cancel: CancellationToken::new(),
         });
         let joined = {
@@ -1547,7 +1703,14 @@ async fn pump_tuner_fanout(
             };
             match tokio::time::timeout(TUNER_READ_TIMEOUT, file.write_all(&bytes)).await {
                 Ok(Ok(())) => {
-                    sink.bytes.fetch_add(bytes.len() as u64, Ordering::Release);
+                    let total = sink
+                        .bytes
+                        .fetch_add(bytes.len() as u64, Ordering::AcqRel)
+                        .saturating_add(bytes.len() as u64);
+                    sink.observation
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .successful_write(std::time::Instant::now(), unix_millis(), total);
                     transport
                         .delivered
                         .fetch_add(bytes.len() as u64, Ordering::Release);
@@ -1561,6 +1724,10 @@ async fn pump_tuner_fanout(
                         %error,
                         "a recording's file could not be written; that capture is stopping"
                     );
+                    sink.observation
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .reason_code = Some("disk_write_failed".to_owned());
                     drop(handle);
                     sink.cancel.cancel();
                 }
@@ -1569,12 +1736,36 @@ async fn pump_tuner_fanout(
                         recording = %sink.recording_id,
                         "a recording's file write stalled; that capture is stopping"
                     );
+                    sink.observation
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .reason_code = Some("disk_write_timeout".to_owned());
                     drop(handle);
                     sink.cancel.cancel();
                 }
             }
         }
     }
+}
+
+fn unix_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or_default()
+}
+
+async fn prior_attempt_bytes(base: &std::path::Path, attempt: i64) -> Option<u64> {
+    if attempt <= 1 {
+        return Some(0);
+    }
+    let mut total = 0_u64;
+    for prior in 1..attempt {
+        let metadata = tokio::fs::metadata(attempt_path(base, prior)).await.ok()?;
+        total = total.checked_add(metadata.len())?;
+    }
+    Some(total)
 }
 
 /// Join `<base>.a1.part`, `<base>.a2.part`, … into `<base>.ts` and remove the
@@ -1989,6 +2180,23 @@ async fn ensure_recordings_library(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_rate_uses_successful_samples_from_one_five_second_window() {
+        let mut sample = DvrSinkObservation::new();
+        let start = std::time::Instant::now();
+        sample.successful_write(start, 1_000, 100);
+        assert_eq!(sample.write_bps(), None, "one write is not a rate");
+        sample.successful_write(start + std::time::Duration::from_secs(1), 2_000, 1_100);
+        assert_eq!(sample.write_bps(), Some(1_000));
+        sample.successful_write(start + std::time::Duration::from_secs(7), 8_000, 2_100);
+        assert_eq!(
+            sample.write_bps(),
+            None,
+            "a new attempt window never reuses a sample older than five seconds"
+        );
+        assert_eq!(sample.first_write_at_ms, Some(1_000));
+    }
 
     fn base(root: &str, title: &str, start: i64, number: &str, id: &str) -> PathBuf {
         PathBuf::from(root)

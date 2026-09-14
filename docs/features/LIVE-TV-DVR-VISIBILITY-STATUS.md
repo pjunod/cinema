@@ -29,7 +29,7 @@ presentation contract around them.
 |---|---|---|
 | S00 isolated base and compiler | complete | independent clone at `28ae8163`; pinned Rust 1.97.1 workspace check passed before Rust edits |
 | S01 blank-list repair | built; final evidence pending | web, Apple and Android decode the real `{rows, next}` envelope; web preserves stale rows and exposes Load more; regression fixtures written but not run |
-| S02 capture observation and overview | queued | bounded owner observations, shared projection and `/api/v1/dvr/overview` |
+| S02 capture observation and overview | built; compile passed | successful-write sampling, five-second rate window, bounded peer observations, shared Activity/overview projection and `/api/v1/dvr/overview`; focused fixtures written but not run |
 | S03 lifecycle ledger and attention | queued | next SQLite/replicated migrations, atomic events, pagination, pruning and per-user acknowledgments |
 | S04 web layouts and controller | queued | shared poller, exact-airing marks, Activity master/detail and canonical `#/recordings` |
 | S05 Apple clients | queued | tolerant decoders, one foreground controller, Recordings navigation and focus-safe details |
