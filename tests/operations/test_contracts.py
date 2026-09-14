@@ -1447,6 +1447,8 @@ assert.equal(context.ACT_TIMER, null);
         windows_action = read(".github/actions/windows-cross/action.yml")
         self.assertIn("cargo-xwin --version", windows_action)
         self.assertIn("cargo install cargo-xwin --version 0.23.1 --locked", windows_action)
+        self.assertIn("command -v clang-cl", windows_action)
+        self.assertIn('echo "$tool_dir" >> "$GITHUB_PATH"', windows_action)
         self.assertIn("cargo xwin build --workspace --locked", windows_action)
         self.assertIn("--target x86_64-pc-windows-msvc", windows_action)
         for workflow_path, gate_name in (
