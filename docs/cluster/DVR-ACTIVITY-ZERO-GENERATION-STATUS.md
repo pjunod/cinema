@@ -61,5 +61,5 @@ while another voter displayed `sent an invalid response` for `nynuc`.
 | Adversarial review | complete | One pass against `decada4790d8`; no concrete findings and no second review requested |
 | Static validation | complete | `cargo fmt --all -- --check` and `cargo clippy -p plurxd --all-targets --locked -- -D warnings` passed; Clippy's two current-main DVR style findings were corrected in this batch |
 | Focused regression | complete | `cargo test --locked -p plurxd --bin plurxd initial_dvr_serving_generation_is_a_valid_peer_snapshot`: 1 passed, 0 failed, 2,245 filtered out |
-| Fast lane | retry ready | Run 2090 reached the exact reviewed head and stopped in `history-check`: the two runtime corrections needed explicit `regressions.d` mappings and the initial status commit needed a non-runtime row. Those three records are now part of the replacement candidate |
+| Fast lane | retry ready | Run 2090 required three explicit history rows; run 2091 then required the metadata-only mapping commit's own non-runtime row. The local audit now covers both layers before the next exact-head attempt |
 | Main merge | waiting | Merge only after pull request #315's exact-head fast lane is green |
