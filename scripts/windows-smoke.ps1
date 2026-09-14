@@ -56,16 +56,17 @@ $Plurxd = (Resolve-Path $Plurxd).Path
 $Ffmpeg = (Resolve-Path $Ffmpeg).Path
 $Ffprobe = (Resolve-Path $Ffprobe).Path
 $Base = "http://127.0.0.1:$Port"
-$Data = Join-Path $WorkRoot "data"
-$Cache = Join-Path $WorkRoot "cache"
-$Scratch = Join-Path $WorkRoot "scratch"
-$Media = Join-Path $WorkRoot "media"
-$Config = Join-Path $WorkRoot "plurx.toml"
-$script:Stdout = Join-Path $WorkRoot "plurxd.stdout.log"
-$script:Stderr = Join-Path $WorkRoot "plurxd.stderr.log"
+$RunRoot = Join-Path ([IO.Path]::GetFullPath($WorkRoot)) ("run-" + [guid]::NewGuid().ToString("N"))
+$Data = Join-Path $RunRoot "data"
+$Cache = Join-Path $RunRoot "cache"
+$Scratch = Join-Path $RunRoot "scratch"
+$Media = Join-Path $RunRoot "media"
+$Config = Join-Path $RunRoot "plurx.toml"
+$script:Stdout = Join-Path $RunRoot "plurxd.stdout.log"
+$script:Stderr = Join-Path $RunRoot "plurxd.stderr.log"
 $fixture = Join-Path $Media "Windows smoke.mkv"
 
-if (Test-Path $WorkRoot) { Remove-Item $WorkRoot -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $RunRoot | Out-Null
 New-Item -ItemType Directory -Force -Path $Data, $Cache, $Scratch, $Media | Out-Null
 
 & $Ffmpeg -hide_banner -loglevel error -f lavfi -i "testsrc2=size=640x360:rate=30" `
@@ -87,9 +88,43 @@ transcode_dir = '$Scratch'
 $baselineMediaPids = @(Get-Process -Name ffmpeg, ffprobe -ErrorAction SilentlyContinue | ForEach-Object Id)
 $env:PLURX_FFMPEG = $Ffmpeg
 $env:PLURX_FFPROBE = $Ffprobe
-$quotedConfig = '"' + $Config.Replace('"', '\"') + '"'
-$server = Start-Process -FilePath $Plurxd -ArgumentList @("--config", $quotedConfig, "run") `
-    -RedirectStandardOutput $script:Stdout -RedirectStandardError $script:Stderr -PassThru
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class PlurxSmokeProcess {
+    const uint GENERIC_WRITE = 0x40000000, FILE_SHARE_READ = 1, FILE_SHARE_WRITE = 2;
+    const uint CREATE_ALWAYS = 2, FILE_ATTRIBUTE_NORMAL = 0x80;
+    const uint STARTF_USESTDHANDLES = 0x100, CREATE_NEW_PROCESS_GROUP = 0x200;
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+    struct STARTUPINFO { public uint cb; public string reserved, desktop, title; public uint x,y,xSize,ySize,xChars,yChars,fill,flags; public short show; public short reserved2; public IntPtr reservedPtr,input,output,error; }
+    [StructLayout(LayoutKind.Sequential)]
+    struct PROCESS_INFORMATION { public IntPtr process, thread; public uint processId, threadId; }
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern IntPtr CreateFile(string name,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetHandleInformation(IntPtr handle,uint mask,uint flags);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern bool CreateProcess(string app,StringBuilder command,IntPtr pa,IntPtr ta,bool inherit,uint flags,IntPtr environment,string cwd,ref STARTUPINFO startup,out PROCESS_INFORMATION info);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GenerateConsoleCtrlEvent(uint controlEvent,uint processGroupId);
+    static string Quote(string value) { return "\"" + value.Replace("\"", "\\\"") + "\""; }
+    public static int Start(string exe,string config,string stdout,string stderr) {
+        IntPtr output=CreateFile(stdout,GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,IntPtr.Zero,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,IntPtr.Zero);
+        IntPtr error=CreateFile(stderr,GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,IntPtr.Zero,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,IntPtr.Zero);
+        if(output.ToInt64()==-1 || error.ToInt64()==-1) throw new Win32Exception();
+        if(!SetHandleInformation(output,1,1) || !SetHandleInformation(error,1,1)) throw new Win32Exception();
+        var startup=new STARTUPINFO(); startup.cb=(uint)Marshal.SizeOf(startup); startup.flags=STARTF_USESTDHANDLES; startup.output=output; startup.error=error; startup.input=IntPtr.Zero;
+        var command=new StringBuilder(Quote(exe)+" --config "+Quote(config)+" run"); PROCESS_INFORMATION info;
+        bool ok=CreateProcess(exe,command,IntPtr.Zero,IntPtr.Zero,true,CREATE_NEW_PROCESS_GROUP,IntPtr.Zero,null,ref startup,out info);
+        int last=Marshal.GetLastWin32Error(); CloseHandle(output); CloseHandle(error);
+        if(!ok) throw new Win32Exception(last); CloseHandle(info.thread); CloseHandle(info.process); return (int)info.processId;
+    }
+}
+'@
+$serverPid = [PlurxSmokeProcess]::Start($Plurxd, $Config, $script:Stdout, $script:Stderr)
+$server = Get-Process -Id $serverPid
 
 try {
     $deadline = (Get-Date).AddSeconds(90)
@@ -231,23 +266,12 @@ try {
         throw "HLS session did not advertise playback control"
     }
 
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class PlurxConsoleControl {
-    [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern bool SetConsoleCtrlHandler(IntPtr handler, bool add);
-    [DllImport("kernel32.dll", SetLastError = true)]
-    public static extern bool GenerateConsoleCtrlEvent(uint controlEvent, uint processGroupId);
-}
-'@
-    [PlurxConsoleControl]::SetConsoleCtrlHandler([IntPtr]::Zero, $true) | Out-Null
-    if (-not [PlurxConsoleControl]::GenerateConsoleCtrlEvent(0, 0)) {
+    if (-not [PlurxSmokeProcess]::GenerateConsoleCtrlEvent(1, [uint32]$server.Id)) {
         throw "GenerateConsoleCtrlEvent failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
     if (-not $server.WaitForExit(30000)) { throw "plurxd did not exit after Ctrl-C" }
-    [PlurxConsoleControl]::SetConsoleCtrlHandler([IntPtr]::Zero, $false) | Out-Null
-    if ($server.ExitCode -ne 0) { throw "plurxd exited with $($server.ExitCode) after Ctrl-C" }
+    $server.Refresh()
+    if ($server.ExitCode -ne 0) { throw "plurxd exited with $($server.ExitCode) after Ctrl-Break" }
 
     Start-Sleep -Seconds 1
     $leftovers = @(Get-Process -Name ffmpeg, ffprobe -ErrorAction SilentlyContinue |

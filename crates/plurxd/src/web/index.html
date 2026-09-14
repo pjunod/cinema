@@ -17335,8 +17335,9 @@ function clusterTransportRecoveryCard(readiness){
       <p class="devcheck-note">Use the supported one-node-at-a-time deployment when these checks are acceptable. Readiness is advisory; transport recovery remains automatic on clustered nodes.</p>
       </div></details>`);
 }
-function windowsServerCard(readiness){
+function windowsServerCard(settings,readiness){
   return setCard(`${cardHead("Windows server","Native runtime, media engine and measured hardware status.",`<span class="pill">advisory</span>`)}
+      ${togRow("dvwin","Enable permanent Dolby Vision conversion","Allows Profile 7 media to be converted to a verified Profile 8.1 replacement on Windows. This saved choice is authoritative; readiness below is advice only.",settings.dolby_vision_convert)}
       <div class="hint">These readings never enable or disable a feature. A failed or absent hardware probe keeps the ordinary software encoder available.</div>
       <details class="setdetails" open><summary>Runtime and hardware readiness</summary><div class="setdetails-body">
       ${devReq(readiness,"windows_server","native_runtime","Native Windows runtime","The Windows build requires x64 Windows 10 1809 or Server 2019+, NTFS/ReFS managed storage, Job Objects and the embedded long-path manifest.")}
@@ -17344,7 +17345,8 @@ function windowsServerCard(readiness){
       ${devReq(readiness,"windows_server","nvenc","NVIDIA NVENC","NVENC is admitted only when the installed driver and this FFmpeg pass the ordinary startup and forced-IDR probes.")}
       ${devReq(readiness,"windows_server","qsv","Intel Quick Sync","Quick Sync is admitted only when D3D11 device initialization, encode and forced-IDR probes succeed on this node.")}
       <p class="devcheck-note">Advisory only. Unmet hardware rows mean software fallback, not a hidden gate.</p>
-      </div></details>`);
+      </div></details>
+      <div class="err" id="winerr" role="alert"></div>${setCardFoot("saveWindowsCompatibility")}`);
 }
 function preparedQualityCard(settings,readiness){
   return setCard(`${cardHead("Quality switching","Prepare the next stream before replacing the one you are watching.",`<span class="pill" id="pqhstate">${settings.prepared_quality_handoff?"Enabled":"Disabled"}</span>`)}
@@ -17466,7 +17468,7 @@ function developerPanel(settings,readiness){
       <div class="setsection"><h2>Library channels</h2><p>Explicit playback enablement with advisory deployment facts.</p></div>${libraryChannels}
       <div class="setsection"><h2>Prepared quality handoff</h2><p>Explicit server and browser enablement with advisory safety evidence.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection"><h2>Playback surface contract</h2><p>Advisory verification status for the one fault contract every client renders. Nothing here is a switch.</p></div>${playbackSurfaceReadinessCard()}
-      <div class="setsection"><h2>Compatibility</h2><p>Native server and protocol controls for compatible playback clients.</p></div>${windowsServerCard(readiness)}${protocol}
+      <div class="setsection"><h2>Compatibility</h2><p>Native server and protocol controls for compatible playback clients.</p></div>${windowsServerCard(settings,readiness)}${protocol}
       <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}
       <div class="setsection"><h2>Delivery experiments</h2><p>Use these overrides for controlled comparisons.</p></div>${experimental}`;
 }
@@ -19287,6 +19289,15 @@ async function saveDeveloper(btn){
     cacheSettings(await api("/settings",{method:"PUT",body:{
       playback_control_protocol_v1:document.getElementById("pcpv1").checked}}));
     toast("Developer settings saved"); if(btn) setCardSaved(btn);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
+async function saveWindowsCompatibility(btn){
+  const err=document.getElementById("winerr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
+      dolby_vision_convert:document.getElementById("dvwin").checked}}));
+    toast("Windows compatibility setting saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
 // The DVR fields go on their own, never mixed with the Live TV tuple: that

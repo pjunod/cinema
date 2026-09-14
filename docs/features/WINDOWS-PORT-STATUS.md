@@ -1,7 +1,7 @@
 # Windows port — live implementation status
 
-**Status:** promotion candidate ready for adversarial review; native and hardware evidence open ·
-**Effort:** `effort/windows-port` · **Updated:** 2026-09-13
+**Status:** adversarial corrections compiled; post-review fast lane pending ·
+**Effort:** `effort/windows-port` · **Updated:** 2026-09-14
 
 Companion to [WINDOWS-PORT-PLAN.md](WINDOWS-PORT-PLAN.md) (the original
 decisions and milestone acceptance checks) and
@@ -25,8 +25,8 @@ do not need Windows-specific builds.
 | Milestone | State | Current fact | Next proof |
 |---|---|---|---|
 | M1 · compile and CI | complete | The Windows MSVC workspace builds locally. Forgejo effort, fast-lane, and full workflows carry the same pinned `cargo-xwin` build. | Keep the Windows compile lane green while later milestones land. |
-| M2 · boot, scan, software play | built · native proof open | Secure Windows filesystem operations, exact ffmpeg path re-verification, Job Object ownership, suspend/resume, sharing-aware cleanup, console shutdown, and the native smoke script are implemented. | Run `scripts/windows-smoke.ps1` on a Windows x64 host and retain its logs. |
-| M3 · service and package | built · clean-VM proof open | SCM install/run/uninstall, ProgramData defaulting, long-path manifest, Windows ZIP packaging, firewall runbook, and CI artifact retention are implemented. | Clean-VM install, reboot, discovery, and uninstall transcript. |
+| M2 · boot, scan, software play | built · native proof open | Secure Windows filesystem operations, scanner-bound direct delivery, exact ffmpeg path re-verification, complete Job Object ownership, suspend/resume, sharing-aware cleanup, targeted console shutdown, and the native smoke script are implemented. | Run `scripts/windows-smoke.ps1` on a Windows x64 host and retain its logs. |
+| M3 · service and package | built · clean-VM proof open | SCM install/run/uninstall with truthful pending/running states, owner-and-SYSTEM service-data ACLs, ProgramData defaulting, long-path manifest, Windows ZIP packaging, firewall runbook, and CI artifact retention are implemented. | Clean-VM install, reboot, discovery, and uninstall transcript. |
 | M4 · NVENC and Quick Sync | code-ready · hardware proof open | Existing probe-gated NVENC/QSV paths are portable and Windows readiness is visible without becoming a feature gate. | Boot probes and two-second segments on real NVIDIA and Intel hardware. |
 | M5 · AMD AMF | deferred | Implement only after M4 exposes the real validation cost. | Separately recorded AMD hardware receipt. |
 
@@ -63,6 +63,9 @@ do not need Windows-specific builds.
 | 2026-09-13 | `4d03946b` | Forgejo effort gate `2052` | pass | M1 policy, native Rust compile, and clean-container Windows compile passed before PR 305 merged. |
 | 2026-09-13 | `01bf515d` | Forgejo effort gate `2056` | pass | The consolidated runtime, service, packaging, documentation, and ownership inventory passed policy plus native Rust and Windows compile before PR 308 merged. |
 | 2026-09-13 | `43bd8abb` | pinned `cargo xwin check` and optimized `cargo xwin build` commands above | pass | The exact effort tree after merging current `main` compiles and links for Windows with Rust 1.97.1; this is the frozen promotion candidate before adversarial review. |
+| 2026-09-14 | post-review working tree | one requested adversarial review | 11 findings addressed | Corrections cover service/key ACLs, Windows free-space proofs, direct-play no-reparse opens, complete child Job ownership, truthful SCM states, permanent-DV Windows execution, atomic recovery publication, handle-based ACL changes, bounded smoke cleanup, targeted Ctrl-Break, and an explicit advisory Developer enable control. |
+| 2026-09-14 | post-review working tree | `rustup run 1.97.1 cargo check --workspace --locked --all-targets` | pass · 1m14s clean target | The review corrections preserve the native workspace compile surface. This is compile evidence, not the requested fast lane. |
+| 2026-09-14 | post-review working tree | `AWS_LC_SYS_NO_ASM=1 rustup run 1.97.1 cargo xwin check --workspace --locked --exclude plurx-cluster-check --target x86_64-pc-windows-msvc` | pass · 13s warm target | The review corrections compile for MSVC with Rust 1.97.1. Native behavior is still unproved. |
 
 Passing compilation proves type and platform linkage coverage. It does not
 prove Windows filesystem, service-control, process-job, discovery, or hardware

@@ -164,7 +164,7 @@ pub(crate) async fn readiness(
 
     Ok(Json(DeveloperReadiness {
         items: vec![
-            windows_server(&state),
+            windows_server(&state, convert_on),
             library_channels(&state, library_channels_on).await,
             dvr(&state, dvr_on, &live_tv, &dvr_config).await,
             cluster_transport_recovery(&state).await,
@@ -177,7 +177,7 @@ pub(crate) async fn readiness(
     }))
 }
 
-fn windows_server(state: &AppState) -> DeveloperEnableItem {
+fn windows_server(state: &AppState, enabled: bool) -> DeveloperEnableItem {
     #[cfg(windows)]
     let platform = DeveloperRequirement {
         id: "native_runtime",
@@ -217,8 +217,8 @@ fn windows_server(state: &AppState) -> DeveloperEnableItem {
     DeveloperEnableItem {
         id: "windows_server",
         title: "Windows server",
-        enabled: None,
-        setting: None,
+        enabled: Some(enabled),
+        setting: Some("dolby_vision_convert"),
         requirements: vec![
             platform,
             DeveloperRequirement {
