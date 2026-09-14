@@ -1,6 +1,6 @@
 # DVR visibility status — make capture state explain itself
 
-**Status:** implementation in progress · **Branch:** `effort/dvr-visibility` ·
+**Status:** promotion candidate · **Branch:** `effort/dvr-visibility` ·
 **Base:** Forgejo `main` merged through `f42a3ba6` · **Updated:** 2026-09-14
 
 Companion to [LIVE-TV-DVR-STATUS.md](LIVE-TV-DVR-STATUS.md) (what the shipped
@@ -34,7 +34,7 @@ presentation contract around them.
 | S04 web layouts and controller | built; compile passed | one scope-aware poller feeds chrome, Live TV and Recordings; exact-airing player context, canonical `#/recordings`, six task tabs, mobile detail, real event history and Activity projection |
 | S05 Apple clients | built; source type-check passed | additive overview/event/attention decoders; one foreground profile controller; iOS/tvOS Recordings root, capture activity, immediate details, history, manual/skipped/rules/reminders and exact-airing player/guide context; device builds remain pending because this host exposes no simulator runtime |
 | S06 Android clients | built; compile passed | additive overview/event/attention decoders; one lifecycle-owned profile controller; phone/Google TV Recordings root, capture activity, immediate detail/history, manual/skipped/rules/reminders, exact-airing context and named stop/delete confirmations; physical D-pad evidence remains pending |
-| S07 review and promotion | review addressed; promotion next | one adversarial review completed against the current-base candidate; all eleven findings are remediated and the affected source compilers pass; mark PR #314 ready and spend the one fast-lane run next |
+| S07 review and promotion | fast lane requested | one adversarial review completed against the current-base candidate; all eleven findings are remediated and the affected source compilers pass; PR #314 is ready and its status-only synchronization starts the promotion lane |
 
 ## Decisions made while implementing
 
@@ -103,8 +103,10 @@ current with `main`. Its six P1 and five P2 findings were handled as one batch:
   volume-icon deprecations remain.
 
 No unit or UI test command has run. The shared web/Apple/Android fixture and
-focused Rust cases remain deliberately unexecuted until PR #314 is marked
-ready and the one fast lane owns the candidate, as requested.
+focused Rust cases remain owned by the one fast lane, as requested. Forgejo's
+initial `ready_for_review` event carried the old draft flag and skipped every
+job without allocating a runner; the following status-only synchronization is
+the authoritative promotion attempt for the unchanged reviewed source.
 
 ## Evidence limits — green source is not a hardware claim
 
