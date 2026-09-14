@@ -2,6 +2,7 @@
 
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -24,6 +25,8 @@ const DESCRIPTION: &str = "Native plurx media server and discovery service";
 
 static STOP: OnceLock<CancellationToken> = OnceLock::new();
 static CONFIG: OnceLock<Config> = OnceLock::new();
+static STATUS: OnceLock<ServiceStatusHandle> = OnceLock::new();
+static READY_REPORTED: AtomicBool = AtomicBool::new(false);
 
 define_windows_service!(service_main_ffi, service_main);
 
@@ -62,6 +65,27 @@ pub(crate) fn install(config_path: Option<&std::path::Path>) -> windows_service:
     )?;
     service.set_description(DESCRIPTION)?;
     service.start::<&str>(&[])?;
+    let started = std::time::Instant::now();
+    loop {
+        let status = service.query_status()?;
+        match status.current_state {
+            ServiceState::Running => break,
+            ServiceState::Stopped => {
+                return Err(windows_service::Error::Winapi(std::io::Error::other(
+                    "plurx service stopped before its listener became ready",
+                )))
+            }
+            _ if started.elapsed() < Duration::from_secs(120) => {
+                std::thread::sleep(Duration::from_millis(250));
+            }
+            _ => {
+                return Err(windows_service::Error::Winapi(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "plurx service did not report ready within 120 seconds",
+                )))
+            }
+        }
+    }
     println!("installed and started {DISPLAY_NAME}");
     Ok(())
 }
@@ -118,16 +142,35 @@ fn service_status(
     state: ServiceState,
     accepted: ServiceControlAccept,
     exit_code: u32,
+    checkpoint: u32,
+    wait_hint: Duration,
 ) -> windows_service::Result<()> {
     status.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
         current_state: state,
         controls_accepted: accepted,
         exit_code: ServiceExitCode::Win32(exit_code),
-        checkpoint: 0,
-        wait_hint: Duration::default(),
+        checkpoint,
+        wait_hint,
         process_id: None,
     })
+}
+
+pub(crate) fn report_listener_ready() -> anyhow::Result<()> {
+    let Some(status) = STATUS.get() else {
+        return Ok(());
+    };
+    service_status(
+        status,
+        ServiceState::Running,
+        ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        0,
+        0,
+        Duration::default(),
+    )
+    .map_err(|error| anyhow::anyhow!("reporting Windows service readiness: {error}"))?;
+    READY_REPORTED.store(true, Ordering::Release);
+    Ok(())
 }
 
 fn service_main(_arguments: Vec<OsString>) {
@@ -145,18 +188,57 @@ fn run_service() -> windows_service::Result<()> {
     })?;
     let handler = service_control_handler::register(SERVICE_NAME, move |control| match control {
         ServiceControl::Stop | ServiceControl::Shutdown => {
+            if let Some(status) = STATUS.get() {
+                let _ = service_status(
+                    status,
+                    ServiceState::StopPending,
+                    ServiceControlAccept::empty(),
+                    0,
+                    1,
+                    Duration::from_secs(30),
+                );
+            }
             stop.cancel();
             ServiceControlHandlerResult::NoError
         }
         ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
         _ => ServiceControlHandlerResult::NotImplemented,
     })?;
+    STATUS.set(handler).map_err(|_| {
+        windows_service::Error::Winapi(std::io::Error::other("service status already initialized"))
+    })?;
     service_status(
         &handler,
-        ServiceState::Running,
-        ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        ServiceState::StartPending,
+        ServiceControlAccept::empty(),
         0,
+        1,
+        Duration::from_secs(120),
     )?;
+    std::thread::spawn(|| {
+        let mut checkpoint = 2_u32;
+        while !READY_REPORTED.load(Ordering::Acquire)
+            && STOP.get().is_some_and(|stop| !stop.is_cancelled())
+        {
+            std::thread::sleep(Duration::from_secs(2));
+            if READY_REPORTED.load(Ordering::Acquire)
+                || STOP.get().is_some_and(CancellationToken::is_cancelled)
+            {
+                break;
+            }
+            if let Some(status) = STATUS.get() {
+                let _ = service_status(
+                    status,
+                    ServiceState::StartPending,
+                    ServiceControlAccept::empty(),
+                    0,
+                    checkpoint,
+                    Duration::from_secs(120),
+                );
+            }
+            checkpoint = checkpoint.saturating_add(1);
+        }
+    });
 
     let mut config = CONFIG.get().cloned().ok_or_else(|| {
         windows_service::Error::Winapi(std::io::Error::other("service config unavailable"))
@@ -169,12 +251,17 @@ fn run_service() -> windows_service::Result<()> {
         runtime.block_on(super::run(config))
     })();
 
+    if let Some(stop) = STOP.get() {
+        stop.cancel();
+    }
     let exit_code = u32::from(result.is_err());
     service_status(
         &handler,
         ServiceState::Stopped,
         ServiceControlAccept::empty(),
         exit_code,
+        0,
+        Duration::default(),
     )?;
     result.map_err(|error| windows_service::Error::Winapi(std::io::Error::other(error.to_string())))
 }

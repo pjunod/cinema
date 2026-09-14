@@ -1311,6 +1311,7 @@ struct LiveTvSession {
 
 struct LiveTvProcess {
     child: tokio::process::Child,
+    _job: crate::process_control::ChildJob,
     // Copy and audio-only conversion intentionally own no video permit.
     _admission: Option<crate::transcode::LiveAdmission>,
     stderr: Option<tokio::task::JoinHandle<()>>,
@@ -5268,7 +5269,8 @@ async fn run_live_session_inner(
             .as_ref()
             .and_then(crate::transcode::LiveAdmission::software_threads),
     )?;
-    let mut child = spawn_live_ffmpeg(&owner.system, &transcode_plan, &session.directory)?;
+    let (mut child, child_job) =
+        spawn_live_ffmpeg(&owner.system, &transcode_plan, &session.directory)?;
     let stdin = child.stdin.take();
     let source_format_changed = Arc::new(AtomicBool::new(false));
     let stderr = child.stderr.take().map(|stderr| {
@@ -5283,6 +5285,7 @@ async fn run_live_session_inner(
     let Some(stdin) = stdin else {
         *session.process.lock().await = Some(LiveTvProcess {
             child,
+            _job: child_job,
             _admission: admission,
             stderr,
         });
@@ -5472,6 +5475,7 @@ async fn run_live_session_inner(
     let _ = pump.await;
     *session.process.lock().await = Some(LiveTvProcess {
         child,
+        _job: child_job,
         _admission: admission,
         stderr,
     });
@@ -5785,9 +5789,10 @@ async fn probe_live_source(
     if let Some(path) = std::env::var_os("PATH") {
         command.env("PATH", path);
     }
-    let mut child = command.spawn().map_err(|error| {
-        LiveTvError::CodecUnsupported(format!("starting bounded source probe: {error}"))
-    })?;
+    let (mut child, _child_job) =
+        crate::process_control::spawn_job_owned(&mut command).map_err(|error| {
+            LiveTvError::CodecUnsupported(format!("starting bounded source probe: {error}"))
+        })?;
     let stdout = child.stdout.take().ok_or_else(|| {
         LiveTvError::StreamFailed("bounded source probe did not expose stdout".into())
     })?;
@@ -5884,10 +5889,9 @@ fn spawn_live_ffmpeg(
     system: &SystemInfo,
     plan: &LiveTvTranscodePlan,
     directory: &Path,
-) -> Result<tokio::process::Child, LiveTvError> {
+) -> Result<(tokio::process::Child, crate::process_control::ChildJob), LiveTvError> {
     let mut command = live_ffmpeg_command(system, plan, directory)?;
-    command
-        .spawn()
+    crate::process_control::spawn_job_owned(&mut command)
         .map_err(|error| LiveTvError::CodecUnsupported(format!("starting live-TV FFmpeg: {error}")))
 }
 
@@ -7316,10 +7320,13 @@ async fn run_graph_probe(
     let mut command =
         live_ffmpeg_command_for_input(system, &plan, directory, LiveTvFfmpegInput::GraphProbe)
             .map_err(|error| format!("could not build live-TV graph probe: {error}"))?;
-    let output = tokio::time::timeout(Duration::from_secs(20), command.output())
-        .await
-        .map_err(|_| "live-TV FFmpeg graph probe timed out".to_owned())?
-        .map_err(|error| format!("could not start live-TV FFmpeg probe: {error}"))?;
+    let output = tokio::time::timeout(
+        Duration::from_secs(20),
+        crate::process_control::output_job_owned(&mut command),
+    )
+    .await
+    .map_err(|_| "live-TV FFmpeg graph probe timed out".to_owned())?
+    .map_err(|error| format!("could not start live-TV FFmpeg probe: {error}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
@@ -8686,7 +8693,7 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
             Some(2),
         )
         .expect("prepare live-TV plan");
-        let mut child =
+        let (mut child, _child_job) =
             spawn_live_ffmpeg(&system, &plan, root.path()).expect("start exact production graph");
         let detected = Arc::new(AtomicBool::new(false));
         let stderr = tokio::spawn(capture_live_stderr(
