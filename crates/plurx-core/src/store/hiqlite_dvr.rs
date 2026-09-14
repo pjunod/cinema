@@ -565,10 +565,18 @@ fn recording_page_statement(
     let (after_start, after_id) = after
         .and_then(crate::dvr::parse_recording_cursor)
         .unwrap_or((i64::MAX, ""));
+    // The tie arm binds the same instant a second time rather than reusing the
+    // first placeholder. hiqlite takes its parameters positionally, in the
+    // order the statement introduces them, so a repeated `$1` would leave every
+    // later value bound one position early — the page limit would arrive as the
+    // row id, and a cluster's schedule page would answer with the wrong rows or
+    // refuse outright. `every_assembled_statement_introduces_its_placeholders_in_order`
+    // is the check that says so.
     let start = binder.bind(after_start);
+    let start_tie = binder.bind(after_start);
     let id = binder.bind(after_id);
     let mut predicate =
-        format!("(airing_start < {start} OR (airing_start = {start} AND id > {id}))");
+        format!("(airing_start < {start} OR (airing_start = {start_tie} AND id > {id}))");
     if filter.states.is_empty() {
         // Deleted rows are history rather than schedule. They come back only
         // when the caller asks for them, by flag or by name.

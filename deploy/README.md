@@ -44,6 +44,16 @@ port and advertises that port with the host's LAN address. That split keeps
 automatic iPhone, iPad, Apple TV, and Android discovery without moving the
 media server off the networks its peer services use.
 
+When `PLURX_SERVER_NAME` is still the default `plurx`, the companion advertises
+the Docker host name plus its LAN address, so a picker says
+`m6 · 192.168.1.20` instead of showing another anonymous `plurx` row. Set a
+custom `PLURX_SERVER_NAME` when a room or role name is clearer; the custom name
+replaces the host name while the address remains visible. Cluster nodes are
+named the same way — every node of one logical server reports the same
+`PLURX_SERVER_NAME`, and it is the host name and the address that tell them
+apart. A node with neither falls back to the first twelve characters of its
+node id, which is the only case where a picker shows a UUID.
+
 ### Writable media is a narrow, explicit opt-in
 
 Every shipped media mount remains read-only. Keep permanent Dolby Vision
@@ -91,15 +101,70 @@ with `docker compose exec plurxd id`, prove that account can create, hard-link,
 sync, rename, and remove a sibling test file on the real mount, then delete the
 test artifacts before enabling conversion.
 
-When `PLURX_SERVER_NAME` is still the default `plurx`, the companion advertises
-the Docker host name plus its LAN address, so a picker says
-`m6 · 192.168.1.20` instead of showing another anonymous `plurx` row. Set a
-custom `PLURX_SERVER_NAME` when a room or role name is clearer; the custom name
-replaces the host name while the address remains visible. Cluster nodes are
-named the same way — every node of one logical server reports the same
-`PLURX_SERVER_NAME`, and it is the host name and the address that tell them
-apart. A node with neither falls back to the first twelve characters of its
-node id, which is the only case where a picker shows a UUID.
+### Recording needs a writable DVR root, and no shipped mount is a good one
+
+Every *media* mount this stack ships is read-only, which is the right default.
+The one writable bind it does ship is the data volume,
+`${PLURX_DATA:-/srv/plurx}:/var/lib/plurx`, and nothing in the code stops you
+pointing `dvr.root` inside it — on a single-node install that will record
+today. Do not. That volume holds the database, and it is node-local: captures
+would compete with the database for space, a full disk there takes the server
+down rather than just the DVR, and no other node can serve what the owner
+wrote.
+
+So in practice recording needs a bind the shipped Compose file does not create
+for you. Add it in `docker-compose.override.yml`:
+
+```yaml
+services:
+  plurxd:
+    volumes:
+      - /mnt/shared/plurx-dvr:/dvr:rw
+```
+
+Then set `dvr.root` in Settings to the **container** path (`/dvr` above).
+
+Three requirements, and the last two are the ones that bite:
+
+- **Writable** by the uid the container runs as (`PUID`:`PGID`). Create the host
+  directory owned by that account before the first start.
+- **The same underlying filesystem on every node.** The owner node writes the
+  capture and any node may serve it back through the ordinary VOD path, so a
+  path that exists on one node only produces recordings the rest of the fleet
+  cannot play. In a cluster this means a real shared filesystem — the same
+  requirement the shared cache has, for the same reason.
+- **Free space above the floor**, which defaults to **50 GB**
+  (`dvr.free_floor_gb`). This one is silent and absolute: below the floor every
+  scheduled row goes to `Conflict` with "disk below the free-space floor" and
+  *nothing records at all*, on a root that is present and perfectly writable.
+  A small test share is the easiest way to be defeated by this.
+
+Do not satisfy this by making the `/media` bind writable. Keep the DVR root a
+separate path outside the read-only media root, exactly as permanent Dolby
+Vision conversion keeps its opted-in library separate above — and note that the
+owner creates a `Recordings` library pointed at the DVR root the first time it
+sweeps, so a root nested inside an existing library path gives you two
+libraries over the same files.
+
+Settings → Developer lists what recording needs and whether each part is met.
+**It is advisory and gates nothing** — it exists so a failure has somewhere to
+point. Read the whole card before blaming the mount, because the row that is
+red is often not this one:
+
+- *The tuner owner can write to the DVR root* — a real probe, but only on the
+  owner. On any other node it reports `Unobservable`.
+- *Every node can read the DVR root* — always `Unobservable` in a cluster: a
+  node sees its own filesystem and no peer's. `Unobservable` is not `Met`;
+  check it yourself with `ls` on each node. (On a single-node install it says
+  so instead — the node that records is the node that serves.)
+- *The DVR root has room above the floor* — the 50 GB default above.
+- *The guide reaches far enough to schedule from* — `Unmet` on a free
+  HDHomeRun tier, which records what is on but gives a series rule nothing to
+  schedule. A subscription tier or an XMLTV source is what changes it, and no
+  amount of fixing the mount will.
+
+Recording itself runs only on the Live TV owner node, so `ps` on any other node
+shows nothing even when everything is working.
 
 Do not add `network_mode: host` to `plurxd`. Compose forbids one service from
 declaring both host networking and `networks`, so doing that recreates the

@@ -1270,6 +1270,9 @@ mod tests {
                 // `media_playback_pointers` fails with "no such table" rather
                 // than with anything about this fixture.
                 "DROP TRIGGER IF EXISTS cache_publication_generation_guard;
+                 DROP TABLE IF EXISTS dvr_reminders;
+                 DROP TABLE IF EXISTS dvr_recordings;
+                 DROP TABLE IF EXISTS dvr_rules;
                  DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard;
                  DROP TRIGGER IF EXISTS offline_recovery_guard;
                  DROP TRIGGER IF EXISTS library_channel_session_recipes_request_delete;
@@ -1387,7 +1390,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 12] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 13] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1404,6 +1407,10 @@ mod tests {
             "ADD COLUMN claim_generation",
             "CREATE TABLE IF NOT EXISTS library_channels",
             "CREATE INDEX IF NOT EXISTS library_channels_build_state",
+            // v57's three DVR tables. Both fixtures drop all three; naming the
+            // recordings table here is enough to identify the migration,
+            // because it is the only one that creates it.
+            "CREATE TABLE IF NOT EXISTS dvr_recordings",
         ];
 
         assert!(

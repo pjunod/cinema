@@ -2894,7 +2894,15 @@ mod tests {
         assert!(names.contains(&"timeline_annotation_sets"));
         assert!(names.contains(&"timeline_manual_overrides"));
         assert!(names.contains(&"media_playback_desired"));
-        assert_eq!(names.len(), 46, "review every imported durable table");
+        // The DVR's three durable tables. Each is replicated rather than
+        // node-local on purpose: a recording is scheduled on any node, written
+        // by the owner, and served by all of them, so the row has to outlive
+        // the node that made it. None of the three carries derived state — the
+        // capture's bytes live on the DVR root and the sidecar, not here.
+        assert!(names.contains(&"dvr_recordings"));
+        assert!(names.contains(&"dvr_rules"));
+        assert!(names.contains(&"dvr_reminders"));
+        assert_eq!(names.len(), 49, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its

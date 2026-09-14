@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["e329a887", "dc0d9783"]
+points = []
+checks = []
+reason = "Deployment documentation only. `deploy/README.md` and the Compose override example gain the writable, cluster-shared bind `dvr.root` needs, and the hardware prompt stops assuming it exists. No shipped check asserts the content of deployment prose against the code it describes — `make operations-check` covers the deploy and shipping contracts, not whether the README explains how to give the DVR somewhere to write — so a revert restores a deployment story in which `dvr.enabled` is a switch with nothing behind it, and nothing goes red. What the prose says is verified by hand against the source rather than by a test: the shipped writable volume is `${PLURX_DATA:-/srv/plurx}:/var/lib/plurx` in `deploy/docker-compose.yml`, nothing validates `dvr.root` on the settings write path in `crates/plurxd/src/http/system.rs`, the free-space floor is `DVR_DEFAULT_FREE_FLOOR_GB = 50` in `crates/plurx-core/src/dvr.rs` and sends every row to `Conflict` in `live_tv/schedule.rs` when unmet, and the four Developer row titles quoted are the ones in `crates/plurxd/src/http/developer.rs`. Its review corrections (dc0d9783) are mapped here too: they narrow the same prose to what the source actually supports — the shipped writable data volume, the 50 GB free-space floor that sends every row to Conflict, the four Developer row titles quoted verbatim, and the owner-only `ps` — and are equally unpinnable, for the same reason. Mapped as no-evidence."
+ignore = true
