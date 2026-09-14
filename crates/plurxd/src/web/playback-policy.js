@@ -63,7 +63,7 @@
   // tests/playback/playback-surface-contract.json by scripts/player-contract-table
   // --embed; do not edit by hand ----
   const SURFACE_CLASSES = {"preparing":{"severity":"progress","blocking":"while_not_presenting","retired_by":["presenting","intent_settled","attached_retired"]},"buffering":{"severity":"progress","blocking":"while_not_presenting","min_ms":350,"retired_by":["presenting","playback_not_requested","attached_retired"]},"recovering":{"severity":"progress","blocking":"while_not_presenting","retired_by":["presenting_after_raise","owner_success","attached_retired"]},"hold":{"severity":"notice","timed_ms":30000,"retired_by":["timer","presenting_after_raise"]},"degraded":{"severity":"notice","timed_ms":5000,"retired_by":["timer","presenting_continuous_ms"],"timer_paused_while_actions":true},"refused":{"severity":"notice","timed_ms":null,"retired_by":["intent_superseded","presenting_continuous_ms"],"default_actions":["retry"]},"exhausted":{"severity":"prompt","blocking":true,"requires_player_stopped":true,"retired_by":["user"],"title":"Playback is stalled.","default_actions":["keep_waiting","retry","close"]},"stopped":{"severity":"terminal","blocking":true,"requires_player_stopped":true,"retired_by":["user"],"default_actions":["retry","close"]}};
-  const SURFACE_SOURCES = [{"id":"owner_stopped","context":"any","class":"stopped","requires":{"player_stopped":true}},{"id":"owner_exhausted","context":"any","class":"exhausted","requires":{"player_stopped":true}},{"id":"auth_401_403","context":"any","class":"stopped","actions":["sign_in","close"],"requires":{"player_stopped":true}},{"id":"vod_source_rescan_required","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"vod_source_unsupported","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"vod_transcode_unavailable","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"vod_subtitle_burn_unavailable","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"vod_disabled","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"create_503_not_yet","context":"start","class":"preparing","codes":["startup_timeout","media_owner_transition","vod_index_pending","vod_engine_unattested"],"retryable":true},{"id":"client_preparing","context":"any","class":"preparing"},{"id":"change_failed","context":"change","class":"refused","actions":["retry"]},{"id":"segment_503_not_yet","context":"attached","class":"recovering","codes":["startup_timeout","playlist_state_changed","segment_pending","segment_wait_busy","node_wait_capacity","media_owner_transition","vod_resurrection_unavailable","response_owner_transition","response_state_changed","response_owner_reclassification_unavailable","response_publication_timeout","response_completion_capacity","response_snapshot_capacity","node_maintenance","node_removal_fenced","learner_route_ineligible"]},{"id":"media_owner_lost_410","context":"any","class":"recovering","then_when_stopped":"stopped","carries":["position_ms"]},{"id":"control_hold","context":"attached","class":"hold"},{"id":"media_waiting","context":"attached","class":"buffering"},{"id":"owner_recovery_step","context":"any","class":"recovering"},{"id":"readiness_deadline_rungs_left","context":"any","class":"recovering"},{"id":"decoder_failed","context":"any","class":"stopped","requires":{"player_stopped":true}},{"id":"black_frame_ladder_spent","context":"start","class":"exhausted","requires":{"player_stopped":true},"actions":["close","retry"]},{"id":"repeated_early_end","context":"attached","class":"stopped","requires":{"player_stopped":true}},{"id":"degraded_notice","context":"any","class":"degraded"},{"id":"log_only","context":"any","class":null}];
+  const SURFACE_SOURCES = [{"id":"owner_stopped","context":"any","class":"stopped","requires":{"player_stopped":true}},{"id":"owner_exhausted","context":"any","class":"exhausted","requires":{"player_stopped":true}},{"id":"startup_exhausted","context":"any","class":"exhausted","actions":["close","retry"],"requires":{"player_stopped":true}},{"id":"hls_init_invalid","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"hls_init_unsupported","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"auth_401_403","context":"any","class":"stopped","actions":["sign_in","close"],"requires":{"player_stopped":true}},{"id":"vod_source_rescan_required","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"vod_source_unsupported","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"vod_transcode_unavailable","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"vod_subtitle_burn_unavailable","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"vod_disabled","context":"start","class":"stopped","requires":{"player_stopped":true}},{"id":"create_503_not_yet","context":"start","class":"preparing","codes":["startup_timeout","media_owner_transition","vod_index_pending","vod_engine_unattested"],"retryable":true},{"id":"client_preparing","context":"any","class":"preparing"},{"id":"change_failed","context":"change","class":"refused","actions":["retry"]},{"id":"segment_503_not_yet","context":"attached","class":"recovering","codes":["startup_timeout","playlist_state_changed","segment_pending","segment_wait_busy","node_wait_capacity","media_owner_transition","vod_resurrection_unavailable","response_owner_transition","response_state_changed","response_owner_reclassification_unavailable","response_publication_timeout","response_completion_capacity","response_snapshot_capacity","node_maintenance","node_removal_fenced","learner_route_ineligible"]},{"id":"media_owner_lost_410","context":"any","class":"recovering","then_when_stopped":"stopped","carries":["position_ms"]},{"id":"control_hold","context":"attached","class":"hold"},{"id":"media_waiting","context":"attached","class":"buffering"},{"id":"owner_recovery_step","context":"any","class":"recovering"},{"id":"readiness_deadline_rungs_left","context":"any","class":"recovering"},{"id":"decoder_failed","context":"any","class":"stopped","requires":{"player_stopped":true}},{"id":"black_frame_ladder_spent","context":"start","class":"exhausted","requires":{"player_stopped":true},"actions":["close","retry"]},{"id":"repeated_early_end","context":"attached","class":"stopped","requires":{"player_stopped":true}},{"id":"degraded_notice","context":"any","class":"degraded"},{"id":"log_only","context":"any","class":null}];
   const SURFACE_TIMINGS = {"buffering_min_ms":350,"hold_notice_ms":30000,"degraded_notice_ms":5000,"refused_progress_ms":10000,"notes":["refused_progress_ms is CONTINUOUS presenting on the attached generation, not accumulated playback.","buffering_min_ms debounces the surface, not the fault: a `media_waiting` fault exists from the moment it is raised and is simply not drawn until it has lasted this long.","A hidden page freezes every timer as well as every evidence sample. The reducer does this by carrying the hidden interval forward: on becoming visible again every fault's raise time is shifted by however long the page was hidden, and the continuous-presenting clock is reset, because no sample bridged the gap.","disagreement_notice_ms retires the \"Playback recovered\" banner a demotion leaves behind (§3.2). Its actions stay valid while the picture could still fail again; this much CONTINUOUS presenting is the point at which the offer is stale. Ruled by the implementer 2026-09-13 in Paul's absence — §3.1 says such a banner does not expire \"while an action is still valid\" and does not say when that ends; a banner with no end is the Android `playFailure` defect wearing a different hat.","presenting_after_raise is the contract's \"presenting evidence on the NEW attached generation\": what makes the evidence count is that the run of presentation BEGAN at or after the fault was raised. An owner that reopens in place, on the same generation, produces exactly that, and a recovering indicator that only a new generation could retire would outlive every in-place recovery."],"disagreement_notice_ms":30000};
   const SURFACE_SEVERITY_RANK = {"notice":1,"progress":2,"prompt":3,"terminal":4};
   // ---- end generated surface table ----
@@ -850,6 +850,77 @@
     per_attach: 1,
   });
 
+  // One absolute startup policy for the web HLS attachment. hls.js owns the
+  // retry ladder inside a source-load cycle; the application owns one
+  // corrective cycle and the ceiling across both. Keeping the numbers here
+  // makes the executor and the stock-loader adapter read the same contract.
+  const HLS_STARTUP = Object.freeze({
+    cold_deadline_ms: 40_000,
+    seek_deadline_ms: 20_000,
+    manifest_dispatch_ceiling: 16,
+    manifest_load_policy: Object.freeze({
+      default: Object.freeze({
+        maxTimeToFirstByteMs: 10_000,
+        maxLoadTimeMs: 12_000,
+        timeoutRetry: Object.freeze({
+          maxNumRetry: 1,
+          retryDelayMs: 1_000,
+          maxRetryDelayMs: 1_000,
+        }),
+        errorRetry: Object.freeze({
+          maxNumRetry: 7,
+          retryDelayMs: 1_000,
+          maxRetryDelayMs: 4_000,
+        }),
+      }),
+    }),
+  });
+
+  // Typed answers that end this source-load cycle immediately. In particular,
+  // a terminal JSON body carried on HTTP 503 must not be retried merely because
+  // hls.js's stock status policy retries 5xx responses.
+  const HLS_STARTUP_TERMINAL_CODES = Object.freeze([
+    "hls_init_invalid",
+    "hls_init_unsupported",
+    "media_session_ended",
+    "media_owner_lost",
+    "media_owner_transition",
+    "producer_failed",
+    "producer_exited",
+    "session_failed",
+    "vod_disabled",
+    "vod_source_rescan_required",
+    "vod_source_unsupported",
+    "vod_subtitle_burn_unavailable",
+    "vod_transcode_unavailable",
+  ]);
+
+  function hlsStartupResponseAction({ status = 0, code = null } = {}) {
+    const numeric = Number(status) || 0;
+    if (numeric === 401 || numeric === 403) return "terminal";
+    if (typeof code === "string" && HLS_STARTUP_TERMINAL_CODES.includes(code)) {
+      return "terminal";
+    }
+    return "retry";
+  }
+
+  function hlsStartupSendAction({
+    state = "active",
+    nowMs = 0,
+    deadlineMs = 0,
+    dispatches = 0,
+    current = true,
+  } = {}) {
+    if (!current || state === "cancelled" || state === "presenting") return "cancel";
+    if (state === "paused") return "pause";
+    if (state === "exhausted") return "exhaust";
+    if (Number(nowMs) >= Number(deadlineMs)) return "exhaust";
+    if ((Number(dispatches) || 0) >= HLS_STARTUP.manifest_dispatch_ceiling) {
+      return "exhaust";
+    }
+    return "send";
+  }
+
   // `used` is the attach's spent budget. A pure predicate so the one place
   // that schedules the retry cannot disagree with the test that pins it.
   function hlsRetryAllowed({ used = 0 } = {}) {
@@ -895,7 +966,8 @@
       return null;
     }
     const retryable =
-      failure.code === "startup_timeout" || failure.status === 503;
+      hlsStartupResponseAction({ status: failure.status, code: failure.code }) === "retry" &&
+      (failure.code === "startup_timeout" || failure.status === 503);
     // The node serving this session died and nothing can take it over. That
     // is neither "still preparing" nor a startup failure — it happens to a
     // viewer who was already watching, and the honest sentence says the
@@ -1722,6 +1794,10 @@
     createRetryStep,
     HLS_RETRY,
     hlsRetryAllowed,
+    HLS_STARTUP,
+    HLS_STARTUP_TERMINAL_CODES,
+    hlsStartupResponseAction,
+    hlsStartupSendAction,
     BEHIND_LIVE_WINDOW_CODE,
     behindLiveWindowRecovers,
     SURFACE_CLASSES,

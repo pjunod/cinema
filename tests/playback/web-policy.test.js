@@ -5510,7 +5510,7 @@ test("the hls.js retry budget is one per attach, and `BEHIND_LIVE_WINDOW` is fin
     /PlaybackPolicy\.hlsRetryAllowed\(\{used:player\.hlsRetryUsed\|\|0\}\)/,
     "the page must read the shared budget",
   );
-  for (const site of ["scheduleHlsNetworkRetry(video,PLAYER,STREAM_FAILURE.code", "scheduleHlsNetworkRetry(video,PLAYER,String(d.details"]) {
+  for (const site of ["scheduleHlsNetworkRetry(video,PLAYER,d)", "scheduleHlsNetworkRetry(video,PLAYER,String(d.details"]) {
     assert.ok(SHIPPED_UI.includes(site), `the shared budget is spent at ${site}`);
   }
 
@@ -5563,6 +5563,46 @@ test("the hls.js retry budget is one per attach, and `BEHIND_LIVE_WINDOW` is fin
     /\.\s*seekToDefaultPosition\s*\(/,
     "seekToDefaultPosition is a live-edge policy the contract forbids",
   );
+});
+
+test("web HLS startup has one bounded manifest policy and terminal precedence", () => {
+  const startup = policy.HLS_STARTUP;
+  assert.deepEqual(startup, {
+    cold_deadline_ms: 40_000,
+    seek_deadline_ms: 20_000,
+    manifest_dispatch_ceiling: 16,
+    manifest_load_policy: {
+      default: {
+        maxTimeToFirstByteMs: 10_000,
+        maxLoadTimeMs: 12_000,
+        timeoutRetry: { maxNumRetry: 1, retryDelayMs: 1_000, maxRetryDelayMs: 1_000 },
+        errorRetry: { maxNumRetry: 7, retryDelayMs: 1_000, maxRetryDelayMs: 4_000 },
+      },
+    },
+  });
+  for (const status of [401, 403]) {
+    assert.equal(policy.hlsStartupResponseAction({ status }), "terminal");
+  }
+  for (const code of policy.HLS_STARTUP_TERMINAL_CODES) {
+    assert.equal(policy.hlsStartupResponseAction({ status: 503, code }), "terminal", code);
+  }
+  assert.equal(policy.hlsStartupResponseAction({ status: 503 }), "retry",
+    "a generic 503 may consume the bounded retry but is not called startup");
+  assert.equal(policy.hlsStartupResponseAction({ status: 503, code: "startup_timeout" }), "retry");
+});
+
+test("the final manifest-send gate rejects pause, stale ownership, deadline and ceiling", () => {
+  const decide = (overrides = {}) => policy.hlsStartupSendAction({
+    state: "active", nowMs: 10, deadlineMs: 100, dispatches: 0, current: true, ...overrides,
+  });
+  assert.equal(decide(), "send");
+  assert.equal(decide({ state: "paused" }), "pause");
+  assert.equal(decide({ state: "cancelled" }), "cancel");
+  assert.equal(decide({ state: "presenting" }), "cancel");
+  assert.equal(decide({ current: false }), "cancel");
+  assert.equal(decide({ nowMs: 100 }), "exhaust");
+  assert.equal(decide({ dispatches: 15 }), "send");
+  assert.equal(decide({ dispatches: 16 }), "exhaust");
 });
 
 // Drained last, in registration order, after every synchronous case has run.

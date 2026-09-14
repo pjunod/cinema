@@ -6788,9 +6788,19 @@ function preferNativeHls(video){
 // confident explanation for a fatal error at minute forty.
 let STREAM_FAILURE=null;
 function clearStreamFailure(){ STREAM_FAILURE=null; }
-function noteStreamFailure(status, body){
+function noteStreamFailure(status, body, evidence){
   const parsed=PlaybackPolicy.parseStreamFailure({status:status, body:body});
-  if(parsed){ parsed.at=Date.now(); STREAM_FAILURE=parsed; }
+  if(!parsed) return null;
+  const owned=evidence||{};
+  const previous=STREAM_FAILURE;
+  // A completion from an older manifest request cannot replace a newer
+  // diagnosis. The attachment identity is checked by the caller; the ordinal
+  // orders requests within that attachment.
+  if(previous&&owned.attachment&&previous.attachment===owned.attachment
+    &&Number(previous.request_ordinal||0)>Number(owned.request_ordinal||0)) return previous;
+  Object.assign(parsed,{at:Date.now()},owned);
+  STREAM_FAILURE=parsed;
+  return parsed;
 }
 // A successful reload belongs to one hls.js instance. Only that instance may
 // clear its retryable playlist refusal: a late success event from a destroyed
@@ -6799,9 +6809,13 @@ function noteStreamFailure(status, body){
 function clearStreamFailureFor(hls){
   const retryable=STREAM_FAILURE &&
     (STREAM_FAILURE.code==="startup_timeout" || STREAM_FAILURE.status===503);
-  if(retryable && PLAYER && PLAYER.hls===hls) clearStreamFailure();
+  if(retryable && PLAYER && PLAYER.hls===hls
+    &&(!STREAM_FAILURE.attachment||STREAM_FAILURE.attachment===PLAYER.mediaAttachment))
+    clearStreamFailure();
 }
 function currentStreamFailureOverlay(){
+  if(STREAM_FAILURE&&STREAM_FAILURE.attachment&&PLAYER
+    &&STREAM_FAILURE.attachment!==PLAYER.mediaAttachment) return null;
   return PlaybackPolicy.streamFailureOverlay(STREAM_FAILURE,Date.now());
 }
 // Session creation fails before `attachHls`, so the preserved typed refusal is
@@ -6871,36 +6885,214 @@ function vodClientContract(){
     }}
   };
 }
-// M5 addition 2 — one bounded hls.js retry per attach.
-//
-// hls.js has already called `stopLoad()` and the element keeps playing whatever
-// it buffered. Two seconds later, ask it to load again FROM WHERE THE PICTURE
-// IS: `startLoad()` with no argument restarts from hls.js's own idea of the
-// position, which after a drained buffer is not the viewer's. The position is
-// read at the moment the retry fires, because the element kept playing through
-// the wait and the two seconds of film it played are exactly what must not be
-// re-fetched.
-//
-// One retry per attach, shared with the `segment_503_not_yet` row — whichever
-// fires first spends it — and then nothing further: `persistentWait`'s reopen,
-// whose budget this does not touch, is the existing recovery and stays the one
-// that follows. Returns whether the retry was scheduled, so the caller can say
-// so in the log without asking the budget a second time.
-function scheduleHlsNetworkRetry(video, player, detail){
+function hlsStartupCurrent(player,episode){
+  return !!(player&&episode&&PLAYER===player&&player.hlsStartup===episode
+    &&player.hls===episode.hls&&episode.attachment.current());
+}
+function hlsStartupIncomplete(player){
+  const episode=player&&player.hlsStartup;
+  return !!(episode&&!['presenting','cancelled'].includes(episode.state));
+}
+function hlsStartupManifestRequest(context){
+  return !!(context&&(context.type==='manifest'||/\.m3u8(?:\?|$)/i.test(String(context.url||''))));
+}
+function abortHlsStartupLoaders(episode){
+  if(!episode) return;
+  for(const loader of [...episode.loaders]){
+    try{loader.abort()}catch(e){}
+    try{loader.destroy()}catch(e){}
+  }
+  episode.loaders.clear();
+}
+function cancelHlsStartup(player,reason){
+  const episode=player&&player.hlsStartup;
+  if(!episode||episode.state==='cancelled'||episode.state==='presenting') return;
+  episode.state='cancelled'; episode.cancelledReason=reason||'cancelled';
+  clearTimeout(episode.retry.timer); episode.retry.timer=null;
+  abortHlsStartupLoaders(episode);
+}
+function completeHlsStartup(player){
+  const episode=player&&player.hlsStartup;
+  if(!episode||!hlsStartupCurrent(player,episode)||episode.state!=='active') return false;
+  episode.state='presenting';
+  clearTimeout(episode.retry.timer); episode.retry.timer=null;
+  clearTimeout(player.stallTimer); player.stallTimer=null;
+  reportTtff();
+  clientLog(Object.assign({level:'info',event:'hls_startup_presenting',
+    detail:`manifest=${episode.manifestState};media=${episode.mediaLoaded?'yes':'no'}`,
+    message:`HLS startup presented after ${Math.round(performance.now()-episode.startedAt)}ms`},
+    playbackContext()));
+  return true;
+}
+function configureHlsStartupDeadline(player,graceMs){
+  const episode=player&&player.hlsStartup;
+  if(!episode||!hlsStartupCurrent(player,episode)||episode.state==='presenting') return;
+  const grace=Number(graceMs)||PlaybackPolicy.HLS_STARTUP.cold_deadline_ms;
+  episode.deadlineMs=Math.min(episode.deadlineMs,performance.now()+grace);
+}
+function diagnoseHlsStartup(player){
+  const episode=player&&player.hlsStartup;
+  const failure=episode&&episode.latestFailure;
+  const explained=failure&&PlaybackPolicy.streamFailureOverlay(failure,Date.now());
+  if(explained&&failure.code==='startup_timeout') return {
+    title:'The stream did not become ready in time.',detail:explained.detail};
+  if(episode&&episode.manifestState!=='parsed'){
+    const status=failure&&failure.status;
+    return {title:'The stream playlist could not be loaded.',
+      detail:failure&&failure.message?failure.message:
+        `The playlist did not load before the startup deadline${status?` (HTTP ${status})`:''}.`};
+  }
+  if(episode&&!episode.mediaLoaded) return {
+    title:'The video data did not arrive in time.',
+    detail:'The playlist loaded, but no media arrived before the startup deadline.'};
+  return {title:'Playback did not start.',
+    detail:'Media arrived, but no presented frame or advancing audio clock was observed. Try again; the decoder cause is not known.'};
+}
+function exhaustHlsStartup(player,reason){
+  const episode=player&&player.hlsStartup;
+  if(!episode||!hlsStartupCurrent(player,episode)||episode.state==='presenting'
+    ||episode.state==='cancelled') return false;
+  if(episode.state!=='exhausted'){
+    episode.state='exhausted'; episode.exhaustedReason=reason||'deadline';
+    clearTimeout(episode.retry.timer); episode.retry.timer=null;
+    abortHlsStartupLoaders(episode);
+    try{episode.hls.stopLoad()}catch(e){}
+  }
+  setTimeout(()=>stallDiagnose().catch(()=>{}),0);
+  return true;
+}
+function armHlsStartupRetry(video,player,episode){
+  clearTimeout(episode.retry.timer);
+  const delay=Math.max(0,episode.retry.dueMs-performance.now());
+  episode.retry.timer=setTimeout(()=>{
+    episode.retry.timer=null;
+    if(!hlsStartupCurrent(player,episode)) return cancelHlsStartup(player,'ownership_changed');
+    if(episode.state==='paused') return;
+    if(performance.now()>=episode.deadlineMs) return exhaustHlsStartup(player,'deadline');
+    if(player.wantsPlayback===false) return pauseHlsStartup(player);
+    episode.retry.state='dispatched'; player.hlsRetryUsed=1;
+    const at=Math.max(0,Number(video&&video.currentTime)||0);
+    const missing=episode.manifestState!=='parsed';
+    const action=missing?'reload_manifest':'resume_loading';
+    clientLog(Object.assign({level:'info',event:'hls_retry',detail:episode.retry.detail,
+      action,ordinal:episode.dispatches+1,
+      elapsed_ms:Math.round(performance.now()-episode.startedAt),
+      remaining_ms:Math.max(0,Math.round(episode.deadlineMs-performance.now())),
+      message:missing?'reloading the current manifest after its initial load failed'
+        :`resuming the established stream at ${at.toFixed(1)}s after a fatal network error`},
+      playbackContext()));
+    try{
+      if(missing) episode.hls.loadSource(episode.playlistUrl);
+      else episode.hls.startLoad(at);
+    }catch(e){ exhaustHlsStartup(player,'retry_dispatch_failed'); }
+  },delay);
+}
+function pauseHlsStartup(player){
+  const episode=player&&player.hlsStartup;
+  if(!episode||!hlsStartupCurrent(player,episode)||episode.state!=='active') return false;
+  episode.state='paused';
+  clearTimeout(episode.retry.timer); episode.retry.timer=null;
+  abortHlsStartupLoaders(episode);
+  try{episode.hls.stopLoad()}catch(e){}
+  return true;
+}
+function resumeHlsStartup(video,player){
+  const episode=player&&player.hlsStartup;
+  if(!episode||!hlsStartupCurrent(player,episode)||episode.state!=='paused') return false;
+  episode.intentGeneration=player.controlIntentGeneration||0;
+  if(performance.now()>=episode.deadlineMs){
+    episode.state='active'; return exhaustHlsStartup(player,'paused_past_deadline');
+  }
+  if(episode.retry.state==='dispatched'){
+    episode.state='active'; return exhaustHlsStartup(player,'corrective_reload_interrupted');
+  }
+  episode.state='active';
+  if(episode.retry.state==='unused'){
+    episode.retry.state='reserved'; episode.retry.dueMs=performance.now();
+    episode.retry.detail='resume_after_startup_pause';
+  }
+  armHlsStartupRetry(video,player,episode);
+  return true;
+}
+function createHlsStartupLoader(StockLoader,episode){
+  return class PlurxStartupLoader extends StockLoader{
+    constructor(config){ super(config); episode.loaders.add(this); this.plurxRequestOrdinal=0; }
+    load(context,config,callbacks){ this.plurxContext=context; return super.load(context,config,callbacks); }
+    openAndSendXhr(xhr,context,config){
+      if(hlsStartupManifestRequest(context)){
+        const action=PlaybackPolicy.hlsStartupSendAction({state:episode.state,
+          nowMs:performance.now(),deadlineMs:episode.deadlineMs,
+          dispatches:episode.dispatches,current:hlsStartupCurrent(episode.player,episode)});
+        if(action!=='send'){
+          if(action==='exhaust') exhaustHlsStartup(episode.player,'manifest_dispatch_limit');
+          else if(action==='cancel') episode.state='cancelled';
+          try{this.abort()}catch(e){}
+          try{this.destroy()}catch(e){}
+          return;
+        }
+        this.plurxRequestOrdinal=++episode.dispatches;
+        episode.manifestState='loading';
+        episode.requestStartedAt=performance.now();
+        clientLog(Object.assign({level:'info',event:'hls_manifest_dispatch',
+          ordinal:this.plurxRequestOrdinal,
+          elapsed_ms:Math.round(performance.now()-episode.startedAt),
+          remaining_ms:Math.max(0,Math.round(episode.deadlineMs-performance.now())),
+          message:`sending manifest request ${this.plurxRequestOrdinal}`},playbackContext()));
+      }
+      return super.openAndSendXhr(xhr,context,config);
+    }
+    readystatechange(){
+      const xhr=this.loader,context=this.context;
+      if(xhr&&xhr.readyState===4&&hlsStartupManifestRequest(context)
+        &&hlsStartupCurrent(episode.player,episode)){
+        xhr._plurxStartupObserved=true;
+        if(xhr.status>=400){
+          const failure=noteStreamFailure(xhr.status,xhr.responseText,{
+            attachment:episode.player.mediaAttachment,resource:'manifest',
+            request_ordinal:this.plurxRequestOrdinal});
+          episode.latestFailure=failure||{status:xhr.status,code:null,
+            message:(xhr.status===401||xhr.status===403)
+              ?'Sign in again before retrying playback.'
+              :`The manifest request failed with HTTP ${xhr.status}.`,
+            at:Date.now(),attachment:episode.player.mediaAttachment,
+            request_ordinal:this.plurxRequestOrdinal};
+          if(PlaybackPolicy.hlsStartupResponseAction({status:xhr.status,
+            code:failure&&failure.code})==='terminal'){
+            STREAM_FAILURE=episode.latestFailure;
+            clearTimeout(this.requestTimeout); xhr.onreadystatechange=null; xhr.onprogress=null;
+            const callbacks=this.callbacks;
+            if(callbacks) callbacks.onError({code:xhr.status,text:xhr.statusText},context,xhr,this.stats);
+            return;
+          }
+        }
+      }
+      return super.readystatechange();
+    }
+    destroy(){ episode.loaders.delete(this); return super.destroy(); }
+  };
+}
+// One application retry per attachment, shared by initial-manifest and
+// established-stream network recovery. An unloaded manifest must be reloaded;
+// startLoad has no levels to start in that state.
+function scheduleHlsNetworkRetry(video,player,detail){
   if(!player||player.hls==null) return false;
+  const episode=player.hlsStartup;
+  if(episode&&hlsStartupCurrent(player,episode)&&episode.state==='active'){
+    if(episode.retry.state!=='unused') return false;
+    episode.retry.state='reserved';
+    player.hlsRetryUsed=1;
+    episode.retry.detail=String(detail&&detail.details||detail||'network');
+    episode.retry.dueMs=performance.now()+PlaybackPolicy.HLS_RETRY.delay_ms;
+    armHlsStartupRetry(video,player,episode);
+    return true;
+  }
   if(!PlaybackPolicy.hlsRetryAllowed({used:player.hlsRetryUsed||0})) return false;
   player.hlsRetryUsed=(player.hlsRetryUsed||0)+1;
-  const hls=player.hls, attempt=player.attemptId||null;
+  const hls=player.hls,attempt=player.attemptId||null;
   setTimeout(()=>{
-    // The attach this budget belonged to is gone: a seek, a quality change or
-    // a teardown replaced it, and reloading its instance would resurrect a
-    // stream nobody is watching.
     if(!PLAYER||PLAYER!==player||PLAYER.hls!==hls||PLAYER.attemptId!==attempt) return;
     const at=Math.max(0,Number(video&&video.currentTime)||0);
-    clientLog(Object.assign({level:"info",event:"hls_retry",detail:detail||"network",
-      message:`reloading the stream at ${at.toFixed(1)}s after a fatal ${detail||"network"} error`},
-      playbackContext()));
-    try{ hls.startLoad(at); }catch(e){}
+    try{hls.startLoad(at)}catch(e){}
   },PlaybackPolicy.HLS_RETRY.delay_ms);
   return true;
 }
@@ -6949,13 +7141,25 @@ function attachHls(video, playlistUrl, startAt){
     // for the whole film.
     const tgt=bufferTargets(PLAYER&&PLAYER.bufSegSecs);
     PLAYER.bufTarget=tgt;
+    const startup={player:attachedPlayer,attachment,playlistUrl,
+      startAt:Math.max(0,Number(startAt)||0),hls:null,state:'active',
+      manifestState:'unknown',mediaLoaded:false,decoderFailed:false,
+      startedAt:performance.now(),
+      deadlineMs:performance.now()+PlaybackPolicy.HLS_STARTUP.cold_deadline_ms,
+      dispatches:0,loaders:new Set(),latestFailure:null,
+      intentGeneration:attachedPlayer.controlIntentGeneration||0,
+      retry:{state:'unused',dueMs:null,detail:null,timer:null}};
+    attachedPlayer.hlsStartup=startup;
     const observesCurrent=()=>attachment.current()&&attachedPlayer.hls===hls
       &&playbackOwnsAttachedMedia(attachedPlayer);
+    const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
     const hls=new Hls({
       enableWorker:false,
       maxBufferLength:tgt.fwd,
       backBufferLength:tgt.back,
       ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
+      ...(StockLoader?{loader:createHlsStartupLoader(StockLoader,startup)}:{}),
+      manifestLoadPolicy:PlaybackPolicy.HLS_STARTUP.manifest_load_policy,
       // Every HLS session is VOD. The old growing-playlist path is not an
       // alternate response, so every fragment fetch uses the measured VOD
       // materialization contract from its first request.
@@ -6972,7 +7176,9 @@ function attachHls(video, playlistUrl, startAt){
       xhrSetup:x=>{
         if(TOKEN) x.setRequestHeader("authorization","Bearer "+TOKEN);
         x.addEventListener("load",()=>{
-          if(observesCurrent()&&x.status>=400) noteStreamFailure(x.status, x.responseText);
+          if(observesCurrent()&&x.status>=400&&!x._plurxStartupObserved)
+            noteStreamFailure(x.status,x.responseText,{attachment:attachedPlayer.mediaAttachment,
+              resource:/\.m3u8(?:\?|$)/i.test(String(x.responseURL||''))?'manifest':'media'});
         });
       }});
     const estimateSeed=PlaybackPolicy.bandwidthSeedBps({
@@ -6986,11 +7192,19 @@ function attachHls(video, playlistUrl, startAt){
       try{ hls.bandwidthEstimate=estimateSeed; }catch(e){}
       PLAYER.bandwidthSeedBps=estimateSeed;
     }
+    startup.hls=hls;
     PLAYER.hls=hls;
     hls.loadSource(playlistUrl);
     hls.attachMedia(video);
+    if(Hls.Events.MANIFEST_LOADING) hls.on(Hls.Events.MANIFEST_LOADING,()=>{
+      if(observesCurrent()) startup.manifestState='loading';
+    });
+    if(Hls.Events.MANIFEST_LOADED) hls.on(Hls.Events.MANIFEST_LOADED,()=>{
+      if(observesCurrent()) startup.manifestState='loaded';
+    });
     resetPlaybackTransportEvents(video);
     hls.on(Hls.Events.MANIFEST_PARSED,()=>{
+      if(observesCurrent()) startup.manifestState='parsed';
       // A newer native seek still belongs to this attachment. It must not
       // suppress the only play request when the manifest finally arrives.
       if(attachment.current()) applyPlaybackTransportIntent(video,attachedPlayer);
@@ -7042,6 +7256,7 @@ function attachHls(video, playlistUrl, startAt){
     // read from the transfer that just happened.
     if(Hls.Events.FRAG_LOADED) hls.on(Hls.Events.FRAG_LOADED,(_,d)=>{
       if(!observesCurrent()) return;
+      startup.mediaLoaded=true;
       const stats=d&&((d.frag&&d.frag.stats)||d.stats);
       const b=stats&&(stats.total||stats.loaded);
       const p=PLAYER; if(!p||p.hls!==hls||!(b>0)) return;
@@ -7106,6 +7321,7 @@ function attachHls(video, playlistUrl, startAt){
       console.warn("[cinema] hls.js fatal",d.type,d.details);
       const hlsFailure=playbackControlHlsFatal(d,!!(PLAYER&&PLAYER.started));
       const isMedia=hlsFailure.media_failure;
+      if(isMedia) startup.decoderFailed=true;
       const controlTrigger=notifyPlaybackControl("failed",hlsFailure.observation);
       clientLog(Object.assign({level:"error",event:"hls_fatal",detail:d.type,message:d.details,
         control_trigger:controlTrigger}, playbackContext()));
@@ -7161,13 +7377,16 @@ function attachHls(video, playlistUrl, startAt){
       // still successfully starting. The refusal body names which; the
       // overlay is only useful if it repeats that instead of sending someone
       // to a log file on a headless box.
+      const startupFailure=hlsStartupIncomplete(PLAYER)&&PLAYER.hlsStartup.latestFailure;
+      if(startupFailure&&PlaybackPolicy.hlsStartupResponseAction(startupFailure)==='terminal')
+        STREAM_FAILURE=startupFailure;
       const explained=currentStreamFailureOverlay();
       // The class decides whether the picture stops. hls.js has called
       // stopLoad() and the element keeps playing whatever it buffered — up to
       // half a minute of it — so a refusal that is still "not yet" gets an
       // indicator over a moving picture rather than the full screen that used
       // to sit there calling it a failed start (§2.1, closed by §3.3 rows 9-12).
-      const where=PLAYER&&PLAYER.started?"attached":"start";
+      const where=hlsStartupIncomplete(PLAYER)?"start":PLAYER&&PLAYER.started?"attached":"start";
       const refusal=explained?PlaybackPolicy.classifyStreamFailure({
         status:STREAM_FAILURE.status,code:STREAM_FAILURE.code,context:where}):null;
       if(explained){
@@ -7185,8 +7404,8 @@ function attachHls(video, playlistUrl, startAt){
         // A "not yet" the server explained is the other half of M5's shared
         // hls.js budget: the picture is still moving, so one reload at the
         // current position is worth a try before the reopen path runs.
-        if(refusal==="segment_503_not_yet")
-          scheduleHlsNetworkRetry(video,PLAYER,STREAM_FAILURE.code||"segment-503");
+        if(refusal==="segment_503_not_yet"||hlsStartupIncomplete(PLAYER))
+          scheduleHlsNetworkRetry(video,PLAYER,d);
         toast(explained.retryable?"Still starting…":"Playback failed");
         return;
       }
@@ -9953,7 +10172,7 @@ async function executePlaybackMediaChange(p,change){
       p.health=null;
       if(change.height>0) p.autoHeight=change.height;
       if(change.note) p.rescuedNote=change.note;
-      armStall(attachSession(v,p,info,pos),20000);
+      armStall(attachSession(v,p,info,pos),PlaybackPolicy.HLS_STARTUP.seek_deadline_ms);
     }else if(change.copyHls){
       if(!await startCopyHls(v,pos,live,null,preparation,()=>retirePlaybackPredecessor(p))) return false;
     }else{
@@ -10914,6 +11133,7 @@ function destroyHlsInstance(p,hls,element){
   resetPlaybackTransportEvents(element);
 }
 function teardownHls(){
+  if(PLAYER) cancelHlsStartup(PLAYER,'teardown');
   if(PLAYER) PLAYER.mediaAttachment=null;
   // A staged successor belongs to the stream it was prepared against. Any new
   // attach on the authoritative element — a seek, a quality change, a close —
@@ -10933,6 +11153,7 @@ function teardownHls(){
 }
 function resetMediaSource(v){
   if(PLAYER){
+    cancelHlsStartup(PLAYER,'media_source_reset');
     PLAYER.mediaAttachment=null;
     rememberPlaybackTransportIntent(v,PLAYER);
     PLAYER.internalMediaReset=true;
@@ -11013,6 +11234,7 @@ function handlePlaybackTransportEvent(v,p,event){
     if(typeof play==='function'&&play.pendingIntent&&PLAY_OPEN_GATE.current(play.pendingIntent.attempt))
       play.pendingIntent.wantsPlayback=false;
     supersedePlaybackControlIntent(p);
+    pauseHlsStartup(p);
     endWait(false);
     // §3.1: a `buffering` fault is about a player that WANTS media, and this
     // viewer does not any more. `endWait` clears the watchdog and the episode
@@ -11030,6 +11252,7 @@ function handlePlaybackTransportEvent(v,p,event){
     if(typeof play==='function'&&play.pendingIntent&&PLAY_OPEN_GATE.current(play.pendingIntent.attempt))
       play.pendingIntent.wantsPlayback=true;
     supersedePlaybackControlIntent(p);
+    resumeHlsStartup(v,p);
     // Symmetry, and nothing more: resuming raises no fault back. If the buffer
     // is still empty the element fires `waiting` again and THAT is the raise.
     playbackSurfaceStep({playback_requested:true});
@@ -11402,9 +11625,11 @@ async function autoControllerTick(){
 // file is already open on the server, so 20s of nothing is already wrong.
 function armStall(fromSec, graceMs){
   clearStall(); if(!PLAYER) return;
+  configureHlsStartupDeadline(PLAYER,graceMs||PlaybackPolicy.HLS_STARTUP.cold_deadline_ms);
   if(PLAYER.samplingStopped) armPlaybackSampling(document.getElementById("video"),PLAYER);
   PLAYER.stallFrom=(fromSec!=null)?fromSec:pbPosSec();
-  PLAYER.stallTimer=setTimeout(()=>stallDiagnose().catch(()=>{}), graceMs||40000);
+  PLAYER.stallTimer=setTimeout(()=>stallDiagnose().catch(()=>{}),
+    graceMs||PlaybackPolicy.HLS_STARTUP.cold_deadline_ms);
 }
 // Recovery offered by a diagnosed stall: restart the stream at the position we
 // were trying to reach, rather than making the user close and re-open the item.
@@ -11426,12 +11651,15 @@ function retryPlayback(){
 async function stallDiagnose(){
   const v=document.getElementById("video");
   const p=PLAYER;
-  if(!playbackOwnsAttachedMedia(p) || p.started) return;
+  const hlsStartup=hlsStartupIncomplete(p);
+  if(!playbackOwnsAttachedMedia(p) || (!hlsStartup&&p.started)) return;
+  if(hlsStartup&&p.hlsStartup.state==='paused') return;
   const generation=p._seekToken||0, action=p.controlIntentGeneration||0;
-  const current=()=>playbackOwnsAttachedMedia(p)&&!p.started&&(p._seekToken||0)===generation
+  const current=()=>playbackOwnsAttachedMedia(p)&&(hlsStartupIncomplete(p)||!p.started)
+    &&(p._seekToken||0)===generation
     &&(p.controlIntentGeneration||0)===action;
   const from=(p.stallFrom!=null)?p.stallFrom:0;
-  if(pbPosSec()>from+0.35) return;   // it actually started moving — never mind
+  if(!hlsStartup&&pbPosSec()>from+0.35) return; // progressive playback moved
   const controlTrigger=notifyPlaybackControl("stalled");
   const hdrs={}; if(TOKEN) hdrs["authorization"]="Bearer "+TOKEN;
   const url=p.probeUrl;
@@ -11439,9 +11667,12 @@ async function stallDiagnose(){
   const terminalFailure=explained&&!explained.retryable;
   let verdict=terminalFailure?explained.title:"Playback hasn't started.";
   let detail=terminalFailure?explained.detail:"Open Settings → Logs and read the last plurxd::stream / transcode line.";
-  if(url&&!terminalFailure){
+  if(hlsStartup&&!terminalFailure){
+    const diagnosis=diagnoseHlsStartup(p);
+    verdict=diagnosis.title; detail=diagnosis.detail;
+  }else if(url&&!terminalFailure){
     try{
-      const {status,segState}=await probePlaybackSource(url,hdrs,p.method==='transcode');
+      const {status,segState}=await probePlaybackSource(url,hdrs,{inspectMedia:p.method==='transcode'});
       if(!current()) return;
       const serverErr = status>=500 || (typeof segState==='number'&&segState>=500);
       const reached   = status>=200 && status<400 && segState!=='blocked' && !(typeof segState==='number'&&segState>=400);
@@ -11455,6 +11686,13 @@ async function stallDiagnose(){
     }
   }
   if(!current()) return;
+  if(hlsStartup){
+    const episode=p.hlsStartup;
+    episode.state='exhausted';
+    clearTimeout(episode.retry.timer); episode.retry.timer=null;
+    abortHlsStartupLoaders(episode);
+    try{episode.hls.stopLoad()}catch(e){}
+  }
   console.warn("[cinema] playback stall diagnosis",{method:p.method,url,networkState:v&&v.networkState,readyState:v&&v.readyState,error:v&&v.error&&v.error.code,verdict});
   finishStallRecovery("failed",verdict);
   clientLog({level:"warn",event:"stall",src:(url||"").split("?")[0],message:verdict,
@@ -11463,13 +11701,14 @@ async function stallDiagnose(){
   // Contract §3.4: stop the player, then raise; §3.3 row 15 is the row these
   // probe verdicts belong to. The sentence and the buttons are unchanged.
   stopPlayerForExhaustion();
-  raisePlaybackSurface("decoder_failed",{player_stopped:true,
-    title:verdict,detail:detail,actions:playbackStallActions(PLAYER)});
+  raisePlaybackSurface(hlsStartup?"startup_exhausted":"decoder_failed",{player_stopped:true,
+    title:verdict,detail:detail,
+    actions:hlsStartup?["close","retry"]:playbackStallActions(PLAYER)});
   toast(verdict);
 }
 // One deadline covers response headers, playlist body and the sample segment.
 // Abort releases network work; the race also bounds transports ignoring abort.
-async function probePlaybackSource(url,headers,isTranscode){
+async function probePlaybackSource(url,headers,evidence){
   const ctl=new AbortController();
   let timer;
   const deadline=new Promise((_,reject)=>{timer=setTimeout(()=>{
@@ -11481,7 +11720,7 @@ async function probePlaybackSource(url,headers,isTranscode){
       const res=await fetch(url,{headers,signal:ctl.signal});
       const status=res.status;
       let segState=null;
-      if(isTranscode){
+      if(evidence&&evidence.inspectMedia){
         const txt=await res.text();
         const seg=(txt.split('\n').find(l=>l&&!l.startsWith('#')&&/\.(?:ts|m4s)(\?|$)/.test(l))||"").trim();
         if(seg){
@@ -12056,6 +12295,7 @@ function playbackProgressTick(v,p){
   if(moved){
     watch.clock=clock; watch.frames=frames; watch.at=now;
     p.presentationAdvancedAt=now;
+    completeHlsStartup(p);
     if(!pending){
       watch.fired=false;
       if(p.waitAt!=null){
@@ -12166,6 +12406,8 @@ function togglePlay(){
   else if(PLAYER){
     rememberPlaybackTransportIntent(v,PLAYER);
     PLAYER.wantsPlayback=!PLAYER.wantsPlayback;
+    if(PLAYER.wantsPlayback) resumeHlsStartup(v,PLAYER);
+    else pauseHlsStartup(PLAYER);
     applyPlaybackTransportIntent(v,PLAYER);
   }
   if(PLAYER)playerActivity();
@@ -12288,16 +12530,16 @@ function handlePlaybackPlaying(v,p){
   p.started=true;
   // A decoder may emit playing without producing another frame or clock
   // advance. Only the independent progress monitor can retire its wait.
-  if(!needsProgress){
+  if(!needsProgress&&!hlsStartupIncomplete(p)){
     endWait(true);
     p.controlPositionHintSec=null; p.controlRenderOverride=null; p.controlObservationOverride=null;
     clearStall(); finishStallRecovery("recovered");
     // Inert by contract (§3.2). `playing` prompts a look; the progress tick's
     // own evidence is what retires whatever is on screen.
     playbackSurfaceStep({event:"playing"});
-  }
+  }else playbackSurfaceStep({event:"playing"});
   playerActivity(); settlePlaybackControlSeek(v,p); pbTick(); pbSyncPlayIcon(); notifyPlaybackControl();
-  if(first) reportTtff();
+  if(first&&!hlsStartupIncomplete(p)) reportTtff();
 }
 // Attach the persistent listeners once; they read live PLAYER state each fire.
 function wirePlayer(){
@@ -17479,6 +17721,24 @@ function playbackSurfaceReadinessCard(){
       <p class="devcheck-note">Advisory only. The contract is merged and every client already renders through it; these rows say what has not been checked, and no answer here enables, disables or overrides anything.</p>
       </div></details>`);
 }
+function webHlsStartupRecoveryCard(){
+  const loader=!!(window.Hls&&Hls.DefaultConfig&&Hls.DefaultConfig.loader);
+  return setCard(`${cardHead("Web HLS startup recovery",
+      "Recover a manifest that failed before hls.js could establish the stream.",
+      `<span class="pill ok">automatic</span>`)}
+      <div class="hint">Recovery is enabled for every hls.js attachment. These checks explain whether this browser can use the complete recovery path; they never enable, disable, or hide it.</div>
+      <details class="setdetails" open><summary>Requirements and readiness</summary><div class="setdetails-body">
+      ${devStaticReq("Final-send loader interception",loader?"met":"unavailable",
+        "The vendored hls.js loader must expose its stock loader so plurx can count actual manifest sends, stop dispatch at the shared ceiling, and read typed refusal bodies before the library retries.",loader?"ok":"warn")}
+      ${devStaticReq("Bounded startup policy","met",
+        "Manifest first-byte, load, retry, application-reload, dispatch-ceiling, and absolute startup deadlines are configured from one browser policy. Fragment delivery keeps its existing policy.","ok")}
+      ${devStaticReq("Truthful init inspection","met",
+        "The server holds playlist publication to its existing five-second bound and reports pending, invalid, unsupported, or unreadable initialization media as distinct typed responses.","ok")}
+      ${devStaticReq("Presentation evidence","met",
+        "Recovery completes only after the media clock advances and, when available, the presented-frame counter advances. A playing event or parsed manifest is not success.","ok")}
+      <p class="devcheck-note">Advisory only. Native-HLS playback continues to use the platform player; this card describes the hls.js/MSE path.</p>
+      </div></details>`);
+}
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
     <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner and guide</span></a>
@@ -17511,6 +17771,7 @@ function developerPanel(settings,readiness){
       <div class="setsection"><h2>Library channels</h2><p>Explicit playback enablement with advisory deployment facts.</p></div>${libraryChannels}
       <div class="setsection"><h2>Prepared quality handoff</h2><p>Explicit server and browser enablement with advisory safety evidence.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection"><h2>Playback surface contract</h2><p>Advisory verification status for the one fault contract every client renders. Nothing here is a switch.</p></div>${playbackSurfaceReadinessCard()}
+      <div class="setsection"><h2>Web HLS startup recovery</h2><p>Always-on manifest recovery with advisory browser and server readiness.</p></div>${webHlsStartupRecoveryCard()}
       <div class="setsection"><h2>Compatibility</h2><p>Native server and protocol controls for compatible playback clients.</p></div>${windowsServerCard(settings,readiness)}${protocol}
       <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}
       <div class="setsection"><h2>Delivery experiments</h2><p>Use these overrides for controlled comparisons.</p></div>${experimental}`;
