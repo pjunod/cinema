@@ -1,6 +1,6 @@
 # Windows port — live implementation status
 
-**Status:** adversarial corrections compiled; post-review fast lane pending ·
+**Status:** post-review fast lane green; ready to merge ·
 **Effort:** `effort/windows-port` · **Updated:** 2026-09-14
 
 Companion to [WINDOWS-PORT-PLAN.md](WINDOWS-PORT-PLAN.md) (the original
@@ -66,6 +66,7 @@ do not need Windows-specific builds.
 | 2026-09-14 | `b3e5f8dd..20c297d8` | one requested adversarial review | 11 findings addressed | Corrections cover service/key ACLs, Windows free-space proofs, direct-play no-reparse opens, complete child Job ownership, truthful SCM states, permanent-DV Windows execution, atomic recovery publication, handle-based ACL changes, bounded smoke cleanup, targeted Ctrl-Break, and an explicit advisory Developer enable control. |
 | 2026-09-14 | `b3e5f8dd..20c297d8` | `rustup run 1.97.1 cargo check --workspace --locked --all-targets` | pass · 1m14s clean target | The review corrections preserve the native workspace compile surface. This is compile evidence, not the requested fast lane. |
 | 2026-09-14 | `b3e5f8dd..20c297d8` | `AWS_LC_SYS_NO_ASM=1 rustup run 1.97.1 cargo xwin check --workspace --locked --exclude plurx-cluster-check --target x86_64-pc-windows-msvc` | pass · 13s warm target | The review corrections compile for MSVC with Rust 1.97.1. Native behavior is still unproved. |
+| 2026-09-14 | `452c920a` | Forgejo main fast lane `2061` | pass | Post-review policy and contract preflight, Rust gate, Windows MSVC compile, embedded-web syntax, and the aggregate Main promotion gate all passed. Unaffected mobile compile jobs were correctly skipped. |
 
 Passing compilation proves type and platform linkage coverage. It does not
 prove Windows filesystem, service-control, process-job, discovery, or hardware
