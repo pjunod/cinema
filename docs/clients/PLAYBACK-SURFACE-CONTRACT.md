@@ -429,26 +429,29 @@ Rows are evaluated in order; the first row whose `context` matches wins.
 |---|---|---|---|---|---|---|
 | 1 | `owner_stopped` | any | `stopped` | yes | class default |  |
 | 2 | `owner_exhausted` | any | `exhausted` | yes | class default |  |
-| 3 | `auth_401_403` | any | `stopped` | yes | `sign_in` · `close` |  |
-| 4 | `vod_source_rescan_required` | start | `stopped` | yes | class default |  |
-| 5 | `vod_source_unsupported` | start | `stopped` | yes | class default |  |
-| 6 | `vod_transcode_unavailable` | start | `stopped` | yes | class default |  |
-| 7 | `vod_subtitle_burn_unavailable` | start | `stopped` | yes | class default |  |
-| 8 | `vod_disabled` | start | `stopped` | yes | class default |  |
-| 9 | `create_503_not_yet` | start | `preparing` | no | class default | codes: `startup_timeout` · `media_owner_transition` · `vod_index_pending` · `vod_engine_unattested`; retryable by the owner (M5) |
-| 10 | `client_preparing` | any | `preparing` | no | class default |  |
-| 11 | `change_failed` | change | `refused` | no | `retry` |  |
-| 12 | `segment_503_not_yet` | attached | `recovering` | no | class default | codes: `startup_timeout` · `playlist_state_changed` · `segment_pending` · `segment_wait_busy` · `node_wait_capacity` · `media_owner_transition` · `vod_resurrection_unavailable` · `response_owner_transition` · `response_state_changed` · `response_owner_reclassification_unavailable` · `response_publication_timeout` · `response_completion_capacity` · `response_snapshot_capacity` · `node_maintenance` · `node_removal_fenced` · `learner_route_ineligible` |
-| 13 | `media_owner_lost_410` | any | `recovering` | no | class default | re-classes to `stopped` when the owner stops; carries `position_ms` |
-| 14 | `control_hold` | attached | `hold` | no | class default |  |
-| 15 | `media_waiting` | attached | `buffering` | no | class default |  |
-| 16 | `owner_recovery_step` | any | `recovering` | no | class default |  |
-| 17 | `readiness_deadline_rungs_left` | any | `recovering` | no | class default |  |
-| 18 | `decoder_failed` | any | `stopped` | yes | class default |  |
-| 19 | `black_frame_ladder_spent` | start | `exhausted` | yes | `close` · `retry` |  |
-| 20 | `repeated_early_end` | attached | `stopped` | yes | class default |  |
-| 21 | `degraded_notice` | any | `degraded` | no | class default |  |
-| 22 | `log_only` | any | *(log only)* | no | class default |  |
+| 3 | `startup_exhausted` | any | `exhausted` | yes | `close` · `retry` |  |
+| 4 | `hls_init_invalid` | start | `stopped` | yes | class default |  |
+| 5 | `hls_init_unsupported` | start | `stopped` | yes | class default |  |
+| 6 | `auth_401_403` | any | `stopped` | yes | `sign_in` · `close` |  |
+| 7 | `vod_source_rescan_required` | start | `stopped` | yes | class default |  |
+| 8 | `vod_source_unsupported` | start | `stopped` | yes | class default |  |
+| 9 | `vod_transcode_unavailable` | start | `stopped` | yes | class default |  |
+| 10 | `vod_subtitle_burn_unavailable` | start | `stopped` | yes | class default |  |
+| 11 | `vod_disabled` | start | `stopped` | yes | class default |  |
+| 12 | `create_503_not_yet` | start | `preparing` | no | class default | codes: `startup_timeout` · `media_owner_transition` · `vod_index_pending` · `vod_engine_unattested`; retryable by the owner (M5) |
+| 13 | `client_preparing` | any | `preparing` | no | class default |  |
+| 14 | `change_failed` | change | `refused` | no | `retry` |  |
+| 15 | `segment_503_not_yet` | attached | `recovering` | no | class default | codes: `startup_timeout` · `playlist_state_changed` · `segment_pending` · `segment_wait_busy` · `node_wait_capacity` · `media_owner_transition` · `vod_resurrection_unavailable` · `response_owner_transition` · `response_state_changed` · `response_owner_reclassification_unavailable` · `response_publication_timeout` · `response_completion_capacity` · `response_snapshot_capacity` · `node_maintenance` · `node_removal_fenced` · `learner_route_ineligible` |
+| 16 | `media_owner_lost_410` | any | `recovering` | no | class default | re-classes to `stopped` when the owner stops; carries `position_ms` |
+| 17 | `control_hold` | attached | `hold` | no | class default |  |
+| 18 | `media_waiting` | attached | `buffering` | no | class default |  |
+| 19 | `owner_recovery_step` | any | `recovering` | no | class default |  |
+| 20 | `readiness_deadline_rungs_left` | any | `recovering` | no | class default |  |
+| 21 | `decoder_failed` | any | `stopped` | yes | class default |  |
+| 22 | `black_frame_ladder_spent` | start | `exhausted` | yes | `close` · `retry` |  |
+| 23 | `repeated_early_end` | attached | `stopped` | yes | class default |  |
+| 24 | `degraded_notice` | any | `degraded` | no | class default |  |
+| 25 | `log_only` | any | *(log only)* | no | class default |  |
 
 | Fixture error | Meaning |
 |---|---|

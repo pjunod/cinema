@@ -178,6 +178,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [VOD-STEADY-ACCEPTANCE-HANDOFF.md](streaming/VOD-STEADY-ACCEPTANCE-HANDOFF.md) | Restoring the steady-play case that CI disabled 2026-08-26. | open |
 | [STREAMING-RELIABILITY-REVIEW.md](streaming/STREAMING-RELIABILITY-REVIEW.md) | Keeping the stream alive while its future changes. | done |
 | [STREAMING-RELIABILITY-STATUS.md](streaming/STREAMING-RELIABILITY-STATUS.md) | Review, repair and promotion status of that effort. | open |
+| [WEB-HLS-STARTUP-RECOVERY-STATUS.md](streaming/WEB-HLS-STARTUP-RECOVERY-STATUS.md) | Implementation, review, qualification, and promotion status for delayed-manifest web startup recovery. | open |
 | [STREAMING-RELIABILITY-HANDOFF.md](streaming/STREAMING-RELIABILITY-HANDOFF.md) | The remaining work, for the next streaming agent. | open |
 | [STREAMING-CONTINUATION-HANDOFF.md](streaming/STREAMING-CONTINUATION-HANDOFF.md) | The continuation-session workflow, branch state, and integration queue for streaming reliability. | open |
 | [PLAYBACK-CAPS-V2-PLAN.md](streaming/PLAYBACK-CAPS-V2-PLAN.md) | Highest deliverable grade, negotiated rather than guessed. | open |

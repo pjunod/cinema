@@ -3247,7 +3247,7 @@ test("the shipped progress tick reports the advance it measured, not that it ran
     "PLAYER", "document", "performance", "playbackSurfaceStep", "playbackSurfaceGeneration",
     "samplePlaybackPresentationClock", "streamHasVideo", "endWait", "clearStall",
     "finishStallRecovery", "persistentWait", "bufferRunway", "PERSISTENT_STALL_MS",
-    "playbackOwnsAttachedMedia",
+    "playbackOwnsAttachedMedia", "completeHlsStartup", "settlePlaybackControlSeek",
     [shippedSource("playbackProgressTick"), "return playbackProgressTick;"].join("\n"),
   );
   const player = { started: true, wantsPlayback: true, attemptId: "g1" };
@@ -3257,7 +3257,7 @@ test("the shipped progress tick reports the advance it measured, not that it ran
     player, { hidden: false }, { now: () => now },
     (event) => fed.push(event), (p) => (p && p.attemptId) || null,
     () => 0, () => false, () => {}, () => {}, () => {}, () => {}, () => 10, 8000,
-    () => true,
+    () => true, () => {}, () => {},
   );
 
   tick(video, player);            // first sample: the watch is seeded, nothing moved
@@ -3286,13 +3286,13 @@ test("a stream that starts again after the owner stopped it gets its sampler bac
   const armed = [];
   const build = new Function(
     "PLAYER", "document", "setTimeout", "clearStall", "stallDiagnose", "pbPosSec",
-    "armPlaybackSampling",
+    "armPlaybackSampling", "configureHlsStartupDeadline", "PlaybackPolicy",
     [shippedSource("armStall"), "return armStall;"].join("\n"),
   );
   const run = (player) => {
     armed.length = 0;
     build(player, { getElementById: () => ({ id: "video" }) }, () => 1, () => {}, () => {}, () => 0,
-      (v, p) => armed.push(p))(0);
+      (v, p) => armed.push(p), () => {}, policy)(0);
     return armed.length;
   };
   assert.equal(run({ samplingStopped: true }), 1,
@@ -3371,6 +3371,7 @@ asyncTest("the diagnosed-stall site stops before it raises", async () => {
     "PLAYER", "document", "TOKEN", "pbPosSec", "notifyPlaybackControl", "currentStreamFailureOverlay",
     "probePlaybackSource", "finishStallRecovery", "clientLog", "toast",
     "stopPlayerForExhaustion", "raisePlaybackSurface", "playbackOwnsAttachedMedia",
+    "hlsStartupIncomplete", "diagnoseHlsStartup", "abortHlsStartupLoaders", "performance",
     [shippedSource("playbackStallActions"), shippedSource("stallDiagnose"), "return stallDiagnose;"].join("\n"),
   );
   const player = { method: "remux", probeUrl: null, started: false };
@@ -3380,7 +3381,7 @@ asyncTest("the diagnosed-stall site stops before it raises", async () => {
     () => {}, () => {}, () => {},
     () => order.push("stop"),
     (source, fault) => { order.push("raise"); runs.push({ source, fault }); },
-    () => true,
+    () => true, () => false, () => ({}), () => {}, { now: () => 0 },
   )();
   assert.deepEqual(order, ["stop", "raise"],
     "a diagnosed stall stops the player before its verdict goes over it");
@@ -4424,6 +4425,7 @@ function carryHarness(player) {
     "prePlayPreview",
     "PLAY_OPEN_GATE",
     "cancelPendingSeek",
+    "cancelHlsStartup",
     [
       shippedBinding("let", "PREPLAY"),
       shippedSource("prePlaySelection"),
@@ -4462,6 +4464,7 @@ function carryHarness(player) {
     () => {},
     { invalidate() {} },
     () => { player._seekPending = null; player._seekPreview = null; },
+    () => {},
   );
 }
 
@@ -5510,7 +5513,7 @@ test("the hls.js retry budget is one per attach, and `BEHIND_LIVE_WINDOW` is fin
     /PlaybackPolicy\.hlsRetryAllowed\(\{used:player\.hlsRetryUsed\|\|0\}\)/,
     "the page must read the shared budget",
   );
-  for (const site of ["scheduleHlsNetworkRetry(video,PLAYER,STREAM_FAILURE.code", "scheduleHlsNetworkRetry(video,PLAYER,String(d.details"]) {
+  for (const site of ["scheduleHlsNetworkRetry(video,PLAYER,d)", "scheduleHlsNetworkRetry(video,PLAYER,String(d.details"]) {
     assert.ok(SHIPPED_UI.includes(site), `the shared budget is spent at ${site}`);
   }
 
@@ -5563,6 +5566,59 @@ test("the hls.js retry budget is one per attach, and `BEHIND_LIVE_WINDOW` is fin
     /\.\s*seekToDefaultPosition\s*\(/,
     "seekToDefaultPosition is a live-edge policy the contract forbids",
   );
+});
+
+test("web HLS startup has one bounded manifest policy and terminal precedence", () => {
+  const startup = policy.HLS_STARTUP;
+  assert.deepEqual(startup, {
+    cold_deadline_ms: 40_000,
+    seek_deadline_ms: 20_000,
+    manifest_dispatch_ceiling: 16,
+    manifest_load_policy: {
+      default: {
+        maxTimeToFirstByteMs: 10_000,
+        maxLoadTimeMs: 12_000,
+        timeoutRetry: { maxNumRetry: 1, retryDelayMs: 1_000, maxRetryDelayMs: 1_000 },
+        errorRetry: { maxNumRetry: 7, retryDelayMs: 1_000, maxRetryDelayMs: 4_000 },
+      },
+    },
+  });
+  for (const status of [401, 403]) {
+    assert.equal(policy.hlsStartupResponseAction({ status }), "terminal");
+  }
+  for (const code of policy.HLS_STARTUP_TERMINAL_CODES) {
+    assert.equal(policy.hlsStartupResponseAction({ status: 503, code }), "terminal", code);
+  }
+  assert.equal(policy.hlsStartupResponseAction({ status: 503 }), "retry",
+    "a generic 503 may consume the bounded retry but is not called startup");
+  assert.equal(policy.hlsStartupResponseAction({ status: 503, code: "startup_timeout" }), "retry");
+  assert.equal(
+    policy.parseStreamFailure({
+      status: 503,
+      body: JSON.stringify({ code: "startup_timeout", message: "x".repeat(900) }),
+    }).message.length,
+    policy.STREAM_FAILURE_MESSAGE_MAX_CHARS,
+    "retained server prose is bounded",
+  );
+  assert.equal(
+    policy.parseStreamFailure({ status: 503, body: "x".repeat(policy.STREAM_FAILURE_BODY_MAX_CHARS + 1) }),
+    null,
+    "oversized response bodies are not parsed as typed evidence",
+  );
+});
+
+test("the final manifest-send gate rejects pause, stale ownership, deadline and ceiling", () => {
+  const decide = (overrides = {}) => policy.hlsStartupSendAction({
+    state: "active", nowMs: 10, deadlineMs: 100, dispatches: 0, current: true, ...overrides,
+  });
+  assert.equal(decide(), "send");
+  assert.equal(decide({ state: "paused" }), "pause");
+  assert.equal(decide({ state: "cancelled" }), "cancel");
+  assert.equal(decide({ state: "presenting" }), "cancel");
+  assert.equal(decide({ current: false }), "cancel");
+  assert.equal(decide({ nowMs: 100 }), "exhaust");
+  assert.equal(decide({ dispatches: 15 }), "send");
+  assert.equal(decide({ dispatches: 16 }), "exhaust");
 });
 
 // Drained last, in registration order, after every synchronous case has run.

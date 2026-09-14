@@ -101,7 +101,7 @@ function fullOpenHarness() {
     "function showSessionOpenFailure(){return false;} function showStallRecoveryFailure(){} function recordAutoSwitch(p,from,to,reason,pos,id){p.abr.switches.push({from,to,reason,pos,id});}",
     "function autoLastGoodHeight(){return null;} function transcodeReason(){return '';} function finishStallRecovery(){return false;}",
     "const PLAY_CAPS={acodec:'aac'};function hlsJsSupported(){return true;}function mseCanTake(){return true;}function clearStreamFailure(){}",
-    "const hlsInstances=[];class Hls{static Events={MANIFEST_PARSED:'manifest',ERROR:'error',LEVEL_LOADED:'level',BUFFER_FLUSHING:'flush',FRAG_CHANGED:'frag',FRAG_LOADED:'loaded',BUFFER_APPENDED:'append'};static ErrorDetails={BUFFER_FULL_ERROR:'quota',BUFFER_APPEND_ERROR:'append-error'};static isSupported(){return true;}constructor(config){this.config=config;this.events={};hlsInstances.push(this);}on(event,fn){this.events[event]=fn;}loadSource(){}attachMedia(){}destroy(){}}window.Hls=Hls;const TOKEN=null;function preferNativeHls(){return false;}function bufferTargets(){return {fwd:20,back:10};}function vodClientContract(){return {};}",
+    "const hlsInstances=[];class Hls{static Events={MANIFEST_PARSED:'manifest',ERROR:'error',LEVEL_LOADED:'level',BUFFER_FLUSHING:'flush',FRAG_CHANGED:'frag',FRAG_LOADED:'loaded',BUFFER_APPENDED:'append'};static ErrorDetails={BUFFER_FULL_ERROR:'quota',BUFFER_APPEND_ERROR:'append-error'};static isSupported(){return true;}constructor(config){this.config=config;this.events={};hlsInstances.push(this);}on(event,fn){this.events[event]=fn;}loadSource(){}startLoad(){}stopLoad(){}attachMedia(){}destroy(){}}window.Hls=Hls;const TOKEN=null;function preferNativeHls(){return false;}function bufferTargets(){return {fwd:20,back:10};}function vodClientContract(){return {};}",
     shippedSource("createPlaybackOpenGate"), "const PLAY_OPEN_GATE=createPlaybackOpenGate();",
     shippedSource("beginPlaybackPreparation"),
     shippedSource("takePlaybackAttemptReason"), shippedSource("playbackSelection"),
@@ -122,7 +122,14 @@ function fullOpenHarness() {
     shippedSource("retirePlaybackPredecessor"),
     shippedSource("handlePlaybackTransportEvent"),
     shippedSource("beginPlaybackMediaAttachment"), shippedSource("applyPlaybackAttachmentPosition"),
-    shippedSource("scheduleHlsNetworkRetry"), shippedSource("attachHls"),
+    shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
+    shippedSource("hlsStartupManifestRequest"),shippedSource("abortHlsStartupLoaders"),
+    shippedSource("cancelHlsStartup"),shippedSource("completeHlsStartup"),
+    shippedSource("configureHlsStartupDeadline"),shippedSource("diagnoseHlsStartup"),
+    shippedSource("exhaustHlsStartup"),shippedSource("armHlsStartupRetry"),
+    shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
+    shippedSource("createHlsStartupLoader"),shippedSource("scheduleHlsNetworkRetry"),
+    shippedSource("attachHls"),
     shippedSource("resetMediaSource"), shippedSource("play"), shippedSource("setQuality"),
     shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("setSub"),shippedSource("burnSub"),
     shippedSource("offsetLabel"), shippedSource("setSync"), shippedSource("togglePlay"),
@@ -1050,7 +1057,7 @@ async function main() {
       "const video={paused:false,currentTime:10,playCount:0,pause(){this.paused=true;},play(){this.paused=false;this.playCount++;return Promise.resolve();},addEventListener(e,f){metadata.push(f);},removeEventListener(){}};",
       "const document={getElementById:()=>video}; const window={Hls:true}; const TOKEN=null;",
       "class Hls{static Events={MANIFEST_PARSED:'manifest',ERROR:'error',LEVEL_LOADED:'level',BUFFER_FLUSHING:'flush',FRAG_CHANGED:'frag',BUFFER_APPENDED:'append'}; static isSupported(){return true;} constructor(){this.events={};instances.push(this);} on(e,f){this.events[e]=f;} loadSource(){} attachMedia(){} destroy(){}}",
-      "const PlaybackPolicy={bandwidthSeedBps:()=>null}; function preferNativeHls(){return native;} function bufferTargets(){return {fwd:20,back:10};} function vodClientContract(){return {};}",
+      "const PlaybackPolicy={bandwidthSeedBps:()=>null,HLS_STARTUP:{cold_deadline_ms:40000,manifest_load_policy:{default:{}}}}; function preferNativeHls(){return native;} function bufferTargets(){return {fwd:20,back:10};} function vodClientContract(){return {};}",
       "function clearStreamFailure(){} function refreshSegTimes(){} function tok(url){return url;} function clearStreamFailureFor(){} function retuneBuffer(){throw Error('stale retune');} function markEvent(){throw Error('stale telemetry');}",
       // Teardown now settles a staged successor before it destroys the
       // incumbent, so the scope carries that path rather than a stub of it.
@@ -1060,7 +1067,7 @@ async function main() {
       shippedSource("queuePlaybackControlAcknowledgement"),
       shippedSource("destroyHlsInstance"),
       shippedSource("freePreparedReplacement"), shippedSource("abandonPreparedReplacement"),
-      "function cancelPreparedFirstFrame(){}",
+      "function cancelPreparedFirstFrame(){} function cancelHlsStartup(){}",
       shippedSource("rememberPlaybackTransportIntent"),shippedSource("pausePlaybackInternally"),
       shippedSource("resetPlaybackTransportEvents"),shippedSource("playbackTransportEvents"),
       shippedSource("setPlaybackMediaSource"),
@@ -1312,6 +1319,7 @@ async function main() {
       "let PLAYER={method:'transcode',probeUrl:'/index.m3u8',started:false},timer;const requests=[],loading=[];const TOKEN=null;",
       surfaceSeam(),
       "const document={getElementById:()=>({classList:{add(){}},currentTime:0})};const console={warn(){}};",
+      "const performance={now:()=>0};function hlsStartupIncomplete(){return false;}function diagnoseHlsStartup(){return {};}function abortHlsStartupLoaders(){}",
       "function setTimeout(fn){timer=fn;return 1;}function clearTimeout(){}function fetch(url){return new Promise(resolve=>requests.push({url,resolve}));}",
       "function pbPosSec(){return 0;}function currentStreamFailureOverlay(){return null;}function notifyPlaybackControl(){}function finishStallRecovery(){}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
       shippedSource("probePlaybackSource"),shippedSource("stallDiagnose"),
@@ -1340,6 +1348,7 @@ async function main() {
       surfaceSeam(),
       "let STREAM_FAILURE={code:'session_failed',status:502,at:Date.now()};const PlaybackPolicy={streamFailureOverlay:()=>({title:'The server could not start playback.',detail:'copy output validation failed: unusable decoder configuration',retryable:false})};",
       "const document={getElementById:()=>({classList:{add(){}},currentTime:0})};const console={warn(){}};function fetch(){requests++;throw Error('terminal refusal must suppress generic probe');}",
+      "const performance={now:()=>0};function hlsStartupIncomplete(){return false;}function diagnoseHlsStartup(){return {};}function abortHlsStartupLoaders(){}",
       "function pbPosSec(){return 0;}function notifyPlaybackControl(){}function finishStallRecovery(){}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
       shippedSource("currentStreamFailureOverlay"),shippedSource("probePlaybackSource"),shippedSource("stallDiagnose"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
@@ -1357,6 +1366,7 @@ async function main() {
       "let PLAYER={method:'remux',probeUrl:'/stream.mp4',started:false},resolve;const loading=[];const TOKEN=null;",
       surfaceSeam(),
       "const document={getElementById:()=>({})};const console={warn(){}};function fetch(){return new Promise(done=>resolve=done);}",
+      "const performance={now:()=>0};function hlsStartupIncomplete(){return false;}function diagnoseHlsStartup(){return {};}function abortHlsStartupLoaders(){}",
       "function pbPosSec(){return 0;}function currentStreamFailureOverlay(){return null;}function notifyPlaybackControl(){}function finishStallRecovery(){throw Error('stale recovery');}function clientLog(){}function toast(){}function setLoading(...args){loading.push(args);}",
       shippedSource("probePlaybackSource"),shippedSource("stallDiagnose"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
@@ -1463,6 +1473,7 @@ async function main() {
       "const v={paused:false,ended:false,removeAttribute(){},load(){queue=[];this.paused=true;},pause(){if(!this.paused){this.paused=true;queue.push('pause');}},play(){if(this.paused){this.paused=false;queue.push('play');}return new Promise((resolve,reject)=>plays.push({resolve,reject}));}};",
       "Object.defineProperty(v,'src',{set(){v.load();}});",
       "function supersedePlaybackControlIntent(p){p.generation=(p.generation||0)+1;}function endWait(){}",
+      "function cancelHlsStartup(){}function pauseHlsStartup(){}function resumeHlsStartup(){}",
       // §3.1: the viewer's own transport intent is what tells the presenter a
       // `buffering` fault is about nothing any more. Recorded, not stubbed away.
       "const surfaceEvents=[];function playbackSurfaceStep(event){surfaceEvents.push(event);return null;}",
@@ -1510,7 +1521,7 @@ async function main() {
       "const v={currentTime:10,paused:false,ended:false,pause(){this.paused=true;}};",
       "function bufferRunway(){return 10;} function persistentWait(){attempts++;return new Promise(()=>{});}",
       "function clearStall(){} function finishStallRecovery(){recovered++;} function setLoading(){} function recordWaitStall(){}",
-      "function playerActivity(){} function settlePlaybackControlSeek(){} function pbTick(){} function pbSyncPlayIcon(){} function notifyPlaybackControl(){} function reportTtff(){}",
+      "function playerActivity(){} function settlePlaybackControlSeek(){} function completeHlsStartup(){} function pbTick(){} function pbSyncPlayIcon(){} function notifyPlaybackControl(){} function reportTtff(){}",
       shippedSource("streamHasVideo"),shippedSource("endWait"),
       shippedSource("samplePlaybackPresentationClock"),shippedSource("pausePlaybackInternally"),
       shippedSource("playbackTransportEvents"),
@@ -2212,6 +2223,7 @@ async function main() {
         shippedSource("stopPlaybackControl"),
         shippedSource("startPlaybackControl"),
         shippedSource("persistentWait"),
+        "function settlePlaybackControlSeek(){} function completeHlsStartup(){}",
         shippedSource("streamHasVideo"),
         shippedSource("samplePlaybackPresentationClock"),
         shippedSource("playbackProgressTick"),
@@ -3349,6 +3361,7 @@ async function main() {
       [
         "let PLAYER=null;",
         "function playbackContext(){return {};}",
+        "function cancelHlsStartup(){}",
         // §3.3 row 18: a staging nobody took up raises a log-only fault, and
         // the seam records it so the assertions below can read it.
         "const surfaceRaised=[];",
@@ -4753,7 +4766,187 @@ async function main() {
     assert.equal(h.stops(), 1, "and the player was stopped before it was raised");
   }
 
+  // Fast state-machine coverage for the shipped startup owner. The stock
+  // loader and real-browser cases below are the acceptance evidence; this
+  // surrogate deliberately claims only the transitions it executes.
+  function startupHarness({ manifestState = "unknown", deadlineMs = 40_000 } = {}) {
+    return new Function("PlaybackPolicy", [
+      "let now=0,STREAM_FAILURE=null;const timers=new Map();let nextTimer=0;",
+      "const sends=[],loads=[],starts=[],logs=[],diagnoses=[];",
+      "const performance={now:()=>now};function setTimeout(fn,ms){const id=++nextTimer;timers.set(id,{fn,at:now+ms});return id;}function clearTimeout(id){timers.delete(id);}",
+      "function clientLog(entry){logs.push(entry);}function playbackContext(){return {};}",
+      "function stallDiagnose(){diagnoses.push('stall');return Promise.resolve();}function reportTtff(){}",
+      "function noteStreamFailure(status,body,evidence){const parsed=PlaybackPolicy.parseStreamFailure({status,body});if(!parsed)return null;Object.assign(parsed,{at:Date.now()},evidence||{});STREAM_FAILURE=parsed;return parsed;}",
+      "const attachment={current:()=>true};const video={currentTime:91};",
+      "const hls={loadSource(url){loads.push({url,at:now});},startLoad(at){starts.push({at,now});},stopLoad(){starts.push({stop:true,now});}};",
+      `let PLAYER={hls,hlsRetryUsed:0,wantsPlayback:true,mediaAttachment:attachment,controlIntentGeneration:1,stallTimer:null};`,
+      `const episode={player:PLAYER,attachment,playlistUrl:'/captured/index.m3u8',hls,state:'active',manifestState:${JSON.stringify(manifestState)},mediaLoaded:false,startedAt:0,deadlineMs:${deadlineMs},dispatches:0,loaders:new Set(),latestFailure:null,retry:{state:'unused',dueMs:null,detail:null,timer:null,intentGeneration:null}};PLAYER.hlsStartup=episode;`,
+      "class StockLoader{constructor(){this.aborted=0;this.destroyed=0;this.reads=0;}openAndSendXhr(xhr,context){sends.push({xhr,context,at:now});}readystatechange(){this.reads++;}abort(){this.aborted++;}destroy(){this.destroyed++;}}",
+      shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
+      shippedSource("hlsStartupManifestRequest"),shippedSource("abortHlsStartupLoaders"),
+      shippedSource("cancelHlsStartup"),shippedSource("completeHlsStartup"),
+      shippedSource("configureHlsStartupDeadline"),shippedSource("diagnoseHlsStartup"),
+      shippedSource("exhaustHlsStartup"),shippedSource("armHlsStartupRetry"),
+      shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
+      shippedSource("createHlsStartupLoader"),shippedSource("scheduleHlsNetworkRetry"),
+      "const Loader=createHlsStartupLoader(StockLoader,episode);",
+      "return {episode,player:PLAYER,video,sends,loads,starts,logs,diagnoses,",
+      " reserve(detail){return scheduleHlsNetworkRetry(video,PLAYER,detail);},",
+      " pause(){return pauseHlsStartup(PLAYER);},resume(){return resumeHlsStartup(video,PLAYER);},",
+      " complete(){return completeHlsStartup(PLAYER);},cancel(){return cancelHlsStartup(PLAYER,'test');},",
+      " loader(){return new Loader({});},",
+      " send(loader,status=200,body=''){const xhr={status,responseText:body,statusText:'status',readyState:4,onreadystatechange:null,onprogress:null};loader.loader=xhr;loader.context={type:'manifest',url:'/captured/index.m3u8'};loader.plurxIntentGeneration=PLAYER.controlIntentGeneration||0;loader.callbacks={onError(...args){loader.error=args;}};loader.stats={};loader.openAndSendXhr(xhr,loader.context,{});if(status>=400){xhr.status=status;loader.readystatechange();}return loader;},",
+      " advance(ms){now+=ms;for(const [id,timer] of [...timers].sort((a,b)=>a[1].at-b[1].at)){if(timer.at<=now){timers.delete(id);timer.fn();}}},setState(state){episode.state=state;},setManifest(state){episode.manifestState=state;},setDeadline(ms){episode.deadlineMs=ms;},setCurrent(value){attachment.current=()=>value;},setWants(value){PLAYER.wantsPlayback=value;},now:()=>now};",
+    ].join("\n"))(require("../../crates/plurxd/src/web/playback-policy.js"));
+  }
+  {
+    const h=startupHarness();
+    assert.equal(h.reserve({details:"manifestLoadError"}),true);
+    assert.equal(h.episode.retry.state,"reserved");
+    h.advance(1_999);assert.equal(h.loads.length,0);
+    h.advance(1);assert.deepEqual(h.loads,[{url:"/captured/index.m3u8",at:2_000}],
+      "an unloaded manifest reloads the captured URL after the shared delay");
+    assert.equal(h.episode.retry.state,"dispatched");
+    assert.equal(h.reserve("again"),false,"the corrective credit is shared and one-shot");
+  }
+  {
+    const h=startupHarness({manifestState:"parsed"});
+    assert.equal(h.reserve("fragLoadError"),true);h.advance(2_000);
+    assert.deepEqual(h.starts,[{at:91,now:2_000}],
+      "an established stream resumes at the current player coordinate");
+  }
+  {
+    const h=startupHarness({manifestState:"parsed"});
+    h.setState("presenting");assert.equal(h.reserve("levelLoadError"),true);
+    h.pause();h.advance(2_000);
+    assert.equal(h.starts.filter(entry=>!entry.stop).length,0,
+      "a pause cancels an established-stream reservation before it can restart loading");
+    assert.equal(h.episode.retry.state,"cancelled",
+      "the shared established-stream credit remains spent after pause");
+  }
+  {
+    const h=startupHarness({deadlineMs:2_000});
+    assert.equal(h.reserve("network"),true);h.advance(2_000);
+    assert.equal(h.loads.length,0);assert.equal(h.episode.state,"exhausted",
+      "the absolute boundary rejects a dispatch at the deadline");
+  }
+  {
+    const h=startupHarness();const loader=h.loader();
+    for(let i=0;i<16;i++)h.send(loader);
+    assert.equal(h.sends.length,16);h.send(loader);
+    assert.equal(h.sends.length,16);assert.equal(h.episode.state,"exhausted",
+      "the final transport gate enforces sixteen actual sends");
+  }
+  {
+    const h=startupHarness();const loader=h.loader();
+    h.pause();h.send(loader);
+    assert.equal(h.sends.length,0);assert.ok(loader.aborted&&loader.destroyed,
+      "a paused dispatch is destroyed before the wire");
+    h.resume();h.advance(0);assert.equal(h.loads.length,1,
+      "unused credit becomes the one immediate corrective reload on resume");
+    h.pause();assert.equal(h.episode.state,"paused");
+    h.resume();assert.equal(h.episode.state,"exhausted",
+      "interrupting a dispatched corrective reload exhausts startup");
+  }
+  {
+    const h=startupHarness();const loader=h.loader();
+    h.send(loader,503,JSON.stringify({code:"producer_failed",message:"ffmpeg exited"}));
+    assert.ok(loader.error,"a terminal typed body reaches hls.js before stock retry");
+    assert.equal(h.episode.latestFailure.code,"producer_failed");
+    const auth=h.loader();h.send(auth,401,"");
+    assert.ok(auth.error);assert.match(h.episode.latestFailure.message,/Sign in/,
+      "auth is terminal even without a typed body");
+  }
+  {
+    const h=startupHarness();const old=h.loader();h.setCurrent(false);h.send(old);
+    assert.equal(h.sends.length,0,"a predecessor completion cannot dispatch");
+    const current=startupHarness();current.complete();assert.equal(current.episode.state,"presenting",
+      "only the presentation owner retires startup");
+  }
+
+  const VendoredHls=require("../../crates/plurxd/src/web/hls.min.js");
+  assert.equal(typeof VendoredHls.DefaultConfig.loader.prototype.openAndSendXhr,"function",
+    "the vendored stock loader exposes the final-send seam the adapter wraps");
+
+  async function actualVendoredLoaderCase({xhrSetup=null}={}){
+    const policy=require("../../crates/plurxd/src/web/playback-policy.js");
+    let now=0,nextTimer=0;
+    const timers=new Map(),sends=[],errors=[];
+    class FakeXHR{
+      constructor(){this.readyState=0;this.status=0;this.statusText="";this.responseText="";this.responseType="";this.listeners={};}
+      open(){this.readyState=1;}
+      setRequestHeader(){}
+      addEventListener(name,fn){this.listeners[name]=fn;}
+      send(){sends.push(this);}
+      abort(){this.aborted=true;}
+      answer(status,body=""){
+        this.status=status;this.statusText=String(status);this.responseText=body;
+        this.responseType="text";this.readyState=4;
+        if(this.onreadystatechange)this.onreadystatechange();
+        if(this.listeners.load)this.listeners.load();
+      }
+    }
+    const priorSelf=global.self;
+    global.self={performance:{now:()=>now},XMLHttpRequest:FakeXHR,
+      setTimeout(fn,ms){const id=++nextTimer;timers.set(id,{fn,at:now+ms});return id;},
+      clearTimeout(id){timers.delete(id);}};
+    const advance=ms=>{
+      now+=ms;
+      for(;;){
+        const due=[...timers].filter(([,timer])=>timer.at<=now)
+          .sort((a,b)=>a[1].at-b[1].at)[0];
+        if(!due)break;
+        timers.delete(due[0]);due[1].fn();
+      }
+    };
+    try{
+      const make=new Function("PlaybackPolicy","StockLoader","xhrSetup","errors",[
+        "let STREAM_FAILURE=null;const performance=self.performance;const setTimeout=self.setTimeout;const clearTimeout=self.clearTimeout;",
+        "function clientLog(){}function playbackContext(){return {};}function stallDiagnose(){return Promise.resolve();}function reportTtff(){}",
+        "function noteStreamFailure(status,body,evidence){const parsed=PlaybackPolicy.parseStreamFailure({status,body});if(!parsed)return null;Object.assign(parsed,{at:Date.now()},evidence||{});STREAM_FAILURE=parsed;return parsed;}",
+        "const attachment={current:()=>true};const video={currentTime:91};",
+        "const hls={loadSource(){},startLoad(){},stopLoad(){}};let PLAYER={hls,hlsRetryUsed:0,wantsPlayback:true,mediaAttachment:attachment,controlIntentGeneration:1};",
+        "const episode={player:PLAYER,attachment,playlistUrl:'/delayed/index.m3u8',hls,state:'active',manifestState:'unknown',mediaLoaded:false,decoderFailed:false,startedAt:0,deadlineMs:40000,dispatches:0,loaders:new Set(),latestFailure:null,retry:{state:'unused',dueMs:null,detail:null,timer:null,intentGeneration:null}};PLAYER.hlsStartup=episode;",
+        shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
+        shippedSource("hlsStartupManifestRequest"),shippedSource("abortHlsStartupLoaders"),
+        shippedSource("cancelHlsStartup"),shippedSource("completeHlsStartup"),
+        shippedSource("configureHlsStartupDeadline"),shippedSource("diagnoseHlsStartup"),
+        shippedSource("exhaustHlsStartup"),shippedSource("armHlsStartupRetry"),
+        shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
+        shippedSource("createHlsStartupLoader"),
+        "const Loader=createHlsStartupLoader(StockLoader,episode);const loader=new Loader({xhrSetup});",
+        "loader.load({type:'manifest',url:'/delayed/index.m3u8',responseType:'text'},",
+        " {loadPolicy:PlaybackPolicy.HLS_STARTUP.manifest_load_policy.default,timeout:10000},",
+        " {onSuccess(){},onProgress(){},onAbort(){},onTimeout(){errors.push('timeout');},onError(error){errors.push(error);}});",
+        "return {episode,loader,pause:()=>pauseHlsStartup(PLAYER)};",
+      ].join("\n"))(policy,VendoredHls.DefaultConfig.loader,xhrSetup,errors);
+      return {make,sends,errors,advance,restore:()=>{global.self=priorSelf;}};
+    }catch(error){global.self=priorSelf;throw error;}
+  }
+  {
+    const h=await actualVendoredLoaderCase();
+    try{
+      assert.equal(h.sends.length,1,"T01/T03: the actual vendored loader reaches the final-send adapter");
+      h.sends[0].answer(503,JSON.stringify({code:"producer_ended",message:"producer ended"}));
+      h.advance(20_000);
+      assert.equal(h.sends.length,1,"T08: a terminal typed 503 suppresses the stock retry timer");
+      assert.equal(h.errors.length,1,"T08: the terminal refusal reaches hls.js once");
+    }finally{h.restore();}
+  }
+  {
+    let releaseSetup;
+    const setup=new Promise(resolve=>{releaseSetup=resolve;});
+    const h=await actualVendoredLoaderCase({xhrSetup:()=>setup});
+    try{
+      assert.equal(h.sends.length,0,"T17: asynchronous xhrSetup has not crossed the final-send gate");
+      h.make.pause();releaseSetup();
+      await Promise.resolve();await Promise.resolve();await Promise.resolve();
+      assert.equal(h.sends.length,0,"T05/T17: pause destroys the actual loader before async setup can send");
+    }finally{h.restore();}
+  }
+
   process.stdout.write("PASS the M5 recovery additions: create retry, hls retry, shared budget\n");
+  process.stdout.write("PASS web HLS startup recovery and final-send ownership\n");
   process.stdout.write("PASS passive web playback-control reporter\n");
 }
 

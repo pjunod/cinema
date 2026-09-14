@@ -196,6 +196,40 @@ scripts/playback-lab run --suite vod --browser chrome \
   --json out/vod.json
 ```
 
+For web HLS startup changes, run the static policy and shipped-controller
+contracts before a browser lab:
+
+```bash
+node --test tests/playback/web-policy.test.js
+node tests/playback/web-control.test.js
+scripts/web-hls-startup-browser-check
+cargo test -p plurxd --locked http::hls::tests
+```
+
+The browser check serves the shipped page and vendored hls.js from an isolated
+loopback server. Its first eight manifest requests receive typed 503s, then a
+generated three-second fMP4 fixture becomes available. The receipt prints the
+fixture hash, hls.js and browser versions, actual manifest-request count, and
+the first observed media position; it does not contact a production server or
+reuse a cached production stream.
+
+The matrix is intentionally phase-aware. Exercise an immediate typed 503, a
+five-second held 503, readiness near 19 s and 30 s, a transport timeout mixed
+with HTTP retries, auth and terminal JSON bodies, pause before and after the
+corrective dispatch, close/replacement while stock XHR setup is pending, the
+40 s cold boundary, the 20 s seek boundary, and the 16th/17th actual manifest
+send. Assert `loadSource(capturedUrl)` only before a manifest parses and
+`startLoad(currentTime)` only after it does. Success requires presentation
+evidence—clock advance plus a frame when a counter exists—not `playing`,
+`MANIFEST_PARSED`, or `readyState`.
+
+The server matrix publishes pending, unreadable, malformed, incomplete,
+oversized, valid-but-unsupported, and valid supported initialization media.
+Assert the exact typed status/code and repeat every negative result across an
+owner replacement: the predecessor result must not be exposed as the
+successor's diagnosis. Keep the request's existing five-second publication
+bound in every case.
+
 The harness starts an isolated server, turns on that same setting set, waits for
 its fragment-index pass, and then runs three cases against the shipped web
 player. A pass proves all of the following:

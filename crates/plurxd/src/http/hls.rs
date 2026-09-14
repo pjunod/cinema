@@ -9532,12 +9532,9 @@ async fn playlist_local_before(
         .await?;
         if query.native == Some(1) {
             let (context, file, owner) = session_file(state, session, initial_vod_deadline).await?;
-            let context = tokio::time::timeout_at(
-                tokio::time::Instant::from_std(initial_vod_deadline),
-                exact_hls_context(state, session, context),
-            )
-            .await
-            .map_err(|_| response_publication_timeout())?;
+            let context =
+                exact_hls_context_before(state, session, context, &owner, initial_vod_deadline)
+                    .await?;
             let response =
                 playlist_response(master_playlist(&file, query.subtitle, &context).into_bytes());
             return complete_buffered_response_before(
@@ -9578,12 +9575,7 @@ async fn playlist_local_before(
     }
     let deadline = response_publication_deadline_before(request_deadline);
     let (context, file, owner) = session_file(state, session, deadline).await?;
-    let context = tokio::time::timeout_at(
-        tokio::time::Instant::from_std(deadline),
-        exact_hls_context(state, session, context),
-    )
-    .await
-    .map_err(|_| response_publication_timeout())?;
+    let context = exact_hls_context_before(state, session, context, &owner, deadline).await?;
     let response = playlist_response(master_playlist(&file, query.subtitle, &context).into_bytes());
     complete_buffered_response_before(
         state,
@@ -9642,12 +9634,7 @@ async fn master_playlist_response_local_before(
 ) -> Result<Response, ApiError> {
     let deadline = response_publication_deadline_before(request_deadline);
     let (context, file, owner) = session_file(state, session, deadline).await?;
-    let context = tokio::time::timeout_at(
-        tokio::time::Instant::from_std(deadline),
-        exact_hls_context(state, session, context),
-    )
-    .await
-    .map_err(|_| response_publication_timeout())?;
+    let context = exact_hls_context_before(state, session, context, &owner, deadline).await?;
     // Apple's multivariant eligibility check rejects UHD Blu-ray-style HEVC
     // High-tier declarations before VideoToolbox sees bytes it can decode.
     // With no native text renditions, the wrapper buys this session nothing:
@@ -10627,17 +10614,161 @@ fn language_tag(raw: Option<&str>) -> &str {
 /// played. Dolby Vision therefore reads its own `dvcC`/`dvvC` configuration
 /// record, which is also the canonical answer when the library row's probe
 /// carried no DOVI side data and the advertised codec came through bare.
+async fn exact_hls_context_before(
+    state: &AppState,
+    session: &str,
+    context: crate::transcode::HlsContext,
+    owner: &crate::transcode::MediaResponseOwner,
+    deadline: Instant,
+) -> Result<crate::transcode::HlsContext, ApiError> {
+    let started = Instant::now();
+    let inspection_deadline = deadline
+        .checked_sub(Duration::from_millis(25))
+        .unwrap_or(deadline);
+    let inspected = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        exact_hls_context_at(state, session, context, inspection_deadline),
+    )
+    .await;
+    match inspected {
+        Ok(Ok(context)) => {
+            tracing::info!(
+                session = %crate::transcode::session_log_id(session),
+                phase = "init_inspection",
+                outcome = "ready",
+                elapsed_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+                "resolved exact HLS initialization context"
+            );
+            Ok(context)
+        }
+        Ok(Err(error)) => {
+            // The init lookup and parse can cross an owner replacement. A
+            // predecessor's refusal must never be published against the
+            // successor that reused this capability URL.
+            authorize_attempt_status(
+                state,
+                session,
+                owner,
+                "master-playlist-init-inspection",
+                None,
+                deadline,
+            )
+            .await?;
+            tracing::warn!(
+                session = %crate::transcode::session_log_id(session),
+                phase = "init_inspection",
+                outcome = error.log_code(),
+                elapsed_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+                "HLS initialization inspection refused the playlist"
+            );
+            Err(error.into_api_error())
+        }
+        Err(_) => {
+            tracing::warn!(
+                session = %crate::transcode::session_log_id(session),
+                phase = "init_inspection",
+                outcome = "response_publication_timeout",
+                elapsed_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+                "HLS initialization inspection exhausted the response deadline"
+            );
+            Err(response_publication_timeout())
+        }
+    }
+}
+
+#[derive(Debug)]
+enum HlsInitInspectionError {
+    Response {
+        status: StatusCode,
+        code: &'static str,
+        message: &'static str,
+    },
+    Api(ApiError),
+}
+
+impl HlsInitInspectionError {
+    fn invalid() -> Self {
+        Self::Response {
+            status: StatusCode::BAD_GATEWAY,
+            code: "hls_init_invalid",
+            message: "the published HLS initialization media is malformed or incomplete",
+        }
+    }
+
+    fn unsupported() -> Self {
+        Self::Response {
+            status: StatusCode::BAD_GATEWAY,
+            code: "hls_init_unsupported",
+            message: "the published HLS initialization media uses an unsupported codec layout",
+        }
+    }
+
+    fn unavailable() -> Self {
+        Self::Response {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "init_inspection_unavailable",
+            message: "initialization media could not be inspected; retry shortly",
+        }
+    }
+
+    fn pending() -> Self {
+        Self::Response {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "startup_timeout",
+            message: "initialization media is not ready yet; retry shortly",
+        }
+    }
+
+    fn from_api_error(error: ApiError) -> Self {
+        Self::Api(error)
+    }
+
+    fn log_code(&self) -> &'static str {
+        match self {
+            Self::Response { code, .. } => code,
+            Self::Api(_) => "producer_or_session_failure",
+        }
+    }
+
+    fn into_api_error(self) -> ApiError {
+        match self {
+            Self::Response {
+                status,
+                code,
+                message,
+            } => ApiError::typed(status, code, message),
+            Self::Api(error) => error,
+        }
+    }
+}
+
+#[cfg(test)]
 async fn exact_hls_context(
     state: &AppState,
     session: &str,
+    context: crate::transcode::HlsContext,
+) -> Result<crate::transcode::HlsContext, HlsInitInspectionError> {
+    exact_hls_context_at(
+        state,
+        session,
+        context,
+        Instant::now() + RESPONSE_PUBLICATION_LIFECYCLE_BUDGET,
+    )
+    .await
+}
+
+async fn exact_hls_context_at(
+    state: &AppState,
+    session: &str,
     mut context: crate::transcode::HlsContext,
-) -> crate::transcode::HlsContext {
+    deadline: Instant,
+) -> Result<crate::transcode::HlsContext, HlsInitInspectionError> {
     let fallback_video = context.codecs.split(',').next().unwrap_or_default();
     let Some(sample_entry) = ["hvc1", "hev1", "dvh1", "dvhe"]
         .into_iter()
         .find(|entry| fallback_video.starts_with(entry))
     else {
-        return context;
+        return Ok(context);
     };
     // A fenced successor names its init after its ownership epoch, so the
     // object to probe comes from the session, not from a literal. Asking for
@@ -10645,61 +10776,178 @@ async fn exact_hls_context(
     // will never be produced, stalling every playlist request for the full
     // production wait before falling back to the scanner's guessed tier.
     let Some(init_object) = state.transcode.session_init_object(session).await else {
-        return context;
+        return Err(HlsInitInspectionError::pending());
     };
     // Initialization segments are a few KiB. Bound malformed input so a
     // playlist request can never allocate without limit. VOD init bytes come
     // through their own registry; live bytes retain the internal delivery
     // tracker that keeps this probe out of player throughput telemetry.
     let mut init = Vec::new();
-    match state.transcode.vod_segment(session, &init_object).await {
+    match state
+        .transcode
+        .vod_segment_before(session, &init_object, deadline)
+        .await
+    {
         Some(crate::transcode::VodResponsePublication {
             result: Ok(Some(ready)),
             ..
         }) => {
-            init.reserve(ready.len.min(INIT_INSPECTION_LIMIT_BYTES) as usize);
-            let mut reader = ready.file.take(INIT_INSPECTION_LIMIT_BYTES);
-            if reader.read_to_end(&mut init).await.is_err() {
-                return context;
+            if ready.len > INIT_INSPECTION_LIMIT_BYTES {
+                return Err(HlsInitInspectionError::invalid());
+            }
+            init.reserve(ready.len as usize);
+            let mut reader = ready.file.take(ready.len);
+            let read = reader
+                .read_to_end(&mut init)
+                .await
+                .map_err(|_| HlsInitInspectionError::unavailable())?;
+            if read as u64 != ready.len {
+                return Err(HlsInitInspectionError::invalid());
             }
         }
-        Some(_) => return context,
+        Some(crate::transcode::VodResponsePublication {
+            result: Ok(None), ..
+        }) => return Err(HlsInitInspectionError::invalid()),
+        Some(crate::transcode::VodResponsePublication {
+            result: Err(crate::vodserve::VodError::Pending { .. }),
+            ..
+        }) => return Err(HlsInitInspectionError::pending()),
+        Some(crate::transcode::VodResponsePublication {
+            result: Err(crate::vodserve::VodError::Busy(_) | crate::vodserve::VodError::Io(_)),
+            ..
+        }) => return Err(HlsInitInspectionError::unavailable()),
+        Some(crate::transcode::VodResponsePublication {
+            result: Err(error @ crate::vodserve::VodError::ProducerFailed(_)),
+            ..
+        })
+        | Some(crate::transcode::VodResponsePublication {
+            result: Err(error @ crate::vodserve::VodError::Gone(_)),
+            ..
+        }) => {
+            return Err(HlsInitInspectionError::from_api_error(vod_error(
+                session, error,
+            )));
+        }
         None => {
-            let Ok(Some(opened)) = state.transcode.segment(session, &init_object).await else {
-                return context;
+            let opened = match state
+                .transcode
+                .segment_for_publication_before(session, &init_object, deadline)
+                .await
+            {
+                Ok(crate::transcode::SegmentPublication::Ready(opened)) => opened,
+                Ok(crate::transcode::SegmentPublication::Pending(_)) => {
+                    return Err(HlsInitInspectionError::pending());
+                }
+                Ok(crate::transcode::SegmentPublication::Missing(Some(_))) => {
+                    return Err(HlsInitInspectionError::invalid());
+                }
+                Ok(crate::transcode::SegmentPublication::Missing(None)) => {
+                    return Err(HlsInitInspectionError::from_api_error(playlist_error(
+                        session,
+                        PlaylistError::SessionGone,
+                    )));
+                }
+                Ok(crate::transcode::SegmentPublication::Unavailable(_)) => {
+                    return Err(HlsInitInspectionError::unavailable());
+                }
+                Ok(crate::transcode::SegmentPublication::Failed(error)) => {
+                    return Err(HlsInitInspectionError::from_api_error(playlist_error(
+                        session,
+                        error.error,
+                    )));
+                }
+                Err(crate::transcode::SegmentOpenError::Capacity) => {
+                    return Err(HlsInitInspectionError::unavailable());
+                }
             };
-            init.reserve(opened.len.min(INIT_INSPECTION_LIMIT_BYTES) as usize);
+            // This open is an internal capability check even when the size
+            // alone rejects it. Settle the zero-body tracker explicitly so a
+            // deliberate oversized refusal is not logged as an abandoned
+            // client response.
+            let mut delivery = opened.delivery.into_internal_probe();
+            if opened.len > INIT_INSPECTION_LIMIT_BYTES {
+                delivery.finish_without_body();
+                return Err(HlsInitInspectionError::invalid());
+            }
+            init.reserve(opened.len as usize);
             // No response body exists here — this is the playlist generator
             // reading `hvcC` for itself.
-            let mut delivery = opened.delivery.into_internal_probe();
-            delivery.expect_at_most(INIT_INSPECTION_LIMIT_BYTES);
+            delivery.expect_at_most(opened.len);
             let started = Instant::now();
-            let mut reader = opened.file.take(INIT_INSPECTION_LIMIT_BYTES);
+            let mut reader = opened.file.take(opened.len);
             match reader.read_to_end(&mut init).await {
                 Ok(bytes) => {
                     delivery.note_read(bytes as u64, started.elapsed());
                     delivery.finish();
+                    if bytes as u64 != opened.len {
+                        return Err(HlsInitInspectionError::invalid());
+                    }
                 }
                 Err(error) => {
                     delivery.fail(&error);
-                    return context;
+                    return Err(HlsInitInspectionError::unavailable());
                 }
             }
         }
+    }
+    let mut reader = plurx_core::fmp4::FragmentReader::new();
+    reader.push(&init);
+    let parsed = match reader.next_unit() {
+        Ok(Some(plurx_core::fmp4::Unit::Init(init))) => init,
+        Ok(Some(_)) | Ok(None) | Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
+            return Err(HlsInitInspectionError::invalid());
+        }
+        Err(
+            plurx_core::fmp4::Fmp4Error::Unsupported(_)
+            | plurx_core::fmp4::Fmp4Error::MultipleHevcSampleEntries { .. },
+        ) => return Err(HlsInitInspectionError::unsupported()),
+    };
+    let required_box = if matches!(sample_entry, "dvh1" | "dvhe") {
+        init.windows(4)
+            .any(|window| window == b"dvcC" || window == b"dvvC")
+    } else {
+        init.windows(4).any(|window| window == b"hvcC")
+    };
+    if !required_box {
+        return Err(HlsInitInspectionError::invalid());
+    }
+    if matches!(sample_entry, "hvc1" | "dvh1") {
+        match plurx_core::fmp4::hevc_parameter_sets_complete(&parsed) {
+            Ok(true) => {}
+            Ok(false) | Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
+                return Err(HlsInitInspectionError::invalid());
+            }
+            Err(
+                plurx_core::fmp4::Fmp4Error::Unsupported(_)
+                | plurx_core::fmp4::Fmp4Error::MultipleHevcSampleEntries { .. },
+            ) => return Err(HlsInitInspectionError::unsupported()),
+        }
+    }
+    match plurx_core::fmp4::validate_hevc_sample_entries(&parsed) {
+        Ok(plurx_core::fmp4::HevcSampleEntryLayout::Single) => {}
+        Ok(plurx_core::fmp4::HevcSampleEntryLayout::NotHevc)
+        | Ok(plurx_core::fmp4::HevcSampleEntryLayout::Multiple { .. }) => {
+            return Err(HlsInitInspectionError::unsupported());
+        }
+        Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
+            return Err(HlsInitInspectionError::invalid());
+        }
+        Err(
+            plurx_core::fmp4::Fmp4Error::Unsupported(_)
+            | plurx_core::fmp4::Fmp4Error::MultipleHevcSampleEntries { .. },
+        ) => return Err(HlsInitInspectionError::unsupported()),
     }
     let derived = if matches!(sample_entry, "dvh1" | "dvhe") {
         dolby_vision_codec_from_init(&init, sample_entry)
     } else {
         hevc_codec_from_init(&init, sample_entry)
     };
-    let Some(video) = derived else {
-        return context;
-    };
+    let video = derived.ok_or_else(HlsInitInspectionError::unsupported)?;
     context.codecs = match context.codecs.split_once(',') {
         Some((_, audio)) if !audio.trim().is_empty() => format!("{video},{}", audio.trim()),
         _ => video,
     };
-    context
+    Ok(context)
 }
 
 /// Apple's Dolby Vision HLS identifier from the `DOVIDecoderConfigurationRecord`.
@@ -12513,6 +12761,22 @@ async fn segment_local_before(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "segment_pending",
                 "the segment is still being produced; retry shortly",
+            ));
+        }
+        Ok(crate::transcode::SegmentPublication::Unavailable(owner)) => {
+            authorize_attempt_status(
+                state,
+                session,
+                &owner,
+                segment_publication_kind(seg, None),
+                Some(seg),
+                response_publication_deadline_before(request_deadline),
+            )
+            .await?;
+            return Err(ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "segment_inspection_unavailable",
+                "the segment exists but its storage metadata is temporarily unavailable",
             ));
         }
         Ok(crate::transcode::SegmentPublication::Failed(error)) => {
@@ -22265,7 +22529,7 @@ mod tests {
     /// returned everything it asked for must not be reported as a response
     /// that ended early.
     #[tokio::test]
-    async fn a_playlist_time_init_probe_is_not_client_delivery_and_never_a_short_response() {
+    async fn web_hls_startup_init_probe_is_not_client_delivery_or_a_short_response() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "probe").await;
         // Past the inspection bound, so the read stops short of the file's
@@ -22283,11 +22547,14 @@ mod tests {
             supplemental_codecs: None,
             frame_rate: None,
         };
-        let resolved = exact_hls_context(&fixture.state, "probe", context.clone()).await;
-        assert_eq!(
-            resolved.codecs, context.codecs,
-            "an init with no hvcC leaves the advertised codecs alone"
-        );
+        let resolved = exact_hls_context(&fixture.state, "probe", context).await;
+        assert!(matches!(
+            resolved,
+            Err(HlsInitInspectionError::Response {
+                code: "hls_init_invalid",
+                ..
+            })
+        ));
         assert_eq!(
             fixture.delivered_bytes(),
             0,
@@ -22304,7 +22571,7 @@ mod tests {
     /// `init.mp4` is indistinguishable from a client fetch that broke, which
     /// is the availability/delivery conflation this telemetry exists to end.
     #[tokio::test]
-    async fn a_failed_init_probe_is_tagged_as_internal_rather_than_a_client_fetch() {
+    async fn web_hls_startup_failed_init_probe_is_internal_and_unavailable() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "probe-error").await;
         tokio::fs::create_dir(dir.path().join("init.mp4"))
@@ -22319,7 +22586,13 @@ mod tests {
             supplemental_codecs: None,
             frame_rate: None,
         };
-        exact_hls_context(&fixture.state, "probe-error", context).await;
+        assert!(matches!(
+            exact_hls_context(&fixture.state, "probe-error", context).await,
+            Err(HlsInitInspectionError::Response {
+                code: "init_inspection_unavailable",
+                ..
+            })
+        ));
 
         let events = fixture.delivery_events(1).await;
         let failed = events
@@ -24992,6 +25265,34 @@ mod tests {
         init
     }
 
+    fn valid_dolby_vision_init(profile: u8, level: u8) -> Vec<u8> {
+        use plurx_core::fmp4::{FragmentReader, Unit};
+        let feed = plurx_core::testfixtures::pipe("clean-cra");
+        let mut reader = FragmentReader::new();
+        reader.push(&feed);
+        let Some(Unit::Init(mut init)) = reader.next_unit().expect("fixture init parses") else {
+            panic!("the fixture opens with an init");
+        };
+        let record = plurx_core::fmp4::DolbyVisionRecord::new(profile, level, true, false, true, 0)
+            .expect("a describable Dolby Vision record");
+        assert!(
+            plurx_core::fmp4::set_dolby_vision_record(&mut init, &record)
+                .expect("insert Dolby Vision record")
+        );
+        init.bytes
+    }
+
+    fn valid_hevc_init() -> Vec<u8> {
+        use plurx_core::fmp4::{FragmentReader, Unit};
+        let feed = plurx_core::testfixtures::pipe("clean-cra");
+        let mut reader = FragmentReader::new();
+        reader.push(&feed);
+        let Some(Unit::Init(init)) = reader.next_unit().expect("fixture init parses") else {
+            panic!("the fixture opens with an init");
+        };
+        init.bytes
+    }
+
     #[test]
     fn dolby_vision_codec_is_read_from_its_own_configuration_record() {
         let init = dolby_vision_init(5, 6);
@@ -25028,12 +25329,7 @@ mod tests {
     async fn a_preserved_dolby_vision_master_keeps_its_dolby_vision_identifier() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "dv").await;
-        // The sample entry's `hvcC` describes the base layer only: Main 10,
-        // High tier, level 150 — the record the HEVC reader would have used.
-        let mut init = vec![0, 0, 0, 21];
-        init.extend_from_slice(b"hvcC");
-        init.extend_from_slice(&[1, 0x22, 0x20, 0, 0, 0, 0x90, 0, 0, 0, 0, 0, 150]);
-        init.extend_from_slice(&dolby_vision_init(5, 6));
+        let init = valid_dolby_vision_init(5, 6);
         tokio::fs::write(dir.path().join("init.mp4"), &init)
             .await
             .expect("dolby vision init");
@@ -25046,7 +25342,9 @@ mod tests {
             supplemental_codecs: None,
             frame_rate: None,
         };
-        let resolved = exact_hls_context(&fixture.state, "dv", context).await;
+        let resolved = exact_hls_context(&fixture.state, "dv", context)
+            .await
+            .expect("the valid Dolby Vision init is supported");
         assert_eq!(
             resolved.codecs, "dvh1.05.06,ec-3",
             "a Dolby Vision master must not be rewritten into HEVC shape"
@@ -25061,7 +25359,7 @@ mod tests {
     async fn a_bare_dolby_vision_declaration_is_completed_from_the_init() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "dv-bare").await;
-        tokio::fs::write(dir.path().join("init.mp4"), dolby_vision_init(5, 6))
+        tokio::fs::write(dir.path().join("init.mp4"), valid_dolby_vision_init(5, 6))
             .await
             .expect("dolby vision init");
 
@@ -25073,19 +25371,19 @@ mod tests {
             supplemental_codecs: None,
             frame_rate: None,
         };
-        let resolved = exact_hls_context(&fixture.state, "dv-bare", context).await;
+        let resolved = exact_hls_context(&fixture.state, "dv-bare", context)
+            .await
+            .expect("the valid Dolby Vision init is supported");
         assert_eq!(resolved.codecs, "dvh1.05.06,ec-3");
     }
 
-    /// And a Dolby Vision init with no configuration record at all leaves the
-    /// advertised string alone rather than falling back to the HEVC reader.
+    /// A Dolby Vision declaration without its required configuration record
+    /// is invalid rather than an invitation to advertise scanner guesses.
     #[tokio::test]
-    async fn a_dolby_vision_init_without_a_configuration_record_changes_nothing() {
+    async fn web_hls_startup_dolby_init_without_configuration_is_invalid() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "dv-nodvcc").await;
-        let mut init = vec![0, 0, 0, 21];
-        init.extend_from_slice(b"hvcC");
-        init.extend_from_slice(&[1, 0x22, 0x20, 0, 0, 0, 0x90, 0, 0, 0, 0, 0, 150]);
+        let init = valid_hevc_init();
         tokio::fs::write(dir.path().join("init.mp4"), &init)
             .await
             .expect("init without dvcC");
@@ -25099,7 +25397,13 @@ mod tests {
             frame_rate: None,
         };
         let resolved = exact_hls_context(&fixture.state, "dv-nodvcc", context).await;
-        assert_eq!(resolved.codecs, "dvh1.05.06,ec-3");
+        assert!(matches!(
+            resolved,
+            Err(HlsInitInspectionError::Response {
+                code: "hls_init_invalid",
+                ..
+            })
+        ));
     }
 
     #[test]
