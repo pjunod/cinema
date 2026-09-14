@@ -6,7 +6,9 @@
 //! therefore seeds `<data_dir>/node.id` from the existing `instance.id`;
 //! future join work may create a distinct local id.
 
-use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::fs::File;
+use std::fs::OpenOptions;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

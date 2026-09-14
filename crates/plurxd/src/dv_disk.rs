@@ -1776,12 +1776,15 @@ async fn open_parent(path: &Path, role: &str) -> Result<SecureDirectory, String>
 async fn create_owned_scratch(paths: &ConversionPaths, owner: &ScratchOwner) -> Result<(), String> {
     let scratch_path = paths.directory.clone();
     tokio::task::spawn_blocking(move || {
+        #[cfg(unix)]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
             builder.mode(0o700);
         }
+        #[cfg(windows)]
+        let builder = std::fs::DirBuilder::new();
         builder.create(scratch_path)
     })
     .await

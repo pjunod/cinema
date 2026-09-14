@@ -497,6 +497,37 @@ silently did nothing. `JSON.stringify` had escaped for the JS layer but not the
 HTML layer, and `esc()` did not yet cover `'`. The lesson is baked into the
 rule above: a string in an inline handler needs both layers, always.
 
+## Windows filesystem and subprocess boundary
+
+Windows keeps the same capability-first intent with different kernel tools.
+plurx opens each path component relative to an already-held parent using
+`NtCreateFile`, asks to observe rather than follow reparse points, and refuses
+symlinks, junctions, and mount-point traversal. File identity is the volume
+serial plus the complete 128-bit `FileIdInfo` identifier. Mutable managed roots
+must be NTFS or ReFS; libraries remain read-only and may live on SMB or another
+filesystem.
+
+The one deliberate platform difference is stock ffmpeg input handoff. Unix
+passes held descriptors; stock Windows ffmpeg has no equivalent pathname-free,
+seekable interface. Windows therefore keeps the validated source handle open,
+resolves its canonical DOS path, reopens that path without following a reparse
+point immediately before spawn, and requires the exact file identity to match.
+There remains a narrow pathname race after that final check and before ffmpeg's
+own open. Do not describe Windows input handoff as descriptor-equivalent.
+
+Scratch claims require the current process to own the directory and replace
+its inherited ACL with a protected owner-and-SYSTEM full-control ACL. That is
+why transcode scratch cannot be a shared or hand-managed library directory.
+Other configured data/cache roots keep their operator-provided NTFS ACLs;
+protect them as service data and do not grant ordinary users write access.
+Windows sharing violations during cleanup mean “still in use,” so the entry is
+retained for a later bounded sweep instead of being treated as corruption.
+
+Every ffmpeg/ffprobe child is assigned, while initially suspended, to a Windows
+Job Object with kill-on-close before it can execute. Console Ctrl-C and SCM
+stop/shutdown converge on the same graceful cancellation path; closing the job
+is the final descendant-containment backstop.
+
 ## Transport — public HTTP, internal cluster TLS
 
 plurx's public HTTP/API listener remains **plain HTTP**. It does not terminate

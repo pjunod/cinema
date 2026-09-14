@@ -12,11 +12,20 @@ runs:
         if ! cargo xwin --version 2>/dev/null | grep -Fq '0.23.1'; then
           cargo install cargo-xwin --version 0.23.1 --locked
         fi
+        tool_dir="$RUNNER_TEMP/plurx-windows-toolchain"
+        mkdir -p "$tool_dir"
+        expose_tool_dir=false
         if ! command -v clang-cl >/dev/null 2>&1; then
           clang="$(command -v clang)"
-          tool_dir="$RUNNER_TEMP/plurx-windows-toolchain"
-          mkdir -p "$tool_dir"
           ln -sf "$clang" "$tool_dir/clang-cl"
+          expose_tool_dir=true
+        fi
+        if ! command -v mt.exe >/dev/null 2>&1; then
+          llvm_mt="$(command -v llvm-mt)"
+          ln -sf "$llvm_mt" "$tool_dir/mt.exe"
+          expose_tool_dir=true
+        fi
+        if [ "$expose_tool_dir" = true ]; then
           echo "$tool_dir" >> "$GITHUB_PATH"
         fi
     - name: Build the Windows workspace

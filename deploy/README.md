@@ -276,8 +276,8 @@ plurxd run          # serves :32400; config via ./plurx.toml or PLURX_* env
 
 Install `ffmpeg`/`ffprobe` (or point `PLURX_FFMPEG`/`PLURX_FFPROBE` at a build
 such as jellyfin-ffmpeg for the best hardware/tone-mapping support). To keep it
-running across reboots, install it as a service — **systemd** on Linux or
-**launchd** on macOS, both below.
+running across reboots, install it as a service — the native Windows service,
+**systemd** on Linux, or **launchd** on macOS, below.
 
 Permanent Dolby Vision Profile 7 → 8.1 conversion additionally needs
 `dovi_tool` and `mkvmerge` 68 or newer. The Docker image includes pinned builds;
@@ -307,6 +307,58 @@ On Intel **Arc**-class GPUs, QuickSync (oneVPL) is usually more reliable than
 VA-API — set `PLURX_HWACCEL: "qsv"` in the override to prefer it. Startup
 validation test-encodes each path and Settings → Logs shows why any hardware
 probe was rejected.
+
+## Run as a service — Windows
+
+Download `plurxd-windows-x86_64.zip`, expand it to a stable directory such as
+`C:\Program Files\plurx`, and copy `plurx.example.toml` to
+`C:\ProgramData\plurx\plurx.toml`. Use absolute Windows paths for data, cache,
+transcode scratch, media libraries, and external tools. The managed data and
+cache roots must be on NTFS or ReFS; a read-only library may be on another
+filesystem or an SMB share.
+
+Install a current jellyfin-ffmpeg Windows build. Put `ffmpeg.exe` and
+`ffprobe.exe` beside `plurxd.exe`, or set the machine-level
+`PLURX_FFMPEG`/`PLURX_FFPROBE` variables to absolute paths. The sibling files
+win over `PATH`; explicit environment variables win over both.
+
+From an elevated PowerShell window:
+
+```powershell
+New-Item -ItemType Directory -Force C:\ProgramData\plurx | Out-Null
+Copy-Item .\plurx.example.toml C:\ProgramData\plurx\plurx.toml
+notepad C:\ProgramData\plurx\plurx.toml
+
+.\plurxd.exe service install --config C:\ProgramData\plurx\plurx.toml
+Get-Service plurxd
+
+netsh advfirewall firewall add rule name="plurx HTTP" dir=in action=allow protocol=TCP localport=32400
+netsh advfirewall firewall add rule name="plurx GDM discovery" dir=in action=allow protocol=UDP localport=32414
+```
+
+The service starts automatically as LocalSystem. When `storage.data_dir` is
+left at the relative default, service mode deliberately relocates it to
+`%ProgramData%\plurx\data`; explicit paths are preserved. Open
+`http://<host>:32400` after `Get-Service plurxd` reports `Running`.
+
+UDP 32414 is only discovery: omitting that rule makes automatic server picking
+fail silently, while a direct URL can still work. TCP 32400 is the web and
+media API. Cluster voters additionally need their explicitly configured Raft
+and peer API ports; do not expose any of these ports to the public internet.
+
+For an upgrade, stop the service, replace `plurxd.exe`, and start it again.
+Uninstall removes the SCM registration after a bounded stop; it leaves data,
+configuration, and the firewall rules for the operator to retain or remove.
+
+```powershell
+Stop-Service plurxd
+Copy-Item .\plurxd.exe 'C:\Program Files\plurx\plurxd.exe' -Force
+Start-Service plurxd
+
+& 'C:\Program Files\plurx\plurxd.exe' service uninstall
+netsh advfirewall firewall delete rule name="plurx HTTP"
+netsh advfirewall firewall delete rule name="plurx GDM discovery"
+```
 
 ## Run as a service — systemd (Linux)
 

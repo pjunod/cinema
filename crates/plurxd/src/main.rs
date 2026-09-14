@@ -50,6 +50,8 @@ mod vodserve;
 mod waitpool;
 mod wal_cli;
 mod watched;
+#[cfg(windows)]
+mod windows_service;
 
 use std::future::IntoFuture;
 use std::io::{Read, Write};
@@ -116,6 +118,12 @@ struct Cli {
 enum Command {
     /// Run the server (the default when no subcommand is given).
     Run,
+    /// Install, remove, or enter the native Windows service.
+    #[cfg(windows)]
+    Service {
+        #[command(subcommand)]
+        command: WindowsServiceCommand,
+    },
     /// Probe a running local server's /readyz and exit 0/1 (container
     /// health checks: no curl needed in the image).
     Healthcheck,
@@ -160,6 +168,18 @@ enum Command {
         #[command(subcommand)]
         command: crate::wal_cli::WalCommand,
     },
+}
+
+#[cfg(windows)]
+#[derive(Subcommand)]
+enum WindowsServiceCommand {
+    /// Install and start plurx as an automatic LocalSystem service.
+    Install,
+    /// Stop and remove the installed plurx service.
+    Uninstall,
+    /// SCM-only entry point installed by `service install`.
+    #[command(hide = true)]
+    Run,
 }
 
 #[derive(Subcommand)]
@@ -234,7 +254,13 @@ fn cli_exit(code: i32, message: impl Into<String>) -> anyhow::Error {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = Config::load(cli.config.as_deref()).context("loading configuration")?;
-    if let Err(error) = dispatch(cli.command.unwrap_or(Command::Run), config).await {
+    if let Err(error) = dispatch(
+        cli.command.unwrap_or(Command::Run),
+        config,
+        cli.config.as_deref(),
+    )
+    .await
+    {
         let code = error
             .downcast_ref::<CliExit>()
             .map_or(1, |error| error.code);
@@ -246,11 +272,19 @@ async fn main() -> anyhow::Result<()> {
 
 /// Route a parsed command, separated from `main` so every subcommand but the
 /// server itself is reachable without a process launch.
-async fn dispatch(command: Command, mut config: Config) -> anyhow::Result<()> {
+async fn dispatch(
+    command: Command,
+    mut config: Config,
+    config_path: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    #[cfg(not(windows))]
+    let _ = config_path;
     match &command {
         Command::Run => {
             canonicalize_storage_roots(&mut config)?;
         }
+        #[cfg(windows)]
+        Command::Service { .. } => {}
         Command::ResetPassword { .. } => {
             canonicalize_configured_dir(&mut config.storage.data_dir, "data")?;
         }
@@ -262,6 +296,16 @@ async fn dispatch(command: Command, mut config: Config) -> anyhow::Result<()> {
     }
     match command {
         Command::Run => run(config).await,
+        #[cfg(windows)]
+        Command::Service { command } => match command {
+            WindowsServiceCommand::Install => {
+                windows_service::install(config_path).map_err(Into::into)
+            }
+            WindowsServiceCommand::Uninstall => windows_service::uninstall().map_err(Into::into),
+            WindowsServiceCommand::Run => {
+                windows_service::dispatch_service(config).map_err(Into::into)
+            }
+        },
         Command::Healthcheck => {
             // One terse line either way — this output lands in `docker inspect`.
             if let Err(error) = healthcheck(&config) {
@@ -1032,6 +1076,25 @@ fn prepare_storage_dirs(
         ));
     }
     persistent.extend_from_slice(extra_persistent);
+    #[cfg(windows)]
+    {
+        plurx_core::fs_secure::require_mutable_volume_blocking(&transcode_identity).with_context(
+            || {
+                format!(
+                    "checking mutable Windows volume for transcode scratch {}",
+                    transcode_identity.display()
+                )
+            },
+        )?;
+        for (label, path) in &persistent {
+            plurx_core::fs_secure::require_mutable_volume_blocking(path).with_context(|| {
+                format!(
+                    "checking mutable Windows volume for {label} {}",
+                    path.display()
+                )
+            })?;
+        }
+    }
     let mut protected =
         ensure_distinct_storage_identities(&transcode_identity, &persistent, !explicit_scratch)?;
     protected.extend_from_slice(extra_protected);
@@ -3113,10 +3176,21 @@ fn shutdown_signal() -> impl std::future::Future<Output = ()> {
         };
         #[cfg(not(unix))]
         let terminate = std::future::pending::<()>();
+        #[cfg(windows)]
+        let service_stop = async {
+            if let Some(token) = crate::windows_service::stop_token() {
+                token.cancelled().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        #[cfg(not(windows))]
+        let service_stop = std::future::pending::<()>();
 
         tokio::select! {
             _ = ctrl_c => {},
             _ = terminate => {},
+            _ = service_stop => {},
         }
         tracing::info!("shutdown signal received, draining");
     }
@@ -4557,7 +4631,7 @@ mod startup_tests {
         let tmp = crate::test_tempdir().expect("tempdir");
         let mut config = config_in(tmp.path());
         config.server.bind = format!("127.0.0.1:{port}").parse().expect("addr");
-        dispatch(Command::Healthcheck, config)
+        dispatch(Command::Healthcheck, config, None)
             .await
             .expect("healthy");
         server.join().expect("server thread");
@@ -6168,6 +6242,7 @@ mod startup_tests {
                     server: "ftp://192.168.1.9:21".to_owned(),
                 },
                 config_in(tmp.path()),
+                None,
             )
             .await
             .expect_err("not an HTTP server")

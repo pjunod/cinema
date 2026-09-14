@@ -1752,6 +1752,21 @@ pub(crate) async fn probe_chapters_until(
 }
 
 async fn run_chapter_probe(path: &Path) -> Result<Vec<serde_json::Value>, ChapterProbeFailure> {
+    #[cfg(windows)]
+    let source = {
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            plurx_core::fs_secure::open_read_nofollow_blocking(&path)
+        })
+        .await
+        .map_err(|_| ChapterProbeFailure::Failed)?
+        .map_err(|_| ChapterProbeFailure::Failed)?
+    };
+    #[cfg(windows)]
+    let input =
+        crate::ffmpeg::windows_source_path(&source).map_err(|_| ChapterProbeFailure::Failed)?;
+    #[cfg(not(windows))]
+    let input = path.to_owned();
     let mut command = tokio::process::Command::new(ffprobe_bin());
     command
         .args([
@@ -1762,12 +1777,16 @@ async fn run_chapter_probe(path: &Path) -> Result<Vec<serde_json::Value>, Chapte
             "-show_chapters",
             "-i",
         ])
-        .arg(path)
+        .arg(&input)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    let mut child = command.spawn().map_err(|_| ChapterProbeFailure::Failed)?;
+    #[cfg(windows)]
+    crate::ffmpeg::verify_windows_source_path(&source, &input)
+        .map_err(|_| ChapterProbeFailure::Failed)?;
+    let (mut child, _child_job) = crate::process_control::spawn_job_owned(&mut command)
+        .map_err(|_| ChapterProbeFailure::Failed)?;
     let stdout = child.stdout.take().ok_or(ChapterProbeFailure::Failed)?;
     let mut bytes = Vec::new();
     stdout
@@ -2382,8 +2401,19 @@ pub async fn stream_mp4(
                 .streams
                 .register(&sid, user.id, &user.username, id, file.item_id, readrate),
         );
+    #[cfg(windows)]
+    let source = crate::fragment_index_cluster::open_source_fence(&file, None)
+        .await
+        .map_err(ApiError::Internal)?;
+    #[cfg(windows)]
+    let remux_path =
+        crate::ffmpeg::windows_source_path(&source.handle).map_err(ApiError::Internal)?;
+    #[cfg(not(windows))]
+    let remux_path = file.path.clone();
     remux(RemuxSpec {
-        path: &file.path,
+        path: &remux_path,
+        #[cfg(windows)]
+        source: &source.handle,
         start: q.start,
         transcode_audio: decision.transcode_audio,
         audio_index: audio,
@@ -2624,6 +2654,8 @@ pub(crate) async fn serve_file_range(
 /// transposition away from remuxing at the wrong pace with the wrong track.
 struct RemuxSpec<'a> {
     path: &'a Path,
+    #[cfg(windows)]
+    source: &'a std::fs::File,
     start: Option<f64>,
     transcode_audio: bool,
     audio_index: i64,
@@ -2670,6 +2702,7 @@ impl Drop for RemuxProcessGuard {
 
 fn spawn_remux_process_owner(
     mut child: tokio::process::Child,
+    child_job: crate::process_control::ChildJob,
     mut serving: tokio::sync::watch::Receiver<crate::serving_fence::ServingState>,
     admitted_generation: u64,
     registry_guard: Option<crate::progressive::StreamGuard>,
@@ -2677,6 +2710,7 @@ fn spawn_remux_process_owner(
     let cancel = tokio_util::sync::CancellationToken::new();
     let owner_cancel = cancel.clone();
     let task = tokio::spawn(async move {
+        let _child_job = child_job;
         // Registration belongs to the process lifetime. It disappears on
         // natural exit, body drop, or serving loss—not merely when Hyper next
         // decides to poll a response body.
@@ -2760,6 +2794,8 @@ fn progressive_hevc_copy_args(
 async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     let RemuxSpec {
         path,
+        #[cfg(windows)]
+        source,
         start,
         transcode_audio,
         audio_index,
@@ -2878,9 +2914,10 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         .stdin(Stdio::null())
         .kill_on_drop(true);
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| ApiError::Internal(format!("spawning ffmpeg: {e}")))?;
+    #[cfg(windows)]
+    crate::ffmpeg::verify_windows_source_path(source, path).map_err(ApiError::Internal)?;
+    let (mut child, child_job) = crate::process_control::spawn_job_owned(&mut cmd)
+        .map_err(|e| ApiError::Internal(format!("spawning job-owned ffmpeg: {e}")))?;
 
     // Probe after the remux starts opening the source, matching the HLS copy
     // path: the work overlaps instead of adding its full latency to startup.
@@ -2949,8 +2986,13 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         .ok_or_else(|| ApiError::Internal("ffmpeg stdout unavailable".into()))?;
 
     let owner_guard = guard.clone();
-    let (process_guard, _process_owner) =
-        spawn_remux_process_owner(child, serving.clone(), admitted_generation, owner_guard);
+    let (process_guard, _process_owner) = spawn_remux_process_owner(
+        child,
+        child_job,
+        serving.clone(),
+        admitted_generation,
+        owner_guard,
+    );
 
     // Stream ffmpeg stdout. The body carries cancellation plus its own
     // idempotent registry guard; the detached owner carries a clone so body
@@ -3685,12 +3727,13 @@ mod tests {
         let mut command = tokio::process::Command::new("sleep");
         command.arg("60").kill_on_drop(true);
         let child = command.spawn().expect("spawn remux stand-in");
+        let child_job = crate::process_control::ChildJob::attach(&child).expect("attach child job");
         let (serving_tx, serving_rx) =
             tokio::sync::watch::channel(crate::serving_fence::ServingState {
                 ready: true,
                 loss_generation: 0,
             });
-        let (_body_guard, owner) = spawn_remux_process_owner(child, serving_rx, 0, None);
+        let (_body_guard, owner) = spawn_remux_process_owner(child, child_job, serving_rx, 0, None);
 
         // Deliberately publish recovery before the owner gets a scheduling
         // point and never construct or poll a body stream. The generation—not
