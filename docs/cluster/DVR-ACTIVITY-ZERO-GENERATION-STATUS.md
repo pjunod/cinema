@@ -1,6 +1,6 @@
 # DVR Activity generation zero — repair status
 
-**Status:** implementation complete · review pending · **Updated:** 2026-09-14 ·
+**Status:** review complete · qualification pending · **Updated:** 2026-09-14 ·
 **Base:** `0b2490839112` · **Branch:**
 `codex/fix-dvr-activity-zero-generation`
 
@@ -24,8 +24,8 @@ addressed, so the final candidate consumes the fast lane once.
 | D01 · reproduce and isolate | complete | `m6` recorded 76 `invalid_response` outcomes only while `nynuc` published an active DVR sink; the count stopped when the recording ended | Root cause names the exact rejected field |
 | D02 · correct the peer contract | complete | Removed only the invalid `serving_generation > 0` predicate; the field is an unsigned fence token and zero is its healthy initial epoch | Complete |
 | D03 · retain the failure | complete | `initial_dvr_serving_generation_is_a_valid_peer_snapshot` serializes the real peer shape and requires the decoder to answer it | Complete |
-| D04 · adversarial review | waiting | Review is deliberately deferred until the implementation is merge-ready | One adversarial pass completed and every accepted finding addressed |
-| D05 · qualification and promotion | waiting | No test suite has run during implementation | Focused regression and fast lane pass on the reviewed candidate, then the pull request merges |
+| D04 · adversarial review | complete | The single review of `decada4790d8` found no concrete correctness, security, coverage, documentation, or workflow defect; it retained the lack of a multi-daemon case as residual risk | Complete |
+| D05 · qualification and promotion | ready | No test suite ran before the review | Focused regression and fast lane pass on the reviewed candidate, then the pull request merges |
 
 ## Root cause — a valid initial epoch was treated as absent
 
@@ -58,7 +58,7 @@ while another voter displayed `sent an invalid response` for `nynuc`.
 | Evidence | State | Receipt |
 |---|---|---|
 | Pinned compiler | ready | `rustc 1.97.1 (8bab26f4f 2026-07-14)` and `cargo 1.97.1` are available through `rustup run 1.97.1` |
-| Adversarial review | waiting | Requested once the implementation and regression commit is published |
+| Adversarial review | complete | One pass against `decada4790d8`; no concrete findings and no second review requested |
 | Focused regression | waiting | Run once on the reviewed candidate |
 | Fast lane | waiting | Apply `fast-lane` only after review findings are resolved |
 | Main merge | waiting | Merge only after the fast lane is green |
