@@ -22,6 +22,8 @@ current system · **open** — work in progress or awaiting a decision ·
 **done** — closed out, kept for history. Accurate as of 2026-09-07; when a
 row and a doc's own `**Status:**` header disagree, the doc wins.
 
+Mobile UI work: [Apple build 159 notes](apple-builds/317-ui-usability.md) · [Mobile and TV usability audit](clients/MOBILE-UI-USABILITY-AUDIT.md) — **open**.
+
 ## Find it fast
 
 | You want to know… | Read |
@@ -253,6 +255,8 @@ player obeys, subtitles and overlays, layouts and themes.
 | [PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md](clients/PLAYBACK-SURFACE-ANDROID-BUILD-PROMPT.md) | The same for M3 and M5's Kotlin: Gradle, the mutations, the device runs. | open |
 | [PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-PROMPT.md](clients/PLAYBACK-SURFACE-PHYSICAL-VERIFICATION-PROMPT.md) | M4: the four §7 recipes on an Apple TV, an iPhone and an Android TV, and what counts as a pass. | open |
 | [PLAYBACK-SURFACE-REMUX-ORIGIN-MEASUREMENT-PROMPT.md](clients/PLAYBACK-SURFACE-REMUX-ORIGIN-MEASUREMENT-PROMPT.md) | M6's gate: the one measurement that decides whether the Android remux-seek landing gets built at all. | open |
+| [WEB-UI-USABILITY-AUDIT.md](clients/WEB-UI-USABILITY-AUDIT.md) | Approved twelve-part web usability audit and acceptance criteria. | open |
+| [WEB-UI-IMPLEMENTATION-STATUS.md](clients/WEB-UI-IMPLEMENTATION-STATUS.md) · [status page](clients/WEB-UI-STATUS.html) | Progress, decisions, review and final fast-lane evidence for the web UI implementation. | open |
 | [UI-NAVIGATION-AUDIT.md](clients/UI-NAVIGATION-AUDIT.md) | Why the player felt different on every client, anchored at `file:line`. | done |
 | [CLIENTS-CODE-REVIEW.md](clients/CLIENTS-CODE-REVIEW.md) · [assessment](clients/CLIENTS-CODE-REVIEW-ASSESSMENT.md) | Capable players that under-ask the server — findings, and what to trust. | done |
 | [CLIENTS-REMEDIATION-PLAN.md](clients/CLIENTS-REMEDIATION-PLAN.md) | Restoring trust, then raising the quality ceiling. | built |

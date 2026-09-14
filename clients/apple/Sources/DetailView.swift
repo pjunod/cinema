@@ -696,6 +696,8 @@ struct DetailView: View {
     @State private var detail: ItemDetail?
     @State private var play: PlayContext?
     @State private var startingEpisodeID: Int?
+    @State private var seriesPlayback: PlayContext?
+    @State private var resolvingSeries = false
     @State private var loadError: String?
     @State private var watchBusy = false
     @State private var actionError: String?
@@ -710,7 +712,6 @@ struct DetailView: View {
     @State private var offlineReader: OfflineBook?
     #endif
     #if os(tvOS)
-    @State private var seriesPlayback: PlayContext?
     @FocusState private var tvFocusedAction: TVDetailFocus?
     /// Set once, the first time this item's detail lands. See the `.task`.
     @State private var hasClaimedTVFocus = false
@@ -768,12 +769,14 @@ struct DetailView: View {
                 let loaded = try await model.itemDetail(itemId)
                 detail = loaded
                 loadError = nil
-                #if os(tvOS)
                 if loaded.item.kind == "show" || loaded.item.kind == "season" {
+                    resolvingSeries = true
                     seriesPlayback = await model.seriesPlayback(loaded)
+                    resolvingSeries = false
                 } else {
                     seriesPlayback = nil
                 }
+                #if os(tvOS)
                 // First arrival only. `.task(id:)` re-runs whenever this view
                 // reappears — coming back from the player, from a season, from
                 // Search — and each of those re-grabbed focus onto Play,
@@ -1236,6 +1239,9 @@ struct DetailView: View {
                     )
                     .padding(.top, 6)
                     #else
+                    if item.kind == "show" || item.kind == "season" {
+                        seriesContinuation
+                    }
                     if let file, item.isPlayable {
                         playbackActions(
                             item: item,
@@ -1669,17 +1675,36 @@ struct DetailView: View {
         return detail.item.isPlayable && detail.files?.first != nil
     }
 
-    private func seriesPlaybackButton(_ target: PlayContext) -> some View {
-        PrimaryButton(
-            title: target.startMs > 0
-                ? "▶  Resume · \(formatTime(target.startMs))"
-                : "▶  Play"
-        ) {
-            play = target
-        }
-        .focused($tvFocusedAction, equals: .primaryAction)
-    }
     #endif
+
+    private func seriesPlaybackButton(_ target: PlayContext) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            PrimaryButton(
+                title: target.startMs > 0
+                    ? "▶  Resume · \(formatTime(target.startMs))"
+                    : "▶  Play episode"
+            ) { play = target }
+            #if os(tvOS)
+            .focused($tvFocusedAction, equals: .primaryAction)
+            #endif
+            Text([target.subtitle, target.title].compactMap { $0 }.joined(separator: " · "))
+                .font(.subheadline)
+                .foregroundStyle(Palette.muted)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    @ViewBuilder
+    private var seriesContinuation: some View {
+        if let seriesPlayback {
+            seriesPlaybackButton(seriesPlayback)
+        } else if resolvingSeries {
+            ProgressView("Finding your next episode…").tint(Palette.accent)
+        } else {
+            Text("Choose an episode below. No playable continuation is available.")
+                .font(.subheadline).foregroundStyle(Palette.muted)
+        }
+    }
 
     static func seriesChildStyle(for kind: String) -> MediaRowStyle {
         kind == "season" ? .episode : .poster
@@ -2083,14 +2108,18 @@ struct DetailView: View {
     private func toggleWatched(_ item: Item, watched: Bool) async {
         watchBusy = true
         actionError = nil
+        let isSeries = item.kind == "show" || item.kind == "season"
+        if isSeries { seriesPlayback = nil; resolvingSeries = true }
         do {
             try await model.setWatched(itemId: item.id, watched: !watched)
             detail = try await model.itemDetail(item.id)
             await model.loadHome()
+            if isSeries, let detail { seriesPlayback = await model.seriesPlayback(detail) }
         } catch {
             actionError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
         }
         watchBusy = false
+        if isSeries { resolvingSeries = false }
     }
 
     private var heroHeight: CGFloat {
@@ -2118,6 +2147,9 @@ struct DetailView: View {
         let item = detail.item
         let hasPlayback = file != nil && item.isPlayable
 
+        if item.kind == "show" || item.kind == "season" {
+            seriesContinuation
+        }
         if !IOSDetailActionLayout.stacksPrimaryAction(
             horizontalSizeClass: horizontalSizeClass
         ) {
@@ -2145,7 +2177,8 @@ struct DetailView: View {
                     makeChannelButton(item)
                 }
             }
-            .frame(maxWidth: hasPlayback ? .infinity : 220, alignment: .leading)
+            .fixedSize(horizontal: !hasPlayback, vertical: false)
+            .frame(maxWidth: .infinity, alignment: .leading)
         } else {
             VStack(alignment: .leading, spacing: 10) {
                 if let file, item.isBook {
@@ -2161,7 +2194,19 @@ struct DetailView: View {
                     )
                 }
 
-                HStack(spacing: 10) {
+                ViewThatFits(in: .horizontal) {
+                    mobileSecondaryActions(detail, file: file, durationMs: durationMs, resumeMs: resumeMs, canResume: canResume, stacked: false)
+                    mobileSecondaryActions(detail, file: file, durationMs: durationMs, resumeMs: resumeMs, canResume: canResume, stacked: true)
+                }
+            }
+            .frame(maxWidth: hasPlayback ? .infinity : nil, alignment: .leading)
+        }
+    }
+
+    private func mobileSecondaryActions(_ detail: ItemDetail, file: MediaFile?, durationMs: Int, resumeMs: Int, canResume: Bool, stacked: Bool) -> some View {
+        let item = detail.item
+        let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10)) : AnyLayout(HStackLayout(spacing: 10))
+        return layout {
                     if let file, item.isPlayable, canResume {
                         mobileStartOverButton(item: item, file: file, durationMs: durationMs)
                     }
@@ -2175,10 +2220,8 @@ struct DetailView: View {
                         makeChannelButton(item)
                     }
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .frame(maxWidth: hasPlayback ? .infinity : nil, alignment: .leading)
-        }
+        .fixedSize(horizontal: !stacked, vertical: false)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func makeChannelButton(_ item: Item) -> some View {

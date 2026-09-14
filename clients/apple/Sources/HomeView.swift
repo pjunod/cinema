@@ -151,6 +151,7 @@ struct HomeView: View {
 
             LibraryChannelsView()
                 .tabItem { Label("Channels", systemImage: "play.rectangle.on.rectangle") }
+                .tag(HomeTab.libraryChannels)
 
             SearchView()
                 .tabItem { Label("Search", systemImage: "magnifyingglass") }
@@ -208,6 +209,8 @@ private struct HomeDashboard: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
+    @ObservedObject private var dvr = DvrController.shared
+
     private var featured: Item? {
         (model.hubs.continueWatching ?? []).first
             ?? (model.hubs.nextUp ?? []).first
@@ -250,12 +253,23 @@ private struct HomeDashboard: View {
         #endif
     }
 
+    #if os(iOS)
     private var homeHeader: some View {
         HStack(alignment: .firstTextBaseline) {
             Text("cinema")
                 .font(.system(size: 32, weight: .bold, design: .monospaced))
                 .foregroundColor(Palette.accent)
             Spacer()
+            NavigationLink { SearchView().appDestinations() } label: {
+                Image(systemName: "magnifyingglass").frame(width: 44, height: 44)
+            }.accessibilityLabel("Search all libraries")
+            Menu {
+                NavigationLink { LibraryChannelsView().appDestinations() } label: { Label("Library channels", systemImage: "play.rectangle.on.rectangle") }
+                NavigationLink { DownloadsView() } label: { Label("Downloads", systemImage: "arrow.down.circle") }
+                NavigationLink { SettingsView() } label: { Label("Settings", systemImage: "gearshape") }
+            } label: {
+                Image(systemName: "ellipsis.circle").frame(width: 44, height: 44)
+            }.accessibilityLabel("More destinations")
             if let username = model.username {
                 Text(username)
                     .font(.system(.caption, design: .monospaced))
@@ -267,8 +281,25 @@ private struct HomeDashboard: View {
         .padding(.bottom, 8)
     }
 
+    #endif
+
     @ViewBuilder
     private var homeContent: some View {
+        if let label = dvr.indicatorLabel {
+            NavigationLink { DvrCaptureActivityView() } label: {
+                Label(label, systemImage: "record.circle")
+                    .font(.headline)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+                    .background(Palette.surface, in: RoundedRectangle(cornerRadius: 12))
+            }
+            #if os(tvOS)
+            .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
+            #else
+            .buttonStyle(.plain)
+            #endif
+            .padding(.horizontal, screenHPad)
+        }
         if HomeLayoutPolicy.usesFeaturedHero, let featured {
             FeaturedHero(item: featured, compact: horizontalSizeClass == .compact)
                 #if os(tvOS)
@@ -455,7 +486,7 @@ private struct FeaturedHero: View {
             )
 
             VStack(alignment: .leading, spacing: 7) {
-                Text("CONTINUE")
+                Text((item.watch?.positionMs ?? 0) > 3_000 ? "CONTINUE WATCHING" : "PICK SOMETHING TO WATCH")
                     .font(.system(size: 10, weight: .bold, design: .rounded))
                     .tracking(1.7)
                     .foregroundStyle(Palette.accent)
@@ -463,7 +494,7 @@ private struct FeaturedHero: View {
                 Text(item.showTitle ?? item.title)
                     .font(.system(size: 25, weight: .heavy, design: .rounded))
                     .foregroundStyle(.white)
-                    .lineLimit(1)
+                    .lineLimit(2)
                     .shadow(color: .black.opacity(0.6), radius: 8, y: 2)
 
                 if item.showTitle != nil {

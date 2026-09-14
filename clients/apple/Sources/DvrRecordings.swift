@@ -687,13 +687,24 @@ struct DvrRecordingsPanel: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
+            #if os(tvOS)
+            ScrollView(.horizontal) {
+                HStack(spacing: 12) {
+                    ForEach(DvrRecordingsChip.allCases) { entry in chipButton(entry) }
+                }.padding(12)
+            }.tvNavigationFocusSection()
+            #else
+            Picker("Recording view", selection: $chip) {
                 ForEach(DvrRecordingsChip.allCases) { entry in
-                    chipButton(entry)
+                    Text(entry.label).tag(entry)
                 }
-                Spacer(minLength: 8)
-                if let summary = summary { Text(summary).font(LiveTvType.tertiary).foregroundStyle(Palette.muted) }
             }
+            .pickerStyle(.menu)
+            .frame(minHeight: 44)
+            .tint(Palette.accent)
+            .accessibilityLabel("Recording view")
+            #endif
+            if let summary { Text(summary).font(LiveTvType.tertiary).foregroundStyle(Palette.muted) }
             if let serverLine = serverLine { Text(serverLine).font(LiveTvType.tertiary).foregroundStyle(Palette.muted) }
             if let row = dvr.confirmFileDelete {
                 confirmation(row)
@@ -1122,7 +1133,7 @@ struct DvrCaptureActivityView: View {
                 }
                 if let age = dvr.overview?.observationAgeMs {
                     Text("DVR observed \(max(0, Int(age / 1_000))) seconds ago")
-                        .font(LiveTvType.tertiary).foregroundStyle(Palette.muted)
+                        .font(.subheadline).foregroundStyle(Palette.muted)
                 }
                 ForEach(dvr.overview?.active ?? []) { row in
                     NavigationLink {
@@ -1130,26 +1141,33 @@ struct DvrCaptureActivityView: View {
                     } label: {
                         VStack(alignment: .leading, spacing: 5) {
                             HStack {
-                                Text(row.title).font(LiveTvType.primary).lineLimit(1)
+                                Text(row.title).font(.body.weight(.semibold)).lineLimit(2)
                                 Spacer()
-                                Text(row.displayState).font(LiveTvType.secondary)
+                                Text(row.displayState).font(.subheadline)
                             }
                             Text(activityDetail(row))
-                                .font(LiveTvType.tertiary).foregroundStyle(Palette.muted)
+                                .font(.subheadline).foregroundStyle(Palette.muted)
                             LiveTvProgressLine(value: row.progress(now: now), height: 3)
                                 .accessibilityLabel("Recording window elapsed")
                                 .accessibilityValue("\(Int(row.progress(now: now) * 100)) percent")
                         }
-                        .padding(12)
+                        .padding(18)
                         .background(Palette.surface, in: RoundedRectangle(cornerRadius: 8))
                     }
+                    #if os(tvOS)
+                    .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
+                    #else
                     .buttonStyle(.plain)
+                    #endif
                 }
             }
             .padding()
         }
         .background(Palette.bg)
         .navigationTitle("Recording activity")
+        #if os(tvOS)
+        .preferredColorScheme(.dark)
+        #endif
         .task {
             while !Task.isCancelled {
                 now = Int(Date().timeIntervalSince1970)

@@ -212,3 +212,24 @@ test("a preview seed arriving after a lost save cannot change the retry body", a
   await c.saveLibraryChannel();
   assert.deepEqual(bodies[1],bodies[0]);
 });
+
+// Review regression: each keystroke is read by the live preview handler.
+test("channel naming waits for the complete subject and preserves a chosen name", () => {
+  const {context: c, nodes} = editor();
+  const draft = c.LIBRARY_CHANNELS.draft;
+  let typed = "";
+  for (const character of "Coastal documentaries") {
+    typed += character;
+    nodes.set("lc-subject", {value: typed});
+    c.lcReadEditor();
+    assert.equal(draft.name, "", "typing must not freeze the first character as the name");
+  }
+  c.lcStep("playback");
+  assert.equal(draft.name, "Coastal documentaries");
+  assert.equal(draft.step, "playback");
+  draft.name = "My coastal favourites";
+  c.lcStep("content");
+  nodes.set("lc-subject", {value: "Coastal railways"});
+  c.lcStep("playback");
+  assert.equal(draft.name, "My coastal favourites", "revising content must preserve an explicit name");
+});
