@@ -1678,8 +1678,11 @@ fn apply_and_observe_progress_line(
 /// and its stdout — which carries `-progress` telemetry — into `progress`.
 #[derive(Clone, Copy, Default)]
 struct FfmpegDescriptors {
+    #[cfg(unix)]
     source: Option<std::os::fd::RawFd>,
+    #[cfg(unix)]
     output: Option<std::os::fd::RawFd>,
+    #[cfg(unix)]
     subtitle: Option<std::os::fd::RawFd>,
 }
 
@@ -4007,12 +4010,18 @@ async fn execute_prepublication_transcode_retry(
                         session.control.clone(),
                     ),
                     &retry.runtime_cache,
-                    FfmpegDescriptors {
-                        subtitle: session
-                            .subtitle_handle
-                            .as_ref()
-                            .map(std::os::fd::AsRawFd::as_raw_fd),
-                        ..FfmpegDescriptors::default()
+                    {
+                        #[cfg(unix)]
+                        let descriptors = FfmpegDescriptors {
+                            subtitle: session
+                                .subtitle_handle
+                                .as_ref()
+                                .map(std::os::fd::AsRawFd::as_raw_fd),
+                            ..FfmpegDescriptors::default()
+                        };
+                        #[cfg(windows)]
+                        let descriptors = FfmpegDescriptors::default();
+                        descriptors
                     },
                     retry.observation.clone(),
                 )
@@ -4975,7 +4984,7 @@ enum AttemptChildTerminal {
 
 enum AttemptChildCommand {
     Signal {
-        signal: libc::c_int,
+        signal: crate::process_control::ProcessSignal,
         reply: tokio::sync::oneshot::Sender<std::io::Result<bool>>,
     },
     Terminate {
@@ -5056,8 +5065,11 @@ impl AttemptChild {
                         };
                         match command {
                             AttemptChildCommand::Signal { signal, reply } => {
-                                let flow_signal =
-                                    signal == libc::SIGSTOP || signal == libc::SIGCONT;
+                                let flow_signal = matches!(
+                                    signal,
+                                    crate::process_control::ProcessSignal::Suspend
+                                        | crate::process_control::ProcessSignal::Resume
+                                );
                                 let result = loop {
                                     let deferred = {
                                         let transition = control.lock_producer_transition();
@@ -5110,7 +5122,8 @@ impl AttemptChild {
                                                 control.finish_producer_flow_applied(
                                                     &transition,
                                                     producer_attempt,
-                                                    signal == libc::SIGSTOP,
+                                                    signal
+                                                        == crate::process_control::ProcessSignal::Suspend,
                                                     matches!(&result, Ok(true)),
                                                 );
                                             }
@@ -5130,7 +5143,11 @@ impl AttemptChild {
                                 let _ = reply.send(result);
                             }
                             AttemptChildCommand::Terminate { reply } => {
-                                match signal_owned_pid(pid, producer_attempt, libc::SIGKILL) {
+                                match signal_owned_pid(
+                                    pid,
+                                    producer_attempt,
+                                    crate::process_control::ProcessSignal::Terminate,
+                                ) {
                                     Ok(_) => {
                                         if let Some(reply) = reply {
                                             terminate_replies.push(reply);
@@ -5309,7 +5326,7 @@ impl AttemptChild {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
     }
 
-    async fn signal(&self, signal: libc::c_int) -> std::io::Result<bool> {
+    async fn signal(&self, signal: crate::process_control::ProcessSignal) -> std::io::Result<bool> {
         if self
             .terminal
             .lock()
@@ -5462,27 +5479,17 @@ impl Drop for AttemptChild {
 fn signal_owned_pid(
     pid: Option<u32>,
     producer_attempt: u64,
-    signal: libc::c_int,
+    signal: crate::process_control::ProcessSignal,
 ) -> std::io::Result<bool> {
     let Some(pid) = pid else {
         return Ok(false);
     };
-    let pid = i32::try_from(pid).map_err(|_| {
-        std::io::Error::other(format!(
-            "producer attempt {producer_attempt} pid does not fit pid_t"
-        ))
-    })?;
-    // SAFETY: this runs only in the task that owns the unreaped Child. The pid
-    // cannot be reused until this task's later try_wait returns a status.
-    if unsafe { libc::kill(pid, signal) } == 0 {
-        return Ok(true);
-    }
-    let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        Ok(false)
-    } else {
-        Err(error)
-    }
+    crate::process_control::signal(pid, signal).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("signaling producer attempt {producer_attempt}: {error}"),
+        )
+    })
 }
 
 struct PreparedSharedCacheRead {
@@ -9696,6 +9703,7 @@ pub struct LocalSourceSnapshot {
 }
 
 impl LocalSourceSnapshot {
+    #[cfg(unix)]
     fn from_metadata(metadata: &std::fs::Metadata) -> Self {
         use std::os::unix::fs::MetadataExt;
         Self {
@@ -9706,6 +9714,22 @@ impl LocalSourceSnapshot {
             changed_nanos: metadata.ctime_nsec(),
             device: metadata.dev(),
             inode: metadata.ino(),
+        }
+    }
+
+    #[cfg(windows)]
+    fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        use std::os::windows::fs::MetadataExt as _;
+
+        let modified = metadata.last_write_time();
+        Self {
+            bytes: metadata.file_size(),
+            modified_secs: (modified / 10_000_000) as i64,
+            modified_nanos: ((modified % 10_000_000) * 100) as i64,
+            changed_secs: (modified / 10_000_000) as i64,
+            changed_nanos: ((modified % 10_000_000) * 100) as i64,
+            device: 0,
+            inode: metadata.creation_time() ^ modified.rotate_left(17),
         }
     }
 }
@@ -11333,6 +11357,7 @@ async fn ensure_cache_directory(
 /// Free bytes the queue may safely promise on the cache filesystem. Keep a
 /// fixed emergency margin for SQLite/Raft logs, manifests, and foreground
 /// session scratch that can arrive immediately after the claim decision.
+#[cfg(unix)]
 fn available_cache_scratch_bytes(path: &std::path::Path) -> Option<i64> {
     const EMERGENCY_MARGIN: u128 = 512 * 1024 * 1024;
     use std::os::unix::ffi::OsStrExt;
@@ -11356,6 +11381,34 @@ fn available_cache_scratch_bytes(path: &std::path::Path) -> Option<i64> {
         .saturating_sub(EMERGENCY_MARGIN)
         .min(i64::MAX as u128);
     Some(bytes as i64)
+}
+
+#[cfg(windows)]
+fn available_cache_scratch_bytes(path: &std::path::Path) -> Option<i64> {
+    const EMERGENCY_MARGIN: u64 = 512 * 1024 * 1024;
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let mut path = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if path.is_empty() || path.contains(&0) {
+        return None;
+    }
+    path.push(0);
+    let mut available = 0u64;
+    // SAFETY: the path is NUL-terminated and `available` is writable for the
+    // duration of the read-only filesystem query.
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+            path.as_ptr(),
+            &raw mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then(|| {
+        available
+            .saturating_sub(EMERGENCY_MARGIN)
+            .min(i64::MAX as u64) as i64
+    })
 }
 
 /// One atomically published answer to the operator's requested rate control.
@@ -16146,7 +16199,9 @@ impl TranscodeManager {
             // hardware is a second a viewer might want it. The value is
             // [`ProducerTuning::pacing`], which is `unpaced()` everywhere
             // except the one test that has to interrupt this encoder.
+            #[cfg(unix)]
             let mut descriptor_file;
+            #[cfg(unix)]
             let (ffmpeg_file, bound_source_fd) = if let Some(source) = &bound_source {
                 use std::os::fd::AsRawFd;
                 descriptor_file = file.clone();
@@ -16155,16 +16210,21 @@ impl TranscodeManager {
             } else {
                 (file, None)
             };
+            #[cfg(windows)]
+            let ffmpeg_file = file;
             // Linux resolves descendants below a directory descriptor through
             // procfs. Darwin's fdesc filesystem reopens `/dev/fd/4` itself but
             // does not resolve `/dev/fd/4/child`; `spawn_ffmpeg` therefore
             // anchors the macOS child cwd to descriptor 4 and the muxer uses a
             // relative path. Both routes remain bound to the held directory.
+            #[cfg(unix)]
             let output_directory = if cfg!(target_os = "macos") {
                 part_name.clone()
             } else {
                 format!("/dev/fd/4/{part_name}")
             };
+            #[cfg(windows)]
+            let output_directory = part_name.clone();
             let execution = TranscodeExecution::from_options(
                 ffmpeg_file,
                 &part_opts,
@@ -16191,10 +16251,16 @@ impl TranscodeManager {
                 hash,
                 FfmpegProgressObserver::offline(Arc::clone(&progress), generation),
                 &self.runtime_cache,
-                FfmpegDescriptors {
-                    source: bound_source_fd,
-                    output: Some(temp.raw_fd()),
-                    subtitle: subtitle_handle.map(std::os::fd::AsRawFd::as_raw_fd),
+                {
+                    #[cfg(unix)]
+                    let descriptors = FfmpegDescriptors {
+                        source: bound_source_fd,
+                        output: Some(temp.raw_fd()),
+                        subtitle: subtitle_handle.map(std::os::fd::AsRawFd::as_raw_fd),
+                    };
+                    #[cfg(windows)]
+                    let descriptors = FfmpegDescriptors::default();
+                    descriptors
                 },
                 observation.clone(),
             )?
@@ -19612,12 +19678,18 @@ impl TranscodeManager {
                         session.control.clone(),
                     ),
                     &self.runtime_cache,
-                    FfmpegDescriptors {
-                        subtitle: session
-                            .subtitle_handle
-                            .as_ref()
-                            .map(std::os::fd::AsRawFd::as_raw_fd),
-                        ..FfmpegDescriptors::default()
+                    {
+                        #[cfg(unix)]
+                        let descriptors = FfmpegDescriptors {
+                            subtitle: session
+                                .subtitle_handle
+                                .as_ref()
+                                .map(std::os::fd::AsRawFd::as_raw_fd),
+                            ..FfmpegDescriptors::default()
+                        };
+                        #[cfg(windows)]
+                        let descriptors = FfmpegDescriptors::default();
+                        descriptors
                     },
                     observation.clone(),
                 )
@@ -24051,9 +24123,9 @@ impl TranscodeManager {
             | crate::playback_control::ProducerFlowIntentionOutcome::Rejected => return,
         }
         let signal = if want_suspend {
-            libc::SIGSTOP
+            crate::process_control::ProcessSignal::Suspend
         } else {
-            libc::SIGCONT
+            crate::process_control::ProcessSignal::Resume
         };
         let sent = {
             let child = session.child.lock().await;
@@ -30138,14 +30210,17 @@ pub(crate) mod tests {
             None,
             "a newly admitted producer has no physical-flow acknowledgement"
         );
-        assert!(child.signal(libc::SIGSTOP).await.expect("supervised stop"));
+        assert!(child
+            .signal(crate::process_control::ProcessSignal::Suspend)
+            .await
+            .expect("supervised stop"));
         assert_eq!(
             control.producer_flow_applied_for_test(),
             Some((attempt, true)),
             "SIGSTOP is acknowledged for this attempt only after the supervisor's successful syscall"
         );
         assert!(child
-            .signal(libc::SIGCONT)
+            .signal(crate::process_control::ProcessSignal::Resume)
             .await
             .expect("supervised continue"));
         assert_eq!(
@@ -30192,7 +30267,7 @@ pub(crate) mod tests {
         assert!(control.reserve_producer_flow_capacity_for_test());
 
         {
-            let signal = child.signal(libc::SIGSTOP);
+            let signal = child.signal(crate::process_control::ProcessSignal::Suspend);
             tokio::pin!(signal);
             tokio::select! {
                 result = signal.as_mut() => panic!("full-capacity signal completed early: {result:?}"),
@@ -30230,7 +30305,7 @@ pub(crate) mod tests {
         assert!(control.reserve_producer_flow_capacity_for_test());
 
         {
-            let signal = child.signal(libc::SIGSTOP);
+            let signal = child.signal(crate::process_control::ProcessSignal::Suspend);
             tokio::pin!(signal);
             tokio::select! {
                 result = signal.as_mut() => panic!("full-capacity signal completed early: {result:?}"),
@@ -30267,7 +30342,11 @@ pub(crate) mod tests {
         child.pause_signal_after_flow_reservation(Arc::clone(&pause));
         let signal = {
             let child = Arc::clone(&child);
-            tokio::spawn(async move { child.signal(libc::SIGSTOP).await })
+            tokio::spawn(async move {
+                child
+                    .signal(crate::process_control::ProcessSignal::Suspend)
+                    .await
+            })
         };
 
         pause.wait();
@@ -30293,7 +30372,10 @@ pub(crate) mod tests {
         })
         .await
         .expect("actor-exit fence publishes retirement");
-        let sent = child.signal(libc::SIGCONT).await.expect("signal verdict");
+        let sent = child
+            .signal(crate::process_control::ProcessSignal::Resume)
+            .await
+            .expect("signal verdict");
         assert!(
             !sent,
             "no process signal can linearize after actor-task retirement"
@@ -30323,7 +30405,11 @@ pub(crate) mod tests {
         child.pause_signal_after_authorization(Arc::clone(&pause));
         let signal = {
             let child = Arc::clone(&child);
-            tokio::spawn(async move { child.signal(libc::SIGSTOP).await })
+            tokio::spawn(async move {
+                child
+                    .signal(crate::process_control::ProcessSignal::Suspend)
+                    .await
+            })
         };
 
         // The supervisor has authorized the exact attempt and still owns the
@@ -30372,7 +30458,7 @@ pub(crate) mod tests {
         );
         assert!(
             !child
-                .signal(libc::SIGCONT)
+                .signal(crate::process_control::ProcessSignal::Resume)
                 .await
                 .expect("retired signal verdict"),
             "no signal can land after the newer retirement fence"

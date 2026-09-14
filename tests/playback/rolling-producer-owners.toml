@@ -86,7 +86,10 @@ replacement = "retained as the sole OS-child supervisor, registered before publi
 [[symbols]]
 id = "physical-flow-signal"
 pattern = "child\\.signal\\("
-expected_occurrences = 7
+# 7 -> 3 for Windows portability: the four raw Unix signal sends moved behind
+# `process_control::signal`. The remaining three sites are AttemptChild calls
+# that retain exact actor attempt/revision authorization and acknowledgement.
+expected_occurrences = 3
 kind = "process_action"
 replacement = "retained behind exact actor attempt/revision authorization and acknowledgement"
 
@@ -2182,7 +2185,10 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # 39 -> 42: the bounded helper sends SIGKILL to its owned process group from
 # explicit cleanup and Drop, and its descendant regression checks that the
 # total wall-time owner cannot be held open by a background child.
-expected_occurrences = 42
+# 42 -> 43 for the one cross-platform process-control dispatch owned by
+# AttemptChild. It targets that supervisor's retained, unreaped child; the
+# platform module performs the OS-specific signal operation synchronously.
+expected_occurrences = 43
 
 [[module_structures]]
 id = "kill-on-drop-construction"

@@ -866,6 +866,7 @@ impl ArtworkFileIdentity {
     }
 }
 
+#[cfg(unix)]
 fn artwork_file_identity(metadata: &std::fs::Metadata) -> ArtworkFileIdentity {
     use std::os::unix::fs::MetadataExt;
     ArtworkFileIdentity {
@@ -874,6 +875,20 @@ fn artwork_file_identity(metadata: &std::fs::Metadata) -> ArtworkFileIdentity {
         bytes: metadata.len(),
         changed_secs: metadata.ctime(),
         changed_nanos: metadata.ctime_nsec(),
+    }
+}
+
+#[cfg(windows)]
+fn artwork_file_identity(metadata: &std::fs::Metadata) -> ArtworkFileIdentity {
+    use std::os::windows::fs::MetadataExt as _;
+
+    let changed = metadata.last_write_time();
+    ArtworkFileIdentity {
+        device: 0,
+        inode: metadata.creation_time() ^ changed.rotate_left(17),
+        bytes: metadata.file_size(),
+        changed_secs: (changed / 10_000_000) as i64,
+        changed_nanos: ((changed % 10_000_000) * 100) as i64,
     }
 }
 

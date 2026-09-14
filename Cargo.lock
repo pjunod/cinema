@@ -2550,6 +2550,7 @@ dependencies = [
  "tracing",
  "uuid",
  "walkdir",
+ "windows-sys 0.61.2",
  "zeroize",
  "zip",
 ]
@@ -2603,6 +2604,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

@@ -334,6 +334,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [HOMEVIDEO-PLAN.md](features/HOMEVIDEO-PLAN.md) | Home video and photos — the `home` libraries. | built |
 | [INTEGRATION-PLAN.md](features/INTEGRATION-PLAN.md) | plurx's side of the monarr pipeline. | built |
 | [WINDOWS-PORT-PLAN.md](features/WINDOWS-PORT-PLAN.md) | What a native `plurxd.exe` would take. | open |
+| [WINDOWS-PORT-STATUS.md](features/WINDOWS-PORT-STATUS.md) | What is built, blocked, and proved for the native Windows server effort. | open |
 
 ---
 

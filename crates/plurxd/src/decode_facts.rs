@@ -511,6 +511,11 @@ fn require_direct_probe_executable(file: &std::fs::File) -> Result<(), DecodeFac
     }
 }
 
+#[cfg(windows)]
+fn require_direct_probe_executable(_file: &std::fs::File) -> Result<(), DecodeFactError> {
+    Err(DecodeFactError::UnsupportedPlatform)
+}
+
 #[cfg(target_os = "linux")]
 fn require_self_contained_linux_elf(file: &std::fs::File) -> Result<(), DecodeFactError> {
     use std::os::unix::fs::FileExt;

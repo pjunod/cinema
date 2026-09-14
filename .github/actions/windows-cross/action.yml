@@ -1,0 +1,29 @@
+name: Windows MSVC cross-build
+description: Compile the Windows server with the repository-pinned cargo-xwin lane
+
+runs:
+  using: composite
+  steps:
+    - name: Install the pinned Windows target and cross-build driver
+      shell: bash
+      run: |
+        set -euo pipefail
+        rustup target add x86_64-pc-windows-msvc
+        if ! cargo xwin --version 2>/dev/null | grep -Fq '0.23.1'; then
+          cargo install cargo-xwin --version 0.23.1 --locked
+        fi
+        if ! command -v clang-cl >/dev/null 2>&1; then
+          clang="$(command -v clang)"
+          tool_dir="$RUNNER_TEMP/plurx-windows-toolchain"
+          mkdir -p "$tool_dir"
+          ln -sf "$clang" "$tool_dir/clang-cl"
+          echo "$tool_dir" >> "$GITHUB_PATH"
+        fi
+    - name: Build the Windows workspace
+      shell: bash
+      env:
+        AWS_LC_SYS_NO_ASM: "1"
+      run: >-
+        cargo xwin build --workspace --locked
+        --exclude plurx-cluster-check
+        --target x86_64-pc-windows-msvc
