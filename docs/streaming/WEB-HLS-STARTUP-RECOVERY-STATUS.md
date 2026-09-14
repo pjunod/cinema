@@ -1,6 +1,6 @@
 # Web HLS startup recovery — implementation status
 
-**Status:** locally qualified · hosted promotion pending · **Updated:** 2026-09-14 · **Base:**
+**Status:** locally qualified · hosted promotion queued · **Updated:** 2026-09-14 · **Base:**
 `28ae8163b52545730f4c65916bb2c8757eabb993` · **Branch:**
 `codex/web-hls-startup-recovery`
 
@@ -27,7 +27,7 @@ the contributor contract forbids using CI as a compiler.
 | S02 · bounded manifest recovery | qualified | One attachment owns 40 s cold / 20 s seek time, one shared corrective credit, explicit stock manifest policy, a 16-send final boundary, pause/resume rules, final-send ownership, and loader destruction | Complete |
 | S03 · truthful diagnosis | qualified | Failure evidence is attachment/resource/ordinal-bound and size-limited; terminal bodies preempt every retry; manifest, media, decoder, and presentation evidence are separate and telemetry omits capability URLs | Complete |
 | S04 · server phase attribution | qualified | Exact init inspection preserves pending, invalid, unsupported, unavailable, and producer/session terminal outcomes; storage uncertainty is distinct from absence; incomplete required HEVC records are invalid; the five-second outer bound remains | Complete |
-| S05 · qualification and promotion | hosted gate pending | The single adversarial review is complete, all nine findings are addressed, current main is integrated, and the local fast lane is green on code-and-test candidate `d226f44d` | Promote the status-only descendant through the Main promotion gate, then merge |
+| S05 · qualification and promotion | hosted gate queued | The single adversarial review is complete, all nine findings are addressed, current main is integrated, and the local fast lane is green on code-and-test candidate `d226f44d`; PR #311 is ready | Pass the exact status-only descendant through the Main promotion gate, then merge |
 
 ## Standing decisions — safety evidence advises but never gates
 
@@ -55,5 +55,5 @@ the contributor contract forbids using CI as a compiler.
 | Web fast lane | passed | `make web-check` on merged candidate `d226f44d`: shipped policy/controller contracts, 26/26 Settings sections, 63/63 surface cases, 484 contrast pairs with no new failures, and actual vendored hls.js playback in Headless Chrome 152 |
 | Browser recovery receipt | passed | Eight typed manifest refusals, 9 manifest requests total, first observed position 0.758 s; fixture SHA-256 `a708543b1bb974a7cbb2889e9039c79eba95e44b5551354bbec5b7faf5ff4915`; hls.js 1.6.16 |
 | Policy and operations | passed | History and validation catalogs clean; 198 validation tests (1 skipped), 356 operations tests, and 4 documentation-index tests pass |
-| Main promotion gate | pending | The status-only descendant still needs the hosted Forgejo receipt on its exact head |
+| Main promotion gate | queued | PR #311 is ready; its next status-only synchronization starts the exact-head hosted Forgejo receipt |
 | Main merge | pending | Merge is allowed only after that exact hosted head is green |
