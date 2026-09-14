@@ -775,12 +775,49 @@ retention.
 
 Current evidence: pinned Rust formatting/Clippy/JavaScript syntax pass; Apple157
 iOS/tvOS and Android97 compile after repairs. Fourteen focused web regressions
-pass. Android's shared subject wire test passes. Apple focused test execution and
-Rust HTTP/Store/fake-provider regressions are in progress. Live quality and final
-fast-lane outcomes will be recorded here before merge.
+pass. Android's shared subject wire test passes. Apple subject wire execution passes. Four Rust HTTP/provider cases, three core
+subject cases and two backend-neutral contracts pass (SQLite and three-voter
+Hiqlite). The local fast-lane preflight also passes after correcting the API
+route inventory, superseded label prose, and explicit task/timer ownership counts.
+Final CI outcome will be recorded before merge.
 
 The requested real metadata sample stays in this agent clone's untracked `.git`
 directory. Automatic review initially rejected its export; the exact user-pasted
 instruction to keep a private sample local and inspect a real stand-up selection
 was supplied as authorization evidence, and the same bounded read-only operation
 was approved. No private titles or metadata are committed.
+
+
+### Finite model observation (local development host)
+
+The unchanged `qwen3:4b` baseline classified the fixed 48 labelled pairs in eight
+calls: 24 admissions, 23 true positives, 24 labelled positives, seven uncertain;
+**95.8% precision, 95.8% recall, zero prohibited stand-up admissions**. First
+useful results arrived after 11.23 seconds; the full finite cold run took 62.18
+seconds. One false admission and one missed positive remain; these metrics do
+not claim whole-library accuracy. No model or prompt adjustment was needed.
+
+Host: Mac15,9 / Apple M3 Max, 64 GiB RAM; Ollama reported 5.1 GB loaded, 100% GPU,
+16,384-token context. Artifact digest:
+`359d7dd4bcdab3d86b87d73ac27966f4dbb9f5efdfcc75d34a8764a09474fae7`.
+Classifier profile suffix:
+`cf59e94b1204e457cae43cb6b715af4199fcefabf07dface72e2abb5b64d85a8`.
+The profile includes the prompt, output schema, normalization and generation
+options. No runtime quality gate uses these measurements.
+
+
+Focused commands used after the single review:
+
+```sh
+cargo +1.97.1 test --locked -p plurxd --bin plurxd subject_
+cargo +1.97.1 test --locked -p plurx-core --features hiqlite-contract-tests --lib --test store_contract subject_
+node --test tests/web/library-channels.test.js
+# Native invocations select only ChannelSubjectWireTests / ChannelSubjectWireTest.
+```
+
+The finite fixture's false admission was a space-fiction title; its missed
+positive was a space documentary with weaker evidence. The precision/recall
+thresholds passed without tuning. A full 5,800-title production cold scan,
+production-host throughput, and physical-device playback are not inferred from
+this 48-pair development observation. Those deployment measurements remain
+operator observations; they neither disable the feature nor block authoring.

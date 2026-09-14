@@ -1913,3 +1913,12 @@ source = "crates/plurxd/src/web/index.html"
 source_anchor = "function libraryChannelDraftKey("
 test = "tests/web/library-channels.test.js"
 test_anchor = "Create never resumes an old edit ID, including legacy stored drafts"
+
+
+[[fixes]]
+id = "clients.subject-save-attempt-survives-late-preview"
+commits = ["3cd9b6e5"]
+source = "crates/plurxd/src/web/index.html"
+source_anchor = "const body=draft.saveBody||"
+test = "tests/web/library-channels.test.js"
+test_anchor = "a preview seed arriving after a lost save cannot change the retry body"

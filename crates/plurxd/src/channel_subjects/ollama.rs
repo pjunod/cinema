@@ -314,6 +314,7 @@ mod tests {
         let mut results = Vec::new();
         let mut first_useful_seconds = None;
         let mut calls = 0;
+        let mut unprocessed = 0;
         for group in fixtures["groups"].as_array().expect("groups") {
             let subject = group["subject"].as_str().expect("subject");
             for chunk in group["pairs"].as_array().expect("pairs").chunks(BATCH_SIZE) {
@@ -332,20 +333,33 @@ mod tests {
                         )
                     })
                     .collect::<Vec<_>>();
-                let rows = provider
+                let mut rows = provider
                     .classify(subject, &batch)
                     .await
                     .expect("classification");
                 calls += 1;
                 for (index, pair) in chunk.iter().enumerate() {
-                    let decision = rows.get(&format!("b{index}")).expect("decision");
+                    let id = format!("b{index}");
+                    if !rows.contains_key(&id) {
+                        calls += 1;
+                        if let Ok(retried) =
+                            provider.classify(subject, &[batch[index].clone()]).await
+                        {
+                            rows.extend(retried);
+                        }
+                    }
+                    let expected = pair["expected"].as_str().expect("label");
+                    positive += usize::from(expected == "match");
+                    let Some(decision) = rows.get(&id) else {
+                        unprocessed += 1;
+                        results.push(json!({"subject":group["name"],"title":pair["fields"]["title"],"expected":expected,"error":"invalid_row_after_retry"}));
+                        continue;
+                    };
                     if first_useful_seconds.is_none()
                         && decision.verdict == plurx_core::channel_subjects::Verdict::Match
                     {
                         first_useful_seconds = Some(started.elapsed().as_secs_f64());
                     }
-                    let expected = pair["expected"].as_str().expect("label");
-                    positive += usize::from(expected == "match");
                     if decision.verdict == plurx_core::channel_subjects::Verdict::Match {
                         accepted += 1;
                         true_positive += usize::from(expected == "match");
@@ -359,7 +373,7 @@ mod tests {
                 }
             }
         }
-        let report = json!({"profile":profile,"calls":calls,"first_useful_seconds":first_useful_seconds,"elapsed_seconds":started.elapsed().as_secs_f64(),"pairs":results.len(),"accepted":accepted,"true_positive":true_positive,"positives":positive,"precision":true_positive as f64/accepted.max(1) as f64,"recall":true_positive as f64/positive.max(1) as f64,"uncertain":uncertain,"standup_prohibited_admissions":prohibited,"results":results});
+        let report = json!({"profile":profile,"calls":calls,"unprocessed":unprocessed,"first_useful_seconds":first_useful_seconds,"elapsed_seconds":started.elapsed().as_secs_f64(),"pairs":results.len(),"accepted":accepted,"true_positive":true_positive,"positives":positive,"precision":true_positive as f64/accepted.max(1) as f64,"recall":true_positive as f64/positive.max(1) as f64,"uncertain":uncertain,"standup_prohibited_admissions":prohibited,"results":results});
         println!("{report}");
         if let Ok(path) = std::env::var("PLURX_SUBJECT_EVAL_OUTPUT") {
             std::fs::write(path, serde_json::to_vec_pretty(&report).expect("report"))
@@ -368,6 +382,7 @@ mod tests {
         if positive == 0 {
             return;
         } // Unlabelled private samples are inspected, never scored as ground truth.
+        assert_eq!(unprocessed, 0, "bounded retry exhausted");
         assert_eq!(prohibited, 0, "standup explicit negatives");
         assert!(
             true_positive as f64 / accepted.max(1) as f64 >= 0.9,
