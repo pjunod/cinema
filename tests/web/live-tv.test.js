@@ -1310,6 +1310,45 @@ async function main() {
     }
   });
 
+  await test("an on-air programme offers all four verbs, not just Watch", () => {
+    // The defect this pins: the grid's click handler used to tune the channel
+    // and return whenever the cell was airing, so the popover never opened and
+    // Record, Record series and the tuner sentence were reachable only on a
+    // FUTURE programme. "Record what I am watching" had no path on the web.
+    const now = 1_000_000;
+    const onAir = { title: "CBS Mornings", start: now - 600, end: now + 3000 };
+    const acts = liveTv.dvrAiringActions(onAir, null, null, now);
+    assert.equal(acts.watch, "now", "an airing programme can be tuned");
+    assert.equal(acts.record, "record", "and it can be recorded — this is the case that was unreachable");
+    assert.equal(acts.series, true, "and a series rule can be made from it");
+    // A reminder about something already started is about the past, and the
+    // route answers `airing_past`, so this one is correctly absent.
+    assert.equal(acts.remind, null);
+
+    // And the shipped handler must not short-circuit before the popover. Read
+    // the real source rather than a copy of it: every cell has to reach
+    // `liveTvPopover` the same way, whatever it is doing right now.
+    const handler = shell.slice(
+      shell.indexOf("function liveTvGridCell("),
+      shell.indexOf("function liveTvPopover("),
+    );
+    assert.ok(handler.length > 0, "liveTvGridCell is still in the shell");
+    assert.ok(
+      handler.includes("liveTvPopover("),
+      "the cell handler opens the popover",
+    );
+    assert.ok(
+      !/if\s*\(\s*airing\s*\)/.test(handler),
+      "no `if (airing)` short-circuit: that is the line that hid Record on everything on air",
+    );
+    assert.ok(
+      !/\breturn\b[^;]*;[\s\S]*liveTvPopover\(/.test(
+        handler.replace(/\/\/[^\n]*/g, ""),
+      ),
+      "nothing returns before the popover call",
+    );
+  });
+
   await test("gridLayout places every cell where the shared cases say, and never overlaps", () => {
     const g = CASES.grid;
     const layout = liveTv.gridLayout(

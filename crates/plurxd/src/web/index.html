@@ -16282,7 +16282,7 @@ function liveTvGridMarkup(visible,selected){
         style="left:${cell.left}px;width:${Math.max(cell.width-4,12)}px"
         title="${esc(cell.programme.title)} · ${esc(liveTvClock(cell.programme.start))}–${esc(liveTvClock(cell.programme.end))}"
         data-channel="${esc(row.channel.id)}" data-cell="${index}"
-        onclick="liveTvGridCell('${esc(row.channel.id)}',${index},${cell.airing})">${esc(cell.programme.title)}${liveTvMarks(row.channel.id,cell.programme,false)}</button>`;
+        onclick="liveTvGridCell('${esc(row.channel.id)}',${index})">${esc(cell.programme.title)}${liveTvMarks(row.channel.id,cell.programme,false)}</button>`;
     }).join("");
     const marker=ends===null?"":`<div class="lt-cell ends" style="left:${((ends-window.start)/slot)*px}px;width:150px">Guide data ends ${esc(liveTvClock(ends))}</div>`;
     return `<div class="lt-grow">
@@ -16359,8 +16359,15 @@ function liveTvSelect(id){
   watchLiveTv(index);
   renderLiveTvChannels();
 }
-function liveTvGridCell(channelId,index,airing){
-  if(airing){ liveTvSelect(channelId); return; }
+function liveTvGridCell(channelId,index){
+  // An airing cell used to tune the channel and return here, which predates
+  // this cell having verbs at all. It meant the popover — and with it Record,
+  // Record series and the tuner sentence — was reachable only on a FUTURE
+  // programme, so the one case a viewer asks for most, "record what I am
+  // watching", had no path on the web at all. `dvrAiringActions` has always
+  // answered for an on-air programme (`watch: "now"`, `record: "record"`), and
+  // the popover puts Watch first, so opening it costs one click and unlocks
+  // the other three verbs.
   // Index into the SAME array the cell came from. `gridLayout` clips to the
   // drawn window while the server deliberately ships an hour of backfill, so
   // indexing the unclipped `programmes` was reliably off by however many
