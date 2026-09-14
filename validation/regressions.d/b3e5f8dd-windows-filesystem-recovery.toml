@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b3e5f8dd"]
+points = ["server.api"]
+checks = ["rust-gate"]
+reason = "The retained server regressions exercise scanner-bound direct-file length checks, permanent Dolby Vision publication and recovery, bounded conversion-tool ownership, credential-key startup, and WAL backup validation; the affected-surface fast lane additionally compiles the same paths for Windows MSVC."
