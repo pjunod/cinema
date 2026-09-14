@@ -1458,7 +1458,9 @@ assert.equal(context.ACT_TIMER, null);
         ):
             jobs = workflow_job_blocks(workflow_path)
             self.assertIn("windows_compile", jobs)
-            self.assertIn("lld llvm nodejs pkg-config", jobs["windows_compile"])
+            self.assertIn(
+                "lld llvm ninja-build nodejs pkg-config", jobs["windows_compile"]
+            )
             self.assertIn("uses: ./.github/actions/windows-cross", jobs["windows_compile"])
             self.assertIn("windows_compile", workflow_job_needs(jobs[gate_name]))
             self.assertIn("WINDOWS_RESULT", jobs[gate_name])
