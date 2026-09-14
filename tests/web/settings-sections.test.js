@@ -325,7 +325,7 @@ test("Developer owns experimental enablement and keeps readiness advisory", () =
     "the server-wide experimental enable must not remain in everyday Playback settings",
   );
   const panels = new Function(
-    "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc",
+    "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc", "window", "Hls",
     // Joined with newlines, never bare interpolation: `shippedSource` here
     // stops at the next `\nfunction `, so a fragment can end inside a trailing
     // `//` comment and swallow whatever follows it.
@@ -342,6 +342,7 @@ test("Developer owns experimental enablement and keeps readiness advisory", () =
       // The panel is composed here from the shipped source, so a card it calls
       // has to be composed too or the panel throws on the name.
       shippedSource("windowsServerCard"),
+      shippedSource("webHlsStartupRecoveryCard"),
       shippedSource("developerPanel"),
       shippedSource("liveTvPanel"),
       "return {developerPanel,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard};",
@@ -357,6 +358,8 @@ test("Developer owns experimental enablement and keeps readiness advisory", () =
       `TOG:${id}|${label}|${note}|checked=${!!checked}|${attrs || ""}`,
     (fn) => `FOOT:${fn}`,
     esc,
+    { Hls: { DefaultConfig: { loader: function StockLoader() {} } } },
+    { DefaultConfig: { loader: function StockLoader() {} } },
   );
   const readiness = { items: [{
     id: "prepared_quality_handoff",
@@ -397,6 +400,10 @@ test("Developer owns experimental enablement and keeps readiness advisory", () =
   // that stops existing.
   assert.match(html, /CARDHEAD:Playback surface contract\|/);
   assert.match(html, /Nothing on this card is a switch/);
+  assert.match(html, /CARDHEAD:Web HLS startup recovery\|/);
+  assert.match(html, /Final-send loader interception/);
+  assert.match(html, /Recovery is enabled for every hls\.js attachment/);
+  assert.match(html, /These checks[^.]*never enable, disable, or hide it/);
   assert.match(html, /This saved switch is authoritative; readiness is advisory and never overrides your choice/);
   // The switch has to be wired to something. A control that renders and does
   // nothing is worse than no control: it reports a capability to the operator
