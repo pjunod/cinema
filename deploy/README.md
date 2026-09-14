@@ -91,6 +91,43 @@ with `docker compose exec plurxd id`, prove that account can create, hard-link,
 sync, rename, and remove a sibling test file on the real mount, then delete the
 test artifacts before enabling conversion.
 
+### Recording needs a writable DVR root, and nothing gives it one by default
+
+Every media mount this stack ships is read-only, which is the right default and
+is also why turning `dvr.enabled` on, by itself, does nothing: the DVR has
+nowhere to write. **Recording requires a bind that the shipped Compose file does
+not create for you.** Add it in `docker-compose.override.yml`:
+
+```yaml
+services:
+  plurxd:
+    volumes:
+      - /mnt/shared/plurx-dvr:/dvr:rw
+```
+
+Then set `dvr.root` in Settings to the **container** path (`/dvr` above).
+
+Two requirements, and the second is the one that bites:
+
+- **Writable** by the uid the container runs as (`PUID`:`PGID`). Create the host
+  directory owned by that account before the first start.
+- **The same underlying filesystem on every node.** The owner node writes the
+  capture and any node may serve it back through the ordinary VOD path, so a
+  path that exists on one node only produces recordings the rest of the fleet
+  cannot play. In a cluster this means a real shared filesystem — the same
+  requirement the shared cache has, for the same reason.
+
+Do not satisfy this by making the `/media` bind writable. Keep the DVR root a
+separate path outside the read-only media root, exactly as permanent Dolby
+Vision conversion keeps its opted-in library separate above.
+
+Settings → Developer lists what recording needs and whether each part is met.
+**It is advisory and gates nothing**, and two of its rows cannot be answered
+from inside the product: a node sees its own filesystem and no peer's, so
+"Every node can read the DVR root" is reported `Unobservable` rather than
+`Met`. Check that one yourself with `ls` on each node — `Unobservable` is not
+`Met`.
+
 When `PLURX_SERVER_NAME` is still the default `plurx`, the companion advertises
 the Docker host name plus its LAN address, so a picker says
 `m6 · 192.168.1.20` instead of showing another anonymous `plurx` row. Set a
