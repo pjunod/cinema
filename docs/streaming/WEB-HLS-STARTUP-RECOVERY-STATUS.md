@@ -23,11 +23,11 @@ the contributor contract forbids using CI as a compiler.
 
 | Work order | State | Current evidence | Exit condition |
 |---|---|---|---|
-| S01 · reproduce both defects | implemented, untested | Shipped-helper coverage drives unloaded-manifest and established-stream recovery separately; the contract asserts the vendored loader's final-send seam | Deferred fast lane rejects `startLoad` on an unloaded manifest and playlist-only decoder diagnosis |
-| S02 · bounded manifest recovery | implemented, untested | One attachment owns 40 s cold / 20 s seek time, one shared corrective credit, explicit stock manifest policy, a 16-send final boundary, pause/resume rules, and loader destruction | Review accepts ownership/cancellation; deferred controller and policy contracts pass |
-| S03 · truthful diagnosis | implemented, untested | Failure evidence is attachment/ordinal-bound; auth and typed terminal bodies preempt stock retry; manifest, media, and presentation exhaustion have different copy and the startup surface has only Close/Try again | Review accepts precedence; generated surface contract and browser contracts pass |
-| S04 · server phase attribution | implemented, untested | Exact init inspection returns fenced `startup_timeout`, `hls_init_invalid`, `hls_init_unsupported`, or `init_inspection_unavailable`; producer/session terminal responses survive; five-second outer bound remains | Rust compile and deferred focused HLS tests pass |
-| S05 · qualification and promotion | deferred | No test result is claimed during implementation | One adversarial review, addressed findings, exact-head fast lane, then merge |
+| S01 · reproduce both defects | review-corrected, untested | Shipped-helper coverage separates unloaded-manifest and established-stream recovery; actual vendored-loader coverage and a delayed-manifest shipped-page browser check are wired into the fast lane | Exact-head controller and browser evidence pass |
+| S02 · bounded manifest recovery | review-corrected, untested | One attachment owns 40 s cold / 20 s seek time, one shared corrective credit, explicit stock manifest policy, a 16-send final boundary, pause/resume rules, final-send ownership, and loader destruction | Exact-head controller and policy contracts pass |
+| S03 · truthful diagnosis | review-corrected, untested | Failure evidence is attachment/resource/ordinal-bound and size-limited; terminal bodies preempt every retry; manifest, media, decoder, and presentation evidence are separate and telemetry omits capability URLs | Generated surface, controller, and browser contracts pass |
+| S04 · server phase attribution | review-corrected, compile-passed | Exact init inspection preserves pending, invalid, unsupported, unavailable, and producer/session terminal outcomes; storage uncertainty is distinct from absence; incomplete required HEVC records are invalid; the five-second outer bound remains | Focused HLS tests pass |
+| S05 · qualification and promotion | fast lane pending | The single adversarial review is complete and all nine findings are addressed by `38b423c9` | Exact-head fast lane, then merge |
 
 ## Standing decisions — safety evidence advises but never gates
 
@@ -49,7 +49,7 @@ the contributor contract forbids using CI as a compiler.
 | Evidence | State | Receipt |
 |---|---|---|
 | Rust 1.97.1 compiler baseline | passed | `cargo check -p plurxd --all-targets --locked` on base `11ca0573`; one pre-existing `AttemptChild::new` dead-code warning |
-| Adversarial implementation review | not run | Runs once after the complete candidate is frozen |
-| Review corrections | not run | Every accepted finding will name its correcting commit |
+| Adversarial implementation review | complete | One pass against `3c3687a1`: four P1 and five P2 findings; no second review requested or run |
+| Review corrections | complete | `38b423c9` fixes terminal retry precedence, established retry ownership, target-position presentation proof, actual loader/browser coverage, resource-scoped evidence ordering, unavailable storage classification, required HEVC record classification, bounded typed bodies, and sanitized episode telemetry |
 | Fast lane | not run | Runs only after review corrections on the exact PR head |
 | Main merge | not run | Merge is allowed only if the reviewed head and green fast-lane head are identical |
