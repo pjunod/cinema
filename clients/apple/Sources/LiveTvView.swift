@@ -3302,9 +3302,19 @@ struct LiveTvView: View {
                 .focusable(!overlayVisible && !temporaryGuide)
                 .focused($focusedControl, equals: FocusTarget.reveal)
                 .accessibilityHidden(true)
+                // `liveInputState`, never a hardcoded `.fullscreenHidden`.
+                // This layer takes every direction through `onMoveCommand`,
+                // so while it holds focus the engine never sees one - and
+                // `focusable(false)` does not relocate focus until the next
+                // focus update, so it can hold focus for a moment after the
+                // overlay is back. Asserting the hidden state made that
+                // moment permanent: every direction routed to `reveal`, which
+                // re-showed an overlay that was already up. Reporting the
+                // real state routes it to `focusControl` instead, which
+                // returns false and lets the framework move focus off.
                 .liveTvRemoteAdapter(
                     .revealSurface,
-                    state: { .fullscreenHidden },
+                    state: { liveInputState },
                     apply: { outcome, _ in applyLiveOutcome(outcome) }
                 )
             #endif
@@ -3439,17 +3449,28 @@ struct LiveTvView: View {
         #endif
         .task(id: overlayGeneration) {
             guard overlayVisible, !temporaryGuide, !showingInfo, !showingMore, !showingLayout,
-                  live.playing, !live.paused else { return }
+                  detail == nil, live.playing, !live.paused else { return }
             try? await Task.sleep(nanoseconds: LiveTvInputRouting.overlayAutoHideNanoseconds)
             guard !Task.isCancelled, !temporaryGuide, !showingInfo, !showingMore, !showingLayout,
-                  live.playing, !live.paused else { return }
+                  detail == nil, live.playing, !live.paused else { return }
             overlayVisible = false
         }
         #if os(tvOS)
         .onAppear { focusedControl = overlayVisible ? .play : .reveal }
         .onChange(of: overlayVisible) { _, visible in
             if visible {
-                focusedControl = .play
+                // Deferred like the hide direction below, and for the same
+                // reason: the buttons are inserted by this very update, and
+                // tvOS drops a `@FocusState` aimed at a view that does not
+                // exist yet. Undeferred, the assignment was dropped, focus
+                // stayed on the reveal layer, and because it had not changed
+                // the bounce in `onChange(of: focusedControl)` never ran.
+                focusedControl = nil
+                Task { @MainActor in
+                    await Task.yield()
+                    guard fullscreen, overlayVisible else { return }
+                    focusedControl = .play
+                }
             } else {
                 focusedControl = nil
                 Task { @MainActor in
