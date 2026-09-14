@@ -4174,7 +4174,8 @@ fn schema_migration_action(
         | RECOVERY_EPOCH_SCHEMA_MIGRATION_SOURCE
         | OFFLINE_RECOVERY_CLAIM_SCHEMA_MIGRATION_SOURCE
         | LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE
-        | LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE => {
+        | LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE
+        | DVR_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -6052,9 +6053,18 @@ mod tests {
             "v35 must advance exactly one step to the channel build-state schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 31,
+            DVR_SCHEMA_MIGRATION_SOURCE, LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION,
+            "the DVR migration must start from the exact v36 shape"
+        );
+        assert_eq!(
+            DVR_SCHEMA_MIGRATION_SOURCE + 1,
+            DVR_SCHEMA_VERSION,
+            "v36 must advance exactly one step to the DVR schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 32,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v36 step"
+            "this implementation contains every additive v5→v37 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
@@ -6253,6 +6263,14 @@ mod tests {
             )
             .expect("channel build-state predecessor"),
             SchemaMigrationAction::MigrateFrom(LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(DVR_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("DVR predecessor"),
+            SchemaMigrationAction::MigrateFrom(DVR_SCHEMA_MIGRATION_SOURCE)
         );
 
         for rows in [Vec::new(), vec![row(4)], vec![row(7), row(7)]] {
