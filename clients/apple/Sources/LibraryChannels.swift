@@ -32,6 +32,7 @@ enum LibraryChannelOrdering: String, Codable, CaseIterable, Identifiable {
 
 struct LibraryChannelRecipe: Codable, Equatable {
     var version = 1
+    var subject: String?
     var libraryIds: [Int] = []
     var kinds: [String] = ["movie", "episode"]
     var genresAny: [String] = []
@@ -47,6 +48,28 @@ struct LibraryChannelRecipe: Codable, Equatable {
     var includeSpecials = false
     var autoRefresh = true
     var matchAllInScope = false
+    enum CodingKeys: String, CodingKey { case version, subject, libraryIds, kinds, genresAny, tagsAny, keywordsAny, yearMin, yearMax, includeItemIds, includeShowIds, excludeItemIds, excludeShowIds, ordering, includeSpecials, autoRefresh, matchAllInScope }
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(version, forKey: .version)
+        try c.encode(subject, forKey: .subject)
+        try c.encode(libraryIds, forKey: .libraryIds)
+        try c.encode(kinds, forKey: .kinds)
+        try c.encode(genresAny, forKey: .genresAny)
+        try c.encode(tagsAny, forKey: .tagsAny)
+        try c.encode(keywordsAny, forKey: .keywordsAny)
+        try c.encode(yearMin, forKey: .yearMin)
+        try c.encode(yearMax, forKey: .yearMax)
+        try c.encode(includeItemIds, forKey: .includeItemIds)
+        try c.encode(includeShowIds, forKey: .includeShowIds)
+        try c.encode(excludeItemIds, forKey: .excludeItemIds)
+        try c.encode(excludeShowIds, forKey: .excludeShowIds)
+        try c.encode(ordering, forKey: .ordering)
+        try c.encode(includeSpecials, forKey: .includeSpecials)
+        try c.encode(autoRefresh, forKey: .autoRefresh)
+        try c.encode(matchAllInScope, forKey: .matchAllInScope)
+    }
+
 }
 
 struct LibraryChannelOccurrence: Codable, Equatable {
@@ -156,6 +179,32 @@ struct LibraryChannelPreview: Codable {
     let firstTen: [Entry]
     let previewSeed: String
     let excludedCount: Int
+}
+
+struct SubjectPreviewRequest: Codable {
+    let recipe: LibraryChannelRecipe
+    let requestId: String
+    let previewSeed: String?
+}
+struct SubjectPreview: Codable {
+    struct Row: Codable, Identifiable {
+        let itemId: String
+        let title: String
+        let verdict: String
+        let reason: String
+        var id: String { itemId }
+    }
+    let jobId: String
+    let state: String
+    let total: Int
+    let processed: Int
+    let matched: Int
+    let uncertain: Int
+    let complete: Bool
+    let error: String?
+    let rows: [Row]
+    let nextCursor: String?
+    let previewSeed: String
 }
 
 struct LibraryChannelFavouriteRequest: Codable { let favourite: Bool }
@@ -954,6 +1003,13 @@ private struct LibraryChannelEditor: View {
     @State private var excludeShowIds: [Int] = []
     @State private var searchText = ""
     @State private var searchResults: [Item] = []
+    @State private var subject = ""
+    @State private var subjectPreview: SubjectPreview?
+    @State private var subjectRecipe: LibraryChannelRecipe?
+    @State private var subjectJobId: String?
+    @State private var subjectFilter = "match"
+    @State private var showAdvanced = false
+    @State private var requestId = UUID().uuidString
     @State private var preview: LibraryChannelPreview?
     @State private var previewSeed: String?
     @State private var busy = false
@@ -961,14 +1017,18 @@ private struct LibraryChannelEditor: View {
     @State private var canShare = false
     @State private var step = 0
 
-    var body: some View {
+    private var editorForm: some View {
         Form {
             if step == 0 { Section("1 · Content") {
+                TextField("Subject — describe what belongs and what to exclude", text: $subject, axis: .vertical)
+                Text("Save at any time. Matching continues in the background.").font(.caption)
+                Button("Stand-up comedy") { setSubject("Stand-up comedy performances and specials. Exclude sitcoms, comedy movies, talk shows, and documentaries about comedians.") }
+
                 HStack {
-                    Button("Space docs") { genres = "Documentary"; keywords = "space, astronomy, mars"; matchAllInScope = false }
-                    Button("’90s comedy") { genres = "Comedy"; yearMin = "1990"; yearMax = "1999"; matchAllInScope = false }
-                    Button("Film noir") { genres = "Film Noir, Crime"; keywords = "noir"; matchAllInScope = false }
-                    Button("All in scope") { genres = ""; tags = ""; keywords = ""; yearMin = ""; yearMax = ""; matchAllInScope = true }
+                    Button("Space docs") { setSubject("Documentaries about space exploration and astronomy.") }
+                    Button("’90s comedy") { setSubject("Comedy films and television episodes released between 1990 and 1999.") }
+                    Button("Film noir") { setSubject("Film noir crime stories with morally ambiguous characters and a dark, fatalistic style.") }
+                    Button("All in scope") { subject = ""; genres = ""; tags = ""; keywords = ""; yearMin = ""; yearMax = ""; matchAllInScope = true }
                 }
                 Toggle("Movies", isOn: $movies)
                 Toggle("Episodes", isOn: $episodes)
@@ -981,10 +1041,13 @@ private struct LibraryChannelEditor: View {
                         }
                     ))
                 }
+                Button(showAdvanced ? "Hide advanced metadata filters" : "Advanced metadata filters") { showAdvanced.toggle() }
+                if showAdvanced {
                 TextField("Genres, comma separated", text: $genres)
                 TextField("Tags, comma separated", text: $tags)
                 TextField("Title keywords, comma separated", text: $keywords)
                 HStack { TextField("From year", text: $yearMin); TextField("Through year", text: $yearMax) }
+                }
                 TextField("Search movies, series, episodes", text: $searchText)
                 Button("Search titles") { Task { await searchTitles() } }
                     .disabled(busy || searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -1007,13 +1070,13 @@ private struct LibraryChannelEditor: View {
                     ForEach(excludeShowIds, id: \.self) { id in Button("Remove excluded series \(id)") { excludeShowIds.removeAll { $0 == id } } }
                 }
                 Button("Preview matches") { Task { await loadPreview() } }.disabled(busy || (!movies && !episodes))
+                subjectResults
                 if let preview {
                     Text("\(preview.eligibleCount) titles · \(preview.repeatDescription)")
-                    ForEach(preview.firstTen) { entry in
-                        let match = preview.matches.first { $0.candidate.itemId == entry.itemId }
+                    ForEach(preview.matches) { match in
                         VStack(alignment: .leading) {
-                            Text(match?.candidate.title ?? "Title \(entry.itemId)")
-                            Text(match?.reasons.joined(separator: " · ") ?? "scheduled").font(.caption).foregroundStyle(.secondary)
+                            Text(match.candidate.title)
+                            Text(match.reasons.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
                         }
                     }
                 }
@@ -1048,18 +1111,38 @@ private struct LibraryChannelEditor: View {
                 }
             }
         }
+    }
+
+    var body: some View {
+        editorForm
         .navigationTitle(channel == nil ? "Make a channel" : "Edit channel")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button(step == 0 ? "Cancel" : "Back") { if step == 0 { persistDraft(); dismiss() } else { step -= 1 } }
             }
             ToolbarItem(placement: .confirmationAction) {
-                if step < 2 { Button("Next") { step += 1 }.disabled(busy || (step == 0 && !movies && !episodes)) }
+                if step < 2 { HStack { Button("Next") { step += 1 }.disabled(busy || (step == 0 && !movies && !episodes)); Button("Save") { Task { await save() } }.disabled(busy || !valid) } }
                 else { Button("Save") { Task { await save() } }.disabled(busy || !valid) }
             }
         }
         .onAppear { loadChannel(); restoreDraft(); applySeed() }
-        .onChange(of: scenePhase) { _, phase in if phase != .active { persistDraft() } }
+        .onDisappear { persistDraft() }
+        .onChange(of: subject) { _, value in if channel == nil && name.isEmpty { name = String(value.unicodeScalars.prefix(80)) } }
+        .onChange(of: recipe) { _, _ in requestId = UUID().uuidString; if recipe != subjectRecipe { subjectJobId = nil; subjectPreview = nil }; persistDraft() }
+        .onChange(of: name) { _, _ in requestId = UUID().uuidString }
+        .onChange(of: description) { _, _ in requestId = UUID().uuidString }
+        .onChange(of: enabled) { _, _ in requestId = UUID().uuidString }
+        .onChange(of: visibility) { _, _ in requestId = UUID().uuidString }
+        .task(id: "\(subjectJobId ?? ""): \(subjectFilter)") {
+            guard subjectJobId != nil else { return }
+            let captured = recipe
+            repeat {
+                await pollSubject()
+                if captured != recipe || subjectPreview?.complete == true || ["cancelled", "failed", "superseded"].contains(subjectPreview?.state ?? "") { return }
+                try? await Task.sleep(for: .seconds(subjectPreview?.state == "waiting_for_provider" ? 10 : 2))
+            } while !Task.isCancelled
+        }
+        .onChange(of: scenePhase) { (_: ScenePhase, phase: ScenePhase) in if phase != ScenePhase.active { persistDraft() } }
         .task {
             if let user = try? await model.requireAPI().me() {
                 canShare = user.isAdmin == true
@@ -1069,9 +1152,42 @@ private struct LibraryChannelEditor: View {
         .interactiveDismissDisabled(dirty)
     }
 
+    @ViewBuilder private var subjectResults: some View {
+                if let result = subjectPreview {
+                    Text("\(result.matched) matches; checked \(result.processed) of \(result.total)")
+                    Text(result.complete ? "Scan complete" : "Partial selection · \(result.state)").font(.caption)
+                    if let error = result.error { Text(error).font(.caption) }
+                    Picker("Results", selection: $subjectFilter) {
+                        Text("Matched").tag("match"); Text("Uncertain").tag("uncertain"); Text("Excluded").tag("no_match")
+                    }
+                    ForEach(result.rows) { row in subjectRow(row) }
+                    if let cursor = result.nextCursor { Button("More results") { Task { await pollSubject(cursor: cursor) } } }
+                }
+    }
+
+    private func subjectRow(_ row: SubjectPreview.Row) -> some View {
+        VStack(alignment: .leading) {
+            Text(row.title)
+            Text(row.reason).font(.caption)
+            HStack {
+                Button("Include") { includeSubjectItem(row.itemId) }
+                Button("Exclude") { excludeSubjectItem(row.itemId) }
+            }
+        }
+    }
+    private func includeSubjectItem(_ value: String) {
+        guard let id = Int(value) else { return }
+        if !includeItemIds.contains(id) { includeItemIds.append(id) }
+        excludeItemIds.removeAll { $0 == id }
+    }
+    private func excludeSubjectItem(_ value: String) {
+        guard let id = Int(value) else { return }
+        if !excludeItemIds.contains(id) { excludeItemIds.append(id) }
+    }
+
     private var valid: Bool {
         !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && name.count <= 80 && description.count <= 500 && (movies || episodes)
+            && name.count <= 80 && description.count <= 500 && subject.unicodeScalars.count <= 500 && (movies || episodes)
     }
 
     private var dirty: Bool {
@@ -1083,6 +1199,7 @@ private struct LibraryChannelEditor: View {
 
     private var recipe: LibraryChannelRecipe {
         var value = channel?.recipe ?? LibraryChannelRecipe()
+        value.subject = subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : subject.precomposedStringWithCanonicalMapping
         value.libraryIds = libraryIds
         value.kinds = (movies ? ["movie"] : []) + (episodes ? ["episode"] : [])
         value.genresAny = list(genres)
@@ -1105,7 +1222,7 @@ private struct LibraryChannelEditor: View {
 
     private var definition: LibraryChannelDefinition {
         LibraryChannelDefinition(
-            requestId: UUID().uuidString,
+            requestId: requestId,
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
             description: description.trimmingCharacters(in: .whitespacesAndNewlines),
             visibility: canShare ? visibility : .personal,
@@ -1120,6 +1237,8 @@ private struct LibraryChannelEditor: View {
         let expectedRevision: Int64?
         let step: Int
         let definition: LibraryChannelDefinition
+        var subjectJobId: String?
+        var subjectRecipe: LibraryChannelRecipe?
     }
 
     private var draftKey: String {
@@ -1129,7 +1248,7 @@ private struct LibraryChannelEditor: View {
     private func persistDraft() {
         guard dirty, let data = try? JSONEncoder().encode(StoredDraft(
             channelId: channel?.id, expectedRevision: channel?.revision,
-            step: step, definition: definition
+            step: step, definition: definition, subjectJobId: subjectJobId, subjectRecipe: subjectRecipe
         )) else { return }
         UserDefaults.standard.set(data, forKey: draftKey)
     }
@@ -1143,6 +1262,7 @@ private struct LibraryChannelEditor: View {
               stored.expectedRevision == channel?.revision
         else { return }
         let value = stored.definition
+        subject = value.recipe.subject ?? ""; subjectJobId = stored.subjectJobId; subjectRecipe = stored.subjectRecipe; requestId = value.requestId
         name = value.name; description = value.description; visibility = value.visibility
         enabled = value.enabled; movies = value.recipe.kinds.contains("movie")
         episodes = value.recipe.kinds.contains("episode"); genres = value.recipe.genresAny.joined(separator: ", ")
@@ -1165,6 +1285,7 @@ private struct LibraryChannelEditor: View {
         description = channel.description
         visibility = channel.visibility
         enabled = channel.enabled
+        subject = channel.recipe.subject ?? ""
         movies = channel.recipe.kinds.contains("movie")
         episodes = channel.recipe.kinds.contains("episode")
         genres = channel.recipe.genresAny.joined(separator: ", ")
@@ -1214,14 +1335,32 @@ private struct LibraryChannelEditor: View {
         else { excludeItemIds = Array(Set(excludeItemIds + [item.id])).sorted() }
     }
 
+    private func setSubject(_ value: String) {
+        subject = value; genres = ""; tags = ""; keywords = ""; yearMin = ""; yearMax = ""; matchAllInScope = false
+    }
+    private func pollSubject(cursor: String? = nil) async {
+        guard let id = subjectJobId, recipe == subjectRecipe else { return }
+        let captured = recipe
+        do {
+            let result = try await model.requireAPI().subjectPreview(id, verdict: subjectFilter, cursor: cursor)
+            guard !Task.isCancelled, id == subjectJobId, captured == recipe else { return }
+            subjectPreview = result; previewSeed = result.previewSeed
+        } catch { if !Task.isCancelled { message = error.localizedDescription } }
+    }
     private func loadPreview() async {
         busy = true
+        let captured = recipe
         do {
-            preview = try await model.requireAPI().previewLibraryChannel(recipe, seed: previewSeed)
-            previewSeed = preview?.previewSeed
+            if captured.subject != nil {
+                let result = try await model.requireAPI().createSubjectPreview(captured, seed: previewSeed)
+                guard captured == recipe else { busy = false; return }
+                subjectRecipe = captured; subjectPreview = result; subjectJobId = result.jobId; previewSeed = result.previewSeed; preview = nil; persistDraft()
+            } else {
+                let result = try await model.requireAPI().previewLibraryChannel(captured, seed: previewSeed)
+                if captured == recipe { preview = result; previewSeed = result.previewSeed; subjectPreview = nil; subjectJobId = nil }
+            }
             message = nil
-        }
-        catch { message = error.localizedDescription }
+        } catch { message = error.localizedDescription }
         busy = false
     }
 

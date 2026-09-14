@@ -516,6 +516,14 @@ struct PlurxAPI {
         }
     }
 
+    func createSubjectPreview(_ recipe: LibraryChannelRecipe, seed: String?) async throws -> SubjectPreview {
+        try await post("library-channels/subject-previews", body: SubjectPreviewRequest(recipe: recipe, requestId: UUID().uuidString, previewSeed: seed))
+    }
+    func subjectPreview(_ id: String, verdict: String, cursor: String? = nil) async throws -> SubjectPreview {
+        let suffix = cursor.map { "&cursor=\($0.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")" } ?? ""
+        return try await get("library-channels/subject-previews/\(id)?verdict=\(verdict)\(suffix)")
+    }
+
     func previewLibraryChannel(_ recipe: LibraryChannelRecipe, seed: String?) async throws -> LibraryChannelPreview {
         try await post("library-channels/preview", body: LibraryChannelPreviewRequest(recipe: recipe, limit: 50, previewSeed: seed))
     }

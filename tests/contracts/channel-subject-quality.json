@@ -1,0 +1,511 @@
+{
+  "description": "48 independently authored synthetic metadata pairs. Labels were written before observing model output; these are finite engineering observations, not a library-wide quality claim.",
+  "groups": [
+    {
+      "name": "standup",
+      "subject": "Stand-up comedy performances and specials. Exclude sitcoms, comedy movies, talk shows, and documentaries about comedians.",
+      "pairs": [
+        {
+          "fields": {
+            "title": "A Night on Stage",
+            "overview": "A filmed stand-up performance before a live audience.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Solo Microphone",
+            "overview": "The comedian performs an hour-long stand-up special at a theatre.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Club Showcase",
+            "overview": "Six comics present their stand-up routines, recorded live at a comedy club.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Tour Finale",
+            "overview": "A concert film of a solo comic telling jokes directly to the audience.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Small Room",
+            "overview": "This episode records a complete live stand-up comedy set, without interviews.",
+            "kind": "episode",
+            "genres": "",
+            "year": "",
+            "show_title": "The Arts Hour",
+            "show_overview": "An anthology mixing interviews, music, documentary portraits, and stage performances."
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Festival Stage",
+            "overview": "A recording of stand-up performances from the comedy festival main stage.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Apartment Laughs",
+            "overview": "A scripted sitcom about three roommates; a comedian stars as the landlord.",
+            "kind": "episode",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "no_match"
+        },
+        {
+          "fields": {
+            "title": "The Comic’s Road",
+            "overview": "A fictional comedy movie about a comedian who travels across the country.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "no_match"
+        },
+        {
+          "fields": {
+            "title": "Behind the Microphone",
+            "overview": "A documentary exploring a famous comedian’s childhood and career through interviews.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "no_match"
+        },
+        {
+          "fields": {
+            "title": "Evening Guests",
+            "overview": "A talk show with celebrity interviews, news discussion, and jokes from the host.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "no_match"
+        },
+        {
+          "fields": {
+            "title": "Stand Up to a Bully",
+            "overview": "A school assembly with no further description of its format or purpose.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "uncertain"
+        },
+        {
+          "fields": {
+            "title": "Live with Jordan",
+            "overview": "",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "uncertain"
+        }
+      ]
+    },
+    {
+      "name": "space",
+      "subject": "Documentaries about space exploration, astronomy, and the universe. Exclude fictional science fiction and unrelated nature films.",
+      "pairs": [
+        {
+          "fields": {
+            "title": "Mapping Mars",
+            "overview": "A documentary follows scientists studying the surface of Mars using robotic probes.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Beyond the Telescope",
+            "overview": "An astronomy documentary explaining how telescopes observe distant galaxies.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "First Orbit",
+            "overview": "Archival footage and expert interviews document the first crewed orbital missions.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Moon Expedition",
+            "overview": "A factual documentary reconstructs the engineering of the Apollo lunar expeditions.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Star Formation",
+            "overview": "Scientists explain the birth of stars in this educational astronomy documentary.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "The Comet Mission",
+            "overview": "A nonfiction episode follows a spacecraft rendezvous with a comet.",
+            "kind": "episode",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Galaxy Warriors",
+            "overview": "A fictional science-fiction adventure about rebels fighting an interstellar empire.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "no_match"
+        },
+        {
+          "fields": {
+            "title": "Open Space",
+            "overview": "A nature documentary about grasslands and migrating antelope.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "no_match"
+        },
+        {
+          "fields": {
+            "title": "Space for Living",
+            "overview": "A factual home-renovation series about making room in small city apartments.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "no_match"
+        },
+        {
+          "fields": {
+            "title": "Ocean Depths",
+            "overview": "A documentary about deep-sea animals and submarine exploration of Earth’s oceans.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "no_match"
+        },
+        {
+          "fields": {
+            "title": "Unknown Horizons",
+            "overview": "A journey beyond familiar boundaries.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "uncertain"
+        },
+        {
+          "fields": {
+            "title": "Mission Archive",
+            "overview": "",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "uncertain"
+        }
+      ]
+    },
+    {
+      "name": "noir",
+      "subject": "Film noir crime stories with morally ambiguous characters, shadowy urban settings, and a dark, fatalistic style.",
+      "pairs": [
+        {
+          "fields": {
+            "title": "Rain on the Boulevard",
+            "overview": "A film noir about a corrupt detective trapped in a fatal conspiracy in a shadowy city.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "The Last Payment",
+            "overview": "A noir crime thriller follows a desperate insurance investigator into betrayal and murder.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Night Ledger",
+            "overview": "A fatalistic film noir about an accountant drawn into an urban criminal syndicate.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Smoke and Glass",
+            "overview": "A morally compromised private eye investigates blackmail in this shadowy noir crime story.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "The Double Deal",
+            "overview": "A classic film noir crime drama of greed, betrayal, and a doomed bank robbery.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "City after Midnight",
+            "overview": "A dark neo-noir crime story follows an unreliable investigator through urban corruption.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Sunny Precinct",
+            "overview": "A cheerful police comedy where friendly officers resolve harmless misunderstandings.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "no_match"
+        },
+        {
+          "fields": {
+            "title": "Noir Chocolate",
+            "overview": "A cooking documentary about the production of dark chocolate.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "no_match"
+        },
+        {
+          "fields": {
+            "title": "Meadow Romance",
+            "overview": "A sunny romantic musical set in a rural village, without any crime plot.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "no_match"
+        },
+        {
+          "fields": {
+            "title": "Noir: A History",
+            "overview": "A documentary examines the lighting techniques used by film noir cinematographers.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "no_match"
+        },
+        {
+          "fields": {
+            "title": "Shadows",
+            "overview": "An investigator searches for something that went missing.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "uncertain"
+        },
+        {
+          "fields": {
+            "title": "Night Streets",
+            "overview": "",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "uncertain"
+        }
+      ]
+    },
+    {
+      "name": "nineties",
+      "subject": "Comedy films and television episodes released between 1990 and 1999 inclusive.",
+      "pairs": [
+        {
+          "fields": {
+            "title": "Weekend Mixup",
+            "overview": "A comedy film about mistaken identities during a family weekend.",
+            "kind": "movie",
+            "genres": "",
+            "year": "1990"
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Office Pranks",
+            "overview": "A sitcom episode in which coworkers compete in a harmless prank contest.",
+            "kind": "episode",
+            "genres": "",
+            "year": "1991"
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Wrong Suitcase",
+            "overview": "A comedy movie about tourists accidentally exchanging suitcases.",
+            "kind": "movie",
+            "genres": "",
+            "year": "1993"
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Dinner Disaster",
+            "overview": "A television comedy episode about an elaborate dinner party gone wrong.",
+            "kind": "episode",
+            "genres": "",
+            "year": "1995"
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Suburban Follies",
+            "overview": "A comedy film following rival neighbours in a gardening competition.",
+            "kind": "movie",
+            "genres": "",
+            "year": "1998"
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Last Laugh of the Decade",
+            "overview": "A sitcom episode about planning a chaotic New Year party.",
+            "kind": "episode",
+            "genres": "",
+            "year": "1999"
+          },
+          "expected": "match"
+        },
+        {
+          "fields": {
+            "title": "Eighties Party",
+            "overview": "A comedy film about a college reunion.",
+            "kind": "movie",
+            "genres": "",
+            "year": "1989"
+          },
+          "expected": "no_match"
+        },
+        {
+          "fields": {
+            "title": "New Century Neighbours",
+            "overview": "A comedy movie about rival suburban families.",
+            "kind": "movie",
+            "genres": "",
+            "year": "2000"
+          },
+          "expected": "no_match"
+        },
+        {
+          "fields": {
+            "title": "Nineties Trial",
+            "overview": "A serious courtroom drama with no comedy elements.",
+            "kind": "movie",
+            "genres": "",
+            "year": "1994"
+          },
+          "expected": "no_match"
+        },
+        {
+          "fields": {
+            "title": "Decade of War",
+            "overview": "A documentary about international armed conflicts during the 1990s.",
+            "kind": "movie",
+            "genres": "",
+            "year": "1997"
+          },
+          "expected": "no_match"
+        },
+        {
+          "fields": {
+            "title": "A Funny Story",
+            "overview": "A film with no year or genre supplied.",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "uncertain"
+        },
+        {
+          "fields": {
+            "title": "Archive Episode",
+            "overview": "",
+            "kind": "movie",
+            "genres": "",
+            "year": ""
+          },
+          "expected": "uncertain"
+        }
+      ]
+    }
+  ]
+}

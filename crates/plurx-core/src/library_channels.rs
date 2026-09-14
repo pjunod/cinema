@@ -191,6 +191,9 @@ pub enum ChannelItemKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LibraryChannelRecipe {
     pub version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(deserialize_with = "deserialize_recipe_ids")]
     pub library_ids: Vec<i64>,
     pub kinds: Vec<ChannelItemKind>,
     pub genres_any: Vec<String>,
@@ -198,9 +201,13 @@ pub struct LibraryChannelRecipe {
     pub keywords_any: Vec<String>,
     pub year_min: Option<i32>,
     pub year_max: Option<i32>,
+    #[serde(deserialize_with = "deserialize_recipe_ids")]
     pub include_item_ids: Vec<i64>,
+    #[serde(deserialize_with = "deserialize_recipe_ids")]
     pub include_show_ids: Vec<i64>,
+    #[serde(deserialize_with = "deserialize_recipe_ids")]
     pub exclude_item_ids: Vec<i64>,
+    #[serde(deserialize_with = "deserialize_recipe_ids")]
     pub exclude_show_ids: Vec<i64>,
     #[serde(default)]
     pub ordering: ChannelOrdering,
@@ -324,6 +331,7 @@ pub struct LibraryChannelBuildClaim {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LibraryChannelPublication {
+    pub subject_claim: Option<(String, String)>,
     pub channel_id: String,
     pub generation_id: String,
     pub expected_revision: i64,
@@ -381,6 +389,7 @@ impl Default for LibraryChannelRecipe {
     fn default() -> Self {
         Self {
             version: 1,
+            subject: None,
             library_ids: Vec::new(),
             kinds: vec![ChannelItemKind::Movie, ChannelItemKind::Episode],
             genres_any: Vec::new(),
@@ -422,6 +431,17 @@ impl LibraryChannelRecipe {
                 "version",
                 "only recipe version 1 is supported",
             ));
+        }
+        self.subject = self
+            .subject
+            .map(|s| normalize_subject_text(s.trim()))
+            .filter(|s| !s.is_empty());
+        if self
+            .subject
+            .as_ref()
+            .is_some_and(|s| s.chars().count() > 500)
+        {
+            return Err(recipe_error("subject", "use at most 500 characters"));
         }
         normalize_ids("library_ids", &mut self.library_ids, CHANNEL_LIBRARIES_MAX)?;
         normalize_ids(
@@ -474,13 +494,36 @@ impl LibraryChannelRecipe {
     }
 
     pub fn has_subject_rules(&self) -> bool {
-        self.match_all_in_scope
+        self.subject.is_some()
+            || self.match_all_in_scope
             || !self.genres_any.is_empty()
             || !self.tags_any.is_empty()
             || !self.keywords_any.is_empty()
             || self.year_min.is_some()
             || self.year_max.is_some()
     }
+}
+
+fn deserialize_recipe_ids<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<i64>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Id {
+        Number(i64),
+        Decimal(String),
+    }
+    Vec::<Id>::deserialize(d)?
+        .into_iter()
+        .map(|id| match id {
+            Id::Number(v) => Ok(v),
+            Id::Decimal(v) => v.parse().map_err(serde::de::Error::custom),
+        })
+        .collect()
+}
+
+pub fn normalize_subject_text(value: &str) -> String {
+    icu_normalizer::ComposingNormalizer::new_nfc()
+        .normalize(value)
+        .into_owned()
 }
 
 fn recipe_error(field: &'static str, message: impl Into<String>) -> RecipeValidationError {
@@ -581,6 +624,31 @@ pub struct ChannelMatch {
 pub fn evaluate_recipe(
     recipe: &LibraryChannelRecipe,
     candidates: impl IntoIterator<Item = ChannelCandidate>,
+) -> Result<Vec<ChannelMatch>, RecipeValidationError> {
+    evaluate_recipe_inner(recipe, candidates, None, false)
+}
+
+/// The same eligibility and advanced filters used by publication, before inference.
+pub fn subject_candidates(
+    recipe: &LibraryChannelRecipe,
+    candidates: impl IntoIterator<Item = ChannelCandidate>,
+) -> Result<Vec<ChannelMatch>, RecipeValidationError> {
+    evaluate_recipe_inner(recipe, candidates, None, true)
+}
+
+pub fn evaluate_subject_recipe(
+    recipe: &LibraryChannelRecipe,
+    candidates: impl IntoIterator<Item = ChannelCandidate>,
+    decisions: &BTreeMap<i64, crate::channel_subjects::SubjectDecision>,
+) -> Result<Vec<ChannelMatch>, RecipeValidationError> {
+    evaluate_recipe_inner(recipe, candidates, Some(decisions), false)
+}
+
+fn evaluate_recipe_inner(
+    recipe: &LibraryChannelRecipe,
+    candidates: impl IntoIterator<Item = ChannelCandidate>,
+    decisions: Option<&BTreeMap<i64, crate::channel_subjects::SubjectDecision>>,
+    collecting: bool,
 ) -> Result<Vec<ChannelMatch>, RecipeValidationError> {
     let recipe = recipe.clone().normalize()?;
     let libraries = recipe.library_ids.iter().copied().collect::<BTreeSet<_>>();
@@ -716,6 +784,15 @@ pub fn evaluate_recipe(
             if recipe.match_all_in_scope && reasons.is_empty() {
                 reasons.push("all titles in scope".to_owned());
             }
+        }
+        if recipe.subject.is_some() && !explicit && !collecting {
+            let Some(decision) = decisions.and_then(|rows| rows.get(&candidate.item_id)) else {
+                continue;
+            };
+            if decision.verdict != crate::channel_subjects::Verdict::Match {
+                continue;
+            }
+            reasons.push(decision.reason.clone());
         }
         matches
             .entry(candidate.item_id)

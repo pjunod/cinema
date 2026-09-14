@@ -1109,6 +1109,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // airing is one row for its whole life, so the unique index covers every
     // state rather than only the live ones.
     crate::dvr::DVR_SCHEMA,
+    // v58: resumable subject classification and owner-scoped decisions.
+    crate::channel_subjects::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

@@ -38,6 +38,7 @@ const GUIDE_MAX_MS: i64 = 24 * 60 * 60 * 1_000;
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
+        .merge(crate::channel_subjects::router())
         .route("/preview", post(preview))
         .route("/guide", get(guide))
         .route("/{id}", get(get_one).put(update).delete(delete_one))
@@ -172,6 +173,41 @@ async fn list(
     Ok(Json(response))
 }
 
+#[derive(Debug, Default, Serialize)]
+#[serde(untagged)]
+enum SubjectPresence {
+    #[default]
+    Absent,
+    Value(Option<String>),
+}
+impl SubjectPresence {
+    fn absent(&self) -> bool {
+        matches!(self, Self::Absent)
+    }
+}
+#[derive(Debug, Serialize)]
+struct InputRecipe {
+    #[serde(flatten)]
+    recipe: LibraryChannelRecipe,
+    #[serde(skip_serializing_if = "SubjectPresence::absent")]
+    subject: SubjectPresence,
+}
+impl<'de> Deserialize<'de> for InputRecipe {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut value = serde_json::Value::deserialize(deserializer)?;
+        let subject = match value.as_object_mut().and_then(|v| v.remove("subject")) {
+            None => SubjectPresence::Absent,
+            Some(value) => SubjectPresence::Value(
+                serde_json::from_value(value).map_err(serde::de::Error::custom)?,
+            ),
+        };
+        Ok(Self {
+            recipe: serde_json::from_value(value).map_err(serde::de::Error::custom)?,
+            subject,
+        })
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 struct DefinitionBody {
     request_id: String,
@@ -182,7 +218,7 @@ struct DefinitionBody {
     visibility: Option<ChannelVisibility>,
     #[serde(default)]
     enabled: bool,
-    recipe: LibraryChannelRecipe,
+    recipe: InputRecipe,
     /// Hex seed returned by preview. Omitting it creates a fresh schedule;
     /// supplying it makes the saved rotation exactly the previewed rotation.
     #[serde(default)]
@@ -208,14 +244,6 @@ async fn create(
     Json(body): Json<DefinitionBody>,
 ) -> Result<(StatusCode, Json<MutationResponse>), ApiError> {
     let (name, description, recipe, visibility) = normalized_definition(&body, user.is_admin)?;
-    let candidates = matching_catalogue(&state, &recipe, None).await?;
-    if body.enabled && candidates.matches.is_empty() {
-        return Err(channel_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "channel_empty",
-            "an enabled channel needs at least one eligible title",
-        ));
-    }
     let now_ms = crate::media_sessions::unix_ms();
     let channel = NewLibraryChannel {
         id: uuid::Uuid::new_v4().to_string(),
@@ -245,28 +273,7 @@ async fn create(
         ChannelMutation::Replay(channel) => (channel, true),
         other => return Err(mutation_error(other)),
     };
-    if !candidates.matches.is_empty() && (replay || stored.build_state != "ready") {
-        build_channel(
-            &state,
-            &user,
-            &stored,
-            candidates,
-            Activation::Initial,
-            false,
-        )
-        .await?;
-    } else if candidates.matches.is_empty() {
-        record_build_failure(
-            &state,
-            &stored,
-            None,
-            None,
-            "channel_empty",
-            "the current recipe has no eligible titles",
-            0,
-        )
-        .await?;
-    }
+    queue_saved_build(state.clone(), user.clone(), stored.clone());
     let refreshed = state
         .store
         .get_library_channel(user.id, user.is_admin, &stored.id)
@@ -287,13 +294,89 @@ async fn create(
     ))
 }
 
+fn queue_saved_build(state: AppState, user: plurx_core::domain::User, channel: LibraryChannel) {
+    tokio::spawn(async move {
+        let result = async {
+            if channel.recipe.subject.is_some() {
+                return crate::channel_subjects::request_channel(&state, &channel).await;
+            }
+            let preferred = preferred_generation_files(&state, &user, &channel).await?;
+            let evaluation = matching_catalogue(&state, &channel.recipe, Some(&preferred)).await?;
+            if evaluation.matches.is_empty() {
+                return record_build_failure(
+                    &state,
+                    &channel,
+                    None,
+                    None,
+                    "channel_empty",
+                    "No current matches; any existing schedule remains active.",
+                    0,
+                )
+                .await;
+            }
+            build_channel(
+                &state,
+                &user,
+                &channel,
+                evaluation,
+                Activation::NextRotation,
+                false,
+            )
+            .await
+        }
+        .await;
+        if let Err(error) = result {
+            tracing::warn!(channel_id=%channel.id,error=?error,"Saved definition retained after background build failure");
+        }
+    });
+}
+
+pub(crate) async fn publish_subject(
+    state: &AppState,
+    channel: &LibraryChannel,
+    matches: Vec<ChannelMatch>,
+    snapshot_digest: String,
+    job_id: &str,
+    claim: &str,
+    next_programme: bool,
+) -> Result<(), ApiError> {
+    let user = state
+        .store
+        .get_user(channel.owner_user_id)
+        .await
+        .map_err(channel_store_error)?
+        .ok_or(ApiError::Forbidden)?;
+    let evaluation = CatalogueEvaluation {
+        candidate_count: matches.len(),
+        matches,
+        snapshot_digest,
+        subject_claim: Some((job_id.to_owned(), claim.to_owned())),
+    };
+    build_channel(
+        state,
+        &user,
+        channel,
+        evaluation,
+        if next_programme {
+            Activation::NextProgramme
+        } else {
+            Activation::NextRotation
+        },
+        false,
+    )
+    .await
+}
+
 async fn get_one(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<ChannelDetail>, ApiError> {
     let channel = editable_channel(&state, &user, &id).await?;
-    Ok(Json(ChannelDetail::new(channel, user.id, user.is_admin)))
+    let matching = crate::channel_subjects::summary(&state, &channel).await;
+    let mut detail = ChannelDetail::new(channel, user.id, user.is_admin);
+    detail.matching = matching;
+    Ok(Json(detail))
 }
 
 #[derive(Serialize)]
@@ -304,17 +387,37 @@ struct ChannelDetail {
     can_edit: bool,
     can_delete: bool,
     can_share: bool,
+    matching: Option<crate::channel_subjects::Summary>,
+    subject_recipe: serde_json::Value,
 }
 
 impl ChannelDetail {
     fn new(channel: LibraryChannel, user_id: i64, admin: bool) -> Self {
         let editable = channel.owner_user_id == user_id || admin;
+        let mut subject_recipe = serde_json::to_value(&channel.recipe).expect("recipe serializes");
+        for key in [
+            "library_ids",
+            "include_item_ids",
+            "include_show_ids",
+            "exclude_item_ids",
+            "exclude_show_ids",
+        ] {
+            if let Some(values) = subject_recipe[key].as_array_mut() {
+                for value in values {
+                    if let Some(id) = value.as_i64() {
+                        *value = serde_json::Value::String(id.to_string());
+                    }
+                }
+            }
+        }
         Self {
+            subject_recipe,
             channel,
             source: "library",
             can_edit: editable,
             can_delete: editable,
             can_share: admin,
+            matching: None,
         }
     }
 }
@@ -326,16 +429,10 @@ async fn update(
     Json(body): Json<UpdateBody>,
 ) -> Result<(StatusCode, Json<MutationResponse>), ApiError> {
     let previous = editable_channel(&state, &user, &id).await?;
-    let (name, description, recipe, visibility) =
+    let (name, description, mut recipe, visibility) =
         normalized_definition(&body.definition, user.is_admin)?;
-    let preferred_files = preferred_generation_files(&state, &user, &previous).await?;
-    let candidates = matching_catalogue(&state, &recipe, Some(&preferred_files)).await?;
-    if body.definition.enabled && candidates.matches.is_empty() {
-        return Err(channel_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "channel_empty",
-            "an enabled channel needs at least one eligible title",
-        ));
+    if body.definition.recipe.subject.absent() {
+        recipe.subject = previous.recipe.subject.clone();
     }
     let update = LibraryChannelUpdate {
         channel_id: id,
@@ -362,29 +459,8 @@ async fn update(
         ChannelMutation::Replay(channel) => (channel, true),
         other => return Err(mutation_error(other)),
     };
-    let has_candidates = !candidates.matches.is_empty();
-    if has_candidates && (!replay || stored.build_state != "ready") {
-        build_channel(
-            &state,
-            &user,
-            &stored,
-            candidates,
-            Activation::NextRotation,
-            false,
-        )
-        .await?;
-    } else if !has_candidates {
-        record_build_failure(
-            &state,
-            &stored,
-            None,
-            None,
-            "channel_empty",
-            "the current recipe has no eligible titles; the old schedule was retained",
-            0,
-        )
-        .await?;
-    }
+    let _ = replay;
+    queue_saved_build(state.clone(), user.clone(), stored.clone());
     let refreshed = visible_channel(&state, &user, &stored.id).await?;
     let build_state = build_state_label(&refreshed);
     Ok((
@@ -651,6 +727,15 @@ async fn rebuild(
     if replay {
         return Ok((StatusCode::ACCEPTED, Json(BuildDto::from(&channel))));
     }
+    if channel.recipe.subject.is_some() {
+        crate::channel_subjects::request_channel_activation(
+            &state,
+            &channel,
+            matches!(body.activation, Activation::NextProgramme),
+        )
+        .await?;
+        return Ok((StatusCode::ACCEPTED, Json(BuildDto::from(&channel))));
+    }
     let preferred_files = preferred_generation_files(&state, &user, &channel).await?;
     let matches = matching_catalogue(&state, &channel.recipe, Some(&preferred_files)).await?;
     if matches.matches.is_empty() {
@@ -677,6 +762,7 @@ async fn rebuild(
 
 #[derive(Serialize)]
 struct BuildDto {
+    matching: Option<crate::channel_subjects::Summary>,
     state: String,
     error_code: Option<String>,
     error_message: Option<String>,
@@ -692,6 +778,7 @@ struct BuildDto {
 impl From<&LibraryChannel> for BuildDto {
     fn from(channel: &LibraryChannel) -> Self {
         Self {
+            matching: None,
             state: channel.build_state.clone(),
             error_code: channel.build_error_code.clone(),
             error_message: channel.build_error_message.clone(),
@@ -712,7 +799,11 @@ async fn build_state(
     Path(id): Path<String>,
 ) -> Result<Json<BuildDto>, ApiError> {
     let channel = visible_channel(&state, &user, &id).await?;
-    Ok(Json(BuildDto::from(&channel)))
+    let mut result = BuildDto::from(&channel);
+    if channel.owner_user_id == user.id || user.is_admin {
+        result.matching = crate::channel_subjects::summary(&state, &channel).await;
+    }
+    Ok(Json(result))
 }
 
 #[derive(Deserialize)]
@@ -1353,6 +1444,7 @@ pub(crate) fn prometheus() -> String {
 
 #[derive(Clone)]
 struct CatalogueEvaluation {
+    subject_claim: Option<(String, String)>,
     matches: Vec<ChannelMatch>,
     snapshot_digest: String,
     candidate_count: usize,
@@ -1404,6 +1496,7 @@ async fn matching_catalogue(
         }
     })?;
     Ok(CatalogueEvaluation {
+        subject_claim: None,
         matches,
         snapshot_digest,
         candidate_count,
@@ -1597,6 +1690,13 @@ async fn build_channel_inner(
             .collect();
         let fenced = matching_catalogue(state, &channel.recipe, Some(&preferred)).await?;
         if fenced.snapshot_digest != evaluation.snapshot_digest {
+            if evaluation.subject_claim.is_some() {
+                return Err(channel_error(
+                    StatusCode::CONFLICT,
+                    "catalogue_changed",
+                    "Catalogue changed during subject publication; reconstruct the job.",
+                ));
+            }
             PUBLICATION_CONFLICTS.fetch_add(1, Ordering::Relaxed);
             record_build_failure(
                 state,
@@ -1624,6 +1724,7 @@ async fn build_channel_inner(
         let pointer = editable_channel(state, user, &channel.id).await?;
         let epoch = activation_epoch(state, user, &pointer, activation, publication_now_ms).await?;
         let publication = LibraryChannelPublication {
+            subject_claim: evaluation.subject_claim.clone(),
             channel_id: channel.id.clone(),
             generation_id,
             expected_revision: channel.revision,
@@ -1751,6 +1852,9 @@ async fn reconcile_once(state: &AppState) {
                 }
             };
             let result = async {
+                if channel.recipe.subject.is_some() {
+                    return crate::channel_subjects::request_channel(state, &channel).await;
+                }
                 let preferred_files = preferred_generation_files(state, &user, &channel).await?;
                 let matches =
                     matching_catalogue(state, &channel.recipe, Some(&preferred_files)).await?;
@@ -1949,7 +2053,11 @@ fn normalized_definition(
     if visibility == ChannelVisibility::Shared && !actor_is_admin {
         return Err(ApiError::Forbidden);
     }
-    let recipe = body.recipe.clone().normalize().map_err(invalid_recipe)?;
+    let mut recipe = body.recipe.recipe.clone();
+    if let SubjectPresence::Value(subject) = &body.recipe.subject {
+        recipe.subject = subject.clone();
+    }
+    let recipe = recipe.normalize().map_err(invalid_recipe)?;
     Ok((name, description, recipe, visibility))
 }
 
@@ -2154,6 +2262,45 @@ fn build_error(mutation: ChannelBuildMutation) -> ApiError {
         }
         ChannelBuildMutation::Applied => {
             ApiError::Internal("unexpected applied build mapping".into())
+        }
+    }
+}
+
+#[cfg(test)]
+mod subject_wire_tests {
+    use super::*;
+    #[test]
+    fn subject_absence_preserves_intent_without_changing_request_replay_hash() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../tests/contracts/channel-subject-wire.json"
+        ))
+        .expect("fixture");
+        for case in fixture["cases"].as_array().expect("cases") {
+            let input: InputRecipe =
+                serde_json::from_value(case["recipe"].clone()).expect("wire recipe");
+            let original = body_digest(&input);
+            let mut effective = input.recipe.clone();
+            effective.subject = match &input.subject {
+                SubjectPresence::Absent => Some("stored subject".into()),
+                SubjectPresence::Value(subject) => subject.clone(),
+            };
+            let effective = effective.normalize().expect("normalization");
+            assert_eq!(
+                serde_json::to_value(effective.subject).expect("subject"),
+                case["expected_update_subject"]
+            );
+            assert_eq!(
+                original,
+                body_digest(&input),
+                "resolving an omitted field must not change retry identity"
+            );
+            if case["name"] == "missing" {
+                assert_eq!(
+                    original,
+                    body_digest(&input.recipe),
+                    "old client hash representation is preserved"
+                );
+            }
         }
     }
 }

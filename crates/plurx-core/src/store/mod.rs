@@ -1928,6 +1928,22 @@ pub trait LibraryStore: Send + Sync + 'static {
 
 #[async_trait]
 pub trait LibraryChannelStore: Send + Sync + 'static {
+    async fn subject_job(
+        &self,
+        query: crate::channel_subjects::JobQuery,
+    ) -> Result<Option<crate::channel_subjects::SubjectJob>, StoreError>;
+    async fn subject_write(
+        &self,
+        write: crate::channel_subjects::JobWrite,
+    ) -> Result<bool, StoreError>;
+    async fn subject_decisions(
+        &self,
+        owner: i64,
+        subject: &str,
+        profile: &str,
+        ids: &[(i64, String)],
+    ) -> Result<Vec<crate::channel_subjects::CachedDecision>, StoreError>;
+
     async fn list_library_channels(
         &self,
         actor_user_id: i64,

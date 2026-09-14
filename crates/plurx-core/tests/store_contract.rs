@@ -301,6 +301,9 @@ const DVR_METHODS: &[&str] = &[
 ];
 
 const LIBRARY_CHANNEL_METHODS: &[&str] = &[
+    "subject_job",
+    "subject_write",
+    "subject_decisions",
     "list_library_channels",
     "get_library_channel",
     "create_library_channel",
@@ -27851,6 +27854,177 @@ async fn a_reminder_fires_once_before_the_start_and_expires_at_it() {
             after[0].state,
             DvrReminderState::Expired,
             "{backend}: an unacknowledged reminder is spent once the programme is on"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn subject_jobs_claim_takeover_cache_isolation_and_cancellation() {
+    use plurx_core::channel_subjects::*;
+    use plurx_core::library_channels::LibraryChannelRecipe;
+    for_each_backend(|store, backend| async move {
+        let owner = store
+            .create_user("subject-owner", "hash", false)
+            .await
+            .expect("owner");
+        let other = store
+            .create_user("subject-other", "hash", false)
+            .await
+            .expect("other");
+        let recipe = LibraryChannelRecipe {
+            subject: Some("Stand-up".into()),
+            ..Default::default()
+        };
+        let mut a = SubjectJob::new(owner.id, recipe.clone(), [1; 32], None, 1000);
+        let b = SubjectJob::new(other.id, recipe, [2; 32], None, 1000);
+        assert!(store
+            .subject_write(JobWrite::Enqueue(a.clone()))
+            .await
+            .expect(backend));
+        assert!(!store
+            .subject_write(JobWrite::Enqueue(a.clone()))
+            .await
+            .expect("reused"));
+        assert!(store
+            .subject_write(JobWrite::Enqueue(b.clone()))
+            .await
+            .expect("second"));
+        assert!(store
+            .subject_job(JobQuery::Id {
+                owner: other.id,
+                admin: false,
+                id: a.id.clone(),
+                now: 1001
+            })
+            .await
+            .expect("private")
+            .is_none());
+        assert!(store
+            .subject_write(JobWrite::Claim {
+                id: a.id.clone(),
+                claim: "first".into(),
+                now: 1001
+            })
+            .await
+            .expect("claim"));
+        assert!(!store
+            .subject_write(JobWrite::Claim {
+                id: b.id.clone(),
+                claim: "other".into(),
+                now: 1002
+            })
+            .await
+            .expect("global exclusion"));
+        assert!(store
+            .subject_write(JobWrite::Claim {
+                id: a.id.clone(),
+                claim: "successor".into(),
+                now: 1002 + CLAIM_MS
+            })
+            .await
+            .expect("takeover"));
+        a.classifier_profile = Some("profile-a".into());
+        a.state = "complete".into();
+        let row = CachedDecision {
+            last_used_ms: 0,
+            item_id: 6336326135859793011,
+            metadata_digest: "metadata-a".into(),
+            decision: SubjectDecision {
+                verdict: Verdict::Match,
+                reason: "performance".into(),
+                evidence_field: "overview".into(),
+                evidence_quote: "live stand-up".into(),
+            },
+        };
+        assert!(!store
+            .subject_write(JobWrite::Commit {
+                job: a.clone(),
+                claim: "first".into(),
+                decisions: vec![row.clone()],
+                now: 1003 + CLAIM_MS,
+                delay_ms: 0
+            })
+            .await
+            .expect("stale response"));
+        assert!(store
+            .subject_write(JobWrite::Commit {
+                job: a.clone(),
+                claim: "successor".into(),
+                decisions: vec![row.clone()],
+                now: 1004 + CLAIM_MS,
+                delay_ms: 0
+            })
+            .await
+            .expect("commit"));
+        assert_eq!(
+            store
+                .subject_decisions(
+                    owner.id,
+                    &a.subject_digest,
+                    "profile-a",
+                    &[(row.item_id, row.metadata_digest.clone())]
+                )
+                .await
+                .expect("cache")
+                .len(),
+            1
+        );
+        assert!(store
+            .subject_decisions(
+                other.id,
+                &a.subject_digest,
+                "profile-a",
+                &[(row.item_id, row.metadata_digest.clone())]
+            )
+            .await
+            .expect("isolated")
+            .is_empty());
+        assert!(store
+            .subject_decisions(
+                owner.id,
+                &a.subject_digest,
+                "profile-b",
+                &[(row.item_id, row.metadata_digest.clone())]
+            )
+            .await
+            .expect("model invalidation")
+            .is_empty());
+        assert!(store
+            .subject_write(JobWrite::Cancel {
+                id: a.id.clone(),
+                owner: owner.id,
+                admin: false,
+                now: 1005 + CLAIM_MS
+            })
+            .await
+            .expect("cancel"));
+        assert_eq!(
+            store
+                .subject_job(JobQuery::Id {
+                    owner: owner.id,
+                    admin: false,
+                    id: a.id,
+                    now: 1006 + CLAIM_MS
+                })
+                .await
+                .expect("durable")
+                .expect("job")
+                .state,
+            "cancelled"
+        );
+        assert_eq!(
+            store
+                .subject_decisions(
+                    owner.id,
+                    &a.subject_digest,
+                    "profile-a",
+                    &[(row.item_id, row.metadata_digest.clone())]
+                )
+                .await
+                .expect("cache survives preview")
+                .len(),
+            1
         );
     })
     .await;

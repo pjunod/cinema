@@ -54,6 +54,12 @@ interface PlurxApi {
         @Query("cursor") cursor: String? = null,
     ): Response<List<LibraryChannelProgramme>>
 
+    @POST("library-channels/subject-previews")
+    suspend fun createSubjectPreview(@Body body: SubjectPreviewRequest): SubjectPreview
+
+    @GET("library-channels/subject-previews/{id}")
+    suspend fun subjectPreview(@Path("id") id: String, @Query("verdict") verdict: String = "match", @Query("cursor") cursor: String? = null): SubjectPreview
+
     @POST("library-channels/preview")
     suspend fun previewLibraryChannel(@Body body: LibraryChannelPreviewRequest): LibraryChannelPreview
 
