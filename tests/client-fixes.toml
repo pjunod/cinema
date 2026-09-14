@@ -1922,3 +1922,31 @@ source = "crates/plurxd/src/web/index.html"
 source_anchor = "const body=draft.saveBody||"
 test = "tests/web/library-channels.test.js"
 test_anchor = "a preview seed arriving after a lost save cannot change the retry body"
+
+[[fixes]]
+# The original clients decoded `/dvr/recordings` as a bare array even though
+# the server has always returned a bounded `{rows,next}` page. That made a
+# successful response look empty on every surface. This Apple anchor names the
+# production decoder; the matching test rejects both the old bare-array shape
+# and loss of the continuation cursor. Web and Android exercise the same shared
+# fixture in their own focused DVR visibility suites.
+id = "apple.dvr-recordings-use-paged-envelope"
+commits = ["7a3fd207"]
+source = "clients/apple/Sources/DvrClient.swift"
+source_anchor = "func recordingsPage(states: [DvrState], after: String? = nil) async throws -> DvrRecordingsPage"
+test = "clients/apple/Tests/DvrVisibilityTests.swift"
+test_anchor = "func testRecordingsUseThePagedServerEnvelope"
+
+[[fixes]]
+# The review correction spans server and all three clients. This client-fix
+# bridge pins the web recordings renderer to the focused paging/stale-data
+# contract that runs in the fast lane. It directly covers preserving loaded
+# rows and continuation state; focus restoration, native forward-event drains
+# and Android's stop confirmation remain compile/static-contract evidence and
+# are deliberately not claimed as unit coverage here.
+id = "web.dvr-review-keeps-recording-page-state"
+commits = ["c74310a2"]
+source = "crates/plurxd/src/web/index.html"
+source_anchor = "function paintRecordingsPage(){"
+test = "tests/web/dvr-visibility.test.js"
+test_anchor = "a failed Saved refresh keeps the last successful page and marks it stale"

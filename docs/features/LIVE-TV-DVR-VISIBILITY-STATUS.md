@@ -34,7 +34,7 @@ presentation contract around them.
 | S04 web layouts and controller | built; compile passed | one scope-aware poller feeds chrome, Live TV and Recordings; exact-airing player context, canonical `#/recordings`, six task tabs, mobile detail, real event history and Activity projection |
 | S05 Apple clients | built; source type-check passed | additive overview/event/attention decoders; one foreground profile controller; iOS/tvOS Recordings root, capture activity, immediate details, history, manual/skipped/rules/reminders and exact-airing player/guide context; device builds remain pending because this host exposes no simulator runtime |
 | S06 Android clients | built; compile passed | additive overview/event/attention decoders; one lifecycle-owned profile controller; phone/Google TV Recordings root, capture activity, immediate detail/history, manual/skipped/rules/reminders, exact-airing context and named stop/delete confirmations; physical D-pad evidence remains pending |
-| S07 review and promotion | fast lane requested | one adversarial review completed against the current-base candidate; all eleven findings are remediated and the affected source compilers pass; PR #314 is ready and its status-only synchronization starts the promotion lane |
+| S07 review and promotion | fast lane retry pending | one adversarial review completed against the current-base candidate; all eleven findings are remediated and the affected source compilers pass; the first real PR #314 promotion run stopped in policy preflight before compiler jobs, and its four history anchors plus Apple build 158 / Android build 98 are now corrected for one synchronization retry |
 
 ## Decisions made while implementing
 
@@ -106,7 +106,13 @@ No unit or UI test command has run. The shared web/Apple/Android fixture and
 focused Rust cases remain owned by the one fast lane, as requested. Forgejo's
 initial `ready_for_review` event carried the old draft flag and skipped every
 job without allocating a runner; the following status-only synchronization is
-the authoritative promotion attempt for the unchanged reviewed source.
+the first authoritative promotion attempt for the unchanged reviewed source.
+It stopped before the compiler jobs because current `main` requires Apple and
+Android release-counter increments and regression-history anchors for four
+corrective commits. Those mechanical promotion inputs are now Apple build 158,
+Android versionCode 98, two client-fix anchors and two runtime regression
+mappings; the next synchronization retries the same fast lane without another
+review or a local test cycle.
 
 ## Evidence limits — green source is not a hardware claim
 

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["703434bd"]
+points = ["live.dvr"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The correction makes both SQLite and Hiqlite compute the attention total independently of the bounded page query, while `attention_cursor_round_trips_section_and_both_watermarks` in `crates/plurxd/src/http/dvr.rs` pins the stable section/watermark cursor consumed with that total. There is no focused page-two store test, so the exact cross-page count is structural SQL and compile evidence rather than claimed end-to-end coverage."
