@@ -105,9 +105,12 @@ import kotlinx.coroutines.delay
 @Composable
 fun LiveTvScreen(
     origin: String,
+    dvrController: DvrController? = null,
     /** A channel a reminder notification asked for; tuned once, when it arrives. */
     initialChannelId: String? = null,
     onOpenItem: (Long) -> Unit = {},
+    onOpenRecording: (String) -> Unit = {},
+    onOpenRecordingActivity: () -> Unit = {},
     onBack: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -172,16 +175,13 @@ fun LiveTvScreen(
     // The DVR is a second, independent surface over the same profile. It never
     // gates the lineup, the guide or a start: an unreachable DVR leaves every
     // Live TV control working and simply draws no marks.
-    val dvrScope = rememberCoroutineScope()
-    val dvr = remember(origin, token, dvrScope) {
-        if (token.isEmpty()) null
-        else runCatching { DvrController(DvrApi(origin, token), dvrScope) }.getOrNull()
-    }
+    val dvr = dvrController
     val dvrState by remember(dvr) {
         dvr?.state ?: MutableStateFlow(DvrScreenState()).asStateFlow()
     }.collectAsStateWithLifecycle()
     var recordingsOpen by remember { mutableStateOf(false) }
-    var dvrChip by remember { mutableStateOf(DvrChip.Library) }
+    var dvrChip by remember { mutableStateOf(DvrChip.Upcoming) }
+    var stopRecordingFor by remember { mutableStateOf<Pair<String, String>?>(null) }
     var deleteFileFor by remember { mutableStateOf<String?>(null) }
     var reminderNow by remember { mutableLongStateOf(now) }
     var initialChannelTuned by remember(initialChannelId) { mutableStateOf(false) }
@@ -192,15 +192,21 @@ fun LiveTvScreen(
         dvr?.load()
         dvr?.startDuePoll()
     }
-    // Once on entry, and once per guide load. Nothing else moves a mark except
-    // a mutation, and DvrController re-reads after each of those itself.
+    DisposableEffect(dvr) {
+        dvr?.setHighFrequency("live-tv", true)
+        onDispose { dvr?.setHighFrequency("live-tv", false) }
+    }
+    // Seed the visible guide on entry/load. The profile controller also
+    // invalidates it after mutations, active-ID changes and the 30-second cap.
     LaunchedEffect(dvr, state.guide?.fetched_at) { dvr?.refreshMarks() }
     LaunchedEffect(recordingsOpen, dvrChip) {
         if (!recordingsOpen) return@LaunchedEffect
         when (dvrChip) {
-            DvrChip.Library -> dvr?.refreshLibrary()
-            DvrChip.Scheduled -> dvr?.refreshMarks()
+            DvrChip.Saved -> dvr?.refreshLibrary()
+            DvrChip.Attention -> dvr?.refreshAttention()
             DvrChip.Rules -> dvr?.refreshRules()
+            DvrChip.Upcoming, DvrChip.Skipped, DvrChip.Reminders, DvrChip.Manual ->
+                dvr?.refreshMarks()
         }
     }
     /**
@@ -235,7 +241,14 @@ fun LiveTvScreen(
      * in a second, separate press that they meant the file too.
      */
     fun stopRecording(id: String) {
-        dvr?.stop(id) { needsConfirmation -> deleteFileFor = needsConfirmation }
+        val row = (dvrState.schedule + dvrState.library).firstOrNull { it.id == id }
+        val activeTitle = row?.takeIf { it.recording }?.title
+            ?: dvrState.overview?.active?.firstOrNull { it.recording_id == id }?.title
+        if (activeTitle != null) {
+            stopRecordingFor = id to activeTitle
+        } else {
+            dvr?.stop(id) { needsConfirmation -> deleteFileFor = needsConfirmation }
+        }
     }
     // A channel replacement deliberately detaches the old decoder while busy.
     // That transient `playing = false` must not throw the viewer out of the
@@ -512,6 +525,11 @@ fun LiveTvScreen(
                 dvrChip = dvrChip,
                 onDvrChip = { dvrChip = it },
                 onOpenItem = onOpenItem,
+                onOpenRecording = onOpenRecording,
+                onMoreLibrary = { dvr?.refreshLibrary(more = true) },
+                onMoreAttention = { dvr?.refreshAttention(more = true) },
+                onMoreUpcoming = { dvr?.refreshSchedule(more = true) },
+                onOpenRecordingActivity = onOpenRecordingActivity,
                 onRecord = { channel, programme -> dvr?.record(channel.id, programme.start) },
                 onRecordSeries = { channel, programme -> recordSeries(channel.id, programme.start) },
                 onRemind = { channel, programme -> remind(channel.id, programme.start) },
@@ -522,6 +540,9 @@ fun LiveTvScreen(
                 onRuleNewOnly = { id, newOnly -> dvr?.setRuleNewOnly(id, newOnly) },
                 onRuleDelete = { id -> dvr?.deleteRule(id) },
                 onRuleMove = { id, delta -> dvr?.moveRule(id, delta) },
+                onManual = { channel, start, end, title ->
+                    dvr?.recordManual(channel, start, end, title)
+                },
             )
         } else {
         if (state.playing) {
@@ -544,17 +565,22 @@ fun LiveTvScreen(
                 if (!fullscreen && !isInPip) {
                     // The chips live on the picture. Six lines of `nowBar`
                     // under it left one list row on an iPhone-sized screen.
-                    Text(
-                        "● LIVE · ${state.watching?.guide_number.orEmpty()} " +
-                            state.watching?.guide_name.orEmpty(),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color.White,
-                        modifier = Modifier
-                            .align(Alignment.TopStart)
-                            .padding(10.dp)
+                    Column(
+                        Modifier.align(Alignment.TopStart).padding(10.dp)
                             .background(Color(0x99000000), MaterialTheme.shapes.small)
                             .padding(horizontal = 8.dp, vertical = 4.dp),
-                    )
+                    ) {
+                        Text(
+                            "● LIVE · ${state.watching?.guide_number.orEmpty()} " +
+                                state.watching?.guide_name.orEmpty(),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White,
+                        )
+                        state.watching?.let { watching ->
+                            dvrRecordingContext(dvrState, watching, controller.airing(watching, now).now, now)
+                                ?.let { Text("● $it", style = MaterialTheme.typography.labelSmall, color = Color.White) }
+                        }
+                    }
                     Row(
                         Modifier.align(Alignment.TopEnd).padding(6.dp),
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -601,7 +627,7 @@ fun LiveTvScreen(
                         showingInfo = showingInfo,
                         moreOpen = showingMore,
                         guide = state.guide,
-                        marks = dvrState.marks,
+                        dvr = dvrState,
                         now = now,
                         onGuide = { temporaryGuide = true; lastInteraction += 1 },
                         onChannels = { fullscreen = false },
@@ -668,6 +694,7 @@ fun LiveTvScreen(
                 onRecordings = { recordingsOpen = true },
                 summary = buildString {
                     append("${state.channels.size} channels")
+                    dvrState.indicatorLabel()?.let { append(" · $it") }
                     if (state.guide?.freshness != null && state.guide?.freshness != "fresh") {
                         append(if (state.guide?.freshness == "stale") " · guide is stale" else " · no guide data")
                     }
@@ -684,6 +711,9 @@ fun LiveTvScreen(
                     }
                 },
             )
+            dvrState.indicatorLabel()?.let { label ->
+                TextButton(onClick = onOpenRecordingActivity) { Text("● $label · Activity") }
+            }
             if (recordingsOpen) {
                 // Recordings is not a saved browse view: On now and Guide are a
                 // habit, and a viewer who last checked the schedule did not ask
@@ -694,12 +724,20 @@ fun LiveTvScreen(
                     chip = dvrChip,
                     onChip = { dvrChip = it },
                     onOpenItem = onOpenItem,
+                    onOpenRecording = onOpenRecording,
+                    onMoreLibrary = { dvr?.refreshLibrary(more = true) },
+                    onMoreAttention = { dvr?.refreshAttention(more = true) },
+                    onMoreUpcoming = { dvr?.refreshSchedule(more = true) },
                     onStop = ::stopRecording,
                     onRestore = { id -> dvr?.restore(id) },
                     onRuleEnabled = { id, enabled -> dvr?.setRuleEnabled(id, enabled) },
                     onRuleNewOnly = { id, newOnly -> dvr?.setRuleNewOnly(id, newOnly) },
                     onRuleDelete = { id -> dvr?.deleteRule(id) },
                     onRuleMove = { id, delta -> dvr?.moveRule(id, delta) },
+                    onForgetReminder = { id -> dvr?.forgetReminder(id) },
+                    onManual = { channel, start, end, title ->
+                        dvr?.recordManual(channel, start, end, title)
+                    },
                     modifier = Modifier.weight(1f),
                 )
             } else if (browse == LiveTvBrowseView.Guide && !television &&
@@ -821,6 +859,22 @@ fun LiveTvScreen(
                 },
             ) { detail = null }
         }
+    }
+    stopRecordingFor?.let { (id, title) ->
+        AlertDialog(
+            onDismissRequest = { stopRecordingFor = null },
+            title = { Text("Stop recording $title?") },
+            text = { Text("Any captured portion will be kept. Watching continues.") },
+            confirmButton = {
+                TextButton(onClick = {
+                    stopRecordingFor = null
+                    dvr?.stop(id) { needsConfirmation -> deleteFileFor = needsConfirmation }
+                }) { Text("Stop recording") }
+            },
+            dismissButton = {
+                TextButton(onClick = { stopRecordingFor = null }) { Text("Keep recording") }
+            },
+        )
     }
     deleteFileFor?.let { id ->
         AlertDialog(
@@ -1162,6 +1216,11 @@ private fun TelevisionLiveTvBrowser(
     dvrChip: DvrChip,
     onDvrChip: (DvrChip) -> Unit,
     onOpenItem: (Long) -> Unit,
+    onOpenRecording: (String) -> Unit,
+    onMoreLibrary: () -> Unit,
+    onMoreAttention: () -> Unit,
+    onMoreUpcoming: () -> Unit,
+    onOpenRecordingActivity: () -> Unit,
     onRecord: (LiveTvChannel, LiveTvProgramme) -> Unit,
     onRecordSeries: (LiveTvChannel, LiveTvProgramme) -> Unit,
     onRemind: (LiveTvChannel, LiveTvProgramme) -> Unit,
@@ -1172,6 +1231,7 @@ private fun TelevisionLiveTvBrowser(
     onRuleNewOnly: (String, Boolean) -> Unit,
     onRuleDelete: (String) -> Unit,
     onRuleMove: (String, Int) -> Unit,
+    onManual: (String, Long, Long, String) -> Unit,
 ) {
     var layoutOpen by remember { mutableStateOf(false) }
     var moreOpen by remember { mutableStateOf(false) }
@@ -1240,6 +1300,7 @@ private fun TelevisionLiveTvBrowser(
                 val total = state.channels.size
                 append(if (shown == total) "$total channels" else "$shown of $total channels")
                 if (state.playing) append(" · 1 tuner in use")
+                dvr.indicatorLabel()?.let { append(" · $it") }
                 state.guide?.freshness?.takeIf { it != "fresh" }?.let {
                     append(if (it == "stale") " · guide is stale" else " · no guide data")
                 }
@@ -1252,6 +1313,11 @@ private fun TelevisionLiveTvBrowser(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f, fill = false),
         )
+        dvr.indicatorLabel()?.let { label ->
+            TextButton(onClick = onOpenRecordingActivity, compact = true) {
+                Text("● $label", style = type.primary)
+            }
+        }
         Spacer(Modifier.weight(1f))
         TextButton(onClick = onToggleFavorites, compact = true) {
             Text(if (favoritesOnly) "★ All" else "★ Favorites", style = type.primary)
@@ -1330,12 +1396,18 @@ private fun TelevisionLiveTvBrowser(
             chip = dvrChip,
             onChip = onDvrChip,
             onOpenItem = onOpenItem,
+            onOpenRecording = onOpenRecording,
+            onMoreLibrary = onMoreLibrary,
+            onMoreAttention = onMoreAttention,
+            onMoreUpcoming = onMoreUpcoming,
             onStop = onStopRecording,
             onRestore = onRestore,
             onRuleEnabled = onRuleEnabled,
             onRuleNewOnly = onRuleNewOnly,
             onRuleDelete = onRuleDelete,
             onRuleMove = onRuleMove,
+            onForgetReminder = onForgetReminder,
+            onManual = onManual,
             modifier = Modifier.fillMaxSize(),
         )
         return
@@ -1631,7 +1703,7 @@ private fun LiveTvStatusLine(message: String) {
 }
 
 /** While a channel plays normally there is nothing to say. */
-private const val LIVE_TV_STEADY_MESSAGE = "Playing live · no recording or rewind"
+private const val LIVE_TV_STEADY_MESSAGE = "Playing live"
 
 /** The television grid, sized from the width it is actually given. */
 @Composable
@@ -1924,7 +1996,7 @@ private fun LiveTvOverlay(
     showingInfo: Boolean,
     moreOpen: Boolean,
     guide: LiveTvGuide?,
-    marks: DvrGuideMarks,
+    dvr: DvrScreenState,
     now: Long,
     onGuide: () -> Unit,
     onChannels: () -> Unit,
@@ -1983,6 +2055,11 @@ private fun LiveTvOverlay(
                     color = Color.White,
                 )
             }
+            if (channel != null) {
+                dvrRecordingContext(dvr, channel, airing.now, now)?.let {
+                    Text("● $it", style = MaterialTheme.typography.labelMedium, color = Color.White)
+                }
+            }
         }
         Column {
             if (temporaryGuide) {
@@ -2032,7 +2109,7 @@ private fun LiveTvOverlay(
                             slots = remember(window) { LiveTvGuideReducer.gridSlots(window) },
                             playingChannelId = channel?.id,
                             dimensions = dimensions,
-                            marks = marks,
+                            marks = dvr.marks,
                             now = now,
                             paging = LiveTvGuidePaging(
                                 canEarlier = canGuideEarlier,

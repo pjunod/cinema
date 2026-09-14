@@ -428,8 +428,10 @@ decoding shows what the file is versus what your browser is actually rendering.
 
 **What it does:** plays live over-the-air television from one HDHomeRun tuner
 on the same screens that play the library — the web app, iOS, tvOS, and
-Android. It is off until an administrator turns it on, and it is a *viewer*,
-not a DVR: nothing is recorded, nothing is scheduled, and nothing is kept.
+Android. Live viewing and recording have separate advisory enable switches.
+The DVR schedules exact guide airings or manual channel/time windows, writes
+on the configured tuner owner, and links finalized media into the ordinary
+recordings library.
 
 - **The page says what is on.** A channel row carries the network chip, the
   number and callsign, the programme on now with a bar running to its end,
@@ -450,8 +452,8 @@ not a DVR: nothing is recorded, nothing is scheduled, and nothing is kept.
   showing a false zero or interrupting playback.
 - **The programme data is a feed, not a dependency.** It comes from the
   HDHomeRun's own guide service by default, or from an XMLTV document an
-  administrator configures. It is read-only: a future programme has a details
-  popover and nothing else, because there is no DVR behind it. Every failure
+  administrator configures. Future programmes can be recorded once, matched
+  by a series rule, or given a reminder. Every failure
   mode is *rendered* — off, empty, stale or erroring all leave a working page
   and a tunable channel, because the channel list and session start never
   consult guide state and never wait on a guide fetch.
@@ -464,6 +466,17 @@ not a DVR: nothing is recorded, nothing is scheduled, and nothing is kept.
   element to the browser, and the "stop when the page hides" rule is narrowed
   to *hidden and not in picture-in-picture*, because a PiP window is playing
   and its tuner is in use.
+- **Recording state follows evidence.** Exact `(channel_id, airing_start)`
+  badges appear in guide cells, selected-programme details and player metadata.
+  A persistent summary opens capture Activity. `Starting`, `Recording`,
+  `Reconnecting`, `Finishing`, `Stop requested` and `Status unavailable` come
+  from bounded owner observations and durable rows, never from a frontend
+  clock. Written bytes and elapsed capture window stay named separately.
+- **Recordings is a permanent destination.** Upcoming, Saved and Needs
+  attention sit beside Series rules, manual timers, skipped-airing restore and
+  reminders on web, iOS, tvOS and Android. Details show durable lifecycle
+  history. Saved media offers Play only after both item and file links exist;
+  deleting it and stopping an active capture are separate named confirmations.
 
 - **One device, named by hand.** An administrator types the tuner's private
   IPv4 into Settings → Live TV. There is no broadcast discovery: a server

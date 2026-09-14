@@ -1111,6 +1111,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     crate::dvr::DVR_SCHEMA,
     // v58: resumable subject classification and owner-scoped decisions.
     crate::channel_subjects::SCHEMA,
+    // v59: bounded DVR lifecycle history and per-user attention review.
+    crate::dvr::DVR_EVENT_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

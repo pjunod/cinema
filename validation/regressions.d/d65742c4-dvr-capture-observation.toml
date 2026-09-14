@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["d65742c4"]
+points = ["live.dvr"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The bounded capture-observation projection is exercised by `display_state_separates_freshness_from_write_health` and `a_reached_clock_never_claims_that_capture_started` in `crates/plurxd/src/http/dvr.rs`: fresh write evidence, quiet writes, stale ownership evidence and a reached schedule clock remain distinct states. The cases do not emulate a physical tuner or multi-node relay, so those observations remain explicitly unclaimed."

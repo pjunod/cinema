@@ -10,6 +10,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
@@ -51,6 +52,11 @@ import tv.plurx.app.ui.theme.PlurxTheme
 import tv.plurx.app.livetv.LiveTvPlayer
 import tv.plurx.app.livetv.LiveTvScreen
 import tv.plurx.app.livetv.LiveTvDeveloperScreen
+import tv.plurx.app.livetv.DvrApi
+import tv.plurx.app.livetv.DvrController
+import tv.plurx.app.livetv.DvrRecordingsScreen
+import tv.plurx.app.livetv.DvrRecordingDetailScreen
+import tv.plurx.app.livetv.DvrCaptureActivityScreen
 import tv.plurx.app.librarychannels.LibraryChannelPlayer
 import tv.plurx.app.librarychannels.LibraryChannelsScreen
 import androidx.compose.ui.platform.LocalContext
@@ -144,6 +150,20 @@ private fun MainNav(
     onReminderChannelUsed: () -> Unit,
 ) {
     val nav = rememberNavController()
+    val dvrScope = rememberCoroutineScope()
+    val token = Session.token.orEmpty()
+    val dvr = androidx.compose.runtime.remember(vm.origin, token, dvrScope) {
+        if (token.isEmpty()) null
+        else runCatching { DvrController(DvrApi(vm.origin, token), dvrScope) }.getOrNull()
+    }
+    DisposableEffect(dvr) {
+        dvr?.load()
+        dvr?.startDuePoll()
+        dvr?.startObservation()
+        onDispose { dvr?.stopObservation() }
+    }
+    LifecycleEventEffect(Lifecycle.Event.ON_START) { dvr?.startObservation() }
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { dvr?.stopObservation() }
     val requestedChannel by reminderChannel.collectAsStateWithLifecycle()
     LaunchedEffect(requestedChannel) {
         val channel = requestedChannel ?: return@LaunchedEffect
@@ -165,6 +185,7 @@ private fun MainNav(
                 onOpenDownloads = { nav.navigate("downloads") },
                 onOpenSettings = { nav.navigate("settings") },
                 onOpenLiveTv = { nav.navigate("live-tv") },
+                onOpenRecordings = { nav.navigate("recordings") },
                 onOpenLibraryChannels = { nav.navigate("library-channels") },
             )
         }
@@ -246,8 +267,38 @@ private fun MainNav(
         ) { entry ->
             LiveTvScreen(
                 origin = vm.origin,
+                dvrController = dvr,
                 initialChannelId = entry.arguments?.getString("channel"),
                 onOpenItem = { id -> nav.navigate("detail/$id") },
+                onOpenRecording = { id -> nav.navigate("recording/${Uri.encode(id)}") },
+                onOpenRecordingActivity = { nav.navigate("recording-activity") },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable("recordings") {
+            DvrRecordingsScreen(
+                controller = dvr,
+                onOpenItem = { id -> nav.navigate("detail/$id") },
+                onOpenRecording = { id -> nav.navigate("recording/${Uri.encode(id)}") },
+                onOpenActivity = { nav.navigate("recording-activity") },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable(
+            "recording/{id}",
+            arguments = listOf(navArgument("id") { type = NavType.StringType }),
+        ) { entry ->
+            DvrRecordingDetailScreen(
+                controller = dvr,
+                recordingId = entry.arguments?.getString("id").orEmpty(),
+                onOpenItem = { id -> nav.navigate("detail/$id") },
+                onBack = { nav.popBackStack() },
+            )
+        }
+        composable("recording-activity") {
+            DvrCaptureActivityScreen(
+                controller = dvr,
+                onOpenRecording = { id -> nav.navigate("recording/${Uri.encode(id)}") },
                 onBack = { nav.popBackStack() },
             )
         }

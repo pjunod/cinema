@@ -56,9 +56,16 @@ data class DvrRecording(
     val state: String,
     /** One sentence for anything that is not plainly scheduled. */
     val state_reason: String? = null,
+    val attempt: Long = 0,
     val gap_s: Long = 0,
     val late_start_s: Long = 0,
     val bytes: Long = 0,
+    val last_progress_ms: Long? = null,
+    val stop_requested_at_ms: Long? = null,
+    val stopped_by_user_id: Long? = null,
+    /** Public attention rows preserve the fact without returning a user id. */
+    val stopped_early: Boolean = false,
+    val started_at_ms: Long? = null,
     /** Both arrive once the scan has linked the capture into the library. */
     val item_id: Long? = null,
     val file_id: Long? = null,
@@ -158,7 +165,160 @@ data class DvrSchedule(
     /** Rows with no tuner. The number the Scheduled chip carries. */
     val conflicts: Int = 0,
     val rows: List<DvrRecording> = emptyList(),
+    val next: String? = null,
 )
+
+@Serializable
+data class DvrRecordingsPage(
+    val rows: List<DvrRecording> = emptyList(),
+    val next: String? = null,
+)
+
+@Serializable
+data class DvrCaptureObservation(
+    val recording_id: String,
+    val channel_id: String,
+    val airing_start: Long,
+    val owner_node_id: String = "",
+    val config_generation: Long = 0,
+    val serving_generation: Long = 0,
+    val attempt: Long = 0,
+    /** Open vocabulary: unknown owner phases still decode and render safely. */
+    val phase: String,
+    val observation_age_ms: Long = 0,
+    val last_write_age_ms: Long? = null,
+    val first_write_at_ms: Long? = null,
+    val attempt_bytes_written: Long = 0,
+    val prior_attempt_bytes: Long? = null,
+    val write_bps: Long? = null,
+    val reason_code: String? = null,
+)
+
+@Serializable
+data class DvrOverviewCounts(
+    val recording: Int? = null,
+    val starting: Int? = null,
+    val reconnecting: Int? = null,
+    val finishing: Int? = null,
+    val unconfirmed: Int? = null,
+    val attention: Int? = null,
+) {
+    val active: Int get() = listOf(recording, starting, reconnecting, finishing, unconfirmed)
+        .filterNotNull().sum()
+}
+
+@Serializable
+data class DvrOverviewDiagnostics(
+    val owner_node_id: String,
+    val recording_sinks: Int? = null,
+    val recording_transports: Int? = null,
+    val storage_free_bytes: Long? = null,
+)
+
+@Serializable
+data class DvrActiveRecording(
+    val recording_id: String,
+    val channel_id: String,
+    val airing_start: Long,
+    val title: String,
+    val episode_title: String? = null,
+    val guide_number: String = "",
+    val channel_name: String = "",
+    val durable_state: String,
+    val state_reason: String? = null,
+    val airing_end: Long,
+    val capture_start: Long,
+    val capture_end: Long,
+    val stop_requested_at_ms: Long? = null,
+    val last_confirmed_bytes: Long? = null,
+    val total_bytes_written: Long? = null,
+    val observation: DvrCaptureObservation? = null,
+    val display_state: String,
+    val display_detail: String = "",
+    val can_stop: Boolean = false,
+    val can_skip: Boolean = false,
+    val can_restore: Boolean = false,
+    val can_delete: Boolean = false,
+    val can_edit_rule: Boolean = false,
+    val can_reorder_rules: Boolean = false,
+    val can_view_diagnostics: Boolean = false,
+) {
+    fun captureProgress(now: Long): Float {
+        val span = capture_end - capture_start
+        return if (span <= 0) 0f else ((now - capture_start).toFloat() / span).coerceIn(0f, 1f)
+    }
+}
+
+@Serializable
+data class DvrOverview(
+    val version: Int = 1,
+    val server_now_ms: Long,
+    val availability: String,
+    val runtime_supported: Boolean = true,
+    val observation_age_ms: Long? = null,
+    val counts: DvrOverviewCounts = DvrOverviewCounts(),
+    val active_total: Int? = null,
+    val active_truncated: Boolean = false,
+    val active: List<DvrActiveRecording> = emptyList(),
+    val next_capture_start: Long? = null,
+    val diagnostics: DvrOverviewDiagnostics? = null,
+) {
+    fun isFresh(clientAgeMs: Long = 0): Boolean {
+        val age = (observation_age_ms ?: 0).coerceAtLeast(0)
+        return availability != "unavailable" &&
+            (availability == "complete" || observation_age_ms != null) &&
+            age <= 20_000 - clientAgeMs.coerceIn(0, 20_001)
+    }
+
+    fun indicatorText(clientAgeMs: Long = 0): String? {
+        if (!isFresh(clientAgeMs)) return if (counts.active > 0) "Status unavailable" else null
+        return listOfNotNull(
+            counts.recording?.takeIf { it > 0 }?.let { "$it recording" },
+            counts.starting?.takeIf { it > 0 }?.let { "$it starting" },
+            counts.reconnecting?.takeIf { it > 0 }?.let { "$it reconnecting" },
+            counts.finishing?.takeIf { it > 0 }?.let { "$it finishing" },
+            counts.unconfirmed?.takeIf { it > 0 }?.let { "$it unconfirmed" },
+        ).takeIf { it.isNotEmpty() }?.joinToString(" · ")
+    }
+}
+
+@Serializable
+data class DvrEvent(
+    val recording_id: String,
+    val sequence: Long,
+    val event_id: String,
+    val kind: String,
+    val occurred_at_ms: Long,
+    val attempt: Long? = null,
+    val actor_user_id: Long? = null,
+    val reason_code: String? = null,
+)
+
+@Serializable
+data class DvrEventsPage(
+    val rows: List<DvrEvent> = emptyList(),
+    val next: String? = null,
+    val history_complete: Boolean = false,
+    val truncated_before_sequence: Long? = null,
+)
+
+@Serializable
+data class DvrAttentionProjection(
+    val recording: DvrRecording,
+    val latest_attention_sequence: Long,
+    val latest_attention_at_ms: Long,
+    val acknowledged_through_sequence: Long = 0,
+)
+
+@Serializable
+data class DvrAttentionPage(
+    val rows: List<DvrAttentionProjection> = emptyList(),
+    val next: String? = null,
+    val total: Int = 0,
+)
+
+@Serializable
+data class DvrAttentionAck(val recording_id: String, val through_sequence: Long)
 
 @Serializable
 data class DvrHolderSink(val recording_id: String, val title: String, val ends_at: Long)
@@ -269,7 +429,6 @@ class DvrApi(origin: String, private val token: String) {
          * web page is a failure rather than a read of unbounded length.
          */
         const val MAX_BODY_BYTES: Long = 1_048_576
-        const val SCHEDULE_DAYS_MAX: Int = 14
     }
 
     private val base = (Session.canonicalOrigin(origin) ?: throw DvrFailure("invalid_settings")).toHttpUrl()
@@ -287,6 +446,7 @@ class DvrApi(origin: String, private val token: String) {
         target: HttpUrl,
         method: String = "GET",
         body: JsonObject? = null,
+        timeoutSeconds: Long? = null,
     ): Answer = withContext(Dispatchers.IO) {
         try {
             val payload = if (method == "POST" || method == "PUT") {
@@ -297,7 +457,9 @@ class DvrApi(origin: String, private val token: String) {
             }
             val request = Request.Builder().url(target).method(method, payload)
                 .header("Authorization", "Bearer $token").build()
-            client.newCall(request).execute().use { response ->
+            val call = client.newCall(request)
+            timeoutSeconds?.let { call.timeout().timeout(it, TimeUnit.SECONDS) }
+            call.execute().use { response ->
                 val source = response.body?.source()
                 if (source?.request(MAX_BODY_BYTES + 1) == true) throw DvrFailure("dvr_unreachable")
                 val text = source?.readUtf8().orEmpty()
@@ -330,12 +492,18 @@ class DvrApi(origin: String, private val token: String) {
 
     suspend fun status(): DvrStatus = Net.json.decodeFromString(request(url("status")).body)
 
-    suspend fun schedule(days: Int = SCHEDULE_DAYS_MAX, cancelled: Boolean = false): DvrSchedule =
+    suspend fun overview(): DvrOverview = Net.json.decodeFromString(
+        request(url("overview"), timeoutSeconds = 4).body,
+    )
+
+    suspend fun schedule(from: Long, to: Long, after: String? = null): DvrSchedule =
         Net.json.decodeFromString(
             request(
                 url("schedule").newBuilder()
-                    .addQueryParameter("days", days.coerceIn(1, SCHEDULE_DAYS_MAX).toString())
-                    .apply { if (cancelled) addQueryParameter("cancelled", "1") }
+                    .addQueryParameter("from", from.toString())
+                    .addQueryParameter("to", to.toString())
+                    .addQueryParameter("limit", "100")
+                    .apply { after?.let { addQueryParameter("after", it) } }
                     .build(),
             ).body,
         )
@@ -345,7 +513,10 @@ class DvrApi(origin: String, private val token: String) {
      * `deleted`, which is the server's own default rather than a filter this
      * client invents.
      */
-    suspend fun recordings(states: List<String> = emptyList()): List<DvrRecording> =
+    suspend fun recordingsPage(
+        states: List<String> = emptyList(),
+        after: String? = null,
+    ): DvrRecordingsPage =
         Net.json.decodeFromString(
             request(
                 url("recordings").newBuilder()
@@ -353,8 +524,45 @@ class DvrApi(origin: String, private val token: String) {
                         if (states.isNotEmpty()) {
                             addQueryParameter("state", states.joinToString(","))
                         }
+                        if (after != null) addQueryParameter("after", after)
                     }
                     .build(),
+            ).body,
+        )
+
+    suspend fun recordings(states: List<String> = emptyList()): List<DvrRecording> =
+        recordingsPage(states).rows
+
+    suspend fun recording(id: String): DvrRecording =
+        Net.json.decodeFromString(request(url("recordings", id)).body)
+
+    suspend fun events(
+        id: String,
+        before: String? = null,
+        after: String? = null,
+        limit: Int = 50,
+    ): DvrEventsPage = Net.json.decodeFromString(
+        request(
+            url("recordings", id, "events").newBuilder().apply {
+                addQueryParameter("limit", limit.coerceIn(1, 100).toString())
+                before?.let { addQueryParameter("before", it) }
+                after?.let { addQueryParameter("after", it) }
+            }.build(),
+        ).body,
+    )
+
+    suspend fun attention(after: String? = null): DvrAttentionPage = Net.json.decodeFromString(
+        request(
+            url("attention").newBuilder().apply { after?.let { addQueryParameter("after", it) } }.build(),
+        ).body,
+    )
+
+    suspend fun acknowledgeAttention(id: String, throughSequence: Long): DvrAttentionAck =
+        Net.json.decodeFromString(
+            request(
+                url("recordings", id, "attention", "ack"),
+                "POST",
+                buildJsonObject { put("through_sequence", throughSequence) },
             ).body,
         )
 
@@ -370,6 +578,24 @@ class DvrApi(origin: String, private val token: String) {
             buildJsonObject {
                 put("channel_id", channelId)
                 put("airing_start", airingStart)
+            },
+        ).body,
+    )
+
+    suspend fun recordManual(
+        channelId: String,
+        captureStart: Long,
+        captureEnd: Long,
+        title: String,
+    ): DvrRecording = Net.json.decodeFromString(
+        request(
+            url("recordings"),
+            "POST",
+            buildJsonObject {
+                put("channel_id", channelId)
+                put("capture_start", captureStart)
+                put("capture_end", captureEnd)
+                if (title.isNotBlank()) put("title", title.trim())
             },
         ).body,
     )

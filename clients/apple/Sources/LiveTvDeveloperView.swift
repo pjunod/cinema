@@ -56,12 +56,30 @@ struct LiveTvDeveloperView: View {
                     }
                     Button("Refresh Library channel readiness") { Task { await loadDeveloperReadiness() } }
                 }
+                Section("Recording · advisory enablement") {
+                    Toggle("Enable recording", isOn: Binding(
+                        get: { saved.dvrEnabled },
+                        set: { write(.dvrEnabled($0)) }
+                    ))
+                    Text("This switch is always yours to operate. The checks explain what is needed for safe capture; unmet or unobservable checks never disable or override it.")
+                    LabeledContent("Recording root", value: saved.dvrRoot.isEmpty ? "Not set" : saved.dvrRoot)
+                    LabeledContent("Reserved tuner slots", value: String(saved.dvrTunerReserve))
+                    if let item = developerReadiness?.items.first(where: { $0.id == "dvr" }) {
+                        ForEach(item.requirements) { requirement in
+                            Label(requirement.title, systemImage: requirement.status == "met" ? "checkmark.circle" : (requirement.status == "unmet" ? "exclamationmark.triangle" : "questionmark.circle"))
+                            Text(requirement.evidence).font(.caption)
+                        }
+                    } else {
+                        Text("Readiness is unavailable. That does not gate the enable switch.").font(.caption)
+                    }
+                    Button("Refresh recording readiness") { Task { await loadDeveloperReadiness() } }
+                }
             }
             Section("HDHomeRun Live TV · runtime enablement") {
                 Text("Watch unprotected antenna channels from one network tuner. No special build is needed.")
                 Text("Before enabling: finish the HDHomeRun channel scan, reserve a stable private IPv4 address, and choose one reachable, committed tuner-owner node. Keep all serving nodes on a compatible plurx version.")
                 Text("The owner needs network access to the tuner and writable scratch space. Compatible broadcasts are copied without an encoder; conversion routes additionally need a working FFmpeg encoder and tone mapping when HDR must become SDR.")
-                Text("ATSC 3.0 can require HEVC and AC-4 decoders your FFmpeg lacks. DRM, recording, rewind, captions, and guide scheduling are not supported. Readiness tests the output graph, not every broadcast codec.")
+                Text("ATSC 3.0 can require HEVC and AC-4 decoders your FFmpeg lacks. DRM, rewind, and captions are not supported. Unprotected channels can be scheduled or recorded manually. Readiness tests the output graph, not every broadcast codec, and never gates either switch.")
             }
             if let saved {
                 Section(saved.liveTvEnabled ? "Live TV is enabled" : "Live TV is disabled") {
@@ -191,7 +209,7 @@ struct LiveTvDeveloperView: View {
                 guard revision == expected else { return }
                 apply(settings)
                 await loadGuideReadiness()
-                message = "Saved. Library channels are \(settings.libraryChannelsEnabled ? "enabled" : "disabled"); Live TV is \(settings.liveTvEnabled ? "enabled" : "disabled")."
+                message = "Saved. Recording is \(settings.dvrEnabled ? "enabled" : "disabled"); Library channels are \(settings.libraryChannelsEnabled ? "enabled" : "disabled"); Live TV is \(settings.liveTvEnabled ? "enabled" : "disabled")."
             } catch {
                 guard revision == expected else { return }
                 // No automatic retry of an uncertain mutation: reload its
