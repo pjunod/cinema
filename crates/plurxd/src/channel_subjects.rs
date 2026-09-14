@@ -196,8 +196,22 @@ async fn read_preview(
     Path(id): Path<String>,
     Query(page): Query<Page>,
 ) -> Result<Json<Envelope>, ApiError> {
-    let job = owned_job(&state, &user, id).await?;
+    let mut job = owned_job(&state, &user, id).await?;
     let (candidates, snapshot) = catalogue(&state, &job.recipe).await?;
+    if job
+        .catalogue_digest
+        .as_ref()
+        .is_some_and(|previous| previous != &snapshot)
+    {
+        job.state = "superseded".into();
+        job.error = Some("Catalogue changed; start a new preview.".into());
+        return Ok(Json(Envelope {
+            summary: Summary::from(&job),
+            rows: vec![],
+            next_cursor: None,
+            preview_seed: hex::encode(job.seed),
+        }));
+    }
     let cursor_identity = digest(&(
         job.id.as_str(),
         job.result_revision,
@@ -354,7 +368,12 @@ pub async fn request_channel_activation(
     {
         if channel.recipe.auto_refresh && previous.state == "complete" {
             let (_, snapshot) = catalogue(state, &channel.recipe).await?;
-            if previous.catalogue_digest.as_ref() != Some(&snapshot) {
+            if previous.catalogue_digest.as_ref() != Some(&snapshot)
+                || observation()
+                    .profile
+                    .as_ref()
+                    .is_some_and(|profile| previous.classifier_profile.as_ref() != Some(profile))
+            {
                 state
                     .store
                     .subject_write(JobWrite::Supersede {
@@ -478,6 +497,21 @@ async fn enabled(state: &AppState) -> Result<bool, ApiError> {
     ))
 }
 
+async fn classify_enabled(
+    state: &AppState,
+    provider: &ollama::Ollama,
+    subject: &str,
+    batch: &[(String, Metadata)],
+) -> Result<BTreeMap<String, SubjectDecision>, String> {
+    if !enabled(state)
+        .await
+        .map_err(|_| "provider_setting_unavailable")?
+    {
+        return Err("provider_paused".into());
+    }
+    provider.classify(subject, batch).await
+}
+
 pub async fn worker(state: AppState, shutdown: CancellationToken) {
     let mut last_maintenance = 0;
     loop {
@@ -489,7 +523,10 @@ pub async fn worker(state: AppState, shutdown: CancellationToken) {
                 .await;
             if let Ok(provider) = ollama::Ollama::configured() {
                 match provider.profile().await {
-                    Ok(profile) => observe(|o| o.profile = Some(profile)),
+                    Ok(profile) => observe(|o| {
+                        o.profile = Some(profile);
+                        o.error = None;
+                    }),
                     Err(error) => observe(|o| {
                         o.profile = None;
                         o.error = Some(error);
@@ -504,7 +541,7 @@ pub async fn worker(state: AppState, shutdown: CancellationToken) {
         tokio::select! {_=shutdown.cancelled()=>return,_=tokio::time::sleep(Duration::from_secs(2))=>{}}
     }
 }
-async fn turn(state: &AppState, shutdown: &CancellationToken) -> Result<(), ApiError> {
+pub(crate) async fn turn(state: &AppState, shutdown: &CancellationToken) -> Result<(), ApiError> {
     let Some(mut job) = state
         .store
         .subject_job(JobQuery::Pending { now: now() })
@@ -571,7 +608,6 @@ async fn process(state: &AppState, job: &mut SubjectJob, claim: &str) -> Result<
         0
     };
     observe(|o| {
-        o.profile = job.classifier_profile.clone();
         o.error = job.error.clone();
     });
     let committed = state
@@ -625,6 +661,15 @@ async fn process_inner(
         job.state = "complete".into();
         return Ok(());
     }
+    let provider = ollama::Ollama::configured().map_err(unavailable)?;
+    let profile_result = provider.profile().await;
+    match &profile_result {
+        Ok(profile) => {
+            observe(|o| o.profile = Some(profile.clone()));
+            job.classifier_profile = Some(profile.clone());
+        }
+        Err(_) => observe(|o| o.profile = None),
+    }
     let initial = cached(state, job, &candidates).await?;
     let immediate = candidates
         .iter()
@@ -660,16 +705,11 @@ async fn process_inner(
             }
         }
     }
-    let provider = ollama::Ollama::configured().map_err(unavailable)?;
-    if job.classifier_profile.is_none() || job.result_revision == 0 {
-        match provider.profile().await {
-            Ok(profile) => job.classifier_profile = Some(profile),
-            Err(e) => {
-                job.state = "waiting_for_provider".into();
-                job.error = Some(e);
-                return Ok(());
-            }
-        }
+    if let Err(error) = profile_result {
+        job.state = "waiting_for_provider".into();
+        job.error = Some(error);
+        job.counts = counts(&candidates, &initial);
+        return Ok(());
     }
     let mut decisions = cached(state, job, &candidates).await?;
     observe(|o| {
@@ -718,6 +758,9 @@ async fn process_inner(
         tentative.push(next.clone());
         let size=serde_json::json!({"subject":job.recipe.subject,"records":tentative.iter().map(|(id,m)|serde_json::json!({"id":id,"metadata":m})).collect::<Vec<_>>()}).to_string().chars().count();
         if size > INPUT_CHARS {
+            if batch.is_empty() {
+                return Err(invalid("An eligible metadata record exceeds the serialized input budget; shorten its metadata and refresh."));
+            }
             break;
         }
         batch.push(next);
@@ -749,32 +792,45 @@ async fn process_inner(
             }
         }
         let subject = job.recipe.subject.as_deref().unwrap_or_default();
-        let mut response = provider.classify(subject, &batch).await;
-        if response.is_err() && enabled(state).await? {
-            response = provider.classify(subject, &batch).await;
+        let mut response = classify_enabled(state, &provider, subject, &batch).await;
+        if response.is_err()
+            && response
+                .as_ref()
+                .err()
+                .is_none_or(|e| e != "provider_paused")
+        {
+            response = classify_enabled(state, &provider, subject, &batch).await;
         }
         let mut response = match response {
             Ok(rows) => rows,
             Err(e) => {
-                job.state =
-                    if e.contains("unreachable") || e.contains("timeout") || e.contains("http_") {
-                        "waiting_for_provider"
-                    } else {
-                        "failed"
-                    }
-                    .into();
+                job.state = if e.contains("unreachable")
+                    || e.contains("timeout")
+                    || e.contains("http_")
+                    || e.contains("paused")
+                    || e.contains("setting_unavailable")
+                {
+                    "waiting_for_provider"
+                } else {
+                    "failed"
+                }
+                .into();
                 job.error = Some(e);
                 job.counts = counts(&candidates, &decisions);
                 return Ok(());
             }
         };
         for ((id, metadata), candidate) in batch.iter().zip(selected) {
-            if !response.contains_key(id) && enabled(state).await? {
-                if let Ok(row) = provider
-                    .classify(subject, &[(id.clone(), metadata.clone())])
+            let mut paused = false;
+            if !response.contains_key(id) {
+                match classify_enabled(state, &provider, subject, &[(id.clone(), metadata.clone())])
                     .await
                 {
-                    response.extend(row);
+                    Ok(row) => response.extend(row),
+                    Err(error) => {
+                        paused =
+                            error == "provider_paused" || error == "provider_setting_unavailable"
+                    }
                 }
             }
             if let Some(decision) = response.remove(id) {
@@ -786,12 +842,33 @@ async fn process_inner(
                 });
                 decisions.insert(candidate.item_id, decision);
             } else {
-                job.error = Some("provider_invalid_or_missing_row_after_retry".into());
+                job.error = Some(
+                    if !paused && enabled(state).await? {
+                        "provider_invalid_or_missing_row_after_retry"
+                    } else {
+                        "provider_paused"
+                    }
+                    .into(),
+                );
+            }
+        }
+    }
+    if !new_decisions.is_empty() {
+        match provider.profile().await {
+            Ok(profile) if job.classifier_profile.as_ref() == Some(&profile) => {}
+            other => {
+                new_decisions.clear();
+                job.state = "queued".into();
+                job.error = Some("Model artifact changed or became unavailable during classification; retrying without caching that response.".into());
+                observe(|o| o.profile = other.ok());
+                return Ok(());
             }
         }
     }
     job.counts = counts(&candidates, &decisions);
-    job.state = if job.error.is_some() {
+    job.state = if job.error.as_deref() == Some("provider_paused") {
+        "waiting_for_provider"
+    } else if job.error.is_some() {
         "failed"
     } else if job.counts.processed == job.counts.total {
         "complete"
@@ -814,6 +891,7 @@ async fn process_inner(
             c
         })
         .collect::<Vec<_>>();
+    job.selection_count = matches.len();
     if let Some(id) = &job.channel_id {
         if let Some(channel) = state
             .store

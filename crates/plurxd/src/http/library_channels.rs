@@ -435,6 +435,7 @@ async fn update(
         recipe.subject = previous.recipe.subject.clone();
     }
     let update = LibraryChannelUpdate {
+        subject_next_programme: false,
         channel_id: id,
         actor_user_id: user.id,
         actor_is_admin: user.is_admin,
@@ -696,6 +697,7 @@ async fn rebuild(
         ));
     }
     let update = LibraryChannelUpdate {
+        subject_next_programme: matches!(body.activation, Activation::NextProgramme),
         channel_id: id.clone(),
         actor_user_id: user.id,
         actor_is_admin: user.is_admin,

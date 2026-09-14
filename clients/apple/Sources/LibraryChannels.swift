@@ -115,9 +115,10 @@ struct LibraryChannel: Codable, Identifiable, Equatable {
     var canShare: Bool?
     var now: LibraryChannelProgramme?
     var next: LibraryChannelProgramme?
+    var matching: SubjectMatchingSummary?
 }
 
-struct LibraryChannelDefinition: Codable {
+struct LibraryChannelDefinition: Codable, Equatable {
     let requestId: String
     let name: String
     let description: String
@@ -125,6 +126,12 @@ struct LibraryChannelDefinition: Codable {
     let enabled: Bool
     let recipe: LibraryChannelRecipe
     let previewSeed: String?
+}
+
+extension LibraryChannelDefinition {
+    func sameAuthoredIntent(as other: Self) -> Bool {
+        name == other.name && description == other.description && visibility == other.visibility && enabled == other.enabled && recipe == other.recipe
+    }
 }
 
 struct LibraryChannelUpdateRequest: Codable {
@@ -186,6 +193,11 @@ struct SubjectPreviewRequest: Codable {
     let requestId: String
     let previewSeed: String?
 }
+struct SubjectMatchingSummary: Codable, Equatable {
+    let jobId: String
+    let state: String
+}
+
 struct SubjectPreview: Codable {
     struct Row: Codable, Identifiable {
         let itemId: String
@@ -217,6 +229,7 @@ struct LibraryChannelRebuildRequest: Codable {
 }
 
 struct LibraryChannelBuild: Codable {
+    let matching: SubjectMatchingSummary?
     let state: String
     let activeGenerationId: String?
     let pendingGenerationId: String?
@@ -1008,8 +1021,12 @@ private struct LibraryChannelEditor: View {
     @State private var subjectRecipe: LibraryChannelRecipe?
     @State private var subjectJobId: String?
     @State private var subjectFilter = "match"
+    @State private var subjectCursor: String?
+    @State private var subjectPollRequest = 0
     @State private var showAdvanced = false
     @State private var requestId = UUID().uuidString
+    @State private var saveAttempt: LibraryChannelDefinition?
+    @State private var finished = false
     @State private var preview: LibraryChannelPreview?
     @State private var previewSeed: String?
     @State private var busy = false
@@ -1127,23 +1144,22 @@ private struct LibraryChannelEditor: View {
         }
         .onAppear { loadChannel(); restoreDraft(); applySeed() }
         .onDisappear { persistDraft() }
-        .onChange(of: subject) { _, value in if channel == nil && name.isEmpty { name = String(value.unicodeScalars.prefix(80)) } }
-        .onChange(of: recipe) { _, _ in requestId = UUID().uuidString; if recipe != subjectRecipe { subjectJobId = nil; subjectPreview = nil }; persistDraft() }
-        .onChange(of: name) { _, _ in requestId = UUID().uuidString }
-        .onChange(of: description) { _, _ in requestId = UUID().uuidString }
-        .onChange(of: enabled) { _, _ in requestId = UUID().uuidString }
-        .onChange(of: visibility) { _, _ in requestId = UUID().uuidString }
-        .task(id: "\(subjectJobId ?? ""): \(subjectFilter)") {
-            guard subjectJobId != nil else { return }
+        .onChange(of: recipe) { _, _ in if recipe != subjectRecipe { subjectJobId = nil; subjectPreview = nil }; persistDraft() }
+        .onChange(of: subjectFilter) { _, _ in subjectCursor = nil }
+        .task(id: "\(subjectJobId ?? ""): \(subjectFilter): \(subjectCursor ?? ""): \(scenePhase)") {
+            guard subjectJobId != nil, scenePhase == .active else { return }
             let captured = recipe
             repeat {
-                await pollSubject()
+                await pollSubject(cursor: subjectCursor)
                 if captured != recipe || subjectPreview?.complete == true || ["cancelled", "failed", "superseded"].contains(subjectPreview?.state ?? "") { return }
                 try? await Task.sleep(for: .seconds(subjectPreview?.state == "waiting_for_provider" ? 10 : 2))
             } while !Task.isCancelled
         }
         .onChange(of: scenePhase) { (_: ScenePhase, phase: ScenePhase) in if phase != ScenePhase.active { persistDraft() } }
         .task {
+            if let channel, subjectJobId == nil, let fresh = try? await model.requireAPI().libraryChannel(channel.id), fresh.recipe == recipe {
+                subjectRecipe = fresh.recipe; subjectJobId = fresh.matching?.jobId
+            }
             if let user = try? await model.requireAPI().me() {
                 canShare = user.isAdmin == true
             }
@@ -1161,7 +1177,7 @@ private struct LibraryChannelEditor: View {
                         Text("Matched").tag("match"); Text("Uncertain").tag("uncertain"); Text("Excluded").tag("no_match")
                     }
                     ForEach(result.rows) { row in subjectRow(row) }
-                    if let cursor = result.nextCursor { Button("More results") { Task { await pollSubject(cursor: cursor) } } }
+                    if let cursor = result.nextCursor { Button("More results") { subjectCursor = cursor } }
                 }
     }
 
@@ -1177,17 +1193,21 @@ private struct LibraryChannelEditor: View {
     }
     private func includeSubjectItem(_ value: String) {
         guard let id = Int(value) else { return }
-        if !includeItemIds.contains(id) { includeItemIds.append(id) }
+        excludeItemIds.removeAll { $0 == id }; if !includeItemIds.contains(id) { includeItemIds.append(id) }
         excludeItemIds.removeAll { $0 == id }
     }
     private func excludeSubjectItem(_ value: String) {
         guard let id = Int(value) else { return }
-        if !excludeItemIds.contains(id) { excludeItemIds.append(id) }
+        includeItemIds.removeAll { $0 == id }; if !excludeItemIds.contains(id) { excludeItemIds.append(id) }
     }
 
+    private var effectiveName: String {
+        let authored = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return authored.isEmpty && channel == nil ? String(subject.trimmingCharacters(in: .whitespacesAndNewlines).unicodeScalars.prefix(80)) : authored
+    }
     private var valid: Bool {
-        !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            && name.count <= 80 && description.count <= 500 && subject.unicodeScalars.count <= 500 && (movies || episodes)
+        !effectiveName.isEmpty
+            && effectiveName.unicodeScalars.count <= 80 && description.count <= 500 && subject.unicodeScalars.count <= 500 && (movies || episodes)
     }
 
     private var dirty: Bool {
@@ -1223,7 +1243,7 @@ private struct LibraryChannelEditor: View {
     private var definition: LibraryChannelDefinition {
         LibraryChannelDefinition(
             requestId: requestId,
-            name: name.trimmingCharacters(in: .whitespacesAndNewlines),
+            name: effectiveName,
             description: description.trimmingCharacters(in: .whitespacesAndNewlines),
             visibility: canShare ? visibility : .personal,
             enabled: enabled,
@@ -1239,6 +1259,7 @@ private struct LibraryChannelEditor: View {
         let definition: LibraryChannelDefinition
         var subjectJobId: String?
         var subjectRecipe: LibraryChannelRecipe?
+        var saveAttempt: LibraryChannelDefinition?
     }
 
     private var draftKey: String {
@@ -1246,14 +1267,15 @@ private struct LibraryChannelEditor: View {
     }
 
     private func persistDraft() {
+        guard !finished else { return }
         guard dirty, let data = try? JSONEncoder().encode(StoredDraft(
             channelId: channel?.id, expectedRevision: channel?.revision,
-            step: step, definition: definition, subjectJobId: subjectJobId, subjectRecipe: subjectRecipe
+            step: step, definition: definition, subjectJobId: subjectJobId, subjectRecipe: subjectRecipe, saveAttempt: saveAttempt
         )) else { return }
         UserDefaults.standard.set(data, forKey: draftKey)
     }
 
-    private func clearDraft() { UserDefaults.standard.removeObject(forKey: draftKey) }
+    private func clearDraft() { finished = true; UserDefaults.standard.removeObject(forKey: draftKey) }
 
     private func restoreDraft() {
         guard let data = UserDefaults.standard.data(forKey: draftKey),
@@ -1262,6 +1284,7 @@ private struct LibraryChannelEditor: View {
               stored.expectedRevision == channel?.revision
         else { return }
         let value = stored.definition
+        saveAttempt = stored.saveAttempt
         subject = value.recipe.subject ?? ""; subjectJobId = stored.subjectJobId; subjectRecipe = stored.subjectRecipe; requestId = value.requestId
         name = value.name; description = value.description; visibility = value.visibility
         enabled = value.enabled; movies = value.recipe.kinds.contains("movie")
@@ -1286,6 +1309,7 @@ private struct LibraryChannelEditor: View {
         visibility = channel.visibility
         enabled = channel.enabled
         subject = channel.recipe.subject ?? ""
+        subjectJobId = channel.matching?.jobId; subjectRecipe = channel.recipe
         movies = channel.recipe.kinds.contains("movie")
         episodes = channel.recipe.kinds.contains("episode")
         genres = channel.recipe.genresAny.joined(separator: ", ")
@@ -1340,12 +1364,13 @@ private struct LibraryChannelEditor: View {
     }
     private func pollSubject(cursor: String? = nil) async {
         guard let id = subjectJobId, recipe == subjectRecipe else { return }
-        let captured = recipe
+        let captured = recipe, filter = subjectFilter
+        subjectPollRequest += 1; let request = subjectPollRequest
         do {
-            let result = try await model.requireAPI().subjectPreview(id, verdict: subjectFilter, cursor: cursor)
-            guard !Task.isCancelled, id == subjectJobId, captured == recipe else { return }
+            let result = try await model.requireAPI().subjectPreview(id, verdict: filter, cursor: cursor)
+            guard !Task.isCancelled, request == subjectPollRequest, filter == subjectFilter, id == subjectJobId, captured == recipe else { return }
             subjectPreview = result; previewSeed = result.previewSeed
-        } catch { if !Task.isCancelled { message = error.localizedDescription } }
+        } catch { if !Task.isCancelled, request == subjectPollRequest { if cursor != nil { subjectCursor = nil }; message = error.localizedDescription } }
     }
     private func loadPreview() async {
         busy = true
@@ -1366,9 +1391,14 @@ private struct LibraryChannelEditor: View {
 
     private func save() async {
         busy = true
+        let current = definition
+        let attempted: LibraryChannelDefinition
+        if let previous = saveAttempt, previous.sameAuthoredIntent(as: current) { attempted = previous }
+        else { attempted = LibraryChannelDefinition(requestId: UUID().uuidString, name: current.name, description: current.description, visibility: current.visibility, enabled: current.enabled, recipe: current.recipe, previewSeed: current.previewSeed) }
+        saveAttempt = attempted; persistDraft()
         do {
-            if let channel { _ = try await model.requireAPI().updateLibraryChannel(channel, definition: definition) }
-            else { _ = try await model.requireAPI().createLibraryChannel(definition) }
+            if let channel { _ = try await model.requireAPI().updateLibraryChannel(channel, definition: attempted) }
+            else { _ = try await model.requireAPI().createLibraryChannel(attempted) }
             clearDraft(); saved(); dismiss()
         } catch { message = error.localizedDescription }
         busy = false

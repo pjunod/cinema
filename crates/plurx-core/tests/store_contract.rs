@@ -28029,3 +28029,120 @@ async fn subject_jobs_claim_takeover_cache_isolation_and_cancellation() {
     })
     .await;
 }
+
+#[tokio::test]
+async fn subject_saved_activation_and_empty_outcome_are_atomic_in_both_stores() {
+    use plurx_core::channel_subjects::*;
+    use plurx_core::library_channels::*;
+    for_each_backend(|store, backend| async move {
+        let owner = store
+            .create_user("subject-saved", "hash", false)
+            .await
+            .expect("owner");
+        let recipe = LibraryChannelRecipe {
+            subject: Some("Stand-up".into()),
+            ..Default::default()
+        };
+        let channel = NewLibraryChannel {
+            id: uuid::Uuid::new_v4().to_string(),
+            owner_user_id: owner.id,
+            request_id: "create".into(),
+            request_hash: digest(&"create"),
+            name: "Subject".into(),
+            description: String::new(),
+            visibility: ChannelVisibility::Personal,
+            enabled: true,
+            recipe: recipe.clone(),
+            seed: [3; 32],
+            now_ms: 1000,
+        };
+        assert!(matches!(
+            store
+                .create_library_channel(false, &channel)
+                .await
+                .expect(backend),
+            ChannelMutation::Applied(_)
+        ));
+        let update = LibraryChannelUpdate {
+            subject_next_programme: true,
+            channel_id: channel.id.clone(),
+            actor_user_id: owner.id,
+            actor_is_admin: false,
+            expected_revision: 1,
+            request_id: "after-programme".into(),
+            request_hash: digest(&"after-programme"),
+            name: channel.name.clone(),
+            description: String::new(),
+            visibility: channel.visibility,
+            enabled: true,
+            recipe,
+            seed: channel.seed,
+            now_ms: 1001,
+        };
+        assert!(matches!(
+            store.update_library_channel(&update).await.expect("update"),
+            ChannelMutation::Applied(_)
+        ));
+        let mut job = store
+            .subject_job(JobQuery::Channel {
+                owner: owner.id,
+                id: channel.id.clone(),
+                revision: 2,
+                now: 1002,
+            })
+            .await
+            .expect("query")
+            .expect("job committed with update");
+        assert!(job.activate_next_programme);
+        assert!(store
+            .subject_write(JobWrite::Claim {
+                id: job.id.clone(),
+                claim: "claim".into(),
+                now: 1002
+            })
+            .await
+            .expect("claim"));
+        job.state = "complete".into();
+        assert!(store
+            .subject_write(JobWrite::Commit {
+                job: job.clone(),
+                claim: "claim".into(),
+                decisions: vec![],
+                now: 1003,
+                delay_ms: 0
+            })
+            .await
+            .expect("settle"));
+        let settled = store
+            .get_library_channel(owner.id, false, &channel.id)
+            .await
+            .expect("read")
+            .expect("channel");
+        assert_eq!(settled.build_state, "failed");
+        assert_eq!(settled.build_error_code.as_deref(), Some("channel_empty"));
+        assert!(settled.enabled, "empty matching never disables the channel");
+        let mut newer = update;
+        newer.expected_revision = 2;
+        newer.request_id = "newer".into();
+        newer.request_hash = digest(&"newer");
+        newer.now_ms = 1004;
+        assert!(matches!(
+            store
+                .update_library_channel(&newer)
+                .await
+                .expect("new revision"),
+            ChannelMutation::Applied(_)
+        ));
+        assert!(!store
+            .subject_write(JobWrite::Commit {
+                job,
+                claim: "claim".into(),
+                decisions: vec![],
+                now: 1005,
+                delay_ms: 0
+            })
+            .await
+            .expect("old completion fenced"));
+    })
+    .await;
+}

@@ -199,3 +199,16 @@ test("lost save response retries the same request ID", async () => {
   await c.saveLibraryChannel();await c.saveLibraryChannel();assert.equal(sent[0].request_id,sent[1].request_id);
   c.LIBRARY_CHANNELS.draft.name="Changed";await c.saveLibraryChannel();assert.notEqual(sent[1].request_id,sent[2].request_id);
 });
+
+
+test("a preview seed arriving after a lost save cannot change the retry body", async () => {
+  const {context:c} = editor();
+  c.LIBRARY_CHANNELS.draft.name = "Retry";
+  c.LIBRARY_CHANNELS.draft.recipe.subject = "Stand-up performances";
+  const bodies=[];
+  c.api=async (_path,options)=>{bodies.push(JSON.parse(JSON.stringify(options.body)));throw new Error("lost response");};
+  await c.saveLibraryChannel();
+  c.LIBRARY_CHANNELS.draft.subjectPreview={preview_seed:"later-seed"};
+  await c.saveLibraryChannel();
+  assert.deepEqual(bodies[1],bodies[0]);
+});

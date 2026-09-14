@@ -264,6 +264,7 @@ pub struct NewLibraryChannel {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LibraryChannelUpdate {
+    pub subject_next_programme: bool,
     pub channel_id: String,
     pub actor_user_id: i64,
     pub actor_is_admin: bool,

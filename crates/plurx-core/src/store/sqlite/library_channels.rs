@@ -386,6 +386,19 @@ impl LibraryChannelStore for SqliteStore {
             )?;
             let result = load_channel(&tx, update.actor_user_id, &update.channel_id)?
                 .ok_or_else(|| StoreError::Database("updated channel disappeared".to_owned()))?;
+            if result.recipe.subject.is_some() {
+                let mut job = crate::channel_subjects::SubjectJob::new(
+                    result.owner_user_id,
+                    result.recipe.clone(),
+                    result.seed,
+                    Some((result.id.clone(), result.revision)),
+                    update.now_ms,
+                );
+                job.activate_next_programme = update.subject_next_programme;
+                for sql in crate::channel_subjects::JobWrite::Enqueue(job).sql() {
+                    tx.execute(&sql, [])?;
+                }
+            }
             tx.commit()?;
             Ok(ChannelMutation::Applied(result))
         })

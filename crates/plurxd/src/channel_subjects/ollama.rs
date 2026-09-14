@@ -296,9 +296,12 @@ mod tests {
     #[tokio::test]
     #[ignore = "finite live model observation; run once during final validation"]
     async fn subject_finite_quality_observation() {
-        let fixtures: Value = serde_json::from_str(include_str!(
+        let source = std::env::var("PLURX_SUBJECT_EVAL_FIXTURE")
+            .ok()
+            .map(|path| std::fs::read_to_string(path).expect("local observation fixture"));
+        let fixtures: Value = serde_json::from_str(source.as_deref().unwrap_or(include_str!(
             "../../../../tests/contracts/channel-subject-quality.json"
-        ))
+        )))
         .expect("fixture");
         let provider = Ollama::configured().expect("provider config");
         let profile = provider.profile().await.expect("installed model");
@@ -362,6 +365,9 @@ mod tests {
             std::fs::write(path, serde_json::to_vec_pretty(&report).expect("report"))
                 .expect("write report");
         }
+        if positive == 0 {
+            return;
+        } // Unlabelled private samples are inspected, never scored as ground truth.
         assert_eq!(prohibited, 0, "standup explicit negatives");
         assert!(
             true_positive as f64 / accepted.max(1) as f64 >= 0.9,

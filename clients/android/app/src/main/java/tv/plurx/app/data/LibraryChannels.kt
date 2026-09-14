@@ -81,6 +81,7 @@ data class LibraryChannel(
     val can_share: Boolean = false,
     val now: LibraryChannelProgramme? = null,
     val next: LibraryChannelProgramme? = null,
+    val matching: SubjectMatchingSummary? = null,
 )
 
 @Serializable
@@ -163,7 +164,7 @@ data class LibraryChannelRebuild(
 
 @Serializable
 data class LibraryChannelBuild(
-    val state: String,
+    val matching: SubjectMatchingSummary? = null,    val state: String,
     val active_generation_id: String? = null,
     val pending_generation_id: String? = null,
     val pending_activation_ms: Long? = null,
@@ -234,6 +235,9 @@ data class DeveloperEnableItem(
 
 @Serializable
 data class DeveloperReadiness(val items: List<DeveloperEnableItem> = emptyList())
+
+@Serializable
+data class SubjectMatchingSummary(val job_id: String, val state: String)
 
 @Serializable
 data class SubjectPreviewRequest(val recipe: LibraryChannelRecipe, val request_id: String = UUID.randomUUID().toString(), val preview_seed: String? = null)

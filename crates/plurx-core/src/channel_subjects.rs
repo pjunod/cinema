@@ -93,6 +93,8 @@ pub struct SubjectJob {
     pub published_ms: Option<i64>,
     #[serde(default)]
     pub activate_next_programme: bool,
+    #[serde(default)]
+    pub selection_count: usize,
 }
 impl SubjectJob {
     pub fn new(
@@ -121,6 +123,7 @@ impl SubjectJob {
             created_ms: now,
             published_ms: None,
             activate_next_programme: false,
+            selection_count: 0,
         }
     }
 }
@@ -324,8 +327,8 @@ impl JobWrite {
                 vec![format!("UPDATE library_channel_subject_decisions SET last_used_ms={now} WHERE {condition} AND last_used_ms<{}",now-PREVIEW_TTL_MS)]
             }
             Self::Supersede{id,now}=>vec![format!("UPDATE library_channel_subject_jobs SET state='superseded',claim_id=NULL,claim_expires_ms=0,updated_ms={now} WHERE id={} AND claim_expires_ms<={now}",text(id))],
-            Self::Enqueue(j)=>vec![format!("INSERT INTO library_channel_subject_jobs(id,owner_user_id,channel_id,channel_revision,identity,state,payload,available_ms,updated_ms,expires_ms) SELECT {},{},{},{},{},'queued',{},{},{},{} WHERE NOT EXISTS(SELECT 1 FROM library_channel_subject_jobs WHERE owner_user_id={} AND identity={} AND expires_ms>{} AND state NOT IN ('cancelled','superseded')) AND (SELECT COUNT(*) FROM library_channel_subject_jobs WHERE owner_user_id={} AND expires_ms>{})<200",
-                text(&j.id),j.owner_user_id,optional(j.channel_id.as_deref()),j.channel_revision.map(|v|v.to_string()).unwrap_or_else(||"NULL".into()),text(&j.identity),payload(j),j.created_ms,j.created_ms,j.created_ms+if j.channel_id.is_some(){FINISHED_TTL_MS}else{PREVIEW_TTL_MS},j.owner_user_id,text(&j.identity),j.created_ms,j.owner_user_id,j.created_ms)],
+            Self::Enqueue(j)=>vec![format!("INSERT INTO library_channel_subject_jobs(id,owner_user_id,channel_id,channel_revision,identity,state,payload,available_ms,updated_ms,expires_ms) SELECT {},{},{},{},{},'queued',{},{},{},{} WHERE NOT EXISTS(SELECT 1 FROM library_channel_subject_jobs WHERE owner_user_id={} AND identity={} AND expires_ms>{} AND state NOT IN ('cancelled','superseded')) AND ({} OR (SELECT COUNT(*) FROM library_channel_subject_jobs WHERE owner_user_id={} AND expires_ms>{})<200)",
+                text(&j.id),j.owner_user_id,optional(j.channel_id.as_deref()),j.channel_revision.map(|v|v.to_string()).unwrap_or_else(||"NULL".into()),text(&j.identity),payload(j),j.created_ms,j.created_ms,j.created_ms+if j.channel_id.is_some(){FINISHED_TTL_MS}else{PREVIEW_TTL_MS},j.owner_user_id,text(&j.identity),j.created_ms,i32::from(j.channel_id.is_some()),j.owner_user_id,j.created_ms)],
             Self::Claim{id,claim,now}=>vec![format!("UPDATE library_channel_subject_jobs SET claim_id={},claim_expires_ms={},state='running' WHERE id={} AND state IN ('queued','running','waiting_for_provider') AND expires_ms>{now} AND available_ms<={now} AND claim_expires_ms<={now} AND NOT EXISTS(SELECT 1 FROM library_channel_subject_jobs WHERE claim_expires_ms>{now}) AND {}",text(claim),now+CLAIM_MS,text(id),revision_fence())],
             Self::Renew{id,claim,now}=>vec![format!("UPDATE library_channel_subject_jobs SET claim_expires_ms={} WHERE id={} AND claim_id={} AND claim_expires_ms>{now} AND state='running' AND {}",now+CLAIM_MS,text(id),text(claim),revision_fence())],
             Self::Commit{job:j,claim,decisions,now,delay_ms}=>{
@@ -335,6 +338,11 @@ impl JobWrite {
                     sql.push(format!("INSERT OR IGNORE INTO library_channel_subject_decisions(owner_user_id,subject_digest,item_id,metadata_digest,classifier_profile,payload,last_used_ms) SELECT {},{},{},{},{},{},{now} WHERE EXISTS(SELECT 1 FROM library_channel_subject_jobs WHERE {fence})",j.owner_user_id,text(&j.subject_digest),d.item_id,text(&d.metadata_digest),text(j.classifier_profile.as_deref().unwrap_or_default()),payload(d)));
                 }
 
+                if j.state == "complete" && j.selection_count == 0 {
+                    if let (Some(channel),Some(revision)) = (&j.channel_id,j.channel_revision) {
+                        sql.push(format!("UPDATE library_channels SET build_state='failed',build_error_code='channel_empty',build_error_message='No eligible subject matches; any existing schedule is retained.',build_candidate_count={},build_entry_count=0,build_last_attempt_ms={now} WHERE id={} AND definition_revision={revision} AND EXISTS(SELECT 1 FROM library_channel_subject_jobs WHERE {fence})",j.counts.total,text(channel)));
+                    }
+                }
                 sql.push(format!("UPDATE library_channel_subject_jobs SET payload={},state={},claim_id=NULL,claim_expires_ms=0,updated_ms={now},available_ms={},expires_ms={} WHERE {fence}",payload(j),text(&j.state),now+delay_ms,if j.channel_id.is_some(){now+FINISHED_TTL_MS}else{j.created_ms+PREVIEW_TTL_MS}));sql
             },
             Self::Cancel{id,owner,admin,now}=>vec![format!("UPDATE library_channel_subject_jobs SET state='cancelled',claim_id=NULL,claim_expires_ms=0,updated_ms={now},expires_ms=MIN(expires_ms,{now}+60000) WHERE id={} AND channel_id IS NULL AND (owner_user_id={owner} OR {})",text(id),i32::from(*admin))],
@@ -430,7 +438,7 @@ mod tests {
         assert!(Metadata::from_candidate(&c).truncated);
     }
     #[test]
-    fn model_evidence_cannot_invent_quotes() {
+    fn subject_model_evidence_cannot_invent_quotes() {
         let metadata = Metadata::from_candidate(&candidate());
         let mut d = SubjectDecision {
             verdict: Verdict::Match,

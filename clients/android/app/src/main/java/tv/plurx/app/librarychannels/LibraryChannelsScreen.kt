@@ -37,6 +37,9 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import tv.plurx.app.ui.components.TvButton as Button
 import tv.plurx.app.ui.components.TvTextButton as TextButton
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -297,10 +300,11 @@ private fun LibraryChannelEditor(
     var episodes by remember(channel) { mutableStateOf(initialRecipe.kinds.contains("episode")) }
     var subject by remember(channel) { mutableStateOf(initialRecipe.subject.jsonPrimitive.contentOrNull.orEmpty()) }
     var subjectPreview by remember { mutableStateOf<SubjectPreview?>(null) }
-    var subjectJobId by remember(draftKey) { mutableStateOf(preferences.getString("$draftKey:subjectJob", null)) }
-    var subjectRecipe by remember(draftKey) { mutableStateOf(preferences.getString("$draftKey:subjectRecipe", null)?.let { runCatching { Json.decodeFromString<LibraryChannelRecipe>(it) }.getOrNull() }) }
+    var subjectJobId by remember(draftKey) { mutableStateOf(preferences.getString("$draftKey:subjectJob", null) ?: channel?.matching?.job_id) }
+    var subjectRecipe by remember(draftKey) { mutableStateOf(preferences.getString("$draftKey:subjectRecipe", null)?.let { runCatching { Json.decodeFromString<LibraryChannelRecipe>(it) }.getOrNull() } ?: channel?.recipe) }
     var showAdvanced by rememberSaveable { mutableStateOf(false) }
     var subjectFilter by remember { mutableStateOf("match") }
+    var subjectCursor by remember { mutableStateOf<String?>(null) }
     var genres by remember(channel) { mutableStateOf(initialRecipe.genres_any.joinToString(", ")) }
     var tags by remember(channel) { mutableStateOf(initialRecipe.tags_any.joinToString(", ")) }
     var keywords by remember(channel) { mutableStateOf(initialRecipe.keywords_any.joinToString(", ")) }
@@ -360,27 +364,39 @@ private fun LibraryChannelEditor(
             match_all_in_scope = matchAllInScope,
         )
     }
-    val valid = name.trim().isNotEmpty() && name.length <= 80 && description.length <= 500 && (movies || episodes)
+    val valid = (name.isNotBlank() || (channel == null && subject.isNotBlank())) && name.length <= 80 && description.length <= 500 && subject.codePointCount(0, subject.length) <= 500 && (movies || episodes)
+    val trimmedSubject = subject.trim()
+    val effectiveName = name.trim().ifEmpty { if (channel == null) trimmedSubject.substring(0, trimmedSubject.offsetByCodePoints(0, minOf(80, trimmedSubject.codePointCount(0, trimmedSubject.length)))) else "" }
+    var saveAttempt by remember(draftKey) { mutableStateOf(preferences.getString("$draftKey:saveAttempt", null)?.let { runCatching { Json.decodeFromString<LibraryChannelDefinition>(it) }.getOrNull() }) }
     val payload = LibraryChannelDefinition(
         request_id = "",
-        name = name.trim(), description = description.trim(),
+        name = effectiveName, description = description.trim(),
         visibility = if (canShare && shared) LibraryChannelVisibility.shared else LibraryChannelVisibility.personal,
         enabled = enabled, recipe = recipe(), preview_seed = previewSeed,
     )
     val requestId = remember(payload) { if (restored?.copy(request_id = "") == payload) restored.request_id else java.util.UUID.randomUUID().toString() }
     val persistedDefinition = payload.copy(request_id = requestId)
     val currentRecipe = recipe()
-    LaunchedEffect(subjectJobId, subjectFilter, currentRecipe) {
+    val lifecycleState by LocalLifecycleOwner.current.lifecycle.currentStateFlow.collectAsState()
+    LaunchedEffect(channel?.id) {
+        if (channel != null && subjectJobId == null) {
+            runCatching { vm.api().libraryChannel(channel.id) }.getOrNull()?.let { fresh ->
+                if (fresh.recipe == recipe()) { subjectRecipe = fresh.recipe; subjectJobId = fresh.matching?.job_id }
+            }
+        }
+    }
+    LaunchedEffect(subjectJobId, subjectFilter, currentRecipe, subjectCursor, lifecycleState) {
+        if (!lifecycleState.isAtLeast(Lifecycle.State.STARTED)) return@LaunchedEffect
         val id = subjectJobId ?: return@LaunchedEffect
         if (currentRecipe != subjectRecipe) { subjectPreview = null; return@LaunchedEffect }
         while (true) {
             try {
-                val result = vm.api().subjectPreview(id, subjectFilter)
+                val result = vm.api().subjectPreview(id, subjectFilter, subjectCursor)
                 subjectPreview = result; previewSeed = result.preview_seed
                 if (result.complete || result.state in listOf("failed", "cancelled", "superseded")) break
                 delay(if (result.state == "waiting_for_provider") 10000L else 2000L)
             } catch (error: CancellationException) { throw error }
-            catch (error: Exception) { message = error.message; delay(10000) }
+            catch (error: Exception) { if (subjectCursor != null) subjectCursor = null; message = error.message; delay(10000) }
         }
     }
     SideEffect {
@@ -396,7 +412,7 @@ private fun LibraryChannelEditor(
         Text(if (channel == null) "Make a channel" else "Edit channel", style = MaterialTheme.typography.headlineSmall)
         if (step == 0) {
         Text("1 · Content", style = MaterialTheme.typography.titleMedium)
-        OutlinedTextField(subject, { subject = it; subjectJobId = null; subjectPreview = null; if (channel == null && name.isBlank()) name = it.take(80) }, label = { Text("Subject — what belongs and what to exclude") }, modifier = Modifier.fillMaxWidth())
+        OutlinedTextField(subject, { subject = it; subjectJobId = null; subjectPreview = null }, label = { Text("Subject — what belongs and what to exclude") }, modifier = Modifier.fillMaxWidth())
         Text("Save now; matching continues in the background.")
         TextButton(onClick = { subject = "Stand-up comedy performances and specials. Exclude sitcoms, comedy movies, talk shows, and documentaries about comedians."; genres = ""; tags = ""; keywords = ""; yearMin = ""; yearMax = ""; matchAllInScope = false; if (name.isBlank()) name = "Stand-up comedy" }) { Text("Stand-up comedy") }
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -479,7 +495,7 @@ private fun LibraryChannelEditor(
             Text("${result.matched} matches; checked ${result.processed} of ${result.total}")
             Text(if (result.complete) "Scan complete" else "Partial selection · ${result.state}")
             result.error?.let { Text(it) }
-            Row { listOf("match" to "Matched", "uncertain" to "Uncertain", "no_match" to "Excluded").forEach { (value, label) -> TextButton(onClick = { subjectFilter = value }) { Text(label) } } }
+            Row { listOf("match" to "Matched", "uncertain" to "Uncertain", "no_match" to "Excluded").forEach { (value, label) -> TextButton(onClick = { subjectFilter = value; subjectCursor = null }) { Text(label) } } }
             result.rows.forEach { row ->
                 Text(row.title); Text(row.reason, style = MaterialTheme.typography.bodySmall)
                 Row {
@@ -487,7 +503,7 @@ private fun LibraryChannelEditor(
                     TextButton(onClick = { row.item_id.toLongOrNull()?.let { excludeItemIds = (excludeItemIds + it).distinct() } }) { Text("Exclude") }
                 }
             }
-            result.next_cursor?.let { cursor -> TextButton(onClick = { scope.launch { try { subjectPreview = vm.api().subjectPreview(result.job_id, subjectFilter, cursor) } catch (e: Exception) { message = e.message } } }) { Text("More results") } }
+            result.next_cursor?.let { cursor -> TextButton(onClick = { subjectCursor = cursor }) { Text("More results") } }
         }
         preview?.let { result ->
             Text("${result.eligible_count} titles · ${result.repeat_description}")
@@ -532,7 +548,7 @@ private fun LibraryChannelEditor(
                 scope.launch {
                     runCatching { vm.api().deleteLibraryChannel(existing.id, existing.revision) }
                         .onSuccess {
-                            preferences.edit().remove(draftKey).remove("$draftKey:step").remove("$draftKey:subjectJob").remove("$draftKey:subjectRecipe").apply()
+                            preferences.edit().remove(draftKey).remove("$draftKey:step").remove("$draftKey:subjectJob").remove("$draftKey:subjectRecipe").remove("$draftKey:saveAttempt").apply()
                             onSaved()
                         }.onFailure { message = it.message }
                 }
@@ -544,7 +560,9 @@ private fun LibraryChannelEditor(
                 busy = true
                 scope.launch {
                     try {
-                        val definition = persistedDefinition
+                        val definition = saveAttempt?.takeIf { it.copy(request_id = "", preview_seed = null) == persistedDefinition.copy(request_id = "", preview_seed = null) } ?: persistedDefinition
+                        saveAttempt = definition
+                        preferences.edit().putString("$draftKey:saveAttempt", Json.encodeToString(definition)).commit()
                         if (channel == null) vm.api().createLibraryChannel(definition)
                         else vm.api().updateLibraryChannel(channel.id, LibraryChannelUpdate(
                             expected_revision = channel.revision,
@@ -556,7 +574,7 @@ private fun LibraryChannelEditor(
                             recipe = definition.recipe,
                             preview_seed = definition.preview_seed,
                         ))
-                        preferences.edit().remove(draftKey).remove("$draftKey:step").remove("$draftKey:subjectJob").remove("$draftKey:subjectRecipe").apply()
+                        preferences.edit().remove(draftKey).remove("$draftKey:step").remove("$draftKey:subjectJob").remove("$draftKey:subjectRecipe").remove("$draftKey:saveAttempt").apply()
                         onSaved()
                     } catch (error: Exception) { message = error.message; busy = false }
                 }

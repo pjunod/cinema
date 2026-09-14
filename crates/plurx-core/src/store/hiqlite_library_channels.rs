@@ -641,16 +641,14 @@ impl LibraryChannelStore for HiqliteAuthStore {
         }
         let recipe = serde_json::to_string(&update.recipe)
             .map_err(|error| StoreError::Database(error.to_string()))?;
-        let results = self
-            .client()
-            .txn([
+        let mut statements = vec![
                 (
                     "UPDATE library_channels SET name = $1, description = $2, visibility = $3, \
                      enabled = $4, definition_revision = definition_revision + 1, recipe_json = $5, \
                      seed = $6, build_state = 'queued', build_error_code = NULL, \
                      build_error_message = NULL, updated_at_ms = $7 WHERE id = $8 AND definition_revision = $9 \
                      AND (owner_user_id = $10 OR $11) \
-                     AND (SELECT COUNT(*) FROM library_channel_requests WHERE user_id = $10) < $12",
+                     AND (SELECT COUNT(*) FROM library_channel_requests WHERE user_id = $10) < $12".to_owned(),
                     params!(
                         update.name.as_str(), update.description.as_str(), update.visibility.as_str(),
                         update.enabled, recipe, update.seed.as_slice(), update.now_ms,
@@ -666,7 +664,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
                      SELECT $1, $2, $3, $4, $5, $6, $7 \
                      WHERE EXISTS(SELECT 1 FROM library_channels WHERE id = $4 \
                        AND definition_revision = $5) \
-                       AND (SELECT COUNT(*) FROM library_channel_requests WHERE user_id = $1) < $8",
+                       AND (SELECT COUNT(*) FROM library_channel_requests WHERE user_id = $1) < $8".to_owned(),
                     params!(
                         update.actor_user_id, update.request_id.as_str(), update.request_hash.as_str(),
                         update.channel_id.as_str(), update.expected_revision + 1, update.now_ms,
@@ -674,13 +672,35 @@ impl LibraryChannelStore for HiqliteAuthStore {
                         CHANNEL_REQUESTS_PER_USER_MAX
                     ),
                 ),
-            ])
-            .await?;
+            ];
+        if update.recipe.subject.is_some() {
+            let mut job = crate::channel_subjects::SubjectJob::new(
+                current.owner_user_id,
+                update.recipe.clone(),
+                update.seed,
+                Some((update.channel_id.clone(), update.expected_revision + 1)),
+                update.now_ms,
+            );
+            job.activate_next_programme = update.subject_next_programme;
+            for sql in crate::channel_subjects::JobWrite::Enqueue(job).sql() {
+                let sql = format!("{sql} AND EXISTS(SELECT 1 FROM library_channel_requests WHERE user_id=$1 AND request_id=$2 AND operation_hash=$3 AND result_revision=$4)");
+                statements.push((
+                    sql,
+                    params!(
+                        update.actor_user_id,
+                        update.request_id.as_str(),
+                        update.request_hash.as_str(),
+                        update.expected_revision + 1
+                    ),
+                ));
+            }
+        }
+        let results = self.client().txn(statements).await?;
         let counts = results
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        if counts != [1, 1] {
+        if counts.first() != Some(&1) || counts.get(1) != Some(&1) {
             return Ok(ChannelMutation::Stale);
         }
         query_channel(self, update.actor_user_id, &update.channel_id)

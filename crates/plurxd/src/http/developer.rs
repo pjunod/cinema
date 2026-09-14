@@ -1152,10 +1152,10 @@ fn webhook_url_approved(dvr: &crate::live_tv::DvrConfig) -> DeveloperRequirement
 
 fn channel_subjects(enabled: bool) -> DeveloperEnableItem {
     let observed = crate::channel_subjects::observation();
-    let status = if observed.profile.is_some() {
-        RequirementStatus::Met
-    } else if observed.error.is_some() {
+    let status = if observed.error.is_some() {
         RequirementStatus::Unmet
+    } else if observed.profile.is_some() {
+        RequirementStatus::Met
     } else {
         RequirementStatus::Unobservable
     };
