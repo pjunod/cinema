@@ -193,7 +193,10 @@ impl ProducerSlot {
                     inner.belief = after(inner.belief, step);
                     return Ok(Performed::Done);
                 }
-                signal(attached_pid(&inner)?, libc::SIGSTOP)?;
+                crate::process_control::signal(
+                    attached_pid(&inner)?,
+                    crate::process_control::ProcessSignal::Suspend,
+                )?;
                 touch();
                 inner.belief = after(inner.belief, step);
                 Ok(Performed::Done)
@@ -205,7 +208,10 @@ impl ProducerSlot {
                     inner.belief = after(inner.belief, step);
                     return Ok(Performed::Done);
                 }
-                signal(attached_pid(&inner)?, libc::SIGCONT)?;
+                crate::process_control::signal(
+                    attached_pid(&inner)?,
+                    crate::process_control::ProcessSignal::Resume,
+                )?;
                 // Clock first, belief second, exactly as `apply_ahead_window`
                 // resumes: the watchdog must never observe "running" beside a
                 // motion clock that still spans the suspension.
@@ -272,18 +278,6 @@ fn no_child() -> io::Error {
         io::ErrorKind::NotFound,
         "no child is attached to this producer slot",
     )
-}
-
-fn signal(pid: u32, signal: libc::c_int) -> io::Result<()> {
-    // SAFETY: `kill(2)` with a pid this slot owns and a signal constant. The
-    // child is held un-reaped under the slot lock, so the pid cannot have
-    // been recycled; a race with its exit yields ESRCH, which the return
-    // check turns into an error the caller keeps its old belief over.
-    if unsafe { libc::kill(pid as libc::pid_t, signal) } == 0 {
-        Ok(())
-    } else {
-        Err(io::Error::last_os_error())
-    }
 }
 
 #[cfg(test)]

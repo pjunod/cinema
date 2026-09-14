@@ -203,6 +203,23 @@ jobs:
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
+  windows_compile:
+    name: Windows compile
+    needs: [scope, preflight]
+    if: needs.scope.outputs.rust == 'true'
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    timeout-minutes: 15
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: windows
+      - uses: ./.github/actions/windows-cross
+
   check:
     name: Rust unit and SQLite contracts
     needs: [scope, preflight]
@@ -1413,6 +1430,7 @@ jobs:
       - mobile_version
       - preflight
       - check
+      - windows_compile
       - cluster_store
       - cluster_topology
       - cluster_transport_recovery
@@ -1439,6 +1457,7 @@ jobs:
           MOBILE_VERSION_RESULT: ${{ needs.mobile_version.result }}
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           CHECK_RESULT: ${{ needs.check.result }}
+          WINDOWS_RESULT: ${{ needs.windows_compile.result }}
           CLUSTER_STORE_RESULT: ${{ needs.cluster_store.result }}
           CLUSTER_TOPOLOGY_RESULT: ${{ needs.cluster_topology.result }}
           CLUSTER_TRANSPORT_RECOVERY_RESULT: ${{ needs.cluster_transport_recovery.result }}
@@ -1453,7 +1472,7 @@ jobs:
         run: |
           for result in \
             "$SCOPE_RESULT" "$MOBILE_VERSION_RESULT" \
-            "$PREFLIGHT_RESULT" "$CHECK_RESULT" \
+            "$PREFLIGHT_RESULT" "$CHECK_RESULT" "$WINDOWS_RESULT" \
             "$CLUSTER_STORE_RESULT" "$CLUSTER_TOPOLOGY_RESULT" \
             "$CLUSTER_TRANSPORT_RECOVERY_RESULT" "$CLUSTER_WAL_RESULT" \
             "$CLUSTER_DAEMON_RESULT" \
@@ -1496,6 +1515,7 @@ jobs:
       - mobile_version
       - preflight
       - check
+      - windows_compile
       - cluster_store
       - cluster_topology
       - cluster_transport_recovery
@@ -1516,6 +1536,7 @@ jobs:
           MOBILE_VERSION_RESULT: ${{ needs.mobile_version.result }}
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           CHECK_RESULT: ${{ needs.check.result }}
+          WINDOWS_RESULT: ${{ needs.windows_compile.result }}
           CLUSTER_STORE_RESULT: ${{ needs.cluster_store.result }}
           CLUSTER_TOPOLOGY_RESULT: ${{ needs.cluster_topology.result }}
           CLUSTER_TRANSPORT_RECOVERY_RESULT: ${{ needs.cluster_transport_recovery.result }}
@@ -1530,7 +1551,7 @@ jobs:
         run: |
           for result in \
             "$SCOPE_RESULT" "$MOBILE_VERSION_RESULT" \
-            "$PREFLIGHT_RESULT" "$CHECK_RESULT" \
+            "$PREFLIGHT_RESULT" "$CHECK_RESULT" "$WINDOWS_RESULT" \
             "$CLUSTER_STORE_RESULT" "$CLUSTER_TOPOLOGY_RESULT" \
             "$CLUSTER_TRANSPORT_RECOVERY_RESULT" "$CLUSTER_WAL_RESULT" \
             "$CLUSTER_DAEMON_RESULT" \

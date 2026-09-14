@@ -278,15 +278,26 @@ fn fingerprint(metadata: &std::fs::Metadata) -> FileFingerprint {
 }
 
 #[cfg(unix)]
-fn secure_file_identity(metadata: &std::fs::Metadata) -> crate::fs_secure::FileIdentity {
+fn secure_file_identity(
+    _file: &tokio::fs::File,
+    metadata: &std::fs::Metadata,
+) -> std::io::Result<crate::fs_secure::FileIdentity> {
     use std::os::unix::fs::MetadataExt;
-    crate::fs_secure::FileIdentity {
+    Ok(crate::fs_secure::FileIdentity {
         device: metadata.dev(),
         inode: metadata.ino(),
         size: metadata.len(),
         changed_seconds: metadata.ctime(),
         changed_nanoseconds: metadata.ctime_nsec(),
-    }
+    })
+}
+
+#[cfg(windows)]
+fn secure_file_identity(
+    file: &tokio::fs::File,
+    _metadata: &std::fs::Metadata,
+) -> std::io::Result<crate::fs_secure::FileIdentity> {
+    crate::fs_secure::async_file_identity(file)
 }
 
 async fn read_bounded_file(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
@@ -586,7 +597,15 @@ where
             };
         }
     };
-    let checkpoint_identity = secure_file_identity(&metadata);
+    let checkpoint_identity = match secure_file_identity(&file, &metadata) {
+        Ok(identity) => identity,
+        Err(_) => {
+            return CheckpointLoad::Ready {
+                objects: Vec::new(),
+                needs_repair: true,
+            };
+        }
+    };
     let mut resume = take_checkpoint_resume(&key)
         .filter(|resume| {
             resume.checkpoint_identity.same_inode(checkpoint_identity)
@@ -729,7 +748,12 @@ where
     }
     match reader.get_ref().metadata().await {
         Ok(metadata) => {
-            let final_identity = secure_file_identity(&metadata);
+            let Ok(final_identity) = secure_file_identity(reader.get_ref(), &metadata) else {
+                return CheckpointLoad::Ready {
+                    objects: Vec::new(),
+                    needs_repair: true,
+                };
+            };
             if !metadata.is_file()
                 || !final_identity.same_inode(checkpoint_identity)
                 || final_identity.size != resume.offset

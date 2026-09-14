@@ -43,6 +43,7 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -330,7 +331,10 @@ fn probe_blocking(roots: &[PathBuf], sustained_secs: f64) -> StorageReport {
     let mut unreadable: Vec<PathBuf> = Vec::new();
     for root in roots {
         match std::fs::metadata(root) {
-            Ok(md) => by_device.entry(md.dev()).or_default().push(root.clone()),
+            Ok(md) => by_device
+                .entry(storage_device_key(root, &md))
+                .or_default()
+                .push(root.clone()),
             Err(_) => unreadable.push(root.clone()),
         }
     }
@@ -358,6 +362,20 @@ fn probe_blocking(roots: &[PathBuf], sustained_secs: f64) -> StorageReport {
         mounts,
         measured_at: Some(now_secs()),
     }
+}
+
+#[cfg(unix)]
+fn storage_device_key(_root: &Path, metadata: &std::fs::Metadata) -> u64 {
+    metadata.dev()
+}
+
+#[cfg(windows)]
+fn storage_device_key(root: &Path, _metadata: &std::fs::Metadata) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    root.components().next().hash(&mut hasher);
+    hasher.finish()
 }
 
 fn sample_device(roots: &[PathBuf], sustained_secs: f64) -> MountSample {

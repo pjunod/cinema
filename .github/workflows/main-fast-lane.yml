@@ -135,6 +135,23 @@ jobs:
           budget-gb: ${{ steps.cargo-cache.outputs.budget-gb }}
           last-used: ${{ steps.cargo-cache.outputs.last-used }}
 
+  windows_compile:
+    name: fast Windows compile
+    needs: [scope, preflight]
+    if: needs.scope.outputs.rust == 'true'
+    runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
+    timeout-minutes: 15
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: https://github.com/dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      - id: cargo-cache
+        uses: ./.github/actions/cargo-cache
+        with:
+          lane: main-fast-windows
+      - uses: ./.github/actions/windows-cross
+
   web_compile:
     name: fast web syntax gate
     needs: [scope, preflight]
@@ -231,6 +248,7 @@ jobs:
       - mobile_version
       - preflight
       - rust_compile
+      - windows_compile
       - web_compile
       - apple_compile
       - android_compile
@@ -243,13 +261,14 @@ jobs:
           MOBILE_VERSION_RESULT: ${{ needs.mobile_version.result }}
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           RUST_RESULT: ${{ needs.rust_compile.result }}
+          WINDOWS_RESULT: ${{ needs.windows_compile.result }}
           WEB_RESULT: ${{ needs.web_compile.result }}
           APPLE_RESULT: ${{ needs.apple_compile.result }}
           ANDROID_RESULT: ${{ needs.android_compile.result }}
         run: |
           for result in \
             "$SCOPE_RESULT" "$MOBILE_VERSION_RESULT" "$PREFLIGHT_RESULT" \
-            "$RUST_RESULT" "$WEB_RESULT" "$APPLE_RESULT" \
+            "$RUST_RESULT" "$WINDOWS_RESULT" "$WEB_RESULT" "$APPLE_RESULT" \
             "$ANDROID_RESULT"; do
             case "$result" in
               success|skipped) ;;

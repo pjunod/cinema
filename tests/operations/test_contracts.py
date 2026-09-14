@@ -1388,7 +1388,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("scope_event=effort_qualification", workflow)
         self.assertIn("qualification: ${{ steps.scope.outputs.qualification }}", workflow)
         fast_rust = workflow.split("  rust_compile:", 1)[1].split(
-            "\n  check:", 1
+            "\n  windows_compile:", 1
         )[0]
         unit_rust = workflow.split("  check:", 1)[1].split(
             "\n  cluster_store_legacy:", 1
@@ -1444,6 +1444,21 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("name: cluster daemon contracts", workflow)
         self.assertIn("if: needs.scope.outputs.rust == 'true'", workflow)
         self.assertIn("needs: [scope, preflight]", workflow)
+        windows_action = read(".github/actions/windows-cross/action.yml")
+        self.assertIn("cargo-xwin --version", windows_action)
+        self.assertIn("cargo install cargo-xwin --version 0.23.1 --locked", windows_action)
+        self.assertIn("cargo xwin build --workspace --locked", windows_action)
+        self.assertIn("--target x86_64-pc-windows-msvc", windows_action)
+        for workflow_path, gate_name in (
+            (".github/workflows/ci.yml", "pr_gate"),
+            (".github/workflows/main-fast-lane.yml", "promotion_gate"),
+            (".github/workflows/effort-ci.yml", "effort_gate"),
+        ):
+            jobs = workflow_job_blocks(workflow_path)
+            self.assertIn("windows_compile", jobs)
+            self.assertIn("uses: ./.github/actions/windows-cross", jobs["windows_compile"])
+            self.assertIn("windows_compile", workflow_job_needs(jobs[gate_name]))
+            self.assertIn("WINDOWS_RESULT", jobs[gate_name])
         self.assertIn("PREFLIGHT_RESULT: ${{ needs.preflight.result }}", workflow)
         self.assertIn(
             "MOBILE_VERSION_RESULT: ${{ needs.mobile_version.result }}",

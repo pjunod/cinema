@@ -4,8 +4,11 @@
 //! proved as a complete replacement before the source pathname moves, and the
 //! scanner then sees an ordinary Profile 8 file on its next read.
 
-use std::ffi::{CString, OsStr, OsString};
+#[cfg(unix)]
+use std::ffi::CString;
+use std::ffi::{OsStr, OsString};
 use std::io;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -1017,6 +1020,24 @@ fn metadata_identity(metadata: &std::fs::Metadata) -> Result<LocalMediaIdentity,
     })
 }
 
+#[cfg(unix)]
+async fn held_media_identity(
+    _file: &tokio::fs::File,
+    metadata: &std::fs::Metadata,
+) -> Result<LocalMediaIdentity, String> {
+    metadata_identity(metadata)
+}
+
+#[cfg(windows)]
+async fn held_media_identity(
+    file: &tokio::fs::File,
+    _metadata: &std::fs::Metadata,
+) -> Result<LocalMediaIdentity, String> {
+    plurx_core::fs_secure::async_file_identity(file)
+        .map(local_identity_from_secure)
+        .map_err(|error| format!("reading Windows file identity: {error}"))
+}
+
 #[cfg(test)]
 async fn hash_held_exact<R>(
     file: &mut R,
@@ -1107,7 +1128,10 @@ async fn hash_regular_file_exact(
     let state = HASH_WORKER
         .get_or_init(|| Arc::new(HashWorkerState::new()))
         .clone();
+    #[cfg(unix)]
     let owned = duplicate_hash_file(file, role)?;
+    #[cfg(windows)]
+    let owned = duplicate_hash_file(file, role).await?;
     let loss_for_worker = loss.clone();
     let role_owned = role.to_owned();
     let wall_deadline = deadline.into_std();
@@ -1123,6 +1147,7 @@ async fn hash_regular_file_exact(
     .await
 }
 
+#[cfg(unix)]
 fn duplicate_hash_file(file: &tokio::fs::File, role: &str) -> Result<std::fs::File, String> {
     let duplicated = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 0) };
     if duplicated < 0 {
@@ -1137,6 +1162,15 @@ fn duplicate_hash_file(file: &tokio::fs::File, role: &str) -> Result<std::fs::Fi
     Ok(std::fs::File::from(unsafe {
         OwnedFd::from_raw_fd(duplicated)
     }))
+}
+
+#[cfg(windows)]
+async fn duplicate_hash_file(file: &tokio::fs::File, role: &str) -> Result<std::fs::File, String> {
+    let cloned = file
+        .try_clone()
+        .await
+        .map_err(|error| format!("duplicating held handle for hashing {role}: {error}"))?;
+    Ok(cloned.into_std().await)
 }
 
 async fn run_bounded_hash_job<F>(
@@ -1297,7 +1331,7 @@ async fn bind_child_fresh(
     if !before.is_file() {
         return Err(format!("{role} is not a regular file"));
     }
-    let local = metadata_identity(&before)?;
+    let local = held_media_identity(&file, &before).await?;
     let content = hash_regular_file_exact(
         &file,
         local.size,
@@ -1310,7 +1344,7 @@ async fn bind_child_fresh(
         .metadata()
         .await
         .map_err(|error| format!("fstat {role} after hashing: {error}"))?;
-    if local != metadata_identity(&after)? || content.size != after.len() {
+    if local != held_media_identity(&file, &after).await? || content.size != after.len() {
         return Err(format!("{role} changed while its bytes were bound"));
     }
     Ok(BoundMedia {
@@ -1349,7 +1383,7 @@ async fn bind_expected_content(
     if !before.is_file() {
         return Err(format!("{role} is not a regular file"));
     }
-    let local = metadata_identity(&before)?;
+    let local = held_media_identity(&file, &before).await?;
     if expected.local.node_id == node_id && expected.local.identity == local {
         return Ok((
             BoundMedia {
@@ -1372,7 +1406,7 @@ async fn bind_expected_content(
         .metadata()
         .await
         .map_err(|error| format!("re-fstat {role}: {error}"))?;
-    if local != metadata_identity(&after)? || content != expected.content {
+    if local != held_media_identity(&file, &after).await? || content != expected.content {
         return Err(format!("{role} does not match the manifest-bound bytes"));
     }
     Ok((
@@ -1405,7 +1439,7 @@ async fn bind_one_of(
     if !before.is_file() {
         return Err(format!("{role} is not a regular file"));
     }
-    let local = metadata_identity(&before)?;
+    let local = held_media_identity(&file, &before).await?;
     if first.local.node_id == node_id && first.local.identity == local {
         return Ok((
             BoundMedia {
@@ -1446,7 +1480,7 @@ async fn bind_one_of(
         .metadata()
         .await
         .map_err(|error| format!("re-fstat {role}: {error}"))?;
-    if local != metadata_identity(&after)? {
+    if local != held_media_identity(&file, &after).await? {
         return Err(format!("{role} changed while its bytes were rebound"));
     }
     let is_first = if content == first.content {
@@ -1475,7 +1509,7 @@ async fn require_held_unchanged(media: &BoundMedia, role: &str) -> Result<(), St
         .metadata()
         .await
         .map_err(|error| format!("fstat {role}: {error}"))?;
-    if media.local != metadata_identity(&current)? {
+    if media.local != held_media_identity(&media.file, &current).await? {
         return Err(format!("{role} inode facts changed"));
     }
     Ok(())
@@ -1712,7 +1746,7 @@ async fn child_identity(
     if !metadata.is_file() {
         return Err(format!("scratch child {name} is not a regular file"));
     }
-    metadata_identity(&metadata)
+    held_media_identity(&file, &metadata).await
 }
 
 async fn child_exists(directory: &SecureDirectory, name: &str) -> Result<bool, String> {
@@ -1976,6 +2010,7 @@ async fn write_cleanup_state(
         .map_err(|error| format!("persisting cleanup quarantine state: {error}"))
 }
 
+#[cfg(unix)]
 async fn create_cleanup_state(
     parent: &SecureDirectory,
     paths: &ConversionPaths,
@@ -2255,6 +2290,7 @@ async fn reconcile_private_cleanup_quarantine(
     unlink_cleanup_state(parent, paths).await
 }
 
+#[cfg(unix)]
 async fn sync_directory(path: &Path) -> Result<(), String> {
     let directory = plurx_core::fs_secure::SecureDirectory::open(path)
         .await
@@ -2271,7 +2307,7 @@ async fn sync_directory(path: &Path) -> Result<(), String> {
     .map_err(|error| format!("syncing directory {}: {error}", path.display()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn rename_noreplace_durable(from: &Path, to: &Path) -> Result<bool, String> {
     let from_parent = open_parent(from, "rename source").await?;
     let to_parent = open_parent(to, "rename destination").await?;
@@ -2280,7 +2316,7 @@ async fn rename_noreplace_durable(from: &Path, to: &Path) -> Result<bool, String
     rename_noreplace_durable_between(&from_parent, &from_name, &to_parent, &to_name).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn rename_noreplace_durable_between(
     from_parent: &SecureDirectory,
     from_name: &str,
@@ -2352,6 +2388,7 @@ async fn rename_noreplace_durable_between(
     Ok(renamed)
 }
 
+#[cfg(unix)]
 async fn rename_expected_noreplace_between(
     from_parent: &SecureDirectory,
     from_name: &str,
@@ -2537,6 +2574,7 @@ async fn rename_expected_noreplace_between(
     .map_err(|error| format!("identity-conditioned rename failed: {error}"))
 }
 
+#[cfg(unix)]
 fn rename_noreplace_raw(
     from_parent: i32,
     from: &CString,
@@ -2585,10 +2623,12 @@ fn rename_noreplace_raw(
     }
 }
 
+#[cfg(unix)]
 fn sync_rename_parents(first: &SecureDirectory, second: &SecureDirectory) -> io::Result<()> {
     sync_rename_parents_raw(first.raw_fd(), second.raw_fd())
 }
 
+#[cfg(unix)]
 fn sync_rename_parents_raw(first: i32, second: i32) -> io::Result<()> {
     if unsafe { libc::fsync(first) } != 0 {
         return Err(io::Error::last_os_error());
@@ -2623,6 +2663,7 @@ fn private_delete_slot(name: &str, kind: PrivateDeleteKind) -> String {
     )
 }
 
+#[cfg(unix)]
 fn validate_private_delete_anchor(
     anchor: &std::fs::File,
     containing: &std::fs::Metadata,
@@ -2632,6 +2673,7 @@ fn validate_private_delete_anchor(
     })
 }
 
+#[cfg(unix)]
 fn validate_private_delete_anchor_metadata(
     metadata: &std::fs::Metadata,
     containing: &std::fs::Metadata,
@@ -2651,6 +2693,7 @@ fn validate_private_delete_anchor_metadata(
     Ok(())
 }
 
+#[cfg(unix)]
 fn open_private_delete_anchor_raw(
     containing_fd: i32,
     create: bool,
@@ -2703,6 +2746,7 @@ fn open_private_delete_anchor_raw(
     Ok(Some(anchor))
 }
 
+#[cfg(unix)]
 fn raw_child_exists(parent_fd: i32, name: &CString) -> io::Result<bool> {
     let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
     if unsafe {
@@ -2725,6 +2769,7 @@ fn raw_child_exists(parent_fd: i32, name: &CString) -> io::Result<bool> {
     }
 }
 
+#[cfg(unix)]
 async fn private_delete_pending(
     directory: &SecureDirectory,
     name: &str,
@@ -2744,6 +2789,7 @@ async fn private_delete_pending(
     .map_err(|error| format!("inspecting private delete anchor: {error}"))
 }
 
+#[cfg(unix)]
 async fn restore_private_delete_slot(
     directory: &SecureDirectory,
     name: &str,
@@ -2795,6 +2841,7 @@ async fn logical_directory_exists(directory: &SecureDirectory, name: &str) -> Re
     private_delete_pending(directory, name, PrivateDeleteKind::Directory).await
 }
 
+#[cfg(unix)]
 async fn drain_private_delete_anchor(
     directory: &SecureDirectory,
     loss: &CancellationToken,
@@ -2869,6 +2916,7 @@ async fn drain_private_delete_anchor(
     Ok(())
 }
 
+#[cfg(unix)]
 fn remove_inner_private_anchor(directory: &std::fs::File) -> io::Result<()> {
     let Some(anchor) = open_private_delete_anchor_raw(directory.as_raw_fd(), false)? else {
         return Ok(());
@@ -2884,6 +2932,7 @@ fn remove_inner_private_anchor(directory: &std::fs::File) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 async fn unlink_expected_child(
     directory: &SecureDirectory,
     name: &str,
@@ -3094,6 +3143,7 @@ enum ProofLinkOutcome {
     ExistingMismatch,
 }
 
+#[cfg(unix)]
 async fn link_public_replacement_proof_once(
     public_parent: &SecureDirectory,
     public_name: &str,
@@ -3189,6 +3239,7 @@ async fn link_public_replacement_proof_once(
     .map_err(|error| format!("creating public replacement proof: {error}"))
 }
 
+#[cfg(unix)]
 async fn ensure_public_replacement_proof(
     public_parent: &SecureDirectory,
     public_name: &str,
@@ -3223,6 +3274,7 @@ async fn ensure_public_replacement_proof(
     unreachable!("bounded proof creation loop returns")
 }
 
+#[cfg(unix)]
 async fn restore_public_from_recovery_guard(
     scratch: &SecureDirectory,
     expected: &LocalMediaIdentity,
@@ -3317,6 +3369,7 @@ async fn restore_public_from_recovery_guard(
     }
 }
 
+#[cfg(unix)]
 async fn unlink_original_if_public_matches(
     scratch: &SecureDirectory,
     pending_name: &str,
@@ -3428,6 +3481,7 @@ async fn unlink_original_if_public_matches(
     ))
 }
 
+#[cfg(unix)]
 async fn remove_flat_tree_expected(
     parent: &SecureDirectory,
     name: &str,
@@ -3620,6 +3674,232 @@ async fn remove_flat_tree_expected(
     .await
     .map_err(|error| format!("joining identity-conditioned tree removal: {error}"))?
     .map_err(|error| format!("identity-conditioned tree removal failed: {error}"))
+}
+
+#[cfg(windows)]
+fn local_identity_from_secure(identity: plurx_core::fs_secure::FileIdentity) -> LocalMediaIdentity {
+    LocalMediaIdentity {
+        device: identity.device,
+        inode: identity.inode ^ identity.inode_high.rotate_left(1),
+        size: identity.size,
+        modified_seconds: identity.changed_seconds,
+        modified_nanoseconds: identity.changed_nanoseconds,
+        changed_seconds: identity.changed_seconds,
+        changed_nanoseconds: identity.changed_nanoseconds,
+    }
+}
+
+#[cfg(windows)]
+async fn create_cleanup_state(
+    parent: &SecureDirectory,
+    paths: &ConversionPaths,
+    state: &CleanupQuarantineState,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec(state)
+        .map_err(|error| format!("encoding cleanup quarantine state: {error}"))?;
+    if bytes.len() as u64 > MAX_CLEANUP_STATE_BYTES {
+        return Err("cleanup quarantine state exceeds its bounded format".to_owned());
+    }
+    parent
+        .create_new_child(&paths.cleanup_state_name, &bytes)
+        .await
+        .map_err(|error| format!("creating exclusive cleanup state: {error}"))
+}
+
+#[cfg(windows)]
+async fn sync_directory(path: &Path) -> Result<(), String> {
+    let directory = SecureDirectory::open(path)
+        .await
+        .map_err(|error| format!("opening directory {} for sync: {error}", path.display()))?;
+    directory
+        .sync()
+        .await
+        .map_err(|error| format!("syncing directory {}: {error}", path.display()))
+}
+
+#[cfg(all(test, windows))]
+async fn rename_noreplace_durable(from: &Path, to: &Path) -> Result<bool, String> {
+    let from_parent = open_parent(from, "rename source").await?;
+    let to_parent = open_parent(to, "rename destination").await?;
+    from_parent
+        .rename_child_to_noreplace(
+            &path_child_name(from, "rename source")?,
+            &to_parent,
+            &path_child_name(to, "rename destination")?,
+        )
+        .await
+        .map_err(|error| format!("exclusive capability rename failed: {error}"))
+}
+
+#[cfg(windows)]
+async fn rename_expected_noreplace_between(
+    from_parent: &SecureDirectory,
+    from_name: &str,
+    expected: &LocalMediaIdentity,
+    to_parent: &SecureDirectory,
+    to_name: &str,
+) -> Result<Option<LocalMediaIdentity>, String> {
+    let before = child_identity(from_parent, from_name).await?;
+    if &before != expected {
+        return Err("rename source no longer has the expected local identity".to_owned());
+    }
+    if !from_parent
+        .rename_child_to_noreplace(from_name, to_parent, to_name)
+        .await
+        .map_err(|error| format!("identity-conditioned rename failed: {error}"))?
+    {
+        return Ok(None);
+    }
+    let after = child_identity(to_parent, to_name).await?;
+    if !expected.same_inode_and_content_facts(&after) {
+        let _ = to_parent
+            .rename_child_to_noreplace(to_name, from_parent, from_name)
+            .await;
+        return Err("rename source changed during the capability operation".to_owned());
+    }
+    Ok(Some(after))
+}
+
+#[cfg(windows)]
+async fn private_delete_pending(
+    _directory: &SecureDirectory,
+    _name: &str,
+    _kind: PrivateDeleteKind,
+) -> Result<bool, String> {
+    Ok(false)
+}
+
+#[cfg(windows)]
+async fn restore_private_delete_slot(
+    _directory: &SecureDirectory,
+    _name: &str,
+    _kind: PrivateDeleteKind,
+) -> Result<bool, String> {
+    Ok(false)
+}
+
+#[cfg(windows)]
+async fn drain_private_delete_anchor(
+    _directory: &SecureDirectory,
+    _loss: &CancellationToken,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(windows)]
+async fn unlink_expected_child(
+    directory: &SecureDirectory,
+    name: &str,
+    expected: &LocalMediaIdentity,
+) -> Result<(), String> {
+    let removed = directory
+        .unlink_child_if_identity(
+            name,
+            expected.device,
+            expected.inode,
+            expected.size,
+            expected.changed_seconds,
+            expected.changed_nanoseconds,
+        )
+        .await
+        .map_err(|error| format!("identity-conditioned delete failed: {error}"))?;
+    if removed {
+        Ok(())
+    } else {
+        Err("delete candidate no longer has the expected local identity".to_owned())
+    }
+}
+
+#[cfg(windows)]
+async fn ensure_public_replacement_proof(
+    public_parent: &SecureDirectory,
+    public_name: &str,
+    expected: &LocalMediaIdentity,
+    scratch: &SecureDirectory,
+) -> Result<LocalMediaIdentity, String> {
+    if child_identity(public_parent, public_name).await? != *expected {
+        return Err("public replacement changed before proof creation".to_owned());
+    }
+    scratch
+        .place_regular_child_from(public_parent, public_name, PUBLIC_PROOF_FILE, expected.size)
+        .await
+        .map_err(|error| format!("creating Windows replacement proof copy: {error}"))?;
+    if child_identity(public_parent, public_name).await? != *expected {
+        return Err("public replacement changed during proof creation".to_owned());
+    }
+    child_identity(scratch, PUBLIC_PROOF_FILE).await
+}
+
+#[cfg(windows)]
+async fn restore_public_from_recovery_guard(
+    scratch: &SecureDirectory,
+    expected: &LocalMediaIdentity,
+    public_parent: &SecureDirectory,
+    public_name: &str,
+) -> Result<LocalMediaIdentity, String> {
+    if child_identity(scratch, PUBLIC_PROOF_FILE).await? != *expected {
+        return Err("recovery guard changed before public restoration".to_owned());
+    }
+    public_parent
+        .place_regular_child_from(scratch, PUBLIC_PROOF_FILE, public_name, expected.size)
+        .await
+        .map_err(|error| format!("restoring public replacement from recovery guard: {error}"))?;
+    child_identity(public_parent, public_name).await
+}
+
+#[cfg(windows)]
+async fn unlink_original_if_public_matches(
+    scratch: &SecureDirectory,
+    pending_name: &str,
+    expected_pending: &LocalMediaIdentity,
+    public_parent: &SecureDirectory,
+    public_name: &str,
+    expected_public: &LocalMediaIdentity,
+) -> Result<Option<LocalMediaIdentity>, String> {
+    if child_identity(public_parent, public_name).await? != *expected_public {
+        return Ok(None);
+    }
+    unlink_expected_child(scratch, pending_name, expected_pending).await?;
+    let after = child_identity(public_parent, public_name).await?;
+    Ok(expected_public
+        .same_inode_and_content_facts(&after)
+        .then_some(after))
+}
+
+#[cfg(windows)]
+async fn remove_flat_tree_expected(
+    parent: &SecureDirectory,
+    name: &str,
+    directory: &SecureDirectory,
+    expected: plurx_core::fs_secure::FileIdentity,
+    loss: &CancellationToken,
+) -> Result<(), String> {
+    let actual = directory
+        .identity()
+        .await
+        .map_err(|error| format!("identifying cleanup root: {error}"))?;
+    if !expected.same_inode(actual) {
+        return Err("cleanup root no longer has the quarantined identity".to_owned());
+    }
+    let mut names = directory
+        .child_names(MAX_SCRATCH_ENTRIES)
+        .await
+        .map_err(|error| format!("listing owned scratch for bounded cleanup: {error}"))?;
+    names.sort_by_key(|child| child == SCRATCH_OWNER_FILE);
+    for child in names {
+        if loss.is_cancelled() {
+            return Err("conversion lease was lost during bounded scratch cleanup".to_owned());
+        }
+        let identity = child_identity(directory, &child).await?;
+        unlink_expected_child(directory, &child, &identity).await?;
+    }
+    if loss.is_cancelled() {
+        return Err("conversion lease was lost before cleanup-root removal".to_owned());
+    }
+    parent
+        .remove_child_tree(name, MAX_SCRATCH_ENTRIES, 1)
+        .await
+        .map_err(|error| format!("removing empty Windows cleanup root: {error}"))
 }
 
 const FAILED_PUBLISHED_FILE: &str = "failed-published.mkv";

@@ -24,6 +24,7 @@ mod pgs_overlay;
 mod pipeprobe;
 mod playback_control;
 mod playstart;
+mod process_control;
 mod prodexec;
 mod prodrun;
 mod prodsched;

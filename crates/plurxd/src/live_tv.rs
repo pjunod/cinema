@@ -2509,6 +2509,7 @@ fn private_webhook_host(host: &str) -> bool {
 /// A non-owner node answering `None` is the common case and not a fault: the
 /// DVR root is a mount the owner writes to, and a node that does not have it
 /// has nothing honest to say about its free space.
+#[cfg(unix)]
 pub(crate) fn free_space_bytes(path: &str) -> Option<u64> {
     if path.trim().is_empty() {
         return None;
@@ -2524,6 +2525,29 @@ pub(crate) fn free_space_bytes(path: &str) -> Option<u64> {
         stats
     };
     Some((stats.f_bsize as u64).saturating_mul(stats.f_bavail as u64))
+}
+
+#[cfg(windows)]
+pub(crate) fn free_space_bytes(path: &str) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt as _;
+
+    let mut path = std::ffi::OsStr::new(path).encode_wide().collect::<Vec<_>>();
+    if path.is_empty() || path.contains(&0) {
+        return None;
+    }
+    path.push(0);
+    let mut available = 0u64;
+    // SAFETY: the path is NUL-terminated and `available` is writable for the
+    // duration of the read-only filesystem query.
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+            path.as_ptr(),
+            &raw mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    (ok != 0).then_some(available)
 }
 
 fn remaining_guide_budget(deadline: tokio::time::Instant) -> Result<Duration, LiveTvError> {
