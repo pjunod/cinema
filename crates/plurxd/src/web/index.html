@@ -4643,6 +4643,12 @@ function closeConnectQr(){
   if(target&&target.isConnected&&target.focus) target.focus();
 }
 function connectQrOpen(){ return !!document.getElementById("connectdialog"); }
+// The cell a popover was opened from, so closing it can hand the keyboard back.
+let LIVE_TV_POP_OPENER=null;
+function liveTvPopoverOpen(){
+  const pop=document.getElementById("live-tv-pop");
+  return !!(pop&&!pop.hidden);
+}
 // Capture Escape before layout-specific sheet handlers so one key closes only
 // the topmost modal, never it and something behind it. The edit dialog is
 // here rather than in its own listener for the same reason: two Escape
@@ -4650,7 +4656,8 @@ function connectQrOpen(){ return !!document.getElementById("connectdialog"); }
 window.addEventListener("keydown",e=>{
   if(e.key!=="Escape") return;
   if(connectQrOpen()){ e.preventDefault(); e.stopImmediatePropagation(); closeConnectQr(); return; }
-  if(document.getElementById("editwrap")){ e.preventDefault(); e.stopImmediatePropagation(); closeEdit(); }
+  if(document.getElementById("editwrap")){ e.preventDefault(); e.stopImmediatePropagation(); closeEdit(); return; }
+  if(liveTvPopoverOpen()){ e.preventDefault(); e.stopImmediatePropagation(); liveTvPopover(null); }
 },true);
 
 // ---- global activity indicator --------------------------------------------
@@ -16383,8 +16390,32 @@ function liveTvGridCell(channelId,index){
 // is worse than an absent one.
 function liveTvPopover(row,channelId){
   let pop=document.getElementById("live-tv-pop");
-  if(!pop){ pop=document.createElement("div"); pop.id="live-tv-pop"; pop.className="lt-pop"; document.body.appendChild(pop); }
-  if(!row){ pop.hidden=true; return; }
+  if(!pop){
+    pop=document.createElement("div"); pop.id="live-tv-pop"; pop.className="lt-pop";
+    // It behaves as a modal — it takes the keyboard and closes on Escape — so
+    // it says it is one, the way the lightbox does. Without this a cell's
+    // verbs were a panel in the middle of the screen that a keyboard could
+    // only reach by tabbing past the whole page, and could not leave at all.
+    pop.setAttribute("role","dialog");
+    pop.setAttribute("aria-modal","true");
+    pop.tabIndex=-1;
+    pop.addEventListener("click",e=>{ if(e.target===pop) liveTvPopover(null); });
+    document.body.appendChild(pop);
+  }
+  if(!row){
+    pop.hidden=true;
+    // Hand the keyboard back to the cell that opened it. The grid re-renders
+    // on the guide poll, so the element may be gone; falling back to the grid
+    // keeps focus inside the page rather than dropping it on <body>.
+    const back=LIVE_TV_POP_OPENER&&document.contains(LIVE_TV_POP_OPENER)
+      ? LIVE_TV_POP_OPENER : document.getElementById("live-tv-grid");
+    LIVE_TV_POP_OPENER=null;
+    if(back&&back.focus) try{ back.focus(); }catch(_){}
+    return;
+  }
+  LIVE_TV_POP_OPENER=document.activeElement&&document.activeElement.classList
+    &&document.activeElement.classList.contains("lt-cell")?document.activeElement:null;
+  pop.setAttribute("aria-label",row.title||"Programme");
   const channel=liveTvChannelById(channelId);
   pop.innerHTML=`<h3>${esc(row.title)}</h3>
     <p>${esc(channel?channel.guide_number+" · "+channel.guide_name:"")} · ${esc(liveTvClock(row.start))}–${esc(liveTvClock(row.end))}${row.episode?" · "+esc(row.episode):""}</p>
@@ -16394,6 +16425,11 @@ function liveTvPopover(row,channelId){
     ${liveTvPopoverActions(row,channelId)}
     <div class="row"><button class="ghost sm" onclick="liveTvPopover(null)">Close</button></div>`;
   pop.hidden=false;
+  // Watch is the first button, so focusing it keeps the old one-Enter path to
+  // tuning: Enter on a cell, Enter again to watch.
+  const first=pop.querySelector("button");
+  if(first) try{ first.focus(); }catch(_){ try{ pop.focus(); }catch(__){} }
+  else try{ pop.focus(); }catch(_){}
   const box=pop.getBoundingClientRect();
   pop.style.left=`${Math.max(12,Math.min(window.innerWidth-box.width-12,(window.innerWidth-box.width)/2))}px`;
   pop.style.top=`${Math.max(12,(window.innerHeight-box.height)/2)}px`;

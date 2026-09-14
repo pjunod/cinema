@@ -492,8 +492,8 @@ the LIVE pill, number/callsign and a progress bar drawn over the picture;
 under it the programme line and mute/stop; then a segmented
 `On now · Guide · Favorites` and the list. `Guide` is the grid: a
 horizontally scrolling `ScrollView` per row sharing one `ScrollViewReader`
-offset, 30 min = 160 pt on phones, a red now line; airing cells tune,
-future cells open a sheet with the synopsis. Rotation to landscape presents
+offset, 30 min = 160 pt on phones, a red now line; every cell opens the
+programme sheet, whose first action is Watch. Rotation to landscape presents
 the fullscreen cover with the §3.5 overlay (a SwiftUI overlay on
 `PlayerSurface`, auto-hide via the `autoHideGeneration` task pattern in
 `PlayerView.swift` 927–953).
@@ -690,10 +690,13 @@ horizontally (header times sticky) and vertically (channel column sticky);
 future, `--panel2` for airing, accent border for the airing cell of the
 playing channel, ellipsised titles, `title=` tooltip with times. Where the
 cache ends, a final hatched cell reads *Guide data ends 12:00 AM*. Click
-an airing cell → tune. Click a future cell → a popover: title, times,
-episode, synopsis, `filters` as pills; **no** actions. Keyboard: roving
-`tabindex` over cells, arrows move, Enter tunes an airing cell, `Home`
-jumps to now. The **docked player** is 400 × 225 top-right with the now
+any cell → a popover: title, times, episode, synopsis, `filters` as pills,
+and the cell's verbs. It is a modal — `role="dialog"`, it takes the
+keyboard, Escape closes it and hands focus back to the cell. Watch is first
+and takes focus, so an airing cell is one more Enter from the picture, and
+Record is reachable on it at all, which it was not while an airing cell
+tuned and returned. Keyboard: roving `tabindex` over cells, arrows move,
+Enter opens the popover, `Home` jumps to now. The **docked player** is 400 × 225 top-right with the now
 bar to its left; the `⤢` expands to the list-view geometry (player wide,
 grid beneath — this is the same page, so it is a class toggle) and `⛶` is
 fullscreen.
@@ -884,8 +887,9 @@ deploy half; this is the check half):
 > 1. iPhone: the list shows a programme title and progress for every
 >    unprotected channel; tapping a row tunes; rotating to landscape goes
 >    fullscreen with the overlay, which hides after 4 s and returns on tap.
-> 2. iPhone: Grid shows the half-hour grid with a red now line; tapping an
->    airing cell tunes; tapping a future cell shows details and no button.
+> 2. iPhone: Grid shows the half-hour grid with a red now line; tapping any
+>    cell — airing or future — opens the programme sheet, whose first action
+>    is Watch and which also offers Record and Record series.
 > 3. iPhone: the PiP button opens the system PiP window; press Home; after
 >    2 minutes the stream is still playing and Activity on the web shows
 >    the session with the programme title.
