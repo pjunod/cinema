@@ -73,6 +73,21 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 /// Collapse only duplicate/concurrent submissions. The ordinary ten-second
 /// cadence and thirty-second reachability contract remain unchanged.
 const HEARTBEAT_COALESCE_WINDOW: Duration = Duration::from_millis(250);
+/// Refresh the live member's address projection without letting a process
+/// claim a tombstoned identity or a different Raft id.
+///
+/// A supported sole-voter readdress rebuilds Hiqlite metadata and rewrites
+/// `membership.json` before any peers are admitted. The application row
+/// survives that rebuild by design, so its original loopback addresses must
+/// converge from the authenticated heartbeat once the voter opens again.
+const UPSERT_CLUSTER_NODE_HEARTBEAT_SQL: &str = "INSERT INTO cluster_nodes \
+     (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at, role) \
+     VALUES ($1, $2, $3, $4, $5, NULL, $6) \
+     ON CONFLICT(node_id) DO UPDATE SET \
+       raft_address = excluded.raft_address, api_address = excluded.api_address, \
+       last_seen_at = excluded.last_seen_at, removed_at = NULL \
+     WHERE cluster_nodes.removed_at IS NULL \
+       AND cluster_nodes.raft_id = excluded.raft_id";
 /// How long a removal waits for survivors to answer a source probe before
 /// treating silence as "cannot prove it". Long enough for a healthy node's
 /// poll plus a `stat` on a sleeping NAS; short enough that an operator gets an
@@ -4323,15 +4338,11 @@ impl MembershipManager {
             (
                 // `role` is supplied only on the insert branch. The row
                 // redemption already wrote owns the admission decision,
-                // and a promotion — which this slice does not implement —
-                // must be able to move it without a heartbeat undoing it.
-                "INSERT INTO cluster_nodes \
-                     (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at, \
-                      role) \
-                     VALUES ($1, $2, $3, $4, $5, NULL, $6) \
-                     ON CONFLICT(node_id) DO UPDATE SET last_seen_at = excluded.last_seen_at, \
-                       removed_at = NULL WHERE cluster_nodes.removed_at IS NULL"
-                    .to_owned(),
+                // and a promotion must be able to move it without a heartbeat
+                // undoing it. Addresses belong to the same stable node and
+                // Raft identity, so they converge after a supported sole-voter
+                // readdress but never across an identity collision.
+                UPSERT_CLUSTER_NODE_HEARTBEAT_SQL.to_owned(),
                 params!(
                     inner.identity.node_id.as_str(),
                     inner.identity.raft_id as i64,
@@ -10697,6 +10708,119 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn heartbeat_reconciles_addresses_only_for_the_same_live_identity() {
+        let connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_nodes (\
+                   node_id TEXT PRIMARY KEY, raft_id INTEGER NOT NULL, \
+                   raft_address TEXT NOT NULL, api_address TEXT NOT NULL, \
+                   last_seen_at INTEGER NOT NULL, removed_at INTEGER, role TEXT); \
+                 INSERT INTO cluster_nodes VALUES \
+                   ('live', 1, '127.0.0.1:32401', '127.0.0.1:32402', 10, NULL, 'voter'), \
+                   ('removed', 2, 'old:32401', 'old:32402', 10, 20, 'learner'), \
+                   ('collision', 3, 'owner:32401', 'owner:32402', 10, NULL, 'voter');",
+            )
+            .expect("seed projected cluster nodes");
+
+        assert_eq!(
+            connection
+                .execute(
+                    UPSERT_CLUSTER_NODE_HEARTBEAT_SQL,
+                    rusqlite::params![
+                        "live",
+                        1_i64,
+                        "192.168.5.236:32401",
+                        "192.168.5.236:32402",
+                        30_i64,
+                        "learner"
+                    ],
+                )
+                .expect("reconcile supported voter readdress"),
+            1
+        );
+        let live = connection
+            .query_row(
+                "SELECT raft_address, api_address, last_seen_at, role \
+                 FROM cluster_nodes WHERE node_id = 'live'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
+            )
+            .expect("read reconciled node");
+        assert_eq!(
+            live,
+            (
+                "192.168.5.236:32401".to_owned(),
+                "192.168.5.236:32402".to_owned(),
+                30,
+                "voter".to_owned(),
+            ),
+            "the heartbeat owns addresses and freshness, not the admitted role"
+        );
+
+        for (node_id, raft_id) in [("removed", 2_i64), ("collision", 99_i64)] {
+            assert_eq!(
+                connection
+                    .execute(
+                        UPSERT_CLUSTER_NODE_HEARTBEAT_SQL,
+                        rusqlite::params![
+                            node_id,
+                            raft_id,
+                            "attacker:32401",
+                            "attacker:32402",
+                            40_i64,
+                            "voter"
+                        ],
+                    )
+                    .expect("refuse address claim"),
+                0,
+                "{node_id} must not accept the heartbeat claim"
+            );
+        }
+        let unchanged = connection
+            .prepare(
+                "SELECT node_id, raft_address, api_address, last_seen_at \
+                 FROM cluster_nodes WHERE node_id != 'live' ORDER BY node_id",
+            )
+            .expect("prepare unchanged identities")
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .expect("read unchanged identities")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect unchanged identities");
+        assert_eq!(
+            unchanged,
+            vec![
+                (
+                    "collision".to_owned(),
+                    "owner:32401".to_owned(),
+                    "owner:32402".to_owned(),
+                    10,
+                ),
+                (
+                    "removed".to_owned(),
+                    "old:32401".to_owned(),
+                    "old:32402".to_owned(),
+                    10,
+                ),
+            ]
+        );
+    }
 
     #[test]
     fn operations_peer_directory_preserves_identities_beyond_the_probe_limit() {
