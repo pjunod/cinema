@@ -8,20 +8,18 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        : "${CARGO_HOME:?Configure the repository Cargo cache before windows-cross}"
         rustup target add x86_64-pc-windows-msvc
         if ! cargo xwin --version 2>/dev/null | grep -Fq '0.23.1'; then
           cargo install cargo-xwin --version 0.23.1 --locked
         fi
-        xwin_cache_dir="$CARGO_HOME/xwin-cache/cargo-xwin-0.23.1"
-        mkdir -p "$xwin_cache_dir"
         {
-          echo "XWIN_CACHE_DIR=$xwin_cache_dir"
+          echo "XWIN_ARCH=x86_64"
+          echo "XWIN_CRT_VERSION=14.44.17.14"
           echo "XWIN_HTTP_RETRIES=8"
+          echo "XWIN_SDK_VERSION=10.0.26100"
+          echo "XWIN_VARIANT=desktop"
+          echo "XWIN_VERSION=17"
         } >> "$GITHUB_ENV"
-        export XWIN_CACHE_DIR="$xwin_cache_dir"
-        export XWIN_HTTP_RETRIES=8
-        cargo xwin cache xwin
         tool_dir="$RUNNER_TEMP/plurx-windows-toolchain"
         mkdir -p "$tool_dir"
         expose_tool_dir=false

@@ -24,7 +24,7 @@ do not need Windows-specific builds.
 
 | Milestone | State | Current fact | Next proof |
 |---|---|---|---|
-| M1 · compile and CI | complete | The Windows MSVC workspace builds locally. Forgejo effort, fast-lane, and full workflows persist the pinned MSVC SDK/CRT and compile normal plus test targets without executing them. | Keep the Windows compile lane green; execute native behavior only on a real Windows runner. |
+| M1 · compile and CI | complete | The Windows MSVC workspace builds locally. Forgejo effort, fast-lane, and full workflows pin the x86_64 MSVC SDK/CRT and compile normal plus test targets without executing them. | Keep the Windows compile lane green; execute native behavior only on a real Windows runner. |
 | M2 · boot, scan, software play | built · native proof open | Secure Windows filesystem operations, scanner-bound direct delivery, exact ffmpeg path re-verification, complete Job Object ownership, suspend/resume, sharing-aware cleanup, targeted console shutdown, and the native smoke script are implemented. | Run `scripts/windows-smoke.ps1` on a Windows x64 host and retain its logs. |
 | M3 · service and package | built · clean-VM proof open | SCM install/run/uninstall with truthful pending/running states, owner-and-SYSTEM service-data ACLs, ProgramData defaulting, long-path manifest, Windows ZIP packaging, firewall runbook, and CI artifact retention are implemented. | Clean-VM install, reboot, discovery, and uninstall transcript. |
 | M4 · NVENC and Quick Sync | code-ready · hardware proof open | Existing probe-gated NVENC/QSV paths are portable and Windows readiness is visible without becoming a feature gate. | Boot probes and two-second segments on real NVIDIA and Intel hardware. |
@@ -40,9 +40,11 @@ do not need Windows-specific builds.
 2. **Forgejo CI uses `cargo-xwin`.** The repository no longer has the plan's
    assumed GitHub-hosted Windows runner. Existing agents can compile the MSVC
    target with Microsoft CRT/SDK inputs supplied by `cargo-xwin`; a native VM
-   remains mandatory for runtime and service evidence. The pinned SDK/CRT is
-   retained under the bounded runner-local Cargo cache because its uncached
-   download exceeded the original 15-minute job deadline on run `2065`.
+   remains mandatory for runtime and service evidence. The x86_64 SDK/CRT
+   versions are exact, their download uses the build path's bounded retries,
+   and cold jobs get 30 minutes because the original deadline expired on run
+   `2065`. No persistent SDK cache is claimed while runner-approved external
+   volumes are unavailable; checkout cleaning makes a workspace cache a lie.
 3. **Readiness is advisory.** Windows-specific experimental capabilities get
    an explicit enable control under Settings → Developer. The same surface
    states each requirement and whether this node meets it, but a red readiness
@@ -69,7 +71,7 @@ do not need Windows-specific builds.
 | 2026-09-14 | `b3e5f8dd..20c297d8` | `rustup run 1.97.1 cargo check --workspace --locked --all-targets` | pass · 1m14s clean target | The review corrections preserve the native workspace compile surface. This is compile evidence, not the requested fast lane. |
 | 2026-09-14 | `b3e5f8dd..20c297d8` | `AWS_LC_SYS_NO_ASM=1 rustup run 1.97.1 cargo xwin check --workspace --locked --exclude plurx-cluster-check --target x86_64-pc-windows-msvc` | pass · 13s warm target | The review corrections compile for MSVC with Rust 1.97.1. Native behavior is still unproved. |
 | 2026-09-14 | `452c920a` | Forgejo main fast lane `2061` | pass | Post-review policy and contract preflight, Rust gate, Windows MSVC compile, embedded-web syntax, and the aggregate Main promotion gate all passed. Unaffected mobile compile jobs were correctly skipped. |
-| 2026-09-14 | `8027480d` | Forgejo main fast lane `2065` | infrastructure fail | A fresh runner spent the 15-minute job allowance installing `cargo-xwin` and downloading the MSVC CRT/SDK. No plurx compiler or test failure occurred. The repair persists the pinned SDK cache, raises the cold-run allowance to 30 minutes, and compiles all Windows test targets without executing them. |
+| 2026-09-14 | `8027480d` | Forgejo main fast lane `2065` | infrastructure fail | A fresh runner spent the 15-minute job allowance installing `cargo-xwin` and downloading the MSVC CRT/SDK. No plurx compiler or test failure occurred. The repair pins x86_64 SDK `10.0.26100` and CRT `14.44.17.14`, uses the build path's eight download retries, raises the cold-run allowance to 30 minutes, and compiles all Windows test targets without executing them. |
 
 Passing compilation includes test-only code and proves type and platform
 linkage coverage. It does not execute those tests and therefore does not

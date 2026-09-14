@@ -1447,16 +1447,15 @@ assert.equal(context.ACT_TIMER, null);
         windows_action = read(".github/actions/windows-cross/action.yml")
         self.assertIn("cargo-xwin --version", windows_action)
         self.assertIn("cargo install cargo-xwin --version 0.23.1 --locked", windows_action)
-        self.assertIn(
-            'xwin_cache_dir="$CARGO_HOME/xwin-cache/cargo-xwin-0.23.1"',
-            windows_action,
-        )
-        self.assertIn('echo "XWIN_CACHE_DIR=$xwin_cache_dir"', windows_action)
+        self.assertIn('echo "XWIN_ARCH=x86_64"', windows_action)
+        self.assertIn('echo "XWIN_CRT_VERSION=14.44.17.14"', windows_action)
         self.assertIn('echo "XWIN_HTTP_RETRIES=8"', windows_action)
-        self.assertLess(
-            windows_action.index("cargo xwin cache xwin"),
-            windows_action.index("cargo xwin build --workspace --all-targets --locked"),
-        )
+        self.assertIn('echo "XWIN_SDK_VERSION=10.0.26100"', windows_action)
+        self.assertIn('echo "XWIN_VARIANT=desktop"', windows_action)
+        self.assertIn('echo "XWIN_VERSION=17"', windows_action)
+        self.assertIn('} >> "$GITHUB_ENV"', windows_action)
+        self.assertNotIn("XWIN_CACHE_DIR", windows_action)
+        self.assertNotIn("cargo xwin cache xwin", windows_action)
         self.assertIn("command -v clang-cl", windows_action)
         self.assertIn('echo "$tool_dir" >> "$GITHUB_PATH"', windows_action)
         self.assertIn(
