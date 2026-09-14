@@ -5148,10 +5148,7 @@ impl AttemptChild {
     /// takes the reader when the process ends: a child that is already dead
     /// when construction returns could otherwise reach that take before the
     /// reader was stored, and settle nothing at all.
-    // The production installer is itself retained behind runtime selection;
-    // test targets exercise this constructor directly and Clippy otherwise
-    // treats the production call chain as unreachable.
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn new(
         producer_attempt: u64,
         mut child: Child,
@@ -30570,6 +30567,7 @@ pub(crate) mod tests {
             .await
             .expect("producer attempt");
         let mut child = AttemptChild::new(attempt, long_running_child(), control.clone(), None);
+        #[cfg(unix)]
         let pid = child.id().expect("running producer pid");
 
         assert_eq!(
@@ -30611,6 +30609,8 @@ pub(crate) mod tests {
                 Some(libc::ESRCH)
             );
         }
+        #[cfg(windows)]
+        assert!(!status.success(), "TerminateProcess must report failure");
         let exit = control
             .snapshot()
             .await
@@ -30619,7 +30619,10 @@ pub(crate) mod tests {
             .producer_exit
             .expect("exact attempt exit");
         assert!(!exit.success);
+        #[cfg(unix)]
         assert_eq!(exit.signal, Some(libc::SIGKILL));
+        #[cfg(windows)]
+        assert_eq!(exit.signal, None);
     }
 
     #[tokio::test]
@@ -30848,6 +30851,7 @@ pub(crate) mod tests {
             .await
             .expect("producer attempt");
         let child = AttemptChild::new(attempt, long_running_child(), control.clone(), None);
+        #[cfg(unix)]
         let pid = child.id().expect("running producer pid");
         drop(child);
 
@@ -30866,7 +30870,10 @@ pub(crate) mod tests {
         .await
         .expect("drop-triggered supervisor reap");
         assert!(!exit.success);
+        #[cfg(unix)]
         assert_eq!(exit.signal, Some(libc::SIGKILL));
+        #[cfg(windows)]
+        assert_eq!(exit.signal, None);
         #[cfg(unix)]
         {
             assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);

@@ -1,6 +1,7 @@
 mod admission;
 mod bounded_process;
 mod cachekeep;
+mod channel_subjects;
 mod copyseg;
 mod decode_facts;
 mod decoder_health;
@@ -2276,6 +2277,10 @@ fn spawn_background_loops(
     tokio::spawn(crate::media_sessions::lease_loop(state.clone()));
     tokio::spawn(crate::media_sessions::takeover_loop(state.clone()));
     tokio::spawn(crate::media_sessions::maintenance_loop(state.clone()));
+    tokio::spawn(crate::channel_subjects::worker(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(crate::http::library_channels::reconcile_loop(
         state.clone(),
         background_shutdown.clone(),
@@ -6112,6 +6117,7 @@ mod startup_tests {
 
     /// SIGTERM is what `docker stop` sends, and it has to start the drain
     /// rather than kill the process mid-stream.
+    #[cfg(unix)]
     #[tokio::test]
     async fn sigterm_starts_the_drain() {
         // Registering our own stream first replaces the default terminate

@@ -11569,6 +11569,7 @@ mod tests {
     /// hold was already shielded. What is asserted is what is true — the field
     /// is cleared rather than latched for the life of the rendition, so the
     /// next reader of it is not the one who discovers it was never true.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_failed_rendition_reclaims_its_producer_and_drops_its_hold() {
         let base = crate::test_tempdir().expect("base");
@@ -11699,6 +11700,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_killed_producer_child_answers_every_waiter_producer_failed() {
         let base = crate::test_tempdir().expect("base");
@@ -14318,6 +14320,7 @@ mod tests {
 
     /// Fix 5: replacing a failed rendition subtracts what its manifest still
     /// claimed, so the rebuild's adoption counts the same bytes exactly once.
+    #[cfg(unix)]
     #[tokio::test]
     async fn replacing_a_failed_rendition_keeps_the_working_set_honest() {
         let base = crate::test_tempdir().expect("base");

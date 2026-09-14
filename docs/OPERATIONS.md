@@ -4659,3 +4659,37 @@ the loading overlay a few seconds longer, then playback).
 | A start answers `startup_timeout` saying the tuner sent no data | The device accepted the connection and delivered nothing — the channel has no signal on this device | Reception. Check that mux in the HDHomeRun's own UI; plurx cannot make a tuner lock |
 | A start answers `startup_timeout` naming a byte count | The tuner is feeding but the producer published no segment inside the producer-progress budget | A real producer problem rather than a missing signal. Check `Settings → Logs` on the owner; the byte count is there so the two cases are distinguishable |
 | An ATSC 3.0 channel returns no picture and no error from the device itself | The device accepted the connection and sent zero bytes — two channels on one test antenna do this | Reception, not software. Check signal on that mux in the HDHomeRun's own UI; plurx cannot make a tuner lock |
+
+
+### Library channel subject matching
+
+Subjects use one administrator-configured Ollama origin. Install Ollama on the
+chosen inference host, run `ollama pull qwen3:4b`, and make the service reachable
+from the daemon nodes. The default is `http://127.0.0.1:11434`; set
+`PLURX_CHANNEL_SUBJECT_URL` to an HTTP(S) origin and optionally
+`PLURX_CHANNEL_SUBJECT_MODEL` on participating nodes. Use the same artifact on
+that origin for reproducible cache reuse. The adapter resolves its full digest,
+rejects redirects and credential-bearing URLs, and sends only bounded title,
+overview, genre/tag, year and episode metadata. It sends no paths, files,
+account data or watch history. Keep the origin on the administrator's trusted
+network; HTTPS uses ordinary certificate validation.
+
+Settings → Developer → Library channel subject matching displays cached
+provider/model and metadata observations. These are advisory. The enabled
+switch defaults on and pauses new inference only; authoring, saving, enabling,
+existing schedules and manual selections keep working. A missing model or
+outage leaves jobs waiting with a visible error. Restore the provider to resume;
+refresh a failed preview to retry malformed output. No cloud fallback exists.
+
+SQLite schema 58 and Hiqlite schema 38 add owner-scoped jobs and decisions.
+Ordinary backups/imports carry both tables. One global claim permits one batch
+at a time across nodes, renews every 20 seconds and expires after 120 seconds.
+Calls have a 90-second deadline, eight records and 12,000 input characters at
+most; each malformed/missing row has one bounded retry. Preview expiry is 24
+hours, retained saved jobs seven days, and unused decisions 30 days. Maintenance
+prunes at most 200 rows per table per minute and preserves active work. A stale
+claim or changed channel revision cannot publish. No inference enters playback.
+
+The implementation observations, model identity, remaining operational limits,
+and delivery evidence live in the
+[subject matching plan](features/LIBRARY-CHANNEL-SUBJECT-MATCHING-IMPLEMENTATION.md).

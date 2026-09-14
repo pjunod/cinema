@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 203
+One binary serves everything on one port (`:32400` by default). plurx has 205
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -2067,8 +2067,11 @@ them, and only an administrator may publish shared visibility.
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | GET | `/api/v1/library-channels` | bearer | Visible channel summaries with private favourite state and derived now/next; `management=true` is admin-only |
+| POST | `/api/v1/library-channels/subject-previews` | bearer | Persist a subject preview; 202 acknowledgement with `job_id`, state, counts and stable `preview_seed`; body carries `recipe`, `request_id`, optional `preview_seed` |
+| GET | `/api/v1/library-channels/subject-previews/{id}` | owner/admin | Poll state and at most 50 named decisions; `verdict=match\|no_match\|uncertain` and opaque `cursor` paginate; item IDs are decimal strings |
+| DELETE | `/api/v1/library-channels/subject-previews/{id}` | owner/admin | Cancel preview work; saved-channel work and cached decisions survive |
 | POST | `/api/v1/library-channels/preview` | bearer | Bounded recipe evaluation without file I/O or publication; accepts an opaque `cursor` plus reusable `preview_seed`, and returns `next_cursor`, `first_ten`, diagnostics and the effective seed |
-| POST | `/api/v1/library-channels` | bearer | Idempotent definition creation and initial immutable generation publication |
+| POST | `/api/v1/library-channels` | bearer | Idempotently persist a definition (201; replay 200); queue publication and return without inference |
 | GET | `/api/v1/library-channels/{id}` | bearer | Definition, revision, generation pointers, and mutation capabilities |
 | PUT | `/api/v1/library-channels/{id}` | bearer | Full expected-revision replacement; the working schedule stays active until the next rotation |
 | DELETE | `/api/v1/library-channels/{id}` | bearer | Idempotent deletion with mandatory `expected_revision` and `request_id` query parameters; media is never deleted |
@@ -2078,6 +2081,27 @@ them, and only an administrator may publish shared visibility.
 | GET | `/api/v1/library-channels/guide` | bearer | At most 20 channels and 24 hours, capped at 1,000 derived occurrences; continue with the opaque cursor in `X-Plurx-Next-Cursor` |
 | POST | `/api/v1/library-channels/{id}/resolve` | bearer | Resolve server-now only; opens no file and creates no session |
 | POST | `/api/v1/library-channels/{id}/sessions` | bearer | Revalidate an occurrence and create one following finite-HLS session |
+
+Recipe version 1 gains optional `subject`: trim, NFC normalization, at most 500
+Unicode scalar values. Creation with an absent, null or empty subject keeps
+ordinary rules. On update an **absent** subject preserves the stored subject;
+explicit null or empty clears it. Advanced filters remain AND constraints;
+explicit includes bypass subject matching but never eligibility, scope or an
+explicit exclusion. New editors always serialize clearing. `subject_recipe`
+on channel detail mirrors the recipe with decimal-string identifier arrays for
+browser-safe round trips; ordinary numeric arrays remain accepted.
+
+Saving and enabling require no preview or provider readiness. Subject work is
+`queued`, `running`, `waiting_for_provider`, `complete`, `failed`, `cancelled`
+or `superseded`. Progress is available as `matching` on owner/admin detail and
+build responses. Polling returns total/processed/matched/rejected/uncertain,
+`result_revision`, a bounded error, and named decision reasons/evidence. A
+changed results/catalogue cursor returns 409 `subject_cursor_restart`; missing,
+expired or unauthorized jobs return 410 `subject_preview_gone`. Preview leases
+expire after 24 hours; restarting a preview reuses exact cached decisions.
+Only `match` or explicit inclusion admits a title. Incomplete/provider errors
+never become negative decisions. Existing rotations remain playable throughout
+classification; publication retains normal next-rotation/next-programme rules.
 
 The collection's canonical spelling has no trailing slash. The server also
 accepts `/api/v1/library-channels/` for list and create during the first native

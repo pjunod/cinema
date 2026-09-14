@@ -118,6 +118,68 @@ fn parse_string_list(column: usize, value: String) -> rusqlite::Result<Vec<Strin
 
 #[async_trait]
 impl LibraryChannelStore for SqliteStore {
+    async fn subject_job(
+        &self,
+        query: crate::channel_subjects::JobQuery,
+    ) -> Result<Option<crate::channel_subjects::SubjectJob>, StoreError> {
+        self.with_read(move |conn| {
+            let row = conn
+                .query_row(&query.sql(), [], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .optional()?;
+            row.map(|(payload, state)| {
+                let mut job: crate::channel_subjects::SubjectJob =
+                    serde_json::from_str(&payload)
+                        .map_err(|e| StoreError::Database(e.to_string()))?;
+                job.state = state;
+                Ok(job)
+            })
+            .transpose()
+        })
+        .await
+    }
+    async fn subject_write(
+        &self,
+        write: crate::channel_subjects::JobWrite,
+    ) -> Result<bool, StoreError> {
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            let mut changed = 0;
+            for sql in write.sql() {
+                changed = tx.execute(&sql, [])?;
+            }
+            tx.commit()?;
+            Ok(changed > 0)
+        })
+        .await
+    }
+    async fn subject_decisions(
+        &self,
+        owner: i64,
+        subject: &str,
+        profile: &str,
+        ids: &[(i64, String)],
+    ) -> Result<Vec<crate::channel_subjects::CachedDecision>, StoreError> {
+        let sql = crate::channel_subjects::decision_query(owner, subject, profile, ids);
+        self.with_read(move |conn| {
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })?;
+            rows.map(|row| {
+                let (payload, last_used_ms) = row?;
+                let mut decision: crate::channel_subjects::CachedDecision =
+                    serde_json::from_str(&payload)
+                        .map_err(|e| StoreError::Database(e.to_string()))?;
+                decision.last_used_ms = last_used_ms;
+                Ok(decision)
+            })
+            .collect()
+        })
+        .await
+    }
+
     async fn list_library_channels(
         &self,
         actor_user_id: i64,
@@ -324,6 +386,19 @@ impl LibraryChannelStore for SqliteStore {
             )?;
             let result = load_channel(&tx, update.actor_user_id, &update.channel_id)?
                 .ok_or_else(|| StoreError::Database("updated channel disappeared".to_owned()))?;
+            if result.recipe.subject.is_some() {
+                let mut job = crate::channel_subjects::SubjectJob::new(
+                    result.owner_user_id,
+                    result.recipe.clone(),
+                    result.seed,
+                    Some((result.id.clone(), result.revision)),
+                    update.now_ms,
+                );
+                job.activate_next_programme = update.subject_next_programme;
+                for sql in crate::channel_subjects::JobWrite::Enqueue(job).sql() {
+                    tx.execute(&sql, [])?;
+                }
+            }
             tx.commit()?;
             Ok(ChannelMutation::Applied(result))
         })
@@ -510,11 +585,11 @@ impl LibraryChannelStore for SqliteStore {
         self.with_read(move |conn| {
             let sql = format!(
                 "SELECT {CHANNEL_COLS}, 0 AS favourite FROM library_channels c \
-                 WHERE c.id > ?1 AND c.enabled = 1 \
+                 WHERE c.id > ?1 AND (c.build_state = 'queued' OR (c.enabled = 1 \
                    AND COALESCE(json_extract(c.recipe_json, '$.auto_refresh'), 1) = 1 \
                    AND (COALESCE(c.last_auto_build_ms, c.build_last_attempt_ms) IS NULL \
                      OR COALESCE(c.last_auto_build_ms, c.build_last_attempt_ms) <= ?2) \
-                 ORDER BY c.id LIMIT ?3"
+                 )) ORDER BY c.id LIMIT ?3"
             );
             let mut statement = conn.prepare(&sql)?;
             let rows = statement.query_map(
@@ -716,6 +791,10 @@ impl LibraryChannelStore for SqliteStore {
         let publication = publication.clone();
         self.with_conn(move |conn| {
             let tx = conn.unchecked_transaction()?;
+            if let Some((job,claim))=&publication.subject_claim {
+                let valid:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM library_channel_subject_jobs WHERE id=?1 AND claim_id=?2 AND channel_id=?3 AND channel_revision=?4 AND state='running' AND claim_expires_ms>?5)",params![job,claim,publication.channel_id,publication.expected_revision,publication.now_ms],|row|row.get(0))?;
+                if !valid {return Ok(ChannelBuildMutation::Stale);}
+            }
             tx.execute(
                 "UPDATE library_channels SET active_generation_id = pending_generation_id, \
                  active_epoch_ms = pending_epoch_ms, pending_generation_id = NULL, \

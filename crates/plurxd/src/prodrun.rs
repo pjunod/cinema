@@ -280,7 +280,7 @@ fn no_child() -> io::Error {
     )
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     #[tokio::test]
     async fn encoded_capacity_is_released_only_after_slot_reap() {

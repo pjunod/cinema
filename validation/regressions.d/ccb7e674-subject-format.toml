@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["ccb7e674"]
+points = ["library.channels"]
+checks = ["rust-gate"]
+reason = "One finite prompt correction after the real sample made required content formats explicit. The unchanged 48-pair independently labelled fixture then measured 100% accepted-positive precision, 95.8% recall and zero prohibited stand-up admissions using the production adapter. Subject HTTP/fake-provider regressions remain green. Complete current cached selections can settle and publish during an outage; atomically enqueued saved revisions recover their last known profile. Published schedules remain outside inference."

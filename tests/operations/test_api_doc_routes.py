@@ -136,6 +136,7 @@ def _nested_router_routes(segment: str) -> set[str]:
                 else _resolve_constant(argument)
             )
             routes.add(prefix + literal)
+        routes.update(prefix + path for path in _merged_router_routes(router.group("body")))
     return routes
 
 
@@ -143,10 +144,11 @@ def _merged_router_routes(segment: str) -> set[str]:
     """Expand `.merge(module::named_router())` at the current prefix."""
     routes: set[str] = set()
     merged = re.compile(
-        r"\.merge\(\s*([A-Za-z_]\w*)::([A-Za-z_]\w*)\(\)\s*\)"
+        r"\.merge\(\s*((?:crate::)?[A-Za-z_]\w*)::([A-Za-z_]\w*)\(\)\s*\)"
     )
     for module, function in merged.findall(segment):
-        source = (ROUTER.parent / f"{module}.rs").read_text(encoding="utf-8")
+        base = ROUTER.parent.parent if module.startswith("crate::") else ROUTER.parent
+        source = (base / f"{module.removeprefix('crate::')}.rs").read_text(encoding="utf-8")
         subrouter = re.search(
             rf"(?:pub(?:\(crate\))?\s+)?fn\s+{re.escape(function)}\([^)]*\)[^{{]*\{{(?P<body>.*?)^\}}",
             source,
@@ -160,6 +162,7 @@ def _merged_router_routes(segment: str) -> set[str]:
                 if argument.startswith('"')
                 else _resolve_constant(argument)
             )
+        routes.update(_merged_router_routes(subrouter.group("body")))
     return routes
 
 

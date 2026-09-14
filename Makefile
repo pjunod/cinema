@@ -1419,6 +1419,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/player-dom.test.js
 	@node tests/web/nav-keyboard.test.js
 	@node tests/web/reader.test.js
+	@node tests/web/library-channels.test.js
 	@node tests/web/live-tv.test.js
 	@node tests/web/layout-containment.test.js
 	@node tests/web/page-read-budget.test.js

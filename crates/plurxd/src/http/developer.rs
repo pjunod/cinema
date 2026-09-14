@@ -166,6 +166,12 @@ pub(crate) async fn readiness(
         items: vec![
             windows_server(&state, convert_on),
             library_channels(&state, library_channels_on).await,
+            channel_subjects(plurx_core::store::stored_switch(
+                settings
+                    .get(crate::channel_subjects::ENABLE_KEY)
+                    .map(String::as_str),
+                true,
+            )),
             dvr(&state, dvr_on, &live_tv, &dvr_config).await,
             cluster_transport_recovery(&state).await,
             playback_control_protocol(control_advertised),
@@ -1142,4 +1148,20 @@ fn webhook_url_approved(dvr: &crate::live_tv::DvrConfig) -> DeveloperRequirement
         status,
         evidence,
     }
+}
+
+fn channel_subjects(enabled: bool) -> DeveloperEnableItem {
+    let observed = crate::channel_subjects::observation();
+    let status = if observed.error.is_some() {
+        RequirementStatus::Unmet
+    } else if observed.profile.is_some() {
+        RequirementStatus::Met
+    } else {
+        RequirementStatus::Unobservable
+    };
+    DeveloperEnableItem {id:"library_channel_subject_matching",title:"Library channel subject matching",enabled:Some(enabled),setting:Some("library_channel_subject_matching_enabled"),requirements:vec![
+        DeveloperRequirement{id:"provider",title:"Local Ollama provider and installed model",status,evidence:observed.error.clone().unwrap_or_else(||observed.profile.clone().unwrap_or_else(||"Not observed yet; configure PLURX_CHANNEL_SUBJECT_URL and PLURX_CHANNEL_SUBJECT_MODEL. No download occurs when enabling.".into()))},
+        DeveloperRequirement{id:"metadata",title:"Metadata coverage",status:if observed.metadata_total>0{RequirementStatus::Met}else{RequirementStatus::Unobservable},evidence:format!("Last observed scope: {} titles, {} missing item overviews, {} truncated inputs. Sparse metadata can remain uncertain.",observed.metadata_total,observed.missing_overviews,observed.truncated)},
+        DeveloperRequirement{id:"batch",title:"Recent batch outcome and queued work",status:if observed.error.is_some(){RequirementStatus::Unmet}else{RequirementStatus::Unobservable},evidence:format!("{}; queued work observed: {}. Only new inference calls pause when disabled; saves, cached decisions and published playback remain available.",observed.error.unwrap_or_else(||"No recent error recorded".into()),observed.pending>0)},
+    ]}
 }

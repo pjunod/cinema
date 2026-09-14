@@ -1,6 +1,9 @@
 package tv.plurx.app.data
 
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.EncodeDefault
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
 import java.util.UUID
 
 @Serializable
@@ -13,9 +16,11 @@ enum class LibraryChannelOrdering {
     balanced_shuffle, release_order,
 }
 
+@OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
 @Serializable
 data class LibraryChannelRecipe(
     val version: Int = 1,
+    @EncodeDefault(EncodeDefault.Mode.ALWAYS) val subject: JsonElement = JsonNull,
     val library_ids: List<Long> = emptyList(),
     val kinds: List<String> = listOf("movie", "episode"),
     val genres_any: List<String> = emptyList(),
@@ -76,6 +81,7 @@ data class LibraryChannel(
     val can_share: Boolean = false,
     val now: LibraryChannelProgramme? = null,
     val next: LibraryChannelProgramme? = null,
+    val matching: SubjectMatchingSummary? = null,
 )
 
 @Serializable
@@ -158,7 +164,7 @@ data class LibraryChannelRebuild(
 
 @Serializable
 data class LibraryChannelBuild(
-    val state: String,
+    val matching: SubjectMatchingSummary? = null,    val state: String,
     val active_generation_id: String? = null,
     val pending_generation_id: String? = null,
     val pending_activation_ms: Long? = null,
@@ -229,3 +235,13 @@ data class DeveloperEnableItem(
 
 @Serializable
 data class DeveloperReadiness(val items: List<DeveloperEnableItem> = emptyList())
+
+@Serializable
+data class SubjectMatchingSummary(val job_id: String, val state: String)
+
+@Serializable
+data class SubjectPreviewRequest(val recipe: LibraryChannelRecipe, val request_id: String = UUID.randomUUID().toString(), val preview_seed: String? = null)
+@Serializable
+data class SubjectPreviewRow(val item_id: String, val title: String, val verdict: String, val reason: String)
+@Serializable
+data class SubjectPreview(val job_id: String, val state: String, val total: Int, val processed: Int, val matched: Int, val uncertain: Int, val complete: Boolean, val error: String? = null, val rows: List<SubjectPreviewRow> = emptyList(), val next_cursor: String? = null, val preview_seed: String)

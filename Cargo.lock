@@ -2532,6 +2532,7 @@ dependencies = [
  "hex",
  "hiqlite",
  "hmac",
+ "icu_normalizer",
  "kamadak-exif",
  "libc",
  "quick-xml",

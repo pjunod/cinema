@@ -1541,6 +1541,7 @@ pub struct SettingsDto {
     /// Always-compiled Library channels. Readiness is advisory and never
     /// vetoes this explicit runtime choice.
     pub library_channels_enabled: bool,
+    pub library_channel_subject_matching_enabled: bool,
     /// Always-compiled HDHomeRun integration. The switch is runtime-only and
     /// remains off until the separate readiness endpoint is green.
     pub live_tv_enabled: bool,
@@ -1929,6 +1930,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
     );
     Ok(SettingsDto {
         server_name,
+        library_channel_subject_matching_enabled: plurx_core::store::stored_switch(
+            setting(crate::channel_subjects::ENABLE_KEY).as_deref(),
+            true,
+        ),
         library_channels_enabled: plurx_core::store::stored_switch(
             setting(keys::LIBRARY_CHANNELS_ENABLED).as_deref(),
             false,
@@ -2170,6 +2175,7 @@ pub struct UpdateSettings {
     /// bootstrap seed and is not edited by this operation.
     pub server_name: Option<String>,
     pub library_channels_enabled: Option<bool>,
+    pub library_channel_subject_matching_enabled: Option<bool>,
     /// HDHomeRun settings are a generation-CAS tuple. Save the address/owner
     /// while disabled, run readiness, then enable in a separate request.
     pub live_tv_enabled: Option<bool>,
@@ -3266,6 +3272,15 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::DVR_WEBHOOK_URL, url.trim())
+            .await?;
+    }
+    if let Some(on) = req.library_channel_subject_matching_enabled {
+        state
+            .store
+            .put_setting(
+                crate::channel_subjects::ENABLE_KEY,
+                if on { "1" } else { "0" },
+            )
             .await?;
     }
     if let Some(on) = req.library_channels_enabled {

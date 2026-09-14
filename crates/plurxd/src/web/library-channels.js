@@ -13,7 +13,7 @@
 
   function defaultRecipe() {
     return {
-      version: 1, library_ids: [], kinds: ["movie", "episode"],
+      version: 1, subject: null, library_ids: [], kinds: ["movie", "episode"],
       genres_any: [], tags_any: [], keywords_any: [], year_min: null,
       year_max: null, include_item_ids: [], include_show_ids: [],
       exclude_item_ids: [], exclude_show_ids: [], ordering: "balanced_shuffle",
@@ -49,8 +49,7 @@
     const recipe = draft && draft.recipe || {};
     if (!Array.isArray(recipe.kinds) || !recipe.kinds.length)
       fields.kinds = "Choose movies, episodes, or both.";
-    if (draft && draft.enabled && (!draft.preview || !draft.preview.eligible_count))
-      fields.enabled = "Preview at least one eligible title before enabling.";
+    if (Array.from(String(recipe.subject || "")).length > 500) fields.subject = "Use at most 500 characters.";
     return fields;
   }
 

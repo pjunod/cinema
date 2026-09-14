@@ -20,6 +20,7 @@ pub mod fs_secure;
 pub mod fs_secure_windows;
 #[cfg(windows)]
 pub use fs_secure_windows as fs_secure;
+pub mod channel_subjects;
 pub mod library_channels;
 pub mod mediafacts;
 pub mod metadata;

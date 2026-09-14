@@ -16,8 +16,8 @@ mod developer;
 mod dto;
 mod dv_disk;
 pub(crate) mod dvr;
-mod error;
-mod extract;
+pub(crate) mod error;
+pub(crate) mod extract;
 pub(crate) use extract::CacheOnlyAdminProofCache;
 mod hls;
 pub(crate) mod images;
@@ -1818,6 +1818,133 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "setup failed: {body}");
         body["token"].as_str().expect("token").to_owned()
+    }
+
+    #[tokio::test]
+    async fn subject_saved_offline_replay_activation_empty_and_catalogue_recovery() {
+        use plurx_core::channel_subjects::{JobQuery, JobWrite};
+        let (app, state) = test_app_with_state();
+        let token = setup_admin(&app).await;
+        state
+            .store
+            .put_setting(crate::channel_subjects::ENABLE_KEY, "false")
+            .await
+            .expect("pause");
+        let recipe = serde_json::to_value(plurx_core::library_channels::LibraryChannelRecipe {
+            subject: Some("Stand-up performances".into()),
+            ..Default::default()
+        })
+        .expect("recipe");
+        let body =
+            json!({"request_id":"subject-create","name":"Stand-up","enabled":true,"recipe":recipe});
+        let (status, created) = call(
+            &app,
+            post("/api/v1/library-channels", Some(&token), body.clone()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        let id = created["channel"]["id"].as_str().expect("id");
+        let (status, replay) =
+            call(&app, post("/api/v1/library-channels", Some(&token), body)).await;
+        assert_eq!(status, StatusCode::OK, "{replay}");
+        assert_eq!(created["channel"]["id"], replay["channel"]["id"]);
+        let mut old_recipe = recipe.clone();
+        old_recipe
+            .as_object_mut()
+            .expect("recipe")
+            .remove("subject");
+        let edit = json!({"expected_revision":1,"request_id":"old-editor","name":"Renamed","enabled":true,"recipe":old_recipe});
+        let path = format!("/api/v1/library-channels/{id}");
+        let (status, updated) = call(&app, put(&path, Some(&token), edit.clone())).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{updated}");
+        assert_eq!(updated["channel"]["recipe"]["subject"], recipe["subject"]);
+        let (status, replay) = call(&app, put(&path, Some(&token), edit)).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{replay}");
+        let (status,rebuilt)=call(&app,post(&format!("{path}/rebuild"),Some(&token),json!({"expected_revision":2,"request_id":"after-programme","activation":"next_programme"}))).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{rebuilt}");
+        let owner = created["channel"]["owner_user_id"].as_i64().expect("owner");
+        let channel = state
+            .store
+            .get_library_channel(owner, false, id)
+            .await
+            .expect("read")
+            .expect("channel");
+        crate::channel_subjects::request_channel(&state, &channel)
+            .await
+            .expect("reconcile reuse");
+        let job = state
+            .store
+            .subject_job(JobQuery::Channel {
+                owner,
+                id: id.into(),
+                revision: 3,
+                now: crate::media_sessions::unix_ms(),
+            })
+            .await
+            .expect("job read")
+            .expect("durable intent");
+        assert!(
+            job.activate_next_programme,
+            "reconciliation cannot change authored activation"
+        );
+        crate::channel_subjects::turn(&state, &tokio_util::sync::CancellationToken::new())
+            .await
+            .expect("empty work");
+        let (_, build) = call(&app, get(&format!("{path}/build"), Some(&token))).await;
+        assert_eq!(build["matching"]["state"], "complete", "{build}");
+        assert_eq!(build["state"], "failed", "empty build settles honestly");
+        assert_eq!(build["error_code"], "channel_empty");
+        let preview = json!({"request_id":"preview-retry","recipe":recipe});
+        let (status, ack) = call(
+            &app,
+            post(
+                "/api/v1/library-channels/subject-previews",
+                Some(&token),
+                preview.clone(),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{ack}");
+        let (_, again) = call(
+            &app,
+            post(
+                "/api/v1/library-channels/subject-previews",
+                Some(&token),
+                preview,
+            ),
+        )
+        .await;
+        assert_eq!(ack["job_id"], again["job_id"]);
+        crate::channel_subjects::turn(&state, &tokio_util::sync::CancellationToken::new())
+            .await
+            .expect("preview empty work");
+        let preview_path = format!(
+            "/api/v1/library-channels/subject-previews/{}",
+            ack["job_id"].as_str().expect("job")
+        );
+        let (_, empty) = call(&app, get(&preview_path, Some(&token))).await;
+        assert_eq!(empty["complete"], true, "{empty}");
+        seed_content(&state).await;
+        let (_, changed) = call(&app, get(&preview_path, Some(&token))).await;
+        assert_eq!(changed["state"], "superseded", "{changed}");
+        assert_eq!(changed["complete"], false);
+        assert_eq!(changed["rows"], json!([]));
+        let mut clear_recipe = recipe.clone();
+        clear_recipe["subject"] = Value::Null;
+        clear_recipe["match_all_in_scope"] = json!(true);
+        let clear = json!({"expected_revision":3,"request_id":"clear-subject","name":"Ordinary","enabled":false,"recipe":clear_recipe});
+        let (status, cleared) = call(&app, put(&path, Some(&token), clear)).await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{cleared}");
+        assert!(cleared["channel"]["recipe"]["subject"].is_null());
+        assert!(!state
+            .store
+            .subject_write(JobWrite::Claim {
+                id: job.id,
+                claim: "stale-revision".into(),
+                now: crate::media_sessions::unix_ms()
+            })
+            .await
+            .expect("stale claim"));
     }
 
     #[tokio::test]

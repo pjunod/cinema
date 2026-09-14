@@ -1472,7 +1472,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # a recipe, publishes a response, or starts a tuner.
 # +1 Windows service startup-checkpoint thread. It exits when readiness or
 # shutdown is published and owns no media producer.
-expected_occurrences = 508
+# PR #313 ownership review: Subject matching adds a shutdown-owned durable worker, one finite post-save build/enqueue task, and a fake-provider test server that is aborted and awaited. None owns a rolling playback producer.
+expected_occurrences = 511
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1832,10 +1833,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # fixture. They are test-only, stay owned by the test task, and launch no child.
 # +3 bounded Windows service/install waits: startup polling, checkpoint
 # publication, and the existing drain contract's new pending-state cadence.
-# 760 -> 758: three duplicated typed-error context timeouts became one bounded
+# PR #313 ownership review: Subject matching adds its cancellation-selected two-second worker cadence and a twenty-second claim renewal interval. Both belong to the durable metadata job worker; no media producer deadline changes.
+# 762 -> 760: three duplicated typed-error context timeouts became one bounded
 # init-inspection timeout, a net removal of two time constructors. The survivor
 # is request-owned and cannot extend RESPONSE_PUBLICATION_LIFECYCLE_BUDGET.
-expected_occurrences = 758
+expected_occurrences = 760
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2125,7 +2127,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # consolidation, not a reduction in child termination or reap coverage.
 # 307 -> 300: seven direct spawn/output launch sites now route through the one
 # reviewed suspended-spawn/Job-assignment owner.
-expected_occurrences = 300
+# PR #313 ownership review: Two Ollama response.status() reads inspect bounded HTTP responses. They launch no process.
+expected_occurrences = 302
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

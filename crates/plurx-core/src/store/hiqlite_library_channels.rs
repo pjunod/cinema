@@ -392,6 +392,73 @@ fn decode_list(value: &str) -> Result<Vec<String>, StoreError> {
 
 #[async_trait]
 impl LibraryChannelStore for HiqliteAuthStore {
+    async fn subject_job(
+        &self,
+        query: crate::channel_subjects::JobQuery,
+    ) -> Result<Option<crate::channel_subjects::SubjectJob>, StoreError> {
+        let rows = self
+            .client()
+            .query_consistent_map::<SubjectRow, _>(query.sql(), params!())
+            .await
+            .map_err(database_error)?;
+        rows.into_iter()
+            .next()
+            .map(|row| {
+                let mut job: crate::channel_subjects::SubjectJob =
+                    serde_json::from_str(&row.payload)
+                        .map_err(|e| StoreError::Database(e.to_string()))?;
+                job.state = row.state;
+                Ok(job)
+            })
+            .transpose()
+    }
+    async fn subject_write(
+        &self,
+        write: crate::channel_subjects::JobWrite,
+    ) -> Result<bool, StoreError> {
+        let statements = write
+            .sql()
+            .into_iter()
+            .map(|sql| {
+                validate_sql(&sql)?;
+                Ok((sql, params!()))
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        let results = self
+            .client()
+            .txn(statements)
+            .await
+            .map_err(database_error)?;
+        let counts = results
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        Ok(counts.last().copied().unwrap_or(0) > 0)
+    }
+    async fn subject_decisions(
+        &self,
+        owner: i64,
+        subject: &str,
+        profile: &str,
+        ids: &[(i64, String)],
+    ) -> Result<Vec<crate::channel_subjects::CachedDecision>, StoreError> {
+        let sql = crate::channel_subjects::decision_query(owner, subject, profile, ids);
+        let rows = self
+            .client()
+            .query_consistent_map::<SubjectPayload, _>(sql, params!())
+            .await
+            .map_err(database_error)?;
+        rows.into_iter()
+            .map(|row| {
+                let mut d: crate::channel_subjects::CachedDecision =
+                    serde_json::from_str(&row.0)
+                        .map_err(|e| StoreError::Database(e.to_string()))?;
+                d.last_used_ms = row.1;
+                Ok(d)
+            })
+            .collect()
+    }
+
     async fn list_library_channels(
         &self,
         actor_user_id: i64,
@@ -574,16 +641,14 @@ impl LibraryChannelStore for HiqliteAuthStore {
         }
         let recipe = serde_json::to_string(&update.recipe)
             .map_err(|error| StoreError::Database(error.to_string()))?;
-        let results = self
-            .client()
-            .txn([
+        let mut statements = vec![
                 (
                     "UPDATE library_channels SET name = $1, description = $2, visibility = $3, \
                      enabled = $4, definition_revision = definition_revision + 1, recipe_json = $5, \
                      seed = $6, build_state = 'queued', build_error_code = NULL, \
                      build_error_message = NULL, updated_at_ms = $7 WHERE id = $8 AND definition_revision = $9 \
                      AND (owner_user_id = $10 OR $11) \
-                     AND (SELECT COUNT(*) FROM library_channel_requests WHERE user_id = $10) < $12",
+                     AND (SELECT COUNT(*) FROM library_channel_requests WHERE user_id = $10) < $12".to_owned(),
                     params!(
                         update.name.as_str(), update.description.as_str(), update.visibility.as_str(),
                         update.enabled, recipe, update.seed.as_slice(), update.now_ms,
@@ -599,7 +664,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
                      SELECT $1, $2, $3, $4, $5, $6, $7 \
                      WHERE EXISTS(SELECT 1 FROM library_channels WHERE id = $4 \
                        AND definition_revision = $5) \
-                       AND (SELECT COUNT(*) FROM library_channel_requests WHERE user_id = $1) < $8",
+                       AND (SELECT COUNT(*) FROM library_channel_requests WHERE user_id = $1) < $8".to_owned(),
                     params!(
                         update.actor_user_id, update.request_id.as_str(), update.request_hash.as_str(),
                         update.channel_id.as_str(), update.expected_revision + 1, update.now_ms,
@@ -607,13 +672,35 @@ impl LibraryChannelStore for HiqliteAuthStore {
                         CHANNEL_REQUESTS_PER_USER_MAX
                     ),
                 ),
-            ])
-            .await?;
+            ];
+        if update.recipe.subject.is_some() {
+            let mut job = crate::channel_subjects::SubjectJob::new(
+                current.owner_user_id,
+                update.recipe.clone(),
+                update.seed,
+                Some((update.channel_id.clone(), update.expected_revision + 1)),
+                update.now_ms,
+            );
+            job.activate_next_programme = update.subject_next_programme;
+            for sql in crate::channel_subjects::JobWrite::Enqueue(job).sql() {
+                let sql = format!("{sql} AND EXISTS(SELECT 1 FROM library_channel_requests WHERE user_id=$1 AND request_id=$2 AND operation_hash=$3 AND result_revision=$4)");
+                statements.push((
+                    sql,
+                    params!(
+                        update.actor_user_id,
+                        update.request_id.as_str(),
+                        update.request_hash.as_str(),
+                        update.expected_revision + 1
+                    ),
+                ));
+            }
+        }
+        let results = self.client().txn(statements).await?;
         let counts = results
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        if counts != [1, 1] {
+        if counts.first() != Some(&1) || counts.get(1) != Some(&1) {
             return Ok(ChannelMutation::Stale);
         }
         query_channel(self, update.actor_user_id, &update.channel_id)
@@ -832,11 +919,11 @@ impl LibraryChannelStore for HiqliteAuthStore {
             .query_consistent_map::<ChannelRow, _>(
                 format!(
                     "SELECT {CHANNEL_COLS}, 0 AS favourite FROM library_channels c \
-                     WHERE c.id > $1 AND c.enabled = 1 \
+                     WHERE c.id > $1 AND (c.build_state = 'queued' OR (c.enabled = 1 \
                        AND COALESCE(json_extract(c.recipe_json, '$.auto_refresh'), 1) = 1 \
                        AND (COALESCE(c.last_auto_build_ms, c.build_last_attempt_ms) IS NULL \
                          OR COALESCE(c.last_auto_build_ms, c.build_last_attempt_ms) <= $2) \
-                     ORDER BY c.id LIMIT $3"
+                     )) ORDER BY c.id LIMIT $3"
                 ),
                 params!(
                     after_id.unwrap_or_default(),
@@ -1066,6 +1153,11 @@ impl LibraryChannelStore for HiqliteAuthStore {
                    WHERE e.generation_id = g.id) = $3 AND (SELECT COALESCE(MAX(e.cumulative_start_ms + e.duration_ms), 0) \
                    FROM library_channel_entries e WHERE e.generation_id = g.id) = $10)"
         };
+        let pointer_sql = if let Some((job, claim)) = &publication.subject_claim {
+            format!("{pointer_sql} AND EXISTS(SELECT 1 FROM library_channel_subject_jobs WHERE id=CAST(X'{}' AS TEXT) AND claim_id=CAST(X'{}' AS TEXT) AND channel_id=$6 AND channel_revision=$7 AND state='running' AND claim_expires_ms>$4)",hex::encode(job),hex::encode(claim))
+        } else {
+            pointer_sql.to_owned()
+        };
         let results = self
             .client()
             .txn([
@@ -1073,7 +1165,8 @@ impl LibraryChannelStore for HiqliteAuthStore {
                     "UPDATE library_channels SET active_generation_id = pending_generation_id, \
                      active_epoch_ms = pending_epoch_ms, pending_generation_id = NULL, \
                      pending_epoch_ms = NULL WHERE id = $1 AND pending_generation_id IS NOT NULL \
-                       AND pending_epoch_ms <= $2",
+                       AND pending_epoch_ms <= $2"
+                        .to_owned(),
                     params!(publication.channel_id.as_str(), publication.now_ms),
                 ),
                 (
@@ -1094,7 +1187,8 @@ impl LibraryChannelStore for HiqliteAuthStore {
                 (
                     "UPDATE library_channel_generations SET state = 'ready', entry_count = $1, \
               loop_duration_ms = $2, build_claim_id = NULL, build_claim_expires_ms = NULL \
-              WHERE id = $3 AND channel_id = $4 AND state = 'building' AND build_claim_id = $5",
+              WHERE id = $3 AND channel_id = $4 AND state = 'building' AND build_claim_id = $5"
+                        .to_owned(),
                     params!(
                         publication.entry_count,
                         publication.loop_duration_ms,
@@ -1245,6 +1339,34 @@ impl LibraryChannelStore for HiqliteAuthStore {
             entries,
         }))
     }
+}
+
+struct SubjectRow {
+    payload: String,
+    state: String,
+}
+impl From<&mut Row<'_>> for SubjectRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            payload: row.get("payload"),
+            state: row.get("state"),
+        }
+    }
+}
+struct SubjectPayload(String, i64);
+impl From<&mut Row<'_>> for SubjectPayload {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(row.get("payload"), row.get("last_used_ms"))
+    }
+}
+pub(super) fn subject_migration_statements() -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    split_schema_statements(crate::channel_subjects::SCHEMA)
+        .into_iter()
+        .map(|sql| {
+            validate_sql(&sql)?;
+            Ok((sql, params!()))
+        })
+        .collect()
 }
 
 #[cfg(test)]

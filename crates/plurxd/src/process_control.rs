@@ -23,10 +23,10 @@ pub(crate) fn spawn_job_owned(
 ) -> io::Result<(tokio::process::Child, ChildJob)> {
     configure_suspended(command);
     let mut child = command.spawn()?;
-    let job = ChildJob::attach(&child).inspect_err(|_error| {
+    let job = ChildJob::attach(&child).inspect_err(|_| {
         let _ = child.start_kill();
     })?;
-    resume_suspended(&child).inspect_err(|_error| {
+    resume_suspended(&child).inspect_err(|_| {
         let _ = child.start_kill();
     })?;
     Ok((child, job))
