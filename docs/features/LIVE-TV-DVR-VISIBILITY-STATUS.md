@@ -1,7 +1,7 @@
 # DVR visibility status — make capture state explain itself
 
 **Status:** implementation in progress · **Branch:** `effort/dvr-visibility` ·
-**Base:** Forgejo `main` at `28ae8163` · **Updated:** 2026-09-14
+**Base:** Forgejo `main` merged through `f42a3ba6` · **Updated:** 2026-09-14
 
 Companion to [LIVE-TV-DVR-STATUS.md](LIVE-TV-DVR-STATUS.md) (what the shipped
 recorder already does),
@@ -34,7 +34,7 @@ presentation contract around them.
 | S04 web layouts and controller | built; compile passed | one scope-aware poller feeds chrome, Live TV and Recordings; exact-airing player context, canonical `#/recordings`, six task tabs, mobile detail, real event history and Activity projection |
 | S05 Apple clients | built; source type-check passed | additive overview/event/attention decoders; one foreground profile controller; iOS/tvOS Recordings root, capture activity, immediate details, history, manual/skipped/rules/reminders and exact-airing player/guide context; device builds remain pending because this host exposes no simulator runtime |
 | S06 Android clients | built; compile passed | additive overview/event/attention decoders; one lifecycle-owned profile controller; phone/Google TV Recordings root, capture activity, immediate detail/history, manual/skipped/rules/reminders, exact-airing context and named stop/delete confirmations; physical D-pad evidence remains pending |
-| S07 review and promotion | ready to start | integration audit complete; merge current `main`, obtain one adversarial code review, address it, mark the draft PR ready and let the fast lane run once |
+| S07 review and promotion | review next | current `main` merged without conflict and the exact candidate recompiled; obtain one adversarial code review, address it, mark the draft PR ready and let the fast lane run once |
 
 ## Decisions made while implementing
 
