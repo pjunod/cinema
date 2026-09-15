@@ -1905,21 +1905,16 @@ pub(crate) const FETCHABLE_GAP_MS: i64 = 10_000;
 /// `client_runway_ms` reads 0 for an unknown runway, so a loaded-media recovery
 /// needs more than the shared starvation ceiling. The fetch-wedge arm retains
 /// its independent published frontier requirement. Both arms require the
-/// client's explicit stalled decoder evidence; a quiet or paused player must
-/// still receive the producer hold it asked for.
+/// client's explicit stalled presentation evidence. Decoder attribution is
+/// independent: ready or unknown does not make stationary loaded media play.
+/// A quiet or paused player must still receive the producer hold it asked for.
 pub(crate) fn recovery_outranks_hold(delivery: &DeliveryView, request: &ControlRequestV1) -> bool {
-    let decoder_waiting = request
-        .observation
-        .as_ref()
-        .and_then(|observation| observation.decoder_state)
-        .is_some_and(|state| matches!(state, DecoderState::Starved | DecoderState::Failed));
     let loaded_but_waiting = delivery.client_runway_ms > STARVED_RUNWAY_MS;
     let published_but_unfetched = delivery.produced_through_ms.is_some_and(|produced| {
         produced.saturating_sub(delivery.fetched_through_ms) >= FETCHABLE_GAP_MS
     });
     request.demand == PlaybackDemand::Active
         && request.render_state == RenderState::Stalled
-        && decoder_waiting
         && (loaded_but_waiting || published_but_unfetched)
 }
 
@@ -14848,28 +14843,17 @@ mod tests {
 
     #[test]
     fn the_serving_predicate_requires_an_active_stall_and_a_recoverable_boundary() {
-        // Active stalled decoder evidence is shared by both recovery arms.
+        // Active stalled presentation evidence is shared by both recovery arms.
         // The final fact may be either published-but-unfetched supply or a
         // substantial contiguous loaded runway; neither depends on a producer
         // hold to make progress.
         type BreakOne = fn(&mut DeliveryView, &mut ControlRequestV1);
-        let cases: [(&str, BreakOne); 5] = [
+        let cases: [(&str, BreakOne); 3] = [
             ("not active", |_, request| {
                 request.demand = PlaybackDemand::Hold;
             }),
             ("not stalled", |_, request| {
                 request.render_state = RenderState::Rendering;
-            }),
-            ("decoder ready", |_, request| {
-                request.observation = Some(ClientObservation {
-                    dropped_frames: None,
-                    decoder_state: Some(DecoderState::Ready),
-                    error_code: None,
-                    error_detail: None,
-                });
-            }),
-            ("no observation", |_, request| {
-                request.observation = None;
             }),
             ("no recoverable boundary", |delivery, _| {
                 delivery.client_runway_ms = STARVED_RUNWAY_MS;
@@ -14889,6 +14873,57 @@ mod tests {
                 "{name} alone must leave the hold in force",
             );
             assert!(!recovery_outranks_hold(&delivery, &request), "{name}");
+        }
+    }
+
+    #[test]
+    fn loaded_stall_recovery_does_not_require_decoder_failure() {
+        for decoder_state in [
+            None,
+            Some(DecoderState::Unknown),
+            Some(DecoderState::Ready),
+            Some(DecoderState::Starved),
+            Some(DecoderState::Failed),
+        ] {
+            let (mut delivery, mut request) = stalled_starved();
+            // The incident's loaded runway, with no fetch gap: presentation
+            // recovery must not depend on a second, invented supply problem.
+            delivery.client_runway_ms = 18_310;
+            delivery.produced_through_ms = Some(214_673);
+            delivery.fetched_through_ms = 214_673;
+            request.observation = decoder_state.map(|state| ClientObservation {
+                dropped_frames: Some(1),
+                decoder_state: Some(state),
+                error_code: None,
+                error_detail: None,
+            });
+            assert!(
+                recovery_outranks_hold(&delivery, &request),
+                "{decoder_state:?}"
+            );
+            assert_eq!(
+                resolve_action(&ControlAction::None, &delivery, &request),
+                ControlAction::None,
+                "{decoder_state:?}"
+            );
+            assert!(
+                action_metrics(&ControlAction::None, &delivery, &request, false).recovery_withheld
+            );
+            // A fetch wedge is equally independent of decoder attribution.
+            delivery.client_runway_ms = 0;
+            delivery.fetched_through_ms = 180_000;
+            assert!(
+                recovery_outranks_hold(&delivery, &request),
+                "{decoder_state:?}"
+            );
+            assert_eq!(
+                resolve_action(&ControlAction::None, &delivery, &request),
+                ControlAction::None,
+                "{decoder_state:?}"
+            );
+            // The same observations do not override intentional pause.
+            request.demand = PlaybackDemand::Hold;
+            assert!(!recovery_outranks_hold(&delivery, &request));
         }
     }
 

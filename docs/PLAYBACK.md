@@ -102,7 +102,7 @@ one.
 | `server.hdr-subtitle-burn-guard` | Old-client burn request on HDR | Session creation independently refuses `subtitle_burn` for a probed DV, HDR10, or HLG source with a machine-readable 422 before playback accounting or encoder creation. A client whose selected plan already delivers SDR may send `subtitle_burn_sdr: true`; this keeps a forced bitmap track on an existing tone-map without authorizing an HDR-to-SDR downgrade. SDR and unprobed sources retain burn support. | Rust HTTP refusal/acknowledgement contract plus helper matrix |
 | `server.pgs-overlay` | PGS capability and artifact delivery | Only a PGS track receives additive `overlay: "pgs-v1"`, and only while the default-off gate is enabled. Authenticated cold manifests return preparation without blocking playback; warm manifests and content-addressed PNGs are published atomically. This does not choose or change video transport. | Auth/type/cache HTTP contract plus parser/cache Rust units |
 | `server.session-kind` | Copy HLS vs transcode HLS | `SessionKind::Copy` preserves video and optionally converts audio/strips DV; `Transcode` runs the video recipe. A matching completed cache entry bypasses the encoder but does not change the logical kind. | Transcode-manager lifecycle unit |
-| `server.live-playlist-window` | Writer history vs client window | A live writer keeps its full EVENT history internally. The default served view becomes sliding only after retention deletes a prefix. The default-off iPad experiment instead serves a typeless playlist plus `EXT-X-START:TIME-OFFSET=0` from the first response, preserving one envelope across that boundary. Completed cached VOD stays whole. | Rust retention/serving integration + typeless shape-stability unit; physical-iPad comparison pending |
+| `server.live-playlist-window` | Writer history vs client window | A rolling writer keeps its full EVENT history internally. Every served rolling view is typeless with `EXT-X-START:TIME-OFFSET=0` from its first response; retention advances the sequence and visible window without changing the playlist type. Inconsistent writer/retention snapshots are retried within the existing request budget. Completed cached VOD stays whole. | Rust retention/serving integration + shape-stability and inconsistent-snapshot tests; updated physical playback pending |
 | `server.auto-rung` | Auto output height | Software follows the source up to 720p. Proven hardware preserves a known SDR source up to 2160p; HDR and unknown geometry stay at the separately-probed 1080p ceiling. A node-local network prior may step that choice down, but absence of a prior is not evidence for a resolution loss. Every route clamps to the source and never upscales. | Encoder-aware Rust matrix plus the 4K AV1 SDR regression |
 | `server.encoder` | Hardware family vs software | Honor a usable admin preference; otherwise take the first probed usable hardware encoder; software x264 is the unconditional fallback. Probe success, not advertised presence, is authority. | Every-family encoder units |
 | `server.tone-map-pipeline` | GPU graph vs CPU graph | A probed vendor graph is used only with its matching encoder and PQ HDR source. Bitmap overlay or a failed/incompatible graph declines to the recorded fallback; CPU is total. | Pipeline decision and fallback units |
@@ -869,16 +869,24 @@ Three details, each load-bearing:
     larger than the bound returns every byte that was asked for, and is
     reported as a skipped inspection rather than as a truncated response.
 
-**Playlist-envelope decision (2026-08-09): experiment, not yet adopted.** The
-default remains the established EVENT-then-sliding behavior until the batched
-physical-iPad run compares a long control playback with the gated variant.
-Enable **Settings → Playback → Experimental typeless sliding HLS** for the
-variant; it is snapshotted when a new session opens, strips EVENT before the
-first client response, adds `EXT-X-START:TIME-OFFSET=0`, and retains that same
-header shape when `MEDIA-SEQUENCE` begins advancing. The server logs the first
-slide once with the session id, first retained index, and seconds since start;
-compare that timestamp with client stall evidence. Keep the setting off if the
-variant does not materially reduce stalls or changes AVPlayer seek behavior.
+**Rolling playlist contract (2026-09-15).** Retention removes old segment
+entries, so a served rolling movie playlist cannot promise append-only EVENT
+semantics. It is typeless from its first response, with
+`EXT-X-START:TIME-OFFSET=0`; `MEDIA-SEQUENCE` and the visible segment window
+advance while that type stays fixed. The complete writer history remains
+internal for duration accounting. A writer snapshot inconsistent with the
+retained boundary is retried within the existing request budget rather than
+exposing raw EVENT history. Completed cached VOD remains unchanged.
+
+The old `hls_typeless_sliding` API field remains accepted for older settings
+clients and peers during upgrades. It no longer selects this binary's local
+playlist format; GET reports the actual local contract as true. No settings
+migration changes saved values. Until remote start acknowledges the actual
+worker shape, durable peer recipes retain the conservative legacy guarantee;
+a new ingress must not assert its local behavior for an older worker. This
+contract correction does not by itself prove Safari's initiating freeze was
+caused by the playlist transition. Physical playback validation remains
+separate from the parser and retention tests.
 
 **Seek and audio-switch stay on this path.** A copy-HLS session sets
 `PLAYER.method = 'remux'` (honest — no video re-encode) and `PLAYER.copyHls =

@@ -1616,8 +1616,8 @@ pub struct SettingsDto {
     /// disk" and that is a property of the disk, not a preference.
     pub hls_ahead_max_bytes: String,
     pub hls_scratch_max_bytes: String,
-    /// Opt-in physical-device experiment: serve new live sessions as typeless
-    /// sliding playlists from their first response. Off by default.
+    /// Deprecated compatibility field. This binary always serves rolling HLS
+    /// as typeless/sliding; retained settings only describe legacy peers.
     pub hls_typeless_sliding: bool,
     /// VOD availability kill switch. On by default; turning it off refuses
     /// HLS session creation and never restores the removed live presentation.
@@ -1983,8 +1983,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         hls_ahead_max_secs,
         hls_ahead_max_bytes,
         hls_scratch_max_bytes,
-        hls_typeless_sliding: setting(keys::HLS_TYPELESS_SLIDING)
-            .is_some_and(|value| value.trim() == "1"),
+        hls_typeless_sliding: true,
         vod_presentation: setting(keys::VOD_PRESENTATION).as_deref() != Some("0"),
         vod_live_recovery: plurx_core::store::stored_switch(
             setting(keys::VOD_LIVE_RECOVERY).as_deref(),
@@ -2263,6 +2262,8 @@ pub struct UpdateSettings {
     pub hls_ahead_max_secs: Option<String>,
     pub hls_ahead_max_bytes: Option<String>,
     pub hls_scratch_max_bytes: Option<String>,
+    /// Legacy-peer compatibility only; cannot change this binary's playlist
+    /// contract. Accepted while older settings clients may still send it.
     pub hls_typeless_sliding: Option<bool>,
     /// Enable remote live-session placement cluster-wide. Enabling is refused
     /// until every committed voter is freshly publishing this protocol;
@@ -3201,6 +3202,9 @@ pub async fn update_settings(
             )
             .await?;
     }
+    // Preserve the shared setting for older binaries during a rolling
+    // upgrade. New local sessions do not consult it; GET reports their actual
+    // unconditional sliding shape. No migration rewrites operator settings.
     if let Some(on) = req.hls_typeless_sliding {
         state
             .store
