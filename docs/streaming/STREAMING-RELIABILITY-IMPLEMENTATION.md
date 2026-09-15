@@ -411,7 +411,7 @@ handoff and reassign work rather than leaving two tasks polling each other.
 | Package | Owner | State | Evidence / next step |
 |---|---|---|---|
 | Plan foundation | Coordinator | merged | [PR #322](http://192.168.4.7:3000/noirr/plurx/pulls/322); commit 05298f1c4, merged as fea5d2451; four docs checks and tracked hook passed |
-| C1 | Coordinator | implementing | codex/streaming-control-contract; truthful recovery and fixed rolling playlist shape |
+| C1 | Coordinator | verified; PR preparation | codex/streaming-control-contract; runtime commit 00a70a7b; 11 focused tests passed |
 | I1 | Sol 1 | implementing | Task 01a0a5b9-9c58-7a52-814c-db7b583e14bc; exact identity and shared consumer |
 | W1 | Sol 2 | implementing | Task 01a0a5b9-bb98-7fd2-a08e-42d1fc6747a3; recovery and obsolete playlist toggle removal |
 | C2 | Coordinator | depends on I1/W1 | Exact preparation demand and integrated outcomes |
@@ -433,3 +433,35 @@ Remote start v1 does not acknowledge playlist shape, so the existing durable
 peer recipe retains its conservative legacy-setting guarantee. Do not assert
 the new ingress's local behavior for an older worker. C2's joined-outcome work
 should retain or improve that attribution without an unnegotiated wire field.
+
+### C1 focused evidence
+
+Runtime commit 00a70a7b: pinned Rust 1.97.1 daemon all-target check and test
+compilation passed. The tracked hook passed catalog lint, workspace formatting,
+workspace all-target Clippy with denied warnings, and embedded JavaScript
+syntax. The four documentation-index checks passed. No full unit suite ran.
+
+Build the test binary with:
+
+~~~bash
+CARGO_TARGET_DIR=/private/tmp/plurx-streaming-target-coordinator \
+  rustup run 1.97.1 cargo test -p plurxd --bin plurxd --locked --no-run
+~~~
+
+The resulting plurxd-6bd69bb492009d17 test executable was invoked with
+`--exact --test-threads=2` and the following full filters. Result: 11 passed,
+0 failed, 2237 filtered out in 1.41 seconds. Compilation time is separate.
+
+~~~text
+playback_control::tests::loaded_stall_recovery_does_not_require_decoder_failure
+playback_control::tests::the_serving_predicate_requires_an_active_stall_and_a_recoverable_boundary
+playback_control::tests::lifecycle_refill_loaded_native_wait_outranks_a_producer_hold
+playback_control::tests::a_producer_decision_still_outranks_the_predicate
+transcode::tests::served_live_playlist_advances_past_the_pruned_prefix
+transcode::tests::typeless_sliding_playlist_keeps_one_shape_across_pruning
+transcode::tests::rolling_playlist_refuses_an_inconsistent_writer_snapshot
+transcode::tests::takeover_playlist_declares_one_monotone_discontinuity
+transcode::tests::an_untouched_takeover_playlist_reports_its_epoch_floor
+transcode::tests::retention_keeps_a_reload_margin_above_the_observed_fetch_lead
+http::tests::seeded_write_surface
+~~~
