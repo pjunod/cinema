@@ -1,0 +1,9 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "2a2ec42f",
+]
+points = ["core.media", "playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The shared Dolby Vision index correction is pinned at every identity and artifact boundary. `the_post_mux_transform_revision_is_part_of_only_the_converted_identity` requires the output-affecting Rust conversion revision to move only converted local keys. `pipeline_digest_is_portable_and_exact_for_dolby_vision_recipes` separates strip, preserve and convert, excludes host-local paths, and moves the shared digest when the post-FFmpeg transform changes. `a_converting_pass_indexes_the_converted_stream` proves fragment sizes describe rewritten bytes. `blob_round_trips_and_rejects_identity_aliases` retains converted promotion metadata and refuses the wrong source, wrong recipe and truncated contents. `a_converting_cluster_artifact_hydrates_without_a_local_v1_index` reaches the selected converting consumer path and rejects reliance on a legacy local index. `operator_requests_are_durable_coalesced_and_lease_fenced` and `source_replacement_cancels_old_generation_and_admits_new_generation` retain exact deduplication, lease and source-generation fences around the widened recipe set."
