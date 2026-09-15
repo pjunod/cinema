@@ -411,7 +411,7 @@ in a subject will trip the gate) and for delivering this review (see §9).
 | Operation | Prerequisites | Blast radius | Rollback | Approval |
 |---|---|---|---|---|
 | Preserve forensic copy of stopped `lab4` | `lab4` process + data-dir lock gone | none (read/copy only) | n/a | operator |
-| `DELETE …/nodes/{nuc4_id}` (4→3) | 3 non-target voters ready twice @10 s; target not leader; offline work quiesced; `settle_offline_work` path healthy | membership change; below 3 voters a second fault halts progress | pre-commit: restart unchanged voter · post-commit: identity tombstoned, only a fresh join recovers capacity | explicit operator |
+| `DELETE …/nodes/{lab4_id}` (4→3) | 3 non-target voters ready twice @10 s; target not leader; offline work quiesced; `settle_offline_work` path healthy | membership change; below 3 voters a second fault halts progress | pre-commit: restart unchanged voter · post-commit: identity tombstoned, only a fresh join recovers capacity | explicit operator |
 | WAL metadata-first reorder (PR-B) | inspector verdict on forensic copy; pre-removal header flush preserved; on-disk format unchanged | vendored WAL write path on every node it deploys to | preceding binary reopens a healthy voter (confirm with restart test) | reviewer + operator |
 | `/home/previews` + Store primitive (PR-E) | Store-call gate cardinality-independent; parity on both backends | additive endpoint; no client uses it until PR-F | revert directly (unused) | standard PR |
 | Web hydration rewrite (PR-F) | PR-E deployed; generation fence preserved; UI golden reviewed | embedded web app behavior | deploy preceding binary; additive endpoint harmless | standard PR |

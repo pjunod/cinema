@@ -11,6 +11,12 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# The fleet registry reaches every workflow through one repository variable,
+# and every use carries the same fallback so an unset variable can never
+# resolve to Docker Hub (an empty registry means docker.io to `docker login`
+# and to `docker/login-action`).
+FLEET_REGISTRY_EXPR = "${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"
+
 
 def duplicate_mapping_keys(path: Path) -> list[tuple[int, str]]:
     """Find repeated plain keys in the GitHub YAML subset used by this repo."""
@@ -489,7 +495,7 @@ class CiCacheContractCase(unittest.TestCase):
         self.assertNotIn("plurx-$runner_name-$CACHE_LANE", action)
         self.assertIn("buildkitd-config-inline:", action)
         self.assertNotIn("buildkitd.toml", action)
-        self.assertIn('[registry."${{ vars.FLEET_REGISTRY }}"]', action)
+        self.assertIn('[registry."%s"]' % FLEET_REGISTRY_EXPR, action)
         self.assertIn("http = true", action)
         self.assertIn(
             'run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50', workflow

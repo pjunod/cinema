@@ -20,7 +20,7 @@ fleet is actually running:
 
 ## 0. What you have
 
-- SSH to the four nodes as `pjunod@{media1,lab6,lab4,lab3}` with the key at
+- SSH to the four nodes as `operator@{media1,lab6,lab4,lab3}` with the key at
   `~/code/plurx-agent/.ssh-deploy-key` (copy to `~/.ssh/id_ed25519`, chmod
   600).
 - The plurx API needs a bearer token. Get one the way a browser does, or ask
@@ -49,7 +49,7 @@ This is new and it is the fastest read in this document:
 ```bash
 for h in media1 lab6 lab4 lab3; do
   echo "== $h"
-  ssh pjunod@$h 'curl -s localhost:32400/metrics | grep -E "^plurx_analysis_queue_"'
+  ssh operator@$h 'curl -s localhost:32400/metrics | grep -E "^plurx_analysis_queue_"'
 done
 ```
 
@@ -83,7 +83,7 @@ reported as such.
 ## 3. Is it actually producing
 
 ```bash
-ssh pjunod@media1 'sudo cp /srv/plurx/hiqlite/state_machine/db/plurx.db* /tmp/ && \
+ssh operator@media1 'sudo cp /srv/plurx/hiqlite/state_machine/db/plurx.db* /tmp/ && \
   sudo sqlite3 /tmp/plurx.db "
     select datetime(max(built_at_ms)/1000,\"unixepoch\") from cluster_fragment_index_artifacts;
     select pipeline_sha256, count(*) from cluster_fragment_index_artifacts group by 1;
@@ -114,7 +114,7 @@ The claim is that attestation now costs about 64 MiB regardless of file size,
 so it should no longer be the thing that times out.
 
 ```bash
-ssh pjunod@media1 'journalctl -u plurx --since "2 hours ago" | grep -iE "attest|verifying" | tail -40'
+ssh operator@media1 'journalctl -u plurx --since "2 hours ago" | grep -iE "attest|verifying" | tail -40'
 curl -s localhost:32400/api/v1/analysis/jobs?filter=working -H "Authorization: Bearer $TOKEN" | jq '.rows[] | {title, phase, bytes_read, total_bytes}'
 ```
 

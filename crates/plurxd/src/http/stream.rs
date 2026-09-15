@@ -4890,7 +4890,7 @@ mod tests {
                 library_id: lib.id,
                 kind: ItemKind::Movie,
                 parent_id: None,
-                title: "Heat".into(),
+                title: "Ember".into(),
                 year: Some(1995),
                 season_number: None,
                 episode_number: None,

@@ -40,7 +40,7 @@ Do not use Paul's working checkout. Create a fresh clone, fetch `main`, and
 record both commit and tree before running anything:
 
 ```bash
-git clone ssh://git@10.42.4.7:222/noirr/plurx.git plurx-recovery-qualification
+git clone ssh://git@forge.lan:222/noirr/plurx.git plurx-recovery-qualification
 cd plurx-recovery-qualification
 git switch main
 git pull --ff-only

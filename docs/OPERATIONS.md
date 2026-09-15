@@ -204,9 +204,11 @@ under `/opt/noirr/forgejo/data`. Back up that directory. Once it carries OCI
 images and git mirrors, it is durable state rather than a recreatable cache.
 
 The registry is plain HTTP on the LAN by decision. Every Docker daemon must
-list the byte-identical address `forge.lan:3000` under
-`insecure-registries`; do not substitute a hostname, expose TCP 3000 to the
-WAN, or enable open registration. The fleet credential is stored at mode 0600
+list the registry under `insecure-registries` using the byte-identical
+`host:port` string that image references use (the `FLEET_REGISTRY` repository
+variable carries the fleet's; `forge.lan:3000` stands in for it in this
+document). Do not mix a hostname and an address for the same registry, expose
+TCP 3000 to the WAN, or enable open registration. The fleet credential is stored at mode 0600
 on lab3 as
 `/opt/noirr/plurx-agent/.forgejo-registry-token`. Stream it through SSH when a
 node needs to log in so it never enters a repository, command argument, or
@@ -240,6 +242,8 @@ ssh lab4
 cd /opt/noirr/plurx
 git fetch origin
 git switch --detach origin/main
+PLURX_REGISTRY=forge.lan:3000 \
+PLURX_SOURCE_URL=http://forge.lan:3000/noirr/plurx \
 PLURX_BUILD_REF="$(git rev-parse HEAD)" \
 PLURX_BUILD_SHA="$(git rev-parse HEAD)" \
   scripts/registry-push

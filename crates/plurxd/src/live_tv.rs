@@ -8985,7 +8985,7 @@ Output #0, hls, to 'index.m3u8':
     fn device_address_is_a_private_canonical_literal() {
         assert_eq!(
             parse_device_ipv4("10.42.4.20").expect("private"),
-            Some(Ipv4Addr::new(192, 168, 4, 20))
+            Some(Ipv4Addr::new(10, 42, 4, 20))
         );
         for refused in [
             "127.0.0.1",
@@ -9586,7 +9586,7 @@ Output #0, hls, to 'index.m3u8':
         assert_eq!(allowed.host_str(), Some("hdhomerun.local"));
         assert_eq!(
             lineup_url(
-                Ipv4Addr::new(192, 168, 4, 20),
+                Ipv4Addr::new(10, 42, 4, 20),
                 Some("http://never-resolve.invalid:5004/lineup.json"),
             )
             .expect("pinned lineup")

@@ -9869,7 +9869,7 @@ mod tests {
         );
         jobs.producing.store(true, Ordering::Relaxed);
         jobs.set_producing(Some(ProducingNow {
-            title: "Heat".into(),
+            title: "Ember".into(),
             reason: crate::produce::REASON_RECENT.to_owned(),
             index: 1,
             total: 2,

@@ -11,7 +11,7 @@ a shut gate is the answer, not an obstacle.
 
 ## 0. What you have
 
-- SSH to the four nodes as `pjunod@{media1,lab6,lab4,lab3}` with the key at
+- SSH to the four nodes as `operator@{media1,lab6,lab4,lab3}` with the key at
   `~/code/plurx-agent/.ssh-deploy-key` (copy it to `~/.ssh/id_ed25519`,
   chmod 600).
 - The plurx API needs a bearer token. Get one the way a browser does, or
@@ -34,7 +34,7 @@ and a half hours, one whole generation. Read it yourself:
 ```bash
 for h in media1 lab6 lab4 lab3; do
   printf '%-7s ' "$h"
-  ssh pjunod@$h 'docker logs plurxd 2>&1 | grep -m1 "plurxd starting";
+  ssh operator@$h 'docker logs plurxd 2>&1 | grep -m1 "plurxd starting";
                  echo "checkout=$(cd /opt/noirr/plurx && git describe --tags --always)"' \
     | sed -E 's/\x1b\[[0-9;]*m//g; s/.*build="([^"]+)".*/\1/' | paste -sd' '
 done

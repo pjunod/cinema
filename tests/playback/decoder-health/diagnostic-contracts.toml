@@ -15,7 +15,7 @@ subordinate_message = "No frame decoded?"
 attributes_every_failure = true
 error_detail = "Invalid data found when processing input"
 fixture = "qualified-ffmpeg-8.stderr"
-fixture_sha256 = "994f1318f5f9c7a895818e446bf669a9818407b7b51174fe5f75b99223640a34"
+fixture_sha256 = "2e586af174b6d079d41a8bcacc774754b3e86579eef5d7bf98714d3ebe9202eb"
 scope = "host diagnostic grammar only; not deployed producer or MPEG-4 qualification"
 
 [[contracts]]

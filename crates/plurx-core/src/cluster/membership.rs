@@ -16847,7 +16847,7 @@ mod tests {
         let named = roster_hostnames(
             vec![
                 hostname_row("node-a", "lab3.lan", "10.42.4.7:32402"),
-                hostname_row("node-b", "", "m6.lan:32402"),
+                hostname_row("node-b", "", "lab6.lan:32402"),
                 // No reported name, and an address that is a bare loopback IP:
                 // nothing here names a machine.
                 hostname_row("node-c", "", "127.0.0.1:32402"),
@@ -16869,7 +16869,7 @@ mod tests {
         // The local row is written by the heartbeat, so for the first heartbeat
         // interval after start the table has no name for this node at all.
         let named = roster_hostnames(
-            vec![hostname_row("node-b", "m6.lan", "10.42.4.14:32402")],
+            vec![hostname_row("node-b", "lab6.lan", "10.42.4.14:32402")],
             "node-a",
             "lab3",
         );

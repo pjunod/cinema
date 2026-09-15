@@ -75,7 +75,7 @@ runs:
           # BuildKit container does not inherit Docker daemon insecure-registry
           # settings, so the builder needs the same trust decision explicitly.
           # Only requests to this exact address are affected.
-          [registry."${{ vars.FLEET_REGISTRY }}"]
+          [registry."${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"]
             http = true
     - name: Start an ephemeral hosted builder
       if: steps.configure.outputs.local != 'true'
@@ -86,5 +86,5 @@ runs:
           # BuildKit container does not inherit Docker daemon insecure-registry
           # settings, so the builder needs the same trust decision explicitly.
           # Only requests to this exact address are affected.
-          [registry."${{ vars.FLEET_REGISTRY }}"]
+          [registry."${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"]
             http = true

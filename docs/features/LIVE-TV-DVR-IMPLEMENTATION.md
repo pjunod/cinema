@@ -1230,7 +1230,7 @@ would otherwise hit.
 
 **Guide capability (before M0 is merged):**
 
-> On the FLEX 4K (device `10AF300E`, LAN), read `http://<tuner-ip>/discover.json`
+> On the FLEX 4K (device `1040A1B2`, LAN), read `http://<tuner-ip>/discover.json`
 > and take `DeviceAuth`. Fetch with curl and `--compressed`, twice:
 > `https://api.hdhomerun.com/api/guide?DeviceAuth=<auth>` and the same with
 > `&Channel=7.1&Start=<unix time 48 hours from now>`. For each report HTTP

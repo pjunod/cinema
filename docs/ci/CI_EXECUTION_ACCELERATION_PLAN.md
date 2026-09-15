@@ -149,7 +149,7 @@ jobs, so the desired isolation is not yet true. Before `shadow` is enabled:
 
 The supplied deployment key is not authorized for `lab1` or `lab5`.
 `lab2` additionally presents a changed ED25519 host key (observed fingerprint
-`SHA256:LI8rEpqCBeVnsn54PLNJy2UqbmWYQaB+cuxP/A5QSoE`). The old known-hosts
+`SHA256:<lab2 host key fingerprint>`). The old known-hosts
 entry has not been replaced and the new key has not been trusted: independent
 verification is required before any host *access*. That remains a security
 boundary, and it is not permission to bypass host verification.
@@ -321,7 +321,7 @@ built from the `FLEET_REGISTRY` repository variable, which names the fleet
 registry's `host:port`:
 
 ```toml
-[registry."${{ vars.FLEET_REGISTRY }}"]
+[registry."${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"]
   http = true
 ```
 

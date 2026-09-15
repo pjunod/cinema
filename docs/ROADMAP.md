@@ -249,7 +249,7 @@ Each client ships with: device profile upstreamed, failover retry logic, and the
 - Trickplay thumbnails (BIF/tiles), theme music, extras UX
 - **Jellyfin-compat façade spike** (CLIENTS.md Tier 3 — the legitimate route to Infuse et al.)
 - plex.tv-emulation Tier 2: revisit only if still worth it
-- Synology/NAS native packages; macOS/Windows server builds
+- Synology/QNAP native packages; macOS/Windows server builds
 - Music & photos: reopen the question with the data model that exists by then
 
 ## Standing rules

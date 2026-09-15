@@ -2783,7 +2783,7 @@ begin with 0.2.7.
   resolution, could be picked ahead of the real file.
 - Episodes whose filename is a hash are found by their release folder. A common
   torrent shape puts every identifying token on the directory —
-  `Paper.Moons.2004.S01E06.The.Long.Wednesday.Part.2.480p.DVD.x265.GROUP/` —
+  `Paper.Moons.2004.S01E06.The.Long.Wednesday.Number.2.480p.DVD.x265.GROUP/` —
   and names the file inside `956a4a82d3e71a92e95bc3658e6978d7.mkv`. The parser
   only ever regexed the *filename*, so every one of these was skipped, and the
   skip note printed the full path while claiming there was no `S01E06` in it —

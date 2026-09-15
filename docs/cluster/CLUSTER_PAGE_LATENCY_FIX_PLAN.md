@@ -496,7 +496,7 @@ Target a known surviving node directly and use the node id, not Raft id:
 
 ```bash
 curl -fsS -X DELETE \
-  "$PLURX_SURVIVOR/api/v1/cluster/nodes/$NUC4_NODE_ID" \
+  "$PLURX_SURVIVOR/api/v1/cluster/nodes/$LAB4_NODE_ID" \
   -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" | jq .
 ```
 

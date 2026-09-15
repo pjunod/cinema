@@ -23,7 +23,7 @@ something is not a result.
 
 - Paul's Mac, unlocked, with `~/code/plurx-agent/ansible/` and
   `ansible-playbook` installed. A cloud session has neither.
-- The FLEX 4K (device `10AF300E`, `10.42.4.20`) on the LAN, and the four
+- The FLEX 4K (device `1040A1B2`, `10.42.4.20`) on the LAN, and the four
   nodes healthy.
 - An Apple TV and an iPhone awake and unlocked, and one Android device.
   An asleep Apple TV is indistinguishable from one that does not exist.
@@ -80,7 +80,7 @@ only there.
 
 Worth doing first: it is three curl commands and it changes how you read §4.
 
-> On the FLEX 4K (device `10AF300E`, `10.42.4.20`), read
+> On the FLEX 4K (device `1040A1B2`, `10.42.4.20`), read
 > `http://10.42.4.20/discover.json` and take `DeviceAuth`. Fetch with curl and
 > `--compressed`, twice:
 > `https://api.hdhomerun.com/api/guide?DeviceAuth=<auth>` and the same with

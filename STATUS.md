@@ -825,7 +825,7 @@ prompt predicted, and the field route is §6.6.
    (10.42.4.14, x86_64, Docker 29.1.3, so `linux/amd64` is native and
    nothing is emulated): `make android-image`, `make android-test` and
    `make android` all green — this is the run CI does. The **local SDK** on
-   `pauls.macbook.air.lan`: JDK 25, Homebrew command-line tools, platform
+   `maca.lan`: JDK 25, Homebrew command-line tools, platform
    `android-37.0`, build-tools 36.0.0 and 37.0.0, Gradle 9.7.1, with
    `:app:compileDebugKotlin`, `:app:testDebugUnitTest`, `:app:lintDebug` and
    `:app:assembleDebug` all green. Both routes report the same

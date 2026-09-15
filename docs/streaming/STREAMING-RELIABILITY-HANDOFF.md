@@ -30,7 +30,7 @@ belong in the requested Developer Enable section.
 ## Resume — exact authority and working copies
 
 - **Forgejo is the sole write, PR, CI and merge authority:**
-  `ssh://git@10.42.4.7:222/noirr/plurx.git`, web
+  `ssh://git@forge.lan:222/noirr/plurx.git`, web
   `http://forge.lan:3000/noirr/plurx`. GitHub is historical/read-only.
 - **Effort:** `effort/streaming-reliability`, last verified head
   `6efec8d9b1b4a27e36a6e0a3c5af8aa773d73909`.

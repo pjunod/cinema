@@ -35,9 +35,10 @@
 # appear in the ansible inventory, so they are derived from `os` and `arch`
 # rather than repeated by hand.
 #
-# Runner names carry their host: `gha-<host>-<role>-<NN>`. The ansible
-# inventory files the `lab5` runners under that machine's hardware name,
-# `asus`; every other host name matches.
+# Runner names carry their host: `gha-<host>-<role>-<NN>`. Host names here
+# are the fleet's neutral names (`lab1`…`lab6`, `media1`, `maca`, `macb`); the
+# ansible inventory maps each one to the machine it runs on, and the runners
+# are registered under these names.
 
 version = 1
 

@@ -63,7 +63,7 @@ Android compilation and debug APK packaging succeeded with the installed SDK,
 repository Gradle wrapper and Android Studio JDK. Existing deprecated Volume
 icon warnings remain. No unit suite was executed.
 
-The M4 Air is reachable through `pauls.macbook.air.lan`. Its formerly
+The M4 Air is reachable through `maca.lan`. Its formerly
 documented numeric address `10.42.5.115` stopped responding later in this
 session; the hostname remained usable. Both
 `plurx-iOS` and `plurx-tvOS` compiled successfully at source `298eced8`, with

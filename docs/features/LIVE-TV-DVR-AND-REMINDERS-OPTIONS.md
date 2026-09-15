@@ -279,7 +279,7 @@ parameter). That is a GPT-session job and §6 has the prompt.
 
 ## 6. The one thing to verify on hardware (GPT prompt)
 
-> On the FLEX 4K (device `10AF300E`, LAN), read `http://<tuner-ip>/discover.json`
+> On the FLEX 4K (device `1040A1B2`, LAN), read `http://<tuner-ip>/discover.json`
 > and take `DeviceAuth`. Then fetch, with curl and `--compressed`, the
 > HDHomeRun guide **twice**: once as
 > `https://api.hdhomerun.com/api/guide?DeviceAuth=<auth>` and once with

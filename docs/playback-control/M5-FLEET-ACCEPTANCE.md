@@ -43,7 +43,7 @@ they last restarted.
 Read it on any node:
 
 ```bash
-ssh pjunod@10.42.4.7 'curl -s http://127.0.0.1:32400/metrics | grep plurx_playback_control'
+ssh operator@10.42.4.7 'curl -s http://127.0.0.1:32400/metrics | grep plurx_playback_control'
 ```
 
 Its companion is the one that says whether anything is being *withheld*:

@@ -22,7 +22,7 @@ addition. That mistake has already been made once and caught in review.
 
 **Forgejo is the sole write, PR, CI and merge authority.**
 `http://forge.lan:3000/noirr/plurx` · SSH
-`ssh://git@10.42.4.7:222/noirr/plurx.git`. GitHub is historical and
+`ssh://git@forge.lan:222/noirr/plurx.git`. GitHub is historical and
 read-only; PR numbers below 900 in old docs are GitHub, current ones are
 Forgejo.
 

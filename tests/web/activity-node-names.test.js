@@ -100,7 +100,7 @@ function snapshot(overrides) {
         {
           method: "hls-copy",
           presentation: "live-recovery",
-          user: "pjunod",
+          user: "operator",
           file_id: 1,
           item_id: 7,
           title: "Tom Segura: Disgraceful",
@@ -287,7 +287,7 @@ function liveSession(overrides) {
       presentation: "live-recovery",
       item_id: 7,
       item_title: "Tom Segura: Disgraceful",
-      user_name: "pjunod",
+      user_name: "operator",
       target_height: 1080,
       encoder: "vaapi",
       lease_mode: "explicit",
@@ -323,7 +323,7 @@ function streaming(sessionOverrides, deliveryOverrides) {
         {
           method: "transcode",
           presentation: session.presentation,
-          user: "pjunod",
+          user: "operator",
           file_id: 1,
           item_id: 7,
           title: "Tom Segura: Disgraceful",
@@ -437,12 +437,12 @@ test("the rung and encoder come from the session row, which is where the server 
 
 test("a direct play has a headline and a delivery meter and nothing invented", () => {
   const html = paint(snapshot({
-    deliveries: [{ method: "direct", user: "pjunod", file_id: 1, item_id: 7, title: "Remux Me", started_unix: Math.floor(Date.now() / 1000) - 60, idle_seconds: 0, delivered_bytes: null, delivered_bps: null }],
+    deliveries: [{ method: "direct", user: "operator", file_id: 1, item_id: 7, title: "Remux Me", started_unix: Math.floor(Date.now() / 1000) - 60, idle_seconds: 0, delivered_bytes: null, delivered_bps: null }],
   }));
   assert.match(html, /<td class="stream-cell"><div class="stream-head"><span class="stream-method">Direct play<\/span><\/div><\/td>/);
   assert.doesNotMatch(html, /stream-state|stream-meters|stream-diag/);
   const remux = paint(snapshot({
-    deliveries: [{ method: "remux", user: "pjunod", file_id: 1, item_id: 7, title: "Remux Me", started_unix: Math.floor(Date.now() / 1000) - 60, idle_seconds: 44, delivered_bytes: 1_048_576, delivered_bps: 38_200_000 }],
+    deliveries: [{ method: "remux", user: "operator", file_id: 1, item_id: 7, title: "Remux Me", started_unix: Math.floor(Date.now() / 1000) - 60, idle_seconds: 44, delivered_bytes: 1_048_576, delivered_bps: 38_200_000 }],
   }));
   assert.match(remux, /<span class="stream-method">Remux<\/span><\/div><div class="stream-meters"><div class="stream-meter "><span class="k">Delivery rate<\/span><span class="v">38 Mb\/s<span class="of">1.0 MB<\/span><\/span><\/div><\/div><\/td>/);
   assert.match(remux, /<div>idle 44s<\/div>/);

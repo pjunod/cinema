@@ -819,7 +819,7 @@ mod tests {
         assert_eq!(
             movie("/m/Ember.1995.REMUX.1080p.mkv"),
             ParsedMovie {
-                title: "Heat".into(),
+                title: "Ember".into(),
                 year: Some(1995)
             }
         );
@@ -903,14 +903,14 @@ mod tests {
     #[test]
     fn hash_named_file_inherits_its_release_folder() {
         let e = ep(
-            "/8tb/tv/Paper Moons/Season 1/Paper.Moons.2004.S01E06.The.Long.Wednesday.Part.2.\
+            "/8tb/tv/Paper Moons/Season 1/Paper.Moons.2004.S01E06.The.Long.Wednesday.Number.2.\
              480p.DVD.x265.GROUP/956a4a82d3e71a92e95bc3658e6978d7.mkv",
         )
         .expect("parsed from the folder name");
         // "Season 1"'s parent is the clean show folder, so it wins the title.
         assert_eq!(e.show_title, "Paper Moons");
         assert_eq!((e.season, e.episode), (1, 6));
-        assert_eq!(e.episode_title.as_deref(), Some("The Long Wednesday Part 2"));
+        assert_eq!(e.episode_title.as_deref(), Some("The Long Wednesday Number 2"));
     }
 
     #[test]
