@@ -1282,7 +1282,7 @@ assert.equal(context.ACT_TIMER, null);
     def test_ship_has_no_obsolete_nuc4_port_exception(self):
         ship = read("scripts/ship")
         self.assertNotIn(
-            "nuc4's port is held by Plex; that is accepted, not a failure",
+            "lab4's port is held by Plex; that is accepted, not a failure",
             ship,
         )
 
@@ -1563,9 +1563,9 @@ assert.equal(context.ACT_TIMER, null);
             readme,
         )
         self.assertIn("/raw/branch/badges/coverage.svg", readme)
-        self.assertIn("http://192.168.4.7:3000/noirr/plurx/actions", readme)
+        self.assertIn("http://forge.lan:3000/noirr/plurx/actions", readme)
         self.assertIn(
-            "git clone http://192.168.4.7:3000/noirr/plurx.git",
+            "git clone http://forge.lan:3000/noirr/plurx.git",
             readme,
         )
         self.assertNotIn("git clone https://github.com/pjunod/plurx", readme)
@@ -2491,7 +2491,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(
             jobs["publish_main"].count("secrets.LOCAL_REGISTRY_TOKEN"), 1
         )
-        self.assertIn("192.168.4.7:3000/noirr/android-build", workflow)
+        self.assertIn("${{ vars.FLEET_REGISTRY }}/noirr/android-build", workflow)
         self.assertEqual(workflow.count("PLURX_ANDROID_IMAGE_READY=1"), 4)
         makefile = read("Makefile")
         self.assertIn('if [ "$${PLURX_ANDROID_IMAGE_READY:-}" = "1" ]', makefile)
@@ -3001,20 +3001,18 @@ assert.equal(context.ACT_TIMER, null);
         readiness = read(".github/workflows/release-readiness.yml")
 
         self.assertIn("uses: ./.github/workflows/publish-release.yml", ci)
-        self.assertIn("REGISTRY_IMAGE: 192.168.4.7:3000/noirr/plurxd", publisher)
+        self.assertIn("REGISTRY_IMAGE: ${{ vars.FLEET_REGISTRY }}/noirr/plurxd", publisher)
         self.assertEqual(publisher.count("secrets.LOCAL_REGISTRY_TOKEN"), 4)
         self.assertEqual(
-            publisher.count(
-                "buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml"
-            ),
+            publisher.count("buildkitd-config-inline: |"),
             4,
         )
         self.assertIn(
-            "<Repository>192.168.4.7:3000/noirr/plurxd:main</Repository>",
+            "<Repository>forge.lan:3000/noirr/plurxd:main</Repository>",
             unraid,
         )
         self.assertIn(
-            "<Registry>http://192.168.4.7:3000/noirr/-/packages/container/plurxd/main</Registry>",
+            "<Registry>http://forge.lan:3000/noirr/-/packages/container/plurxd/main</Registry>",
             unraid,
         )
         self.assertNotIn("schedule:", readiness)
@@ -3360,7 +3358,7 @@ assert.equal(context.ACT_TIMER, null);
         # most one slot, so a surplus shard cannot be given a runner of its
         # own: it serialises behind a busy one and buys a more complicated
         # failure and no wall time. This is the check that caught a three-shard
-        # matrix on 2026-09-02 after `gha-nuc2-android-01` lost `ci-store` for
+        # matrix on 2026-09-02 after `gha-lab2-android-01` lost `ci-store` for
         # failing the lane on an unwritable Cargo home.
         self.assertGreaterEqual(
             len([r for r in runners if "ci-store" in r["labels"]]),
@@ -3458,7 +3456,7 @@ assert.equal(context.ACT_TIMER, null);
         script = ROOT / "scripts/ci-flake-report"
         subprocess.run([str(script), "--help"], check=True, stdout=subprocess.PIPE)
         reporter = script.read_text(encoding="utf-8")
-        self.assertIn('default="http://192.168.4.7:3000/api/v1"', reporter)
+        self.assertIn('default="http://forge.lan:3000/api/v1"', reporter)
         self.assertIn('default="noirr/plurx"', reporter)
         self.assertIn('os.environ.get("FORGEJO_TOKEN")', reporter)
         self.assertNotIn("api.github.com", reporter)

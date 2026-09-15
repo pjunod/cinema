@@ -202,8 +202,8 @@ jobs:
         env:
           REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
         run: |
-          tag="192.168.4.7:3000/noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
-          echo "$REGISTRY_TOKEN" | docker login 192.168.4.7:3000 -u fleet --password-stdin || true
+          tag="${{ vars.FLEET_REGISTRY }}/noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
+          echo "$REGISTRY_TOKEN" | docker login ${{ vars.FLEET_REGISTRY }} -u fleet --password-stdin || true
           if docker pull "$tag"; then
             docker tag "$tag" plurx-android-build
           else

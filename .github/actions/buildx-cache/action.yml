@@ -38,7 +38,7 @@ runs:
         # `ci-buildkit-prune` step that bounds the builder is skipped, because
         # it only runs when the builder is named. So the branch that was
         # supposed to be the safe one was the unbounded one, and it was the only
-        # branch any job ever took: `bolt.db` on `gha-m6-general-01` held 15
+        # branch any job ever took: `bolt.db` on `gha-lab6-general-01` held 15
         # `buildkit-blob-1-sha256` entries beside the Cargo tarballs.
         #
         # A self-hosted runner gets the named builder, whose state is pruned to
@@ -70,10 +70,21 @@ runs:
       with:
         name: ${{ steps.configure.outputs.builder_name }}
         keep-state: true
-        buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml
-
+        buildkitd-config-inline: |
+          # The fleet registry is deliberately plain HTTP on the private LAN. A
+          # BuildKit container does not inherit Docker daemon insecure-registry
+          # settings, so the builder needs the same trust decision explicitly.
+          # Only requests to this exact address are affected.
+          [registry."${{ vars.FLEET_REGISTRY }}"]
+            http = true
     - name: Start an ephemeral hosted builder
       if: steps.configure.outputs.local != 'true'
       uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       with:
-        buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml
+        buildkitd-config-inline: |
+          # The fleet registry is deliberately plain HTTP on the private LAN. A
+          # BuildKit container does not inherit Docker daemon insecure-registry
+          # settings, so the builder needs the same trust decision explicitly.
+          # Only requests to this exact address are affected.
+          [registry."${{ vars.FLEET_REGISTRY }}"]
+            http = true
