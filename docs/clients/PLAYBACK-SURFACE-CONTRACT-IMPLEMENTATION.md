@@ -655,7 +655,7 @@ existing reopen on drain, ledger shows `recovering → cleared(by: presenting)`.
 Acceptance:
 
 ```bash
-# on the macOS runner (mba, 192.168.5.115) — DEVELOPMENT_PIPELINE.md §4, compile before CI
+# on the macOS runner (maca, 10.42.5.115) — DEVELOPMENT_PIPELINE.md §4, compile before CI
 make apple-test          # AppleClientTests runs every fixture case against PlaybackSurfaceModel
 scripts/playback-surface-fence
 python3 -m unittest discover -s tests/operations -p 'test_*.py'   # build claims + docs index

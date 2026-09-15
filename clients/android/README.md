@@ -189,7 +189,7 @@ recomputed on every decision, because unplugging HDMI changes the answer.
   owner node, compatible fleet, FFmpeg, scratch space and session budget before
   runtime enablement. [The Live TV plan](../../docs/features/HDHOMERUN-LIVE-TV-PLAN.md)
   records limits and acceptance; source tests are not physical playback proof.
-- **Connect & sign in** to any plurx server by address (`http://192.168.1.10:32400`); the
+- **Connect & sign in** to any plurx server by address (`http://10.42.1.10:32400`); the
   session is remembered so the app reconnects silently on next launch.
 - **Adaptive home** with Continue Watching, Next Up, and Recently Added hubs,
   category- or library-grouped rails, poster-size controls, and layouts tuned
@@ -366,7 +366,7 @@ adb install -r app-debug.apk
 over the network:
 
 ```bash
-adb connect 192.168.1.55        # your TV's IP
+adb connect 10.42.1.55        # your TV's IP
 adb install -r app-debug.apk
 ```
 
@@ -399,7 +399,7 @@ icon'd app. For a native iOS / Apple TV build, see
 ## First run
 
 1. Launch **plurx**. On the connect screen enter your server address — host and port are
-   enough (`192.168.1.10:32400`); `http://` is assumed if you leave the scheme off.
+   enough (`10.42.1.10:32400`); `http://` is assumed if you leave the scheme off.
 2. Sign in with your plurx username and password.
 3. That's it — the token is stored (DataStore) and reused until it stops working or you sign
    out from Settings. Sign Out sends the captured bearer to the captured server

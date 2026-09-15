@@ -2250,11 +2250,11 @@ test("hostname leads the identity while node id stays secondary", () => {
   const row = ui.clusterNodeRow(
     node("550e8400-e29b-41d4-a716-446655440000", 7, "voter", {
       hostname: "living-room-plurx",
-      advertised_host: "192.168.1.20",
+      advertised_host: "10.42.1.20",
     }),
   );
   assert.match(row, /class="clhost">living-room-plurx/);
-  assert.match(row, /Advertised host 192\.168\.1\.20/);
+  assert.match(row, /Advertised host 10\.42\.1\.20/);
   assert.match(
     row,
     /class="clid">Node ID 550e8400-e29b-41d4-a716-446655440000/,

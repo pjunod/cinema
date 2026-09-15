@@ -126,7 +126,7 @@ class LiveTvUiTest {
                                     enabled = write.getBoolean("live_tv_enabled")
                                     generation += 1
                                 }
-                                """{"live_tv_enabled":$enabled,"live_tv_device_ipv4":"192.168.4.20","live_tv_owner_node_id":"fixture-voter",
+                                """{"live_tv_enabled":$enabled,"live_tv_device_ipv4":"10.42.4.20","live_tv_owner_node_id":"fixture-voter",
                                     "live_tv_max_sessions":2,"live_tv_output_height":720,"live_tv_config_generation":$generation,
                                     "live_tv_transition_from_owner_node_id":"","live_tv_transition_drain_before":0}"""
                             }

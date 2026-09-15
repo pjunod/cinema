@@ -714,7 +714,7 @@ modelled; and C1's reader-across-the-orphan-pass case is untested.
 ## 6. STATUS.html — three corrections before this is pinned
 
 The rewrite is mostly a *correction*: the perf rows were stale, and M2/M3
-being done is supported by [PERF-PLAN.md](../performance/PERF-PLAN.md):3-5 (4.89× on nynuc)
+being done is supported by [PERF-PLAN.md](../performance/PERF-PLAN.md):3-5 (4.89× on media1)
 and :8-9. Three things need fixing before the page is trustworthy.
 
 **The hero tiles and dateline were not updated with the sections below them,

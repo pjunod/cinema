@@ -8,8 +8,8 @@ has touched a tuner yet — that pass is
 **Base:** Forgejo `main` at `a605d03c` (started at `75edcb44`; `main` moved 138
 commits under this branch — 116 excluding merges, in two waves of 115 and 23 —
 and both are merged in) ·
-**PR:** [#294](http://192.168.4.7:3000/noirr/plurx/pulls/294) ·
-**Issue:** [#295](http://192.168.4.7:3000/noirr/plurx/issues/295) ·
+**PR:** [#294](http://forge.lan:3000/noirr/plurx/pulls/294) ·
+**Issue:** [#295](http://forge.lan:3000/noirr/plurx/issues/295) ·
 **Apple build 153 · Android versionCode 94** ·
 **Updated:** 2026-09-13
 
@@ -66,7 +66,7 @@ promotion on its same-viewer stray eviction. Neither was on `main` when this
 started — that effort was planned but unbuilt — so both were built here, and
 only those two.
 
-`effort/live-tv-reliability` ([#281](http://192.168.4.7:3000/noirr/plurx/pulls/281))
+`effort/live-tv-reliability` ([#281](http://forge.lan:3000/noirr/plurx/pulls/281))
 has since merged its own implementations of exactly those two things. Two
 independent builds of one feature, converging on the same field names, is what
 made `live_tv.rs` conflict in thirty-five places on the merge. **The rule
@@ -132,7 +132,7 @@ asserted:
   `one_tuner_get_runs_the_full_hls_lifecycle_and_stop_waits_for_cleanup` — all
   three want an `ffprobe` the container does not configure;
 - `fmp4::tests::complete_multi_entry_hevc_is_a_typed_validated_structural_refusal`
-  — issue [#237](http://192.168.4.7:3000/noirr/plurx/issues/237);
+  — issue [#237](http://forge.lan:3000/noirr/plurx/issues/237);
 - `tests/playback/web-control.test.js`'s `an interval past the deadline is
   clamped to it`, whose assertion reads the real wall clock and therefore
   depends on how fast the container ran the preceding 13 seconds of suite.

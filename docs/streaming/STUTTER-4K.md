@@ -90,7 +90,7 @@ with the browser's MSE capability check still the safety veto.
 
 ## 2. The symptom, measured
 
-The reference session is *Wicked (2024) Remux-2160p.mkv* on nuc4, Chrome,
+The reference session is *Harbor Lights (2023) Remux-2160p.mkv* on lab4, Chrome,
 Quality → Auto:
 
 | Fact | Value |
@@ -143,7 +143,7 @@ and the number that settled it. The harnesses are in §6.
 
 ### 3.1 Storage — not it
 
-Four traces on nynuc, per-mount, replayed against a simulated client buffer:
+Four traces on media1, per-mount, replayed against a simulated client buffer:
 no 250 ms window ever fell below realtime for the source bitrate. Storage
 under Wicked reads 2428 Mb/s against a 69 Mb/s need — 35× headroom. The
 built-in probe (`storeprobe.rs`) reports this per mount; §4.9ter of
@@ -152,7 +152,7 @@ built-in probe (`storeprobe.rs`) reports this per mount; §4.9ter of
 ### 3.2 Network — not it
 
 Delivery 63 Mb/s against a 357 Mb/s client estimate, on a 2.5–10 G LAN.
-nynuc's wireless bridge is a real ceiling (46 MB/s bridged vs 301 MB/s wired)
+media1's wireless bridge is a real ceiling (46 MB/s bridged vs 301 MB/s wired)
 but the stutter reproduces identically on wired nodes.
 
 ### 3.3 MSE buffer-quota churn — fixed, and it was a real bug, but not this
@@ -1207,7 +1207,7 @@ playbook computes it per host.
 
 > **This did not hold, and the reason is worth keeping.** 2026-07-30, mid-way
 > through a debugging session that had already stalled twice on "which build
-> are you running?": the System page read `plurx · cinemarr 0.2.0 (unstamped
+> are you running?": the System page read `plurx · noirr 0.2.0 (unstamped
 > build)`. Forwarding the argument was necessary and not sufficient — the fix
 > ended at *documenting* that deploys must set a variable, which puts the work
 > on a human remembering it every single time and fails silently when they

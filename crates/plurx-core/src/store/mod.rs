@@ -1541,7 +1541,7 @@ pub mod keys {
     /// first response; this value cannot change their presentation contract.
     pub const HLS_TYPELESS_SLIDING: &str = "playback.hls_typeless_sliding";
     /// How often, in minutes, to build fragment indexes for files that have
-    /// none. `0` is off, and off is the default until M0-P1's nynuc numbers
+    /// none. `0` is off, and off is the default until M0-P1's media1 numbers
     /// say what a full read of a library costs over NFS — the whole point of
     /// that probe is to size this job, and turning it on before the numbers
     /// return would be guessing with the operator's disks.

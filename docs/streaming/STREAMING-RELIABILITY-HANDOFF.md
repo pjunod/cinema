@@ -30,15 +30,15 @@ belong in the requested Developer Enable section.
 ## Resume — exact authority and working copies
 
 - **Forgejo is the sole write, PR, CI and merge authority:**
-  `ssh://git@192.168.4.7:222/noirr/plurx.git`, web
-  `http://192.168.4.7:3000/noirr/plurx`. GitHub is historical/read-only.
+  `ssh://git@10.42.4.7:222/noirr/plurx.git`, web
+  `http://forge.lan:3000/noirr/plurx`. GitHub is historical/read-only.
 - **Effort:** `effort/streaming-reliability`, last verified head
   `6efec8d9b1b4a27e36a6e0a3c5af8aa773d73909`.
 - **Integrated main:** `15f88e53e65362c803692a73448ee0fa7cdc1a8e`.
   Refresh both refs before resuming; they may advance independently.
 - **Never use the user's checkouts for implementation.** The paths below
   are agent-owned worktrees of an agent-owned clone. Preserve dirty work.
-- **SSH key:** `/Users/pjunod/code/plurx-agent/.ssh-deploy-key`.
+- **SSH key:** `~/code/plurx-agent/.ssh-deploy-key`.
   Use it through SSH; do not print, copy into containers, or commit it.
 
 | Work | Agent-owned path | Branch / checkpoint |

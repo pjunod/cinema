@@ -1195,7 +1195,7 @@ final class LiveTvTests: XCTestCase {
         let status = LiveTvStatus(
             state: "active",
             channel: channel,
-            ownerNodeId: "nynuc",
+            ownerNodeId: "media1",
             encoder: "nvenc",
             outputHeight: 720,
             signal: LiveTvSignal(
@@ -1293,7 +1293,7 @@ final class LiveTvTests: XCTestCase {
         func fields(_ change: LiveTvSettingsChange) throws -> [String: Any] {
             try XCTUnwrap(JSONSerialization.jsonObject(with: change.body(generation: 12)) as? [String: Any])
         }
-        let config = try fields(.configure(ipv4: "192.168.4.100", owner: "new-owner", sessions: 2, height: 720))
+        let config = try fields(.configure(ipv4: "10.42.4.100", owner: "new-owner", sessions: 2, height: 720))
         XCTAssertNil(config["live_tv_enabled"])
         XCTAssertEqual(config["live_tv_config_generation"] as? Int, 12)
         XCTAssertEqual(config["live_tv_max_output_height"] as? Int, 0)
@@ -1310,8 +1310,8 @@ final class LiveTvTests: XCTestCase {
     func testServerSettingsSnakeCaseContractDecodesWithoutUnrelatedSecrets() throws {
         let decoder = JSONDecoder()
         decoder.keyDecodingStrategy = .convertFromSnakeCase
-        let dto = try decoder.decode(LiveTvSettings.self, from: Data(#"{"live_tv_enabled":false,"live_tv_device_ipv4":"192.168.4.100","live_tv_owner_node_id":"owner","live_tv_max_sessions":2,"live_tv_output_height":720,"live_tv_config_generation":12,"live_tv_transition_from_owner_node_id":"old","live_tv_transition_drain_before":8,"tmdb_api_key":"unused-secret"}"#.utf8))
-        XCTAssertEqual(dto.liveTvDeviceIpv4, "192.168.4.100")
+        let dto = try decoder.decode(LiveTvSettings.self, from: Data(#"{"live_tv_enabled":false,"live_tv_device_ipv4":"10.42.4.100","live_tv_owner_node_id":"owner","live_tv_max_sessions":2,"live_tv_output_height":720,"live_tv_config_generation":12,"live_tv_transition_from_owner_node_id":"old","live_tv_transition_drain_before":8,"tmdb_api_key":"unused-secret"}"#.utf8))
+        XCTAssertEqual(dto.liveTvDeviceIpv4, "10.42.4.100")
         XCTAssertEqual(dto.liveTvConfigGeneration, 12)
         XCTAssertEqual(dto.liveTvTransitionFromOwnerNodeId, "old")
     }

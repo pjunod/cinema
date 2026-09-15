@@ -78,8 +78,8 @@ its whole path and sampled every changed subsystem that can alter it:
    owner loss;
 5. settings, operator status, metrics, telemetry, CI, nightly validation, and
    physical evidence;
-6. de-identified seven-day telemetry and post-deploy logs on `nynuc`, `m6`,
-   `nuc3`, and `nuc4` using the supplied read-only deployment access.
+6. de-identified seven-day telemetry and post-deploy logs on `media1`, `lab6`,
+   `lab3`, and `lab4` using the supplied read-only deployment access.
 
 Three independent passes attacked the server, clients, and operations/test
 contracts. A fourth exact-head adversarial pass is required on every repair PR
@@ -170,10 +170,10 @@ polling, records `server_hold`, and returns before the HDR/same-delivery recover
 path. The monitor re-enters and can accept the same hold again without a retry
 budget or terminal bound.
 
-This matches historical fleet evidence on `m6`: one VAAPI playback repeatedly
+This matches historical fleet evidence on `lab6`: one VAAPI playback repeatedly
 reported a frozen position, about 61.5 seconds of runway, `server_hold`, and
 increasing stall durations for many minutes. Across the seven-day node-local
-sample, `m6` held 642 stall records over 156 sessions, with a maximum reported
+sample, `lab6` held 642 stall records over 156 sessions, with a maximum reported
 stagnation of 896,194 ms. Those records span multiple builds, so they prove the
 failure class in operation, not that every event came from the current binary.
 
@@ -793,7 +793,7 @@ regression questions across restarts.
 The four nodes ran the same source build, but usable pipeline evidence differed
 by node. NVENC was unavailable everywhere; QSV/VAAPI validation succeeded for
 basic paths, while Main10/HDR graphs failed or were refused on some nodes.
-`nynuc` also had hundreds of fragment-index requests waiting and dozens at the
+`media1` also had hundreds of fragment-index requests waiting and dozens at the
 attempt limit during the audit. Those facts directly affect recipe placement,
 VOD availability, and successor preparation.
 
@@ -838,7 +838,7 @@ can panic or construct an invalid bound.
 return `Content-Range: bytes */len` with 416 where required, and cover empty,
 suffix, overflow, and malformed ranges.
 
-**Corrective task:** [Forgejo #14](http://192.168.4.7:3000/noirr/plurx/pulls/14)
+**Corrective task:** [Forgejo #14](http://forge.lan:3000/noirr/plurx/pulls/14)
 at exact-approved `9239999a` implements the parser and actual-response tests,
 HEAD method handling, conservative If-Range fallback without a strong current
 validator, and successful-GET-only playback bookkeeping. The bounded list is
@@ -935,7 +935,7 @@ are retained in
 | Finding | Source or executable evidence |
 |---|---|
 | P0-1 | [`BufferingStallTracker.sample`](../../clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt#L265), [`Controller.onStall`](../../clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt#L931), and `PlaybackTelemetryTest`'s threshold-without-result case |
-| P0-2 | Web `persistentWait` hold branch in [`index.html`](../../crates/plurxd/src/web/index.html#L3614); Apple [`applyStallVerdict` and `holdMayDecideStall`](../../clients/apple/Sources/PlayerController.swift#L3557); `AppleClientTests.testAHeldWedgeSpendsNothingAndSaysNothingSoTheReopenCanAnswer`; retained `m6` aggregate/detail query |
+| P0-2 | Web `persistentWait` hold branch in [`index.html`](../../crates/plurxd/src/web/index.html#L3614); Apple [`applyStallVerdict` and `holdMayDecideStall`](../../clients/apple/Sources/PlayerController.swift#L3557); `AppleClientTests.testAHeldWedgeSpendsNothingAndSaysNothingSoTheReopenCanAnswer`; retained `lab6` aggregate/detail query |
 | P0-3 | Default feature in [`crates/plurxd/Cargo.toml`](../../crates/plurxd/Cargo.toml#L9); production/test default split in [`TranscodeManager::live_hls_recovery_enabled`](../../crates/plurxd/src/transcode.rs#L13570); VOD refusal in [`VodServe::try_create_with_release_fence`](../../crates/plurxd/src/vodserve.rs#L2307) |
 | P0-4 | Response-before-stage in [`control_session_local`](../../crates/plurxd/src/http/hls.rs#L5116); placeholder stage in [`stage_prepared_successor`](../../crates/plurxd/src/http/hls.rs#L5549); client vocabularies in [`playback-control.js`](../../crates/plurxd/src/web/playback-control.js#L14), [`PlaybackControlReporter.swift`](../../clients/apple/Sources/PlaybackControlReporter.swift#L316), and [`PlaybackControlReporter.kt`](../../clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt#L335); [M6 caller handoff](../playback-control/M6-CALLER-HANDOFF.md) §3.4–3.5 |
 | P1-1 | Watchdog/frontier before admission in [`VodServe::segment`](../../crates/plurxd/src/vodserve.rs#L4112); pool cancellation in [`waitpool.rs`](../../crates/plurxd/src/waitpool.rs#L126); sticky failure in [`vodserve.rs`](../../crates/plurxd/src/vodserve.rs#L4299); isolated `WaitPool` storm test at `waitpool.rs:405` |
@@ -1358,7 +1358,7 @@ can yield to newer intent, while explicit End and protocol failure stay final.
 The regression bridge is retained separately in `7d5f959a`.
 
 The frozen source passed scoped independent review. After integrating foundation
-task [#19](http://192.168.4.7:3000/noirr/plurx/pulls/19) at `12be7b5b`, the exact
+task [#19](http://forge.lan:3000/noirr/plurx/pulls/19) at `12be7b5b`, the exact
 tree again passed 103 Apple tests, 102 Android tests, tvOS compilation, and
 complete web checks. Exact integrated-head approval and the development gate
 remain required before merge. These captures do not implement cold
@@ -1409,7 +1409,7 @@ and native-selection ownership tests remain in the focused run.
 ### Executable handoff audit — durable settlement is not a running successor
 
 The initial audit used Forgejo main `4ce33f95` and concurrent
-[PR #5](http://192.168.4.7:3000/noirr/plurx/pulls/5) at `20951a9`. It was
+[PR #5](http://forge.lan:3000/noirr/plurx/pulls/5) at `20951a9`. It was
 rechecked after that PR merged into main `15f88e53`: durable,
 cancellation-independent acknowledgement settlement and exact predecessor
 compare-and-swap are implemented, but `stage_prepared_successor` still writes
@@ -1742,9 +1742,9 @@ must not advertise `prepare_replacement` or promise transparent changes.
 
 At the audit snapshot all four nodes ran
 `plurxd 0.3.0 (v0.3.0-639-g03379035)`. Containers were healthy after a
-coordinated 2026-09-04 restart. `nynuc`, `nuc3`, and `nuc4` validated QSV and
+coordinated 2026-09-04 restart. `media1`, `lab3`, and `lab4` validated QSV and
 VAAPI for basic work, with node-specific Main10/HDR failures; NVENC could not
-load CUDA. `nynuc` showed a degraded fragment-index queue. Seven-day playback
+load CUDA. `media1` showed a degraded fragment-index queue. Seven-day playback
 telemetry on the active nodes contained real stalls and recoveries, including
 the long held Apple freeze described in P0-2.
 

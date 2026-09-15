@@ -8,7 +8,7 @@ the Live TV reliability effort. Companion to
 (the *why*). Read this one to answer "how far along is it" without asking.
 
 **Lane:** `effort/live-tv-reliability`, merged into `main` at `755195a` ·
-**Pull request:** [#281](http://192.168.4.7:3000/noirr/plurx/pulls/281), merged ·
+**Pull request:** [#281](http://forge.lan:3000/noirr/plurx/pulls/281), merged ·
 **Fast lane:** all eight jobs green on `644316f` ·
 **Last updated:** 2026-09-13
 
@@ -155,8 +155,8 @@ verdict so a fleet mid-rollout is never shown as broken for lacking it.
 
 | Step | Who can do it | State |
 |---|---|---|
-| Merge into `main` | this session | done — [#281](http://192.168.4.7:3000/noirr/plurx/pulls/281) at `755195a` |
-| Server deploy to `nynuc`, `m6`, `nuc4`, `nuc3` | this session | run from `media/deploy.yml`, `-e only=plurx` |
+| Merge into `main` | this session | done — [#281](http://forge.lan:3000/noirr/plurx/pulls/281) at `755195a` |
+| Server deploy to `media1`, `lab6`, `lab4`, `lab3` | this session | run from `media/deploy.yml`, `-e only=plurx` |
 | Apple build 147 → the Apple TV and the iPhone | Paul's Mac | not done — needs the Xcode signing identity |
 | Android `versionCode` 90 → the Google TV and the phones | Paul's Mac | not done — needs the paired devices |
 | Physical verification, cases (1)–(6) | Paul's Mac | not done — §8 |
@@ -170,7 +170,7 @@ nothing about what the nodes deploy, because each node fetches from its own
 reset. The four nodes are the whole `noirr` group.
 
 One operational note, recorded because it cost four minutes of downtime on
-`nynuc`: the playbook stops the stack to copy a consistent database before it
+`media1`: the playbook stops the stack to copy a consistent database before it
 rebuilds, so a controller that dies mid-run leaves that node down. Run it
 somewhere that survives — a `screen` on a node, not a shell that can be
 reaped. `docker compose start` in `/opt/noirr/plurx/deploy` brings a node back
@@ -178,10 +178,10 @@ without waiting for the rebuild.
 
 ### What the deploy proved, on the fleet
 
-All four nodes report `v0.3.0-2236-g3062f3c9` and `ready`. `nynuc` writes
+All four nodes report `v0.3.0-2236-g3062f3c9` and `ready`. `media1` writes
 `/srv/plurx/cache/runtime/live-tv/guide.json` - 564 KB, 1772 programme rows.
 
-Then the objective itself, measured by restarting `plurxd` on `nynuc` and
+Then the objective itself, measured by restarting `plurxd` on `media1` and
 polling `/metrics` every five seconds:
 
 | | `guide_age_seconds` | `guide_programmes` |

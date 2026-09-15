@@ -113,7 +113,7 @@ The owner node is the only process that touches the tuner today
 loop on the owner, like `guide_refresh_loop` (`live_tv.rs:3206`) and
 `scratch_sweep_loop` (`live_tv.rs:2750`). What every node needs — the
 rules, the schedule, the recordings, the reminders — lives in the
-replicated Store, so the UI on nuc4 shows what nynuc is recording.
+replicated Store, so the UI on lab4 shows what media1 is recording.
 
 ### 3.2 Guide identity and horizon (M0)
 
@@ -587,7 +587,7 @@ user-visible notifications; the overlay is the whole story there.
 
 `Activity` (`http/system.rs:3440`) gains rows of `kind: "record"` from a
 new `LiveTvManager::recording_activities()` — label *Recording Kitchen
-Table*, detail *7.1 WABC · rule "Kitchen Table (new)" · tuner held on nynuc ·
+Table*, detail *7.1 WABC · rule "Kitchen Table (new)" · tuner held on media1 ·
 24 min left · 1.9 GB → /20t/dvr/…*, `percent` from elapsed/capture span —
 inserted after `live_tv` in `local_activity` (`:3905`, the push at `:3908–3910`) and merged in the
 clustered path beside `clustered_live_tv` (`:3629`). The web row
@@ -1025,7 +1025,7 @@ with a fresher one that carries ids yields one row with the ids.
 
 **Acceptance:** `cargo test -p plurxd live_tv::guide` green;
 `tests/playback/live-tv-guide-cases.json` gains one case with ids and both
-native clients decode it (`make apple-test` on `mba`, Android unit test);
+native clients decode it (`make apple-test` on `maca`, Android unit test);
 `GET /live-tv/guide?hours=336` on a fixture owner returns programmes past
 72 h and more than 200 per channel; `python3 -m unittest
 tests.operations.test_api_doc_routes` green after the `:1825` row edit.
@@ -1177,7 +1177,7 @@ entitlements — local notifications need none).
 Follow `dvr-tv-guide.png`, `dvr-tv-reminder.png`, `dvr-tv-recordings.png`,
 `dvr-phone-*.png`. Type sizes and grid metrics unchanged (guardrail 7).
 
-**Acceptance:** `make apple-test` on `mba` green; a 1080p tvOS simulator
+**Acceptance:** `make apple-test` on `maca` green; a 1080p tvOS simulator
 screenshot of the guide with a focused future cell showing the four
 actions and of the overlay over playback; an iPhone screenshot of the
 programme sheet; a local notification observed firing on a simulator with

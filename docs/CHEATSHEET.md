@@ -62,7 +62,7 @@ hook run with `git commit --no-verify`. [VALIDATION.md](VALIDATION.md) explains
 point selection, evidence, and why the UI “golden” is a reviewed structural
 answer key rather than a screenshot. Pushing a version tag
 (`git tag v0.1.0 && git push --tags`) builds and publishes a multi-arch image
-to `192.168.4.7:3000/noirr/plurxd`.
+to `forge.lan:3000/noirr/plurxd`.
 
 Large projects use one temporary integration branch so each task pays for
 compilation rather than release qualification. The full operating contract is
@@ -144,7 +144,7 @@ HOST=http://localhost:32400
 # 1. Configure. The owner is the node id (GET /api/v1/server) of the machine
 #    on the tuner's network. The generation must be the current one.
 curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
-  -d '{"live_tv_config_generation":0,"live_tv_device_ipv4":"192.168.4.20",
+  -d '{"live_tv_config_generation":0,"live_tv_device_ipv4":"10.42.4.20",
        "live_tv_owner_node_id":"<node id>","live_tv_max_sessions":2,
        "live_tv_output_height":720}' $HOST/api/v1/settings
 
@@ -180,7 +180,7 @@ Accept it against your actual tuner (occupies tuners for a few minutes, touches
 no running server):
 
 ```bash
-make live-tv-hardware-check DEVICE=192.168.4.20 TUNERS=2
+make live-tv-hardware-check DEVICE=10.42.4.20 TUNERS=2
 # → target/live-tv-hardware/hardware.json
 ```
 

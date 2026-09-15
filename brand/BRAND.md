@@ -26,7 +26,7 @@ metadata, where punctuation should not make the name harder to read aloud.
 - Short in-app labels: Cinema, Curator, Runner.
 - Pronunciation: “nwar.”
 
-Do not use the retired working names `cinemarr`, `watch`, `fetch`, `screen`,
+Do not use the retired working names `watch`, `fetch`, `screen`,
 `Catalog`, or `Boundlight` in new public material. Historical technical names
 such as `plurx`, `monarr`, and `nzbd` remain valid when they identify a binary,
 configuration key, network service, or compatibility surface.

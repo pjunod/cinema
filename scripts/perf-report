@@ -15,7 +15,7 @@ session and measuring the segments that session wrote — not by reconstructing
 the arguments, which would only prove that two copies of the flag list agree.
 
     scripts/perf-report --sustained
-    scripts/perf-report --url http://nynuc:32400 --ratecontrol 42
+    scripts/perf-report --url http://media1:32400 --ratecontrol 42
 
 Prompts for the admin username and password if you don't pass them.
 

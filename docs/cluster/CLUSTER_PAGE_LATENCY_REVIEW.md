@@ -16,7 +16,7 @@ Review this as an incident analysis, performance design, and recovery-safety
 problem. Start with the facts in §2 and the code paths in §3. Separate facts,
 strong inferences, and open hypotheses. In particular:
 
-1. Confirm or dispute that `nuc4`'s Raft storage inconsistency is the dominant
+1. Confirm or dispute that `lab4`'s Raft storage inconsistency is the dominant
    cause of the multi-second read latency.
 2. Identify the safest supported way to recover or replace that voter without
    risking split brain, silent state loss, or an unsupported activated-node
@@ -42,10 +42,10 @@ consensus overhead and it is not an undeployed PR.
 
 Two problems compound:
 
-- **Operational fault:** Raft voter `3` (`nuc4`) repeatedly rejects Raft work
+- **Operational fault:** Raft voter `3` (`lab4`) repeatedly rejects Raft work
   because log index `520000` is missing from its local storage. The leader logs
   failed leadership confirmations for consistent reads. A two-minute sample
-  contained 1,014 leader read-confirmation failures and 2,071 `nuc4`
+  contained 1,014 leader read-confirmation failures and 2,071 `lab4`
   `LogIndexNotFound` errors.
 - **Presentation fault:** Home and Settings replace the current body with
   `Loading…`, await every dependency needed by their page model, and paint only
@@ -67,10 +67,10 @@ The live Cluster panel reported this roster during the diagnosis:
 
 | Host | Raft id | Role | UI reachability | Relevant observation |
 |---|---:|---|---|---|
-| `nynuc` | 1 | voter · inspected web node | reachable | Advertised host is shown as `localhost`; verify that the actual Raft address is remotely usable. |
-| `nuc4` | 3 | voter | reachable | Continuously rejects Raft work with `LogIndexNotFound` for index `520000`. |
-| `nuc3` | 4 | voter · leader | reachable | Logs repeated failures while confirming leadership for consistent reads against target `3`. |
-| `m6` | 5 | voter | reachable | No specific fault established in this investigation. |
+| `media1` | 1 | voter · inspected web node | reachable | Advertised host is shown as `localhost`; verify that the actual Raft address is remotely usable. |
+| `lab4` | 3 | voter | reachable | Continuously rejects Raft work with `LogIndexNotFound` for index `520000`. |
+| `lab3` | 4 | voter · leader | reachable | Logs repeated failures while confirming leadership for consistent reads against target `3`. |
+| `lab6` | 5 | voter | reachable | No specific fault established in this investigation. |
 
 Four voters require three acknowledgements and still tolerate only one voter
 failure. The existing runbook already warns that four voters add quorum work
@@ -79,7 +79,7 @@ itself the incident: a healthy four-voter cluster must still answer reads in a
 small number of LAN round trips. It does mean one broken voter leaves less
 margin and makes every false health signal more consequential.
 
-The `localhost` display on `nynuc` is a review item, not a proven cause. Confirm
+The `localhost` display on `media1` is a review item, not a proven cause. Confirm
 the committed Raft and API addresses before attributing any quorum failure to
 it. Do not infer routing health from the hostname label alone.
 
@@ -94,12 +94,12 @@ microbenchmark.
 
 | HTTP host | Route | First route-specific content | Observed time |
 |---|---|---|---:|
-| `nynuc` | Activity | `Now playing` | 761 ms |
-| `nynuc` | Settings | Settings tab bar | 3,238 ms |
-| `nynuc` | Home | `Continue watching` | 3,236 ms |
-| `nuc3` | Activity | `Now playing` | 3,062 ms |
-| `nuc3` | Settings | Settings tab bar | 3,063 ms |
-| `nuc3` | Home | `Continue watching` | 3,069 ms |
+| `media1` | Activity | `Now playing` | 761 ms |
+| `media1` | Settings | Settings tab bar | 3,238 ms |
+| `media1` | Home | `Continue watching` | 3,236 ms |
+| `lab3` | Activity | `Now playing` | 3,062 ms |
+| `lab3` | Settings | Settings tab bar | 3,063 ms |
+| `lab3` | Home | `Continue watching` | 3,069 ms |
 
 One sample per route is enough to reproduce the complaint, not enough to set a
 performance budget. The remediation must add repeated measurements with
@@ -111,12 +111,12 @@ percentiles as described in §8.
 
 | Host | Reported build | Built at |
 |---|---|---|
-| `nynuc` | `v0.2.7-954-g9df935b0` | `2026-08-22T20:44:27Z` |
-| `nuc4` | `unknown` | `2026-08-22T20:44:32Z` |
-| `nuc3` | `unknown` | `2026-08-22T19:31:40Z` |
-| `m6` | `v0.2.7-956-gb1da45f3` | `2026-08-22T20:57:51Z` |
+| `media1` | `v0.2.7-954-g9df935b0` | `2026-08-22T20:44:27Z` |
+| `lab4` | `unknown` | `2026-08-22T20:44:32Z` |
+| `lab3` | `unknown` | `2026-08-22T19:31:40Z` |
+| `lab6` | `v0.2.7-956-gb1da45f3` | `2026-08-22T20:57:51Z` |
 
-`9df935b0` contains PR #510, so `nynuc` proves the optimization was deployed.
+`9df935b0` contains PR #510, so `media1` proves the optimization was deployed.
 The two `unknown` stamps do not prove an incompatible binary, but they prevent
 the fleet from proving that every voter runs the same revision. Finish a
 uniform, stamped rollout before treating a version-sensitive conclusion as
@@ -126,7 +126,7 @@ closed. Current `main` at the time of writing is `a0f9fc14`, after PR #516.
 
 The following excerpts are shortened and contain no token or media path.
 
-On `nuc4`:
+On `lab4`:
 
 ```text
 AppendEntries: vote=T1131-N4:committed,
@@ -137,7 +137,7 @@ StorageError(Defensive {
 })
 ```
 
-On the leader, `nuc3`:
+On the leader, `lab3`:
 
 ```text
 timeout while confirming leadership for read request
@@ -145,7 +145,7 @@ target=3
 error=Unreachable node: ... LogIndex(520000) ... got None
 ```
 
-On `nynuc`:
+On `media1`:
 
 ```text
 offline source probe pass failed code="membership_internal"
@@ -156,8 +156,8 @@ A bounded two-minute sample recorded:
 | Signal | Count | Approximate rate |
 |---|---:|---:|
 | Leader read-confirmation failures | 1,014 | 8.5/s |
-| `nuc4` missing-log defensive errors | 2,071 | 17.3/s |
-| `nynuc` offline-source-probe failures | 218 | 1.8/s |
+| `lab4` missing-log defensive errors | 2,071 | 17.3/s |
+| `media1` offline-source-probe failures | 218 | 1.8/s |
 
 The Cluster log also showed a high rate of accepted Hiqlite SQLite WebSocket
 streams during page load. Treat connection churn as a plausible amplifier,
@@ -169,14 +169,14 @@ still needs measurement.
 
 | Classification | Statement | Confidence |
 |---|---|---|
-| Fact | `nuc4` repeatedly reports `LogIndexNotFound` for Raft log index `520000`. | Direct live logs. |
-| Fact | The leader repeatedly fails to confirm consistent reads against Raft target `3`. | Direct live logs; target `3` maps to `nuc4` in the roster. |
+| Fact | `lab4` repeatedly reports `LogIndexNotFound` for Raft log index `520000`. | Direct live logs. |
+| Fact | The leader repeatedly fails to confirm consistent reads against Raft target `3`. | Direct live logs; target `3` maps to `lab4` in the roster. |
 | Fact | Home and Settings paint only after their complete awaited request sets resolve. | Current web source. |
-| Fact | The UI labels `nuc4` reachable while its Raft core is rejecting work. | Same-time UI and log observations. |
+| Fact | The UI labels `lab4` reachable while its Raft core is rejecting work. | Same-time UI and log observations. |
 | Strong inference | Raft confirmation retries dominate the multi-second route delay. | Error type, rate, timing shape, and consistent-read code path agree. Confirm with per-operation timings before declaring closure. |
 | Hypothesis | Repeated WebSocket setup magnifies CPU/network contention. | Connection log volume is high; no connection-lifetime or CPU correlation was captured. |
 | Hypothesis | Mixed or unstamped builds contributed to the invalid log state. | Fleet attribution is incomplete; no causal version boundary is established. |
-| Hypothesis | `nynuc`'s displayed `localhost` advertisement reduces usable quorum paths. | The display is suspicious; the actual committed Raft address has not been verified. |
+| Hypothesis | `media1`'s displayed `localhost` advertisement reduces usable quorum paths. | The display is suspicious; the actual committed Raft address has not been verified. |
 
 ## 3. Critical paths — one delayed authority read holds the whole body
 
@@ -263,8 +263,8 @@ slowest endpoint; it does not make unrelated work free.
 [`web/index.html`](../../crates/plurxd/src/web/index.html) lines 8927–8953
 installs `Loading…`, awaits `/activity/detail`, and paints the full body. Its
 request fan-out is lower than Settings and Home, which is consistent with the
-761 ms `nynuc` sample, but the route still has no stale-content or sectional
-fallback. On `nuc3` it reproduced the same three-second wait as the other two
+761 ms `media1` sample, but the route still has no stale-content or sectional
+fallback. On `lab3` it reproduced the same three-second wait as the other two
 pages.
 
 The non-overlapping three-second poll and generation fences added by PR #510
@@ -319,10 +319,10 @@ paint contract.
 
 ## 5. Root cause and contributing defects — fix them in dependency order
 
-### P0: `nuc4` has an invalid Raft storage state
+### P0: `lab4` has an invalid Raft storage state
 
 `LogIndexNotFound { want: 520000, got: None }` is an OpenRaft defensive storage
-failure, not a slow query. `nuc4`'s Raft core repeatedly closes its channel
+failure, not a slow query. `lab4`'s Raft core repeatedly closes its channel
 after rejecting `AppendEntries`; the leader then reports that target as
 unreachable while confirming reads.
 
@@ -332,7 +332,7 @@ install failure, restart during compaction, filesystem loss, and a vendored
 Hiqlite/OpenRaft defect. The logs establish the bad state; they do not establish
 which class created it.
 
-Do not start by deleting `nuc4`'s Raft files. Preserve a forensic copy and use
+Do not start by deleting `lab4`'s Raft files. Preserve a forensic copy and use
 the supported membership contract. Directly editing or partially clearing an
 activated data directory can turn one damaged voter into an unprovable
 cluster.
@@ -345,7 +345,7 @@ answers whether a node recently sent its application heartbeat. It does not
 prove that the node can append a Raft entry, install a snapshot, serve a
 consistent read, or keep its Raft core alive.
 
-The current UI therefore presents `nuc4` as reachable at the same time its
+The current UI therefore presents `lab4` as reachable at the same time its
 Raft storage rejects every append. The word is locally correct but
 operationally misleading. The Cluster panel needs separate signals such as:
 
@@ -411,7 +411,7 @@ Before changing membership or local Raft state:
 **Acceptance:** every node's running revision is attributable, and the review
 can explain which evidence survives each proposed recovery step.
 
-### 6.2 Recover or replace `nuc4` only through a reviewed quorum-safe path
+### 6.2 Recover or replace `lab4` only through a reviewed quorum-safe path
 
 The existing supported model removes a follower through the membership API,
 stops it, discards the tombstoned data directory, and rejoins from a fresh
@@ -421,10 +421,10 @@ quorum and the offline-work resolution path is currently failing.
 
 The reviewer must answer:
 
-- Can the remaining three voters prove a healthy quorum without `nuc4`?
+- Can the remaining three voters prove a healthy quorum without `lab4`?
 - Can the membership removal transaction complete while the probe loop's
   replicated read fails?
-- Does `nuc4` own active offline work or singleton job leases that must be
+- Does `lab4` own active offline work or singleton job leases that must be
   resolved or fenced?
 - Is a controlled process stop before removal safe, or would it remove an
   acknowledgement the four-voter quorum still needs?
@@ -496,7 +496,7 @@ authoritative.
 - **Do not automate removal of the fourth voter.** Three voters are the usual
   topology, but selecting and removing a live voter is an operator decision
   with offline-work and quorum consequences.
-- **Do not delete or edit `nuc4`'s Raft state before preserving evidence and
+- **Do not delete or edit `lab4`'s Raft state before preserving evidence and
   approving the recovery sequence.** The missing index may be the only clue to
   a snapshot/purge defect that can recur on every replacement node.
 - **Do not treat an activated-node SQLite copy as a supported restore point.**
@@ -586,7 +586,7 @@ Return these sections in order:
 
 1. **Verdict:** confirm, partially confirm, or reject the stated primary root
    cause. Name the strongest contradicting evidence if rejecting it.
-2. **P0 recovery findings:** the exact safe sequence for `nuc4`, required
+2. **P0 recovery findings:** the exact safe sequence for `lab4`, required
    backups/evidence, rollback boundary, and any reason not to use the normal
    remove-and-rejoin path.
 3. **P0 correctness findings:** defects in Raft persistence, snapshot/log

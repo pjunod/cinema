@@ -35,7 +35,7 @@
   <line x1="0" y1="74" x2="1600" y2="74" stroke="#c8bfb2"/>
 
   <g class="ui">
-    <text x="30" y="45" class="ink" font-size="23" font-weight="760">cinemarr</text>
+    <text x="30" y="45" class="ink" font-size="23" font-weight="760">noirr</text>
     <rect x="145" y="24" width="58" height="27" rx="5" fill="#e9e2d7"/>
     <text x="158" y="42" class="mono accent small">SPINE</text>
 

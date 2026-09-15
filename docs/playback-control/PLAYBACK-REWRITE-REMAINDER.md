@@ -1,10 +1,10 @@
 # Playback rewrite remainder — the next Sol implementation handoff
 
-**Status:** executed through [PR #263](http://192.168.4.7:3000/noirr/plurx/pulls/263),
+**Status:** executed through [PR #263](http://forge.lan:3000/noirr/plurx/pulls/263),
 merge `eaecb19988851c1efb1c8beb541b6a5b497643de` · **Reconciled:**
 2026-09-12 · **Source baseline:**
 `10f2afe60b3d177866fdcc5741acd9f494525d73` on `main`.
-**Lifecycle landing:** [PR #259](http://192.168.4.7:3000/noirr/plurx/pulls/259),
+**Lifecycle landing:** [PR #259](http://forge.lan:3000/noirr/plurx/pulls/259),
 merge `5548c3d3c0b631af6df8d15c3c27e0d6a9880068`.
 
 This was the finite execution handoff. Read the

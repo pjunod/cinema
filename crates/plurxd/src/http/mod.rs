@@ -4154,7 +4154,7 @@ mod tests {
                 "/api/v1/settings",
                 Some(&admin),
                 json!({
-                    "live_tv_device_ipv4": "192.168.4.20",
+                    "live_tv_device_ipv4": "10.42.4.20",
                     "live_tv_owner_node_id": owner,
                     "live_tv_max_sessions": 2,
                     "live_tv_output_height": 1080,
@@ -4165,7 +4165,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{saved}");
         assert_eq!(saved["live_tv_enabled"], json!(false));
-        assert_eq!(saved["live_tv_device_ipv4"], json!("192.168.4.20"));
+        assert_eq!(saved["live_tv_device_ipv4"], json!("10.42.4.20"));
         assert_eq!(saved["live_tv_owner_node_id"], json!(owner));
         assert_eq!(saved["live_tv_max_sessions"], json!(2));
         assert_eq!(saved["live_tv_output_height"], json!(1080));
@@ -4247,7 +4247,7 @@ mod tests {
                 "/api/v1/settings",
                 Some(&admin),
                 json!({
-                    "live_tv_device_ipv4": "192.168.4.20",
+                    "live_tv_device_ipv4": "10.42.4.20",
                     "live_tv_owner_node_id": owner,
                     "live_tv_config_generation": 0
                 }),
@@ -4256,7 +4256,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{saved}");
 
-        // Nothing on 192.168.4.20 answers in a test process, so every device
+        // Nothing on 10.42.4.20 answers in a test process, so every device
         // readiness check is red. The enable still lands.
         let (status, enabled) = call(
             &app,
@@ -4315,7 +4315,7 @@ mod tests {
                 "/api/v1/settings",
                 Some(&admin),
                 json!({
-                    "live_tv_device_ipv4": "192.168.4.20",
+                    "live_tv_device_ipv4": "10.42.4.20",
                     "live_tv_owner_node_id": owner,
                     "live_tv_config_generation": 0
                 }),
@@ -4409,7 +4409,7 @@ mod tests {
             .store
             .put_settings(&[
                 (keys::LIVE_TV_ENABLED, "1"),
-                (keys::LIVE_TV_DEVICE_IPV4, "192.168.4.20"),
+                (keys::LIVE_TV_DEVICE_IPV4, "10.42.4.20"),
                 (keys::LIVE_TV_OWNER_NODE_ID, "lost-owner-a"),
                 (keys::LIVE_TV_CONFIG_GENERATION, "7"),
             ])
@@ -4514,7 +4514,7 @@ mod tests {
                 "/api/v1/settings",
                 Some(&admin),
                 json!({
-                    "live_tv_device_ipv4": "192.168.4.20",
+                    "live_tv_device_ipv4": "10.42.4.20",
                     "live_tv_owner_node_id": owner,
                     "live_tv_config_generation": 0
                 }),
@@ -5435,7 +5435,7 @@ mod tests {
     fn the_webhook_policy_admits_the_lan_and_refuses_the_open_internet_in_the_clear() {
         let approved = |raw: &str| crate::live_tv::approved_webhook_url(raw).is_ok();
         assert!(approved("https://hooks.example.com/plurx"));
-        assert!(approved("http://192.168.4.7:8123/api/webhook/plurx"));
+        assert!(approved("http://10.42.4.7:8123/api/webhook/plurx"));
         assert!(approved("http://127.0.0.1:8123/hook"));
         assert!(approved("http://[fd00::1]:8123/hook"));
         assert!(
@@ -13910,7 +13910,7 @@ mod tests {
                 library_id: lib.id,
                 kind: ItemKind::Movie,
                 parent_id: None,
-                title: "Blade Runner 2049".into(),
+                title: "Neon District 2049".into(),
                 year: Some(2017),
                 season_number: None,
                 episode_number: None,

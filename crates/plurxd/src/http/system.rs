@@ -6007,7 +6007,7 @@ mod tests {
     /// `ttff_ms` over the log ring returned a series that was part start times
     /// and part stall lengths — with the stalls, being longer, owning the whole
     /// tail. That is the one number M0 exists to produce, wrong in the
-    /// direction that makes the server look worse than it is: on nynuc a real
+    /// direction that makes the server look worse than it is: on media1 a real
     /// p90 of 1.5 s read as 4.6 s.
     #[test]
     fn a_stalls_duration_is_never_reported_as_a_start_time() {

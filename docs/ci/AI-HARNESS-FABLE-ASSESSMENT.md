@@ -95,7 +95,7 @@ and how much each cost:
 
 1. **Getting a trustworthy compile-and-test result from wherever the agent
    is.** Compile loops (device VM has no cargo; container needs a source
-   archive; nuc3 is fastest at ~25 min for the gate), bridge traps (stale
+   archive; lab3 is fastest at ~25 min for the gate), bridge traps (stale
    bytes on a reused path, a full `$HOME`, calls over ~90 s dropping the
    link, `TMPDIR`), git wedges (`core.bare` flipped, index locks, mounts
    that cannot unlink), pushes that 403, a CI queue with one `ci-store`
@@ -155,7 +155,7 @@ pinned toolchain, Clippy, the affected unit tests, and the four paperwork
 gates — `history-check` restricted to `origin/main..HEAD`,
 `validation.mobile_versions`, `test_docs_index`, `validation-lint`. It
 prints `rustc --version` and the tree hash it ran against, so the evidence
-names its snapshot. It detects whether cargo is local, on nuc3, or in a
+names its snapshot. It detects whether cargo is local, on lab3, or in a
 container, and does the archive-and-ship step itself when it is not local.
 
 **Why first:** it attacks categories 1 and 4 at once, and it is the

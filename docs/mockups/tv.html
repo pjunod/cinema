@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>cinemarr — 10-foot (TV) layout mockups</title>
+<title>noirr — 10-foot (TV) layout mockups</title>
 <style>
   *{box-sizing:border-box}
   html,body{margin:0;min-height:100%}
@@ -136,7 +136,7 @@
     font:700 18px var(--font-mono);letter-spacing:-.02em}
   [data-theme=noirr] .wm .t,[data-theme=giallo] .wm .t{display:none}
   [data-theme=noirr] .wm::before{content:"noirr"}
-  [data-theme=giallo] .wm::before{content:"cinemarr"}
+  [data-theme=giallo] .wm::before{content:"noirr"}
   [data-theme=noirr] .wm::after,[data-theme=giallo] .wm::after{content:"";display:inline-block;width:10px;
     height:3px;margin-left:4px;background:var(--accent);border-radius:1px;vertical-align:-2px}
 </style>
@@ -236,7 +236,7 @@ function theaterTV(){
   const it=IT.sc;
   return `<div class="ttv">
     <div class="bg" style="background:${artBG(it)}"></div><div class="scrim"></div>
-    <nav><span class="wm"><span class="t">cinemarr</span></span>
+    <nav><span class="wm"><span class="t">noirr</span></span>
       <span class="on">home</span><span>movies</span><span>shows</span><span>anime</span><span>search</span>
       <span style="margin-left:auto;font:600 14px var(--font-mono);color:rgba(255,255,255,.6)">9:41</span></nav>
     <div class="fg">
@@ -284,7 +284,7 @@ function guideTV(){
 }
 function classicTV(){
   return `<div class="ctv">
-    <div class="top"><span class="wm"><span class="t">cinemarr</span></span>
+    <div class="top"><span class="wm"><span class="t">noirr</span></span>
       <nav><a class="on f foc">Home</a><a class="f">Activity</a><a class="f">Settings</a></nav>
       <span class="scan">Scanning Movies · 86%</span></div>
     <div class="rt" style="margin-top:14px">continue watching</div>

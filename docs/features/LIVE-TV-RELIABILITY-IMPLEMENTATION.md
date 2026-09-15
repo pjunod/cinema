@@ -871,7 +871,7 @@ Developer views. Met/unmet colouring, never a gate.
 
 Server milestones and client milestones are on different CI lanes; keep
 them in separate PRs. The Rust focused command for every server PR is
-`cargo test -p plurxd --bin plurxd live_tv::` (nuc3: ~6 min cold, ~1 min
+`cargo test -p plurxd --bin plurxd live_tv::` (lab3: ~6 min cold, ~1 min
 incremental; the cloud container works too, see `docs/ci/AGENT-COMPILE-LOOP.md`).
 
 ### 5.1 M0 — contracts and fixtures (docs + tests, no behaviour)
@@ -899,7 +899,7 @@ disk is ignored), `the_guide_document_says_when_the_owner_comes_back`,
 `a_settings_generation_change_wakes_the_guide_loop_once`, and one over the
 lineup wake (`get_or_refresh` from cold notifies; from warm does not).
 - **Accept:** the focused suite green; `docs/API.md` guide row mentions
-  `next_refresh_at`; on nynuc after deploy, `plurx_live_tv_guide_age_seconds`
+  `next_refresh_at`; on media1 after deploy, `plurx_live_tv_guide_age_seconds`
   is a number within 10 s of `/readyz` and `skipped` does not increment
   past 1.
 
@@ -907,7 +907,7 @@ lineup wake (`get_or_refresh` from cold notifies; from warm does not).
 
 §3.16's guide-loop items only (`loadLiveTvGuide` loop, `startGuideRefresh`
 ×2). No barrier changes yet.
-- **Accept:** `make web-check`; `make apple-test` on `mba`;
+- **Accept:** `make web-check`; `make apple-test` on `maca`;
   `./gradlew testDebugUnitTest lintDebug`; Apple `147`, Android `90` (or
   bump once more in M4 — one bump per client per lane is enough: do it in
   the last client PR). Manual: open Live TV < 60 s after a deploy on each
@@ -972,7 +972,7 @@ not an extracted helper.
 ### 5.6 M5 — Developer rows, status doc, release counters, deploy
 
 §3.17 client halves; a `LIVE-TV-RELIABILITY-STATUS.md` beside this file with the
-before/after metrics from nynuc; STATUS.md entry; `make apple-build-bump`,
+before/after metrics from media1; STATUS.md entry; `make apple-build-bump`,
 Android `versionCode` + README claim (if not done in M4); lane promotion
 (the one full run); Paul deploys.
 
@@ -1057,7 +1057,7 @@ in the foreground, without giving the app a chance to release.
 > `origin/main` with `scripts/ship --apple --android`, or `scripts/ship-physical`
 > if Ansible is unhealthy. The servers are already on this code. For every case record
 > the device, the build from Settings → About, what you did, whether the
-> server logged a `Live TV session ended` line before you reopened (nynuc:
+> server logged a `Live TV session ended` line before you reopened (media1:
 > `sudo docker logs --since 5m plurxd | grep 'Live TV session ended'`), the
 > seconds since the last keepalive, and the reopen result; screenshot any
 > failure.
@@ -1079,7 +1079,7 @@ in the foreground, without giving the app a chance to release.
 > `session ended` line is there), and the first press plays. This is not
 > a failure.
 > (5) Deploy mid-stream: start a channel on the Apple TV, ask Paul to
-> restart nynuc's plurxd, reopen Live TV after it is back. Expected: the
+> restart media1's plurxd, reopen Live TV after it is back. Expected: the
 > channel list, and the first press plays.
 > (6) Confirm the words "Wait 90 seconds" cannot be produced by any
 > sequence you try.

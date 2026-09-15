@@ -174,7 +174,7 @@ is dispatched after the coordinator integrates I1. Do not poll indefinitely.
   conversion-metadata blob validation, hydration without a local v1 index,
   request coalescing/lease fencing and source replacement. Pinned format,
   `plurxd` all-target check and `plurxd` all-target Clippy also passed.
-- PR: [#325 — Share exact Dolby Vision fragment indexes](http://192.168.4.7:3000/noirr/plurx/pulls/325),
+- PR: [#325 — Share exact Dolby Vision fragment indexes](http://forge.lan:3000/noirr/plurx/pulls/325),
   `codex/streaming-shared-index` into `effort/streaming-reliability`.
 - Files transferred back to coordinator: `state.rs` was verified unchanged
   and released during I1. `vodserve.rs` transferred after PR #325 integrated.
@@ -200,7 +200,7 @@ is dispatched after the coordinator integrates I1. Do not poll indefinitely.
   `analysis_hash_stop_signal_observes_foreground_playback` passed with pinned
   Rust 1.97.1. They retain foreground priority, cancellation cleanup and the
   no-charge retry boundary without changing Rust server or core code.
-- I2 PR: [#327 — Measure bounded VOD preparation phases](http://192.168.4.7:3000/noirr/plurx/pulls/327),
+- I2 PR: [#327 — Measure bounded VOD preparation phases](http://forge.lan:3000/noirr/plurx/pulls/327),
   `codex/streaming-index-measurement` into
   `effort/streaming-reliability`.
 

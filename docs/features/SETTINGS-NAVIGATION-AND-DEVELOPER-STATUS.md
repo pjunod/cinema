@@ -71,7 +71,7 @@ changing product behavior.
 | Intended settings DOM drift | Regenerated the portable golden: 78 captures and 7,536 structural facts with no console or page errors |
 | Host-dependent decoder path counts | Render each measured path set inside one stable code container; the golden now records the same evidence shape on macOS and Linux |
 | Rust deadline test | One unrelated timing assertion failed after 2,147 passes; the unchanged Rust suite passed on the next current-head attempt |
-| VOD browser runner capacity | Job stopped before test execution at its 45 GiB disk preflight; idle `gha-nuc4-general-02` was pruned with Docker's unused-data cleanup and the repository's bounded Cargo-cache pruner, leaving 48 GiB free |
+| VOD browser runner capacity | Job stopped before test execution at its 45 GiB disk preflight; idle `gha-lab4-general-02` was pruned with Docker's unused-data cleanup and the repository's bounded Cargo-cache pruner, leaving 48 GiB free |
 
 PR #228 remains the authority for the final current-head Main promotion gate
 and merge result; this document records causes and repairs without predicting a

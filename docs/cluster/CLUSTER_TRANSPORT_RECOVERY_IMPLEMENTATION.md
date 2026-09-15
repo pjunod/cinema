@@ -5,7 +5,7 @@ written · **Written:** 2026-09-05 · **Executor:** Sol
 
 This is the complete implementation handoff. Work through the milestones in
 order; do not replace the flush correction with a mismatch reconnect patch.
-Companion to [the incident diagnosis](NUC3_SNAPSHOT_CATCHUP_DIAGNOSIS.md)
+Companion to [the incident diagnosis](LAB3_SNAPSHOT_CATCHUP_DIAGNOSIS.md)
 (the original observations), [OPERATIONS.md](../OPERATIONS.md) (operator contracts),
 and [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (branching and qualification).
 This document supersedes the diagnosis's proposed fix ordering and timeout
@@ -66,13 +66,13 @@ or request ID has been forensically identified.
 
 ### 1.2 The earlier outage also involved the cluster API
 
-Read-only retrieval of the retained `nuc3` and `m6` Docker logs established:
+Read-only retrieval of the retained `lab3` and `lab6` Docker logs established:
 
 | UTC time, 2026-09-05 | Observation |
 |---|---|
-| 17:43:39 | `nuc3` listened and recovered serving authority on build `c661d387` |
-| 17:49:59–17:50:00 | Leader API disconnect/reconnect errors during the `m6` restart; learner briefly recovered serving authority |
-| 17:50:52 onward | Repeated replicated-operation timeouts on `nuc3` |
+| 17:43:39 | `lab3` listened and recovered serving authority on build `c661d387` |
+| 17:49:59–17:50:00 | Leader API disconnect/reconnect errors during the `lab6` restart; learner briefly recovered serving authority |
+| 17:50:52 onward | Repeated replicated-operation timeouts on `lab3` |
 | 17:55:32 | Several late API transaction responses found their callers gone; serving authority expired again |
 | 18:08:11 onward | Retrieved learner logs already show `/readyz` returning 503 |
 | 18:26:37–18:26:47 | Learner drained and restarted |

@@ -137,7 +137,7 @@ ruling on now:
 
 - **The DVR root must be a mount every node sees.** You have four plurx
   nodes on the same media mounts (`/20t`, `/8tb`, `/8t-2`, `/media`,
-  `/mnt/qnap` NFS); the owner node writes, any node serves. The setting is
+  `/mnt/nas` NFS); the owner node writes, any node serves. The setting is
   a container path, like every library root.
 - **Playback while still recording** is a second milestone: it needs the
   VOD path to accept a growing input. K1 keeps that possible (a growing
@@ -216,7 +216,7 @@ you and another account on the same server get your own.
 | **R3 · Outbound webhook** | anything you already notify with — **Home Assistant** (its companion app is on every phone and can hit the TVs), ntfy, a generic JSON POST | one settings URL through the approved-URL pattern (`approved_artwork_url`, `http/comingsoon.rs:534`; `approved_guide_url`, `guide.rs:76`), fired by the same job that starts recordings | **cheap, covers the gap in R2**, and doubles as *recording started / finished / failed* |
 | **R4 · Apple push (APNs)** | iPhone/iPad lock screen, app closed, no dependence on the phone having synced | an APNs auth key (`.p8`) uploaded in settings; plurxd talks HTTP/2 to APNs itself; device tokens hang off the per-device `tokens` rows (`hiqlite.rs:199`, `device` column) | real push, fully self-hosted, but a second credential and a push entitlement in the build |
 | **R5 · Android push (FCM)** | Android lock screen | a Firebase project and its `google-services.json` in *your* build | a third-party dependency for what R2 + R3 already cover; **UnifiedPush** is the self-hosted alternative if this ever matters |
-| **R6 · Web Push** | browsers, tab closed | a service worker in the embedded UI, VAPID keys plurxd generates, **and HTTPS** — push is refused on a plain-HTTP origin, which is what `nynuc:32400` is | not until the servers speak TLS |
+| **R6 · Web Push** | browsers, tab closed | a service worker in the embedded UI, VAPID keys plurxd generates, **and HTTPS** — push is refused on a plain-HTTP origin, which is what `media1:32400` is | not until the servers speak TLS |
 
 **Recommendation: R1 + R2 + R3 in the first milestone.** R1 is the
 TV story and it is one overlay per client; R2 is the phone story and it is

@@ -446,7 +446,7 @@ counters and every deploy resets them (M6 handoff §4).
 #### 3.3.2 The counter above cannot answer the question it was built for
 
 **Met the acceptance and measured the wrong thing.** The first production
-datapoint arrived on m6 on 2026-09-02 — one `resolution_or_bitrate` change,
+datapoint arrived on lab6 on 2026-09-02 — one `resolution_or_bitrate` change,
 outcome `client_cannot_prepare` — and every datapoint after it will read the
 same, for a reason visible in `decide_preparation` itself: the client gate is
 checked *above* the axis rule and the throughput floor, and all three clients

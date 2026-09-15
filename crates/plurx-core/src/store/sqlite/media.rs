@@ -1938,7 +1938,7 @@ mod tests {
                 library_id: lib,
                 kind: ItemKind::Movie,
                 parent_id: None,
-                title: "Blade Runner 2049".into(),
+                title: "Neon District 2049".into(),
                 year: Some(2017),
                 season_number: None,
                 episode_number: None,

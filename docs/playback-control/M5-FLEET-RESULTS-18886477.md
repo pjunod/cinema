@@ -12,11 +12,11 @@ that the replacement behavior worked.
 
 ## 1. Result — web and Apple exchanged, Android did not run
 
-The web gate passed on nuc3. Its Control panel left *awaiting first
+The web gate passed on lab3. Its Control panel left *awaiting first
 acceptance*, and the node's full-vocabulary web counter rose from zero to six
 during the initial observation. It reached 27 before the final snapshot.
 
-Apple build 103 also completed full-vocabulary exchanges. m6 recorded 228
+Apple build 103 also completed full-vocabulary exchanges. lab6 recorded 228
 complete Apple exchanges and a real `server_hold` while an Apple viewer was
 attached. No incomplete-vocabulary or suppressed-action counter moved.
 
@@ -56,21 +56,21 @@ the version-59 APK. The different SHAs do not represent different client code.
 The rerun did not redeploy the cluster. Another session repaired it, and this
 run waited for the serial-deployment boundary before touching a client.
 
-At 03:45:45Z, 03:45:57Z, and 03:46:09Z, nuc3, nuc4, m6, and nynuc each
+At 03:45:45Z, 03:45:57Z, and 03:46:09Z, lab3, lab4, lab6, and media1 each
 returned `readyz=200` and the exact build
 `v0.3.0-64-g18886477`. A final identity read after testing returned the same
 build on every node.
 
 | Node | Reported version | Reported build | Readiness boundary |
 |---|---|---|---|
-| nuc3 | 0.3.0 | `v0.3.0-64-g18886477` | Three consecutive `readyz=200` readings |
-| nuc4 | 0.3.0 | `v0.3.0-64-g18886477` | Three consecutive `readyz=200` readings |
-| m6 | 0.3.0 | `v0.3.0-64-g18886477` | Three consecutive `readyz=200` readings |
-| nynuc | 0.3.0 | `v0.3.0-64-g18886477` | Three consecutive `readyz=200` readings |
+| lab3 | 0.3.0 | `v0.3.0-64-g18886477` | Three consecutive `readyz=200` readings |
+| lab4 | 0.3.0 | `v0.3.0-64-g18886477` | Three consecutive `readyz=200` readings |
+| lab6 | 0.3.0 | `v0.3.0-64-g18886477` | Three consecutive `readyz=200` readings |
+| media1 | 0.3.0 | `v0.3.0-64-g18886477` | Three consecutive `readyz=200` readings |
 
-## 4. Web gate — the reporter completed exchanges on nuc3
+## 4. Web gate — the reporter completed exchanges on lab3
 
-The web player used *Eye for an Eye (2025)* on nuc3. Mac output was muted
+The web player used *Eye for an Eye (2025)* on lab3. Mac output was muted
 before playback and restored after the player was closed.
 
 The Control panel changed to:
@@ -113,8 +113,8 @@ The following are the fresh page-origin lines, verbatim. Extension messages
 and page lines that predated the gate are excluded.
 
 ```text
-2026-09-01T03:50:39.174Z http://nuc3:32400/ [cinema] hls.js fatal networkError manifestLoadTimeOut
-2026-09-01T03:51:14.158Z http://nuc3:32400/ [cinema] playback stall diagnosis Object
+2026-09-01T03:50:39.174Z http://lab3:32400/ [cinema] hls.js fatal networkError manifestLoadTimeOut
+2026-09-01T03:51:14.158Z http://lab3:32400/ [cinema] playback stall diagnosis Object
 ```
 
 ## 5. Mobile deployment — matching builds reached only part of the roster
@@ -143,13 +143,13 @@ Installation failed on the Xiaomi because MIUI opened its ADB-install approval
 path and immediately canceled it. No existing app was removed to work around
 that device policy.
 
-## 6. Apple arm — complete vocabulary and a real hold on m6
+## 6. Apple arm — complete vocabulary and a real hold on lab6
 
 Launching build 103 on the iPhone 17 Pro Max reattached an Apple viewer to
 *Heavy Is the Head* on m6. The Apple complete-vocabulary counter was already
 moving when first sampled and reached 228 before the final snapshot.
 
-m6 recorded a real `server_hold`. During the hold, repeated client reports
+lab6 recorded a real `server_hold`. During the hold, repeated client reports
 kept the same delivery attempt and named `outcome=server_hold`; the server
 held and later resumed the producer. That is evidence against an immediate
 reopen during the hold, but the viewer's on-screen explanation was not read.
@@ -161,25 +161,25 @@ viewer confirmed a picture. That observation is useful, but it is not counted
 as clean rerun evidence because it cannot be joined to the post-restart metric
 snapshot.
 
-## 7. Final metrics — only nuc3 web and m6 Apple moved
+## 7. Final metrics — only lab3 web and lab6 Apple moved
 
 | Node | Platform | `complete="true"` | `complete="false"` | Suppressed |
 |---|---|---:|---:|---:|
-| nuc3 | Web | 27 | 0 | 0 |
-| nuc3 | Apple | 0 | 0 | 0 |
-| nuc3 | Android | 0 | 0 | 0 |
-| nuc4 | Web | 0 | 0 | 0 |
-| nuc4 | Apple | 0 | 0 | 0 |
-| nuc4 | Android | 0 | 0 | 0 |
-| m6 | Web | 0 | 0 | 0 |
-| m6 | Apple | 228 | 0 | 0 |
-| m6 | Android | 0 | 0 | 0 |
-| nynuc | Web | 0 | 0 | 0 |
-| nynuc | Apple | 0 | 0 | 0 |
-| nynuc | Android | 0 | 0 | 0 |
+| lab3 | Web | 27 | 0 | 0 |
+| lab3 | Apple | 0 | 0 | 0 |
+| lab3 | Android | 0 | 0 | 0 |
+| lab4 | Web | 0 | 0 | 0 |
+| lab4 | Apple | 0 | 0 | 0 |
+| lab4 | Android | 0 | 0 | 0 |
+| lab6 | Web | 0 | 0 | 0 |
+| lab6 | Apple | 228 | 0 | 0 |
+| lab6 | Android | 0 | 0 | 0 |
+| media1 | Web | 0 | 0 | 0 |
+| media1 | Apple | 0 | 0 | 0 |
+| media1 | Android | 0 | 0 | 0 |
 
-**How to read this table:** nuc3 proves the deployed web client can complete a
-full-vocabulary exchange. m6 proves an installed Apple build 103 can do the
+**How to read this table:** lab3 proves the deployed web client can complete a
+full-vocabulary exchange. lab6 proves an installed Apple build 103 can do the
 same. Android's zero means no Android client ran; it is not a pass or an
 incomplete-vocabulary failure. Every `complete="false"` value remaining zero
 means no observed client declared an older vocabulary.

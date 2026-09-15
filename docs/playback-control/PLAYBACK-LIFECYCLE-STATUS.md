@@ -9,7 +9,7 @@
 
 **Status:** combined B01–B05 implementation, review, qualification and main
 promotion complete · **Updated:** 2026-09-12 · **Promotion:**
-[PR #263](http://192.168.4.7:3000/noirr/plurx/pulls/263), merge `eaecb199`
+[PR #263](http://forge.lan:3000/noirr/plurx/pulls/263), merge `eaecb199`
 
 Companion to the
 [implementation contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) (what to build),
@@ -113,11 +113,11 @@ selected test then passed.
 ### Main promotion receipt
 
 Exact candidate `91eb25464ca2ca9511c91c58c8aa294b16cf9c62` passed
-[main fast-lane run 1903](http://192.168.4.7:3000/noirr/plurx/actions/runs/1885):
+[main fast-lane run 1903](http://forge.lan:3000/noirr/plurx/actions/runs/1885):
 scope · mobile release version · policy/contracts · web · Rust · Apple ·
 Android · `Main promotion gate` all succeeded. Because every rostered
 `android-kvm` runner was offline, Android used one capability-matched ephemeral
-runner on trusted `nynuc`; the host is x86_64 and exposes `/dev/kvm` and Docker.
+runner on trusted `media1`; the host is x86_64 and exposes `/dev/kvm` and Docker.
 No changed SSH host key was trusted or bypassed. The runner self-deleted after
 its one job, its temporary directory and diagnostic log were removed, and the
 four merged task/effort branches were pruned after ancestry checks.
@@ -182,14 +182,14 @@ remain separate history inside the effort branch.
 | `139ad01f` tree | `rustup run 1.97.1 cargo clippy -p plurxd --locked --all-targets -- -D warnings` | passed in 34 seconds |
 | `139ad01f` tree | `scripts/js-check` | passed; shipped inline scripts parsed without running browser tests |
 | `139ad01f` tree | `make apple-build` plus iOS and tvOS `build-for-testing` | passed at Apple build 143; test bundles compiled but did not execute |
-| `139ad01f` tree | `ANDROID_HOME=/Users/pjunod/Library/Android/sdk ./gradlew :app:assembleDebug :app:compileDebugUnitTestKotlin --no-daemon` | passed at Android versionCode 86; test source compiled but did not execute |
+| `139ad01f` tree | `ANDROID_HOME=~/Library/Android/sdk ./gradlew :app:assembleDebug :app:compileDebugUnitTestKotlin --no-daemon` | passed at Android versionCode 86; test source compiled but did not execute |
 | `180ddcdd` tree | pinned Rust fmt, `cargo check -p plurxd --locked --all-targets`, and Clippy with `-D warnings` | passed in 2, 7, and 13 seconds respectively |
 | `180ddcdd` tree | `scripts/js-check` | passed; two shipped inline script blocks parsed |
 | `180ddcdd` tree | `make apple-build` | passed for iOS and tvOS at Apple build 143 |
 | `180ddcdd` tree | iOS and tvOS `xcodebuild ... build-for-testing` | passed; changed XCTest sources compiled without execution |
-| `180ddcdd` tree | `ANDROID_HOME=/Users/pjunod/Library/Android/sdk ./gradlew :app:assembleDebug :app:compileDebugUnitTestKotlin --no-daemon` | passed in 6 seconds at Android versionCode 86; no tests executed |
+| `180ddcdd` tree | `ANDROID_HOME=~/Library/Android/sdk ./gradlew :app:assembleDebug :app:compileDebugUnitTestKotlin --no-daemon` | passed in 6 seconds at Android versionCode 86; no tests executed |
 | `88066364` tree | pinned Rust fmt, `cargo check -p plurxd --locked --all-targets`, and Clippy with `-D warnings` | passed in 2, 8, and 15 seconds respectively; test targets compiled without execution |
-| `88066364` tree | `ANDROID_HOME=/Users/pjunod/Library/Android/sdk ./gradlew :app:assembleDebug :app:compileDebugUnitTestKotlin --no-daemon` | passed in 11 seconds at Android versionCode 86; changed app and test sources compiled without execution |
+| `88066364` tree | `ANDROID_HOME=~/Library/Android/sdk ./gradlew :app:assembleDebug :app:compileDebugUnitTestKotlin --no-daemon` | passed in 11 seconds at Android versionCode 86; changed app and test sources compiled without execution |
 
 The compiler loop will be repeated only if `main` moves before review or review
 corrections change compiled source. No unit,

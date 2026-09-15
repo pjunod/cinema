@@ -4,7 +4,7 @@
 //! tuner, a file or a disk, and none waits on the owner node — the owner loop
 //! reads the same replicated rows on its own fifteen-second tick and is the
 //! only writer of `recording` and the terminal states. That split is what lets
-//! a viewer on nuc4 stop a capture running on nynuc without a second internal
+//! a viewer on lab4 stop a capture running on media1 without a second internal
 //! route, and it is why `DELETE` on a live recording answers `202` with a
 //! pending flag rather than pretending the file is already closed.
 //!

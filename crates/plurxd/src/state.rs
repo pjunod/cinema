@@ -1732,7 +1732,7 @@ const INDEX_MAX_EXAMINED_PER_PASS: usize = 200;
 const INDEX_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
 /// Short files retain the original ceiling. Long remuxes need a duration-sized
 /// allowance: indexing is a complete video-bitstream pass, and a measured
-/// 14x Dolby Vision copy on nynuc needs about nine minutes for a two-hour film.
+/// 14x Dolby Vision copy on media1 needs about nine minutes for a two-hour film.
 const INDEX_FILE_BUDGET_FLOOR_SECS: u64 = 90;
 const INDEX_FILE_BUDGET_CEILING_SECS: u64 = 30 * 60;
 const INDEX_EXPECTED_MIN_SPEED: u64 = 8;

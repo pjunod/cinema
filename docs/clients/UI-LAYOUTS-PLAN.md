@@ -71,7 +71,7 @@ labels, and which secondary affordances are visible where. A layout does
 the player (projection mode — playback drops to true black in every
 layout and every theme), auth screens, the settings *forms* (only their
 framing), and user-facing strings (everything renders `${APP_NAME}`,
-today `"cinemarr"` — [index.html:828], never the literal "plurx").
+today `"noirr"` — [index.html:828], never the literal "plurx").
 
 Why the hard line: five layouts that each fork business logic are five
 apps. Five shells over one set of view-models is one app wearing five

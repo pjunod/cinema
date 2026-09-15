@@ -198,23 +198,23 @@ hand.
 ### The fleet registry — build once, pull everywhere
 
 The noirr fleet pulls `plurxd` from Forgejo at
-`192.168.4.7:3000/noirr/plurxd`. Forgejo 16.0.3 runs on nuc3 under
+`forge.lan:3000/noirr/plurxd`. Forgejo 16.0.3 runs on lab3 under
 `/opt/noirr/forgejo`; its database, repositories, and package layers all live
 under `/opt/noirr/forgejo/data`. Back up that directory. Once it carries OCI
 images and git mirrors, it is durable state rather than a recreatable cache.
 
 The registry is plain HTTP on the LAN by decision. Every Docker daemon must
-list the byte-identical address `192.168.4.7:3000` under
+list the byte-identical address `forge.lan:3000` under
 `insecure-registries`; do not substitute a hostname, expose TCP 3000 to the
 WAN, or enable open registration. The fleet credential is stored at mode 0600
-on nuc3 as
+on lab3 as
 `/opt/noirr/plurx-agent/.forgejo-registry-token`. Stream it through SSH when a
 node needs to log in so it never enters a repository, command argument, or
 shell history:
 
 ```bash
-ssh nuc3 'cat /opt/noirr/plurx-agent/.forgejo-registry-token' |
-  ssh nuc4 'docker login 192.168.4.7:3000 \
+ssh lab3 'cat /opt/noirr/plurx-agent/.forgejo-registry-token' |
+  ssh lab4 'docker login forge.lan:3000 \
     --username fleet --password-stdin'
 ```
 
@@ -232,11 +232,11 @@ derive a masked Basic header from the run-scoped token for that one `git fetch`;
 they write no credential helper, remote URL, or repository configuration.
 
 If the automatic job must be recovered, run the same guarded publisher on
-nuc4 from the exact Forgejo commit. Supplying both identity variables makes a
+lab4 from the exact Forgejo commit. Supplying both identity variables makes a
 retry reuse an existing immutable image instead of rebuilding it:
 
 ```bash
-ssh nuc4
+ssh lab4
 cd /opt/noirr/plurx
 git fetch origin
 git switch --detach origin/main
@@ -248,7 +248,7 @@ PLURX_BUILD_SHA="$(git rev-parse HEAD)" \
 Each voter keeps this gitignored setting in `deploy/.env`:
 
 ```bash
-PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:main
+PLURX_IMAGE=forge.lan:3000/noirr/plurxd:main
 ```
 
 Pulling does not stop the running voter, so it may happen ahead of the rolling
@@ -287,13 +287,13 @@ together.
 git fetch origin
 git switch --detach <old-40-character-sha>
 sed -i.bak \
-  's|^PLURX_IMAGE=.*|PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:sha-<first-12-characters>|' \
+  's|^PLURX_IMAGE=.*|PLURX_IMAGE=forge.lan:3000/noirr/plurxd:sha-<first-12-characters>|' \
   deploy/.env
 make docker-image-up
 curl -fsS http://127.0.0.1:32400/readyz
 ```
 
-If nuc3 or Forgejo is down, do not weaken the cluster sequence. Leave one
+If lab3 or Forgejo is down, do not weaken the cluster sequence. Leave one
 voter down at most and use the retained local-build path on that voter:
 
 ```bash
@@ -2961,8 +2961,8 @@ single-record bytes. Do not expose UDP 5353 to the internet.
 The Compose companion shares the host's UTS namespace only to read its
 hostname. On a never-joined install, if the durable server name is the generic
 default `plurx`, that hostname is the discovery label; an explicit name
-replaces it. The LAN address is appended in either case (`m6 ·
-192.168.1.20`). Cluster records instead use the replicated logical name plus a
+replaces it. The LAN address is appended in either case (`lab6 ·
+10.42.1.20`). Cluster records instead use the replicated logical name plus a
 short local-node suffix. Rename the logical server through the admin settings
 API so every voter converges; changing a joining node's TOML seed does not
 rename it.
@@ -3362,17 +3362,17 @@ curl -fsS -X PUT \
   -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   --data '{"transcode_rate_mode":"quality","transcode_quality":22}' \
-  http://nynuc:32400/api/v1/settings
+  http://media1:32400/api/v1/settings
 
 # Return to the byte-for-byte legacy path and clear the override.
 curl -fsS -X PUT \
   -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   --data '{"transcode_rate_mode":"bitrate","transcode_quality":null}' \
-  http://nynuc:32400/api/v1/settings
+  http://media1:32400/api/v1/settings
 ```
 
-QSV's built-in value is **22**, selected by the 2026-08-14 nynuc D5 sweep.
+QSV's built-in value is **22**, selected by the 2026-08-14 media1 D5 sweep.
 Values 21 and 22 produced byte-for-byte identical QVBR captures on both corpus
 halves; 23 was the first failing value because the easy clip grew by 940 bytes
 and lost 0.004328 VMAF. Choosing the highest passing value keeps the most
@@ -3383,7 +3383,7 @@ not D5 calibration.
 
 The q=22 result is deliberately modest: easy-content bytes fell from
 31,764,104 to 31,763,916, while the hard clip gained 0.020034 VMAF and grew
-0.53%. It proves bounded flat-quality behavior on nynuc; it does not claim the
+0.53%. It proves bounded flat-quality behavior on media1; it does not claim the
 plan's expected 10–35% typical-content savings from this two-clip corpus.
 Effective VBR retains the literal legacy recipe bytes; each effective quality
 value has a distinct recipe identity, so a requested mode that falls back
@@ -3437,13 +3437,13 @@ snapshot plus its old binary, not a code-only downgrade.
 
 Performance II N1 is judged on bytes created by the deployed server, not by a
 second copy of its encoder arguments. Run `scripts/bench rate-control` on a
-controller that can reach nynuc. The harness opens real plurxd HLS sessions;
+controller that can reach media1. The harness opens real plurxd HLS sessions;
 the server's configured production Jellyfin FFmpeg and hardware encoder create
 every segment. It rejects cached VOD and copy sessions, and it refuses to start
 or mutate global settings unless the immediately preceding `/system` and
 `/activity/detail` responses show no transcode, delivery, speculative producer,
 or offline work. During capture, every poll must show exactly the harness-owned
-HLS session as the sole session and delivery. Reserve nynuc as a maintenance
+HLS session as the sole session and delivery. Reserve media1 as a maintenance
 node and stop playback for the whole run. The repeated checks catch competing
 work visible at a boundary, but the GET and following POST/PUT are not atomic.
 Reserved-node exclusivity is the operational lock.
@@ -3455,7 +3455,7 @@ FFmpeg is scoring-only: never set it as `PLURX_FFMPEG`, add it to the compose
 service, or make it a production/live-path dependency. Ordinary `ffmpeg` is the
 CLI default only when its requested model passes the executable `libvmaf`
 behavior probe with exactly one finite score. No scorer is installed or needed
-on nynuc or in compose. Nynuc performs production encoding; the accepted laptop
+on media1 or in compose. media1 performs production encoding; the accepted laptop
 controller scorer runs only after DELETE succeeds and `/system` confirms the
 node returned to zero active transcodes.
 
@@ -3475,7 +3475,7 @@ below.
 
 ```bash
 scripts/bench rate-control \
-  --base http://nynuc:32400 \
+  --base http://media1:32400 \
   --token "$PLURX_ADMIN_TOKEN" \
   --library "$PLURX_FIXTURE_LIBRARY_ID" \
   --corpus scripts/perf2-rate-control-smoke-corpus.json \
@@ -3496,7 +3496,7 @@ path, and pinned SHA-256. Relabeling the same clip as both easy and hard is not
 a corpus. `scripts/perf2-rate-control-smoke-corpus.json` remains VBR-smoke-only
 and is not D5 calibration or full acceptance.
 
-Capture server hashes from the exact files in nynuc's fixture library, then
+Capture server hashes from the exact files in media1's fixture library, then
 produce the same ordered list locally and compare it before running. Replace
 the server directory below with the library's real path; do not hash a second
 copy merely because it has the same filename:
@@ -3504,19 +3504,19 @@ copy merely because it has the same filename:
 ```bash
 mkdir -p out
 
-ssh nynuc \
-  'cd /mnt/qnap/media/plurx-perf2/bench-media && sha256sum -- 1080p-h264.mkv grainy.mkv' \
-  > out/nynuc-perf2.sha256
+ssh media1 \
+  'cd /mnt/nas/media/plurx-perf2/bench-media && sha256sum -- 1080p-h264.mkv grainy.mkv' \
+  > out/media1-perf2.sha256
 
 (
   cd bench-media
   shasum -a 256 1080p-h264.mkv grainy.mkv
 ) > out/laptop-perf2.sha256
 
-diff -u out/laptop-perf2.sha256 out/nynuc-perf2.sha256
+diff -u out/laptop-perf2.sha256 out/media1-perf2.sha256
 ```
 
-An empty `diff` is the preflight. The harness then parses the nynuc file
+An empty `diff` is the preflight. The harness then parses the media1 file
 fail-closed, records its own SHA-256, and requires every server filename digest
 to equal the pinned local-reference digest. It also records the corpus
 manifest's SHA-256 and requires every server file to be probed, available, and
@@ -3526,11 +3526,11 @@ non-SDR delivery fail.
 
 ```bash
 scripts/bench rate-control \
-  --base http://nynuc:32400 \
+  --base http://media1:32400 \
   --token "$PLURX_ADMIN_TOKEN" \
   --library "$PLURX_FIXTURE_LIBRARY_ID" \
   --corpus scripts/perf2-rate-control-n1-corpus.json \
-  --server-sha256-manifest out/nynuc-perf2.sha256 \
+  --server-sha256-manifest out/media1-perf2.sha256 \
   --modes vbr,qvbr \
   --vmaf-ffmpeg /opt/homebrew/Cellar/ffmpeg/8.1.2_1/bin/ffmpeg \
   --vmaf-model vmaf_v0.6.1 \
@@ -3552,7 +3552,7 @@ Omitting `--quality` explicitly sends and verifies
 `transcode_quality: null` for both captures; it does not preserve a preexisting
 override. The original pair is still restored in the final cleanup path.
 
-The 2026-08-14 nynuc QSV acceptance used deployed build
+The 2026-08-14 media1 QSV acceptance used deployed build
 `v0.2.7-167-gb6aaed6` and selected default 22. The no-override run passed with
 these results:
 
@@ -3610,14 +3610,14 @@ rollback_body="$(jq -c \
 
 curl -fsS \
   -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
-  http://nynuc:32400/api/v1/system \
+  http://media1:32400/api/v1/system \
   | jq -e '.active_transcodes == 0'
 
 curl -fsS -X PUT \
   -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   --data "$rollback_body" \
-  http://nynuc:32400/api/v1/settings \
+  http://media1:32400/api/v1/settings \
   | jq --argjson expected "$rollback_body" -e \
       '.transcode_rate_mode == $expected.transcode_rate_mode and
        .transcode_quality == $expected.transcode_quality'
@@ -3665,7 +3665,7 @@ server/build/Jellyfin-FFmpeg/encoder identity, and scoring-only FFmpeg
 path/build/configuration/hash/model/filter fingerprint. Each capture requires a
 stable status encoder matching StartResponse and `/system.encoder_selected`;
 the two modes must also use the same encoder per fixture. This prevents a
-stable software fallback from masquerading as nynuc QSV evidence. VBR and the
+stable software fallback from masquerading as media1 QSV evidence. VBR and the
 requested quality-mode capture must also advertise identical requested/rung
 height, total, peak, and derived nominal/audio/max/buffer facts. An inflated
 quality-mode cap is not an equal comparison. Peak rate uses the same
@@ -4208,7 +4208,7 @@ curl -s -H "Authorization: Bearer $TOKEN" $HOST/api/v1/settings \
 # 2. Configure the device. The owner is a node id from /api/v1/server.
 curl -s -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"live_tv_config_generation":0,
-       "live_tv_device_ipv4":"192.168.4.20",
+       "live_tv_device_ipv4":"10.42.4.20",
        "live_tv_owner_node_id":"<node id of the machine next to the tuner>",
        "live_tv_max_sessions":2,
        "live_tv_output_height":720}' \
@@ -4478,7 +4478,7 @@ on ports 80 and 5004 — which is honest about the protocol and cannot be honest
 about a tuner. For the numbers that only hardware knows:
 
 ```bash
-make live-tv-hardware-check DEVICE=192.168.4.20 TUNERS=2
+make live-tv-hardware-check DEVICE=10.42.4.20 TUNERS=2
 ```
 
 It boots a throwaway server (nothing you are running is touched), occupies at

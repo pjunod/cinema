@@ -258,7 +258,7 @@ matches the CPU reference picture, beats it on speed) all execute per node.
 A Windows driver that can't reproduce the claim falls back to software —
 the same rule as everywhere. **No family is enabled on Windows by editing a
 table; it is enabled by running the probes on real hardware and recording
-the measurement in the PR**, exactly like `hevc_qsv`'s nynuc numbers.
+the measurement in the PR**, exactly like `hevc_qsv`'s media1 numbers.
 Recommend `PLURX_FFMPEG` pointed at jellyfin-ffmpeg's Windows build in all
 docs; stock gyan/BtbN builds carry NVENC/QSV/AMF too but not the tonemapx
 filter the HDR chain uses.
@@ -350,7 +350,7 @@ a documented manual check).
 
 NVENC and QSV on real Windows hardware: boot probes green, forced-IDR probe
 confirms 2-second segments (not 10.4), tone-map gate selects or refuses the
-hw graph honestly, and the numbers go in the PR the way hevc_qsv's nynuc
+hw graph honestly, and the numbers go in the PR the way hevc_qsv's media1
 numbers did. Needs a Windows box with an NVIDIA card and one with an Intel
 iGPU — see §8.
 

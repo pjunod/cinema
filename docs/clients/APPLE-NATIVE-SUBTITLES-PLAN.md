@@ -29,7 +29,7 @@ took, and record why.
 | Ref | Commit | What it is |
 |---|---|---|
 | `origin/agent/native-apple-subtitles` | `f35ada1` | The feature branch: all client work + docs. This plan lives here. |
-| `origin/main` = `deploy/native-apple-subtitles` | `787eaa6` | Production server, deployed on `nynuc` · `m6` · `nuc3` (`nuc4` blocked by Plex on the port, accepted) |
+| `origin/main` = `deploy/native-apple-subtitles` | `787eaa6` | Production server, deployed on `media1` · `lab6` · `lab3` (`lab4` blocked by Plex on the port, accepted) |
 | merge-base of the two | `a1d1dd2` | Where the lines diverged |
 | local `main` | `4bb7dd6` | `origin/main` + the status-page commit, **unpushed** |
 | local `agent/native-apple-subtitles` | was `f8655c1` | Advanced to carry this plan's commit |
@@ -246,7 +246,7 @@ milestone whose files they touch.
 | P2-7 | `PlayerController.swift:302` | `direct = … && !hasNativeSubtitles` abolishes true direct play whenever any native track exists, even with subs Off forever — every such play becomes a copy session, and on Bedroom today that path degrades to compat transcode (`-12927`) → **decided by Paul 2026-08-02: stay direct until the first native selection**, accepting one reopen at that boundary. Landed in M1 (§5.1); see §2.5.1 |
 | P2-8 | `PlayerController.swift:133,581-587` | `appliesMediaSelectionCriteriaAutomatically = true` + legible criteria lets AVPlayer auto-enable a rendition before the explicit selection lands: transient double subtitles on burn sessions whose file also has same-language text → apply selection before `play()`, or own selection fully with criteria off |
 | P2-9 | `PlayerController.swift:621-647` | Untagged-language tracks are never auto-selectable (`languageCode(nil)` ≠ pref), diverging from the server's shared policy ("untagged tracks remain eligible", `tracks.rs:178`) → decide and align both sides; failure direction today is safe (no subtitle) |
-| P2-10 | `crates/plurxd/src/web/index.html:1256` | "Scan this from the **Plurx** iPhone…" hardcodes the brand in user-facing text; this tree brands as `${APP_NAME}` ("cinemarr") → interpolate APP_NAME. (`.connectqr img` background `#fff` is a deliberate QR quiet zone — keep, comment it) |
+| P2-10 | `crates/plurxd/src/web/index.html:1256` | "Scan this from the **Plurx** iPhone…" hardcodes the brand in user-facing text; this tree brands as `${APP_NAME}` ("noirr") → interpolate APP_NAME. (`.connectqr img` background `#fff` is a deliberate QR quiet zone — keep, comment it) |
 | P2-11 | `hls.rs:563-571` | Two forced tracks in one language both get FORCED=YES + AUTOSELECT=NO; Apple's authoring rules require AUTOSELECT=YES on forced renditions → candidate rung for the §5.4 ladder, not a direct change |
 
 ### 2.5.1 The P2-7 decision — direct play survives a file that has text tracks
@@ -441,10 +441,10 @@ Either way §5.1 reaches `origin/main` before §5.4 starts.
 ### 4.3 Externalities the routes share
 
 - **Ansible repo:** the inventory changes (nodes pinned to `origin/main`,
-  `nuc3` added) are local commits `26d8b2b` + `1d6ac4c` in `~/code/ansible`
+  `lab3` added) are local commits `26d8b2b` + `1d6ac4c` in `~/code/ansible`
   — a repo with **no git remote**. They exist on Paul's machine only. Deploys
   work; just know the pin lives outside this repo, and say so when you
-  deploy. `nuc4`'s port conflict with Plex is accepted — do not report it
+  deploy. `lab4`'s port conflict with Plex is accepted — do not report it
   as a running plurx.
 - **Local `main` is ahead of `origin/main`** by the status-page commit(s);
   pushing main publishes those too. Fine — just expected.

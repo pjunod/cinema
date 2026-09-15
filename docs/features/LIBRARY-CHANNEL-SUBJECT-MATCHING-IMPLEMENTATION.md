@@ -677,7 +677,7 @@ existing history convention.
 | P1 | Complete | Own clone `/private/tmp/plurx-subject-matching-20260914`; base `fd70676b`. Rust 1.97.1 compiler loop, tracked formatting/Clippy/JavaScript syntax hook pass. Subject presence compatibility and editor repairs integrated. Local `qwen3:4b` installed. No tests run yet. |
 | P2 | Implemented; focused regressions written | SQLite migration 58 / Hiqlite 38; shared job/cache SQL, global renewable claim, revision and publication fences, exact metadata/profile cache keys, bounded retention. Preview create acknowledges without catalogue or inference work. Saved definitions queue durably. |
 | P3 | Implemented; integration compilation in progress | Web, Apple and Android subject editors, progress/results/manual overrides, shared wire fixture. Apple build 157: iOS and tvOS compile passed. Android build 97: app and JVM test sources compile passed. No behavior tests run yet. |
-| P4 | Review complete; final validation in progress | One adversarial review of `394d03f2` found 12 issues, repaired as author. Main `11ca0573` integrated. [Draft PR #313](http://192.168.4.7:3000/noirr/plurx/pulls/313); one adversarial review next, then repairs and final fast-lane qualification. No deployment authorized. |
+| P4 | Review complete; final validation in progress | One adversarial review of `394d03f2` found 12 issues, repaired as author. Main `11ca0573` integrated. [Draft PR #313](http://forge.lan:3000/noirr/plurx/pulls/313); one adversarial review next, then repairs and final fast-lane qualification. No deployment authorized. |
 
 **Execution policy:** Paul explicitly confirmed on 2026-09-14 that his latest
 instructions supersede the older early-test/task-PR steps below. Compilation,
@@ -844,6 +844,6 @@ retry; it is not silently treated as a negative decision.
 
 All twelve adversarial findings were addressed by the author. Final gate status,
 review closure and the merged commit are maintained in
-[PR #313](http://192.168.4.7:3000/noirr/plurx/pulls/313), which is the authoritative
+[PR #313](http://forge.lan:3000/noirr/plurx/pulls/313), which is the authoritative
 live promotion receipt. Release uploads, deployment and physical-device/full-
 library performance observations are separate from this implementation merge.

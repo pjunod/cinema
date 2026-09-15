@@ -549,7 +549,7 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
             "canonicalization",
         })
         nodes = {node["name"]: node for node in fleet["nodes"]}
-        self.assertEqual(set(nodes), {"nynuc", "m6", "nuc4", "nuc3"})
+        self.assertEqual(set(nodes), {"media1", "lab6", "lab4", "lab3"})
         for name, node in nodes.items():
             with self.subTest(node=name):
                 for field in (
@@ -584,7 +584,7 @@ class DecoderSelectionInventoryTests(unittest.TestCase):
             set(CONTRACT_FIELDS) - {"subordinate_message"}, set(contract)
         )
         self.assertEqual(contract["id"], RAWVIDEO_CONTRACT)
-        self.assertEqual(contract["host"], "nynuc")
+        self.assertEqual(contract["host"], "media1")
         self.assertEqual(len(contract["binary_sha256"]), 64)
         self.assertEqual(len(contract["buildconf_sha256"]), 64)
         fixture = FIXTURES / contract["fixture"]

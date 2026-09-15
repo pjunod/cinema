@@ -46,7 +46,7 @@ an operator action, not an optimization hidden inside a deploy.
 ```text
 live incident
      │
-     ├── damaged `nuc4` WAL / Raft state
+     ├── damaged `lab4` WAL / Raft state
      │        │
      │        └── leader confirmation retries ──▶ request reaches 3 s timeout
      │
@@ -120,7 +120,7 @@ implementation time.
 
 ### 2.1 Facts the implementation must not turn back into hypotheses
 
-- `nuc4` repeatedly reported `LogIndexNotFound` for index `520000`.
+- `lab4` repeatedly reported `LogIndexNotFound` for index `520000`.
 - The leader repeatedly failed leadership confirmation against Raft id `3`.
 - The observed route delays cluster around the Store timeout, not ordinary LAN
   consensus cost.
@@ -439,11 +439,11 @@ merging them without their individual gates is not.
 This milestone changes production availability and membership. The plan is
 not authorization to execute it.
 
-### 5.1 Preflight proves the remaining majority before touching `nuc4`
+### 5.1 Preflight proves the remaining majority before touching `lab4`
 
 From direct, node-specific HTTP addresses:
 
-1. Confirm the roster still maps `nuc4` to Raft id `3` and another voter is
+1. Confirm the roster still maps `lab4` to Raft id `3` and another voter is
    leader.
 2. Confirm the other three voters run attributable builds and answer
    `/healthz` plus `/readyz` twice, ten seconds apart.
@@ -455,7 +455,7 @@ From direct, node-specific HTTP addresses:
    same replicated Store path. If any probe pass still reports
    `membership_internal`, or the Store histogram records failures during the
    preflight window, stop: the removal path is not healthy enough to commit.
-5. Stop new offline-package admissions to `nuc4` at the routing layer and let
+5. Stop new offline-package admissions to `lab4` at the routing layer and let
    active transfers finish. The removal API still owns the final resolution;
    routing quiets the race rather than bypassing it.
 6. Open a maintenance window. Three surviving voters are exactly the quorum of
@@ -475,7 +475,7 @@ without including tokens or media paths.
 
 ### 5.2 Preserve a stopped forensic copy before membership changes
 
-Stop only `nuc4`, confirm its process and data-directory lock are gone, then
+Stop only `lab4`, confirm its process and data-directory lock are gone, then
 copy its complete authoritative set described in
 [OPERATIONS.md](../OPERATIONS.md): `hiqlite/` · `node.id` · `membership.json` ·
 cluster secrets · activation/readdress markers · migration state · credential
@@ -510,13 +510,13 @@ diagnostics before retrying. The membership implementation is designed to
 reconcile an interrupted outcome; an operator must not infer failure from one
 lost response.
 
-**Irreversible boundary:** once the membership change commits, `nuc4`'s old
+**Irreversible boundary:** once the membership change commits, `lab4`'s old
 identity and directory are tombstoned. The rollback is a fresh join with a new
 token and fresh directory, not restarting the old copy.
 
 **Acceptance:** the committed roster contains exactly three voters, no pending
 removal remains, offline work has moved or failed with its documented code,
-and the stopped `nuc4` process cannot re-enter membership.
+and the stopped `lab4` process cannot re-enter membership.
 
 ### 5.4 Hold at three voters and measure before adding anything
 
@@ -821,7 +821,7 @@ remains after a route shell or prior snapshot exists.
 
 | Claim | Deterministic evidence | Physical or operational evidence |
 |---|---|---|
-| WAL purge survives crashes | Vendor failpoint tests · multi-cycle follower restart scenario. | Preserved `nuc4` inspection matches or contradicts the reproduced invariant. |
+| WAL purge survives crashes | Vendor failpoint tests · multi-cycle follower restart scenario. | Preserved `lab4` inspection matches or contradicts the reproduced invariant. |
 | Three retained voters are healthy | Cluster convergence and restart tests. | Ten-minute mixed load with zero established failure signatures. |
 | Health wording is truthful | Rust classifier table tests · shipped JS text tests. | Stop/fault one follower; panel warns while heartbeat may remain recent. |
 | Probe loop does not storm | Paused-time cadence and log-summary tests. | Ten-minute injected Store failure has bounded warnings and recovers promptly. |

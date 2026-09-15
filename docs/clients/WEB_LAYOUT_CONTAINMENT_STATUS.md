@@ -1,7 +1,7 @@
 # Web layout containment — live delivery status
 
 **Status:** live delivery state is recorded on authoritative
-[Forgejo PR #4](http://192.168.4.7:3000/noirr/plurx/pulls/4) ·
+[Forgejo PR #4](http://forge.lan:3000/noirr/plurx/pulls/4) ·
 **Updated:** 2026-09-04
 
 This page tracks the systemic fix for intrinsic-width content escaping its

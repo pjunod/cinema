@@ -1,8 +1,8 @@
 # plurx
 
-[![ci](http://192.168.4.7:3000/noirr/plurx/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](http://192.168.4.7:3000/noirr/plurx/actions)
-[![lint](http://192.168.4.7:3000/noirr/plurx/actions/workflows/lint.yml/badge.svg)](http://192.168.4.7:3000/noirr/plurx/actions)
-[![unit coverage](http://192.168.4.7:3000/noirr/plurx/raw/branch/badges/coverage.svg)](http://192.168.4.7:3000/noirr/plurx/actions)
+[![ci](http://forge.lan:3000/noirr/plurx/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](http://forge.lan:3000/noirr/plurx/actions)
+[![lint](http://forge.lan:3000/noirr/plurx/actions/workflows/lint.yml/badge.svg)](http://forge.lan:3000/noirr/plurx/actions)
+[![unit coverage](http://forge.lan:3000/noirr/plurx/raw/branch/badges/coverage.svg)](http://forge.lan:3000/noirr/plurx/actions)
 
 A self-hosted media server and player in the spirit of **old-school Plex** —
 before the streaming tiles, the ads, and the cloud accounts. Your media, your
@@ -263,7 +263,7 @@ transcode and stream tests spawn ffmpeg for real. CI installs them for the same
 reason.
 
 ```bash
-git clone http://192.168.4.7:3000/noirr/plurx.git && cd plurx
+git clone http://forge.lan:3000/noirr/plurx.git && cd plurx
 make run          # build + serve http://localhost:32400  (cargo run -p plurxd)
 make check        # history + operations + catalog + Rust — mandatory baseline
 make history-check # audit every corrective commit against current evidence

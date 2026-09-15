@@ -158,7 +158,7 @@ class DvrMarksTest {
              "capture_start":1789000740,"capture_end":1789002720,
              "title":"Kitchen Table","episode":"S3E14","state":"scheduled",
              "attempt":0,"gap_s":0,"late_start_s":0,"bytes":0,
-             "tuner_owner_node_id":"nynuc","path":"/20t/dvr/x.ts",
+             "tuner_owner_node_id":"media1","path":"/20t/dvr/x.ts",
              "created_at_ms":1,"updated_at_ms":2}
             """.trimIndent(),
         )

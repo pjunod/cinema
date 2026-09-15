@@ -3,7 +3,7 @@
 #
 #   sudo PLURX_TOKEN=<forgejo token> bash -euc 'f=$(mktemp); curl -fsSL \
 #     -H "Authorization: token $PLURX_TOKEN" \
-#     http://192.168.4.7:3000/noirr/plurx/raw/branch/main/deploy/runner-janitor/bootstrap \
+#     http://forge.lan:3000/noirr/plurx/raw/branch/main/deploy/runner-janitor/bootstrap \
 #     -o "$f"; bash "$f"; rm -f "$f"'
 #
 # The shape of that command is not decoration either, and getting it wrong is
@@ -38,7 +38,7 @@
 # requests, which is the only version of this check that can fail.
 set -euo pipefail
 
-FORGE=${PLURX_FORGE:-http://192.168.4.7:3000}
+FORGE=${PLURX_FORGE:-http://forge.lan:3000}
 REF=${PLURX_REF:-main}
 TOKEN=${PLURX_TOKEN:-}
 base="$FORGE/noirr/plurx/raw/branch/$REF/deploy/runner-janitor"

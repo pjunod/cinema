@@ -113,7 +113,7 @@ through M3; M4 *is* Phase 4's transcode chapter and waits for its plumbing.
   takes a 4K HDR session below realtime.
 - ✅ **M2 complete 2026-07-29:** GPU tone-map candidate graphs, the real-HDR
   boot probe, per-session routing and downgrade, and racing-safe hardware
-  admission all shipped. The nynuc acceptance run measured the QSV path at
+  admission all shipped. The media1 acceptance run measured the QSV path at
   4.89× the CPU chain while holding the bitrate bound.
 - ✅ **M3 complete 2026-07-28:** the resumable pre-transcode producer, LRU
   budget, viewer preemption, cache-hit VOD serving, offline-package pinning,
@@ -249,7 +249,7 @@ Each client ships with: device profile upstreamed, failover retry logic, and the
 - Trickplay thumbnails (BIF/tiles), theme music, extras UX
 - **Jellyfin-compat façade spike** (CLIENTS.md Tier 3 — the legitimate route to Infuse et al.)
 - plex.tv-emulation Tier 2: revisit only if still worth it
-- Synology/QNAP native packages; macOS/Windows server builds
+- Synology/NAS native packages; macOS/Windows server builds
 - Music & photos: reopen the question with the data model that exists by then
 
 ## Standing rules

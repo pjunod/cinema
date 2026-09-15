@@ -57,7 +57,7 @@ at `test -c /dev/kvm`. That was an incompatible runner, not an Android test
 failure. The same commit is now rerunning as attempt 2 in documented
 `self-hosted` mode.
 
-The only uniquely labeled Store runner is `gha-nuc1-general-01`. It was
+The only uniquely labeled Store runner is `gha-lab1-general-01`. It was
 offline, then returned online on 2026-09-02. Do not bypass its required Store
 job. The repository deliberately uses `ci-store` to keep this heavy stateful
 suite off production voters.
@@ -80,7 +80,7 @@ The exact committed tree at `7e002460` then passed the complete local gate
 with pinned Rust 1.97.1:
 
 ```bash
-env PATH=/Users/pjunod/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:/Users/pjunod/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin \
+env PATH=~/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:~/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin \
   make check
 ```
 
@@ -142,7 +142,7 @@ Work from `/private/tmp/plurx-m7-r-m2`. The macOS system Git has crashed in
 `libiconv` on this machine; use the bundled Git first on `PATH`:
 
 ```bash
-export PATH=/Users/pjunod/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:/usr/bin:/bin
+export PATH=~/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:/usr/bin:/bin
 ```
 
 Poll the current attempt without dumping every successful job:
@@ -206,7 +206,7 @@ git fetch origin main
 git worktree add -b codex/m7-r-m3 \
   /private/tmp/plurx-m7-r-m3 origin/main
 cd /private/tmp/plurx-m7-r-m3
-/Users/pjunod/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin/rustc --version
+~/.rustup/toolchains/1.97.1-aarch64-apple-darwin/bin/rustc --version
 ```
 
 The version must be Rust 1.97.1 before any Rust edit. If that compiler loop is
@@ -467,7 +467,7 @@ hard" is not a stop condition; violating the contract is.
 
 ```bash
 cd /private/tmp/plurx-m7-r-m2
-export PATH=/Users/pjunod/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:/usr/bin:/bin
+export PATH=~/.cache/codex-runtimes/codex-primary-runtime/dependencies/bin/fallback:/usr/bin:/bin
 
 git status -sb
 gh variable get CI_RUNNER_MODE --repo pjunod/plurx

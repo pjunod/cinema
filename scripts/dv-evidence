@@ -15,8 +15,8 @@
 # the media library and never changes server configuration.
 #
 # Usage:
-#   scripts/dv-evidence --server http://nynuc:8080 --token <bearer> --file 5615
-#   scripts/dv-evidence -s http://nynuc:8080 -t "$PLURX_TOKEN" -f 5615 -o ./ev
+#   scripts/dv-evidence --server http://media1:8080 --token <bearer> --file 5615
+#   scripts/dv-evidence -s http://media1:8080 -t "$PLURX_TOKEN" -f 5615 -o ./ev
 #
 # Then, on the Apple TV, play the two URLs this prints and capture the device
 # log (the script tells you the exact predicate). Attach the whole output
@@ -49,7 +49,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$SERVER" ]  || die "--server is required (e.g. http://nynuc:8080)"
+[ -n "$SERVER" ]  || die "--server is required (e.g. http://media1:8080)"
 [ -n "$TOKEN" ]   || die "--token is required (a bearer token for an account that can play)"
 [ -n "$FILE_ID" ] || die "--file is required (the media file id; the DV regression case is 5615)"
 

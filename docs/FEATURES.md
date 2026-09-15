@@ -50,7 +50,7 @@ books, and home media.
   forced into TVDB season shapes. An episode whose filename carries nothing —
   a hash-named `.mkv` inside `Show.S01E06.480p.x265-GROUP/` — takes its marker
   from the folder holding it, since that is where such releases put it. The
-  crammed DVD-era form is read too (`drawn.together.102` → S01E02): standalone
+  crammed DVD-era form is read too (`paper.moons.102` → S01E02): standalone
   three-digit token, seasons 1–9, with resolution and codec numbers excluded —
   and never for anime, where `- 102` is absolute episode 102.
 - **Extras are left out, by name.** A `Season NN` directory has no episode to

@@ -10732,8 +10732,8 @@ mod tests {
                     rusqlite::params![
                         "live",
                         1_i64,
-                        "192.168.5.236:32401",
-                        "192.168.5.236:32402",
+                        "10.42.5.236:32401",
+                        "10.42.5.236:32402",
                         30_i64,
                         "learner"
                     ],
@@ -10759,8 +10759,8 @@ mod tests {
         assert_eq!(
             live,
             (
-                "192.168.5.236:32401".to_owned(),
-                "192.168.5.236:32402".to_owned(),
+                "10.42.5.236:32401".to_owned(),
+                "10.42.5.236:32402".to_owned(),
                 30,
                 "voter".to_owned(),
             ),
@@ -16828,7 +16828,7 @@ mod tests {
             short_hostname("living-room.example.net"),
             Some("living-room".to_owned())
         );
-        assert_eq!(short_hostname("nuc4.local."), Some("nuc4".to_owned()));
+        assert_eq!(short_hostname("lab4.local."), Some("lab4".to_owned()));
         assert_eq!(short_hostname("192.0.2.40"), None);
         assert_eq!(membership_hostname("", "plurx-a.lan:32402"), "plurx-a");
         assert_eq!(membership_hostname("", "127.0.0.1:32402"), "unknown-host");
@@ -16846,17 +16846,17 @@ mod tests {
     fn the_roster_names_every_node_it_can_and_omits_the_ones_it_cannot() {
         let named = roster_hostnames(
             vec![
-                hostname_row("node-a", "nuc3.lan", "192.168.4.7:32402"),
+                hostname_row("node-a", "lab3.lan", "10.42.4.7:32402"),
                 hostname_row("node-b", "", "m6.lan:32402"),
                 // No reported name, and an address that is a bare loopback IP:
                 // nothing here names a machine.
                 hostname_row("node-c", "", "127.0.0.1:32402"),
             ],
             "node-a",
-            "nuc3",
+            "lab3",
         );
-        assert_eq!(named.get("node-a").map(String::as_str), Some("nuc3"));
-        assert_eq!(named.get("node-b").map(String::as_str), Some("m6"));
+        assert_eq!(named.get("node-a").map(String::as_str), Some("lab3"));
+        assert_eq!(named.get("node-b").map(String::as_str), Some("lab6"));
         // The point of omitting it: a caller holding "node-c" shows that id,
         // which at least identifies the machine, rather than a sentinel that
         // names every unnamed node identically.
@@ -16869,22 +16869,22 @@ mod tests {
         // The local row is written by the heartbeat, so for the first heartbeat
         // interval after start the table has no name for this node at all.
         let named = roster_hostnames(
-            vec![hostname_row("node-b", "m6.lan", "192.168.4.14:32402")],
+            vec![hostname_row("node-b", "m6.lan", "10.42.4.14:32402")],
             "node-a",
-            "nuc3",
+            "lab3",
         );
-        assert_eq!(named.get("node-a").map(String::as_str), Some("nuc3"));
-        assert_eq!(named.get("node-b").map(String::as_str), Some("m6"));
+        assert_eq!(named.get("node-a").map(String::as_str), Some("lab3"));
+        assert_eq!(named.get("node-b").map(String::as_str), Some("lab6"));
     }
 
     #[test]
     fn the_local_node_prefers_its_own_name_over_a_stale_replicated_row() {
         let named = roster_hostnames(
-            vec![hostname_row("node-a", "old-name", "192.168.4.7:32402")],
+            vec![hostname_row("node-a", "old-name", "10.42.4.7:32402")],
             "node-a",
-            "nuc3",
+            "lab3",
         );
-        assert_eq!(named.get("node-a").map(String::as_str), Some("nuc3"));
+        assert_eq!(named.get("node-a").map(String::as_str), Some("lab3"));
     }
 
     #[test]
@@ -17010,22 +17010,22 @@ mod tests {
     #[test]
     fn reverse_dns_supplies_a_short_name_for_an_ip_only_node() {
         let hostname =
-            membership_hostname_with_lookup("unknown-host", "192.168.4.7:32402", |address| {
-                assert_eq!(address, "192.168.4.7".parse::<IpAddr>().expect("ip"));
-                Some("nuc3.home.arpa".to_owned())
+            membership_hostname_with_lookup("unknown-host", "10.42.4.7:32402", |address| {
+                assert_eq!(address, "10.42.4.7".parse::<IpAddr>().expect("ip"));
+                Some("lab3.home.arpa".to_owned())
             });
 
-        assert_eq!(hostname, "nuc3");
+        assert_eq!(hostname, "lab3");
     }
 
     #[test]
     fn reported_hostname_wins_without_a_reverse_lookup() {
         let hostname =
-            membership_hostname_with_lookup("nuc4.example.net", "192.168.4.8:32402", |_| {
+            membership_hostname_with_lookup("lab4.example.net", "10.42.4.8:32402", |_| {
                 panic!("reported hostnames must not trigger reverse DNS")
             });
 
-        assert_eq!(hostname, "nuc4");
+        assert_eq!(hostname, "lab4");
     }
 
     #[test]

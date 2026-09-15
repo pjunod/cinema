@@ -8,10 +8,10 @@ This page tracks the bounded navigation adapter requested by Paul.
 ## Checkout and decisions
 
 Own clone: `/private/tmp/plurx-ripwire`. Integration: `effort/ripwire`.
-[Adapter task PR #244](http://192.168.4.7:3000/noirr/plurx/pulls/244) merged
-into the effort. [Pilot task PR #247](http://192.168.4.7:3000/noirr/plurx/pulls/247)
+[Adapter task PR #244](http://forge.lan:3000/noirr/plurx/pulls/244) merged
+into the effort. [Pilot task PR #247](http://forge.lan:3000/noirr/plurx/pulls/247)
 merged into the effort. Task merges are frozen. Main `d9c15581` is
-integrated; [main PR #248](http://192.168.4.7:3000/noirr/plurx/pulls/248) is draft with
+integrated; [main PR #248](http://forge.lan:3000/noirr/plurx/pulls/248) is draft with
 its single adversarial review addressed.
 Initial main: `4519f87aa17def278dc4ad6c08a411e7829c2ec4`.
 The user's working tree is untouched. No hooks installed.

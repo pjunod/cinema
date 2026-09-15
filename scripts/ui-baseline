@@ -23,7 +23,7 @@ So this script now sweeps every registered layout and it compares.
     scripts/ui-baseline --self-host --check      # capture, then FAIL on drift
     scripts/ui-baseline --self-host --update     # rewrite the committed golden
     scripts/ui-baseline --self-host --baseline target/ui-baseline-before
-    scripts/ui-baseline --base-url http://nynuc:32400 --token "$PLURX_TOKEN"
+    scripts/ui-baseline --base-url http://media1:32400 --token "$PLURX_TOKEN"
 
 `--self-host` boots a throwaway plurxd on a scratch data dir, seeds it with a
 tiny generated library (ffmpeg, deterministic bytes, cached between runs),

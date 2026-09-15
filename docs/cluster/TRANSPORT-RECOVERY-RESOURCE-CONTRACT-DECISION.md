@@ -104,7 +104,7 @@ about 2% per campaign over the six persistent node-resources of two roles;
 at strict alternation, which is what the CI runner's four measured samples
 show, it is zero. The two edges fail on opposite hosts. A slow runner that
 mostly lands high is exposed at the floor; a fast one that mostly lands low
-— nuc3 sampled `16/31` on the warmup and cycles 1 and 2, then `19/35` on
+— lab3 sampled `16/31` on the warmup and cycles 1 and 2, then `19/35` on
 cycle 3 — is exposed at the ceiling, and needs four slow drains in the
 closing half after none in the opening: at one slow drain in five, 1.3% per
 role, about 2.6% per campaign. The other wobble in the record, 34 against 35 owned tasks on node 1's

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>cinemarr — web layout mockups</title>
+<title>noirr — web layout mockups</title>
 <style>
   /* ============ mockup viewer chrome (not part of the proposed UI) ============ */
   *{box-sizing:border-box}
@@ -460,7 +460,7 @@ const ICONS={
 /* ================= layout: classic ================= */
 function chromeClassic(active,body){
   return `<header class="c-top">
-    <span class="wm"><span class="t">cinemarr</span></span>
+    <span class="wm"><span class="t">noirr</span></span>
     <nav class="c-nav"><a class="${active==="home"?"on":""}">Home</a><a>Activity</a><a>Settings</a></nav>
     <span style="flex:1"></span>
     <span class="c-scan"><i></i>Scanning Movies · 182 of 210 files · 86%</span>
@@ -521,7 +521,7 @@ function chromeCatalog(active,body){
   const lib=(ic,nm,n,on)=>`<a class="${on?"on":""}">${ICONS[ic]}${nm}<span class="n">${n}</span></a>`;
   return `<div class="p-shell">
   <aside class="p-side">
-    <div class="p-brand"><span class="wm"><span class="t">cinemarr</span></span></div>
+    <div class="p-brand"><span class="wm"><span class="t">noirr</span></span></div>
     <input class="searchbox" placeholder="Search">
     <nav class="p-nav">
       <a class="${active==="home"?"on":""}">${ICONS.home}Home</a>
@@ -602,7 +602,7 @@ function catalogDetail(){
 
 /* ================= layout: theater ================= */
 function theaterTop(active){
-  return `<div class="t-top"><span class="wm"><span class="t">cinemarr</span></span>
+  return `<div class="t-top"><span class="wm"><span class="t">noirr</span></span>
     <nav><a class="${active==="home"?"on":""}">Home</a><a>Movies</a><a>Shows</a><a>Anime</a></nav>
     <div class="ic"><span>⌕</span><span>◐</span><span>paul</span></div></div>`;
 }
@@ -666,7 +666,7 @@ function theaterDetail(){
 
 /* ================= layout: deck ================= */
 function deckRail(active){
-  return `<nav class="d-rail"><span class="wm"><span class="t">cinemarr</span></span>
+  return `<nav class="d-rail"><span class="wm"><span class="t">noirr</span></span>
     <a class="${active==="home"?"on":""}">home</a>
     <div class="sec">libraries</div>
     <a class="${active==="movies"?"on":""}">movies<span class="n">210</span></a>
@@ -854,7 +854,7 @@ function bar(){
     <div class="grp"><span class="lbl">screen</span>${Object.keys(SCREENS).map(k=>b("screen",k,SCREENS[k])).join("")}</div>
     <div class="grp"><span class="lbl">theme</span>${Object.keys(THEMES).map(k=>b("theme",k,THEMES[k].name)).join("")}</div>
     <div class="grp"><span class="lbl">mode</span>${b("mode","dark","Dark")}${b("mode","light","Light")} ${modeNote}</div>
-    <span class="note">cinemarr ui mockups — fictional library, no real titles</span>`;
+    <span class="note">noirr ui mockups — fictional library, no real titles</span>`;
 }
 function setS(k,v){STATE[k]=v;render();}
 function render(){

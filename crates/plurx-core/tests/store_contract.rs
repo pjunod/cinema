@@ -15375,7 +15375,7 @@ async fn sqlite_import_refuses_unrecoverable_committed_claims_before_raft_and_re
 /// The fixture is built to defeat a row count on purpose: the oversized band's
 /// rows are large enough that [`SUPERSEDED_ROW_CHUNK_BOUND`] adjacent ones
 /// exceed the production WAL payload capacity, which is exactly the entry that
-/// panicked node `m6` into an HTTP-healthy unreplicated boot (#290). That
+/// panicked node `lab6` into an HTTP-healthy unreplicated boot (#290). That
 /// premise is asserted where the fixture sizes are declared, so passing means
 /// the builder split on bytes rather than that the row count was favourable.
 /// The #279 band is retained alongside it: the byte bound must not regress the
@@ -27654,7 +27654,7 @@ async fn a_stop_request_survives_the_progress_writes_racing_it_and_is_idempotent
                 reason: None,
                 patch: DvrStatePatch::Started {
                     attempt: 1,
-                    tuner_owner_node_id: "nynuc".to_owned(),
+                    tuner_owner_node_id: "media1".to_owned(),
                     started_at_ms: 4_000,
                     late_start_s: 0,
                     path: "/20t/dvr/Kitchen Table/a.ts".to_owned(),
