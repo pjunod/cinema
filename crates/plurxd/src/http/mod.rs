@@ -11677,7 +11677,7 @@ mod tests {
         assert_eq!(before["offline_max_gb"], 25);
         assert_eq!(before["offline_max_gb_per_user"], 15);
         assert_eq!(before["offline_max_rows_per_user"], 50);
-        assert_eq!(before["hls_typeless_sliding"], false);
+        assert_eq!(before["hls_typeless_sliding"], true);
         // The artwork sweep is the one job that reads back as on before
         // anybody has touched it. A 0 here would mean a fresh install never
         // repairs a poster it failed to download.
@@ -11691,7 +11691,7 @@ mod tests {
                         "artwork_retry_mins": 0, "offline_enabled": false,
                         "offline_max_gb": 40, "offline_max_gb_per_user": 20,
                         "offline_max_rows_per_user": 75,
-                        "hls_typeless_sliding": true }),
+                        "hls_typeless_sliding": false }),
             ),
         )
         .await;
@@ -11702,7 +11702,10 @@ mod tests {
         assert_eq!(after["offline_max_gb"], 40);
         assert_eq!(after["offline_max_gb_per_user"], 20);
         assert_eq!(after["offline_max_rows_per_user"], 75);
-        assert_eq!(after["hls_typeless_sliding"], true);
+        assert_eq!(
+            after["hls_typeless_sliding"], true,
+            "a legacy setting cannot change the rolling playlist contract"
+        );
         assert_eq!(
             after["artwork_retry_mins"], 0,
             "an explicit 0 must survive the default, or the job cannot be turned off"

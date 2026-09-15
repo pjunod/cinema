@@ -417,13 +417,43 @@ pub(crate) fn converted_dolby_vision_record(
         .map_err(|error| error.to_string())
 }
 
-/// The identity a file's index is keyed by, for this build of ffmpeg.
-pub fn identity_for(file: &MediaFile, video: transcode::CopyVideoOptions) -> SourceIdentity {
+/// Revision of the output-affecting Rust transform behind a converting copy.
+///
+/// FFmpeg never sees this stage: [`crate::dvpipe::Converter`] rewrites the
+/// muxer's fragments after the child emits them.  The recipe identity must
+/// nevertheless move whenever that rewrite changes produced bytes, or a new
+/// binary could consume an index built for the previous transform.  Keep the
+/// token scoped to converting copies so ordinary stripped and preserved
+/// artifacts retain their existing identities.
+pub(crate) const DV_CONVERSION_TRANSFORM_REVISION: &str = "dv-p7-to-p81-rpu-v1";
+
+pub(crate) fn output_transform_identity(
+    file: &MediaFile,
+    video: transcode::CopyVideoOptions,
+) -> Option<&'static str> {
+    (video.converts_dolby_vision() && file.hdr.as_deref() == Some("dolby_vision"))
+        .then_some(DV_CONVERSION_TRANSFORM_REVISION)
+}
+
+fn identity_for_transform(
+    file: &MediaFile,
+    video: transcode::CopyVideoOptions,
+    transform: Option<&str>,
+) -> SourceIdentity {
+    let mut recipe = transcode::copy_video_args(file, video);
+    if let (true, Some(transform)) = (video.converts_dolby_vision(), transform) {
+        recipe.push(format!("--plurx-output-transform={transform}"));
+    }
     SourceIdentity::new(
         file.size.max(0) as u64,
         file.mtime,
-        plurx_core::segplan::argv_fingerprint(&transcode::copy_video_args(file, video)),
+        plurx_core::segplan::argv_fingerprint(&recipe),
     )
+}
+
+/// The identity a file's index is keyed by, for this build of ffmpeg.
+pub fn identity_for(file: &MediaFile, video: transcode::CopyVideoOptions) -> SourceIdentity {
+    identity_for_transform(file, video, output_transform_identity(file, video))
 }
 
 /// Every copy-video pipeline a real client can ask this file for, in the order
@@ -988,6 +1018,60 @@ mod tests {
             Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
         );
         assert_eq!(video_identities(&label_only, None, true, true).len(), 2);
+    }
+
+    /// A transform implemented after FFmpeg must move the index identity even
+    /// when the executable argv is byte-for-byte unchanged.  Ordinary copy
+    /// recipes do not carry that transform and therefore keep their existing
+    /// identities across a conversion revision bump.
+    #[test]
+    fn the_post_mux_transform_revision_is_part_of_only_the_converted_identity() {
+        let mut file = hevc_file(
+            Some("dolby_vision"),
+            Some("Dolby Vision · Profile 7 (HDR10-compatible)"),
+        );
+        file.dolby_vision.profile = Some(7);
+        file.dolby_vision.level = Some(6);
+        file.dolby_vision.bl_compat_id = Some(1);
+
+        let preserved = transcode::CopyVideoOptions::new(true, true);
+        let converted = preserved.with_dolby_vision_conversion(true);
+        let legacy_converted = identity_for_transform(&file, converted, None);
+        let current_converted = identity_for(&file, converted);
+        let next_converted = identity_for_transform(
+            &file,
+            converted,
+            Some("dv-p7-to-p81-rpu-next-test-revision"),
+        );
+
+        assert_ne!(
+            current_converted.argv_fingerprint, legacy_converted.argv_fingerprint,
+            "the Rust transform cannot be represented only by FFmpeg argv"
+        );
+        assert_ne!(
+            current_converted.argv_fingerprint, next_converted.argv_fingerprint,
+            "a byte-affecting transform revision must invalidate its old index"
+        );
+        assert_eq!(
+            identity_for(&file, preserved).argv_fingerprint,
+            identity_for_transform(
+                &file,
+                preserved,
+                Some("dv-p7-to-p81-rpu-next-test-revision")
+            )
+            .argv_fingerprint,
+            "ordinary preserving artifacts remain reusable"
+        );
+
+        let mut plain_hdr10 = file.clone();
+        plain_hdr10.hdr = Some("hdr10".to_owned());
+        plain_hdr10.hdr_format = Some("HDR10".to_owned());
+        plain_hdr10.dolby_vision = Default::default();
+        assert_eq!(
+            identity_for(&plain_hdr10, converted).argv_fingerprint,
+            identity_for_transform(&plain_hdr10, converted, None).argv_fingerprint,
+            "a conversion flag on a non-DV source selects no Rust transform"
+        );
     }
 
     /// The converted stream's configuration record, from the source's facts.

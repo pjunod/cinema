@@ -11,6 +11,7 @@ import org.junit.Test
 import tv.plurx.app.data.CreateSessionReq
 import tv.plurx.app.data.HlsStart
 import tv.plurx.app.data.PlaybackQuality
+import tv.plurx.app.data.ReopenReason
 
 /** The same transport transition, asynchronous create, and final attachment
  * boundary used by Controller. Only the server and Media3 mutations are fake. */
@@ -20,6 +21,14 @@ class PlaybackRequestOwnershipTest {
         assertTrue(loadedWaitNeedsNativeReevaluation(142_000, 120_000))
         assertFalse(loadedWaitNeedsNativeReevaluation(130_000, 120_000))
         assertFalse(loadedWaitNeedsNativeReevaluation(119_000, 120_000))
+    }
+
+    @Test
+    fun timerOnlyPresentationWaitDoesNotInventDecoderFailure() {
+        val evidence = presentationStallEvidence()
+        assertEquals(DecoderState.UNKNOWN, evidence.decoderState)
+        assertNull(evidence.errorCode)
+        assertNull(evidence.errorDetail)
     }
 
     @Test
@@ -99,8 +108,16 @@ class PlaybackRequestOwnershipTest {
                 releaseSession = released::add,
             )
             val create = async {
-                if (route == "create") coordinator.create(body()) { guard.isCurrent(request) }
-                else coordinator.reopenAfterStall(body()) { guard.isCurrent(request) }
+                val requestBody = if (route == "fallback") {
+                    body().copy(
+                        previous_session_id = "predecessor",
+                        reopen_reason = ReopenReason.Stall,
+                    )
+                } else {
+                    body()
+                }
+                if (route == "create") coordinator.create(requestBody) { guard.isCurrent(request) }
+                else coordinator.reopenAfterStall(requestBody) { guard.isCurrent(request) }
             }
             entered.await()
             guard.invalidateForUserAction()

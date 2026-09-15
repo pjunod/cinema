@@ -2230,6 +2230,30 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
   assert.equal(capped.height, 480, "the 720p rung exceeds the player");
 });
 
+test("native element transfer errors never spend a compatibility transcode", () => {
+  for (const code of [0, 1, 2, 3, 4]) {
+    const run = new Function("PlaybackPolicy", "code", [
+      "const callbacks={}, rescues=[]; let stopped=0;",
+      "const PLAYER={method:'remux',triedFallback:false};",
+      "const document={getElementById(){return {};}};",
+      "const console={warn(){}};",
+      "function playbackOwnsAttachedMedia(){return true;} function notifyPlaybackControl(){} function clearStall(){}",
+      "function finishStallRecovery(){return false;} function playbackIsReal(){return false;}",
+      "function streamRejectionFacts(){return {};} function streamRejectionNote(){return '';} function streamRejectionReport(){return {};} function streamRejectionMessage(){return '';}",
+      "function clientLog(){} function raisePlaybackSurface(){} function toast(){} function pbTick(){} function pbSyncPlayIcon(){}",
+      "function stopPlayerForExhaustion(){stopped++;} function startTranscodeFallback(reason){rescues.push(reason);}",
+      shippedSource("wirePlayerMedia"),
+      "const v={error:{code},currentSrc:'/media',getAttribute(){return '/media';},addEventListener(name,fn){callbacks[name]=fn;}};",
+      "wirePlayerMedia(v); callbacks.error(); return {rescues,stopped,tried:PLAYER.triedFallback};",
+    ].join("\n"));
+    const result = run(policy, code);
+    const decode = code === 3 || code === 4;
+    assert.equal(result.rescues.length, decode ? 1 : 0, `native code ${code}`);
+    assert.equal(result.tried, decode, "transfer failure must retain the compatible-rescue credit");
+    assert.equal(result.stopped, decode ? 0 : 1, "nondecode terminal errors use the existing failure owner");
+  }
+});
+
 test("a rejected cheap stream gets one compatibility transcode", () => {
   assert.equal(policy.fallbackAction({ method: "direct_play" }), "transcode");
   assert.equal(policy.fallbackAction({ method: "remux" }), "transcode");
@@ -2251,7 +2275,25 @@ test("a rejected cheap stream gets one compatibility transcode", () => {
 test("a persistent stall gets one bounded method-aware recovery", () => {
   assert.equal(
     policy.stallRecoveryAction({ method: "remux", quality: "auto" }),
+    "restart",
+    "missing attribution cannot authorize a recipe change",
+  );
+  assert.equal(
+    policy.stallRecoveryAction({ method: "remux", quality: "auto", cause: "decoder" }),
     "transcode",
+    "typed decoder evidence keeps the compatible-recipe fallback reachable",
+  );
+  assert.equal(
+    policy.stallRecoveryAction({ method: "remux", quality: "auto", cause: "network" }),
+    "restart",
+    "a generic transfer failure does not prove that the recipe exceeds capacity",
+  );
+  assert.equal(
+    policy.stallRecoveryAction({
+      method: "remux", quality: "original", cause: "decoder",
+    }),
+    "restart",
+    "an explicit quality choice remains exact even after a decoder error",
   );
   for (const quality of ["original", "nomse", "1080"]) {
     assert.equal(
@@ -2313,12 +2355,12 @@ test("a persistent supply stall spends its one restart on the sustainable rung",
   }
   assert.match(
     shippedSource("persistentWait"),
-    /stallRecoveryTargetHeight\([\s\S]*?seekTo\(position,true,recoveryHeight,false\)/,
+    /stallRecoveryTargetHeight\([\s\S]*?seekTo\(position,true,recoveryHeight,false,p\.recoveringStall\)/,
     "the shipped persistent-stall path must pass the measured target into its bound reopen",
   );
 });
 
-test("a transcode stall reopen is bound to the exact predecessor", () => {
+test("only measured capacity adaptation sends the legacy rung-lowering stall reason", () => {
   const ordinary = { start: 42, height: 720 };
   assert.deepEqual(
     policy.stallReopenSessionOptions({
@@ -2326,6 +2368,7 @@ test("a transcode stall reopen is bound to the exact predecessor", () => {
       forceReopen: true,
       method: "transcode",
       sessionId: "session-before-stall",
+      cause: "network",
     }),
     {
       start: 42,
@@ -2338,6 +2381,17 @@ test("a transcode stall reopen is bound to the exact predecessor", () => {
   assert.deepEqual(
     policy.stallReopenSessionOptions({
       options: ordinary,
+      forceReopen: true,
+      method: "transcode",
+      sessionId: "session-before-stall",
+      cause: "unknown",
+    }),
+    ordinary,
+    "a same-recipe presentation repair keeps the playback identity but sends no rung-drop ticket",
+  );
+  assert.deepEqual(
+    policy.stallReopenSessionOptions({
+      options: ordinary,
       forceReopen: false,
       method: "transcode",
       sessionId: "ordinary-seek",
@@ -2347,8 +2401,13 @@ test("a transcode stall reopen is bound to the exact predecessor", () => {
   );
   assert.match(
     shippedSource("seekTo")+shippedSource("executePlaybackMediaChange"),
-    /previousSessionId:PLAYER\.sessionId[\s\S]*stallReopenSessionOptions\([\s\S]*?sessionId:change\.previousSessionId/,
-    "the shipped restart path must carry the typed predecessor binding",
+    /previousSessionId:PLAYER\.sessionId[\s\S]*recoveryCause:[\s\S]*stallReopenSessionOptions\([\s\S]*?cause:change\.recoveryCause/,
+    "the shipped restart path must distinguish same-recipe repair from measured adaptation",
+  );
+  assert.match(
+    shippedSource("seekTo"),
+    /kind==="supply"&&autoHeightOverride>0[\s\S]*\?"network":"unknown"/,
+    "only an independently selected lower rung authorizes the legacy capacity ticket",
   );
 });
 

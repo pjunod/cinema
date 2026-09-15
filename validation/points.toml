@@ -164,7 +164,7 @@ timeout_seconds = 3600
 [[checks]]
 id = "playback-shaping"
 title = "Network-shaping harness contract"
-command = "node tests/playback/network-shaping.test.js"
+command = "node tests/playback/network-shaping.test.js && node --test tests/playback/preparation-measurement.test.js"
 profiles = ["commit", "ci", "full", "nightly"]
 requires = ["node"]
 missing = "fail"

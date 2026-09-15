@@ -67,7 +67,9 @@ replacement = "the session executor installing one actor-authorized attempt"
 [[symbols]]
 id = "direct-session-failure"
 pattern = "(?:self|session)\\.fail\\("
-expected_occurrences = 12
+# +1 is the rejected-snapshot request regression injecting a terminal cause
+# after deadline expiry; no production failure owner is added.
+expected_occurrences = 13
 kind = "failure_owner"
 replacement = "typed producer facts entering the actor; only prepublication and compatibility failures project Session::failed, while published actor failures retain admitted media"
 
@@ -144,9 +146,11 @@ replacement = "exact prepared playlist bytes enter the actor before visibility t
 [[symbols]]
 id = "playlist-deadline-poll"
 pattern = "wait_for_playlist_poll_before"
-expected_occurrences = 4
+# Incomplete startup snapshots now join the same retry tail as all rejected
+# snapshots; its old dedicated call is removed, with no new timer owner.
+expected_occurrences = 3
 kind = "response_timer"
-replacement = "one helper and three call sites clamp polling to the already-owned absolute playlist deadline"
+replacement = "one helper and two call sites clamp polling to the already-owned absolute playlist deadline"
 
 [[symbols]]
 id = "response-media-commit"
@@ -1837,7 +1841,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 762 -> 760: three duplicated typed-error context timeouts became one bounded
 # init-inspection timeout, a net removal of two time constructors. The survivor
 # is request-owned and cannot extend RESPONSE_PUBLICATION_LIFECYCLE_BUDGET.
-expected_occurrences = 760
+# +1 is a test-only timeout around the actual rejected-snapshot request loop.
+# It fails the test if the inner deadline is bypassed; it owns no producer
+# or response in production.
+expected_occurrences = 761
 
 [[module_structures]]
 id = "bare-time-constructor"

@@ -1536,10 +1536,9 @@ pub mod keys {
     /// one runaway session; it says nothing about several healthy ones filling
     /// the disk between them.
     pub const HLS_SCRATCH_MAX_BYTES: &str = "playback.hls_scratch_max_bytes";
-    /// Experimental Apple-facing playlist envelope. When enabled, new live
-    /// HLS sessions serve a typeless sliding playlist from their first
-    /// response instead of changing from EVENT only after retention begins.
-    /// Off by default until the physical-iPad control run is conclusive.
+    /// Legacy-peer playlist setting, retained for rolling upgrades. Current
+    /// rolling sessions always serve a typeless sliding playlist from their
+    /// first response; this value cannot change their presentation contract.
     pub const HLS_TYPELESS_SLIDING: &str = "playback.hls_typeless_sliding";
     /// How often, in minutes, to build fragment indexes for files that have
     /// none. `0` is off, and off is the default until M0-P1's nynuc numbers

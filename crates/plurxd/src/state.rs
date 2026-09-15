@@ -2382,6 +2382,82 @@ impl LeaseHeartbeat {
     }
 }
 
+fn analysis_request_generation(
+    file: &MediaFile,
+    component: &str,
+    pipeline_version: &str,
+    video_identity: &str,
+    force_rebuild: bool,
+) -> String {
+    if force_rebuild {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        plurx_core::segplan::argv_fingerprint(&[
+            "analysis-request".to_owned(),
+            file.id.to_string(),
+            file.size.to_string(),
+            file.mtime.to_string(),
+            component.to_owned(),
+            pipeline_version.to_owned(),
+            // Only fragment-index work attests a source, so only its
+            // generations belong to an attestation regime. Stamping this
+            // on `skip_markers` as well would re-request every semantic
+            // pass and republish its annotations under a new generation
+            // id, for a change that has nothing to do with them.
+            if component == "fragment_index" {
+                ANALYSIS_ATTESTATION_GENERATION.to_owned()
+            } else {
+                String::new()
+            },
+            // The identity is part of the generation, which is what lets
+            // one file hold one request per identity instead of one
+            // request that tombstones the rest.
+            video_identity.to_owned(),
+        ])
+    }
+}
+
+/// Persist the exact copy recipe needed by a playback request before any
+/// source read. The existing analysis worker owns attestation, indexing and
+/// retries; playback keeps its usable rolling fallback while that work waits.
+/// Automatic preparation uses the existing background/normal request class,
+/// below foreground media production and explicit forced operator work.
+/// It does not depend on the periodic discovery cadence.
+pub(crate) async fn enqueue_copy_preparation(
+    store: &dyn Store,
+    node_id: &str,
+    file: &MediaFile,
+    video: plurx_core::transcode::CopyVideoOptions,
+) -> Result<AnalysisRequest, StoreError> {
+    let pipeline_version = crate::ffmpeg::fragment_index_engine_digest().await;
+    let video_identity = crate::fragindex::identity_for(file, video).argv_fingerprint;
+    let now = clock_ms();
+    store
+        .enqueue_analysis_request(&NewAnalysisRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            component: "fragment_index".to_owned(),
+            requested_generation: analysis_request_generation(
+                file,
+                "fragment_index",
+                &pipeline_version,
+                &video_identity,
+                false,
+            ),
+            pipeline_version,
+            video_identity,
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            force_rebuild: false,
+            target_node_id: node_id.to_owned(),
+            not_before_ms: now,
+            created_at_ms: now,
+        })
+        .await
+}
+
 pub(crate) fn clock_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3826,32 +3902,13 @@ impl JobManager {
         } else {
             crate::http::stream::CHAPTER_ANNOTATION_VERSION.to_owned()
         };
-        let requested_generation = if force_rebuild {
-            uuid::Uuid::new_v4().to_string()
-        } else {
-            plurx_core::segplan::argv_fingerprint(&[
-                "analysis-request".to_owned(),
-                file.id.to_string(),
-                file.size.to_string(),
-                file.mtime.to_string(),
-                component.to_owned(),
-                pipeline_version.clone(),
-                // Only fragment-index work attests a source, so only its
-                // generations belong to an attestation regime. Stamping this
-                // on `skip_markers` as well would re-request every semantic
-                // pass and republish its annotations under a new generation
-                // id, for a change that has nothing to do with them.
-                if component == "fragment_index" {
-                    ANALYSIS_ATTESTATION_GENERATION.to_owned()
-                } else {
-                    String::new()
-                },
-                // The identity is part of the generation, which is what lets
-                // one file hold one request per identity instead of one
-                // request that tombstones the rest.
-                video_identity.to_owned(),
-            ])
-        };
+        let requested_generation = analysis_request_generation(
+            &file,
+            component,
+            &pipeline_version,
+            video_identity,
+            force_rebuild,
+        );
         let request = self
             .store
             .enqueue_analysis_request(&NewAnalysisRequest {
@@ -8744,6 +8801,87 @@ mod tests {
     use plurx_core::domain::{
         DolbyVisionFacts, ItemKind, NewItem, NewLibrary, PlaybackEventQuery, ProbeResult,
     };
+
+    #[tokio::test]
+    async fn playback_preparation_is_durable_exact_and_independent_of_discovery() {
+        use plurx_core::store::ClusterFragmentIndexStore as _;
+        use plurx_core::transcode::CopyVideoOptions;
+        let store = SqliteStore::open_in_memory().expect("store");
+        store
+            .put_setting(keys::VOD_INDEX_MINS, "0")
+            .await
+            .expect("disable discovery");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Movies".to_owned(),
+                kind: LibraryKind::Movies,
+                paths: Vec::new(),
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "First play".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        // Deliberately absent: enqueueing must not hash or open the media.
+        let id = store
+            .upsert_file(
+                item,
+                "/absent/first-play.mkv",
+                100,
+                1,
+                &ProbeResult {
+                    video_codec: Some("hevc".to_owned()),
+                    hdr: Some("dolby_vision".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("file");
+        let file = store.get_file(id).await.expect("read").expect("file");
+        let strip = CopyVideoOptions::new(true, false);
+        let convert = strip.with_dolby_vision_conversion(true);
+        let first = enqueue_copy_preparation(&store, "node-a", &file, convert)
+            .await
+            .expect("first request");
+        let retry = enqueue_copy_preparation(&store, "node-a", &file, convert)
+            .await
+            .expect("joined request");
+        let other = enqueue_copy_preparation(&store, "node-a", &file, strip)
+            .await
+            .expect("different recipe");
+        assert_eq!(first.request_id, retry.request_id);
+        assert_ne!(first.request_id, other.request_id);
+        assert_eq!(first.state, "queued");
+        assert_eq!(
+            first.video_identity,
+            crate::fragindex::identity_for(&file, convert).argv_fingerprint
+        );
+        assert_eq!(first.target_node_id, "node-a");
+        assert_eq!(first.priority, "normal");
+        assert!(!first.force_rebuild);
+        assert_eq!(
+            store.analysis_requests(10).await.expect("requests").len(),
+            2
+        );
+        assert_eq!(
+            store
+                .get_setting(keys::VOD_INDEX_MINS)
+                .await
+                .expect("setting")
+                .as_deref(),
+            Some("0")
+        );
+    }
 
     fn lease_heartbeat(
         renew_every_ms: u64,

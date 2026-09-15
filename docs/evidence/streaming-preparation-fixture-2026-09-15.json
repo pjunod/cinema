@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "kind": "plurx_preparation_measurement",
+  "generated_at": "2026-09-15T16:36:17.580Z",
+  "tested_commit": "26ffaaf723b4ca80080e83f7b44249fa8af45a60",
+  "host": "pauls.macbook.pro.2.lan",
+  "fixture": {
+    "id": "remux-h264-multitrack-1080",
+    "source_size_bytes": 23789793,
+    "cache_condition": {
+      "fragment_index_before_pass": "absent_isolated_runtime",
+      "fragment_index_at_playback": "local",
+      "operating_system_page_cache": "uncontrolled"
+    }
+  },
+  "recipe_identity_label": "remux/remux/sdr/auto",
+  "measurements": {
+    "source_indexing": {
+      "wall_status": "measured",
+      "wall_ms": 59574,
+      "bytes_read_status": "unavailable",
+      "bytes_read": null,
+      "reason": "request-to-completed-pass wall time includes scheduler wake-up; the daemon exposes no per-pass I/O byte counter",
+      "full_source": true,
+      "target_count": 1
+    },
+    "shared_hydration": {
+      "status": "unavailable",
+      "wall_ms": null,
+      "reason": "the isolated playback-lab runtime has no artifact peer"
+    },
+    "session_startup": {
+      "status": "measured",
+      "wall_ms": 37
+    },
+    "first_frame": {
+      "status": "measured",
+      "wall_ms": 2051
+    }
+  },
+  "status": "passed",
+  "error": null,
+  "limits": [
+    "fixture media only; this is not physical NAS evidence",
+    "the isolated runtime has no artifact peer, so shared hydration is unavailable",
+    "operating-system page-cache state and per-pass bytes read are not controlled or exported"
+  ]
+}

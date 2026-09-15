@@ -2237,19 +2237,8 @@ final class AppleClientTests: XCTestCase {
     /// (The test this comment documents is
     /// `testAFloorStoppedStallDoesNotSpendARollingReopenSlot`, below.)
 
-    /// The three stall kinds are not one condition, and the evidence the
-    /// server gets has to say which. A buffering stall is a starved decoder
-    /// and says nothing about the file; a silent freeze is a decoder that
-    /// accepted the media and then stopped presenting it, which is the
-    /// Profile-5 shape the server cannot derive from anything it holds; a
-    /// delivery wedge is the server's own clock saying this client stopped
-    /// fetching, so the decoder is not the subject at all.
-    ///
-    /// Collapsing them would hand the arbiter one word — "stalled" — which is
-    /// exactly the ambiguity M5 exists to remove.
-    ///
-    /// (The test this documents is
-    /// `testStallEvidenceNamesWhichConditionTheServerIsBeingToldAbout`, below.)
+    /// Stall kinds retain distinct diagnostics and viewer wording, but none
+    /// synthesizes a decoder or network cause for the control plane.
 
     /// The server's seven hold reasons, in the viewer's words.
     ///
@@ -2273,29 +2262,17 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(PlayerController.holdNotice(nil), "Waiting for the server.")
     }
 
-    func testStallEvidenceNamesWhichConditionTheServerIsBeingToldAbout() {
-        let buffering = PlayerController.stallEvidence(for: .buffering)
-        XCTAssertEqual(buffering.decoderState, .starved)
-        XCTAssertNil(buffering.errorCode, "a starved decoder is not a decoder error")
-
-        let silent = PlayerController.stallEvidence(for: .silent)
-        XCTAssertEqual(silent.decoderState, .failed)
-        XCTAssertEqual(silent.errorCode, .decoder)
-        XCTAssertEqual(silent.errorDetail, "silent_freeze")
-
-        let delivery = PlayerController.stallEvidence(for: .delivery)
-        XCTAssertEqual(delivery.decoderState, .starved)
-        XCTAssertEqual(delivery.errorCode, .network,
-                       "a delivery wedge is the transport, not the decoder")
-        XCTAssertEqual(delivery.errorDetail, "delivery_wedge")
-
-        // Every kind must survive the wire's own bounding, or the evidence is
-        // dropped silently at the last step.
+    func testTimerOnlyStallsRemainUnknownToTheServer() {
+        // A stationary clock identifies failed presentation, not its cause.
+        // Actual AVPlayer item failures exercise the separate error ladder.
         for kind in [PlaybackStallKind.buffering, .silent, .delivery] {
-            let bounded = PlayerController.stallEvidence(for: kind).bounded
+            let evidence = PlayerController.stallEvidence(for: kind)
+            XCTAssertEqual(evidence.decoderState, .unknown)
+            XCTAssertNil(evidence.errorCode)
+            XCTAssertNil(evidence.errorDetail)
+            let bounded = evidence.bounded
             XCTAssertNotNil(bounded, "\(kind) produced evidence the wire discards")
-            XCTAssertEqual(bounded?.decoderState,
-                           PlayerController.stallEvidence(for: kind).decoderState)
+            XCTAssertEqual(bounded?.decoderState, .unknown)
         }
     }
 
@@ -2414,8 +2391,9 @@ final class AppleClientTests: XCTestCase {
         )
     }
 
-    /// Only a live growing session has a predecessor rung to name.
-    func testOnlyAGrowingServerSessionMintsABoundRecovery() {
+    /// The legacy typed helper remains narrowly scoped for interoperability;
+    /// timer-only presentation recovery no longer calls it.
+    func testLegacyBoundRecoveryOnlyNamesAGrowingServerSession() {
         XCTAssertEqual(
             PlayerController.stallReopenIntent(
                 sessionId: "session-a",
@@ -2638,39 +2616,34 @@ final class AppleClientTests: XCTestCase {
         )
     }
 
-    /// The server rewrites a ticketed automatic reopen one rung down, which is
-    /// right for a link that cannot hold the rung and wrong for a session whose
-    /// published bytes were never fetched: a 2160p copy session has to come
-    /// back a 2160p copy session.
-    func testAWedgeReopensWithoutATicketSoItsRungSurvivesTheRecovery() {
+    /// Every timer-only presentation stall uses the same unticketed repair.
+    /// The body retains Auto and the selected recipe while omitting the only
+    /// field pair that authorizes the server to step quality down.
+    func testPresentationStallRepairPreservesTheRecipeWithoutAQualityTicket() {
         let unbound = PlayerController.applyOpenIntent(
-            to: createBody(),
-            intent: PlayerController.stallReopenIntent(
-                sessionId: "session-a", isVOD: false, requestId: "request-1", wedge: true
-            ),
+            to: createBody(height: 2_160),
+            intent: .sameDeliveryRepair,
             currentSessionId: "session-a",
             selectedHeight: nil
         )
         XCTAssertNil(unbound.previousSessionId)
         XCTAssertNil(unbound.reopenReason)
+        XCTAssertEqual(unbound.height, 2_160)
         XCTAssertEqual(unbound.qualityAuto, true, "the viewer is still on Auto")
 
-        // Every other stall still carries today's ticket.
-        let bound = PlayerController.applyOpenIntent(
-            to: createBody(),
-            intent: PlayerController.stallReopenIntent(
-                sessionId: "session-a", isVOD: false, requestId: "request-1", wedge: false
-            ),
+        let manual = PlayerController.applyOpenIntent(
+            to: createBody(height: 720),
+            intent: .sameDeliveryRepair,
             currentSessionId: "session-a",
-            selectedHeight: nil
+            selectedHeight: 720
         )
-        XCTAssertEqual(bound.previousSessionId, "session-a")
-        XCTAssertEqual(bound.reopenReason, "stall")
-        XCTAssertEqual(bound.requestId, "request-1")
+        XCTAssertNil(manual.previousSessionId)
+        XCTAssertNil(manual.reopenReason)
+        XCTAssertEqual(manual.height, 720)
+        XCTAssertEqual(manual.qualityAuto, false, "manual quality remains sticky")
 
-        // The evidence the reopen reads: a `.delivery` stall is a wedge before
-        // any status poll has landed, which is the state the watchdog fires
-        // from — its own poll is superseded by the recovery it starts.
+        // The server-truth delivery detector still distinguishes its message,
+        // but does not change the request classification.
         XCTAssertTrue(PlayerController.isDeliveryWedge(
             kind: .delivery, deliveredIdleMs: nil, publishedEndMs: nil, fetchedEndMs: nil
         ))
@@ -2679,10 +2652,8 @@ final class AppleClientTests: XCTestCase {
         ))
     }
 
-    /// Dropping the ticket changes which rung comes back, not how many times
-    /// this client may ask. Both bounds still own that, and neither reads the
-    /// intent at all.
-    func testAnUnticketedWedgeStillGetsOneAttemptUnderTheSameBounds() {
+    /// Dropping the ticket changes no recovery bound.
+    func testAnUnticketedPresentationRepairStillGetsOneAttemptUnderTheSameBounds() {
         var recovery = SameDeliveryStallRecoveryState()
         XCTAssertEqual(recovery.next(for: .delivery), .reopen)
         XCTAssertEqual(

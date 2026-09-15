@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["298cc69d"]
+points = ["playback.pipeline", "core.media"]
+checks = ["rust-gate"]
+reason = "playback_preparation_is_durable_exact_and_independent_of_discovery proves durable exact-recipe deduplication without opening the source when periodic discovery is disabled. first_play_queues_missing_source_preparation_with_discovery_off exercises the VOD caller, explicit shared-cache disable, joined queue admission, and refusal to attach an incomplete presentation. a_converting_cluster_artifact_hydrates_without_a_local_v1_index retains shared conversion hydration. requests_the_vod_presentation_cannot_serve_fail_typed retains prerequisite refusal boundaries. Four focused daemon tests passed; no full unit suite or physical playback claim."
