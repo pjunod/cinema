@@ -63,15 +63,20 @@ Android compilation and debug APK packaging succeeded with the installed SDK,
 repository Gradle wrapper and Android Studio JDK. Existing deprecated Volume
 icon warnings remain. No unit suite was executed.
 
-The M4 Air is available at `192.168.5.115` (`pauls.macbook.air.lan`). Both
+The M4 Air is reachable through `pauls.macbook.air.lan`. Its formerly
+documented numeric address `192.168.5.115` stopped responding later in this
+session; the hostname remained usable. Both
 `plurx-iOS` and `plurx-tvOS` compiled successfully at source `298eced8`, with
 Xcode 26.6 (17F113), in an isolated source-only extraction. No credential or
-`.git` directory was transferred. Release metadata now claims Apple 160 and
-Android 99; those final metadata changes will be compiled before ready.
+`.git` directory was transferred. The final release candidate `27e2805f` also compiled both Apple targets
+successfully, with Apple build 160. Android build 99 packaged successfully
+from the same candidate. XcodeGen is the pinned 2.46.0.
 
-Screen Sharing is disabled on the Air. Permission to use `simctl` for visual
-captures was requested because the computer-use tool requires explicit user
-authorization before another UI-control method is used.
+Screen Sharing to the numeric address failed; that does not establish the
+current host's sharing configuration. The local desktop then locked and the UI
+tool requested manual unlock. Permission to use `simctl` for visual captures
+was requested because the computer-use tool requires explicit user authorization
+before another UI-control method is used. No sharing setting was changed.
 
 An isolated Android TV emulator and debug APK were prepared, but the available
 computer-use tool cannot select its standalone QEMU window. No visual pass or
@@ -86,7 +91,6 @@ its missing mapping to its existing SQLite regression, without changing Rust.
 Existing native source guards were updated for the renamed wide browser and
 touch-only semantic typography; no extra unit suite was introduced or run.
 
-Before merge: finish native visual/focus and retained-playback checks; compile
-the final build claims; run the single final fast lane and merge only its
+Before merge: finish native visual/focus and retained-playback checks; run the single final fast lane and merge only its
 passing candidate. PR320 is draft. No app has been published to a store or
 installed on a physical device by this follow-up.
