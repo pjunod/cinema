@@ -1,6 +1,6 @@
 # Library pages — scan your library and inspect one file
 
-**Status:** implementation and review in progress · **Updated:** 2026-09-15
+**Status:** built · PR #330 awaiting final lane · **Updated:** 2026-09-15
 
 Companion to [CLIENTS.md](../CLIENTS.md). This revision implements the approved
 Home and item-page proposals across the web, Apple and Android clients.
@@ -50,19 +50,31 @@ as the web proposal. Illustration artwork in the proposal is not shipped.
 
 ## Evidence and remaining work
 
-The web has been rendered at 1280 px and 390 px with sample data through the
-actual application and all three themes. The initial pass had no JavaScript
-errors or phone overflow; file changes updated all four header badges and
-expanded track lists showed six rows. Final captures follow review findings.
+Production web pages were rendered at 1280 px and 390 px with sample data in
+all three themes. No JavaScript errors or phone overflow were observed. File
+changes updated all four header badges; expanded track lists showed six rows.
+The implemented Apple DetailView was captured in disposable iPhone, iPad and
+Apple TV simulators using an isolated sample-data harness. Android visuals,
+physical-device playback and full remote-focus acceptance remain unverified.
 
-Local iOS, tvOS and Android application compilation passed before review.
-One adversarial review completed; all five P2 findings are addressed. The final fast lane has not run,
-and no merge, deployment, publication or physical-device installation is claimed.
+Local iOS/tvOS compilation (`make apple-build`) and Android application
+compilation (`./gradlew :app:assembleDebug`) passed after review. Local Xcode
+is 27.0; the final Apple lane uses the pinned Xcode 26.6 runner. Rust 1.97.1
+`cargo check -p plurxd --all-targets --locked`, workspace Clippy with denied
+warnings and formatting passed. Focused regressions:
 
-Retained regression: `node tests/web/calm-library.test.js` checks recordings by
-library identity, uncertainty in language tags and per-file selection summaries.
-Existing native expectations are updated for the removed featured continuation.
+- `node tests/web/calm-library.test.js`
+- `cargo test -p plurx-core global_recent_additions_exclude_recordings_before_limiting --locked`
+- `cargo test -p plurxd --bin plurxd original_download_supports_ranges_without_registering_playback --locked`
 
+The download regression initially found its legacy sample file shorter than
+its recorded length. Matching the fixture to the probe made the ranged
+response pass without weakening the production file-size check. Retained
+native expectations reflect the removed hero and collapsed track disclosures.
+
+One adversarial review completed; all five P2 findings are addressed. PR #330
+runs one final fast lane after these records are complete. This document does
+not claim a merge, deployment, publication or physical-device installation.
 
 ## Review findings addressed
 

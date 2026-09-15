@@ -2168,8 +2168,7 @@ pub struct DirectQuery {
     pub stream: Option<String>,
 }
 
-/// GET /api/v1/files/:id/direct — raw file with HTTP range support.
-/// Download the original file without treating the transfer as playback.
+/// GET /api/v1/files/:id/download — download the original file without treating the transfer as playback.
 /// Authentication and range handling are identical to the direct media route.
 pub async fn download(
     _user: AuthUser,
@@ -2188,6 +2187,7 @@ pub async fn download(
     Ok(response)
 }
 
+/// GET /api/v1/files/:id/direct — raw file with HTTP range support.
 pub async fn direct(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,

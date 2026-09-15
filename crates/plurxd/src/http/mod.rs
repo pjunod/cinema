@@ -1744,6 +1744,7 @@ mod tests {
             "/api/v1/files/7/offline-options",
             "/api/v1/files/7/stream.mp4",
             "/api/v1/files/7/direct",
+            "/api/v1/files/7/download",
             "/api/v1/files/7/content",
             "/api/v1/offline/media/capability/0.ts",
             "/api/v1/publication/capability/chapter.xhtml",
@@ -11972,6 +11973,20 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let seeded = seed_content(&state).await;
+        // The legacy seed records a 42-byte file but writes a shorter placeholder.
+        // Download serving deliberately rejects bytes that differ from the probe.
+        let file = state
+            .store
+            .get_file(seeded.file)
+            .await
+            .expect("query seeded file")
+            .expect("seeded file");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&file.path)
+            .expect("open placeholder")
+            .set_len(file.size as u64)
+            .expect("match recorded length");
         let uri = format!("/api/v1/files/{}/download?token={admin}", seeded.file);
         let response = app
             .clone()

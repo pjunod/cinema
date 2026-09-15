@@ -56,7 +56,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -341,68 +340,6 @@ private fun DetailContent(
     }
 }
 
-@Composable
-private fun CompactDetailHero(
-    item: Item,
-    file: MediaFileDto?,
-    durationMs: Long?,
-    onBack: () -> Unit,
-) {
-    val progress = detailProgress(item, durationMs)
-    Box(Modifier.fillMaxWidth().height(300.dp)) {
-        NetworkImage(imageUrl(item.backdrop ?: item.poster), Modifier.fillMaxSize())
-        Box(
-            Modifier.fillMaxSize().background(
-                Brush.verticalGradient(
-                    listOf(Color(0x22000000), Color(0x44000000), Bg),
-                ),
-            ),
-        )
-        DetailBackButton(onBack)
-        Column(
-            Modifier.align(Alignment.BottomStart).fillMaxWidth().padding(horizontal = 20.dp, vertical = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(7.dp),
-        ) {
-            item.show_title?.let { showTitle ->
-                Text(
-                    showTitle.uppercase(),
-                    color = Accent,
-                    style = MaterialTheme.typography.labelSmall,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
-            Text(
-                item.title,
-                color = Color.White,
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.ExtraBold,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-            file?.let { mediaFile ->
-                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    items(detailMediaFacts(mediaFile), key = { it.kind }) { fact ->
-                        MediaFactChip(fact)
-                    }
-                }
-            }
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                compactDetailFacts(item, durationMs).forEach { fact ->
-                    Text(fact, color = Color.White.copy(alpha = 0.7f), style = MaterialTheme.typography.labelSmall)
-                }
-            }
-            if (progress > 0f) {
-                Box(Modifier.fillMaxWidth().height(3.dp).background(Color.White.copy(alpha = 0.18f))) {
-                    Box(Modifier.fillMaxWidth(progress).height(3.dp).background(Accent))
-                }
-            }
-        }
-    }
-}
-
 internal fun compactDetailFacts(item: Item, durationMs: Long?): List<String> = buildList {
     if (item.kind == "episode" && item.season_number != null && item.episode_number != null) {
         add("S${item.season_number} E${item.episode_number}")
@@ -410,14 +347,6 @@ internal fun compactDetailFacts(item: Item, durationMs: Long?): List<String> = b
     item.year?.let { add(it.toString()) }
     durationMs?.takeIf { it > 0 }?.let { add(compactRuntimeLabel(it)) }
     addAll(item.tags.take(2))
-}
-
-private fun detailProgress(item: Item, durationMs: Long?): Float {
-    val watch = item.watch ?: return 0f
-    val position = watch.position_ms
-    val duration = watch.duration_ms ?: durationMs ?: return 0f
-    if (duration <= 0) return 0f
-    return (position.toFloat() / duration).coerceIn(0f, 1f)
 }
 
 @Composable
