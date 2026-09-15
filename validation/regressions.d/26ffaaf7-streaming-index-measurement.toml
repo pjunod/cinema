@@ -7,9 +7,3 @@ commits = [
 points = ["playback.pipeline"]
 checks = ["playback-shaping"]
 reason = "The bounded preparation measurement extends the existing playback lab instead of creating a second benchmark path. `measured phases stay separate from unavailable preparation facts` requires source indexing, peer hydration, session attachment and first frame to remain distinct, retains the exact fixture size, cache state, recipe label, host and commit, and prevents an unavailable I/O byte count from borrowing the source size. `the VOD mode writes one compact JSON artifact and no JUnit sidecar` exercises the actual one-case VOD runner seam, requires one compact artifact, and proves owned server and browser state is released. The existing playback-shaping command now includes that focused contract after its established network-shaping suite."
-
-[[coverage]]
-commits = ["9c06c542"]
-points = ["validation.framework"]
-checks = ["catalog-contract"]
-reason = "The evidence commit wires the retained preparation contract into the playback-shaping check and records its fixture output; catalog-contract validates that check registration. It changes validation metadata, not playback runtime."

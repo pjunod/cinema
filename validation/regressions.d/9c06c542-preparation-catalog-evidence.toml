@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9c06c542"]
+points = ["validation.framework"]
+checks = ["catalog-contract"]
+reason = "The evidence commit wires the retained preparation contract into the playback-shaping check and records its fixture output; catalog-contract validates that check registration. It changes validation metadata, not playback runtime."
