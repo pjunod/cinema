@@ -1,401 +1,253 @@
-# plurx
+# noirr cinema
 
-[![ci](http://192.168.4.7:3000/noirr/plurx/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](http://192.168.4.7:3000/noirr/plurx/actions)
-[![lint](http://192.168.4.7:3000/noirr/plurx/actions/workflows/lint.yml/badge.svg)](http://192.168.4.7:3000/noirr/plurx/actions)
-[![unit coverage](http://192.168.4.7:3000/noirr/plurx/raw/branch/badges/coverage.svg)](http://192.168.4.7:3000/noirr/plurx/actions)
+A self-hosted media server for movies, TV, anime, ebooks, audiobooks, home
+videos, and photos. Cinema combines a Rust server, a browser player and admin
+UI, and native Apple and Android clients. Your library stays on your hardware;
+local accounts work without a cloud login. The repository and server binary
+are still named `plurx` and `plurxd`.
 
-A self-hosted media server and player in the spirit of **old-school Plex** —
-before the streaming tiles, the ads, and the cloud accounts. Your media, your
-hardware, your network: one lean Rust binary, a web app that doubles as the admin
-UI, first-class ebook and audiobook libraries, a Plex-compatible API so existing
-clients just work, and the thing no media server has ever shipped — **real
-high-availability clustering**. Music is out of scope on purpose (see
-[non-goals](#non-goals)); books are not — text books and audiobooks are both
-supported, photos live in `home` libraries, and *live* television from one
-locally configured HDHomeRun tuner is supported and off by default. Recording
-it is not: plurx is not a DVR.
+[Features](#features) · [Screenshots](#what-it-looks-like) ·
+[Quickstart](#quickstart) · [Documentation](#start-here) ·
+[Development](#development)
 
-> **Self-hosted and pre-1.0.** plurx runs on your LAN with no cloud dependency and
-> never phones home. The server runs natively on Linux, macOS, and Windows x64;
-> Docker remains the recommended homelab path. Media mounts are **read-only by
-> default**. The one explicit
-> exception is admin-only, per-library Dolby Vision Profile 7 → 8.1 on-disk
-> conversion: it is Off by default and requires the writable-storage and backup
-> contract in [Operations](docs/OPERATIONS.md). Today plurx runs as a **single
-> one-voter node** on the replicated Store after a verified, reversible SQLite
-> import. Membership and failover are still Phase 4 work. Treat it as a capable
-> daily driver, not a backup of your only copy.
+> **Pre-1.0.** Keep backups of your media and server data. Ordinary scanning and
+> playback use read-only media mounts. DVR recording and optional Dolby Vision
+> on-disk conversion require explicitly configured writable storage; read the
+> [operations guide](docs/OPERATIONS.md) before enabling them. Hardware playback
+> and recovery support depend on the device and deployment.
 
-![The plurx home screen — continue watching, next up, and recently added](docs/img/home.png)
+![noirr cinema home with synthetic demo films and a demo series](docs/img/home.png)
 
-## Start here
+## Features
 
-[docs/README.md](docs/README.md) is the index of everything below: every file
-under `docs/`, the question it answers, and whether it is still live. Start
-there when you know what you are looking for; read on when you don't.
+Cinema covers the library, the player, and the work of running your own server.
+The [full feature inventory](docs/FEATURES.md) documents behavior, limits, and
+planned work in detail.
 
-New to the project? Read in this order. [docs/FEATURES.md](docs/FEATURES.md) is
-the shortest answer to *what does this actually do* — the exhaustive inventory,
-including what it deliberately doesn't. Then [docs/OPERATIONS.md](docs/OPERATIONS.md)
-for running it day to day and reading every status and log line it shows you, with
-[docs/CHEATSHEET.md](docs/CHEATSHEET.md) as the copy-paste quickstart beside it.
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) has the diagrams and the founding
-decisions (why one binary clusters without external infra), and
-[docs/API.md](docs/API.md) is the API reference: every endpoint plurxd serves,
-which credential it takes, and what comes back — written from the routers
-because there is no OpenAPI document.
-[docs/VALIDATION.md](docs/VALIDATION.md) explains the functionality-point
-catalog — how a changed path selects behavior contracts, which checks run at
-commit, CI, and full depth, and how to add a regression without losing it.
-[docs/DEVELOPMENT_PIPELINE.md](docs/DEVELOPMENT_PIPELINE.md) explains the
-effort-branch lane for large projects: compile quickly during task integration,
-then run one complete exact-tree qualification before merging to `main`.
-[docs/features/HDHOMERUN-LIVE-TV-PLAN.md](docs/features/HDHOMERUN-LIVE-TV-PLAN.md) is the plan for
-one HDHomeRun tuner as bounded live HLS across the web, Apple, and Android
-clients, with DRM and ATSC 3.0 codec limits stated explicitly, and
-[docs/features/HDHOMERUN-LIVE-TV-STATUS.md](docs/features/HDHOMERUN-LIVE-TV-STATUS.md) is what is
-built versus what is proved: the hardware pass has now run against a real
-HDHomeRun FLEX 4K, ATSC 1.0 plays end to end, and ATSC 3.0 is refused by the
-startup budget rather than by a codec.
-[docs/ci/AGENT-COMPILE-LOOP.md](docs/ci/AGENT-COMPILE-LOOP.md) is its short
-companion for anyone — contributor or coding agent — whose checkout has no
-Rust toolchain: how to put `cargo check`, Clippy and the unit suite ten
-minutes away instead of pushing to find out.
-[docs/DECODER_SELECTION_RECOVERY_STATUS.md](docs/DECODER_SELECTION_RECOVERY_STATUS.md)
-tracks the active decoder-selection and bounded-recovery effort: milestone
-PRs, qualification evidence, decisions, and explicit gaps.
-[docs/cluster/CLUSTER_TRANSPORT_RECOVERY_IMPLEMENTATION.md](docs/cluster/CLUSTER_TRANSPORT_RECOVERY_IMPLEMENTATION.md)
-specifies the TLS flush correction, bounded snapshot recovery, and the
-regressions required before the clustering reliability fixes ship.
-[docs/ci/CI_TEST_OVERHAUL_PLAN.md](docs/ci/CI_TEST_OVERHAUL_PLAN.md) records
-the measured failure order, docs-only lane, suite split, and safe rebase-result
-reuse roadmap. Then
-[docs/PLAYBACK.md](docs/PLAYBACK.md) traces the end-to-end path a file takes to
-become a stream — every direct/remux/transcode fork and the per-browser
-transport choice behind it;
-[docs/streaming/PLAYBACK-CAPS-V2-PLAN.md](docs/streaming/PLAYBACK-CAPS-V2-PLAN.md) is the open
-implementation plan for making that decision negotiate the highest grade a
-device can show — structured capabilities, an HDR10 transcode rung, and
-Dolby Vision Profile 7 → 8.1 conversion on the fly and on disk.
-[docs/PLAYBACK-TESTING.md](docs/PLAYBACK-TESTING.md)
-turns that map into an automated source × quality × operation matrix, with
-[docs/BENCHMARKING.md](docs/BENCHMARKING.md) defining the controlled
-Cinema/plurx-vs-Plex A/B suite — identical corpus, separate engine and decoded-
-frame clocks, raw evidence, percentiles, failure rates, and ratio direction —
-and with
-[docs/clients/PGS_OVERLAY_PLAN.md](docs/clients/PGS_OVERLAY_PLAN.md) defining the proposed
-Dolby Vision-safe bitmap-subtitle path and
-[docs/clients/PGS-OVERLAY-M0-FEASIBILITY.md](docs/clients/PGS-OVERLAY-M0-FEASIBILITY.md)
-recording the parser, fixture, resource, and physical-device evidence required
-before that path can ship, and with
-[docs/streaming/STUTTER-4K.md](docs/streaming/STUTTER-4K.md) as the open investigation into the one
-fork that misbehaves: what is already ruled out and the experiment that ruled it
-out, so the next attempt starts where the last one stopped. If you run plurx
-beside monarr,
-[docs/INTEGRATION.md](docs/INTEGRATION.md) documents every seam between them —
-what each does, where you watch it, and the command that proves it works.
-[docs/clients/PLAYER-INPUT-CONTRACT.md](docs/clients/PLAYER-INPUT-CONTRACT.md) is the one
-routing table every player obeys — what a press, click, or swipe does in each
-state on every client — with [docs/clients/UI-NAVIGATION-AUDIT.md](docs/clients/UI-NAVIGATION-AUDIT.md)
-recording why the three players diverged and
-[docs/clients/PLAYER-INPUT-CONTRACT-PLAN.md](docs/clients/PLAYER-INPUT-CONTRACT-PLAN.md) the
-milestones that make them conform.
-[docs/clients/EBOOK-READER-PLAN.md](docs/clients/EBOOK-READER-PLAN.md) finishes the Books loop:
-Curator's import handoff, Cinema-owned reading state, the EPUB renderer,
-phone/tablet clients, and offline originals, each behind an acceptance gate.
-Scope and the phased
-plan live in [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) and
-[docs/ROADMAP.md](docs/ROADMAP.md), with
-[docs/cluster/CLUSTERING-PLAN.md](docs/cluster/CLUSTERING-PLAN.md) turning Phase 4 into ordered
-milestones and acceptance checks, with
-[docs/cluster/CLUSTER-PERFORMANCE-PLAN.md](docs/cluster/CLUSTER-PERFORMANCE-PLAN.md) defining
-the post-membership topology, consistency classes, observability, and ordered
-work that turns additional nodes into measured read and application capacity,
-and
-[docs/cluster/CLUSTER-MEDIA-POOL-PLAN.md](docs/cluster/CLUSTER-MEDIA-POOL-PLAN.md) defining how
-those voters become one capability-aware transcode, cache, and failover pool,
-and [docs/features/WINDOWS-PORT-STATUS.md](docs/features/WINDOWS-PORT-STATUS.md) recording the
-native Windows server implementation, release artifact, validation evidence,
-and still-unmeasured hardware receipts;
-client strategy in
-[docs/CLIENTS.md](docs/CLIENTS.md), with
-[docs/clients/APPLE-NATIVE-SUBTITLES-HANDOFF.md](docs/clients/APPLE-NATIVE-SUBTITLES-HANDOFF.md)
-recording what the Apple native-subtitle work shipped, why each choice was
-made, and the copied-Dolby failure that was resolved on physical hardware,
-and [docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md](docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md)
-preserving the independent review, remediation history, and physical-device
-acceptance trail; the trust
-model — who can reach what, and what plurx leaves to the reverse proxy — in
-[docs/SECURITY.md](docs/SECURITY.md);
-deploy recipes in [deploy/README.md](deploy/README.md). What the version numbers
-promise, and how a release is cut, is in
-[docs/RELEASING.md](docs/RELEASING.md); what changed between them is in
-[CHANGELOG.md](CHANGELOG.md). Getting the phone and Apple TV apps onto real
-devices — TestFlight, the App Store, Google Play, and the demo server App
-Review needs because it cannot reach your LAN — is
-[docs/PUBLISHING.md](docs/PUBLISHING.md).
+### Build one library from many sources
+
+- **Movies, TV, and anime.** Multiple folders per library, incremental scans,
+  episode and anime absolute-number recognition, and multiple versions of a
+  title. Inspect resolution, codecs, HDR, audio, subtitles, and chapters before
+  pressing Play.
+- **Metadata and artwork.** TMDB for movies and TV, AniList for anime, cached
+  artwork, per-item refresh, and scheduled retries for missing images. A TMDB
+  key is optional; local browsing and playback do not require one.
+- **Books and audiobooks.** Built-in EPUB reading, reading progress,
+  multipart audiobook playback, chapters, and resume. Native phone and tablet
+  apps support offline EPUB copies; offline audiobooks remain planned.
+- **Home videos and photos.** Browse your own folder tree, capture dates,
+  local thumbnails, editable metadata, and a full-screen photo viewer.
+- **Keep up with new media.** Scheduled scans, targeted import notifications,
+  scoped integration keys, and a coming-soon calendar from a paired monarr.
+
+### Watch the way your device can play
+
+- **Direct play, remux, or transcode.** Cinema selects a delivery path for the
+  client. Hardware encoding supports NVENC, Quick Sync, VA-API, and
+  VideoToolbox where available, with software fallback.
+- **HDR-aware delivery.** Source and delivered formats stay visible. Tone
+  mapping and Dolby Vision handling follow the selected source, device, and
+  delivery path; the [playback guide](docs/PLAYBACK.md) explains the limits.
+- **Choose tracks before playback.** Audio and subtitle lists show language,
+  codec, defaults, and forced/SDH flags. Track choices accompany the playback
+  decision, including an explanation when subtitles require burn-in.
+- **A player with useful controls.** Resume, chapter navigation, skip intro and
+  credits, optional auto-skip, keyboard controls, fullscreen, and a stats
+  overlay that explains what is actually being delivered.
+- **Continue across screens.** Per-user progress, Continue watching, and
+  next-episode continuation across browser, Apple, and Android clients.
+  [Client coverage](docs/CLIENTS.md) records platform differences.
+
+### Add television and channels
+
+- **Live TV.** One configured HDHomeRun tuner, now/next information, list and
+  grid guides, XMLTV support, fullscreen, and picture-in-picture where the
+  client supports it. DRM-protected channels are identified and refused.
+- **DVR.** Record guide airings or manual time windows, create series rules and
+  reminders, follow recording activity, and play finalized recordings from
+  the library. Live viewing and recording have separate enable switches.
+- **Library channels.** Turn existing library titles into continuous schedules
+  with personal or shared channels, now/next browsing, favorites, and
+  Watch from start. Optional local Ollama matching selects titles by subject
+  and explains its metadata-based decisions.
+
+### Make it yours and keep it running
+
+- **Layouts and themes.** Classic, Catalog, and Theater web layouts; light,
+  dark, and system appearance; named themes including noirr and Terminal.
+- **Local accounts.** Admin and standard users, device login tokens, and
+  scoped API keys. OIDC, parental controls, and per-user library permissions
+  remain planned.
+- **Compatibility and history.** A bounded Plex-compatible API for supported
+  clients, plus optional Trakt history and scrobbling. See the
+  [feature inventory](docs/FEATURES.md) for the supported directions and limits.
+- **Operations you can inspect.** Live activity, scan results, logs, readiness
+  checks, Prometheus metrics, and playback diagnostics. Replicated storage,
+  cluster membership, transport recovery, and media-pool tooling have
+  dedicated [architecture and qualification records](docs/README.md).
+- **One server application.** Run on Linux, macOS, or Windows x64, with
+  Docker/Compose and native deployment recipes. No external database service
+  is required.
 
 ## What it looks like
 
-A borderless, projection-style player: the title and controls auto-hide during
-playback, a staged loading overlay replaces the mystery gray screen, and an ⓘ
-stats overlay shows source → what your browser is actually decoding — plus Skip
-Intro / Skip Credits from real chapter markers.
+These captures use generated artwork, sample media, and fictional demo entries.
+No personal library titles, posters, or filenames appear.
 
-![The player with the stats overlay open](docs/img/player-stats.png)
+### Inspect a title before you play
 
-Every item shows its versions with labeled specs — a 2160p Dolby Vision remux and
-a 1080p encode on one title, each with full video/audio/file detail:
+The item page brings together artwork, playback actions, and file and track
+facts.
 
-![Movie detail with multiple versions and labeled specs](docs/img/item-detail.png)
+![Demo film detail with playback actions and media specifications](docs/img/item-detail.png)
+
+### See what the player is doing
+
+The stats overlay explains the source and delivery path while the player keeps
+its controls over the picture.
+
+![Demo playback with the stats overlay open](docs/img/player-stats.png)
 
 <details>
-<summary>More screenshots — Skip Intro, Settings, and a second theme</summary>
+<summary>More screenshots: Skip Intro, Settings, and Terminal</summary>
 
-The Skip Intro button appears when playback enters a marked region (chapters, or a
-conservative end-credits estimate); auto-skip is an opt-in preference:
+**Skip Intro** appears during a marked intro region. Auto-skip is optional.
 
-![Borderless player showing the Skip Intro button](docs/img/player-skip-intro.png)
+![Synthetic demo playback showing Skip Intro](docs/img/player-skip-intro.png)
 
-The admin Settings page: server + hardware at a glance (green pills are encoders
-that passed a real startup probe), libraries with **live** scan status, users,
-metadata key, and a live log viewer:
+**Settings** groups server, library, playback, and maintenance controls by task.
 
-![Settings — server diagnostics, hardware pills, and live library scan status](docs/img/settings.png)
+![noirr cinema server settings](docs/img/settings.png)
 
-Theming follows the system light/dark and offers named themes — here the **Terminal**
-theme (true-black, monospace):
+**Terminal** gives the same library a monospace theme with green accents.
 
-![The Terminal theme — true black, monospace, green accents](docs/img/theme-terminal.png)
+![The synthetic demo library in the Terminal theme](docs/img/theme-terminal.png)
 
 </details>
 
-## Principles
-
-1. **Your media, your rules.** No cloud dependency, no phone-home, no externally
-   hosted accounts. Everything works on a LAN that never touches the internet.
-2. **Direct play first.** The server's job is to get out of the way — every
-   client uses hardware decoding, and plurx only remuxes or transcodes when a
-   device truly can't handle the file, using hardware encoders when it must.
-3. **Lean and boring to operate.** One static binary. No external database,
-   message broker, or sidecar. Run one node, or run three identical binaries and
-   they form an HA cluster.
-4. **HA is a feature, not an ops project.** Active-active nodes over shared
-   storage; settings, users, watch state, and playback sessions replicate — a
-   node dying mid-movie costs seconds, not your evening.
-5. **Meet clients where they are.** A native API for our own apps, plus a Plex
-   Media Server-compatible API so existing third-party Plex clients point at
-   plurx and just work.
-
 ## Quickstart
 
-The fast path with Docker/Compose — from nothing to playing in five steps:
+Docker/Compose is the recommended homelab setup. Start from a checkout of this
+repository; install Docker with Compose first.
 
 ```bash
-# 1. Make the data directory — the db, artwork and every user/key live here,
-#    at a path you chose so it cannot go missing quietly (see deploy/README.md)
-sudo install -d -o $(id -u) -g $(id -g) /srv/plurx
+# Run from the repository root. Create persistent server storage.
+sudo install -d -o "$(id -u)" -g "$(id -g)" /srv/plurx
 
-# 2. Point it at your media and bring it up (builds from source the first time)
-cd deploy
-cp docker-compose.override.example.yml docker-compose.override.yml
-$EDITOR docker-compose.override.yml     # media mounts as host:container:ro, + optional GPU
-cd .. && make docker-up                    # builds, starts, and stamps the commit into the build
+# Configure your media mounts and optional GPU access.
+cp deploy/docker-compose.override.example.yml deploy/docker-compose.override.yml
+cp deploy/.env.example deploy/.env
+$EDITOR deploy/docker-compose.override.yml
+$EDITOR deploy/.env                     # set storage paths and the process uid/gid
 
-# 3. Open the web app — the first launch is the admin-account setup screen
-open http://<host>:32400                # :32400 is the default port
-
-# 4. Add a library: Settings → Libraries → Add & scan
-#    Kind: Movies | TV Shows | Anime | Books | Home videos & photos
-#    Path: what the SERVER sees (the container mount)
-
-# 5. Press play. Open ⓘ Stats (or press i) to see how it's being served.
+# Build the server and start it with the source commit stamped into the image.
+make docker-up
 ```
 
-Movies and TV want a free TMDB key for posters and metadata (Settings →
-Metadata); anime enriches from AniList with no key, while books and home videos
-use no provider at all. Home-video thumbnails are frame grabs. Everything runtime — users,
-libraries, keys — is edited in Settings, never a config file. A scan that finds
-nothing almost always means the path isn't what the server sees; the fix is in
-[docs/OPERATIONS.md](docs/OPERATIONS.md#reading-library-scan-status).
+1. Open `http://<server>:32400` and create the first administrator account.
+2. Go to **Settings → Libraries → Add & scan**. Choose a library kind and the
+   path visible **inside the container**.
+3. Optionally add your TMDB key in **Settings → Metadata** for movie and TV
+   metadata and posters.
+4. Open a title and press **Play**. Open **Stats** or press `i` to inspect the
+   delivery path.
+
+A library that scans zero files usually has an incorrect container path or
+unreadable mount. The [scan-status guide](docs/OPERATIONS.md#reading-library-scan-status)
+explains the counts and errors. Keep the server data directory persistent:
+it holds accounts, keys, library metadata, and watch state.
 
 ## Install
 
-Three ways to run it; all serve the web app + API on `:32400`.
+All server variants serve the web app and API on port `32400` by default.
 
-```bash
-# Docker / Compose — recommended for homelabs; bundles ffmpeg, builds from source first run
-make docker-up      # == docker compose up -d --build, with the commit stamped in
+| Deployment | Start here | Requirements |
+|---|---|---|
+| Docker / Compose | `make docker-up` | Docker with Compose; configured media and data mounts |
+| Native server | `plurxd run` | `ffmpeg` and `ffprobe` on `PATH` |
+| Build from source | `cargo run -p plurxd` | Repository-pinned Rust toolchain; `ffmpeg` and `ffprobe` |
 
-# Bare metal — one static binary; needs ffmpeg/ffprobe on PATH
-#   (jellyfin-ffmpeg recommended, or point PLURX_FFMPEG / PLURX_FFPROBE at them)
-plurxd run
+Hardware transcoding also needs the appropriate GPU driver and device access.
+Configuration layers defaults, `plurx.toml`, and `PLURX_*` environment variables;
+accounts, libraries, provider keys, and runtime preferences are managed in
+Settings.
 
-# From source (development)
-cargo run -p plurxd                     # or: make run
-```
+The [deployment guide](deploy/README.md) covers Compose, native services,
+Windows, systemd, launchd, Unraid, storage, GPU access, and ports. The
+[client guide](docs/CLIENTS.md) covers native apps and Plex-compatible clients.
 
-**Prerequisites.** Just `ffmpeg`/`ffprobe`, for scanning and remux/transcode —
-the Docker image already bundles them. Hardware transcoding additionally needs
-the GPU exposed to the process (NVENC / QuickSync / VA-API / VideoToolbox) and
-its driver; the software x264 path is always there as a fallback. Configuration
-layers defaults → `plurx.toml` → `PLURX_*` env (full table in
-[docs/OPERATIONS.md](docs/OPERATIONS.md#configuration-surface)).
+## Start here
 
-**Full guides.** [deploy/README.md](deploy/README.md) is the complete
-**install & setup** reference — every target (Compose, bare metal, a systemd
-service on Linux, a launchd agent on macOS, Unraid, TrueNAS/Kubernetes), GPU
-passthrough, and ports.
-[docs/OPERATIONS.md](docs/OPERATIONS.md) is **operations** — running it day to
-day and reading every status, log, and stats line it shows you.
-[docs/CHEATSHEET.md](docs/CHEATSHEET.md) is the **cheat sheet** — the
-copy-paste commands, in order, plus a table of where everything lives.
+| I want to… | Read |
+|---|---|
+| See the full feature set and its limits | [Features](docs/FEATURES.md) |
+| Run and troubleshoot the server | [Operations](docs/OPERATIONS.md) |
+| Find commands quickly | [Cheat sheet](docs/CHEATSHEET.md) |
+| Understand playback decisions | [Playback](docs/PLAYBACK.md) |
+| Understand the architecture | [Architecture](docs/ARCHITECTURE.md) |
+| Connect an application | [API](docs/API.md) · [Integrations](docs/INTEGRATION.md) |
+| Understand authentication and exposure | [Security](docs/SECURITY.md) |
+| Contribute and validate a change | [Development pipeline](docs/DEVELOPMENT_PIPELINE.md) · [Validation](docs/VALIDATION.md) |
+| Find plans, delivery status, or test evidence | [Documentation index](docs/README.md) |
+| Follow releases and changes | [Releasing](docs/RELEASING.md) · [Changelog](CHANGELOG.md) |
+
+The [documentation index](docs/README.md) is the complete map of maintained
+references and subject-specific plans. Each entry states its question and
+status.
 
 ## Development
 
-The repo pins the exact rustc, clippy, and rustfmt in
-[`rust-toolchain.toml`](rust-toolchain.toml), so `rustup` fetches the right
-versions on your first build. Functionality-point validation also needs Python
-3.11+; its standard-library TOML parser is the only Python dependency. The one
-thing neither toolchain supplies is `ffmpeg`/`ffprobe` — keep them on `PATH`,
-not only for anything that scans or plays but for the Rust gate itself, whose
-transcode and stream tests spawn ffmpeg for real. CI installs them for the same
-reason.
+Use `rustup` so [rust-toolchain.toml](rust-toolchain.toml) selects the exact
+compiler, Clippy, and rustfmt versions. Validation tooling needs Python 3.11+;
+media tests also need `ffmpeg` and `ffprobe` on `PATH`.
 
 ```bash
-git clone http://192.168.4.7:3000/noirr/plurx.git && cd plurx
-make run          # build + serve http://localhost:32400  (cargo run -p plurxd)
-make check        # history + operations + catalog + Rust — mandatory baseline
-make history-check # audit every corrective commit against current evidence
-make operations-check # pin deploy, CI, container, and ship contracts
-make validate-help # explain the validation workflow and UI golden
-make validate-staged # validate the functionality points in the staged diff
-make validate     # point-aware local gate; adds checks for non-Rust surfaces
-make validate-full # browser, native clients, device (opt-in), and container runtime
-make validate-nightly # exhaustive playback/recovery/resource-bound tier
-make hooks        # validate functionality points affected by each staged commit
-make playback-smoke # real-browser matrix; Chrome default, Safari/Edge/Firefox targets available
-make benchmark-check # validate A/B matrix and raw/report contracts; contacts no server
+make run                # build and serve on http://localhost:32400
+make hooks              # install the repository's commit checks
+make check              # history, operations, catalog, benchmark, and Rust baseline
+make validate-staged    # validate the functionality points affected by staged files
+make                    # list all available targets
 ```
 
-Everything goes through the `Makefile`; `make` with no target lists them all
-(`make test`, `make coverage` → `lcov.info`, `make docker`). One gotcha worth
-knowing up front: the web app is a single file embedded into the binary at build
-time ([`crates/plurxd/src/web/index.html`](crates/plurxd/src/web/index.html)),
-so a UI change only shows up after a rebuild. How the pieces fit and *why* is
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); the crate map is [below](#layout).
-
-## Usage
-
-**Add a library.** Settings → Libraries → *Add & scan*. Pick Movies, TV Shows,
-Anime, Books, or Home videos & photos; give it one or more paths. The scanner
-identifies files, probes them with `ffprobe`, and enriches from TMDB
-(movies/TV, optional key) or AniList (anime, no key). A Books library detects
-ebooks separately from audio, groups numbered audio files into one multipart
-audiobook, and preserves embedded duration, codec/container, and chapter facts.
-Ebooks open through the authenticated original-file route; audiobooks use the
-ordinary playback, resume, progress, and delivery-decision path. A home library is
-different by design: its folder tree *is* the organization, its titles are your
-filenames untouched, and its metadata comes from the disk — an optional Kodi
-`.nfo` read exactly once, plus capture dates and frame-grab thumbnails. See
-[docs/FEATURES.md](docs/FEATURES.md#1a-home-video--photos--the-shoebox-browsable). Watch the live status: `scanning… N / M files` → `fetching metadata…` →
-`idle`. A scan that finds nothing almost always means the path isn't what the
-server sees — see [OPERATIONS.md](docs/OPERATIONS.md#reading-library-scan-status).
-
-**Play something.** Press play; plurx decides direct-play / remux / transcode for
-your device and reports it. Open the **Stats** overlay (ⓘ or press `i`) to see the
-method, source, and what your browser is actually decoding. *Direct play* is
-ideal, *Remux* is cheap, *Transcode · QuickSync* means the GPU is working,
-*Transcode · software* means it fell back to CPU (the logs say why).
-
-**Point a Plex client at it.** Kodi-family Plex clients (Composite, PKC),
-`python-plexapi`, and Home Assistant work against the Plex-compat façade + GDM
-discovery — no plex.tv contact. See [docs/CLIENTS.md](docs/CLIENTS.md).
-
-**Operate it.** `/healthz`, `/readyz`, and Prometheus `/metrics` (including
-cluster quorum, node-heartbeat, Raft lag, offline queue, timing, quota, and
-transfer series); a stopped-node WAL inspector ships in the image; a global
-activity pill shows what the server is doing on every page; Settings → Logs is
-a live, filterable log viewer. Full guide:
-[docs/OPERATIONS.md](docs/OPERATIONS.md).
+The web app is [embedded in the binary](crates/plurxd/src/web/index.html), so
+UI edits require a rebuild and restart. Follow the
+[development pipeline](docs/DEVELOPMENT_PIPELINE.md) for branch, review, and
+qualification rules. If your checkout has no compiler, use the
+[source-only compile loop](docs/ci/AGENT-COMPILE-LOOP.md) before pushing.
 
 ## Layout
 
-| Path | What's inside |
+| Path | Purpose |
 |---|---|
-| [`crates/plurx-core`](crates/plurx-core) | Domain model · the `Store` trait · scanner · metadata agents · playback decision engine |
-| [`crates/plurxd`](crates/plurxd) | The HTTP daemon (axum) · transcode orchestrator · the embedded single-file web app |
-| [`crates/plurx-compat-plex`](crates/plurx-compat-plex) | Plex Media Server API façade + GDM discovery responder |
-| [`tests/playback`](tests/playback) | Synthetic playback corpus contract · smoke/full source × quality × operation matrix |
-| [`docs/`](docs) | [Indexed by `docs/README.md`](docs/README.md) — the reference set at the root · one folder per subject: `playback-control` · `streaming` · `cluster` · `clients` · `performance` · `ci` · `features` · `reviews` · `archive` |
-| [`deploy/`](deploy) | Docker/Compose, systemd unit, macOS launchd agent, and Unraid templates |
+| [crates/plurx-core](crates/plurx-core) | Domain model, storage, scanner, metadata, and playback decisions |
+| [crates/plurxd](crates/plurxd) | HTTP server, playback orchestration, and embedded web UI |
+| [crates/plurx-compat-plex](crates/plurx-compat-plex) | Plex API compatibility and discovery |
+| [clients](clients) | Native Apple and Android applications |
+| [tests](tests) | Operations, browser, playback, and integration contracts |
+| [deploy](deploy) | Container and native deployment recipes |
+| [docs](docs/README.md) | Reference documentation, plans, and qualification records |
 
 ## Status
 
-Phases are gates — each ends with something you actually use. Full detail in
-[docs/ROADMAP.md](docs/ROADMAP.md).
-
-- [x] **Phase 0 — Skeleton.** Workspace, CI (fmt/clippy/test, cross-build), Docker
-  image, `Store` trait boundary from commit one.
-- [x] **Phase 1 — It plays.** Scanner, TMDB metadata, native API, direct play +
-  remux, resume, embedded web app.
-- [x] **Phase 2 — Old-Plex parity.** Hardware transcode (NVENC/QSV/VA-API/
-  VideoToolbox + software fallback) with HDR→SDR tone-mapping and HLS; anime
-  (AniList, absolute numbering, dual-audio); multi-version items; subtitles;
-  Plex-compat Tier 1 (validated with `python-plexapi`); ops (metrics, logs,
-  deploy templates).
-- [x] **Phase 3 — Cluster spike.** The HA decision gate: store backend (hiqlite)
-  and transcode-failover mechanic decided and validated against real sources. See
-  [docs/cluster/PHASE3-SPIKE.md](docs/cluster/PHASE3-SPIKE.md).
-- [x] **Home video & photos.** A `home` library kind: mirrored folder trees,
-  filename-verbatim titles, capture dates, seed-once `.nfo` sidecars, photo
-  lightbox, local frame-grab artwork, and in-UI metadata editing.
-- [~] **Books.** A `books` library kind with separate ebook and audiobook
-  items, multipart audiobook grouping, chapter/codec/container/duration facts,
-  authenticated ebook opening, and cross-client audio playback with one global
-  resume/progress timeline are shipped. Revision-bound, replicated ebook
-  reading state and its authenticated API are also shipped. The bounded,
-  capability-scoped EPUB publication layer and built-in web/iOS/Android online
-  readers are complete. App-managed offline EPUB copies now ship on iPhone,
-  iPad, and Android phones/tablets; televisions remain deliberately excluded.
-  Metadata enrichment and the physical airplane-mode acceptance matrix remain
-  in [EBOOK-READER-PLAN.md](docs/clients/EBOOK-READER-PLAN.md). M0–M3 are complete and
-  M4 implementation is complete with device acceptance in progress.
-- [~] **Playback experience.** Borderless player, staged loading, rich stats,
-  skip intro/credits with auto-skip, and immutable film-addressed VOD HLS are
-  shipped. HLS no longer falls back to the removed growing live presentation;
-  unfinished transcode-rung and subtitle-burn VOD classes fail explicitly.
-  Public ratings and multi-server dashboard still remain.
-- [~] **Phase 4 — HA for real.** Clustering M0–M2 is merged behind the
-  unchanged `Store` trait: `plurxd run` verifies and atomically activates a
-  one-voter replicated store while retaining SQLite for pre-membership
-  rollback. Membership, replicated sessions, and failover remain open.
-- [~] **Phase 5 — Native clients.** Android/Google TV and Apple iOS/tvOS clients
-  are working; Tizen/webOS and Roku have not started.
+Cinema is pre-1.0 and under active development. The feature overview describes
+implemented behavior; device support, rollout evidence, and remaining work are
+tracked in the [feature inventory](docs/FEATURES.md),
+[client guide](docs/CLIENTS.md), and [delivery records](docs/README.md).
+The [roadmap](docs/ROADMAP.md) preserves the project phases and design history.
 
 ## Non-goals
 
-Deliberate, with reasons — the full list and rationale is in
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#8-non-goals-what-the-architecture-deliberately-refuses)
-and [docs/FEATURES.md](docs/FEATURES.md#11-what-plurx-does-not-do):
-
-- **No cloud, no phone-home.** There is no plurx.tv and there never needs to be.
-- **No ordinary media mutation.** Scanning, metadata, and playback use read-only
-  mounts; plurx does not organize or rename files. The sole opt-in exception is
-  the admin-only, per-library, off-by-default Dolby Vision on-disk conversion
-  documented in [Operations](docs/OPERATIONS.md).
-- **Not a streaming aggregator.** No ads, no rentals, no "discover" feeds, no
-  channel services. One over-the-air HDHomeRun tuner plays live on every
-  first-party client, off by default — see
-  [Features §4a](docs/FEATURES.md) and the
-  [runbook](docs/OPERATIONS.md).
-- **Not a DVR.** Live TV records nothing: no recording, no scheduling, no
-  retention, no series rules. DRM-flagged channels are listed and refused,
-  because there is no licensed DRM path.
-- **No general music library** in v1 (the data model won't preclude it later).
-  Audiobooks are supported in Books libraries; photos are supported in Home.
-- **No transcode-by-default.** On demand only, when a device forces it.
+- **No cloud account requirement or streaming-service aggregation.** Cinema
+  serves your library and configured tuner; metadata and integrations are
+  optional network services.
+- **No automatic organization of your media.** Ordinary library maintenance
+  does not rename or move source files. Writable conversion and DVR storage
+  are explicit operator choices.
+- **No general music library.** Audiobooks belong in Books; personal video and
+  photos belong in Home libraries.
+- **No DRM bypass.** Protected television channels cannot be played or recorded.
 
 ## License
 
-Private for now. Licensing will be decided if/when the project is shared.
+Private for now. Licensing will be decided before public distribution.
