@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["a767f5fe", "79553e2f"]
-points = ["web.experience", "library.catalog", "server.api"]
-checks = ["web-static", "rust-gate"]
-reason = "The retained calm-library web contract exercises recording exclusion by library identity, uncertain language tags and per-file track choices. The SQLite global_recent_additions_exclude_recordings_before_limiting regression fills the catalogue with DVR entries and requires the movie to survive the global limit. The HTTP original_download_supports_ranges_without_registering_playback regression requires an authenticated ranged attachment without a watching entry, plus denial without credentials."

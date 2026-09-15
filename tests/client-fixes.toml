@@ -185,9 +185,12 @@ test_anchor = "testPGSOverlayDisablesManualAndAutomaticPictureInPicture"
 id = "apple.home-hero-edge-clipping"
 commits = ["b423fcce"]
 source = "clients/apple/Sources/HomeView.swift"
-source_anchor = "struct IOSHomeHeroCardLayout: ViewModifier"
+# The approved quiet Home removes the hero entirely. Its retained successor
+# rejects reintroducing that oversized/clipped presentation and keeps every
+# continuation available in the compact list.
+source_anchor = "static let usesFeaturedHero = false"
 test = "clients/apple/Tests/AppleClientTests.swift"
-test_anchor = "testPhoneHomeHeroKeepsEqualInsetsOnBothEdges"
+test_anchor = "testPhoneHomeKeepsEveryContinuationWithoutAFeaturedHero"
 
 [[fixes]]
 id = "clients.media-origin-and-seek-routing"
@@ -2002,6 +2005,32 @@ test_anchor = "const missingPicture = info.playbackInfoOverview({"
 # the sibling Apple claim suite validates the required build-note Issue line.
 id = "clients.playback-info-release-documentation"
 commits = ["537e22e6"]
+source = "clients/android/README.md"
+source_anchor = "> Status: **v0.3.0**, build"
+test = "tests/operations/test_mobile_build_claims.py"
+test_anchor = "def test_repository_build_claims_match_release_inputs"
+
+[[fixes]]
+# Focused web evidence; native layout evidence is compile plus simulator
+# captures, not blanket unit coverage of the visual revision.
+id = "clients.calm-library-track-choices"
+commits = ["a767f5fe"]
+source = "crates/plurxd/src/web/index.html"
+source_anchor = "function itemTrackSummary("
+test = "tests/web/calm-library.test.js"
+test_anchor = "assert.equal(summary(file, 'audio'), 'English');"
+
+[[fixes]]
+id = "clients.calm-library-download-check"
+commits = ["79553e2f"]
+source = "crates/plurxd/src/http/stream.rs"
+source_anchor = "pub async fn download("
+test = "crates/plurxd/src/http/mod.rs"
+test_anchor = "async fn original_download_supports_ranges_without_registering_playback()"
+
+[[fixes]]
+id = "clients.calm-library-release-claims"
+commits = ["6d7a34db"]
 source = "clients/android/README.md"
 source_anchor = "> Status: **v0.3.0**, build"
 test = "tests/operations/test_mobile_build_claims.py"
