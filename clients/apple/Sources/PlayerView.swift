@@ -2682,6 +2682,7 @@ struct PlayerView: View {
 enum PlaybackStatsMode: String, CaseIterable, Identifiable {
     case mini
     case standard
+    case details
     case debug
 
     var id: Self { self }
@@ -2701,9 +2702,10 @@ enum PlaybackStatsMode: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .mini: return "Mini"
-        case .standard: return "Standard"
-        case .debug: return "Debug"
+        case .mini: return "Compact"
+        case .standard: return "Overview"
+        case .details: return "Details"
+        case .debug: return "Diagnostics"
         }
     }
 }
@@ -2920,52 +2922,52 @@ struct ApplePlaybackInfoField: Identifiable {
 /// Apple-applicable rows from playback-info-fields.json, in fixture order.
 /// The renderer and parity test both consume this list.
 let applePlaybackInfoFields: [ApplePlaybackInfoField] = [
-    .init("method", "Method", "PLAYBACK", [.mini, .standard, .debug]),
-    .init("position", "Position", "PLAYBACK", [.mini, .standard, .debug]),
-    .init("reason", "Reason", "PLAYBACK", [.standard, .debug], placement: .notes),
+    .init("method", "Method", "PLAYBACK", [.mini, .standard, .details, .debug]),
+    .init("position", "Position", "PLAYBACK", [.mini, .standard, .details, .debug]),
+    .init("reason", "Reason", "PLAYBACK", [.standard, .details, .debug], placement: .notes),
     .init("build", "Build", "PLAYBACK", [.debug], always: true),
     .init("transport", "Transport", "PLAYBACK", [.debug], placement: .notes),
     .init("file_id", "File ID", "PLAYBACK", [.debug]),
     .init("session", "Session", "PLAYBACK", [.debug], placement: .notes),
-    .init("source_video", "Video", "SOURCE", [.standard, .debug], placement: .notes),
-    .init("source_resolution", "Resolution", "SOURCE", [.standard, .debug]),
-    .init("source_bitrate", "Bitrate", "SOURCE", [.standard, .debug]),
-    .init("container", "Container", "SOURCE", [.standard, .debug]),
-    .init("source_audio", "Audio", "SOURCE", [.standard, .debug], placement: .notes),
+    .init("source_video", "Original video", "SOURCE", [.standard, .details, .debug], placement: .notes),
+    .init("source_resolution", "Original resolution", "SOURCE", [.standard, .details, .debug]),
+    .init("source_bitrate", "Source bitrate", "SOURCE", [.standard, .details, .debug]),
+    .init("container", "Container", "SOURCE", [.standard, .details, .debug]),
+    .init("source_audio", "Source audio track", "SOURCE", [.standard, .details, .debug], placement: .notes),
     .init("source_file", "File", "SOURCE", [.debug], placement: .notes),
     .init("av_offset", "AV offset", "SOURCE", [.debug], always: true),
-    .init("decode_resolution", "Resolution", "NOW DECODING", [.mini, .standard, .debug]),
-    .init("dynamic_range", "Dynamic range", "NOW DECODING", [.mini, .standard, .debug], placement: .notes),
-    .init("decode_audio", "Audio", "NOW DECODING", [.debug], placement: .notes),
+    .init("decode_resolution", "Playing resolution", "NOW DECODING", [.mini, .standard, .details, .debug], always: true),
+    .init("dynamic_range", "Dynamic range", "NOW DECODING", [.mini, .standard, .details, .debug], placement: .notes),
+    .init("decode_audio", "Stream audio track", "NOW DECODING", [.debug], placement: .notes),
     .init("player_state", "Player state", "NOW DECODING", [.debug]),
     .init("waiting_reason", "Waiting reason", "NOW DECODING", [.debug], placement: .notes),
-    .init("stalls", "Stalls", "NOW DECODING", [.standard, .debug]),
-    .init("subtitles", "Subtitles", "NOW DECODING", [.standard, .debug]),
+    .init("stalls", "Buffering interruptions", "NOW DECODING", [.standard, .details, .debug]),
+    .init("subtitles", "Subtitles", "NOW DECODING", [.standard, .details, .debug]),
     .init("source_read", "Source read", "BUFFERING / DELIVERY", [.debug], always: true),
-    .init("server_ready", "Server ready", "BUFFERING / DELIVERY", [.standard, .debug], always: true),
+    .init("server_ready", "Ready on server", "BUFFERING / DELIVERY", [.standard, .details, .debug], always: true),
     .init("ready_state", "Ready state", "BUFFERING / DELIVERY", [.debug], always: true),
     .init("ready_anchor", "Ready anchor", "BUFFERING / DELIVERY", [.debug]),
     .init("ready_end", "Ready end", "BUFFERING / DELIVERY", [.debug]),
     .init("later_ready", "Later ready", "BUFFERING / DELIVERY", [.debug], placement: .notes),
-    .init("http_wait", "HTTP wait", "BUFFERING / DELIVERY", [.standard, .debug]),
-    .init("client_loaded", "Client loaded", "BUFFERING / DELIVERY", [.mini, .standard, .debug]),
-    .init("presentation", "Presentation", "BUFFERING / DELIVERY", [.standard, .debug]),
-    .init("presentation_age", "Last advance", "BUFFERING / DELIVERY", [.standard, .debug]),
-    .init("delivery_rate", "Delivery rate", "BUFFERING / DELIVERY", [.mini, .standard, .debug]),
-    .init("delivered", "Delivered", "BUFFERING / DELIVERY", [.standard, .debug]),
+    .init("http_wait", "HTTP wait", "BUFFERING / DELIVERY", [.standard, .details, .debug]),
+    .init("client_loaded", "Buffered on device", "BUFFERING / DELIVERY", [.mini, .standard, .details, .debug]),
+    .init("presentation", "Presentation", "BUFFERING / DELIVERY", [.standard, .details, .debug]),
+    .init("presentation_age", "Last advance", "BUFFERING / DELIVERY", [.standard, .details, .debug]),
+    .init("delivery_rate", "Server response rate", "BUFFERING / DELIVERY", [.mini, .standard, .details, .debug]),
+    .init("delivered", "Server responses completed", "BUFFERING / DELIVERY", [.standard, .details, .debug]),
     .init("delivery_idle", "Delivery idle", "BUFFERING / DELIVERY", [.debug]),
     .init("status_age", "Status sample age", "BUFFERING / DELIVERY", [.debug]),
-    .init("observed_rate", "Observed rate", "NETWORK", [.debug]),
+    .init("observed_rate", "Observed download rate", "NETWORK", [.debug]),
     .init("stream_rate", "Stream rate", "NETWORK", [.debug]),
     .init("transferred", "Transferred", "NETWORK", [.debug]),
     .init("requests", "Requests", "NETWORK", [.debug]),
     .init("started_in", "Started in", "NETWORK", [.debug]),
-    .init("status", "Status", "SERVER", [.standard, .debug], always: true),
-    .init("encoder", "Encoder", "SERVER", [.standard, .debug]),
-    .init("encode_speed", "Encode speed", "SERVER", [.standard, .debug]),
-    .init("production_actual", "Production actual", "SERVER", [.standard, .debug]),
-    .init("production_target", "Production target", "SERVER", [.standard, .debug]),
-    .init("producer_state", "Producer", "SERVER", [.standard, .debug]),
+    .init("status", "Server state", "SERVER", [.standard, .details, .debug], always: true),
+    .init("encoder", "Encoder", "SERVER", [.standard, .details, .debug]),
+    .init("encode_speed", "Encode speed", "SERVER", [.standard, .details, .debug]),
+    .init("production_actual", "Production actual", "SERVER", [.standard, .details, .debug]),
+    .init("production_target", "Production target", "SERVER", [.standard, .details, .debug]),
+    .init("producer_state", "Producer", "SERVER", [.standard, .details, .debug]),
     .init("fetch_reserve", "Fetch reserve", "SERVER", [.debug]),
     .init("ahead_bytes", "Fetch reserve bytes", "SERVER", [.debug]),
     .init("produced", "Produced", "SERVER", [.debug]),
@@ -2978,9 +2980,9 @@ let applePlaybackInfoFields: [ApplePlaybackInfoField] = [
     .init("playlist", "Playlist", "SERVER", [.debug]),
     .init("published_end", "Published end", "SERVER", [.debug]),
     .init("fetched_end", "Fetched end", "SERVER", [.debug]),
-    .init("control", "Control", "SERVER", [.standard, .debug]),
-    .init("surface_kind", "Surface", "SURFACE", [.standard, .debug]),
-    .init("surface_class", "Fault", "SURFACE", [.standard, .debug]),
+    .init("control", "Control", "SERVER", [.standard, .details, .debug]),
+    .init("surface_kind", "Surface", "SURFACE", [.standard, .details, .debug]),
+    .init("surface_class", "Fault", "SURFACE", [.standard, .details, .debug]),
     .init("surface_source", "Source", "SURFACE", [.debug]),
     .init("surface_ids", "Attached/intent", "SURFACE", [.debug]),
     .init("surface_history", "History", "SURFACE", [.debug], placement: .notes),
@@ -3004,768 +3006,43 @@ struct PlaybackStatsView: View {
         applePlaybackInfoFields.filter { $0.modes.contains(mode) }.map(\.label)
     }
 
-    #if os(tvOS)
-    @FocusState private var dismissFocused: Bool
-    #endif
-
-    #if os(iOS)
-    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
-    #endif
-
-    /// This panel floats over the video, so its contrast must not follow the
-    /// app's light/dark palette. A fixed dark surface keeps the white copy
-    /// readable in every appearance and over both bright and dark frames.
-    /// It also carries the whole contrast job — there is no scrim behind it.
-    private let panelSurface = Palette.playerChrome.opacity(0.96)
-    private let labelColor = Color.white.opacity(0.82)
-
     var body: some View {
-        Group {
-            if mode == .mini {
-                miniBody
-            } else {
-                ledgerBody
-            }
-        }
-        #if os(tvOS)
-        .onAppear { requestInitialFocus() }
-        .onChange(of: mode) { _, _ in requestInitialFocus() }
-        #endif
-    }
-
-    #if os(tvOS)
-    private func requestInitialFocus() {
-        Task { @MainActor in
-            await Task.yield()
-            dismissFocused = true
-        }
-    }
-    #endif
-
-    private var modeSelector: some View {
-        HStack(spacing: 6) {
-            ForEach(PlaybackStatsMode.allCases) { candidate in
-                Button {
-                    withAnimation(.easeInOut(duration: 0.16)) { mode = candidate }
-                } label: {
-                    Text(candidate.label)
-                        .font(.system(size: modeFontSize, weight: .semibold, design: .rounded))
-                        .padding(.horizontal, modeHorizontalPadding)
-                        .padding(.vertical, modeVerticalPadding)
-                        .foregroundStyle(mode == candidate ? .white : .white.opacity(0.62))
-                        .background(
-                            mode == candidate ? Palette.accent : Color.white.opacity(0.07),
-                            in: Capsule()
-                        )
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("\(candidate.label) playback info")
-                .accessibilityAddTraits(mode == candidate ? .isSelected : [])
-            }
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel("Playback info size")
-    }
-
-    private var modeFontSize: CGFloat {
-        #if os(tvOS)
-        15
-        #else
-        11
-        #endif
-    }
-
-    private var modeHorizontalPadding: CGFloat {
-        #if os(tvOS)
-        13
-        #else
-        9
-        #endif
-    }
-
-    private var modeVerticalPadding: CGFloat {
-        #if os(tvOS)
-        7
-        #else
-        5
-        #endif
-    }
-
-    private var closeButton: some View {
-        Button(action: onDismiss) {
-            Image(systemName: "xmark")
-                .font(.system(size: modeFontSize, weight: .bold))
-                .padding(modeVerticalPadding)
-                .foregroundStyle(.white.opacity(0.72))
-                .background(.white.opacity(0.07), in: Circle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("Close playback info")
-    }
-
-    // MARK: - Mini
-
-    /// One horizontal line inside a bounded panel: method, position, the
-    /// three facts, and a health pill, all separated by hairlines.
-    private var miniBody: some View {
-        miniShrinkWrap(
-            HStack(spacing: miniSpacing) {
-                Text(controller.methodLabel)
-                    .font(.system(size: miniTitleSize, weight: .bold, design: .rounded))
-                    .foregroundStyle(.white)
-                    .lineLimit(1)
-
-                miniDivider
-
-                Text("\(formatTime(controller.currentMs)) / \(formatTime(controller.knownDurationMs))")
-                    .font(.system(size: miniDetailSize, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.62))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-
-                ForEach(miniFacts) { fact in
-                    miniDivider
-                    miniFact(fact)
-                }
-
-                miniDivider
-
-                miniHealth
-                miniControls
-            }
-            .padding(.horizontal, miniHorizontalPadding)
-            .padding(.vertical, miniVerticalPadding)
-        )
-        .background(panelSurface, in: RoundedRectangle(cornerRadius: miniCornerRadius))
-        .overlay {
-            RoundedRectangle(cornerRadius: miniCornerRadius)
-                .stroke(.white.opacity(0.12), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.45), radius: 24, y: 12)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-        .padding(miniOuterPadding)
-    }
-
-    /// The controls are the one part of the line that must never compress,
-    /// so they carry the layout priority and the facts absorb the squeeze.
-    private var miniControls: some View {
-        HStack(spacing: miniSpacing) {
-            modeSelector
-            closeButton
-        }
-        .layoutPriority(1)
-    }
-
-    /// The line is bounded, never free-running. `fixedSize` used to stand
-    /// here on the television, which proposed every child its ideal width and
-    /// so made the `lineLimit` and `minimumScaleFactor` on the fact values
-    /// inert: a long method label beside a long summary simply kept growing,
-    /// and because the panel is trailing-aligned it bled off the leading
-    /// edge. A width bound gives those modifiers something to work against
-    /// again — the values scale and truncate inside it instead.
-    private func miniShrinkWrap<V: View>(_ view: V) -> some View {
-        view.frame(maxWidth: miniMaxWidth)
-    }
-
-    private var miniDivider: some View {
-        Rectangle()
-            .fill(Color.white.opacity(0.16))
-            .frame(width: 1, height: miniDividerHeight)
-            .accessibilityHidden(true)
-    }
-
-    private var miniFacts: [PlaybackLedgerRow] {
-        var rows: [PlaybackLedgerRow] = []
-        let size = controller.presentationSize
-        if size.width > 0 && size.height > 0 {
-            rows.append(PlaybackLedgerRow(
-                label: "Resolution",
-                value: "\(Int(size.width))×\(Int(size.height))",
-                tone: playbackTone
-            ))
-        }
-        if let range = PlayerView.dynamicRangeSummary(
-            source: controller.decision?.source,
-            delivered: controller.deliveredRange,
-            displayHDR: Caps.displayIsHDR,
-            reasons: []
-        ) {
-            rows.append(PlaybackLedgerRow(
-                label: "Dynamic range",
-                value: range.components(separatedBy: " — ").first ?? range,
-                tone: playbackTone
-            ))
-        }
-        rows.append(PlaybackLedgerRow(label: "Client loaded", value: miniClientLoadedSummary, tone: bufferTone))
-        rows.append(PlaybackLedgerRow(
-            label: "Delivery rate",
-            value: miniNetworkSummary,
-            tone: networkTone
-        ))
-        return rows
-    }
-
-    private func miniFact(_ fact: PlaybackLedgerRow) -> some View {
-        HStack(spacing: 5) {
-            Text(fact.label.uppercased())
-                .font(.system(size: miniLabelSize, weight: .bold, design: .rounded))
-                .tracking(0.8)
-                .foregroundStyle(.white.opacity(0.42))
-                .lineLimit(1)
-            Text(fact.value)
-                .font(.system(size: miniDetailSize, weight: .semibold, design: .rounded))
-                .foregroundStyle(fact.tone.color)
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
-        }
-        .accessibilityElement(children: .combine)
-    }
-
-    private var miniHealth: some View {
-        let status = playbackServerStatus
-        return HStack(spacing: 5) {
-            Circle()
-                .fill(status.tone.color)
-                .frame(width: miniHealthDotSize, height: miniHealthDotSize)
-            Text(status.value)
-                .font(.system(size: miniDetailSize, weight: .semibold, design: .rounded))
-                .foregroundStyle(playbackTone.color)
-                .lineLimit(1)
-        }
-        .padding(.horizontal, miniPillHorizontalPadding)
-        .padding(.vertical, miniPillVerticalPadding)
-        .background(.white.opacity(0.07), in: Capsule())
-        .accessibilityElement(children: .combine)
-    }
-
-    private var miniClientLoadedSummary: String {
-        if let runway = controller.bufferedRunwaySeconds() {
-            return String(format: "%.1f s", runway)
-        }
-        return "Measuring"
-    }
-
-    private var miniNetworkSummary: String {
-        // `Delivery rate` is the server-reported rate. The player's own
-        // estimate is `Observed rate`, a different row with a different
-        // label — printing it here put two numbers under one label.
-        if let delivered = controller.sessionStatus?.deliveredBps, delivered > 0 {
-            return bitRate(delivered)
-        }
-        return "Measuring"
-    }
-
-    private var miniSpacing: CGFloat {
-        #if os(tvOS)
-        12
-        #else
-        7
-        #endif
-    }
-
-    private var miniTitleSize: CGFloat {
-        #if os(tvOS)
-        21
-        #else
-        14
-        #endif
-    }
-
-    private var miniDetailSize: CGFloat {
-        #if os(tvOS)
-        14
-        #else
-        10
-        #endif
-    }
-
-    private var miniLabelSize: CGFloat {
-        #if os(tvOS)
-        11
-        #else
-        8
-        #endif
-    }
-
-    private var miniHealthDotSize: CGFloat {
-        #if os(tvOS)
-        8
-        #else
-        6
-        #endif
-    }
-
-    private var miniDividerHeight: CGFloat {
-        #if os(tvOS)
-        22
-        #else
-        14
-        #endif
-    }
-
-    private var miniPillHorizontalPadding: CGFloat {
-        #if os(tvOS)
-        11
-        #else
-        8
-        #endif
-    }
-
-    private var miniPillVerticalPadding: CGFloat {
-        #if os(tvOS)
-        5
-        #else
-        3
-        #endif
-    }
-
-    private var miniHorizontalPadding: CGFloat {
-        #if os(tvOS)
-        18
-        #else
-        11
-        #endif
-    }
-
-    private var miniVerticalPadding: CGFloat {
-        #if os(tvOS)
-        12
-        #else
-        9
-        #endif
-    }
-
-    /// The upper bound on the shrink-wrapped line. Without it the values'
-    /// `minimumScaleFactor` never engages, because nothing ever proposes the
-    /// line a width narrower than it asked for.
-    private var miniMaxWidth: CGFloat {
-        #if os(tvOS)
-        1_240
-        #else
-        560
-        #endif
-    }
-
-    private var miniCornerRadius: CGFloat {
-        #if os(tvOS)
-        16
-        #else
-        10
-        #endif
-    }
-
-    private var miniOuterPadding: CGFloat {
-        #if os(tvOS)
-        36
-        #else
-        12
-        #endif
-    }
-
-    // MARK: - Ledger shell
-
-    /// Anchored to the top-trailing corner in every mode and clipped short of
-    /// the transport controls, so growing from Standard to Debug extends the
-    /// same block downward instead of moving it.
-    private var ledgerBody: some View {
         GeometryReader { geometry in
-            let insets = geometry.safeAreaInsets
-            let usableWidth = max(
-                0,
-                geometry.size.width - insets.leading - insets.trailing - (ledgerEdgeInset * 2)
-            )
-            let usableHeight = max(
-                0,
-                geometry.size.height - insets.top - insets.bottom
-                    - (ledgerEdgeInset * 2) - ledgerTransportReserve
-            )
-            let panelWidth = max(0, min(ledgerMaxWidth, usableWidth * ledgerWidthFraction))
-            let panelHeight = max(0, min(ledgerMaxHeight, usableHeight))
-
-            ZStack {
-                ledgerBackdrop
-
-                ledgerInitialFocus(
-                    ledgerPanel
-                        .frame(width: panelWidth)
-                        .frame(maxHeight: panelHeight, alignment: .top)
-                        .padding(.top, insets.top + ledgerEdgeInset)
-                        .padding(.trailing, insets.trailing + ledgerEdgeInset)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+            let inset: CGFloat = 20
+            #if os(tvOS)
+            let maximum: CGFloat = 1100
+            #else
+            let maximum: CGFloat = 736
+            #endif
+            ZStack(alignment: .topTrailing) {
+                #if os(iOS)
+                Color.clear.contentShape(Rectangle()).onTapGesture { onDismiss() }
+                #endif
+                PlaybackInfoPanel(
+                    title: controller.decision?.title ?? "Current playback",
+                    facts: presentationFacts,
+                    mode: $mode,
+                    onClose: onDismiss
                 )
-            }
+                .frame(width: max(0, min(maximum, geometry.size.width - inset * 2)))
+                .frame(maxHeight: max(0, geometry.size.height - inset * 2), alignment: .top)
+                .padding(inset)
+            }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
         }
     }
 
-    /// The visual scrim is gone — the panel carries the whole contrast job —
-    /// but on the phone the scrim was also doing layout work: Debug was a
-    /// modal surface, and the old `Color.black.opacity(0.52)` absorbed every
-    /// tap that missed the panel. Without something hit-testable those taps
-    /// now reach the transport controls behind it. The old scrim carried no
-    /// tap gesture, so neither does this: taps are swallowed, not acted on.
-    /// Standard never had a scrim on the phone and does not get one here.
-    /// The television keeps focus out of the controls by disabling them at
-    /// the call site instead, so it needs nothing.
-    @ViewBuilder
-    private var ledgerBackdrop: some View {
-        #if os(iOS)
-        // Hit-testable and invisible. Without it the taps that miss the panel
-        // reach the transport controls behind it; with it they are the touch
-        // table's `info × tap_surface`, which is `close_info`.
-        Color.clear
-            .contentShape(Rectangle())
-            .ignoresSafeArea()
-            .onTapGesture { onDismiss() }
-        #else
-        EmptyView()
-        #endif
-    }
-
-    /// The remote lands on Done in every mode. Debug used to wire no initial
-    /// focus at all, which left the panel unreachable.
-    private func ledgerInitialFocus<V: View>(_ view: V) -> some View {
-        #if os(tvOS)
-        return view.onAppear { requestInitialFocus() }
-        #else
-        return view
-        #endif
-    }
-
-    private var ledgerPanel: some View {
-        VStack(alignment: .leading, spacing: ledgerSpacing) {
-            let sections = mode == .debug ? debugSections : standardSections
-
-            ledgerHeader
-
-            Divider().overlay(.white.opacity(0.12))
-
-            // The ledger is meant to fit without scrolling — the panel then
-            // shrink-wraps to its content instead of reserving the whole
-            // height. The ScrollView is the safety net for smaller outputs.
-            ViewThatFits(in: .vertical) {
-                ledgerColumns(sections)
-                ScrollView { ledgerColumns(sections) }
-            }
-        }
-        .padding(ledgerPanelPadding)
-        .background(
-            panelSurface,
-            in: RoundedRectangle(cornerRadius: ledgerCornerRadius, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: ledgerCornerRadius, style: .continuous)
-                .stroke(.white.opacity(0.13), lineWidth: 1)
-        }
-        .shadow(color: .black.opacity(0.58), radius: 28, y: 12)
-    }
-
-    private var ledgerHeader: some View {
-        HStack(alignment: .center, spacing: ledgerSpacing) {
-            ledgerTitleBlock
-            Spacer(minLength: ledgerSpacing)
-            ledgerHeaderHealth
-            modeSelector
-            ledgerDismissControl
-        }
-    }
-
-    private var ledgerTitleBlock: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(mode == .debug ? "Playback debug" : "Playback info")
-                .font(ledgerTitleFont)
-                .foregroundStyle(.white)
-            ledgerSubtitle
-        }
-    }
-
-    @ViewBuilder
-    private var ledgerSubtitle: some View {
-        #if os(tvOS)
-        if mode == .standard {
-            HStack(spacing: 8) {
-                Text(controller.methodLabel)
-                    .font(.system(size: 18, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Palette.accent)
-
-                Text("·")
-                    .foregroundStyle(.white.opacity(0.35))
-
-                Text("\(formatTime(controller.currentMs)) of \(formatTime(controller.knownDurationMs))")
-                    .font(.system(size: 17, weight: .medium, design: .rounded))
-                    .foregroundStyle(.white.opacity(0.72))
-            }
-        }
-        #else
-        if mode == .debug {
-            Text("Live player, network, and server diagnostics")
-                .font(.system(size: ledgerDetailSize, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.56))
-        }
-        #endif
-    }
-
-    @ViewBuilder
-    private var ledgerHeaderHealth: some View {
-        #if os(tvOS)
-        if mode == .standard {
-            playbackServerHealth
-        }
-        #else
-        EmptyView()
-        #endif
-    }
-
-    @ViewBuilder
-    private var ledgerDismissControl: some View {
-        #if os(tvOS)
-        Button(action: onDismiss) {
-            Label("Done", systemImage: "xmark")
-                .font(.system(size: 17, weight: .semibold, design: .rounded))
-        }
-        .buttonStyle(TVReadableButtonStyle(prominent: false))
-        .focused($dismissFocused)
-        .accessibilityLabel("Close playback info")
-        #else
-        closeButton
-        #endif
-    }
-
-    #if os(tvOS)
-    /// The pill means server state on every client and in every mode — the
-    /// stall count is the `Stalls` row and nothing else. The tvOS Standard
-    /// header used to print "No stalls" beside that row: two spellings of one
-    /// datum, and no server state in the header at all.
-    private var playbackServerHealth: some View {
-        let status = playbackServerStatus
-        return HStack(spacing: 9) {
-            Circle()
-                .fill(status.tone.color)
-                .frame(width: 11, height: 11)
-            Text(status.value)
-                .font(.system(size: 16, weight: .semibold, design: .rounded))
-                .foregroundStyle(playbackTone.color)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 7)
-        .background(.white.opacity(0.07), in: Capsule())
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Playback health, \(status.value)")
-    }
-    #endif
-
-    // MARK: - Ledger layout
-
-    @ViewBuilder
-    private func ledgerColumns(_ sections: [PlaybackLedgerSection]) -> some View {
-        VStack(alignment: .leading, spacing: ledgerSpacing) {
-            if ledgerUsesTwoColumns {
-                HStack(alignment: .top, spacing: ledgerColumnGap) {
-                    ledgerColumn(sections.filter { $0.column == .left })
-                    ledgerColumn(sections.filter { $0.column == .right })
-                }
-            } else {
-                ledgerColumn(
-                    sections.filter { $0.column == .left }
-                        + sections.filter { $0.column == .right }
-                )
-            }
-
-            ledgerNotes(sections)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private func ledgerColumn(_ sections: [PlaybackLedgerSection]) -> some View {
-        VStack(alignment: .leading, spacing: ledgerSpacing) {
-            ForEach(sections.filter { $0.rendersBox }) { section in
-                ledgerSection(section)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-    }
-
-    private func ledgerSection(_ section: PlaybackLedgerSection) -> some View {
-        ledgerFocusable(
-            VStack(alignment: .leading, spacing: ledgerRowSpacing) {
-                Text(section.title.uppercased())
-                    .font(.system(size: ledgerSectionSize, weight: .bold, design: .rounded))
-                    .tracking(1)
-                    .foregroundStyle(Palette.accent)
-
-                ledgerSectionRows(section)
-            }
-            .padding(ledgerSectionPadding)
-            .frame(maxWidth: .infinity, alignment: .topLeading)
-            .background(
-                .white.opacity(0.045),
-                in: RoundedRectangle(cornerRadius: ledgerSectionCornerRadius, style: .continuous)
-            )
-            .overlay {
-                RoundedRectangle(cornerRadius: ledgerSectionCornerRadius, style: .continuous)
-                    .stroke(.white.opacity(0.07), lineWidth: 1)
-            }
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel(section.title)
-        )
-    }
-
-    /// The ledger is sized to fit a 1080p canvas without scrolling, but the
-    /// ScrollView stays as a safety net for smaller outputs. A section has to
-    /// be focusable or the remote can never reach the part that scrolled off.
-    private func ledgerFocusable<V: View>(_ view: V) -> some View {
-        #if os(tvOS)
-        return view.focusable(true)
-        #else
-        return view
-        #endif
-    }
-
-    /// Grid rows first, then — only for a section that owns its notes — the
-    /// notes it kept. The two are drawn from disjoint halves of the section
-    /// (`gridRows` and `noteRows` partition `rows` on placement) and a section
-    /// that owns its notes contributes none to the shared strip, so nothing
-    /// here can draw a row twice or leave one undrawn.
-    private func ledgerSectionRows(_ section: PlaybackLedgerSection) -> some View {
-        let rows = section.gridRows
-        return VStack(alignment: .leading, spacing: ledgerRowSpacing) {
-            if rows.isEmpty {
-                if let placeholder = section.placeholder {
-                    Text(placeholder)
-                        .font(ledgerValueFont)
-                        .foregroundStyle(.white.opacity(0.48))
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                // With no grid rows and no placeholder the box exists only
-                // because the section owns notes, which the block below draws.
-                // A section with neither never draws a box in the first place.
-            } else if ledgerAllowsDenseColumns && section.prefersDenseColumns {
-                let split = (rows.count + 1) / 2
-                HStack(alignment: .top, spacing: ledgerColumnGap) {
-                    ledgerRowStack(Array(rows.prefix(split)), section: section, dense: true)
-                    ledgerRowStack(Array(rows.dropFirst(split)), section: section, dense: true)
-                }
-            } else {
-                ledgerRowStack(rows, section: section, dense: false)
-            }
-
-            if section.ownsNotes {
-                ForEach(section.noteRows) { row in
-                    ledgerNoteRow(row)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-    }
-
-    private func ledgerRowStack(
-        _ rows: [PlaybackLedgerRow],
-        section: PlaybackLedgerSection,
-        dense: Bool
-    ) -> some View {
-        VStack(alignment: .leading, spacing: ledgerRowSpacing) {
-            ForEach(rows) { row in
-                ledgerGridRow(row, numeric: section.prefersNumericAlignment, dense: dense)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-    }
-
-    /// Label in a fixed gutter, value filling the rest on the same baseline.
-    /// Grid values are capped at a fixed number of lines so nothing here can
-    /// stretch a column again — the long ones live in the notes strip.
-    private func ledgerGridRow(
-        _ row: PlaybackLedgerRow,
-        numeric: Bool,
-        dense: Bool
-    ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: ledgerRowGap) {
-            Text(row.label)
-                .font(ledgerLabelFont)
-                .foregroundStyle(ledgerLabelColor)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(
-                    width: dense ? ledgerDenseGutterWidth : ledgerGutterWidth,
-                    alignment: .leading
-                )
-
-            ledgerValueText(row, numeric: numeric)
-                .lineLimit(ledgerGridValueLineLimit)
-                .truncationMode(.tail)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: numeric ? .trailing : .leading)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-    }
-
-    @ViewBuilder
-    private func ledgerNotes(_ sections: [PlaybackLedgerSection]) -> some View {
-        let notes = sections.flatMap { $0.stripNoteRows }
-        if !notes.isEmpty {
-            // The strip is the last child of the column stack, so on the
-            // television it has to be focusable for the same reason a section
-            // does: with nothing focusable below the final section box the
-            // remote can never scroll far enough to reveal it.
-            ledgerFocusable(
-                VStack(alignment: .leading, spacing: ledgerRowSpacing) {
-                    Divider().overlay(.white.opacity(0.12))
-
-                    Text("Notes")
-                        .font(.system(size: ledgerSectionSize, weight: .bold, design: .rounded))
-                        .tracking(1)
-                        .foregroundStyle(.white.opacity(0.5))
-
-                    ForEach(notes) { row in
-                        ledgerNoteRow(row)
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityElement(children: .contain)
-                .accessibilityLabel("Notes")
+    private var presentationFacts: [PlaybackInfoFact] {
+        applePlaybackInfoFields.compactMap { field in
+            let supplied = contractValue(for: field.id)
+            guard let text = supplied?.value ?? (field.always ? "Not reported" : nil) else { return nil }
+            let notes = [playbackInfoExplanation(field.id), supplied?.note].compactMap { $0 }.joined(separator: " ")
+            return PlaybackInfoFact(
+                id: field.id, label: field.label, value: text,
+                note: notes.isEmpty ? nil : notes,
+                group: playbackInfoGroup(field.section),
+                diagnosticOnly: !field.modes.contains(.standard)
             )
         }
-    }
-
-    /// The gutter is the hanging indent: wrapped lines line up under the
-    /// first line of the value, never under the label.
-    private func ledgerNoteRow(_ row: PlaybackLedgerRow) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: ledgerRowGap) {
-            Text(row.label)
-                .font(ledgerLabelFont)
-                .foregroundStyle(ledgerLabelColor)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .frame(width: ledgerGutterWidth, alignment: .leading)
-
-            ledgerValueText(row, numeric: false)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(ledgerNoteAccessibilityLabel(row))
-    }
-
-    /// The decision reason used to be a footer that announced itself as one
-    /// sentence. As a note row the combined children would read out the bare
-    /// word "Reason" first, so it keeps the footer's spoken form.
-    private func ledgerNoteAccessibilityLabel(_ row: PlaybackLedgerRow) -> String {
-        row.label == "Reason"
-            ? "Playback reason, \(row.value)"
-            : "\(row.label), \(row.value)"
-    }
-
-    private func ledgerValueText(_ row: PlaybackLedgerRow, numeric: Bool) -> some View {
-        let text = Text(row.value)
-            .font(numeric ? ledgerValueFont.monospacedDigit() : ledgerValueFont)
-            .foregroundStyle(row.tone.color)
-        #if os(iOS)
-        return text.textSelection(.enabled)
-        #else
-        return text
-        #endif
     }
 
     // MARK: - Debug field set
@@ -3885,7 +3162,7 @@ struct PlaybackStatsView: View {
             return ContractFieldValue(value: "\(applied) ms", note: note)
         case "decode_resolution":
             let size = controller.presentationSize
-            guard size.width > 0, size.height > 0 else { return nil }
+            guard size.width > 0, size.height > 0 else { return ContractFieldValue(value: "Not reported", tone: .muted) }
             return ContractFieldValue(value: "\(Int(size.width))×\(Int(size.height))")
         case "dynamic_range":
             guard let range = PlayerView.dynamicRangeSummary(
@@ -3896,7 +3173,7 @@ struct PlaybackStatsView: View {
             ) else { return nil }
             return ContractFieldValue(value: range)
         case "decode_audio":
-            return selectedAudioDescription.map { ContractFieldValue(value: $0) }
+            return nil
         case "source_read":
             return ContractFieldValue(value: "Unavailable", tone: .muted)
         case "server_ready":
@@ -4121,62 +3398,6 @@ struct PlaybackStatsView: View {
         contractSections(for: .standard)
     }
 
-    private func ledgerRow(
-        _ label: String,
-        _ value: String,
-        tone: PlaybackStatTone = .neutral
-    ) -> PlaybackLedgerRow {
-        PlaybackLedgerRow(
-            label: label,
-            value: value,
-            tone: tone,
-            placement: PlaybackLedgerRow.resolvedPlacement(label: label)
-        )
-    }
-
-    /// A row whose value is prose by construction rather than by label — the
-    /// cached-VOD sentence, which is a note wherever it appears even though
-    /// its label is not a note label anywhere else.
-    private func ledgerNote(
-        _ label: String,
-        _ value: String,
-        tone: PlaybackStatTone = .neutral
-    ) -> PlaybackLedgerRow {
-        PlaybackLedgerRow(label: label, value: value, tone: tone, placement: .notes)
-    }
-
-    /// A short datum with an optional trailing clause, split into two rows
-    /// that never trade places: the datum is always a grid row and the clause,
-    /// when there is one, is always a note under the same label. The clause
-    /// coming and going changes whether the note exists, never where either
-    /// half is drawn. Both halves carry the same tone so the pair still reads
-    /// as one fact.
-    private func ledgerSplitRows(
-        _ label: String,
-        _ datum: String,
-        clause: String?,
-        tone: PlaybackStatTone = .neutral
-    ) -> [PlaybackLedgerRow] {
-        var rows = [
-            PlaybackLedgerRow(label: label, value: datum, tone: tone, placement: .grid)
-        ]
-        if let clause, !clause.isEmpty {
-            rows.append(
-                PlaybackLedgerRow(label: label, value: clause, tone: tone, placement: .notes)
-            )
-        }
-        return rows
-    }
-
-    /// Cuts a separator-joined value at its first seam: the leading fact is
-    /// the datum, everything after it is the clause. Used where the value is
-    /// assembled elsewhere and only arrives here as one string.
-    private func ledgerSeam(_ value: String) -> (datum: String, clause: String?) {
-        guard let seam = value.range(of: " · ") else { return (value, nil) }
-        let clause = String(value[seam.upperBound...])
-        return (String(value[..<seam.lowerBound]), clause.isEmpty ? nil : clause)
-    }
-
     // MARK: - Shared values
 
     private var selectedAudioDescription: String? {
@@ -4348,227 +3569,4 @@ struct PlaybackStatsView: View {
         ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
     }
 
-    // MARK: - Ledger metrics
-
-    /// Two columns need real width. A phone has none to spare, so there the
-    /// sections stack in declared order instead of splitting.
-    private var ledgerUsesTwoColumns: Bool {
-        #if os(iOS)
-        return horizontalSizeClass != .compact
-        #else
-        return true
-        #endif
-    }
-
-    /// The television reads its grid from across a room and holds every value
-    /// to one line. A phone's value column is around 160pt wide — half that
-    /// once the sections split into two columns — which cuts values the notes
-    /// strip does not claim, so the compact size class gets a second line.
-    /// It stays a hard cap: two lines cannot stretch a column either.
-    private var ledgerGridValueLineLimit: Int {
-        #if os(iOS)
-        return horizontalSizeClass == .compact ? 2 : 1
-        #else
-        return 1
-        #endif
-    }
-
-    /// Two-up inside a section only works where the sub-columns stay wide
-    /// enough to hold a short value without wrapping.
-    private var ledgerAllowsDenseColumns: Bool {
-        #if os(tvOS)
-        return true
-        #else
-        return false
-        #endif
-    }
-
-    private var ledgerTitleFont: Font {
-        #if os(tvOS)
-        return mode == .debug
-            ? .system(size: 26, weight: .bold, design: .rounded)
-            : .system(
-                size: TVPlaybackInfoPresentation.titleFontSize,
-                weight: .bold,
-                design: .rounded
-            )
-        #else
-        return mode == .debug
-            ? .system(size: 17, weight: .bold, design: .rounded)
-            : .system(.headline, design: .monospaced)
-        #endif
-    }
-
-    private var ledgerLabelFont: Font {
-        #if os(tvOS)
-        return mode == .debug
-            ? .system(size: 12, weight: .medium, design: .monospaced)
-            : .system(size: 14, weight: .medium, design: .rounded)
-        #else
-        return mode == .debug
-            ? .system(size: 9, weight: .medium, design: .monospaced)
-            : .system(.caption, design: .monospaced)
-        #endif
-    }
-
-    private var ledgerValueFont: Font {
-        #if os(tvOS)
-        return mode == .debug
-            ? .system(size: 13, weight: .medium, design: .monospaced)
-            : .system(
-                size: TVPlaybackInfoPresentation.valueFontSize,
-                weight: .semibold,
-                design: .rounded
-            )
-        #else
-        return mode == .debug
-            ? .system(size: 10, weight: .medium, design: .monospaced)
-            : .system(.caption, design: .monospaced)
-        #endif
-    }
-
-    private var ledgerLabelColor: Color {
-        mode == .debug ? .white.opacity(0.45) : labelColor
-    }
-
-    private var ledgerSectionSize: CGFloat {
-        #if os(tvOS)
-        return mode == .debug ? 14 : 15
-        #else
-        return mode == .debug ? 10 : 11
-        #endif
-    }
-
-    private var ledgerDetailSize: CGFloat {
-        #if os(tvOS)
-        14
-        #else
-        10
-        #endif
-    }
-
-    private var ledgerGutterWidth: CGFloat {
-        #if os(tvOS)
-        return mode == .debug ? 104 : 140
-        #else
-        return mode == .debug ? 86 : 100
-        #endif
-    }
-
-    private var ledgerDenseGutterWidth: CGFloat {
-        #if os(tvOS)
-        88
-        #else
-        70
-        #endif
-    }
-
-    private var ledgerSpacing: CGFloat {
-        #if os(tvOS)
-        12
-        #else
-        8
-        #endif
-    }
-
-    private var ledgerColumnGap: CGFloat {
-        #if os(tvOS)
-        18
-        #else
-        10
-        #endif
-    }
-
-    private var ledgerRowSpacing: CGFloat {
-        #if os(tvOS)
-        7
-        #else
-        5
-        #endif
-    }
-
-    private var ledgerRowGap: CGFloat {
-        #if os(tvOS)
-        8
-        #else
-        6
-        #endif
-    }
-
-    private var ledgerPanelPadding: CGFloat {
-        #if os(tvOS)
-        20
-        #else
-        12
-        #endif
-    }
-
-    private var ledgerSectionPadding: CGFloat {
-        #if os(tvOS)
-        13
-        #else
-        9
-        #endif
-    }
-
-    private var ledgerCornerRadius: CGFloat {
-        #if os(tvOS)
-        20
-        #else
-        12
-        #endif
-    }
-
-    private var ledgerSectionCornerRadius: CGFloat {
-        #if os(tvOS)
-        13
-        #else
-        9
-        #endif
-    }
-
-    private var ledgerEdgeInset: CGFloat {
-        #if os(tvOS)
-        return TVPlaybackInfoPresentation.debugEdgeInset
-        #else
-        return 10
-        #endif
-    }
-
-    private var ledgerWidthFraction: CGFloat {
-        #if os(tvOS)
-        return mode == .debug ? 0.66 : 0.52
-        #else
-        return 0.94
-        #endif
-    }
-
-    private var ledgerMaxWidth: CGFloat {
-        #if os(tvOS)
-        return mode == .debug
-            ? TVPlaybackInfoPresentation.debugPanelMaxWidth
-            : TVPlaybackInfoPresentation.panelMaxWidth
-        #else
-        return mode == .debug ? 760 : 560
-        #endif
-    }
-
-    private var ledgerMaxHeight: CGFloat {
-        #if os(tvOS)
-        return TVPlaybackInfoPresentation.debugPanelMaxHeight
-        #else
-        return 680
-        #endif
-    }
-
-    /// The panel stops short of the transport controls rather than floating
-    /// over them. This is the height of the transport row plus the overlay's
-    /// own padding, not the whole now-playing header beside it.
-    private var ledgerTransportReserve: CGFloat {
-        #if os(tvOS)
-        200
-        #else
-        130
-        #endif
-    }
 }
