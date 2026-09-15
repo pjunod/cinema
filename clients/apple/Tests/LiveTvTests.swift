@@ -2098,9 +2098,28 @@ final class LiveTvTests: XCTestCase {
         let source = try String(
             contentsOf: testsDirectory.appendingPathComponent("../Sources/LiveTvView.swift").standardizedFileURL,
             encoding: .utf8)
+        // Touch-only branches use semantic styles for Dynamic Type. Apply
+        // this existing ten-foot guard to the source active on tvOS only.
+        var branchConditions: [Bool] = []
+        var televisionLines: [String] = []
+        for line in source.components(separatedBy: "\n") {
+            let directive = line.trimmingCharacters(in: .whitespaces)
+            if directive == "#if os(tvOS)" {
+                branchConditions.append(true)
+            } else if directive == "#if os(iOS)" {
+                branchConditions.append(false)
+            } else if directive == "#else", !branchConditions.isEmpty {
+                branchConditions[branchConditions.count - 1].toggle()
+            } else if directive == "#endif", !branchConditions.isEmpty {
+                branchConditions.removeLast()
+            } else if branchConditions.allSatisfy({ $0 }) {
+                televisionLines.append(line)
+            }
+        }
+        let televisionSource = televisionLines.joined(separator: "\n")
         for style in [".font(.subheadline", ".font(.title2", ".font(.title3",
                       ".font(.callout", ".font(.headline"] {
-            XCTAssertFalse(source.contains(style),
+            XCTAssertFalse(televisionSource.contains(style),
                            "\(style) inflates on tvOS — use LiveTvType")
         }
         XCTAssertTrue(source.contains("enum LiveTvType"))

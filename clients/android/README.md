@@ -20,8 +20,9 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `98` — native viewer parity across phone, foldable,
-> and TV. Build 98 adds permanent Recordings, capture activity, lifecycle
+> Status: **v0.3.0**, build `99` — native viewer parity across phone, foldable,
+> and TV. Build 99 adds adaptive tablet/TV Live TV panes, retained recording
+> overlays and controls that grow with text. Build 98 adds permanent Recordings, capture activity, lifecycle
 > history, reminders and advisory DVR readiness across phone and TV. Build 97
 > adds channel subjects, resumable matching progress and named
 > Include/Exclude decisions; saving never waits for inference.

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["40d7c22d"]
+points = ["cluster.membership"]
+checks = ["rust-gate"]
+reason = "The retained heartbeat_reconciles_addresses_only_for_the_same_live_identity SQLite regression executes UPSERT_CLUSTER_NODE_HEARTBEAT_SQL and requires a live same-Raft-identity heartbeat to refresh both projected addresses while preserving its admitted role. It also requires removed identities and a mismatched Raft id to leave addresses and freshness unchanged. The existing test fails if the old heartbeat SQL is restored; this entry supplies the missing mapping for the already-merged correction and makes no new runtime change."

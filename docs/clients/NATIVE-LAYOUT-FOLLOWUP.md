@@ -1,21 +1,21 @@
 # Native layouts — phone fixes and watch-first television
 
-**Status:** open · **Updated:** 2026-09-14 · **Branch:** `codex/apple-layout-followup`
+**Status:** draft PR320; native compilation passed · **Updated:** 2026-09-14 · **Branch:** `codex/apple-layout-followup`
 
 Companion to the [mobile audit](MOBILE-UI-USABILITY-AUDIT.md): this records
 implementation and validation of the native follow-up after PR317 merged at
-`55a2fce0`. Work is confined to an agent-owned clone. The user's screenshots
+`55a2fce0`. Work is confined to an agent-owned clone. Draft PR: http://192.168.4.7:3000/noirr/plurx/pulls/320. The user's screenshots
 show the production problems; no screenshot is treated as proof of the fix.
 
 ## Changes and current evidence
 
 | Surface | Implemented behavior | Evidence / remaining work |
 |---|---|---|
-| iPhone detail | Resume stays primary; labeled secondary actions occupy an adaptive grid instead of four separate full-height rows | iOS source parsing passes; Xcode compilation and visual check pending |
-| iPhone Live TV | View menu and recording activity action; summary gets its own wrapping line; bottom status reserves content space | iOS source parsing passes; device check pending |
-| iPad Live TV | Large player and programme/recording actions beside the channel list in landscape; stacked watch/list regions in portrait; Guide and Recordings open above the retained player | Source parsing passes; full compile and PiP/presentation check pending |
-| iPad fullscreen | Existing guide grid opens over the picture; closing it keeps playback; selecting through the modal guide returns to inline playback | Source parsing passes; running-player validation pending |
-| Apple TV Home | Small mixed shelves measure their complete card height, reserve focus clearance, and allow two title lines; missing artwork has a title/symbol fallback | tvOS source parsing passes; runtime focus/scroll check pending |
+| iPhone detail | Resume stays primary; labeled secondary actions occupy an adaptive grid instead of four separate full-height rows | iOS compiled on M4 Air; visual check pending |
+| iPhone Live TV | View menu and recording activity action; summary gets its own wrapping line; bottom status reserves content space | iOS compiled on M4 Air; device check pending |
+| iPad Live TV | Large player and programme/recording actions beside the channel list in landscape; stacked watch/list regions in portrait; Guide and Recordings open above the retained player | iOS compiled on M4 Air; PiP/presentation check pending |
+| iPad fullscreen | Existing guide grid opens over the picture; closing it keeps playback; selecting through the modal guide returns to inline playback | iOS compiled on M4 Air; running-player validation pending |
+| Apple TV Home | Small mixed shelves measure their complete card height, reserve focus clearance, and allow two title lines; missing artwork has a title/symbol fallback | tvOS compiled on M4 Air; runtime focus/scroll check pending |
 | Android TV / tablets | Large player beside channels; portrait tablets stack the panes; wrapping DVR controls; Guide preview constrained by both width and height; touch Recordings overlays the retained player | Final reviewed source compiles and packages with `:app:assembleDebug`; visual/runtime check pending |
 
 No unit tests have run for this follow-up. Native compilation is separate from
@@ -63,19 +63,30 @@ Android compilation and debug APK packaging succeeded with the installed SDK,
 repository Gradle wrapper and Android Studio JDK. Existing deprecated Volume
 icon warnings remain. No unit suite was executed.
 
-The local Xcode installation lacks its Developer Applications directory and
-has an unaccepted license; its SDK has also moved beyond the repository-pinned
-Xcode 26.6. No license was accepted or developer directory changed globally.
-The configured Apple runner hostname `mba` does not resolve. A working Mac
-address was requested while independent work continued.
+The M4 Air is available at `192.168.5.115` (`pauls.macbook.air.lan`). Both
+`plurx-iOS` and `plurx-tvOS` compiled successfully at source `298eced8`, with
+Xcode 26.6 (17F113), in an isolated source-only extraction. No credential or
+`.git` directory was transferred. Release metadata now claims Apple 160 and
+Android 99; those final metadata changes will be compiled before ready.
+
+Screen Sharing is disabled on the Air. Permission to use `simctl` for visual
+captures was requested because the computer-use tool requires explicit user
+authorization before another UI-control method is used.
 
 An isolated Android TV emulator and debug APK were prepared, but the available
 computer-use tool cannot select its standalone QEMU window. No visual pass or
 playback evidence is claimed from that attempt.
 
-Before merge: complete iOS/tvOS compilation on the correct toolchain; inspect
-actual phone, tablet and TV layouts/focus and retained playback; claim current
-mobile build numbers and per-change release notes; open the follow-up PR;
-record corrective-history anchors as required; run the single final fast lane
-and merge only its passing candidate. This branch has not been pushed, merged,
-published to a store, or installed on a physical device.
+The Forgejo create endpoint ignored `draft: true`; applying its `WIP:` title
+convention immediately made PR320 draft. The prematurely allocated run 2085
+(API run 2103) failed at release counters and history policy before the test
+steps. Final single-lane execution is still pending. The history check found
+an already-merged runtime correction `40d7c22d` with no mapping; this PR adds
+its missing mapping to its existing SQLite regression, without changing Rust.
+Existing native source guards were updated for the renamed wide browser and
+touch-only semantic typography; no extra unit suite was introduced or run.
+
+Before merge: finish native visual/focus and retained-playback checks; compile
+the final build claims; run the single final fast lane and merge only its
+passing candidate. PR320 is draft. No app has been published to a store or
+installed on a physical device by this follow-up.
