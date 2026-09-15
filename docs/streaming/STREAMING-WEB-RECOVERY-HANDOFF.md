@@ -167,7 +167,8 @@ is ready and report; the coordinator dispatches Wave 2 after integration.
 ## 6. Result — implementation task fills this in
 
 - Tested base: `fea5d245131095f26f60d67a69e6570aa3626125`. Implementation:
-  `c29b0ac21931ad6ca1026af4190e5816934c9177`.
+  `c29b0ac21931ad6ca1026af4190e5816934c9177`; focused integration amendment:
+  `019f17586`.
 - Observation/action policy change: loaded runway with no frame progress and no
   media error is a presentation stall with unknown cause. Its one bounded repair
   preserves the current delivery recipe. A generic network disconnect also

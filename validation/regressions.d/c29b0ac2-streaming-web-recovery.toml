@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["c29b0ac2"]
+commits = ["c29b0ac2", "019f1758"]
 points = ["playback.pipeline", "web.experience"]
 checks = ["web-static"]
 reason = "The shipped-player fixture gives an Auto remux 18.310 seconds of loaded media, no media error, and no frame progress, then requires one same-recipe seek repair with an unknown cause, no transcode, and an exact frozen recipe covering method, copy mode, quality, dimensions, dynamic range, audio, subtitle, offset, session, attachment, and control generations. Its companion cases require passive none and old-server hold responses to reach that one repair without another deferral callback, actual progress during an outstanding ask to cancel it, a generic network disconnect to preserve the recipe, typed decoder failure to retain compatibility fallback, decoded-ahead frames to remain insufficient while presentation callbacks stay at zero, film-clock progress to settle only when frame counters are unavailable, and a newer viewer intent to cancel the episode. The policy fixture separately reserves the legacy stall reopen reason for an independently selected lower supply rung; the settings fixture rejects the retired typeless-HLS toggle and outgoing setting. `web-static` runs all three retained source-linked suites and the embedded-JavaScript checker."
