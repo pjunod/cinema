@@ -1,6 +1,6 @@
 # Shared indexes — Sol implementation handoff
 
-**Status:** ready for Wave 1 implementation · **Written:** 2026-09-15
+**Status:** Wave 1 implementation complete; PR #325 open · **Written:** 2026-09-15
 · **Executes:** I1/I2 in [the effort plan](STREAMING-RELIABILITY-IMPLEMENTATION.md)
 · **Base:** c2216ae75cb2a6f86efabaa4ebc2169a231ecc50
 
@@ -160,8 +160,10 @@ is dispatched after the coordinator integrates I1. Do not poll indefinitely.
 
 ## 6. Result — implementation task fills this in
 
-- Tested base: `fea5d245131095f26f60d67a69e6570aa3626125`; final
-  implementation commit is recorded in the task PR.
+- Tested base: `fea5d245131095f26f60d67a69e6570aa3626125`; runtime
+  implementation commit: `2a2ec42fa09159a06724ab038a1cbb45b6a30202`;
+  combined candidate after merging the coordinator's current effort head:
+  `5d9b34bb9`.
 - Artifact representation/key change: blob format v2 is unchanged because it
   already retains conversion promotion, init, fragment, source and pipeline
   facts. Ordinary strip/preserve keys remain reusable. Converting local and
@@ -172,8 +174,8 @@ is dispatched after the coordinator integrates I1. Do not poll indefinitely.
   conversion-metadata blob validation, hydration without a local v1 index,
   request coalescing/lease fencing and source replacement. Pinned format,
   `plurxd` all-target check and `plurxd` all-target Clippy also passed.
-- PR: `codex/streaming-shared-index` into `effort/streaming-reliability`;
-  Forgejo URL is recorded after publication.
+- PR: [#325 — Share exact Dolby Vision fragment indexes](http://192.168.4.7:3000/noirr/plurx/pulls/325),
+  `codex/streaming-shared-index` into `effort/streaming-reliability`.
 - Files transferred back to coordinator: `state.rs` was verified unchanged
   and released during I1. `vodserve.rs` transfers after this PR integrates.
 
