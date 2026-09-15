@@ -120,3 +120,8 @@ for (const field of infoFields) assert.equal(diagnosticMarkup.split(`data-stats-
 assert.match(diagnosticMarkup, /<summary>Picture &amp; sound<\/summary>/);
 assert.match(diagnosticMarkup, /<summary>Session &amp; history<\/summary>/);
 process.stdout.write("PASS playback information keeps unknown picture size and complete diagnostics\n");
+
+const originalAudio = info.playbackInfoOverview({method: "Transcode", source_audio: "DTS · 5.1"});
+assert.match(originalAudio, /Stream audio track[^]*?<strong>Not reported<\/strong>/);
+assert.match(originalAudio, /Original audio track[^]*?<strong>DTS · 5.1<\/strong>/);
+assert.match(source, /client_loaded:clientLoadedSeconds==null\?"Not reported"/);

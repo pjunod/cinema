@@ -43,6 +43,38 @@ struct PlaybackInfoPanel: View {
     }
 
     var body: some View {
+        Group {
+            if mode == .mini { compactBody } else { expandedBody }
+        }
+        .font(.system(size: bodySize))
+        .foregroundStyle(.white)
+        .background(Palette.playerChrome.opacity(0.97), in: RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.15)))
+        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .buttonStyle(PlaybackInfoButtonStyle())
+        #if os(tvOS)
+        .onAppear { Task { @MainActor in await Task.yield(); closeFocused = true } }
+        .onChange(of: mode) { _, _ in closeFocused = true }
+        #endif
+    }
+
+    private var compactBody: some View {
+        HStack(alignment: .top, spacing: 12) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 16, alignment: .topLeading)], alignment: .leading, spacing: 12) {
+                summary("Playing resolution", value("decode_resolution"), size: bodySize + 1)
+                summary("Playback", value("player_state"), size: bodySize + 1)
+                summary("Buffered on device", value("client_loaded"), size: bodySize + 1)
+            }
+            VStack(spacing: 4) {
+                Button { mode = .standard } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right").frame(minWidth: 44, minHeight: 44)
+                }.accessibilityLabel("Expand playback info")
+                closeButton
+            }
+        }.padding(16)
+    }
+
+    private var expandedBody: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 5) {
@@ -66,13 +98,7 @@ struct PlaybackInfoPanel: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    if mode == .mini {
-                        adaptiveFacts {
-                            summary("Playing resolution", value("decode_resolution"))
-                            summary("Playback", value("player_state"))
-                            summary("Buffered on device", value("client_loaded"))
-                        }
-                    } else if mode == .standard {
+                    if mode == .standard {
                         overview
                     } else {
                         Text("Source, stream and player observations are separate. Unavailable is not zero.")
@@ -85,16 +111,6 @@ struct PlaybackInfoPanel: View {
                 }.padding(20)
             }
         }
-        .font(.system(size: bodySize))
-        .foregroundStyle(.white)
-        .background(Palette.playerChrome.opacity(0.97), in: RoundedRectangle(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.15)))
-        .clipShape(RoundedRectangle(cornerRadius: 20))
-        .buttonStyle(PlaybackInfoButtonStyle())
-        #if os(tvOS)
-        .onAppear { Task { @MainActor in await Task.yield(); closeFocused = true } }
-        .onChange(of: mode) { _, _ in closeFocused = true }
-        #endif
     }
 
     private var closeButton: some View {
@@ -137,7 +153,12 @@ struct PlaybackInfoPanel: View {
             }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
                 .background(.white.opacity(0.055), in: RoundedRectangle(cornerRadius: 10))
             adaptiveFacts {
-                summary("Audio track", fact("decode_audio")?.value ?? value("source_audio"), note: "Track metadata; device output is not reported.")
+                VStack(alignment: .leading, spacing: 12) {
+                    summary("Stream audio track", value("decode_audio"), note: "Track metadata; device output is not reported.")
+                    if fact("decode_audio") == nil, let original = fact("source_audio") {
+                        summary("Original audio track", original.value)
+                    }
+                }
                 summary("Subtitles", value("subtitles"), note: fact("subtitles")?.note)
             }
             Divider().overlay(.white.opacity(0.12))
@@ -244,9 +265,9 @@ func playbackInfoResolution(_ size: CGSize?) -> String {
 
 private struct PlaybackInfoButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
-        Body(configuration: configuration)
+        StyledLabel(configuration: configuration)
     }
-    private struct Body: View {
+    private struct StyledLabel: View {
         let configuration: ButtonStyle.Configuration
         @Environment(\.isFocused) private var focused
         var body: some View {

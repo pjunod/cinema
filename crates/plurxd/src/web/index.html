@@ -13760,7 +13760,7 @@ function playbackInfoOverview(t,live=false){
     fact("Playing resolution",t.decode_resolution,"Size reported by the attached player.",true)+
     fact(live?"Broadcast source":"Original file",t.source_resolution,t.source_video)+`</div>`+
     `<div class="pi-explanation"><strong>${esc(t.method||"Method not reported")}</strong><p>${esc(reason)}</p></div>`+
-    `<div class="pi-tracks">${fact("Audio track",t.decode_audio||t.source_audio,"Track metadata; device output is not reported.")}${fact("Subtitles",t.subtitles,t.subtitles_note)}</div>`+
+    `<div class="pi-tracks"><div>${fact("Stream audio track",t.decode_audio,"Track metadata; device output is not reported.")+(t.decode_audio?"":t.source_audio?fact("Original audio track",t.source_audio):"")}</div>${fact("Subtitles",t.subtitles,t.subtitles_note)}</div>`+
     `<div class="pi-metrics">${fact("Buffered on this device",t.client_loaded,"Contiguous media loaded ahead of your position.")}${fact(live?"Behind stream live edge":"Buffering interruptions",live?t.live_edge:t.stalls,live?"Behind the latest available media; not broadcast delay.":"Player-reported interruptions for this playback; intentional pauses excluded.")}</div>`+
     (live?`<div class="pi-explanation"><strong>Tuner reception</strong><p>${esc(t.reception||"Not reported")}</p></div>`:"");
 }
@@ -13986,8 +13986,8 @@ function playbackStatsTelemetry(){
     audio.channels?fmtChannels(audio.channels):null,
     audio.language?(langName(audio.language)||audio.language):null,
     p.audio&&p.audio.length>1?`+${p.audio.length-1} tracks`:null].filter(Boolean).join(" · "):null;
-  let clientLoadedSeconds=0;
-  try{ clientLoadedSeconds=bufferRunway(v); }catch(e){}
+  let clientLoadedSeconds=null;
+  if(v) try{ clientLoadedSeconds=bufferRunway(v); }catch(e){}
   let frames=null,droppedCount=null,frameRate=p._fpsVal==null?null:p._fpsVal;
   try{
     const quality=v&&v.getVideoPlaybackQuality&&v.getVideoPlaybackQuality();
@@ -14065,7 +14065,7 @@ function playbackStatsTelemetry(){
     later_ready:h&&h.server_next_ready_start_ms!=null&&h.server_next_ready_end_ms!=null?
       `${Math.round(h.server_next_ready_start_ms)}–${Math.round(h.server_next_ready_end_ms)} ms`:null,
     http_wait:httpWait&&httpWait.value,http_wait_note:httpWait&&httpWait.note,
-    client_loaded:`${Math.max(0,clientLoadedSeconds).toFixed(1)} s`,
+    client_loaded:clientLoadedSeconds==null?"Not reported":`${Math.max(0,clientLoadedSeconds).toFixed(1)} s`,
     client_loaded_tone:statsRunwayTone(clientLoadedSeconds,false),
     presentation,presentation_tone:playbackState==="Playing"?"good":
       playbackState==="Buffering"?"warn":playbackState==="Failed"?"bad":"",
@@ -14392,7 +14392,7 @@ function applyPlayerOutcome(outcome,ctx={}){
       const at=items.indexOf(document.activeElement);
       const forward=direction==="down"||direction==="right";
       const next=at<0?(forward?0:items.length-1):(at+(forward?1:-1)+items.length)%items.length;
-      items[next].focus({preventScroll:true});
+      items[next].focus();
       return true;
     }
     case "focus_row":
@@ -16695,6 +16695,7 @@ function liveTvProgramme(channelId){
   return PlurxLiveTv.programmeAt(LIVE_TV.guide,channelId,liveTvNowSeconds());
 }
 function liveTvSourceProgrammeEnd(channel){
+  if(!channel) return null;
   const observed=channel&&channel.source_format&&channel.source_format.observed_at;
   const row=LIVE_TV.guide&&Array.isArray(LIVE_TV.guide.channels)
     ?LIVE_TV.guide.channels.find(entry=>entry.id===channel.id):null;
@@ -16754,7 +16755,8 @@ function liveTvStatsTelemetry(){
     method:plan?(plan.video_action==="copy"?(plan.audio_action==="copy"?"Remux":"Audio converted for this player"):"Video converted for this player"):"Not reported",
     player_state:!attached?"Waiting for player":v.error?"Failed":v.ended?"Ended":v.paused?"Paused":v.readyState<3?"Buffering":"Playing",
     decode_resolution:attached&&v.videoWidth>0&&v.videoHeight>0?`${v.videoWidth}×${v.videoHeight}`:"Not reported",
-    source_resolution:source.exact.join(" · ")||"Not reported",
+    source_resolution:source.exact[0]||"Not reported",
+    source_video:source.exact.slice(1).join(" · ")||null,
     source_resolution_note:source.observedAt?`Tuner source observed ${new Date(source.observedAt*1000).toLocaleString()}`:"Source measurement not reported.",
     stream_format:plan?.output?[plan.output.width>0&&plan.output.height>0?`${plan.output.width}×${plan.output.height}`:null,plan.output.video_codec,plan.output.hdr].filter(Boolean).join(" · "):null,
     decode_audio:plan?.output?[plan.output.audio_codec,plan.output.audio_channels>0?`${plan.output.audio_channels} channels`:null].filter(Boolean).join(" · "):null,
@@ -16772,6 +16774,8 @@ function setLiveTvStatsMode(mode){
   if(!["mini","standard","details","debug"].includes(mode)) return;
   const panel=document.getElementById("live-tv-stats"); if(!panel) return;
   panel.dataset.mode=mode;
+  panel.setAttribute("aria-modal",String(mode!=="mini"));
+  const backdrop=document.getElementById("live-tv-stats-backdrop");if(backdrop)backdrop.hidden=mode==="mini";
   updateLiveTvStats();
 }
 function openLiveTvStats(){
@@ -16781,23 +16785,20 @@ function openLiveTvStats(){
   panel.id="live-tv-stats"; panel.className="statsov on live-stats"; panel.dataset.mode="standard";
   panel.setAttribute("role","dialog");panel.setAttribute("aria-label","Playback info");panel.setAttribute("aria-modal","true");
   panel.innerHTML=`<div class="statshd"><span>Playback info</span><div class="statsmodes" role="radiogroup" aria-label="Playback information level">${[["mini","Compact"],["standard","Overview"],["details","Details"],["debug","Diagnostics"]].map(([id,label])=>`<button type="button" data-live-stats-mode="${id}" role="radio" onclick="setLiveTvStatsMode('${id}')">${label}</button>`).join("")}</div><button class="statsx" aria-label="Close playback info" onclick="closeLiveTvStats()">×</button></div><div class="statsbody"></div>`;
-  (document.fullscreenElement||document.body).appendChild(panel);
+  const parent=document.fullscreenElement||document.body;
+  const backdrop=document.createElement("div");backdrop.id="live-tv-stats-backdrop";
+  backdrop.style.cssText="position:fixed;inset:0;z-index:9998";
+  backdrop.addEventListener("click",event=>{event.stopPropagation();closeLiveTvStats();});
+  parent.append(backdrop,panel);
   panel.addEventListener("click",event=>event.stopPropagation());
-  panel.addEventListener("keydown",event=>{
-    if(event.key==="Escape"){event.preventDefault();closeLiveTvStats();}
-    if(event.key==="Tab"){
-      const items=[...panel.querySelectorAll("button,summary")].filter(node=>node.getClientRects().length);
-      const at=items.indexOf(document.activeElement),next=event.shiftKey?(at-1+items.length)%items.length:(at+1)%items.length;
-      event.preventDefault();items[next]?.focus();
-    }
-    event.stopPropagation();
-  });
+  wireLiveTvStatsKeys(panel);
   updateLiveTvStats();panel.querySelector(".statsx").focus();
   LIVE_TV_STATS_TIMER=setInterval(updateLiveTvStats,1000);
 }
 function closeLiveTvStats(restore=true){
   clearInterval(LIVE_TV_STATS_TIMER);LIVE_TV_STATS_TIMER=null;
   document.getElementById("live-tv-stats")?.remove();
+  document.getElementById("live-tv-stats-backdrop")?.remove();
   if(restore){
     const opener=LIVE_TV_STATS_OPENER?.isConnected?LIVE_TV_STATS_OPENER:document.querySelector("[data-live-info-opener]");
     opener?.focus();
@@ -17329,6 +17330,17 @@ function liveTvApplyOutcome(outcome){
     case "return_browser": exitLiveTvPresentation(); return true;
     default: return false;
   }
+}
+function wireLiveTvStatsKeys(panel){
+  panel.addEventListener("keydown",event=>{
+    if(event.key==="Escape"){event.preventDefault();closeLiveTvStats();}
+    if(event.key==="Tab"&&panel.dataset.mode!=="mini"){
+      const items=[...panel.querySelectorAll("button,summary")].filter(node=>node.getClientRects().length);
+      const at=items.indexOf(document.activeElement),next=event.shiftKey?(at-1+items.length)%items.length:(at+1)%items.length;
+      event.preventDefault();items[next]?.focus();
+    }
+    event.stopPropagation();
+  });
 }
 function liveTvKeydown(event){
   if(document.getElementById("live-tv-stats")) return;

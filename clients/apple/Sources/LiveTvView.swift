@@ -924,6 +924,8 @@ struct LiveTvStreamInfoPanel: View {
             PlaybackInfoFact(id: "source_resolution", label: "Broadcast source", value: channel.sourceFormatDescription ?? "Not reported", note: channel.sourceFormat.map { "Source observed \(Date(timeIntervalSince1970: TimeInterval($0.observedAt)).formatted())" }),
             PlaybackInfoFact(id: "stream_format", label: "Stream format", value: plan?.videoDescription ?? "Not reported", note: "Server delivery metadata; separate from the picture reported by the player."),
             PlaybackInfoFact(id: "method", label: "Delivery method", value: plan?.playbackMethod ?? "Not reported", group: "Server work"),
+            PlaybackInfoFact(id: "status", label: "Server state", value: status?.state ?? "Not reported", note: playbackInfoExplanation("status"), group: "Server work"),
+            PlaybackInfoFact(id: "device_audio", label: "Device audio output", value: "Not reported", note: "Track metadata does not confirm speaker or HDMI output."),
             PlaybackInfoFact(id: "decode_audio", label: "Stream audio track", value: plan?.audioDescription ?? "Not reported", note: playbackInfoExplanation("decode_audio")),
             PlaybackInfoFact(id: "subtitles", label: "Subtitles", value: "Not reported"),
             PlaybackInfoFact(id: "player_state", label: "Playback", value: player.playerState),

@@ -96,12 +96,17 @@ internal fun PlaybackInfoPanel(
                     InfoPair(wide,
                         { InfoSummary("Playing resolution", value("decode_resolution"), "Size reported by the attached player.", tv, hero = true) },
                         { InfoSummary(if (isLive) "Broadcast source" else "Original file", value("source_resolution"), facts.firstOrNull { it.id == "source_video" }?.value, tv) })
-                    Column(Modifier.fillMaxWidth().background(Color(0xFF1E232D), RoundedCornerShape(10.dp)).padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                    Column(Modifier.fillMaxWidth().background(Color(0xFF1E232D), RoundedCornerShape(10.dp)).tvFocusRing(RoundedCornerShape(10.dp), focusedScale = 1f).focusable(tv).padding(16.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
                         Text(value("method"), color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = bodySize)
                         Text(facts.firstOrNull { it.id == "reason" }?.value ?: playbackMethodExplanation(value("method")), color = muted, fontSize = labelSize)
                     }
                     InfoPair(wide,
-                        { InfoSummary("Audio track", facts.firstOrNull { it.id == "decode_audio" }?.value ?: value("source_audio"), "Track metadata; device output is not reported.", tv) },
+                        { Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                            InfoSummary("Stream audio track", value("decode_audio"), "Track metadata; device output is not reported.", tv)
+                            if (facts.none { it.id == "decode_audio" }) facts.firstOrNull { it.id == "source_audio" }?.let {
+                                InfoSummary("Original audio track", it.value, tv = tv)
+                            }
+                        } },
                         { InfoSummary("Subtitles", value("subtitles"), note("subtitles"), tv) })
                     HorizontalDivider(color = Color(0xFF343D4D))
                     InfoPair(wide,
@@ -159,7 +164,7 @@ private fun InfoPair(wide: Boolean, first: @Composable () -> Unit, second: @Comp
 
 @Composable
 private fun InfoSummary(label: String, value: String, note: String? = null, tv: Boolean, hero: Boolean = false) {
-    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column(Modifier.fillMaxWidth().tvFocusRing(RoundedCornerShape(8.dp), focusedScale = 1f).focusable(tv), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Text(label, color = Color(0xFFACB7C9), fontSize = if (tv) 16.sp else 13.sp)
         Text(value, color = Color.White, fontSize = if (hero) if (tv) 44.sp else 34.sp else if (tv) 24.sp else 19.sp, fontWeight = FontWeight.SemiBold)
         note?.let { Text(it, color = Color(0xFFACB7C9), fontSize = if (tv) 16.sp else 13.sp) }

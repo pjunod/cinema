@@ -1,6 +1,6 @@
 # Playback information redesign
 
-> **Status:** implementation complete; adversarial review and final qualification pending.
+> **Status:** implementation and review fixes complete; final qualification pending.
 > **Updated:** 2026-09-15. **Scope:** web, iPhone, iPad, Apple TV, Android phones,
 > tablets and TV. No feature flag or new enablement requirement.
 
@@ -64,3 +64,29 @@ stored mode compatibility. No repeated unit suite is part of this work.
 
 Compiler, review, rendering and final lane evidence will be recorded here before
 merge. Compilation alone does not establish live playback or remote usability.
+
+## Adversarial review — 2026-09-15
+
+Exactly one read-only agent review examined `104c8d0c` against `c2216ae7`.
+It requested changes for six P2 findings; no P1 finding was reported.
+
+| Finding | Addressed behavior |
+|---|---|
+| Android TV Overview had no remote scroll targets | Summary groups and method explanation are focusable with visible focus rings; Compose scroll containers bring focused content into view. |
+| Web arrow focus could move below the visible diagnostics viewport | Disclosure focus allows scrolling instead of suppressing it. |
+| Apple Compact retained a full-height ScrollView | Compact now has a separate content-sized layout outside the expanded scroll shell. |
+| Original audio silently stood in for the playing track | Stream audio stays explicitly unknown; any fallback is separately labeled Original audio track. |
+| Pending web attachments reported unknown buffer as zero | Device buffer remains Not reported until there is an attached-player observation. |
+| Apple Live TV omitted server state and device audio output | Both shared facts are present; the unsupported device-output measurement is explicit. |
+
+Local follow-up also corrected title ownership, guarded Live TV source lookup
+without a lease, contained the web dialog's input in the existing adapter, and
+preserved Compact transport interaction. No second review or unit loop was run.
+
+Local compile evidence after review fixes: `:app:assembleDebug --offline --no-daemon`
+passed with the existing Android SDK/JDK. iOS and tvOS `xcodebuild ... build`
+passed using local Xcode 27.0, generic simulator destinations, unsigned output
+and `clients/apple/build/DerivedData`. The Air answered a version probe but
+subsequent transfers timed out; no remote build is claimed. Embedded JavaScript
+syntax, the input-adapter fence and validation catalog lint passed. The single
+final fast lane and device/rendering acceptance remain pending.
