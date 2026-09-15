@@ -206,7 +206,7 @@ resource scheduler or fleet-wide redesign belongs in this effort.
 
 | Lane | Owner | First-wave files | Exclusions |
 |---|---|---|---|
-| C: protocol and integration | This task | playback_control.rs, transcode.rs; protocol-focused tests; this plan, docs index and API reference | No edits in Sol-owned files until handoff |
+| C: protocol and integration | This task | playback_control.rs, transcode.rs; HTTP settings and core legacy-setting documentation; protocol-focused tests; this plan, docs index and live references | No edits in Sol-owned files until handoff |
 | I: shared exact-recipe indexes | Sol task 1 | fragindex.rs, fragment_index_cluster.rs, state.rs, vodserve.rs; core store/fragment_index_cluster.rs if needed; embedded tests; shared-index handoff | No web/client or transcode.rs edits; no migrations without a concrete need |
 | W: web recovery and quality | Sol task 2 | web/index.html, web/playback-policy.js, web/playback-control.js; web-control.test.js, web-policy.test.js; web-recovery handoff | No server files or native clients |
 
@@ -215,6 +215,8 @@ All daemon paths above are beneath crates/plurxd/src; tests are beneath
 crates/plurx-core/src. Re-verify symbols at the branch base before editing.
 The coordinator owns shared validation catalog and root documentation changes;
 workers send the required mappings before their PR is considered complete.
+Each worker owns its unique per-commit regressions.d fragment; central catalog
+changes remain with the coordinator.
 Worker-owned handoff documents record behavior in their implementation commit.
 The coordinator must apply accompanying live-reference updates before merging
 the task PR, without sweeping unrelated documentation into it.
@@ -408,10 +410,10 @@ handoff and reassign work rather than leaving two tasks polling each other.
 
 | Package | Owner | State | Evidence / next step |
 |---|---|---|---|
-| Plan foundation | Coordinator | prepared | Docs validation and foundation PR before dispatch |
-| C1 | Coordinator | ready | Server contract and fallback shape |
-| I1 | Sol 1 | ready | Shared-index handoff |
-| W1 | Sol 2 | ready | Web-recovery handoff |
+| Plan foundation | Coordinator | merged | [PR #322](http://192.168.4.7:3000/noirr/plurx/pulls/322); commit 05298f1c4, merged as fea5d2451; four docs checks and tracked hook passed |
+| C1 | Coordinator | implementing | codex/streaming-control-contract; truthful recovery and fixed rolling playlist shape |
+| I1 | Sol 1 | implementing | Task 01a0a5b9-9c58-7a52-814c-db7b583e14bc; exact identity and shared consumer |
+| W1 | Sol 2 | implementing | Task 01a0a5b9-bb98-7fd2-a08e-42d1fc6747a3; recovery and obsolete playlist toggle removal |
 | C2 | Coordinator | depends on I1/W1 | Exact preparation demand and integrated outcomes |
 | I2 | Sol 1 | depends on I1 | Measurement and resource harness |
 | W2 | Sol 2 | depends on C1/W1 | Native evidence/recovery parity |
@@ -421,3 +423,13 @@ handoff and reassign work rather than leaving two tasks polling each other.
 Record task IDs and PRs here as they become known. Never record a test pass
 without its command and tested commit. Main documents that currently claim
 VOD-only production must be reconciled before promotion.
+
+### C1 compatibility note
+
+The updated binary always serves rolling playlists with one typeless shape;
+there is no per-session experiment flag. The legacy settings API field stays
+accepted for older clients/peers and reports the actual local contract as true.
+Remote start v1 does not acknowledge playlist shape, so the existing durable
+peer recipe retains its conservative legacy-setting guarantee. Do not assert
+the new ingress's local behavior for an older worker. C2's joined-outcome work
+should retain or improve that attribution without an unnegotiated wire field.
