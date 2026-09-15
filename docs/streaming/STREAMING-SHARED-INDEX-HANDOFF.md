@@ -1,6 +1,6 @@
 # Shared indexes — Sol implementation handoff
 
-**Status:** Wave 1 implementation complete; PR #325 open · **Written:** 2026-09-15
+**Status:** I1 merged; I2 PR #327 open · **Written:** 2026-09-15
 · **Executes:** I1/I2 in [the effort plan](STREAMING-RELIABILITY-IMPLEMENTATION.md)
 · **Base:** c2216ae75cb2a6f86efabaa4ebc2169a231ecc50
 
@@ -177,7 +177,32 @@ is dispatched after the coordinator integrates I1. Do not poll indefinitely.
 - PR: [#325 — Share exact Dolby Vision fragment indexes](http://192.168.4.7:3000/noirr/plurx/pulls/325),
   `codex/streaming-shared-index` into `effort/streaming-reliability`.
 - Files transferred back to coordinator: `state.rs` was verified unchanged
-  and released during I1. `vodserve.rs` transfers after this PR integrates.
+  and released during I1. `vodserve.rs` transferred after PR #325 integrated.
+- I2 harness: runtime commit `26ffaaf723b4ca80080e83f7b44249fa8af45a60`
+  extends `scripts/playback-lab` with `--preparation-measurement`. One filtered
+  VOD case writes one compact JSON artifact instead of a general report and
+  JUnit sidecar; source indexing, shared hydration, session attachment and
+  first frame remain separate facts.
+- I2 fixture result: the 23,789,793-byte `remux-h264-multitrack-1080` fixture
+  passed with 59,574 ms from index request to completed full-source pass,
+  37 ms to attach the VOD session and 2,051 ms to the first presented frame.
+  The run used an absent isolated-runtime index before the pass and a local
+  index at playback; operating-system page-cache state was uncontrolled.
+  [The compact result](../evidence/streaming-preparation-fixture-2026-09-15.json)
+  is measurement evidence, not a software gate.
+- Unavailable I2 evidence: the isolated runtime had no artifact peer, so
+  shared-hydration latency is unavailable. The daemon exposes no per-pass I/O
+  byte counter, so bytes read are also unavailable rather than inferred from
+  the source size. No NAS file, real film or production service was read.
+- I2 scheduler proof: the existing exact tests
+  `speculative_capacity_uses_spare_room_but_never_jumps_a_live_waiter`,
+  `a_start_that_never_gets_its_slot_still_releases_the_producer` and
+  `analysis_hash_stop_signal_observes_foreground_playback` passed with pinned
+  Rust 1.97.1. They retain foreground priority, cancellation cleanup and the
+  no-charge retry boundary without changing Rust server or core code.
+- I2 PR: [#327 — Measure bounded VOD preparation phases](http://192.168.4.7:3000/noirr/plurx/pulls/327),
+  `codex/streaming-index-measurement` into
+  `effort/streaming-reliability`.
 
 ## CI and review rule — current pipeline correction
 

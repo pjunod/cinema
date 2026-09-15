@@ -1,0 +1,9 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "26ffaaf7",
+]
+points = ["playback.pipeline"]
+checks = ["playback-shaping"]
+reason = "The bounded preparation measurement extends the existing playback lab instead of creating a second benchmark path. `measured phases stay separate from unavailable preparation facts` requires source indexing, peer hydration, session attachment and first frame to remain distinct, retains the exact fixture size, cache state, recipe label, host and commit, and prevents an unavailable I/O byte count from borrowing the source size. `the VOD mode writes one compact JSON artifact and no JUnit sidecar` exercises the actual one-case VOD runner seam, requires one compact artifact, and proves owned server and browser state is released. The existing playback-shaping command now includes that focused contract after its established network-shaping suite."
