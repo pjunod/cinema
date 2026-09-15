@@ -797,6 +797,20 @@ pub(crate) fn pipeline_digest(
     engine_sha256: &str,
     video: plurx_core::transcode::CopyVideoOptions,
 ) -> String {
+    pipeline_digest_for_transform(
+        file,
+        engine_sha256,
+        video,
+        crate::fragindex::output_transform_identity(file, video),
+    )
+}
+
+fn pipeline_digest_for_transform(
+    file: &MediaFile,
+    engine_sha256: &str,
+    video: plurx_core::transcode::CopyVideoOptions,
+    transform: Option<&str>,
+) -> String {
     let mut args = plurx_core::transcode::copy_index_pipe_args(file, video);
     if let Some(input) = args
         .windows(2)
@@ -804,6 +818,13 @@ pub(crate) fn pipeline_digest(
         .map(|index| index + 1)
     {
         args[input] = "{attested-source-fd}".to_owned();
+    }
+    // The conversion is a Rust transform after FFmpeg, so it is absent from
+    // the executable argv above.  Bind its revision into the same canonical
+    // recipe vector before hashing; otherwise a changed converter could reuse
+    // old fragment sizes and init metadata under a still-valid engine digest.
+    if let (true, Some(transform)) = (video.converts_dolby_vision(), transform) {
+        args.push(format!("{{plurx-output-transform:{transform}}}"));
     }
     cluster_fragment_index_pipeline_digest(engine_sha256, &args)
         .expect("the engine probe always returns a SHA-256 digest")
@@ -988,6 +1009,60 @@ mod tests {
             Some(root.join("aa").join(format!("{key}.idx")))
         );
         assert!(cache_path(root, "../escape").is_none());
+    }
+
+    /// The shared key is portable across host paths, exact across all three
+    /// Dolby Vision recipes, and includes the Rust transform revision that is
+    /// deliberately absent from FFmpeg's executable argv.
+    #[test]
+    fn pipeline_digest_is_portable_and_exact_for_dolby_vision_recipes() {
+        let dir = tempfile::tempdir().expect("source dir");
+        let path = dir.path().join("movie.mkv");
+        std::fs::write(&path, b"source").expect("source");
+        let mut file = sampled_file(path);
+        file.hdr = Some("dolby_vision".to_owned());
+        file.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".to_owned());
+        file.dolby_vision.profile = Some(7);
+        file.dolby_vision.level = Some(6);
+        file.dolby_vision.bl_compat_id = Some(1);
+        let engine = "a".repeat(64);
+
+        let stripped = plurx_core::transcode::CopyVideoOptions::new(true, false);
+        let preserved = plurx_core::transcode::CopyVideoOptions::new(true, true);
+        let converted = preserved.with_dolby_vision_conversion(true);
+        let keys =
+            [stripped, preserved, converted].map(|video| pipeline_digest(&file, &engine, video));
+        assert_eq!(
+            keys.iter().collect::<std::collections::HashSet<_>>().len(),
+            3
+        );
+
+        let mut relocated = file.clone();
+        relocated.path = PathBuf::from("/a/different/host/mount/movie.mkv");
+        assert_eq!(
+            pipeline_digest(&file, &engine, converted),
+            pipeline_digest(&relocated, &engine, converted),
+            "the attested source digest, not a host-local path, supplies source identity"
+        );
+
+        let current = pipeline_digest(&file, &engine, converted);
+        let next = pipeline_digest_for_transform(
+            &file,
+            &engine,
+            converted,
+            Some("dv-p7-to-p81-rpu-next-test-revision"),
+        );
+        assert_ne!(current, next);
+        assert_eq!(
+            pipeline_digest(&file, &engine, preserved),
+            pipeline_digest_for_transform(
+                &file,
+                &engine,
+                preserved,
+                Some("dv-p7-to-p81-rpu-next-test-revision")
+            ),
+            "an unrelated conversion revision must not invalidate ordinary artifacts"
+        );
     }
 
     #[tokio::test]
