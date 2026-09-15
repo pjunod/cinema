@@ -1850,6 +1850,10 @@ mod tests {
             SourceIdentity::new(123, 456, "argv"),
         );
         index.parameter_sets_constant = true;
+        index.promotion.dolby_vision = Some(
+            crate::fmp4::DolbyVisionRecord::new(8, 6, false, true, true, 1)
+                .expect("converted record"),
+        );
         let source = digest('a');
         let pipeline = digest('b');
         let blob = encode_cluster_fragment_index_blob(&index, &source, &pipeline).expect("encode");
@@ -1864,6 +1868,12 @@ mod tests {
         );
         assert_eq!(decoded.source, SourceIdentity::new(0, 0, pipeline.clone()));
         assert!(decode_cluster_fragment_index_blob(&blob, &digest('d'), &pipeline).is_err());
+        assert!(decode_cluster_fragment_index_blob(&blob, &source, &digest('d')).is_err());
+        assert!(
+            decode_cluster_fragment_index_blob(&blob[..blob.len() - 1], &source, &pipeline)
+                .is_err(),
+            "a truncated artifact must not supply substitute fragment metadata"
+        );
     }
 
     #[test]
