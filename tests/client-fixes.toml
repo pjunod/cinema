@@ -1995,3 +1995,14 @@ source = "crates/plurxd/src/web/index.html"
 source_anchor = "function playbackInfoOverview("
 test = "tests/web/player-dom.test.js"
 test_anchor = "const missingPicture = info.playbackInfoOverview({"
+
+[[fixes]]
+# Documentation-only correction: native README claims must agree with release
+# inputs. The retained operation check rejects the stale Android build claim;
+# the sibling Apple claim suite validates the required build-note Issue line.
+id = "clients.playback-info-release-documentation"
+commits = ["537e22e6"]
+source = "clients/android/README.md"
+source_anchor = "> Status: **v0.3.0**, build"
+test = "tests/operations/test_mobile_build_claims.py"
+test_anchor = "def test_repository_build_claims_match_release_inputs"
