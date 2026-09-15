@@ -160,11 +160,22 @@ is dispatched after the coordinator integrates I1. Do not poll indefinitely.
 
 ## 6. Result — implementation task fills this in
 
-- Tested base and final commit: pending.
-- Artifact representation/key change: pending.
-- Focused checks: pending.
-- PR: pending.
-- Files transferred back to coordinator: pending.
+- Tested base: `fea5d245131095f26f60d67a69e6570aa3626125`; final
+  implementation commit is recorded in the task PR.
+- Artifact representation/key change: blob format v2 is unchanged because it
+  already retains conversion promotion, init, fragment, source and pipeline
+  facts. Ordinary strip/preserve keys remain reusable. Converting local and
+  shared keys now include `dv-p7-to-p81-rpu-v1`, so a byte-affecting Rust
+  transform revision cannot consume an older plan.
+- Focused checks: seven exact Rust regressions passed for transform and recipe
+  isolation, path-portable shared identity, converted-byte indexing,
+  conversion-metadata blob validation, hydration without a local v1 index,
+  request coalescing/lease fencing and source replacement. Pinned format,
+  `plurxd` all-target check and `plurxd` all-target Clippy also passed.
+- PR: `codex/streaming-shared-index` into `effort/streaming-reliability`;
+  Forgejo URL is recorded after publication.
+- Files transferred back to coordinator: `state.rs` was verified unchanged
+  and released during I1. `vodserve.rs` transfers after this PR integrates.
 
 ## CI and review rule — current pipeline correction
 
