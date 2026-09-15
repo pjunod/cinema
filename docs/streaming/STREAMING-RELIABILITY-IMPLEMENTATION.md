@@ -414,11 +414,11 @@ handoff and reassign work rather than leaving two tasks polling each other.
 | C1 | Coordinator | merged | [PR #323](http://192.168.4.7:3000/noirr/plurx/pulls/323); runtime 00a70a7b; 11 focused tests passed |
 | I1 | Sol 1 | merged | [PR #325](http://192.168.4.7:3000/noirr/plurx/pulls/325); runtime 2a2ec42f; seven focused identity, conversion and store tests passed |
 | W1 | Sol 2 | merged | [PR #324](http://192.168.4.7:3000/noirr/plurx/pulls/324); head e906ba04; passive waits, transfer attribution and presented-frame corrections verified |
-| C2 | Coordinator | verified; PR preparation | Runtime 298cc69d; exact demand joins the existing queue; four focused tests and tracked hook passed |
+| C2 | Coordinator | merged | [PR #326](http://192.168.4.7:3000/noirr/plurx/pulls/326); runtime 298cc69d; four focused tests and combined web proof passed |
 | I2 | Sol 1 | implementing | Existing playback-lab measurement extension; no production scan |
-| W2 | Sol 2 | depends on C1/W1 | Native evidence/recovery parity |
+| W2 | Sol 2 | implementing | Native evidence/recovery parity from integrated current main |
 | Final promotion | Coordinator | pending | One adversarial agent review; current-candidate main fast lane |
-| Fallback retirement | Coordinator/user | decision after Wave 2 | May remain deferred without prolonging this effort |
+| Fallback retirement | Coordinator | retain | Exact copy plans still need complete source passes; preserve prompt first play and close the retirement question for this effort |
 
 Record task IDs and PRs here as they become known. Never record a test pass
 without its command and tested commit. Main documents that currently claim
@@ -501,3 +501,13 @@ passed again. The focused web policy, control, settings-section and player-DOM
 files passed together with `node --test` (four files, 31.3 seconds), covering
 the concurrent playback-info merge. This replaces the older-base evidence for
 integration; no full web or Rust suite was repeated.
+
+### Final integration correction
+
+Runtime `8297e553` closes the adjacent native-browser error seam: element
+aborts and transfer failures no longer count as media incompatibility when
+selecting a rescue transcode. Decode and unsupported-format errors retain
+that path. `node tests/playback/web-policy.test.js` passed, including the
+shipped callback for all five native error-code cases; the normal workspace
+hook passed. This correction will receive the same single final main-PR
+adversarial review as the integrated effort.
