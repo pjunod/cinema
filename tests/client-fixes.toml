@@ -185,12 +185,10 @@ test_anchor = "testPGSOverlayDisablesManualAndAutomaticPictureInPicture"
 id = "apple.home-hero-edge-clipping"
 commits = ["b423fcce"]
 source = "clients/apple/Sources/HomeView.swift"
-# The approved quiet Home removes the hero entirely. Its retained successor
-# rejects reintroducing that oversized/clipped presentation and keeps every
-# continuation available in the compact list.
-source_anchor = "static let usesFeaturedHero = false"
+# The original featured card and its equal-inset regression are restored.
+source_anchor = "struct IOSHomeHeroCardLayout: ViewModifier"
 test = "clients/apple/Tests/AppleClientTests.swift"
-test_anchor = "testPhoneHomeKeepsEveryContinuationWithoutAFeaturedHero"
+test_anchor = "testPhoneHomeHeroKeepsEqualInsetsOnBothEdges"
 
 [[fixes]]
 id = "clients.media-origin-and-seek-routing"
