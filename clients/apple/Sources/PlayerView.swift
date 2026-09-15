@@ -808,6 +808,7 @@ struct PlayerView: View {
                         #if os(tvOS)
                         PlaybackStatsView(
                             controller: controller,
+                            title: title,
                             mode: $statsMode,
                             onDismiss: dismissPlaybackInfo
                         )
@@ -815,6 +816,7 @@ struct PlayerView: View {
                         #else
                         PlaybackStatsView(
                             controller: controller,
+                            title: title,
                             mode: $statsMode,
                             onDismiss: dismissPlaybackInfo
                         )
@@ -2862,6 +2864,7 @@ let applePlaybackInfoFields: [ApplePlaybackInfoField] = [
 /// Adapts the attached finite player into the shared playback-info presentation.
 struct PlaybackStatsView: View {
     @ObservedObject var controller: PlayerController
+    let title: String
     @Binding var mode: PlaybackStatsMode
     let onDismiss: () -> Void
 
@@ -2884,7 +2887,7 @@ struct PlaybackStatsView: View {
                 }
                 #endif
                 PlaybackInfoPanel(
-                    title: controller.decision?.title ?? "Current playback",
+                    title: title,
                     facts: presentationFacts,
                     mode: $mode,
                     onClose: onDismiss
