@@ -2050,3 +2050,11 @@ source = "clients/apple/Sources/HomeView.swift"
 source_anchor = "usesFeaturedHero ? Array(items.dropFirst()) : items"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testPhoneHomeUsesOneCompactContinueFeature"
+
+[[fixes]]
+id = "android.home-focus-after-acquisition"
+commits = ["1fd42b68"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/TvFocus.kt"
+source_anchor = "if (acquired) notifyFocused?.invoke()"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/components/TvFocusTest.kt"
+test_anchor = "fun initialFocusCanDisableItselfOnlyAfterTheTargetAcceptsFocus()"
