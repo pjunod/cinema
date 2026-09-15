@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["f41d73cd"]
+commits = ["f41d73cd", "bf69b0fa"]
 points = ["web.experience"]
 checks = ["web-static"]
 reason = "The existing calm-library web regression verifies the three restored Home renderers, original poster rails, and Theater feature while retaining item track-choice checks. Browser captures inspect each layout at desktop and phone widths."

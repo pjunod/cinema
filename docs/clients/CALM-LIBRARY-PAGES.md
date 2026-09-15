@@ -86,6 +86,8 @@ promotion gate for that PR. No deployment, publication or physical-device
 installation was performed. The subsequent web Home restoration receives
 its own review and validation. Its single adversarial review found no
 actionable issues; the final Home renderers use the pre-PR #317 poster-rail composition.
+Production web captures at 1280 px and 390 px cover all three restored layouts
+with sample data; no script errors or horizontal overflow were observed.
 
 ## Review findings addressed
 
