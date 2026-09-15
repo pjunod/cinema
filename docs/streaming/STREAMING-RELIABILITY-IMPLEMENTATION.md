@@ -1,6 +1,6 @@
 # Streaming reliability — execution plan and integration contract
 
-**Status:** six implementation packages complete; final review and main
+**Status:** six implementation packages and one adversarial review complete; main
 promotion pending; not deployed · **Written:** 2026-09-15 · **Base:** c2216ae75cb2a6f86efabaa4ebc2169a231ecc50
 · **Integration branch:** effort/streaming-reliability
 
@@ -417,7 +417,7 @@ handoff and reassign work rather than leaving two tasks polling each other.
 | C2 | Coordinator | merged | [PR #326](http://192.168.4.7:3000/noirr/plurx/pulls/326); runtime 298cc69d; four focused tests and combined web proof passed |
 | I2 | Sol 1 | merged | [PR #327](http://192.168.4.7:3000/noirr/plurx/pulls/327); one isolated fixture, focused harness and priority/cancellation proof |
 | W2 | Sol 2 | merged | [PR #328](http://192.168.4.7:3000/noirr/plurx/pulls/328); runtime 27f91b76; native builds and focused tests passed |
-| Final promotion | Coordinator | pending | One adversarial agent review; current-candidate main fast lane |
+| Final promotion | Coordinator | pending | [PR #329](http://192.168.4.7:3000/noirr/plurx/pulls/329); one adversarial review complete, sole finding corrected in 19d9911bb; current-candidate main fast lane required |
 | Fallback retirement | Coordinator | retain | Exact copy plans still need complete source passes; preserve prompt first play and close the retirement question for this effort |
 
 Record task IDs and PRs here as they become known. Never record a test pass
@@ -509,8 +509,8 @@ aborts and transfer failures no longer count as media incompatibility when
 selecting a rescue transcode. Decode and unsupported-format errors retain
 that path. `node tests/playback/web-policy.test.js` passed, including the
 shipped callback for all five native error-code cases; the normal workspace
-hook passed. This correction will receive the same single final main-PR
-adversarial review as the integrated effort.
+hook passed. This correction was included in the single final main-PR
+adversarial review of the integrated effort.
 
 ### I2 measurement and limits
 
@@ -546,3 +546,45 @@ Apple source build 162 and Android versionCode 101 are recorded in the native
 release metadata. These builds are not deployed or uploaded by this effort.
 Exact commands and release evidence are in the web/native handoff and build
 fragment; no physical-device acceptance is inferred from simulator/JVM tests.
+
+
+### Final adversarial review and disposition
+
+One adversarial agent reviewed the integrated main PR #329 at `17790df04`,
+including W1 web recovery, W2 native parity and the coordinator's browser
+error-classification correction. It reported one actionable P2 in the server
+playlist retry loop and no additional actionable client findings. There is no
+second review campaign.
+
+Runtime `19d9911bb` routes rejected snapshots, attempt changes, incomplete
+startup playlists and refused publication observations through the existing
+terminal/deadline/poll tail. The reviewer initially described an unbounded HTTP
+request; the outer absolute timeout already bounded HTTP work. The confirmed
+defect was that inner rejection paths skipped pacing and their own deadline,
+relying on that outer safety net. The correction makes the loop enforce its
+existing contract and retains terminal-producer error precedence.
+
+Pinned Rust 1.97.1 compiled the daemon test binary with:
+
+```bash
+CARGO_TARGET_DIR=/private/tmp/plurx-streaming-target-coordinator \
+  rustup run 1.97.1 cargo test -p plurxd --bin plurxd --locked --no-run
+```
+
+The resulting binary ran `--exact transcode::tests::<name> --nocapture` once
+for each of these seven filters; all passed:
+
+- `rejected_rolling_snapshots_obey_the_request_loop_deadline`
+- `playlist_deadline_bounds_work_after_exact_bytes_are_observed`
+- `playlist_reclassification_reuses_one_absolute_deadline`
+- `waiting_playlist_rebinds_to_a_prepublication_successor_attempt`
+- `predecessor_playlist_cannot_open_the_successor_startup_gate`
+- `first_live_transcode_playlist_waits_for_two_segments`
+- `a_terminal_verdict_names_its_cause_to_every_later_reader`
+
+The new request-loop regression holds both header-only and missing-retained-
+boundary snapshots through their deadline, without using the outer HTTP timeout
+to make the test pass, and checks terminal failure precedence after expiry.
+The normal workspace hook passed formatting, strict all-target Clippy, catalog
+lint and JavaScript syntax. Main remained `2699360e7`; no base port invalidated
+this evidence. The main promotion lane remains a separate required check.
