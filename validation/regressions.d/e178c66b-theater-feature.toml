@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e178c66b"]
+points = ["web.experience"]
+checks = ["web-static"]
+reason = "The calm-library regression requires Theater to render its featured region, prioritizes the server-ordered in-progress episode, and rejects Next up as a featured source. Classic and Catalog retain the compact Home composition."
