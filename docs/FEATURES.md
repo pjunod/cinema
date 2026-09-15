@@ -16,6 +16,9 @@ works. Scope and phase gates live in [REQUIREMENTS.md](REQUIREMENTS.md) and
 
 ---
 
+For visual examples, see the [screenshot tour](features/SCREENSHOT-TOUR.md):
+native phones and tablets, Live TV guides, DVR, and browser library layouts.
+
 ## Browsing and recording usability
 
 The three web layouts share playback-first movie, episode and series pages.

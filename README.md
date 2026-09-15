@@ -93,7 +93,41 @@ planned work in detail.
 ## What it looks like
 
 These captures use generated artwork, sample media, and fictional demo entries.
-No personal library titles, posters, or filenames appear.
+No personal library titles, posters, or filenames appear. TV guide and recording
+status examples use synthetic fixtures. The [screenshot tour](docs/features/SCREENSHOT-TOUR.md)
+shows the full set of native, Live TV, DVR, and library layouts.
+
+### Native apps on phones and tablets
+
+The same library has native iPhone, iPad, and Android views. Browse, resume,
+open the guide, and find recordings from the client’s own navigation.
+
+| iPhone | Android |
+|---|---|
+| ![Native iPhone Home using the demo library](docs/img/ios-home.png) | ![Native Android Home using the demo library](docs/img/android-home.png) |
+
+Tablet layouts, native TV guides, and recording views are in the
+[screenshot tour](docs/features/SCREENSHOT-TOUR.md).
+
+### Live television and DVR
+
+Browse airings in a list or grid, preview a channel, and see which programmes
+are recording. The preview below plays generated sample video.
+
+![Live TV grid with demo channels, programmes, and recording badges](docs/img/live-tv-grid.png)
+
+<details>
+<summary>Recording activity and saved programmes</summary>
+
+**Activity** shows active recordings and their capture details together.
+
+![Synthetic recording activity with the selected capture’s details](docs/img/recording-activity.png)
+
+**Saved** collects completed recordings for playback.
+
+![Saved recordings using fictional demo programmes](docs/img/recordings-saved.png)
+
+</details>
 
 ### Inspect a title before you play
 
