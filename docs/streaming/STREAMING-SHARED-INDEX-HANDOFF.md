@@ -1,6 +1,6 @@
 # Shared indexes — Sol implementation handoff
 
-**Status:** I1 merged; I2 measurement ready for review · **Written:** 2026-09-15
+**Status:** I1 merged; I2 PR #327 open · **Written:** 2026-09-15
 · **Executes:** I1/I2 in [the effort plan](STREAMING-RELIABILITY-IMPLEMENTATION.md)
 · **Base:** c2216ae75cb2a6f86efabaa4ebc2169a231ecc50
 
@@ -200,8 +200,9 @@ is dispatched after the coordinator integrates I1. Do not poll indefinitely.
   `analysis_hash_stop_signal_observes_foreground_playback` passed with pinned
   Rust 1.97.1. They retain foreground priority, cancellation cleanup and the
   no-charge retry boundary without changing Rust server or core code.
-- I2 PR: `codex/streaming-index-measurement` into
-  `effort/streaming-reliability`; Forgejo URL is recorded after publication.
+- I2 PR: [#327 — Measure bounded VOD preparation phases](http://192.168.4.7:3000/noirr/plurx/pulls/327),
+  `codex/streaming-index-measurement` into
+  `effort/streaming-reliability`.
 
 ## CI and review rule — current pipeline correction
 
