@@ -1,7 +1,7 @@
 # Streaming reliability — execution plan and integration contract
 
-**Status:** ready for parallel implementation; no behavior shipped by this
-plan · **Written:** 2026-09-15 · **Base:** c2216ae75cb2a6f86efabaa4ebc2169a231ecc50
+**Status:** implementation integrated through C2/I2; native parity and final
+main promotion in progress; not deployed · **Written:** 2026-09-15 · **Base:** c2216ae75cb2a6f86efabaa4ebc2169a231ecc50
 · **Integration branch:** effort/streaming-reliability
 
 Companion to [PLAYBACK.md](../PLAYBACK.md) (the delivery inventory),
@@ -74,7 +74,7 @@ was 214673 ms, target 49 seconds, release threshold 24 seconds and publication
 lead 26 seconds. This proves a held producer and a stationary presentation;
 it does not prove that resuming production would have fixed Safari.
 
-The current shared resolver rejects preserved Dolby Vision before hydration;
+At the incident baseline, the shared resolver rejected preserved Dolby Vision before hydration;
 local indexing supports stripped, preserved and converted identities, but the
 needed local row was missing and the local indexing cadence was disabled.
 An older shared artifact existed. Existence of an artifact is not proof it
@@ -415,7 +415,7 @@ handoff and reassign work rather than leaving two tasks polling each other.
 | I1 | Sol 1 | merged | [PR #325](http://192.168.4.7:3000/noirr/plurx/pulls/325); runtime 2a2ec42f; seven focused identity, conversion and store tests passed |
 | W1 | Sol 2 | merged | [PR #324](http://192.168.4.7:3000/noirr/plurx/pulls/324); head e906ba04; passive waits, transfer attribution and presented-frame corrections verified |
 | C2 | Coordinator | merged | [PR #326](http://192.168.4.7:3000/noirr/plurx/pulls/326); runtime 298cc69d; four focused tests and combined web proof passed |
-| I2 | Sol 1 | implementing | Existing playback-lab measurement extension; no production scan |
+| I2 | Sol 1 | merged | [PR #327](http://192.168.4.7:3000/noirr/plurx/pulls/327); one isolated fixture, focused harness and priority/cancellation proof |
 | W2 | Sol 2 | implementing | Native evidence/recovery parity from integrated current main |
 | Final promotion | Coordinator | pending | One adversarial agent review; current-candidate main fast lane |
 | Fallback retirement | Coordinator | retain | Exact copy plans still need complete source passes; preserve prompt first play and close the retirement question for this effort |
@@ -511,3 +511,19 @@ that path. `node tests/playback/web-policy.test.js` passed, including the
 shipped callback for all five native error-code cases; the normal workspace
 hook passed. This correction will receive the same single final main-PR
 adversarial review as the integrated effort.
+
+### I2 measurement and limits
+
+[Committed fixture report](../evidence/streaming-preparation-fixture-2026-09-15.json)
+records one isolated headless-Chrome remux-H264 case on runtime `26ffaaf7`:
+23,789,793 source bytes, 59,574 ms from index request to completed full-source
+pass, 37 ms from playback request to VOD attachment and 2,051 ms to first
+presented frame. The case passed with no stalls or hitches. The preparation
+interval includes scheduler wake-up; it is not processing time or an estimate
+of source throughput. Shared-peer hydration and per-pass I/O bytes were
+unavailable; OS page-cache state was uncontrolled. This is fixture evidence,
+not a NAS, P7 movie or physical Safari measurement.
+
+The report is diagnostic only. No feature consults it for activation. The
+retained rolling fallback allows first play without waiting for this complete
+pass. No additional index-algorithm project is required to close this effort.
