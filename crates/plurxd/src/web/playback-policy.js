@@ -603,17 +603,24 @@
       : "fail";
   }
 
-  // A wait that persists has already outlived hls.js/browser nudges. Auto may
-  // trade an original remux for a compatible transcode; an explicit quality
-  // choice is respected and merely reconnected. One automatic attempt is the
-  // hard bound that prevents a bad file or dead network from restart-looping.
+  // A wait that persists has already outlived hls.js/browser nudges, but time
+  // plus buffered media does not identify a decoder fault. Only independently
+  // attributed decoder or network evidence may trade an Auto remux for a
+  // compatible transcode. An explicit quality choice is always reconnected
+  // exactly. One automatic attempt is the hard bound that prevents a bad file
+  // or dead network from restart-looping.
   function stallRecoveryAction({
     method,
     quality = "auto",
+    cause = "unknown",
     alreadyRecovered = false,
   }) {
     if (alreadyRecovered) return "prompt";
-    if (method === "remux" && qualityForce(quality) === "auto") {
+    if (
+      method === "remux" &&
+      qualityForce(quality) === "auto" &&
+      ["decoder", "network"].includes(cause)
+    ) {
       return "transcode";
     }
     return ["direct_play", "remux", "transcode"].includes(method)
@@ -662,17 +669,26 @@
       : null;
   }
 
-  // Bind a transcode restart to the exact session that stalled. The server
-  // owns Auto rung normalization, so a plain create would only reproduce the
-  // same unsustainable rung and spend the client's one recovery attempt.
+  // Bind only an evidence-backed Auto adaptation to the exact session whose
+  // rung is being changed. The legacy `stall` reason asks the server to lower
+  // Auto one rung, so sending it for an unattributed presentation repair would
+  // silently change the selected recipe. Same-recipe restarts retain the
+  // stable playback supersession id carried by every create and omit this
+  // adaptation-only pair.
   function stallReopenSessionOptions({
     options = {},
     forceReopen = false,
     method = null,
     sessionId = null,
+    cause = "unknown",
   } = {}) {
     const result = { ...options };
-    if (forceReopen && method === "transcode" && sessionId) {
+    if (
+      forceReopen &&
+      method === "transcode" &&
+      sessionId &&
+      cause === "network"
+    ) {
       result.previous_session_id = sessionId;
       result.reopen_reason = "stall";
     }

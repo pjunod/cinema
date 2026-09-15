@@ -1521,8 +1521,8 @@ async function main() {
       "const v={currentTime:10,paused:false,ended:false,pause(){this.paused=true;}};",
       "function bufferRunway(){return 10;} function persistentWait(){attempts++;return new Promise(()=>{});}",
       "function clearStall(){} function finishStallRecovery(){recovered++;} function setLoading(){} function recordWaitStall(){}",
-      "function playerActivity(){} function settlePlaybackControlSeek(){} function completeHlsStartup(){} function pbTick(){} function pbSyncPlayIcon(){} function notifyPlaybackControl(){} function reportTtff(){}",
-      shippedSource("streamHasVideo"),shippedSource("endWait"),
+      "function playerActivity(){} function settlePlaybackControlSeek(){} function completeHlsStartup(){} function hlsStartupIncomplete(){return false;} function pbTick(){} function pbSyncPlayIcon(){} function notifyPlaybackControl(){} function reportTtff(){}",
+      shippedSource("streamHasVideo"),shippedSource("persistentWaitEvidence"),shippedSource("endWait"),
       shippedSource("samplePlaybackPresentationClock"),shippedSource("pausePlaybackInternally"),
       shippedSource("playbackTransportEvents"),
       shippedSource("playbackProgressTick"),shippedSource("playbackWaitNeedsProgress"),shippedSource("handlePlaybackPlaying"),
@@ -1536,6 +1536,16 @@ async function main() {
     assert.equal(h.recovered(),0,'an event alone must not report recovered');
     h.v.currentTime=11;h.p.controlPresentedFrames=11;h.tick(20500);
     assert.equal(h.p.waitAt,null);assert.equal(h.recovered(),1,'actual output progress retires the wait');
+    h.p.progressWatch=null;h.p.waitAt=null;h.p.recoveringStall={at:20500,action:'restart'};
+    h.v.currentTime=20;h.tick(21000);h.playing();
+    assert.equal(h.recovered(),1,'playing without presentation progress cannot complete a replacement');
+    h.v.currentTime=21;h.p.controlPresentedFrames=12;h.tick(21500);
+    assert.equal(h.recovered(),2,'new presentation progress completes the replacement episode');
+    h.p.progressWatch=null;h.p.recoveringStall={at:21500,action:'restart'};
+    h.p.controlHasFrameCallbacks=false;delete h.v.getVideoPlaybackQuality;
+    h.v.currentTime=30;h.tick(22000);h.playing();h.v.currentTime=31;h.tick(22500);
+    assert.equal(h.recovered(),3,
+      'the explicit clock fallback completes recovery when frame counters are unavailable');
   }
   player.waitAt=performance.now()-9_000;
   const inferredSupply=adapter.playbackControlSnapshot(video,player);
@@ -1727,7 +1737,9 @@ async function main() {
     assert.match(shippedSource("adoptPlaybackMediaElement"),new RegExp(binding),
       `a switch must re-bind ${binding} to the element that now owns the picture`);
   }
-  assert.match(shippedSource("persistentWait"),/error_code:"decoder"/);
+  assert.match(shippedSource("persistentWaitEvidence"),/error_code:"decoder"/);
+  assert.doesNotMatch(shippedSource("persistentWait"),/persistent_decode_stall/,
+    "elapsed time must never be serialized as a decoder failure");
   assert.match(shippedSource("persistentWait"),/askPlaybackControl\("stalled",controlObservation,began\+CONTROL_STALL_DEFER_DEADLINE_MS\)/);
   assert.match(shippedSource("attachHls"),/notifyPlaybackControl\("failed",hlsFailure\.observation\)/);
   assert.match(shippedSource("stallDiagnose"),/notifyPlaybackControl\("stalled"\)/);
@@ -2222,6 +2234,8 @@ async function main() {
         shippedSource("flushPreparedSettlement"), shippedSource("cancelPreparedFirstFrame"),
         shippedSource("stopPlaybackControl"),
         shippedSource("startPlaybackControl"),
+        shippedSource("persistentWaitEvidence"),
+        shippedSource("stallRecoverySnapshot"),
         shippedSource("persistentWait"),
         "function settlePlaybackControlSeek(){} function completeHlsStartup(){}",
         shippedSource("streamHasVideo"),
@@ -2255,7 +2269,7 @@ async function main() {
       (fn, ms) => { const id = nextTimer++; timers.set(id, { fn, ms }); return id; },
       (id) => { timers.delete(id); },
       8_000,
-      { stallRecoveryAction: () => "reconnect", stallRecoveryTargetHeight: () => 720 },
+      options.policy || { stallRecoveryAction: () => "reconnect", stallRecoveryTargetHeight: () => 720 },
       () => "auto",
       (player, kind, ms, runway, detail) => stalls.push(detail),
       () => 12,
@@ -2305,6 +2319,66 @@ async function main() {
     };
   }
   const stalledVideo = { paused: false, seeking: false };
+  {
+    const classify = new Function(
+      "SUPPLY_RUNWAY_SECS",
+      `${shippedSource("persistentWaitEvidence")}\nreturn persistentWaitEvidence;`,
+    )(1.5);
+    assert.deepEqual(classify({ error: null }, 18.310), {
+      kind: "presentation", cause: "unknown",
+      observation: { decoder_state: "unknown" },
+    }, "loaded runway plus no progress remains an unattributed presentation wait");
+    assert.deepEqual(classify({ error: { code: 2, message: "fetch failed" } }, 18.310), {
+      kind: "supply", cause: "network",
+      observation: {
+        decoder_state: "unknown", error_code: "network", error_detail: "fetch failed",
+      },
+    }, "a typed media network error remains independent adaptation evidence");
+    assert.deepEqual(classify({ error: { code: 3, message: "decode failed" } }, 18.310), {
+      kind: "decode", cause: "decoder",
+      observation: {
+        decoder_state: "failed", error_code: "decoder", error_detail: "decode failed",
+      },
+    }, "a typed media decoder error still qualifies decoder attribution");
+    assert.deepEqual(classify({ error: null }, 1), {
+      kind: "supply", cause: "unknown",
+      observation: { decoder_state: "starved" },
+    }, "an empty buffer identifies supply pressure without inventing a network cause");
+  }
+  {
+    let now=20_001;
+    const policyInputs=[];
+    const h=stallHarness({clock:{now:()=>now},policy:{
+      stallRecoveryAction(input){policyInputs.push(input);return 'restart';},
+      stallRecoveryTargetHeight(){return null;},
+    }});
+    const player=Object.assign(stalledPlayer(),{
+      waitAt:1,waitRunway:18.310,controlIntentGeneration:7,
+      controlPresentationEpoch:11,sessionId:'session-original',copyHls:true,
+      curAudio:1,audio:[{index:0},{index:4}],curSub:9,burnedSub:null,aoffset:125,
+      source:{video_codec:'hevc',video_profile:'Main 10',width:3840,height:2160,
+        hdr_format:'Dolby Vision Profile 8'},
+    });
+    const video=Object.assign({},stalledVideo,{error:null,videoHeight:2160});
+    h.stub.attach(player,video,bootstrap());h.attached.push(player);await flush();
+    await h.stub.stall(player,video,1,3);
+    assert.equal(policyInputs.length,1);
+    assert.equal(policyInputs[0].cause,'unknown');
+    assert.deepEqual(h.reopened,[{kind:'seek',position:12}],
+      'the 18.310s loaded wait performs one same-recipe repair, never a transcode');
+    assert.equal(player.recoveringStall.kind,'presentation');
+    assert.deepEqual(player.recoveringStall.recipe,{
+      method:'remux',copy_hls:true,quality:'auto',height:2160,
+      video_codec:'hevc',video_profile:'Main 10',width:3840,dynamic_range:'Dolby Vision Profile 8',
+      audio_track:4,subtitle_track:9,subtitle_mode:'native',audio_offset_ms:125,
+    },'the episode freezes the selected quality and tracks before mutation');
+    assert.equal(player.recoveringStall.sessionId,'session-original');
+    assert.equal(player.recoveringStall.intentGeneration,7);
+    h.stub.supersede(player);
+    assert.equal(player.recoveringStall,null,
+      'a newer viewer intent cancels the old recovery episode before a callback can act');
+    h.stub.detach(player);
+  }
   {
     const h=stallHarness(),player=stalledPlayer(),held=deferred();
     player.mediaAttachment={};player.controlIntentGeneration=0;

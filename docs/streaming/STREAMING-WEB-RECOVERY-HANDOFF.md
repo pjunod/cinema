@@ -1,8 +1,8 @@
 # Web recovery — Sol implementation handoff
 
-**Status:** ready for Wave 1 implementation · **Written:** 2026-09-15
+**Status:** Wave 1 implemented · **Written:** 2026-09-15
 · **Executes:** W1/W2 in [the effort plan](STREAMING-RELIABILITY-IMPLEMENTATION.md)
-· **Base:** c2216ae75cb2a6f86efabaa4ebc2169a231ecc50
+· **Tested base:** fea5d245131095f26f60d67a69e6570aa3626125
 
 Read the effort plan and repository AGENTS.md first. Work in a separate
 worktree and codex branch from current effort/streaming-reliability. The
@@ -166,11 +166,27 @@ is ready and report; the coordinator dispatches Wave 2 after integration.
 
 ## 6. Result — implementation task fills this in
 
-- Tested base and final commit: pending.
-- Observation/action policy change: pending.
-- Focused checks: pending.
-- PR: pending.
-- Remaining physical observation: pending.
+- Tested base: `fea5d245131095f26f60d67a69e6570aa3626125`. The
+  implementation commit is the commit carrying this result.
+- Observation/action policy change: loaded runway with no frame progress and no
+  media error is a presentation stall with unknown cause. Its one bounded repair
+  preserves the current delivery recipe. Typed decoder/network errors and the
+  existing measured supply controller retain their compatible adaptation paths.
+- Identity and completion: the first episode freezes film position, delivery,
+  resolution, dynamic range, tracks, offset, attachment and control generations.
+  A play event alone does not settle it; new presented frames, or film-clock
+  progress when frame counters are unavailable, settle it once. Viewer intent
+  supersedes stale recovery.
+- Focused proof: `node --test tests/playback/web-policy.test.js
+  tests/playback/web-control.test.js` passed. `make web-check` reached and passed
+  both changed playback suites, then stopped at the unchanged
+  `tests/web/library-channels.test.js` harness because its baseline `document`
+  mock lacks `addEventListener`; the failing extracted source is outside this
+  task's diff. The settings-section test for the removed HLS switch passes.
+- PR: `codex/streaming-web-recovery` into `effort/streaming-reliability`; URL is
+  recorded after Forgejo creates it.
+- Remaining physical observation: Safari playback has not been claimed from
+  fake video objects. The coordinator owns the later physical regression run.
 
 ## CI and review rule — current pipeline correction
 
