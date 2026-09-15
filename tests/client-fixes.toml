@@ -1280,7 +1280,7 @@ commits = ["7c21d238", "88066364"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackTelemetry.kt"
 source_anchor = "nativeReevaluationSpent = false"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackTelemetryTest.kt"
-test_anchor = "lifecycleRefillLoadedWaitClaimsOneReevaluationAndKeepsTheAbsoluteDeadline"
+test_anchor = "lifecycleRefillLoadedWaitClaimsOneReevaluationWithoutCreatingAnotherDeadline"
 
 [[fixes]]
 # Readiness truth is advisory: an unmet fleet/link observation must be visible
@@ -2006,3 +2006,19 @@ source = "clients/android/README.md"
 source_anchor = "> Status: **v0.3.0**, build"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "def test_repository_build_claims_match_release_inputs"
+
+[[fixes]]
+id = "apple.unknown-stall-preserves-delivery"
+commits = ["27f91b76"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "case sameDeliveryRepair"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testPresentationStallRepairPreservesTheRecipeWithoutAQualityTicket"
+
+[[fixes]]
+id = "android.unknown-stall-preserves-delivery"
+commits = ["27f91b76"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/Controller.kt"
+source_anchor = "internal fun presentationStallEvidence()"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest.kt"
+test_anchor = "fun presentationStallRepairPreservesRecipeWithoutQualityReductionTicket"

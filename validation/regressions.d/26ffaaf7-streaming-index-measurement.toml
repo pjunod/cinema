@@ -3,6 +3,7 @@ version = 1
 [[coverage]]
 commits = [
   "26ffaaf7",
+  "9c06c542",
 ]
 points = ["playback.pipeline"]
 checks = ["playback-shaping"]
