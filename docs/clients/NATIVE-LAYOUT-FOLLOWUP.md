@@ -108,9 +108,10 @@ empty, and recording/selected-channel states are samples.
 The TV capture exposed one additional horizontal truncation: movie year and
 remaining time competed with the resolution label. TV cards now put resolution
 on its own line and allow two metadata lines. The refreshed capture shows
-“2023 62m left” in full. Both Apple targets compiled with this adjustment in
-the capture build; the release source is compiled separately after removing
-the harness.
+“2023 62m left” in full. Both Apple targets compiled with this adjustment in the capture build.
+After removing the harness, both release targets compiled successfully from
+committed source `fb492fbd`. All three disposable simulators were then deleted.
+Catalog lint and the history audit pass; no unit suite has run yet.
 
 These screenshots establish the pictured static layouts, not playback,
 retained PiP, guide transitions, remote focus movement, or Android rendering.
