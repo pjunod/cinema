@@ -8,18 +8,6 @@ function declaration(name) {
   const tail = source.slice(start);
   return tail.slice(0, tail.indexOf('\n}') + 2);
 }
-const recent = new Function(`${declaration('homeRecentItems')}; return homeRecentItems;`)();
-const page = {
-  libs: [{id: '9007199254740993', kind: 'movies'}, {id: '9007199254740994', kind: 'recordings'}],
-  hubs: {recently_added: [
-    {id: '1', library_id: '9007199254740994', title: 'Movie-looking DVR title'},
-    {id: '2', library_id: '9007199254740993', recorded_at: '2026-09-15'},
-    {id: '3', library_id: 'unknown'},
-  ]},
-};
-assert.deepEqual(recent(page).map(item => item.id), ['2']);
-assert.deepEqual(recent({...page, previewsPending: true}), []);
-assert.deepEqual(recent({...page, previewsError: true}), []);
 const english = new Function(`${declaration('englishTrackNote')}; return englishTrackNote;`)();
 assert.match(english([{language: 'en-US'}], 'audio'), /available/);
 assert.match(english([{language: 'fra'}, {language: null}], 'audio'), /not confirmed/);
@@ -36,15 +24,23 @@ assert.equal(summary(file, 'audio'), 'English');
 assert.equal(summary(file, 'subtitle'), 'Off');
 assert.equal(summary({...file, id: 'file-a'}, 'audio'), 'French · default');
 assert.equal(summary({...file, id: 'file-a'}, 'subtitle'), 'English · default');
-assert.doesNotMatch(declaration('calmHomeBody'), /next_up|theaterHero|watch-cards/);
-console.log('Calm library regressions: recording ownership, unknown languages, per-file choices, and compact Home passed.');
+console.log('Item regressions: unknown languages and per-file track choices passed.');
 
-const hero = new Function('homeRecentItems',
-  `const THEATER_HERO_KINDS={movie:1,episode:1,video:1}; ${declaration('theaterHeroPick')}; return theaterHeroPick;`)(recent);
+const hero = new Function(
+  `const THEATER_HERO_KINDS={movie:1,episode:1,video:1}; ${declaration('theaterHeroPick')}; return theaterHeroPick;`)();
 const continued = {id:'continue',kind:'episode',title:'The episode I was watching'};
-assert.equal(hero({...page,hubs:{...page.hubs,continue_watching:[continued]}}).item,continued);
-assert.equal(hero({...page,hubs:{...page.hubs,continue_watching:[continued]}}).resuming,true);
-assert.equal(hero({...page,hubs:{recently_added:[],next_up:[continued]}}),null);
+assert.equal(hero({hubs:{continue_watching:[continued]}}).item,continued);
+assert.equal(hero({hubs:{continue_watching:[continued]}}).resuming,true);
+assert.equal(hero({hubs:{recently_added:[],next_up:[continued]}}),null);
 assert.match(declaration('theaterHomeBody'), /theaterHeroHtml/);
 assert.match(declaration('theaterHomeBody'), /data-home-slot="hero"/);
-console.log('Theater retains its recently played feature without promoting Next up.');
+for (const name of ['classicHomeBody', 'catalogHomeBody', 'theaterHomeBody']) {
+  const body = declaration(name);
+  assert.match(body, /viewingHubs\(p\)/);
+  assert.match(body, /homeSavedHtml\(p\)/);
+  assert.doesNotMatch(body, /calmHomeBody|<details/);
+}
+assert.match(declaration('viewingHubs'), /nextRows=next.filter/);
+assert.match(declaration('homeSavedHtml'), /dvr-saved-card/);
+assert.doesNotMatch(source, /calm-home|resume-strip|home-explore/);
+console.log('All three Home layouts retain their original shelves and Theater feature.');

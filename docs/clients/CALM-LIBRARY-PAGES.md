@@ -1,23 +1,26 @@
 # Library pages — scan your library and inspect one file
 
-**Status:** built · PR #330 awaiting final lane · **Updated:** 2026-09-15
+**Status:** built in PR #330; web Home restoration in review · **Updated:** 2026-09-15
 
 Companion to [CLIENTS.md](../CLIENTS.md). This revision implements the approved
 Home and item-page proposals across the web, Apple and Android clients.
 
-## Home starts with the library
+## Web Home returns to its previous layouts
 
-Recently added comes first and excludes libraries whose type is `recordings`.
-Continue watching shows three compact entries, with the remainder behind More
-in progress. Recently recorded stays separate. A generic Next up shelf no longer appears. Classic, Catalog and native Home
-use compact continuation entries; web Theater retains its large recently played
-feature above the other sections, as requested in the final design refinement. Series continuation stays attached
-to the named series or season page.
+On September 15, 2026, the user requested restoration of the Classic, Catalog
+and Theater home pages from before PR #330. Their original viewing cards,
+Next episode list, recording cards, Coming soon shelf and library previews
+are restored. Theater keeps its full-width featured title above the shelves;
+Classic uses library grids and Catalog uses library rails.
 
-The web waits for the library roster before classifying recent entries; an
-unknown library does not get guessed to be a movie library. Web library previews
-and upcoming releases remain under disclosures. Native library destinations
-remain available from their existing navigation.
+The compact web Home composition and its unused styles are removed. The
+server still excludes recording libraries from global Recently added before
+the limit. Item pages and playback information retain the PR #330 design.
+This restoration targets the three web layouts; native Home is unchanged.
+
+Apple and Android Home still lead with Recently added, with three compact
+Continue watching entries, a disclosure for the remainder, and a separate
+Recently recorded section. Their generic Next up shelf remains removed.
 
 ## The item header describes the selected file
 
@@ -75,9 +78,12 @@ its recorded length. Matching the fixture to the probe made the ranged
 response pass without weakening the production file-size check. Retained
 native expectations reflect the removed hero and collapsed track disclosures.
 
-One adversarial review completed; all five P2 findings are addressed. PR #330
-runs one final fast lane after these records are complete. This document does
-not claim a merge, deployment, publication or physical-device installation.
+PR #330 merged at `23d8e3a0` after one adversarial review and all five P2
+findings were addressed. Policy, release versions, Rust, web, Apple and
+Android passed. The user explicitly waived Windows and the dependent
+promotion gate for that PR. No deployment, publication or physical-device
+installation was performed. The subsequent web Home restoration receives
+its own review and validation.
 
 ## Review findings addressed
 

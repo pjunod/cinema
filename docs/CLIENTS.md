@@ -262,9 +262,10 @@ Tier 1 is honest old-Plex compatibility on day one: a Kodi box or the `plexapi` 
 
 ## Quiet library pages
 
-Home leads with Recently added, excludes DVR libraries before the server limit,
-and keeps compact Continue watching and Recently recorded sections. The
-[revision record](clients/CALM-LIBRARY-PAGES.md) describes the shared web, Apple
-and Android hierarchy. Item pages show source quality/container badges and
+Classic, Catalog and Theater retain their original web Home compositions.
+Native Home keeps compact Continue watching and Recently recorded sections.
+Global Recently added excludes DVR libraries before the server limit. The
+[revision record](clients/CALM-LIBRARY-PAGES.md) records the web Home restoration
+and the retained Apple and Android hierarchy. Item pages show source quality/container badges and
 English track availability above an open Media section. Long audio and subtitle
 lists are collapsed, searchable, and show six matches before Show all.
