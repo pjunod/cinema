@@ -1,6 +1,6 @@
 # Library pages — scan your library and inspect one file
 
-**Status:** built in PR #330; web Home restoration in review · **Updated:** 2026-09-15
+**Status:** built in PR #330; web Home restoration in PR #331 · **Updated:** 2026-09-15
 
 Companion to [CLIENTS.md](../CLIENTS.md). This revision implements the approved
 Home and item-page proposals across the web, Apple and Android clients.
@@ -83,7 +83,9 @@ findings were addressed. Policy, release versions, Rust, web, Apple and
 Android passed. The user explicitly waived Windows and the dependent
 promotion gate for that PR. No deployment, publication or physical-device
 installation was performed. The subsequent web Home restoration receives
-its own review and validation.
+its own review and validation. Its single adversarial review found no
+actionable issues; the Home renderers match the pre-PR #330 source after
+whitespace normalization.
 
 ## Review findings addressed
 
