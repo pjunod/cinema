@@ -1,7 +1,7 @@
 # Streaming reliability — execution plan and integration contract
 
-**Status:** implementation integrated through C2/I2; native parity and final
-main promotion in progress; not deployed · **Written:** 2026-09-15 · **Base:** c2216ae75cb2a6f86efabaa4ebc2169a231ecc50
+**Status:** six implementation packages complete; final review and main
+promotion pending; not deployed · **Written:** 2026-09-15 · **Base:** c2216ae75cb2a6f86efabaa4ebc2169a231ecc50
 · **Integration branch:** effort/streaming-reliability
 
 Companion to [PLAYBACK.md](../PLAYBACK.md) (the delivery inventory),
@@ -416,7 +416,7 @@ handoff and reassign work rather than leaving two tasks polling each other.
 | W1 | Sol 2 | merged | [PR #324](http://192.168.4.7:3000/noirr/plurx/pulls/324); head e906ba04; passive waits, transfer attribution and presented-frame corrections verified |
 | C2 | Coordinator | merged | [PR #326](http://192.168.4.7:3000/noirr/plurx/pulls/326); runtime 298cc69d; four focused tests and combined web proof passed |
 | I2 | Sol 1 | merged | [PR #327](http://192.168.4.7:3000/noirr/plurx/pulls/327); one isolated fixture, focused harness and priority/cancellation proof |
-| W2 | Sol 2 | implementing | Native evidence/recovery parity from integrated current main |
+| W2 | Sol 2 | merged | [PR #328](http://192.168.4.7:3000/noirr/plurx/pulls/328); runtime 27f91b76; native builds and focused tests passed |
 | Final promotion | Coordinator | pending | One adversarial agent review; current-candidate main fast lane |
 | Fallback retirement | Coordinator | retain | Exact copy plans still need complete source passes; preserve prompt first play and close the retirement question for this effort |
 
@@ -527,3 +527,22 @@ not a NAS, P7 movie or physical Safari measurement.
 The report is diagnostic only. No feature consults it for activation. The
 retained rolling fallback allows first play without waiting for this complete
 pass. No additional index-algorithm project is required to close this effort.
+
+### W2 native evidence
+
+[PR #328](http://192.168.4.7:3000/noirr/plurx/pulls/328), runtime `27f91b76`,
+keeps timer-only Apple/Android stalls unknown and requests the same delivery
+without the legacy Auto-quality reduction ticket. Existing request ownership,
+intent cancellation, successor cleanup and recovery budgets remain in use.
+Actual native transport/decode error classification was retained. Android's
+unbound repair no longer retries unrelated 400 responses as though they were
+missing-predecessor failures.
+
+Local iOS and tvOS builds passed with Xcode 27.0; the two selected iOS tests and
+89 Android tests across four recovery classes passed. Android used the existing
+SDK/JDK and Gradle cache. One missing import in an existing DVR test was repaired
+to permit test-source compilation, without changing DVR runtime behavior.
+Apple source build 162 and Android versionCode 101 are recorded in the native
+release metadata. These builds are not deployed or uploaded by this effort.
+Exact commands and release evidence are in the web/native handoff and build
+fragment; no physical-device acceptance is inferred from simulator/JVM tests.
