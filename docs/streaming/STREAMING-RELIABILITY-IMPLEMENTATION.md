@@ -417,7 +417,7 @@ handoff and reassign work rather than leaving two tasks polling each other.
 | C2 | Coordinator | merged | [PR #326](http://192.168.4.7:3000/noirr/plurx/pulls/326); runtime 298cc69d; four focused tests and combined web proof passed |
 | I2 | Sol 1 | merged | [PR #327](http://192.168.4.7:3000/noirr/plurx/pulls/327); one isolated fixture, focused harness and priority/cancellation proof |
 | W2 | Sol 2 | merged | [PR #328](http://192.168.4.7:3000/noirr/plurx/pulls/328); runtime 27f91b76; native builds and focused tests passed |
-| Final promotion | Coordinator | pending | [PR #329](http://192.168.4.7:3000/noirr/plurx/pulls/329); one adversarial review complete, sole finding corrected in 19d9911bb; current-candidate main fast lane required |
+| Final promotion | Coordinator | ready | [PR #329](http://192.168.4.7:3000/noirr/plurx/pulls/329); one adversarial review complete, sole finding corrected in 19d9911bb; current-candidate main fast lane required |
 | Fallback retirement | Coordinator | retain | Exact copy plans still need complete source passes; preserve prompt first play and close the retirement question for this effort |
 
 Record task IDs and PRs here as they become known. Never record a test pass
@@ -588,3 +588,8 @@ to make the test pass, and checks terminal failure precedence after expiry.
 The normal workspace hook passed formatting, strict all-target Clippy, catalog
 lint and JavaScript syntax. Main remained `2699360e7`; no base port invalidated
 this evidence. The main promotion lane remains a separate required check.
+
+PR #329 is ready for promotion. Forgejo's title update changed `draft` to
+false without emitting a new workflow run; the branch's documentation update
+uses the existing `synchronize` trigger to start the same main fast lane. The
+latest draft run was entirely skipped and is not accepted as gate evidence.
