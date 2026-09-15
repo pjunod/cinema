@@ -414,7 +414,7 @@ handoff and reassign work rather than leaving two tasks polling each other.
 | C1 | Coordinator | merged | [PR #323](http://192.168.4.7:3000/noirr/plurx/pulls/323); runtime 00a70a7b; 11 focused tests passed |
 | I1 | Sol 1 | merged | [PR #325](http://192.168.4.7:3000/noirr/plurx/pulls/325); runtime 2a2ec42f; seven focused identity, conversion and store tests passed |
 | W1 | Sol 2 | amendment in progress | [PR #324](http://192.168.4.7:3000/noirr/plurx/pulls/324); passive waits, transfer attribution and presented-frame corrections |
-| C2 | Coordinator | implementing | Exact preparation demand joins the existing queue; local focused verification |
+| C2 | Coordinator | verified; PR preparation | Runtime 298cc69d; exact demand joins the existing queue; four focused tests and tracked hook passed |
 | I2 | Sol 1 | implementing | Existing playback-lab measurement extension; no production scan |
 | W2 | Sol 2 | depends on C1/W1 | Native evidence/recovery parity |
 | Final promotion | Coordinator | pending | One adversarial agent review; current-candidate main fast lane |
@@ -465,3 +465,32 @@ transcode::tests::an_untouched_takeover_playlist_reports_its_epoch_floor
 transcode::tests::retention_keeps_a_reload_margin_above_the_observed_fetch_lead
 http::tests::seeded_write_surface
 ~~~
+
+### C2 focused evidence
+
+Runtime commit `298cc69d`: pinned Rust 1.97.1 daemon test compilation and
+tracked workspace formatting/Clippy/JavaScript hook passed. Four documentation
+index checks passed. The four focused tests below passed using the C1 build
+command and its test executable with `--exact --test-threads=2`; the two
+unchanged tests were not rerun after correcting only the new state fixture's
+missing Dolby Vision metadata. No full unit suite ran.
+
+~~~text
+state::tests::playback_preparation_is_durable_exact_and_independent_of_discovery
+vodserve::tests::first_play_queues_missing_source_preparation_with_discovery_off
+vodserve::tests::a_converting_cluster_artifact_hydrates_without_a_local_v1_index
+vodserve::tests::requests_the_vod_presentation_cannot_serve_fail_typed
+~~~
+
+The existing scheduler already consumes explicitly requested analysis with
+periodic discovery disabled. C2 therefore adds demand at the missing-source
+boundary and shares the canonical generation algorithm; it does not add a
+scheduler, schema, activation receipt or mandatory import sweep. Existing
+status rows supply preparation outcomes. Existing attested-artifact repair
+continues using the shared-index queue. A usable local index starts directly.
+
+The first-play rolling fallback remains intentional: exact copy indexing
+still requires a complete source pass. Its presentation is now typeless from
+the first response (C1), and completing preparation never changes the active
+watch. Physical first-play latency and Safari recovery remain separate
+observations, not claims made by these fixture tests.
