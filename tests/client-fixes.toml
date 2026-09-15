@@ -1961,7 +1961,7 @@ test_anchor = "a failed Saved refresh keeps the last successful page and marks i
 id = "clients.dvr-promotion-clears-current-mobile-builds"
 commits = ["b914464b"]
 source = "clients/android/app/build.gradle.kts"
-source_anchor = "versionCode = 99"
+source_anchor = "versionCode ="
 test = "tests/validation/test_mobile_versions.py"
 test_anchor = "def test_android_counter_the_target_already_ships_fails_against_the_target"
 
@@ -1984,3 +1984,25 @@ source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvScreen.kt"
 source_anchor = "WideLiveTvBrowser("
 test = "clients/android/app/src/test/java/tv/plurx/app/livetv/LiveTvInputPolicyTest.kt"
 test_anchor = "tuning and layout changes do not force television fullscreen"
+
+[[fixes]]
+# This regression proves the reviewed presentation keeps unknown picture size
+# distinct from original metadata and retains every diagnostic field. Native
+# layout/focus evidence is compilation plus the fixture captures, not unit coverage.
+id = "clients.playback-info-picture-provenance"
+commits = ["104c8d0c", "daf9e789"]
+source = "crates/plurxd/src/web/index.html"
+source_anchor = "function playbackInfoOverview("
+test = "tests/web/player-dom.test.js"
+test_anchor = "const missingPicture = info.playbackInfoOverview({"
+
+[[fixes]]
+# Documentation-only correction: native README claims must agree with release
+# inputs. The retained operation check rejects the stale Android build claim;
+# the sibling Apple claim suite validates the required build-note Issue line.
+id = "clients.playback-info-release-documentation"
+commits = ["537e22e6"]
+source = "clients/android/README.md"
+source_anchor = "> Status: **v0.3.0**, build"
+test = "tests/operations/test_mobile_build_claims.py"
+test_anchor = "def test_repository_build_claims_match_release_inputs"

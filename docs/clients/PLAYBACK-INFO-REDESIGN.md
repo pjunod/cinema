@@ -1,0 +1,109 @@
+# Playback information redesign
+
+> **Status:** implementation and review fixes complete; final qualification pending.
+> **Updated:** 2026-09-15. **Scope:** web, iPhone, iPad, Apple TV, Android phones,
+> tablets and TV. No feature flag or new enablement requirement.
+
+## What changed
+
+Playback info opens on an Overview with player-reported resolution, original
+source, delivery method and reason, tracks, device buffer and interruptions.
+Details groups related observations into expandable sections. Diagnostics keeps
+all platform-supported contract fields and history. Compact shows three labeled
+essentials. Existing stored mode values remain compatible; `details` is additive.
+
+The production layouts follow the approved proposal: a source/player comparison
+at wide widths, stacked phone facts, readable typography, explanatory surfaces,
+inline metric definitions and disclosure controls. The headline prints the exact
+player-reported dimensions instead of guessing a progressive/interlaced badge.
+
+## Implementation map
+
+| Surface | Presentation | Existing data owner |
+|---|---|---|
+| Web library and VOD | `playbackInfoOverview`, `playbackInfoMarkup`, incremental diagnostic patcher in `index.html` | `PLAYER` and the attached video element |
+| Web Live TV | Same renderers, separate bounded Playback info dialog | `LIVE_TV`, current lease and retained live video element |
+| Apple library and VOD | `PlaybackInfoPanel.swift`, adapted by `PlaybackStatsView` | `PlayerController` and its current AVPlayerItem |
+| Apple Live TV | Same panel, adapted by `LiveTvStreamInfoPanel` | `LiveTvPlayerController`; local one-second samples while visible |
+| Android library and downloads | `PlaybackInfoPanel.kt`, adapted by `PlaybackInfoOverlay` | Existing Media3 controller/player |
+| Android Live TV | Same panel, adapted by `LiveTvPlaybackInformation` | Retained `LiveTvPlayer`; local one-second samples while visible |
+
+The [input contract](PLAYER-INPUT-CONTRACT.md#7-playback-info--a-shared-hierarchy-across-clients)
+and its canonical field fixture define names, units and modes. Existing
+playback ownership, session creation, keepalive and recovery are unchanged.
+Diagnostic refresh does not renew a tuner lease or issue a new server request.
+
+## Data rules and deliberate choices
+
+- Positive dimensions from the attached player are the only playing-resolution
+  measurement. Missing dimensions remain `Not reported`; original or manifest
+  dimensions never fill that slot. Pending web replacements suppress predecessor
+  measurements. Media3 uses `videoSize` for the player and `videoFormat` separately.
+- Apple presentation dimensions and browser intrinsic dimensions can include
+  presentation aspect correction. This is a player-reported picture size, not
+  a claim about coded pixels or the display's physical resolution.
+- Audio track metadata never implies speaker or HDMI output. Unsupported device
+  audio output remains explicit. Apple currently does not supply stream dimensions
+  independently from source/presentation, and says so.
+- Device buffer, server-ready media, production progress, media bitrate, observed
+  transfer rate and server response bytes keep separate meanings. Explanations
+  stay with their values. Playback state does not stand in for server state.
+- Live-edge distance is to available media, not end-to-end broadcast latency.
+  Web/Android Live TV lack an interruption counter; they show `Not reported`.
+- Source timestamps and existing server sample-age fields remain available.
+  No invented health score, receive confirmation or freshness timestamp is shown.
+
+## Verification record
+
+The final candidate must compile locally for affected native clients before
+pushing. Exactly one adversarial review precedes the single final main fast
+lane. The fast lane includes the retained field/DOM contract regressions:
+unknown cached-VOD picture size cannot become original size, and every diagnostic
+field remains reachable. Native regressions cover resolution availability and
+stored mode compatibility. No repeated unit suite is part of this work.
+
+Compiler, review and rendering evidence is recorded below. The PR records the
+final lane result against its exact candidate. Compilation alone does not
+establish live playback or remote usability.
+
+## Adversarial review — 2026-09-15
+
+Exactly one read-only agent review examined `104c8d0c` against `c2216ae7`.
+It requested changes for six P2 findings; no P1 finding was reported.
+
+| Finding | Addressed behavior |
+|---|---|
+| Android TV Overview had no remote scroll targets | Summary groups and method explanation are focusable with visible focus rings; Compose scroll containers bring focused content into view. |
+| Web arrow focus could move below the visible diagnostics viewport | Disclosure focus allows scrolling instead of suppressing it. |
+| Apple Compact retained a full-height ScrollView | Compact now has a separate content-sized layout outside the expanded scroll shell. |
+| Original audio silently stood in for the playing track | Stream audio stays explicitly unknown; any fallback is separately labeled Original audio track. |
+| Pending web attachments reported unknown buffer as zero | Device buffer remains Not reported until there is an attached-player observation. |
+| Apple Live TV omitted server state and device audio output | Both shared facts are present; the unsupported device-output measurement is explicit. |
+
+Local follow-up also corrected title ownership, guarded Live TV source lookup
+without a lease, contained the web dialog's input in the existing adapter, and
+preserved Compact transport interaction. No second review or unit loop was run.
+
+Local compile evidence after review fixes: `:app:assembleDebug --offline --no-daemon`
+passed with the existing Android SDK/JDK. iOS and tvOS `xcodebuild ... build`
+passed using local Xcode 27.0, generic simulator destinations, unsigned output
+and `clients/apple/build/DerivedData`. The Air answered a version probe but
+subsequent transfers timed out; no remote build is claimed. Embedded JavaScript
+syntax, the input-adapter fence and validation catalog lint passed. The single
+final fast lane remains pending.
+
+
+## Native rendering evidence — 2026-09-15
+
+Disposable iPhone, iPad Air 13-inch and Apple TV 1080p simulators rendered the
+production panel with clearly labeled sample values. Captures cover phone
+Overview and Compact, iPad Live TV Overview, and Apple TV Overview and Details.
+Labels, missing-resolution text, focus styling and grouped value explanations
+were inspected. Compact uses content height. A duplicate inset in the phone
+player wrapper was removed so it does not needlessly narrow the panel.
+
+The temporary preview entry point and fixture view were removed before the
+final production rebuild. These are component captures, not evidence of live
+stream accuracy, full player/sheet integration, or remote navigation acceptance.
+Android compilation passed; Android and browser visual acceptance were not
+performed in this pass. No simulator fixture code ships.

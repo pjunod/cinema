@@ -256,8 +256,8 @@ No requirement to complete a library-wide backfill.
 ### 4.2 Wave 2 integrates the first-play experience and native parity
 
 **C2 — preparation demand, joined outcomes and quality ownership.** After I1,
-connect missing exact plans and ingestion completion to the existing queue;
-separate foreground requests from periodic cadence; expose bounded queued,
+connect missing exact plans requested by playback to the existing queue;
+retain ingestion/discovery scheduling and separate requested work from periodic cadence; expose bounded queued,
 running, ready, failed and unavailable reasons through existing status
 surfaces. Reuse cancellation, source/recipe fences and job deduplication.
 Ensure repeated play requests cannot create duplicate full-file passes.
@@ -411,11 +411,11 @@ handoff and reassign work rather than leaving two tasks polling each other.
 | Package | Owner | State | Evidence / next step |
 |---|---|---|---|
 | Plan foundation | Coordinator | merged | [PR #322](http://192.168.4.7:3000/noirr/plurx/pulls/322); commit 05298f1c4, merged as fea5d2451; four docs checks and tracked hook passed |
-| C1 | Coordinator | verified; PR preparation | codex/streaming-control-contract; runtime commit 00a70a7b; 11 focused tests passed |
-| I1 | Sol 1 | implementing | Task 01a0a5b9-9c58-7a52-814c-db7b583e14bc; exact identity and shared consumer |
-| W1 | Sol 2 | implementing | Task 01a0a5b9-bb98-7fd2-a08e-42d1fc6747a3; recovery and obsolete playlist toggle removal |
-| C2 | Coordinator | depends on I1/W1 | Exact preparation demand and integrated outcomes |
-| I2 | Sol 1 | depends on I1 | Measurement and resource harness |
+| C1 | Coordinator | merged | [PR #323](http://192.168.4.7:3000/noirr/plurx/pulls/323); runtime 00a70a7b; 11 focused tests passed |
+| I1 | Sol 1 | merged | [PR #325](http://192.168.4.7:3000/noirr/plurx/pulls/325); runtime 2a2ec42f; seven focused identity, conversion and store tests passed |
+| W1 | Sol 2 | merged | [PR #324](http://192.168.4.7:3000/noirr/plurx/pulls/324); head e906ba04; passive waits, transfer attribution and presented-frame corrections verified |
+| C2 | Coordinator | verified; PR preparation | Runtime 298cc69d; exact demand joins the existing queue; four focused tests and tracked hook passed |
+| I2 | Sol 1 | implementing | Existing playback-lab measurement extension; no production scan |
 | W2 | Sol 2 | depends on C1/W1 | Native evidence/recovery parity |
 | Final promotion | Coordinator | pending | One adversarial agent review; current-candidate main fast lane |
 | Fallback retirement | Coordinator/user | decision after Wave 2 | May remain deferred without prolonging this effort |
@@ -465,3 +465,39 @@ transcode::tests::an_untouched_takeover_playlist_reports_its_epoch_floor
 transcode::tests::retention_keeps_a_reload_margin_above_the_observed_fetch_lead
 http::tests::seeded_write_surface
 ~~~
+
+### C2 focused evidence
+
+Runtime commit `298cc69d`: pinned Rust 1.97.1 daemon test compilation and
+tracked workspace formatting/Clippy/JavaScript hook passed. Four documentation
+index checks passed. The four focused tests below passed using the C1 build
+command and its test executable with `--exact --test-threads=2`; the two
+unchanged tests were not rerun after correcting only the new state fixture's
+missing Dolby Vision metadata. No full unit suite ran.
+
+~~~text
+state::tests::playback_preparation_is_durable_exact_and_independent_of_discovery
+vodserve::tests::first_play_queues_missing_source_preparation_with_discovery_off
+vodserve::tests::a_converting_cluster_artifact_hydrates_without_a_local_v1_index
+vodserve::tests::requests_the_vod_presentation_cannot_serve_fail_typed
+~~~
+
+The existing scheduler already consumes explicitly requested analysis with
+periodic discovery disabled. C2 therefore adds demand at the missing-source
+boundary and shares the canonical generation algorithm; it does not add a
+scheduler, schema, activation receipt or mandatory import sweep. Existing
+status rows supply preparation outcomes. Existing attested-artifact repair
+continues using the shared-index queue. A usable local index starts directly.
+
+The first-play rolling fallback remains intentional: exact copy indexing
+still requires a complete source pass. Its presentation is now typeless from
+the first response (C1), and completing preparation never changes the active
+watch. Physical first-play latency and Safari recovery remain separate
+observations, not claims made by these fixture tests.
+
+Combined tree `c2770918` includes current main `2699360e7` and merged W1.
+The pinned daemon test binary was rebuilt for that tree; all four C2 filters
+passed again. The focused web policy, control, settings-section and player-DOM
+files passed together with `node --test` (four files, 31.3 seconds), covering
+the concurrent playback-info merge. This replaces the older-base evidence for
+integration; no full web or Rust suite was repeated.

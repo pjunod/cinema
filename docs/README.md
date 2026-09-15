@@ -180,7 +180,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [VOD-M2-QUESTIONS.md](streaming/VOD-M2-QUESTIONS.md) | The M2 questions and how each was ruled. | done |
 | [VOD-M3-HANDOFF.md](streaming/VOD-M3-HANDOFF.md) | Serving from the plan — the first code on the live path. | built |
 | [VOD-M4-HANDOFF.md](streaming/VOD-M4-HANDOFF.md) | Web adoption and release acceptance. | built |
-| [VOD-CUTOVER.md](streaming/VOD-CUTOVER.md) | The VOD-only HLS cutover, and what it retired. | built |
+| [VOD-CUTOVER.md](streaming/VOD-CUTOVER.md) | Historical VOD-only cutover; superseded by the retained first-play fallback. | done |
 | [VOD-ENCODING.md](streaming/VOD-ENCODING.md) | How immutable transcode and subtitle-burn VOD produce and verify the bytes named by a playlist. | built |
 | [VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md](streaming/VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md) | Restoring the seek-storm case that CI disabled 2026-08-26. | open |
 | [VOD-STALL-ACCEPTANCE-HANDOFF.md](streaming/VOD-STALL-ACCEPTANCE-HANDOFF.md) | Restoring the bandwidth-recovery case; blocked on a device measurement. | open |
@@ -251,6 +251,8 @@ player obeys, subtitles and overlays, layouts and themes.
 |---|---|---|
 | [APPLE-CLIENT-PARITY.md](clients/APPLE-CLIENT-PARITY.md) | What the Apple client has, what it lacks, and which build proved it. | live |
 | [ANDROID-CLIENT-PARITY.md](clients/ANDROID-CLIENT-PARITY.md) | The same, for Android. | live |
+| [PLAYBACK-INFO-REDESIGN.md](clients/PLAYBACK-INFO-REDESIGN.md) | Playback info hierarchy, measurement semantics and qualification. | open |
+| [playback-info-redesign.md](apple-builds/playback-info-redesign.md) | Apple build 161 playback-info changes. | open |
 | [PLAYER-INPUT-CONTRACT.md](clients/PLAYER-INPUT-CONTRACT.md) | One routing table every client obeys — which key does what, in which state. | live |
 | [PLAYER-INPUT-CONTRACT-PLAN.md](clients/PLAYER-INPUT-CONTRACT-PLAN.md) | How that contract was implemented. | built |
 | [PLAYER-INPUT-PHYSICAL-VERIFICATION-2026-09-02.md](clients/PLAYER-INPUT-PHYSICAL-VERIFICATION-2026-09-02.md) | What the physical devices did on 2026-09-02. | done |

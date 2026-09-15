@@ -2446,11 +2446,13 @@ impl VodServe {
         })
     }
 
+    /// None means this node has no source attestation yet. The caller may
+    /// still use a local index; only a complete index miss queues analysis.
     async fn try_cluster_fragment_index(
         &self,
         file: &MediaFile,
         video: CopyVideoOptions,
-    ) -> Result<(FragmentIndex, String, String), String> {
+    ) -> Result<Option<(FragmentIndex, String, String)>, String> {
         if !crate::ffmpeg::fragment_index_engine_is_current().await {
             return Err("the fragment-index engine changed; restart is required".to_owned());
         }
@@ -2465,13 +2467,15 @@ impl VodServe {
             .as_deref()
             .ok_or_else(|| "this process has no cluster index cache root".to_owned())?;
         let object_version = crate::fragment_index_cluster::inspect_source(file).await?;
-        let observation = self
+        let Some(observation) = self
             .shared
             .store
             .fragment_index_source(node_id, file.id, &object_version)
             .await
             .map_err(|error| format!("reading source attestation: {error}"))?
-            .ok_or_else(|| "this node has not attested the current source object".to_owned())?;
+        else {
+            return Ok(None);
+        };
         let engine = crate::ffmpeg::fragment_index_engine_digest().await;
         let pipeline = crate::fragment_index_cluster::pipeline_digest(file, &engine, video);
         let cache_key = plurx_core::store::cluster_fragment_index_key(
@@ -2537,7 +2541,7 @@ impl VodServe {
                 .await;
             return Err("no verified holder could supply the v2 artifact".to_owned());
         };
-        Ok((index, object_version, artifact.cache_key))
+        Ok(Some((index, object_version, artifact.cache_key)))
     }
 
     /// Keep VOD lifecycle telemetry on the same node-local event stream as
@@ -2841,10 +2845,12 @@ impl VodServe {
         let cluster_index = if prepared.encoding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
-            self.try_cluster_fragment_index(file, video).await.map(Some)
+            self.try_cluster_fragment_index(file, video).await
         } else {
             Ok(None)
         };
+        let needs_attestation = cluster_cache_enabled && matches!(&cluster_index, Ok(None));
+        let unavailable_reason = cluster_index.as_ref().err().cloned();
         let (index, source_object_version, cluster_cache_key) = match cluster_index {
             Ok(Some((index, object_version, cache_key))) => {
                 (Some(index), Some(object_version), Some(cache_key))
@@ -2883,9 +2889,42 @@ impl VodServe {
             }
         };
         if index.is_none() && prepared.encoding.is_none() {
+            let reason = if needs_attestation {
+                match self.shared.cluster_node_id.as_deref() {
+                    Some(node_id) => match crate::state::enqueue_copy_preparation(
+                        self.shared.store.as_ref(),
+                        node_id,
+                        file,
+                        video,
+                    )
+                    .await
+                    {
+                        Ok(request) => format!(
+                            "exact copy preparation is {}{}",
+                            request.state,
+                            if request.last_error_code.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {}", request.last_error_code)
+                            }
+                        ),
+                        Err(error) => {
+                            format!("exact copy preparation could not be queued: {error}")
+                        }
+                    },
+                    None => "this process has no cluster index identity".to_owned(),
+                }
+            } else {
+                unavailable_reason.unwrap_or_else(|| {
+                    "shared preparation is disabled; no matching local index exists".to_owned()
+                })
+            };
+            // This is a prerequisite refusal, not a claim that a worker is
+            // active. The durable analysis row and reason carry its actual
+            // queued/running/failed state; the caller keeps rolling first play.
             return Err(crate::transcode::vod_refusal_error(
                 "vod_index_pending",
-                "no fragment index stored for the file's current identity",
+                reason,
             ));
         }
         // The §2 ruling: a single immutable init cannot describe a film whose
@@ -8419,7 +8458,8 @@ mod tests {
         let (hydrated, hydrated_version, hydrated_key) = serve
             .try_cluster_fragment_index(&file, video)
             .await
-            .expect("selected converting artifact hydrates");
+            .expect("selected converting artifact hydrates")
+            .expect("source is already attested");
         assert_eq!(hydrated_key, cache_key);
         assert_eq!(hydrated_version, object_version);
         assert_eq!(hydrated.promotion.dolby_vision, Some(record));
@@ -12360,6 +12400,138 @@ mod tests {
             .await
             .expect_err("an unindexed file must not change presentation");
         assert!(index_error.contains("vod_index_pending"));
+    }
+
+    #[tokio::test]
+    async fn first_play_queues_missing_source_preparation_with_discovery_off() {
+        use plurx_core::store::SettingsStore as _;
+        testfixtures::require_ffmpeg();
+        let base = crate::test_tempdir().expect("base");
+        let source = fixture_file();
+        let metadata = std::fs::metadata(&source.path).expect("source metadata");
+        let mtime = metadata
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("epoch")
+            .as_secs() as i64;
+        let sqlite = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let library = sqlite
+            .create_library(&plurx_core::domain::NewLibrary {
+                name: "First play".to_owned(),
+                kind: plurx_core::domain::LibraryKind::Movies,
+                paths: Vec::new(),
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = sqlite
+            .insert_item(&plurx_core::domain::NewItem {
+                library_id: library.id,
+                kind: plurx_core::domain::ItemKind::Movie,
+                parent_id: None,
+                title: "Cold source".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let file_id = sqlite
+            .upsert_file(
+                item,
+                &source.path.to_string_lossy(),
+                metadata.len() as i64,
+                mtime,
+                &plurx_core::domain::ProbeResult {
+                    duration_ms: source.duration_ms,
+                    container: source.container,
+                    video_codec: source.video_codec,
+                    width: source.width,
+                    height: source.height,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("file");
+        let file = sqlite.get_file(file_id).await.expect("read").expect("file");
+        sqlite
+            .put_setting(plurx_core::store::keys::VOD_INDEX_MINS, "0")
+            .await
+            .expect("disable discovery");
+        let store: Arc<dyn Store> = sqlite.clone();
+        let serve = VodServe::new_cluster(
+            base.path().join("vod"),
+            store,
+            "node-a".to_owned(),
+            base.path().join("indexes"),
+            None,
+        );
+        let mut req = request("first-play", 0.0);
+        req.file_id = file.id;
+        let disabled = serve
+            .try_create(
+                &req,
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "viewer",
+                    item_title: "Cold source",
+                    supersession_user: "viewer",
+                },
+                "disabled".to_owned(),
+            )
+            .await
+            .expect_err("missing index");
+        assert!(
+            disabled.contains("shared preparation is disabled"),
+            "{disabled}"
+        );
+        assert!(sqlite
+            .analysis_requests(10)
+            .await
+            .expect("requests")
+            .is_empty());
+
+        sqlite
+            .put_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, "1")
+            .await
+            .expect("enable shared preparation");
+        for session in ["first", "retry"] {
+            let refused = serve
+                .try_create(
+                    &req,
+                    &file,
+                    &settings(),
+                    VodAttribution {
+                        user_name: "viewer",
+                        item_title: "Cold source",
+                        supersession_user: "viewer",
+                    },
+                    session.to_owned(),
+                )
+                .await
+                .expect_err("rolling fallback is still needed");
+            assert!(refused.contains("vod_index_pending"), "{refused}");
+            assert!(
+                refused.contains("exact copy preparation is queued"),
+                "{refused}"
+            );
+        }
+        let queued = sqlite.analysis_requests(10).await.expect("requests");
+        assert_eq!(
+            queued.len(),
+            1,
+            "repeated first play joins the same preparation"
+        );
+        assert_eq!(queued[0].file_id, file.id);
+        assert_eq!(queued[0].target_node_id, "node-a");
+        assert_eq!(queued[0].state, "queued");
+        assert!(!queued[0].video_identity.is_empty());
+        assert!(
+            serve.shared.sessions.lock().await.is_empty(),
+            "no incomplete VOD session attaches"
+        );
     }
 
     #[tokio::test]

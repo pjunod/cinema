@@ -1,10 +1,21 @@
-# VOD-only HLS cutover
+# Historical VOD-only HLS cutover
 
-**Status:** immutable copy and encoded production implemented; final effort
-qualification pending 2026-09-08
+**Status:** superseded design record. The cutover below describes the original
+VOD-only decision, not the current production contract.
 
-**Decision:** the growing live-HLS presentation is not a fallback and is no
-longer available to production session creation
+**Current correction (2026-09-15):** rolling HLS was restored for missing VOD
+prerequisites so newly added media remains playable before indexing finishes.
+It remains available in the streaming reliability effort. Rolling responses
+use a valid typeless shape from their first response; a completed exact index
+permits immutable VOD on a later create without changing an active watch.
+Missing source preparation now joins the existing queue independently of
+periodic discovery when shared preparation is enabled. See
+[STREAMING-RELIABILITY-IMPLEMENTATION.md](STREAMING-RELIABILITY-IMPLEMENTATION.md)
+and [PLAYBACK.md](../PLAYBACK.md) for the current behavior. The historical
+wire, retirement and verification claims below must not be used as current
+operating instructions.
+
+## Original decision and evidence
 
 **Scope:** server, web, Apple, and Android HLS session contracts
 

@@ -936,10 +936,10 @@ first leaves a monotonic lifetime verdict that refuses any later replacement.
 
 ## The fragment index — a file's segmentation, computed once
 
-Nothing below serves a viewer today. It is written down here because it is
-running on the server as of 2026-08-23 and an operator reading logs will see
-it, and because [VOD-PRESENTATION-PLAN.md](streaming/VOD-PRESENTATION-PLAN.md) §2.2 is
-the contract it exists to satisfy.
+Copy VOD uses a complete index for the exact source and output recipe.
+A missing index keeps the current watch on the rolling presentation; it does
+not make the viewer wait for a full source pass. See
+[VOD-PRESENTATION-PLAN.md](streaming/VOD-PRESENTATION-PLAN.md) §2.2.
 
 **What it is.** One row per fragment of a file, produced by the production copy
 pipe with the audio dropped and the input unpaced: first-sample decode time,
@@ -960,14 +960,21 @@ twice, is a typed failure and an index invalidation — which is also how a
 re-fragmenting ffmpeg upgrade announces itself rather than silently
 misaligning.
 
-**When one is built.** A background job, `playback.vod_index_mins` minutes
-apart, **defaulting to 0, which is off.** M0-P1 exists to price a full read of
-a library over NFS and its numbers are not in yet. When it does run it takes at
-most four files and two minutes per pass, examines at most two hundred, gives
-up on any single file after ninety seconds, and stands down entirely while the
-pre-transcode worker is busy. A pass that ends short is discarded rather than
-stored: an index built from a partial read places every later boundary in the
-wrong part of the film.
+**When one is built.** Periodic discovery follows `playback.vod_index_mins`;
+`0` stops discovery. Queue execution is independent. With shared preparation
+enabled, a copy-VOD lookup that lacks both a source attestation and a usable
+local index persists one exact-recipe analysis request. Repeated plays join
+that generation. The existing worker attests the source, builds the complete
+index and publishes it under its existing admission, lease and retry rules.
+Automatic preparation uses normal background priority so media production
+keeps precedence. An already-attested source missing its exact artifact uses
+the existing shared-index job queue instead.
+
+Preparation does not change a running session's presentation. A later create
+can use the completed immutable plan. Existing analysis-request status reports
+queued, running or terminal state; `vod_index_pending` describes an unmet VOD
+prerequisite and its reason, not a promise that an index worker is running.
+A partial source pass is never published as a complete index.
 
 **How one stops being valid.** By mismatch, never by deletion. The stored
 identity carries the source's size and mtime *and* a fingerprint of the video
@@ -975,12 +982,12 @@ branch's ffmpeg arguments, so a replaced file, a Dolby Vision preservation
 path, or an ffmpeg upgrade all simply stop matching. Nothing has to notice the
 change, and nothing can fail to.
 
-**Where it lives.** Node-local on both backends — SQLite migration v25,
-and a hiqlite voter's per-voter sidecar rather than Raft. An index describes
-what one machine's ffmpeg produced from one machine's copy of a file, and the
-landing match compares exactly those numbers; one node's answer governing
-another node's landings would put a viewer in the wrong part of the film with
-nothing to report it.
+**Where it lives.** Legacy indexes remain local. Shared artifacts require a
+matching attested source digest and exact pipeline identity before hydration.
+The identity includes the post-mux Dolby Vision conversion revision, so a
+converted P7-to-P8.1 stream cannot consume an ordinary-copy index. Verified
+shared artifacts can supply that converting recipe without a local legacy
+index. A source replacement or pipeline change selects a different identity.
 
 ## Persistent stalls — one bounded recovery, with an outcome
 

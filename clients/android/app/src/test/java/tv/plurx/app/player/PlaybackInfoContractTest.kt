@@ -125,9 +125,16 @@ class PlaybackInfoContractTest {
             .filter { PlaybackStatsMode.Mini in it.modes }
             .map(InfoRow::id)
         assertEquals(
-            listOf("method", "position", "decode_resolution", "dynamic_range", "client_loaded", "delivery_rate"),
+            listOf("decode_resolution", "player_state", "client_loaded"),
             mini,
         )
+    }
+
+    @Test
+    fun missingPlayerSizeDoesNotFallBackToTheSourceSize() {
+        val rows = playbackInfoRows(details.copy(decodeResolution = null, sourceResolution = "3840×2160"), emptyList())
+        assertEquals("Not reported", rows.single { it.id == "decode_resolution" }.value)
+        assertEquals("3840×2160", rows.single { it.id == "source_resolution" }.value)
     }
 
     @Test

@@ -2,6 +2,12 @@
 
 package tv.plurx.app.livetv
 
+import tv.plurx.app.player.PlaybackInfoPanel
+import tv.plurx.app.player.PlaybackInfoFact
+import tv.plurx.app.player.PlaybackStatsMode
+import tv.plurx.app.player.playerStateLabel
+import tv.plurx.app.player.playbackInfoExplanation
+
 import android.Manifest
 import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
@@ -31,6 +37,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -654,6 +661,7 @@ fun LiveTvScreen(
                 }
                 if (fullscreen && overlayVisible && !isInPip) {
                     LiveTvOverlay(
+                        player = controller.player,
                         channel = state.watching,
                         airing = state.watching?.let { controller.airing(it, now) } ?: LiveTvAiring(),
                         status = state.status,
@@ -942,7 +950,7 @@ fun LiveTvScreen(
         ModalBottomSheet(onDismissRequest = { showingInfo = false }) {
             Column(Modifier.fillMaxWidth().padding(16.dp)) {
                 Text("Stream info", style = MaterialTheme.typography.titleMedium)
-                state.watching?.let { LiveTvTechnicalDetails(it, state.status) }
+                state.watching?.let { LiveTvPlaybackInformation(it, state.status, controller.player, { showingInfo = false }, Modifier.fillMaxWidth().heightIn(max = 760.dp)) }
                 TextButton(onClick = { showingInfo = false }) { Text("Close") }
             }
         }
@@ -2025,6 +2033,7 @@ private fun LiveTvFocusedActions(
  */
 @Composable
 private fun LiveTvOverlay(
+    player: androidx.media3.exoplayer.ExoPlayer?,
     channel: LiveTvChannel?,
     airing: LiveTvAiring,
     status: LiveTvStatus?,
@@ -2059,6 +2068,15 @@ private fun LiveTvOverlay(
     onStop: () -> Unit,
     onLeave: () -> Unit,
 ) {
+    if (showingInfo) {
+        BoxWithConstraints(Modifier.fillMaxSize().padding(20.dp)) {
+            channel?.let {
+                LiveTvPlaybackInformation(it, status, player, onClosePanel,
+                    Modifier.align(Alignment.TopEnd).widthIn(max = 900.dp).fillMaxWidth().heightIn(max = maxHeight))
+            }
+        }
+        return
+    }
     val guideFocus = remember { FocusRequester() }
     val type = LiveTvTypography.current()
     RequestInitialFocus(guideFocus, enabled = !temporaryGuide && !showingInfo && !moreOpen)
@@ -2168,14 +2186,6 @@ private fun LiveTvOverlay(
                         )
                     }
                 }
-            } else if (showingInfo) {
-                Column(
-                    Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).padding(12.dp),
-                ) {
-                    Text("Stream info", style = MaterialTheme.typography.titleMedium)
-                    channel?.let { LiveTvTechnicalDetails(it, status) }
-                    TextButton(onClick = onClosePanel) { Text("Close") }
-                }
             }
             LinearProgressIndicator(
                 progress = { airing.progress ?: 0f },
@@ -2243,6 +2253,62 @@ private fun LiveTvPlayerSurface(controller: LiveTvPlayer) {
 }
 
 @Composable
+private fun LiveTvPlaybackInformation(
+    channel: LiveTvChannel,
+    status: LiveTvStatus?,
+    player: androidx.media3.exoplayer.ExoPlayer?,
+    onClose: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var mode by remember { mutableStateOf(PlaybackStatsMode.Standard) }
+    var sample by remember(player) { mutableLongStateOf(0L) }
+    LaunchedEffect(player) {
+        while (true) { sample += 1; delay(1_000) }
+    }
+    // The sample only exists while the panel is composed; it never polls or
+    // renews a tuner lease. A replaced player creates a fresh observation set.
+    val facts = remember(player, channel, status, sample) {
+        val size = player?.videoSize
+        val plan = status?.delivery
+        fun seconds(value: Long?) = value?.takeIf { it >= 0 }?.let { String.format(java.util.Locale.US, "%.1f s", it / 1_000.0) } ?: "Not reported"
+        val buffered = player?.takeIf { it.currentMediaItem != null }?.let { (it.bufferedPosition - it.currentPosition).coerceAtLeast(0) }
+        val edge = player?.takeIf { it.isCurrentMediaItemLive && it.duration != androidx.media3.common.C.TIME_UNSET && it.duration >= 0 }
+            ?.let { (it.duration - it.currentPosition).coerceAtLeast(0) }
+        val reception = listOfNotNull(
+            status?.signal?.strength_percent?.let { "Strength $it%" },
+            status?.signal?.quality_percent?.let { "Quality $it%" },
+            status?.signal?.symbol_quality_percent?.let { "Symbol $it%" },
+        ).joinToString(" · ").ifEmpty { "Not reported" }
+        val method = plan?.let {
+            when {
+                it.video_action == "copy" && it.audio_action == "copy" -> "Remux"
+                it.video_action == "copy" -> "Audio converted for this player"
+                else -> "Video converted for this player"
+            }
+        } ?: "Not reported"
+        buildList {
+            add(PlaybackInfoFact("decode_resolution", "Playing resolution", size?.takeIf { it.width > 0 && it.height > 0 }?.let { "${it.width}×${it.height}" } ?: "Not reported", playbackInfoExplanation("decode_resolution")))
+            add(PlaybackInfoFact("source_resolution", "Broadcast source", channel.sourceFormatDescription ?: "Not reported", channel.measuredSource?.observed_at?.let { "Source observed ${liveTvObservedTime(it)}" }))
+            add(PlaybackInfoFact("stream_format", "Stream format", plan?.output?.let { "${it.width}×${it.height} · ${it.video_codec.uppercase()}" } ?: "Not reported", "Server delivery metadata; not a player picture measurement."))
+            add(PlaybackInfoFact("decode_audio", "Stream audio track", player?.audioFormat?.let { "${it.sampleMimeType ?: "Codec not reported"} · ${it.channelCount.takeIf { count -> count > 0 }?.let { count -> "$count channels" } ?: "Channels not reported"}" } ?: "Not reported", playbackInfoExplanation("decode_audio")))
+            add(PlaybackInfoFact("device_audio", "Device audio output", "Not reported"))
+            add(PlaybackInfoFact("method", "Delivery method", method, group = "Server work"))
+            add(PlaybackInfoFact("player_state", "Playback", player?.let(::playerStateLabel) ?: "Not reported"))
+            add(PlaybackInfoFact("subtitles", "Subtitles", player?.let { p -> if (p.currentTracks.groups.any { it.type == androidx.media3.common.C.TRACK_TYPE_TEXT && it.isSelected }) "Selected · rendered by player" else "Off" } ?: "Not reported"))
+            add(PlaybackInfoFact("client_loaded", "Buffered on device", seconds(buffered), playbackInfoExplanation("client_loaded"), "Buffer & delivery"))
+            add(PlaybackInfoFact("live_edge", "Behind stream live edge", seconds(edge), "Behind latest available media; not broadcast delay.", "Live stream & reception"))
+            add(PlaybackInfoFact("reception", "Tuner reception", reception, group = "Live stream & reception"))
+            add(PlaybackInfoFact("stalls", "Buffering interruptions", "Not reported", "This live player does not expose an interruption counter.", "Buffer & delivery"))
+            add(PlaybackInfoFact("status", "Server state", status?.state ?: "Not reported", playbackInfoExplanation("status"), "Server work"))
+            status?.encoder?.let { add(PlaybackInfoFact("encoder", "Encoder", it, group = "Server work")) }
+            status?.owner_node_id?.let { add(PlaybackInfoFact("owner", "Server owner", it, group = "Session & history", diagnosticOnly = true)) }
+            add(PlaybackInfoFact("sample", "Player sampled", java.text.DateFormat.getTimeInstance().format(java.util.Date()), group = "Session & history"))
+        }
+    }
+    PlaybackInfoPanel(title = channel.title, facts = facts, mode = mode, onMode = { mode = it }, onClose = onClose, modifier = modifier, isLive = true)
+}
+
+@Composable
 private fun LiveTvTechnicalDetails(channel: LiveTvChannel, status: LiveTvStatus?) {
     Column(
         Modifier.fillMaxWidth().padding(vertical = 6.dp),
@@ -2267,7 +2333,7 @@ private fun LiveTvTechnicalDetails(channel: LiveTvChannel, status: LiveTvStatus?
                     it.encoder?.takeUnless { encoder -> encoder == "pending" }
                         ?.let { encoder -> add("${encoder.uppercase()} encoder") }
                 }.joinToString(" · ")
-            LiveTvTechnicalRow("Playing", delivery)
+            LiveTvTechnicalRow("Stream format", delivery)
         }
         val meters = status?.signal?.let { signal ->
             listOfNotNull(
