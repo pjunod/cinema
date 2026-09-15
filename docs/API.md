@@ -930,8 +930,10 @@ that.
 If the verdict looks wrong, the capabilities are the first suspect: re-run the
 same request as the `POST` form with an explicit document and compare, since
 both shapes route through one translation and must agree.
-`vod_indexed: false` means a subsequent copy session will have to build a
-fragment index first.
+`vod_indexed: false` means this node lacks the matching local copy index.
+Session creation can hydrate an exact shared artifact; otherwise it retains
+the rolling first-play fallback while enabled shared preparation queues the
+missing source/recipe work. It does not wait for a full-file index pass.
 
 ---
 

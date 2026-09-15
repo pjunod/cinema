@@ -84,8 +84,8 @@ function test(name, run) {
   }
 }
 
-test("playback info exposes and remembers the shared three-mode contract", () => {
-  for (const mode of ["mini", "standard", "debug"]) {
+test("playback info exposes and remembers the shared playback-info levels", () => {
+  for (const mode of ["mini", "standard", "details", "debug"]) {
     assert.match(
       SHIPPED_UI,
       new RegExp(`data-stats-mode=["']${mode}["']`),
@@ -2251,7 +2251,25 @@ test("a rejected cheap stream gets one compatibility transcode", () => {
 test("a persistent stall gets one bounded method-aware recovery", () => {
   assert.equal(
     policy.stallRecoveryAction({ method: "remux", quality: "auto" }),
+    "restart",
+    "missing attribution cannot authorize a recipe change",
+  );
+  assert.equal(
+    policy.stallRecoveryAction({ method: "remux", quality: "auto", cause: "decoder" }),
     "transcode",
+    "typed decoder evidence keeps the compatible-recipe fallback reachable",
+  );
+  assert.equal(
+    policy.stallRecoveryAction({ method: "remux", quality: "auto", cause: "network" }),
+    "restart",
+    "a generic transfer failure does not prove that the recipe exceeds capacity",
+  );
+  assert.equal(
+    policy.stallRecoveryAction({
+      method: "remux", quality: "original", cause: "decoder",
+    }),
+    "restart",
+    "an explicit quality choice remains exact even after a decoder error",
   );
   for (const quality of ["original", "nomse", "1080"]) {
     assert.equal(
@@ -2313,12 +2331,12 @@ test("a persistent supply stall spends its one restart on the sustainable rung",
   }
   assert.match(
     shippedSource("persistentWait"),
-    /stallRecoveryTargetHeight\([\s\S]*?seekTo\(position,true,recoveryHeight,false\)/,
+    /stallRecoveryTargetHeight\([\s\S]*?seekTo\(position,true,recoveryHeight,false,p\.recoveringStall\)/,
     "the shipped persistent-stall path must pass the measured target into its bound reopen",
   );
 });
 
-test("a transcode stall reopen is bound to the exact predecessor", () => {
+test("only measured capacity adaptation sends the legacy rung-lowering stall reason", () => {
   const ordinary = { start: 42, height: 720 };
   assert.deepEqual(
     policy.stallReopenSessionOptions({
@@ -2326,6 +2344,7 @@ test("a transcode stall reopen is bound to the exact predecessor", () => {
       forceReopen: true,
       method: "transcode",
       sessionId: "session-before-stall",
+      cause: "network",
     }),
     {
       start: 42,
@@ -2338,6 +2357,17 @@ test("a transcode stall reopen is bound to the exact predecessor", () => {
   assert.deepEqual(
     policy.stallReopenSessionOptions({
       options: ordinary,
+      forceReopen: true,
+      method: "transcode",
+      sessionId: "session-before-stall",
+      cause: "unknown",
+    }),
+    ordinary,
+    "a same-recipe presentation repair keeps the playback identity but sends no rung-drop ticket",
+  );
+  assert.deepEqual(
+    policy.stallReopenSessionOptions({
+      options: ordinary,
       forceReopen: false,
       method: "transcode",
       sessionId: "ordinary-seek",
@@ -2347,8 +2377,13 @@ test("a transcode stall reopen is bound to the exact predecessor", () => {
   );
   assert.match(
     shippedSource("seekTo")+shippedSource("executePlaybackMediaChange"),
-    /previousSessionId:PLAYER\.sessionId[\s\S]*stallReopenSessionOptions\([\s\S]*?sessionId:change\.previousSessionId/,
-    "the shipped restart path must carry the typed predecessor binding",
+    /previousSessionId:PLAYER\.sessionId[\s\S]*recoveryCause:[\s\S]*stallReopenSessionOptions\([\s\S]*?cause:change\.recoveryCause/,
+    "the shipped restart path must distinguish same-recipe repair from measured adaptation",
+  );
+  assert.match(
+    shippedSource("seekTo"),
+    /kind==="supply"&&autoHeightOverride>0[\s\S]*\?"network":"unknown"/,
+    "only an independently selected lower rung authorizes the legacy capacity ticket",
   );
 });
 
@@ -3404,7 +3439,7 @@ test("playback-info row builders follow the shared web field list in fixture ord
     telemetry[field.id] = `value:${field.id}`;
   }
   telemetry.dynamic_range_mini = "HDR10";
-  for (const mode of ["mini", "standard", "debug"]) {
+  for (const mode of ["mini", "standard", "details", "debug"]) {
     const expected = require("./playback-info-fields.json").fields
       .filter((field) => field.modes.includes(mode) && (!field.available_on || field.available_on.includes("web")))
       .map((field) => field.label);
@@ -3416,17 +3451,24 @@ test("playback-info row builders follow the shared web field list in fixture ord
 // can read: the SURFACE section is the ledger half of the surface contract's
 // attributability (§5), and it had to be added to a hand-written column list
 // to appear at all.
-test("every playback-info section the fixture declares has a column to render in", () => {
-  const markup = shippedSource("playbackInfoMarkup");
-  const sections = new Set(require("./playback-info-fields.json").fields.map((field) => field.section));
-  const rendered = new Set(
-    [...markup.matchAll(/\[([^\]]*)\]\.map\(gridSection\)/g)]
-      .flatMap((match) => [...match[1].matchAll(/"([^"]+)"/g)].map((name) => name[1])),
-  );
-  for (const section of sections) {
-    assert.ok(rendered.has(section), `the ${section} section has no column and would never be drawn`);
+test("every available diagnostic field is rendered in a named disclosure", () => {
+  const render = new Function(`${shippedSource("esc")}\n${shippedSource("playbackInfoHelp")}\n${shippedSource("playbackInfoMarkup")}\nreturn playbackInfoMarkup;`)();
+  const fields = require("./playback-info-fields.json").fields;
+  const rows = fields.map(field => ({...field, value: "observed", note: "sample"}));
+  const markup = render("debug", rows, "", "");
+  for (const field of fields) {
+    assert.equal(markup.split(`data-stats-id="${field.id}"`).length - 1, 1, `${field.id} must appear exactly once`);
   }
-  assert.ok(sections.has("SURFACE"), "the ledger's SURFACE section is what §5 asks the web for");
+  assert.match(markup, /<summary>Picture &amp; sound<\/summary>/);
+  assert.match(markup, /<summary>Session &amp; history<\/summary>/);
+});
+
+test("missing player resolution stays explicit beside source metadata", () => {
+  const render = new Function(`${shippedSource("esc")}\n${shippedSource("playbackInfoOverview")}\nreturn playbackInfoOverview;`)();
+  const markup = render({decode_resolution: "Not reported", source_resolution: "3840×2160", player_state: "Playing", method: "Transcode · cached"});
+  assert.match(markup, /pi-picture[^]*?Playing resolution[^]*?<strong>Not reported<\/strong>/);
+  assert.match(markup, /Original file[^]*?<strong>3840×2160<\/strong>/);
+  assert.match(markup, /Buffered on this device/);
 });
 
 test("decode rescue uses lost frames over a long window, not pipeline latency", () => {

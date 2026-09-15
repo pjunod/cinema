@@ -797,174 +797,8 @@
   .statsmodes button:focus-visible{outline:2px solid #fff;outline-offset:2px}
   .statsx{background:transparent;border:0;color:rgba(255,255,255,.6);font-size:12px;line-height:1;cursor:pointer;padding:4px 6px;border-radius:5px}
   .statsx:hover{background:rgba(255,255,255,.1);color:#fff}
-  /* The three levels intentionally match the native clients. Mini leaves the
-     picture legible, Standard is the glanceable Source/Now decoding/Server
-     ledger, and Debug is the same ledger with everything in it. */
-  /* Mini shrink-wraps its one line. A fixed 650px box around five short
-     values was mostly empty air over the picture; max-content is exactly as
-     wide as the sentence it holds, and no wider. */
-  .statsov[data-mode=mini]{width:max-content;max-width:calc(100vw - 40px);max-height:none}
-  .statsov[data-mode=standard]{width:min(900px,calc(100vw - 40px))}
-  .statsov[data-mode=debug]{width:min(1040px,calc(100vw - 40px))}
-  /* One ledger, one column's worth of width. These widths are sized for two
-     ledgers side by side; a direct-play session has only the client's half,
-     and at 1040px that was a 503px column of text beside 500px of nothing.
-     Higher specificity than the coarse-pointer width below on purpose — a
-     tablet has the same empty half. */
-  .statsov.onecol[data-mode=standard]{width:min(520px,calc(100vw - 40px))}
-  .statsov.onecol[data-mode=debug]{width:min(600px,calc(100vw - 40px))}
-  /* One line, one baseline, hairlines between the facts. The four-cell grid
-     this replaces stacked a caption over every value and reserved a column
-     width for the widest of them, so mini was three rows tall and half empty.
-     Reading order is the order you ask the questions in: what is playing,
-     where am I, what am I getting, how much is in hand, how fast is it
-     arriving, and is the far end healthy. */
-  /* `wrap`, and it costs nothing on a wide screen: the panel is `max-content`
-     wide, so the line is exactly as wide as it wants to be and there is never
-     a break opportunity to take. It only engages once `max-width` clamps the
-     balloon — on a phone — and then a break is strictly better than the
-     alternative, which was flexbox handing every cell a fraction of its own
-     text: at 390px the method cell was allotted 24px and rendered "T…". */
-  .statsmini{display:flex;flex-wrap:wrap;row-gap:2px;align-items:baseline;min-width:0;white-space:nowrap}
-  .statsmini > div{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .statsmini .sdiv{flex:0 0 auto;align-self:center;width:1px;height:11px;margin:0 9px;background:rgba(255,255,255,.2)}
-  .statsmini .smethod{flex:0 1 auto;font:700 13px/1.2 ui-sans-serif,system-ui,sans-serif;color:#fff}
-  .statsmini .spos{flex:0 0 auto;color:rgba(255,255,255,.55)}
-  .statsmini .sval{flex:0 1 auto;color:#fff;font:650 10.5px/1.25 ui-sans-serif,system-ui,sans-serif}
-  /* The buffer and the delivery rate are five characters each and never need
-     to give any of them up. They were shrinking anyway: `.spos` and `.spill`
-     are `flex:0 0 auto`, so the three `.sval`s shared the entire overflow, and
-     at 640px wide "12.5 s" ellipsized to "12…" and "38 Mb/s" to "38 …" — the
-     two numbers a glance is FOR, sacrificed to make room for a longer
-     neighbour. Only the resolution/grade cell shrinks now; it is the one with
-     a redundant half. */
-  .statsmini .sval.sfix{flex:0 0 auto}
-  /* The one thing on this line that is a verdict rather than a measurement,
-     so it is shaped like one. Same state the Server section names in full. */
-  .statsmini .spill{flex:0 0 auto;align-self:center;display:inline-flex;align-items:center;gap:5px;
-    padding:2px 8px 2px 6px;border-radius:999px;background:rgba(255,255,255,.08);
-    font:650 9.5px/1.2 ui-sans-serif,system-ui,sans-serif;color:rgba(255,255,255,.8)}
-  .statsmini .sdot{width:6px;height:6px;border-radius:50%;background:currentColor;flex:0 0 auto}
-  .statsov .stat-good{color:#6ddb98!important}
-  .statsov .stat-warn{color:#ffbd4a!important}
-  .statsov .stat-bad{color:#ff6268!important}
-  .statsov .stat-muted{color:rgba(255,255,255,.52)!important}
-  @media(max-width:560px){
-    .statsmini .sdiv{margin:0 6px}
-  }
-  .statsbody{overflow-y:auto;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;padding:7px 9px 8px}
-  /* Two explicit tracks with a FIXED section→column assignment — Playback,
-     Source and Now decoding on the left; Network and Server on the right —
-     rather than the `columns:` reflow this replaces. Reflow chose sides on
-     the fly from the rendered height, and the panel re-renders once a second:
-     a section moved across the panel the moment a row appeared or a value got
-     a digit longer, under the eye of someone mid-sentence reading it. Which
-     side a thing is on is now a property of what it is.
-     The split is also the question people are actually asking: the left
-     column is this machine's account of the stream, the right column is the
-     far end's. Blame lives in the difference between the two, so they are
-     side by side rather than one after the other. */
-  /* `.statscols`, not `.cols`: this is one 12k-line global stylesheet shared by
-     the library, the admin pages and the player, and a name that generic was
-     one careless `class="cols"` in an unrelated view away from inheriting a
-     two-track grid it never asked for. Every selector here is stats-only, so
-     the name says so. */
-  .statscols{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 14px;align-items:start}
-  .statscols > div{min-width:0}
-  /* A direct-play session has no server-side half at all — no health, no hls,
-     no cache — so Network and Server render nothing and the right track is
-     empty air for half the panel while the left one is squeezed. When
-     panelHtml sees one side come back empty it says so here, and the panel
-     narrows to the one ledger it actually has. */
-  .statscols.one{grid-template-columns:minmax(0,1fr)}
-  .stsec{margin-bottom:6px}
-  /* Sentences leave the grid. Reason, the auto-switch log, the codec lines
-     and the hitch verdict are prose, and prose in a half-panel column is six
-     short ragged lines that push every number below the fold. They collect
-     here instead: full width, at the foot of the panel, under a hairline, in
-     the order the sections that own them appear. The label keeps the same
-     gutter as every row above, and the sentence hangs off it — a wrapped
-     clause lines up under its own first word rather than under the label. */
-  .snotes{margin-top:7px;padding-top:6px;border-top:1px solid rgba(255,255,255,.13)}
-  /* Which section a sentence came from, when more than one contributed. Flat,
-     the strip read as one undifferentiated list and nothing said that Video
-     and Audio are facts about the FILE while Dynamic range and Hitches are
-     facts about this playback — the same distinction the two ledgers above
-     make by position, lost the moment a row left the grid.
-     Deliberately NOT styled like `.sechd`: muted grey, sentence case, no
-     accent and no extra tracking, because the word "Source" appearing twice
-     on one panel in two different weights reads as two different things. This
-     is a quiet backreference to a heading, not another heading. */
-  .snotegrp{color:rgba(255,255,255,.34);font-weight:600;font-size:9.5px;margin:5px 0 1px}
-  .snotes > .snotegrp:first-child{margin-top:0}
-  .snote{padding:1px 0 1px 112px;text-indent:-112px;overflow-wrap:anywhere;color:rgba(255,255,255,.72)}
-  .snote > b{display:inline-block;width:112px;box-sizing:border-box;padding-right:7px;text-indent:0;vertical-align:top}
-  /* Two real columns rather than an inline-block label with a minimum width.
-     That version had no gap of its own, so any label wider than the minimum
-     touched its value ("Client estimate338 Mb/s"), and a value long enough to
-     wrap — the Reason line, every time — came back to the left margin and read
-     as a new field. A grid fixes both: the gap is the gutter, and wrapped text
-     stays inside the value column. Each row is its own grid, so the width is
-     fixed rather than max-content: 112px, which every label here fits at this
-     size, and which the notes strip below reuses so a note's first word lands
-     on the same left edge as a value. Section headers opt out, being one item
-     and not two. */
-  /* `anywhere`, because the values worth reading most are the ones with no
-     break opportunity in them: a browser's own error text arrives as
-     PipelineStatus::CHUNK_DEMUXER_ERROR_APPEND_FAILED, one unbreakable token
-     wider than any column here, and it was being clipped at the panel edge —
-     losing the end of the sentence that says what went wrong. */
-  .stsec .r{display:grid;grid-template-columns:112px minmax(0,1fr);gap:0 7px;align-items:baseline;
-    padding:1px 0;overflow-wrap:anywhere}
-  .stsec .r > span{min-width:0}
-  /* A section aligns as a unit, decided from its own rendered rows: if nearly
-     all of them are numbers, the whole section's values go flush right on a
-     tabular figure grid, so digits stack in their places and a rate that
-     doubled is visible as a wider number without reading it. A section with
-     words in it stays flush left, where words belong. Mixing the two inside
-     one section was the worst of both — a ragged right edge that still looked
-     like it was trying to be a table. */
-  .stsec.num .r > span{text-align:right;font-variant-numeric:tabular-nums}
-  /* …with a per-row escape hatch, because the section verdict is a majority
-     vote and the minority is always the prose. "Now decoding" scores 4 of 5
-     numeric and goes flush right, which then right-ragged the Decoder
-     sentence over three wrapped lines and the frame-rate clause over two —
-     wrapped prose set flush right is the least readable thing on the panel,
-     and tabular figures inside a sentence space its digits like a table.
-     A row whose value is a sentence rather than a quantity keeps normal
-     figures and its left edge; the section keeps its column of numbers. */
-  .stsec.num .r.txt > span{text-align:left;font-variant-numeric:normal}
-  .stsec .sechd{display:block}
-  /* ---- responsive, and deliberately AFTER every base rule above ----------
-     These override `.statscols` and `.stsec .r` at the SAME specificity, so
-     they only win by source order. Sitting above the base rules (where the
-     narrow-viewport block used to live) they were simply dead: a 390px phone
-     in portrait still got two tracks, a 39px value column and a 1629px-tall
-     panel. Keep new breakpoints below this line. */
-  /* A short screen — a phone held sideways, which is how a phone watches
-     video — has no width to spend on two ledgers AND no height to waste, so
-     the columns stack and the label gutter narrows to buy value width. */
-  @media(max-height:640px){
-    .statscols{grid-template-columns:minmax(0,1fr)}
-    .stsec .r{grid-template-columns:92px minmax(0,1fr)}
-    /* The notes strip borrows the rows' gutter so a sentence's first word
-       lands on the same left edge as a value. It has to borrow the narrowed
-       one too, or the promise only holds on a desktop. */
-    .snote{padding-left:92px;text-indent:-92px}
-    .snote > b{width:92px}
-  }
-  /* Too narrow for two ledgers side by side; the assignment survives, the
-     columns just stack in the order they are written. Same narrowed gutter as
-     the short-screen case above — a portrait phone is the tighter of the two,
-     not the looser one. */
-  @media(max-width:560px){
-    .statscols{grid-template-columns:minmax(0,1fr)}
-    .stsec .r{grid-template-columns:92px minmax(0,1fr)}
-    .snote{padding-left:92px;text-indent:-92px}
-    .snote > b{width:92px}
-  }
-  .statsov b{color:rgba(255,255,255,.5);font-weight:600}
-  .statsov .sechd{color:var(--accent);font-weight:700;margin-bottom:2px;text-transform:uppercase;letter-spacing:.05em;font-size:9.5px}
+  .statsov[data-mode=mini]{width:min(736px,calc(100vw - 32px))}
+  .statsov .stat-good{color:#8ad7b4}.statsov .stat-warn{color:#f1c278}.statsov .stat-bad{color:#ff8d8d}.statsov .stat-muted{color:#acb7c9}
   .pmenu{position:absolute;top:60px;right:20px;min-width:190px;max-width:300px;background:rgba(14,16,22,.97);border:1px solid rgba(255,255,255,.14);
     border-radius:10px;padding:6px;display:none;z-index:6;box-shadow:0 10px 30px rgba(0,0,0,.5)}
   /* Opened from the transport rather than the top bar: sit above the button
@@ -3361,6 +3195,34 @@
 
 .watch-about-compact{display:none}@media(max-width:760px){.watch-about-wide{display:none}.watch-about-compact{display:block;margin:12px 0}.watch-about-compact summary{cursor:pointer;padding:8px 0}.watch-hero{grid-template-columns:70px minmax(0,1fr);gap:14px}.watch-poster{width:70px}}@media(max-width:600px){header.top nav{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;overflow:visible;gap:0}header.top nav a{padding:10px 4px;font-size:12px;text-align:center;white-space:normal;min-width:0}}
 @media(max-width:899px){[data-layout=theater]:has(.th-top .dvr-global.on){--th-top:100px}[data-layout=theater] .th-top{flex-wrap:wrap;padding-top:4px;padding-bottom:4px;gap:8px}[data-layout=theater] .th-top .search{flex:1 1 80px;width:80px;min-width:0}[data-layout=theater] .th-top .dvr-global{order:4;max-width:100%;white-space:normal;margin-right:auto}[data-layout=theater] .th-top .dvr-global.on{flex-basis:100%;width:100%;justify-content:center}[data-layout=theater] .th-pills{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:calc(100% - 28px);border-radius:18px;gap:2px}[data-layout=theater] .th-pills a{text-align:center;padding:8px 4px;min-width:0;font-size:12px;white-space:normal}[data-layout=theater] main#main{padding-bottom:120px}[data-layout=catalog] .px-foot .dvr-global{order:5;max-width:100%;white-space:normal;flex-basis:100%}}
+
+/* Playback info: the same reading order on phones, tablets and desktop. */
+.statsov{font:15px/1.5 system-ui,sans-serif;background:rgba(20,23,30,.97);border-radius:19px;container-type:inline-size}
+.statsov[data-mode=standard],.statsov[data-mode=details],.statsov[data-mode=debug]{width:min(736px,calc(100vw - 32px))}
+.statsov .statshd{padding:16px 20px 12px;display:grid;grid-template-columns:1fr auto;color:#f3f5f9;font:650 21px/1.25 system-ui;text-transform:none;letter-spacing:normal}
+.statsov .statsmodes{grid-row:2;grid-column:1 / -1;margin:8px 0 0;gap:4px;flex-wrap:wrap}
+.statsov .statsmodes button{font:500 14px/1.3 system-ui;min-height:44px;padding:8px 12px;border-radius:9px}
+.statsov .statsmodes button.on{background:#203450;color:#8bb8ff}
+.statsov .statsx{grid-row:1;grid-column:2;min-width:44px;min-height:44px;font-size:20px}
+.statsov .statsbody{padding:22px 24px;overflow-y:auto;min-height:0}
+.pi-state{color:#8bb8ff;font-weight:600;margin-bottom:18px}
+.pi-hero,.pi-tracks,.pi-metrics{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:24px}
+.pi-fact{min-width:0;overflow-wrap:anywhere}.pi-label{display:block;font-size:13px;color:#acb7c9}
+.pi-fact strong{display:block;font-size:23px;font-weight:600;font-variant-numeric:tabular-nums;margin:5px 0}
+.pi-fact p,.pi-explanation p,.pi-help{font-size:14px;color:#acb7c9;margin:5px 0 0}
+.pi-picture strong{font-size:36px;letter-spacing:-.035em;line-height:1.15}
+.pi-hero>.pi-fact+ .pi-fact{border-left:1px solid #343d4d;padding-left:24px}
+.pi-explanation{padding:14px 16px;border-radius:10px;background:#1e232d;margin:20px 0}
+.pi-tracks{border-bottom:1px solid #343d4d;padding-bottom:20px}.pi-tracks strong{font-size:16px}
+.pi-metrics{margin-top:20px}.pi-metrics strong{font-size:25px}
+.pi-group{border-bottom:1px solid #343d4d}.pi-group summary{cursor:pointer;font-weight:600;padding:16px 0;min-height:48px}
+.pi-group summary:focus-visible{outline:2px solid #8bb8ff;outline-offset:2px}
+.pi-row{display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr);gap:16px;padding:12px 0;border-top:1px solid #343d4d;overflow-wrap:anywhere}
+.pi-row b{font-weight:500}.pi-row small{display:block;font-size:12px;color:#acb7c9;margin-top:4px}.pi-row>.v{text-align:right;font-variant-numeric:tabular-nums}
+.pi-compact{display:flex;flex-wrap:wrap;gap:12px 24px}.pi-compact strong{font-size:19px}
+@container(max-width:520px){.pi-hero,.pi-tracks,.pi-metrics,.pi-row{grid-template-columns:minmax(0,1fr);gap:14px}.pi-hero>.pi-fact+ .pi-fact{border-left:0;border-top:1px solid #343d4d;padding:14px 0 0}.pi-row>.v{text-align:left}.statsov .statsbody{padding:18px 16px}.statsov .statshd{padding:12px 16px}.statsov .statsmodes button{padding:8px;font-size:13px}}
+
+.live-stats{position:fixed!important;top:20px!important;right:20px!important;max-height:calc(100dvh - 40px)!important;z-index:9999!important}
 </style>
 <script>
 // Theme engine. Runs in <head> before first paint so there's no flash of the
@@ -3585,7 +3447,7 @@ if(window.matchMedia){ try{ window.matchMedia("(prefers-color-scheme: dark)").ad
 </head>
 <body>
 <div id="app"></div>
-<div class="modal" id="modal" role="dialog" aria-modal="true" aria-label="Player"><div class="player" id="player"><video id="video" autoplay playsinline x-webkit-airplay="allow"></video><div class="pbar" id="pbar"><div class="ptitle" id="playTitle"></div><div class="row"><button class="pbtn" id="statsbtn" aria-haspopup="dialog" aria-expanded="false" title="Playback info (i)" onclick="toggleStats()">ⓘ Playback info</button><button class="pbtn" id="apbtn" style="display:none" title="AirPlay">📺 AirPlay</button><button class="pbtn" id="pbclose" title="Close (Esc)" onclick="closePlayer()">✕ Close</button></div></div><div class="ptimeline" id="ptimeline"><span class="ptime" id="ptcur" aria-hidden="true">0:00</span><div class="pseek" id="pseek" role="slider" tabindex="0" aria-label="Playback position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0:00"><div class="pseek-buf" id="pseekbuf" aria-hidden="true"></div><div class="pseek-fill" id="pseekfill" aria-hidden="true"></div><div class="pseek-thumb" id="pseekthumb" aria-hidden="true"></div></div><span class="ptime" id="ptdur" aria-hidden="true">0:00</span></div><div class="ptransport" id="ptransport"><button class="picon" id="pbback" aria-label="Back 10 seconds" title="Back 10s (←)" onclick="nudge(-10)">↺</button><button class="picon" id="pbplay" aria-label="Play" title="Play / Pause (space)" onclick="togglePlay()">▶</button><button class="picon" id="pbforward" aria-label="Forward 10 seconds" title="Forward 10s (→)" onclick="nudge(10)">↻</button><span class="ptransport-spacer" aria-hidden="true"></span><button class="picon paud" id="pbaudio" aria-haspopup="menu" aria-expanded="false" aria-label="Audio track" title="Audio track" style="display:none" onclick="toggleMenu('audio',1)">🔊</button><button class="picon pcc" id="pbsubs" aria-haspopup="menu" aria-expanded="false" aria-label="Subtitles" title="Subtitles (c)" style="display:none" onclick="toggleMenu('subs',1)">CC</button><button class="picon" id="pbquality" aria-haspopup="menu" aria-expanded="false" aria-label="Playback quality" title="Playback quality" onclick="toggleMenu('quality',1)">◆</button><button class="picon" id="pbsettings" aria-haspopup="menu" aria-expanded="false" aria-label="Playback settings" title="Playback settings" onclick="toggleMenu('settings',1)">⚙</button><button class="picon" id="pbinfo" aria-label="Title info" title="Show title, synopsis & release info" onclick="togglePlayerInfo()">≡</button><button class="picon" id="pbpip" aria-label="Picture in picture" title="Picture-in-picture" style="display:none" onclick="togglePip()">◲</button><button class="picon" id="pbfs" aria-label="Fullscreen" title="Fullscreen (f)" onclick="toggleFullscreen()">⛶</button></div><div class="pinfo" id="pinfo"></div><div class="pskip" id="pskip"></div><div class="ploading" id="ploading"><div class="pspin"></div><div class="ploadText" id="ploadText">Loading…</div><div class="ploadSub" id="ploadSub"></div><div class="ploadAct" id="ploadAct"></div></div><div class="psurface" id="psurface" role="status" aria-live="polite"><div class="psurfText" id="psurfText"></div><div class="psurfSub" id="psurfSub"></div><div class="psurfAct" id="psurfAct"></div></div><div class="pindicator" id="pindicator" role="status" aria-live="polite"><div class="pspin" aria-hidden="true"></div><span id="pindText"></span></div><div class="statsov" id="statsov" data-mode="standard"><div class="statshd"><span id="statstitle">Playback info</span><div class="statsmodes" role="radiogroup" aria-label="Playback info size"><button type="button" data-stats-mode="mini" role="radio" onclick="setStatsMode('mini')">Mini</button><button type="button" data-stats-mode="standard" role="radio" onclick="setStatsMode('standard')">Standard</button><button type="button" data-stats-mode="debug" role="radio" onclick="setStatsMode('debug')">Debug</button></div><button class="statsx" aria-label="Close playback info" title="Close (i)" onclick="toggleStats()">✕</button></div><div class="statsbody" id="statsbody"></div></div><div class="pmenu" id="pmenu" role="menu"></div></div></div>
+<div class="modal" id="modal" role="dialog" aria-modal="true" aria-label="Player"><div class="player" id="player"><video id="video" autoplay playsinline x-webkit-airplay="allow"></video><div class="pbar" id="pbar"><div class="ptitle" id="playTitle"></div><div class="row"><button class="pbtn" id="statsbtn" aria-haspopup="dialog" aria-expanded="false" title="Playback info (i)" onclick="toggleStats()">ⓘ Playback info</button><button class="pbtn" id="apbtn" style="display:none" title="AirPlay">📺 AirPlay</button><button class="pbtn" id="pbclose" title="Close (Esc)" onclick="closePlayer()">✕ Close</button></div></div><div class="ptimeline" id="ptimeline"><span class="ptime" id="ptcur" aria-hidden="true">0:00</span><div class="pseek" id="pseek" role="slider" tabindex="0" aria-label="Playback position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0:00"><div class="pseek-buf" id="pseekbuf" aria-hidden="true"></div><div class="pseek-fill" id="pseekfill" aria-hidden="true"></div><div class="pseek-thumb" id="pseekthumb" aria-hidden="true"></div></div><span class="ptime" id="ptdur" aria-hidden="true">0:00</span></div><div class="ptransport" id="ptransport"><button class="picon" id="pbback" aria-label="Back 10 seconds" title="Back 10s (←)" onclick="nudge(-10)">↺</button><button class="picon" id="pbplay" aria-label="Play" title="Play / Pause (space)" onclick="togglePlay()">▶</button><button class="picon" id="pbforward" aria-label="Forward 10 seconds" title="Forward 10s (→)" onclick="nudge(10)">↻</button><span class="ptransport-spacer" aria-hidden="true"></span><button class="picon paud" id="pbaudio" aria-haspopup="menu" aria-expanded="false" aria-label="Audio track" title="Audio track" style="display:none" onclick="toggleMenu('audio',1)">🔊</button><button class="picon pcc" id="pbsubs" aria-haspopup="menu" aria-expanded="false" aria-label="Subtitles" title="Subtitles (c)" style="display:none" onclick="toggleMenu('subs',1)">CC</button><button class="picon" id="pbquality" aria-haspopup="menu" aria-expanded="false" aria-label="Playback quality" title="Playback quality" onclick="toggleMenu('quality',1)">◆</button><button class="picon" id="pbsettings" aria-haspopup="menu" aria-expanded="false" aria-label="Playback settings" title="Playback settings" onclick="toggleMenu('settings',1)">⚙</button><button class="picon" id="pbinfo" aria-label="Title info" title="Show title, synopsis & release info" onclick="togglePlayerInfo()">≡</button><button class="picon" id="pbpip" aria-label="Picture in picture" title="Picture-in-picture" style="display:none" onclick="togglePip()">◲</button><button class="picon" id="pbfs" aria-label="Fullscreen" title="Fullscreen (f)" onclick="toggleFullscreen()">⛶</button></div><div class="pinfo" id="pinfo"></div><div class="pskip" id="pskip"></div><div class="ploading" id="ploading"><div class="pspin"></div><div class="ploadText" id="ploadText">Loading…</div><div class="ploadSub" id="ploadSub"></div><div class="ploadAct" id="ploadAct"></div></div><div class="psurface" id="psurface" role="status" aria-live="polite"><div class="psurfText" id="psurfText"></div><div class="psurfSub" id="psurfSub"></div><div class="psurfAct" id="psurfAct"></div></div><div class="pindicator" id="pindicator" role="status" aria-live="polite"><div class="pspin" aria-hidden="true"></div><span id="pindText"></span></div><div class="statsov" id="statsov" data-mode="standard"><div class="statshd"><span id="statstitle">Playback info</span><div class="statsmodes" role="radiogroup" aria-label="Playback information level"><button type="button" data-stats-mode="mini" role="radio" onclick="setStatsMode('mini')">Compact</button><button type="button" data-stats-mode="standard" role="radio" onclick="setStatsMode('standard')">Overview</button><button type="button" data-stats-mode="details" role="radio" onclick="setStatsMode('details')">Details</button><button type="button" data-stats-mode="debug" role="radio" onclick="setStatsMode('debug')">Diagnostics</button></div><button class="statsx" aria-label="Close playback info" title="Close (i)" onclick="toggleStats()">✕</button></div><div class="statsbody" id="statsbody"></div></div><div class="pmenu" id="pmenu" role="menu"></div></div></div>
 <div id="live-tv-host" class="lth" data-mode="slot" hidden>
   <video id="live-tv-video" playsinline aria-label="Live television"></video>
   <div class="lth-overlay" id="live-tv-overlay"></div>
@@ -4004,10 +3866,10 @@ function reportTtff(){
 // hungry for 80ms between segments is not an interruption anyone saw. And a
 // wait is classified by how much was buffered when it began, because that
 // single number separates two unrelated faults: nothing left to play (supply —
-// the server or the link ran out) versus plenty left and still not playing
-// (decode — the browser could not keep up with what it already had). Only the
-// first is a delivery problem, and only the first should ever send anyone
-// looking at pacing.
+// the server or the link ran out) versus plenty left and still not presenting.
+// The latter is an unattributed presentation wait unless the media element
+// exposes a typed error; loaded bytes alone say nothing about the decoder.
+// Only supply pressure should send anyone looking at pacing.
 const STALL_MIN_MS=350;      // shorter than this and playback did not visibly pause
 const SUPPLY_RUNWAY_SECS=1.5; // less buffered than this when it began: we ran dry
 const PERSISTENT_STALL_MS=8000; // browser nudges failed; recover instead of spinning forever
@@ -4049,8 +3911,8 @@ function noteAutoStall(p,kind,episodeAtMs){
 function recordWaitStall(p, kind, ms, runway, detail, episodeAtMs, controlTrigger){
   p.stalls=(p.stalls||0)+1;
   PLAYBACK_LIFETIME_STALLS++;
-  p.stallsByKind=p.stallsByKind||{supply:0,decode:0};
-  p.stallsByKind[kind]++;
+  p.stallsByKind=p.stallsByKind||{supply:0,decode:0,presentation:0};
+  p.stallsByKind[kind]=(p.stallsByKind[kind]||0)+1;
   noteAutoStall(p,kind,episodeAtMs);
   const ctx=playbackContext();
   clientLog(Object.assign({level:"warn",event:"stall",detail:detail||kind,ms,
@@ -4070,13 +3932,61 @@ function endWait(resumed){
   p.waitAt=null; p.waitRunway=null; p.waitNudgedAt=null; p.waitReported=false;
   if(reported) return;                       // persistentWait already emitted it
   if(!resumed || ms<STALL_MIN_MS) return;    // a hitch, not a stall
-  const kind=(runway!=null && runway<SUPPLY_RUNWAY_SECS)?"supply":"decode";
+  let video=null; try{video=document.getElementById&&document.getElementById("video");}catch(e){}
+  const kind=persistentWaitEvidence(video,runway).kind;
   recordWaitStall(p,kind,ms,runway,kind,began);
+}
+// Classify only what the browser actually exposed. A stationary film clock
+// with loaded media is a presentation wait, not a decoder verdict. Typed media
+// errors remain usable evidence, while an empty buffer identifies supply
+// pressure without guessing whether disk, producer or network caused it.
+function persistentWaitEvidence(v,runway){
+  const error=v&&v.error;
+  const code=Number(error&&error.code)||0;
+  const detail=String(error&&error.message||"").replace(/[\r\n\0]+/g," ").slice(0,120);
+  if(code===3||code===4){
+    return {kind:"decode",cause:"decoder",observation:{decoder_state:"failed",
+      error_code:"decoder",error_detail:detail||`media_error_${code}`}};
+  }
+  if(code===2){
+    return {kind:"supply",cause:"network",observation:{decoder_state:"unknown",
+      error_code:"network",error_detail:detail||"media_error_2"}};
+  }
+  if(runway!=null&&runway<SUPPLY_RUNWAY_SECS){
+    return {kind:"supply",cause:"unknown",observation:{decoder_state:"starved"}};
+  }
+  return {kind:"presentation",cause:"unknown",
+    observation:{decoder_state:"unknown"}};
+}
+// Freeze the evidence and selected delivery contract before the attachment
+// owner mutates anything. Later callbacks can describe this episode without
+// re-reading a successor's method, quality, tracks or media identity.
+function stallRecoverySnapshot(p,v,{began,kind,cause,action,position,targetHeight}){
+  const source=p&&p.source||{};
+  const selected=p&&p.audio&&p.audio[p.curAudio];
+  const recipe=Object.freeze({
+    method:p&&p.method||null,copy_hls:!!(p&&p.copyHls),quality:playQuality(),
+    height:Number((p&&p.health&&p.health.target_height)||(p&&p.autoHeight)||
+      (v&&v.videoHeight)||source.height)||null,
+    video_codec:source.video_codec||null,video_profile:source.video_profile||null,
+    width:Number(source.width)||null,
+    dynamic_range:(p&&p.deliveredRange)||source.hdr_format||source.hdr||null,
+    audio_track:selected?selected.index:0,subtitle_track:p&&p.curSub>=0?p.curSub:null,
+    subtitle_mode:p&&p.burnedSub!=null?"burn":p&&p.curSub>=0?"native":"off",
+    audio_offset_ms:Number(p&&p.aoffset)||0,
+  });
+  return Object.freeze({player:p,attachment:p&&p.mediaAttachment||null,
+    generation:p&&p._seekToken||0,intentGeneration:p&&p.controlIntentGeneration||0,
+    presentationEpoch:p&&p.controlPresentationEpoch||0,
+    sessionId:p&&p.sessionId||null,began,at:performance.now(),kind,cause,action,
+    position,targetHeight,recipe});
 }
 // A wait that never resumes used to be invisible forever: endWait() was the
 // only reporter and therefore never ran. Record it at a fixed deadline, then
-// make one method-aware attempt. Auto remuxes move to a smaller transcode;
-// explicit quality choices and already-compatible streams simply reconnect.
+// make one evidence-aware attempt. Unattributed waits keep the selected recipe;
+// independently attributed decoder failures may use the compatible path;
+// generic transfer failures reconnect without inventing a capacity verdict,
+// and explicit quality choices remain exact.
 async function persistentWait(v,p,began,generation,actionGeneration){
   if(!playbackOwnsAttachedMedia(p)) return;
   if(PLAYER!==p || p.waitAt!==began || !(p.started||p.controlSeek?.executed) ||
@@ -4086,20 +3996,18 @@ async function persistentWait(v,p,began,generation,actionGeneration){
      (v.seeking&&!p.controlSeek?.executed&&!p.progressWatch?.fired)) return;
   p.waitTimer=null;
   const ms=Math.round(performance.now()-began), runway=p.waitRunway;
-  const kind=(runway!=null && runway<SUPPLY_RUNWAY_SECS)?"supply":"decode";
+  const evidence=persistentWaitEvidence(v,runway), kind=evidence.kind;
   const firstReport=!p.waitReported;
   p.waitReported=true;
   // This exact transition owns the legacy reopen. Cadence alone is too late:
   // the replacement normally stops this reporter before its next scheduled
   // exchange, leaving the server with only the earlier `waiting` fact.
-  const controlObservation=kind==="supply"
-    ? {decoder_state:"starved"}
-    : {decoder_state:"failed",error_code:"decoder",error_detail:"persistent_decode_stall"};
+  const controlObservation=evidence.observation;
   // Presentation recovery belongs to this client, not to the producer
   // verdict. Spend the one harmless browser reevaluation before the bounded
-  // ask so a hold suppressed to `none` receives the same treatment.
+  // ask; once it resolves, a passive response leaves no work pending.
   let nativeReevaluated=false;
-  if(kind==="decode"&&p.waitNudgedAt!==began){
+  if(kind==="presentation"&&p.waitNudgedAt!==began){
     p.waitNudgedAt=began;
     nativeReevaluated=true;
     try{
@@ -4158,14 +4066,14 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   }
   if(p.stallDeferralsAt!==began){ p.stallDeferralsAt=began; p.stallDeferrals=0; }
   if(verdict&&verdict.type==="hold"){
-    if(kind==="supply"){
+    if(kind==="supply"||kind==="presentation"){
       // A hold says why the producer paused. It never says whether published
-      // bytes can be fetched, and production state is not authority over
-      // serving: this player's buffer is empty and its supply has stopped, so
-      // there is nothing left for waiting to arrive at. Fall through to the
-      // same bounded recovery an unanswered ask gets.
+      // bytes can be fetched or whether already-loaded bytes can be presented,
+      // and production state is not authority over either serving or the local
+      // presentation owner. Fall through to the same bounded local recovery an
+      // unanswered ask gets.
       clientLog({level:"warn",event:"stall_recovery",detail:"fallthrough:hold",
-        message:`server holds this stall (${verdict.reason}) — nothing left to play, recovering anyway`,
+        message:`server holds this ${kind} stall (${verdict.reason}) — recovering locally`,
         control_trigger:controlTrigger});
     }else if(controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
       // Production is deliberately not advancing, so the client's reopen would
@@ -4193,16 +4101,6 @@ async function persistentWait(v,p,began,generation,actionGeneration){
         control_trigger:controlTrigger});
     }
   }
-  if(kind==="decode"&&p.waitNudgedAt===began&&
-     (!verdict||verdict.type==="none")&&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
-    // `none` is passive: it means production has no authoritative action for
-    // this presentation wait. Observe the native reevaluation under the same
-    // absolute episode deadline instead of treating absence of a server
-    // command as an instruction to replace media immediately.
-    p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation,actionGeneration).catch(()=>{}),
-      Math.min(PERSISTENT_STALL_MS,CONTROL_STALL_DEFER_DEADLINE_MS-controlElapsedMs));
-    return;
-  }
   if(verdict&&verdict.type==="retry_resource"&&(p.stallDeferrals||0)<CONTROL_DEFER_LIMIT
      &&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
     // Production stopped for something that may not recur, and named when to
@@ -4221,7 +4119,7 @@ async function persistentWait(v,p,began,generation,actionGeneration){
     return;
   }
   const action=PlaybackPolicy.stallRecoveryAction({
-    method:p.method, quality:playQuality(),
+    method:p.method, quality:playQuality(),cause:evidence.cause,
     alreadyRecovered:(p.stallRecoveries||0)>0
   });
   if(action==='prompt'){
@@ -4244,8 +4142,8 @@ async function persistentWait(v,p,began,generation,actionGeneration){
     nowMs:performance.now()
   });
   p.stallRecoveries=(p.stallRecoveries||0)+1;
-  p.recoveringStall={at:performance.now(),action,kind,position:p.stallFrom,
-    targetHeight:recoveryHeight};
+  p.recoveringStall=stallRecoverySnapshot(p,v,{began,kind,cause:evidence.cause,
+    action,position:p.stallFrom,targetHeight:recoveryHeight});
   clientLog(Object.assign({level:"warn",event:"stall_recovery",detail:`attempt:${action}`,
     message:`persistent ${kind} stall — ${action==='transcode'?"switching to transcode":"reconnecting"}`,
     control_trigger:controlTrigger},
@@ -4253,11 +4151,13 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   const position=p.recoveringStall.position;
   endWait(false);
   raisePlaybackSurface("owner_recovery_step",{
-    title:action==='transcode'?"Buffer ran dry — optimizing…":"Playback stalled — reconnecting…",
+    title:action==='transcode'
+      ?(kind==='supply'?"Buffer ran dry — optimizing…":"Playback stalled — changing decoder path…")
+      :"Playback stalled — reconnecting…",
     detail:`resuming from ${clockFromSec(position)}`});
   if(action==='transcode') startTranscodeFallback("stall-recovery",
     `switched to a transcode after a persistent ${kind} stall`);
-  else seekTo(position,true,recoveryHeight,false);
+  else seekTo(position,true,recoveryHeight,false,p.recoveringStall);
 }
 function finishStallRecovery(outcome,note){
   const p=PLAYER, r=p&&p.recoveringStall; if(!r) return false;
@@ -8805,6 +8705,10 @@ function controlVerdictText(message){
 function supersedePlaybackControlIntent(p){
   if(!p) return 0;
   p.controlIntentGeneration=(p.controlIntentGeneration||0)+1;
+  // Viewer intent cancels an in-flight automatic episode. Automatic recovery
+  // begins its seek with `supersedeIntent=false`, so it retains this exact
+  // episode while pause, seek, track change and close fence every old callback.
+  p.recoveringStall=null;
   const startup=p.hlsStartup;
   if(startup&&startup.retry&&startup.retry.state==='reserved'){
     clearTimeout(startup.retry.timer); startup.retry.timer=null;
@@ -10387,7 +10291,8 @@ async function executePlaybackMediaChange(p,change){
   const method=p.burnedSub!=null?'transcode':change.method;
   const opts=method==='transcode'?PlaybackPolicy.stallReopenSessionOptions({
     options:transcodeOpts(pos,audio,change.height),forceReopen:!!change.forceReopen,
-    method,sessionId:change.previousSessionId||p.sessionId}):null;
+    method,sessionId:change.previousSessionId||p.sessionId,
+    cause:change.recoveryCause||"unknown"}):null;
   newAttempt(change.reason||"stream-change");
   p.stallFrom=pos;
   if(change.automatic&&p.abr) p.abr.switching=true;
@@ -12533,10 +12438,12 @@ function playbackProgressTick(v,p){
   const clock=Number(v.currentTime)||0;
   let frames=null, frameSource="none";
   if(streamHasVideo(p,v)){
-    if(p.controlHasFrameCallbacks&&p.controlPresentedFrames>0){
-      frames=p.controlPresentedFrames; frameSource="callbacks";
-    }
-    else try{
+    if(p.controlHasFrameCallbacks){
+      // Callback support is itself the observation contract. Zero presented
+      // callbacks is real evidence and must not fall through to a decoded-frame
+      // counter that can advance while the compositor remains frozen.
+      frames=Number(p.controlPresentedFrames)||0; frameSource="callbacks";
+    }else try{
       const q=v.getVideoPlaybackQuality?.();
       if(Number.isFinite(q?.totalVideoFrames)){frames=q.totalVideoFrames; frameSource="quality";}
     }catch(e){}
@@ -12562,6 +12469,7 @@ function playbackProgressTick(v,p){
         endWait(true);
         clearStall(); finishStallRecovery("recovered");
       }
+      else if(p.recoveringStall){ clearStall(); finishStallRecovery("recovered"); }
     }
   }
   // Exclude time spent paused or backgrounded. A new active watch starts a
@@ -12780,7 +12688,7 @@ function pbWireSeek(){
 }
 function playbackWaitNeedsProgress(p){
   return !!(p&&(p.pendingMediaChange||hasPendingPlaybackOpen(p)||
-    (p.progressWatch?.fired&&p.waitAt!=null)));
+    p.controlSeek||p.recoveringStall||(p.progressWatch?.fired&&p.waitAt!=null)));
 }
 function handlePlaybackPlaying(v,p){
   if(!p||PLAYER!==p) return;
@@ -13061,7 +12969,8 @@ function skipMarker(m,automatic=false){
 }
 // Seek that works for every method: direct play seeks natively; remux/transcode
 // restart the server-side stream at the new offset (the stream is one-directional).
-async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, viewerInitiated=true){
+async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, viewerInitiated=true,
+  recoveryEpisode=null){
   const v=document.getElementById("video"); if(!v||!PLAYER) return;
   targetSec=Math.max(0,targetSec);
   const markerEnd=Number(PLAYER._lastMarkerSkipEndMs)||0;
@@ -13138,7 +13047,12 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   // its await, so only the last seek attaches.
   return requestPlaybackMediaChange(PLAYER,{method:PLAYER.method,copyHls:!!PLAYER.copyHls,
     reason:forceReopen?"stall-restart":"seek",height:autoHeightOverride,
-    forceReopen,previousSessionId:PLAYER.sessionId});
+    forceReopen,previousSessionId:PLAYER.sessionId,
+    // Only an independently selected lower rung turns supply pressure into a
+    // capacity verdict. MEDIA_ERR_NETWORK alone is a failed transfer and keeps
+    // this create on the same recipe without the legacy rung-lowering ticket.
+    recoveryCause:recoveryEpisode&&recoveryEpisode.kind==="supply"&&autoHeightOverride>0
+      ?"network":"unknown"});
 }
 function autoskipOn(){ try{ return localStorage.getItem("plurx_autoskip")==="1"; }catch(e){ return false; } }
 function setAutoskip(on){ try{ localStorage.setItem("plurx_autoskip", on?"1":"0"); }catch(e){}
@@ -13866,7 +13780,7 @@ async function switchAudio(idx){
 // ---- playback stats overlay (press i, or the Stats button) ----------------
 // ---- generated from tests/playback/playback-info-fields.json by
 // scripts/player-contract-table --embed; do not edit by hand ----
-const PLAYBACK_INFO_FIELDS=[{"id":"method","label":"Method","section":"PLAYBACK","modes":["mini","standard","debug"],"format":"text","note":"The delivery verdict — the same vocabulary on every client: Direct play · Remux · Transcode · Transcode · cached; the encoder and rung follow as a clause (\"Transcode · nvenc · 1080p\")."},{"id":"playback_mode","label":"Playback mode","section":"PLAYBACK","modes":["debug"],"format":"text","available_on":["web"],"note":"Live HLS / VOD HLS / progressive — the web presentation kind. Native players have one presentation."},{"id":"position","label":"Position","section":"PLAYBACK","modes":["mini","standard","debug"],"format":"position"},{"id":"reason","label":"Reason","section":"PLAYBACK","modes":["standard","debug"],"format":"list","placement":"notes","note":"Why the server chose this method."},{"id":"build","label":"Build","section":"PLAYBACK","modes":["debug"],"format":"text","always":true},{"id":"transport","label":"Transport","section":"PLAYBACK","modes":["debug"],"format":"text","placement":"notes"},{"id":"file_id","label":"File ID","section":"PLAYBACK","modes":["debug"],"format":"text"},{"id":"session","label":"Session","section":"PLAYBACK","modes":["debug"],"format":"text","placement":"notes"},{"id":"switched","label":"Switched","section":"PLAYBACK","modes":["debug"],"format":"list","placement":"notes","available_on":["web"],"note":"Auto-quality moves this session."},{"id":"source_video","label":"Video","section":"SOURCE","modes":["standard","debug"],"format":"list","placement":"notes","note":"codec · profile · bit depth · HDR format."},{"id":"source_resolution","label":"Resolution","section":"SOURCE","modes":["standard","debug"],"format":"resolution"},{"id":"source_bitrate","label":"Bitrate","section":"SOURCE","modes":["standard","debug"],"format":"bitrate"},{"id":"container","label":"Container","section":"SOURCE","modes":["standard","debug"],"format":"text"},{"id":"source_audio","label":"Audio","section":"SOURCE","modes":["standard","debug"],"format":"list","placement":"notes","note":"codec · channels · language, \"+N tracks\" when more exist."},{"id":"source_file","label":"File","section":"SOURCE","modes":["debug"],"format":"text","placement":"notes"},{"id":"av_offset","label":"AV offset","section":"SOURCE","modes":["debug"],"format":"millis","always":true,"note":"Applied offset; the container-declared value follows in parentheses when it differs."},{"id":"decode_resolution","label":"Resolution","section":"NOW DECODING","modes":["mini","standard","debug"],"format":"resolution"},{"id":"dynamic_range","label":"Dynamic range","section":"NOW DECODING","modes":["mini","standard","debug"],"format":"text","placement":"notes","note":"Mini shows the chip form (\"DV P7 → HDR10\"); the ledger shows the sentence."},{"id":"decode_audio","label":"Audio","section":"NOW DECODING","modes":["debug"],"format":"list","placement":"notes","note":"What the player's audio output actually is (route-aware where the platform says)."},{"id":"frames","label":"Frames","section":"NOW DECODING","modes":["standard","debug"],"format":"fraction","available_on":["web","android"],"note":"dropped / total. AVPlayer does not expose it."},{"id":"frame_rate","label":"Frame rate","section":"NOW DECODING","modes":["debug"],"format":"text","available_on":["web"]},{"id":"player_state","label":"Player state","section":"NOW DECODING","modes":["debug"],"format":"text","note":"One vocabulary: Playing · Paused · Buffering · Ended · Failed."},{"id":"waiting_reason","label":"Waiting reason","section":"NOW DECODING","modes":["debug"],"format":"text","placement":"notes","available_on":["apple"]},{"id":"decoder","label":"Decoder","section":"NOW DECODING","modes":["debug"],"format":"text","available_on":["web","android"],"note":"hardware / software, with the reason when software."},{"id":"stalls","label":"Stalls","section":"NOW DECODING","modes":["standard","debug"],"format":"text","note":"\"2 (1 supply · 1 decode)\" — player-side stall count this session."},{"id":"subtitles","label":"Subtitles","section":"NOW DECODING","modes":["standard","debug"],"format":"text","note":"Track name; the delivery clause (native · burned · overlay) is a note under the same label."},{"id":"source_read","label":"Source read","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"text","always":true,"note":"Measured source read activity only. Configured input pacing is not a measurement; unsupported clients show Unavailable."},{"id":"server_ready","label":"Server ready","section":"BUFFERING / DELIVERY","modes":["standard","debug"],"format":"seconds","always":true,"note":"Contiguous complete media beginning at the latest accepted absolute playhead or seek anchor. Missing is 0.0 s; unobservable or evicted coverage is Unavailable."},{"id":"ready_state","label":"Ready state","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"text","always":true,"note":"Ready · Missing · Unavailable; kept separate so unknown is never rendered as zero."},{"id":"ready_anchor","label":"Ready anchor","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"millis"},{"id":"ready_end","label":"Ready end","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"millis"},{"id":"later_ready","label":"Later ready","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"text","placement":"notes","note":"A later contiguous ready island is diagnostic context, never runway at the current playhead."},{"id":"http_wait","label":"HTTP wait","section":"BUFFERING / DELIVERY","modes":["standard","debug"],"format":"text","note":"Active server-side media responses waiting for publication. This does not describe client buffering."},{"id":"client_loaded","label":"Client loaded","section":"BUFFERING / DELIVERY","modes":["mini","standard","debug"],"format":"seconds","note":"Contiguous native/browser loaded media ahead of the attached current playhead. Prepared successors never contribute."},{"id":"presentation","label":"Presentation","section":"BUFFERING / DELIVERY","modes":["standard","debug"],"format":"text","note":"The player's observed presentation state; it does not infer a server or network cause."},{"id":"presentation_age","label":"Last advance","section":"BUFFERING / DELIVERY","modes":["standard","debug"],"format":"millis","note":"Age of the last observed film-clock or frame advance. Unavailable until an advance has been observed."},{"id":"delivery_rate","label":"Delivery rate","section":"BUFFERING / DELIVERY","modes":["mini","standard","debug"],"format":"bitrate","note":"Server-reported completed-response rate; \"· idle\" appended when delivery has gone quiet. Completion is not proof of receipt or decode."},{"id":"delivered","label":"Delivered","section":"BUFFERING / DELIVERY","modes":["standard","debug"],"format":"bytes","note":"Server-reported completed response bytes for this session. Never labelled Transferred."},{"id":"delivery_idle","label":"Delivery idle","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"millis"},{"id":"status_age","label":"Status sample age","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"millis","note":"Age since this client received the currently displayed server sample."},{"id":"observed_rate","label":"Observed rate","section":"NETWORK","modes":["debug"],"format":"bitrate","note":"The player's own throughput estimate."},{"id":"stream_rate","label":"Stream rate","section":"NETWORK","modes":["debug"],"format":"bitrate","note":"The declared rate of the rendition being played."},{"id":"transferred","label":"Transferred","section":"NETWORK","modes":["debug"],"format":"bytes","available_on":["apple"],"note":"Client access-log bytes — a different number from Delivered, so a different label."},{"id":"requests","label":"Requests","section":"NETWORK","modes":["debug"],"format":"count","available_on":["apple"]},{"id":"started_in","label":"Started in","section":"NETWORK","modes":["debug"],"format":"seconds","note":"Time to first frame."},{"id":"status","label":"Status","section":"SERVER","modes":["standard","debug"],"format":"text","always":true,"note":"One vocabulary: No server-side session · Active · Holding buffer · Served from cache (+ the VOD states on the web). Debug shows it too."},{"id":"encoder","label":"Encoder","section":"SERVER","modes":["standard","debug"],"format":"text"},{"id":"encode_speed","label":"Encode speed","section":"SERVER","modes":["standard","debug"],"format":"speed","note":"\"(avg)\" appended when only the cumulative figure exists. Never abbreviated to Encode."},{"id":"production_actual","label":"Production actual","section":"SERVER","modes":["standard","debug"],"format":"seconds","note":"Actor-owned media produced beyond accepted client demand. This is producer control, not a client or server-ready buffer."},{"id":"production_target","label":"Production target","section":"SERVER","modes":["standard","debug"],"format":"seconds","note":"Actor-owned pacing target. Advisory policy is never relabelled as measured buffer."},{"id":"producer_state","label":"Producer","section":"SERVER","modes":["standard","debug"],"format":"text"},{"id":"fetch_reserve","label":"Fetch reserve","section":"SERVER","modes":["debug"],"format":"seconds","note":"Compatibility frontier measured beyond the last fetched segment, not beyond the playhead."},{"id":"ahead_bytes","label":"Fetch reserve bytes","section":"SERVER","modes":["debug"],"format":"bytes"},{"id":"produced","label":"Produced","section":"SERVER","modes":["debug"],"format":"clock"},{"id":"pacing","label":"Pacing","section":"SERVER","modes":["debug"],"format":"speed"},{"id":"held","label":"Held","section":"SERVER","modes":["debug"],"format":"yesno"},{"id":"hold_reason","label":"Hold reason","section":"SERVER","modes":["debug"],"format":"text"},{"id":"suspend_count","label":"Suspend count","section":"SERVER","modes":["debug"],"format":"count"},{"id":"demand_window","label":"Demand window","section":"SERVER","modes":["debug"],"format":"text","available_on":["web"]},{"id":"request_idle","label":"Request idle","section":"SERVER","modes":["debug"],"format":"seconds"},{"id":"last_request","label":"Last request","section":"SERVER","modes":["debug"],"format":"text","placement":"notes"},{"id":"playlist","label":"Playlist","section":"SERVER","modes":["debug"],"format":"text"},{"id":"published_end","label":"Published end","section":"SERVER","modes":["debug"],"format":"millis"},{"id":"fetched_end","label":"Fetched end","section":"SERVER","modes":["debug"],"format":"millis"},{"id":"control","label":"Control","section":"SERVER","modes":["standard","debug"],"format":"text","note":"Playback-control session owner and state; timing and failure are notes under the same label in Debug."},{"id":"surface_kind","label":"Surface","section":"SURFACE","modes":["standard","debug"],"format":"text","note":"What is drawn over the picture right now — none · indicator · banner · blocking."},{"id":"surface_class","label":"Fault","section":"SURFACE","modes":["standard","debug"],"format":"text","note":"The fault class the surface is projecting: preparing · buffering · recovering · hold · degraded · refused · exhausted · stopped."},{"id":"surface_source","label":"Source","section":"SURFACE","modes":["debug"],"format":"text","note":"The raw event the fault came from, as named in tests/playback/playback-surface-contract.json."},{"id":"surface_ids","label":"Attached/intent","section":"SURFACE","modes":["debug"],"format":"text","note":"The media generation the fault is about and the viewer request it belongs to, if any."},{"id":"surface_history","label":"History","section":"SURFACE","modes":["debug"],"format":"text","placement":"notes","note":"Last 16 faults: class · source · raised → cleared (by) · player at raise (rate, position, presenting, stopped_by_owner)."}];
+const PLAYBACK_INFO_FIELDS=[{"id":"method","label":"Method","section":"PLAYBACK","modes":["standard","details","debug"],"format":"text","note":"The delivery verdict — the same vocabulary on every client: Direct play · Remux · Transcode · Transcode · cached; the encoder and rung follow as a clause (\"Transcode · nvenc · 1080p\")."},{"id":"playback_mode","label":"Playback mode","section":"PLAYBACK","modes":["debug"],"format":"text","available_on":["web"],"note":"Live HLS / VOD HLS / progressive — the web presentation kind. Native players have one presentation."},{"id":"position","label":"Position","section":"PLAYBACK","modes":["standard","details","debug"],"format":"position"},{"id":"reason","label":"Reason","section":"PLAYBACK","modes":["standard","details","debug"],"format":"list","placement":"notes","note":"Why the server chose this method."},{"id":"build","label":"Build","section":"PLAYBACK","modes":["debug"],"format":"text","always":true},{"id":"transport","label":"Transport","section":"PLAYBACK","modes":["debug"],"format":"text","placement":"notes"},{"id":"file_id","label":"File ID","section":"PLAYBACK","modes":["debug"],"format":"text"},{"id":"session","label":"Session","section":"PLAYBACK","modes":["debug"],"format":"text","placement":"notes"},{"id":"switched","label":"Switched","section":"PLAYBACK","modes":["debug"],"format":"list","placement":"notes","available_on":["web"],"note":"Auto-quality moves this session."},{"id":"source_video","label":"Original video","section":"SOURCE","modes":["standard","details","debug"],"format":"list","placement":"notes","note":"codec · profile · bit depth · HDR format."},{"id":"source_resolution","label":"Original resolution","section":"SOURCE","modes":["standard","details","debug"],"format":"resolution"},{"id":"source_bitrate","label":"Source bitrate","section":"SOURCE","modes":["standard","details","debug"],"format":"bitrate"},{"id":"container","label":"Container","section":"SOURCE","modes":["standard","details","debug"],"format":"text"},{"id":"source_audio","label":"Source audio track","section":"SOURCE","modes":["standard","details","debug"],"format":"list","placement":"notes","note":"codec · channels · language, \"+N tracks\" when more exist."},{"id":"source_file","label":"File","section":"SOURCE","modes":["debug"],"format":"text","placement":"notes"},{"id":"av_offset","label":"AV offset","section":"SOURCE","modes":["debug"],"format":"millis","always":true,"note":"Applied offset; the container-declared value follows in parentheses when it differs."},{"id":"decode_resolution","label":"Playing resolution","section":"NOW DECODING","modes":["mini","standard","details","debug"],"format":"resolution","always":true,"note":"Positive dimensions reported by the attached player. Not reported is not zero or the original file size."},{"id":"stream_format","label":"Stream format","section":"NOW DECODING","modes":["standard","details","debug"],"format":"text","always":true,"note":"Stream or manifest metadata. Not a player picture measurement."},{"id":"device_audio","label":"Device audio output","section":"NOW DECODING","modes":["standard","details","debug"],"format":"text","always":true,"note":"Speaker or HDMI output only when reported by the platform; never inferred from the audio track."},{"id":"dynamic_range","label":"Dynamic range","section":"NOW DECODING","modes":["standard","details","debug"],"format":"text","placement":"notes","note":"Mini shows the chip form (\"DV P7 → HDR10\"); the ledger shows the sentence."},{"id":"decode_audio","label":"Stream audio track","section":"NOW DECODING","modes":["standard","details","debug"],"format":"list","placement":"notes","note":"Selected stream audio track metadata; not a claim about speaker or HDMI output."},{"id":"frames","label":"Frames","section":"NOW DECODING","modes":["standard","details","debug"],"format":"fraction","available_on":["web","android"],"note":"dropped / total. AVPlayer does not expose it."},{"id":"frame_rate","label":"Frame rate","section":"NOW DECODING","modes":["debug"],"format":"text","available_on":["web"]},{"id":"player_state","label":"Player state","section":"NOW DECODING","modes":["mini","standard","details","debug"],"format":"text","note":"One vocabulary: Playing · Paused · Buffering · Ended · Failed."},{"id":"waiting_reason","label":"Waiting reason","section":"NOW DECODING","modes":["debug"],"format":"text","placement":"notes","available_on":["apple"]},{"id":"decoder","label":"Decoder","section":"NOW DECODING","modes":["debug"],"format":"text","available_on":["web","android"],"note":"hardware / software, with the reason when software."},{"id":"stalls","label":"Buffering interruptions","section":"NOW DECODING","modes":["standard","details","debug"],"format":"text","note":"\"2 (1 supply · 1 decode)\" — player-side stall count this session."},{"id":"subtitles","label":"Subtitles","section":"NOW DECODING","modes":["standard","details","debug"],"format":"text","note":"Track name; the delivery clause (native · burned · overlay) is a note under the same label."},{"id":"source_read","label":"Source read","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"text","always":true,"note":"Measured source read activity only. Configured input pacing is not a measurement; unsupported clients show Unavailable."},{"id":"server_ready","label":"Ready on server","section":"BUFFERING / DELIVERY","modes":["standard","details","debug"],"format":"seconds","always":true,"note":"Contiguous complete media beginning at the latest accepted absolute playhead or seek anchor. Missing is 0.0 s; unobservable or evicted coverage is Unavailable."},{"id":"ready_state","label":"Ready state","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"text","always":true,"note":"Ready · Missing · Unavailable; kept separate so unknown is never rendered as zero."},{"id":"ready_anchor","label":"Ready anchor","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"millis"},{"id":"ready_end","label":"Ready end","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"millis"},{"id":"later_ready","label":"Later ready","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"text","placement":"notes","note":"A later contiguous ready island is diagnostic context, never runway at the current playhead."},{"id":"http_wait","label":"HTTP wait","section":"BUFFERING / DELIVERY","modes":["standard","details","debug"],"format":"text","note":"Active server-side media responses waiting for publication. This does not describe client buffering."},{"id":"client_loaded","label":"Buffered on device","section":"BUFFERING / DELIVERY","modes":["mini","standard","details","debug"],"format":"seconds","note":"Contiguous native/browser loaded media ahead of the attached current playhead. Prepared successors never contribute."},{"id":"presentation","label":"Presentation","section":"BUFFERING / DELIVERY","modes":["standard","details","debug"],"format":"text","note":"The player's observed presentation state; it does not infer a server or network cause."},{"id":"presentation_age","label":"Last advance","section":"BUFFERING / DELIVERY","modes":["standard","details","debug"],"format":"millis","note":"Age of the last observed film-clock or frame advance. Unavailable until an advance has been observed."},{"id":"delivery_rate","label":"Server response rate","section":"BUFFERING / DELIVERY","modes":["standard","details","debug"],"format":"bitrate","note":"Server-reported completed-response rate; \"· idle\" appended when delivery has gone quiet. Completion is not proof of receipt or decode."},{"id":"delivered","label":"Server responses completed","section":"BUFFERING / DELIVERY","modes":["standard","details","debug"],"format":"bytes","note":"Server-reported completed response bytes for this session. Never labelled Transferred."},{"id":"delivery_idle","label":"Delivery idle","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"millis"},{"id":"status_age","label":"Status sample age","section":"BUFFERING / DELIVERY","modes":["debug"],"format":"millis","note":"Age since this client received the currently displayed server sample."},{"id":"observed_rate","label":"Observed download rate","section":"NETWORK","modes":["standard","details","debug"],"format":"bitrate","note":"The player's own throughput estimate."},{"id":"stream_rate","label":"Stream rate","section":"NETWORK","modes":["standard","details","debug"],"format":"bitrate","note":"The declared rate of the rendition being played."},{"id":"transferred","label":"Transferred","section":"NETWORK","modes":["debug"],"format":"bytes","available_on":["apple"],"note":"Client access-log bytes — a different number from Delivered, so a different label."},{"id":"requests","label":"Requests","section":"NETWORK","modes":["debug"],"format":"count","available_on":["apple"]},{"id":"started_in","label":"Started in","section":"NETWORK","modes":["debug"],"format":"seconds","note":"Time to first frame."},{"id":"status","label":"Server state","section":"SERVER","modes":["standard","details","debug"],"format":"text","always":true,"note":"One vocabulary: No server-side session · Active · Holding buffer · Served from cache (+ the VOD states on the web). Debug shows it too."},{"id":"encoder","label":"Encoder","section":"SERVER","modes":["standard","details","debug"],"format":"text"},{"id":"encode_speed","label":"Encode speed","section":"SERVER","modes":["standard","details","debug"],"format":"speed","note":"\"(avg)\" appended when only the cumulative figure exists. Never abbreviated to Encode."},{"id":"production_actual","label":"Production actual","section":"SERVER","modes":["standard","details","debug"],"format":"seconds","note":"Actor-owned media produced beyond accepted client demand. This is producer control, not a client or server-ready buffer."},{"id":"production_target","label":"Production target","section":"SERVER","modes":["standard","details","debug"],"format":"seconds","note":"Actor-owned pacing target. Advisory policy is never relabelled as measured buffer."},{"id":"producer_state","label":"Producer","section":"SERVER","modes":["standard","details","debug"],"format":"text"},{"id":"fetch_reserve","label":"Fetch reserve","section":"SERVER","modes":["debug"],"format":"seconds","note":"Compatibility frontier measured beyond the last fetched segment, not beyond the playhead."},{"id":"ahead_bytes","label":"Fetch reserve bytes","section":"SERVER","modes":["debug"],"format":"bytes"},{"id":"produced","label":"Produced","section":"SERVER","modes":["debug"],"format":"clock"},{"id":"pacing","label":"Pacing","section":"SERVER","modes":["debug"],"format":"speed"},{"id":"held","label":"Held","section":"SERVER","modes":["debug"],"format":"yesno"},{"id":"hold_reason","label":"Hold reason","section":"SERVER","modes":["debug"],"format":"text"},{"id":"suspend_count","label":"Suspend count","section":"SERVER","modes":["debug"],"format":"count"},{"id":"demand_window","label":"Demand window","section":"SERVER","modes":["debug"],"format":"text","available_on":["web"]},{"id":"request_idle","label":"Request idle","section":"SERVER","modes":["debug"],"format":"seconds"},{"id":"last_request","label":"Last request","section":"SERVER","modes":["debug"],"format":"text","placement":"notes"},{"id":"playlist","label":"Playlist","section":"SERVER","modes":["debug"],"format":"text"},{"id":"published_end","label":"Published end","section":"SERVER","modes":["debug"],"format":"millis"},{"id":"fetched_end","label":"Fetched end","section":"SERVER","modes":["debug"],"format":"millis"},{"id":"control","label":"Control","section":"SERVER","modes":["standard","details","debug"],"format":"text","note":"Playback-control session owner and state; timing and failure are notes under the same label in Debug."},{"id":"surface_kind","label":"Surface","section":"SURFACE","modes":["standard","details","debug"],"format":"text","note":"What is drawn over the picture right now — none · indicator · banner · blocking."},{"id":"surface_class","label":"Fault","section":"SURFACE","modes":["standard","details","debug"],"format":"text","note":"The fault class the surface is projecting: preparing · buffering · recovering · hold · degraded · refused · exhausted · stopped."},{"id":"surface_source","label":"Source","section":"SURFACE","modes":["debug"],"format":"text","note":"The raw event the fault came from, as named in tests/playback/playback-surface-contract.json."},{"id":"surface_ids","label":"Attached/intent","section":"SURFACE","modes":["debug"],"format":"text","note":"The media generation the fault is about and the viewer request it belongs to, if any."},{"id":"surface_history","label":"History","section":"SURFACE","modes":["debug"],"format":"text","placement":"notes","note":"Last 16 faults: class · source · raised → cleared (by) · player at raise (rate, position, presenting, stopped_by_owner)."}];
 // ---- end playback info fields ----
 const STATS_ROWS=Object.freeze(Object.fromEntries(PLAYBACK_INFO_FIELDS.map(field=>[
   field.id,Object.freeze({
@@ -13883,45 +13797,58 @@ function playbackInfoRows(mode,telemetry){
     .map(field=>{
       const spec=STATS_ROWS[field.id];
       let value=spec.build(telemetry,mode);
-      if(value==null&&spec.always) value="—";
+      if(value==null&&spec.always) value=["decode_resolution","stream_format","device_audio"].includes(field.id)?"Not reported":"—";
       if(value==null) return null;
       return {id:spec.id,label:spec.label,section:spec.section,placement:spec.placement,
         value:String(value),note:spec.note(telemetry),tone:telemetry[`${field.id}_tone`]||""};
     }).filter(Boolean);
 }
-function playbackInfoSectionTitle(section){
-  return section==="NOW DECODING"?"Now decoding":section.charAt(0)+section.slice(1).toLowerCase();
+// Overview is deliberately separate from the diagnostic field ledger. Values
+// still come from the same attached-player snapshot, including cached VOD.
+function playbackInfoOverview(t,live=false){
+  const fact=(label,value,help="",hero=false)=>`<div class="pi-fact${hero?' pi-picture':''}"><span class="pi-label">${esc(label)}</span><strong>${esc(value||"Not reported")}</strong>${help?`<p>${esc(help)}</p>`:""}</div>`;
+  const reason=t.reason||(/cached/i.test(t.method||"")?"Playing a prepared copy. Original and player picture sizes are reported separately.":/direct/i.test(t.method||"")?"The original media is delivered without server conversion.":/remux/i.test(t.method||"")?"Media is repackaged for this player; the video is not re-encoded.":"The server selected this delivery method. No further reason was reported.");
+  return `<div class="pi-state">${esc(t.player_state||"Not reported")}${live?' · Live TV':''}</div><div class="pi-hero">`+
+    fact("Playing resolution",t.decode_resolution,"Size reported by the attached player.",true)+
+    fact(live?"Broadcast source":"Original file",t.source_resolution,t.source_video)+`</div>`+
+    `<div class="pi-explanation"><strong>${esc(t.method||"Method not reported")}</strong><p>${esc(reason)}</p></div>`+
+    `<div class="pi-tracks"><div>${fact("Stream audio track",t.decode_audio,"Track metadata; device output is not reported.")+(t.decode_audio?"":t.source_audio?fact("Original audio track",t.source_audio):"")}</div>${fact("Subtitles",t.subtitles,t.subtitles_note)}</div>`+
+    `<div class="pi-metrics">${fact("Buffered on this device",t.client_loaded,"Contiguous media loaded ahead of your position.")}${fact(live?"Behind stream live edge":"Buffering interruptions",live?t.live_edge:t.stalls,live?"Behind the latest available media; not broadcast delay.":"Player-reported interruptions for this playback; intentional pauses excluded.")}</div>`+
+    (live?`<div class="pi-explanation"><strong>Tuner reception</strong><p>${esc(t.reception||"Not reported")}</p></div>`:"");
 }
 function playbackInfoMarkup(mode,rows,healthWord,healthStatus){
-  if(mode==="mini"){
-    return `<div class="statsmini">`+rows.map((row,index)=>
-      `${index?'<div class="sdiv" aria-hidden="true"></div>':''}<div class="sval" data-stats-id="${row.id}"><span class="v"></span></div>`
-    ).join("")+`<div class="sdiv" aria-hidden="true"></div><div class="spill" data-stats-health title="${esc(healthStatus)}"><span class="sdot" aria-hidden="true"></span><span class="v">${esc(healthWord)}</span></div></div>`;
-  }
-  const sections=PLAYBACK_INFO_FIELDS.map(field=>field.section).filter((section,index,all)=>all.indexOf(section)===index);
-  const gridSection=section=>{
-    const sectionRows=rows.filter(row=>row.section===section&&row.placement!=="notes");
-    if(!sectionRows.length) return "";
-    return `<div class="stsec"><div class="sechd">${playbackInfoSectionTitle(section)}</div>`+
-      sectionRows.map(row=>`<div class="r" data-stats-id="${row.id}"><b>${esc(row.label)}</b><span class="v"></span></div>`).join("")+`</div>`;
-  };
-  const left=["PLAYBACK","SOURCE","NOW DECODING"].map(gridSection).join("");
-  const right=["BUFFERING / DELIVERY","NETWORK","SERVER","SURFACE"].map(gridSection).join("");
-  const noteHtml=rows.length?`<div class="snotes">`+rows.map(row=>
-    `<div class="snote" ${row.placement==="notes"?`data-stats-id="${row.id}"`:`data-stats-note="${row.id}"`}><b>${esc(row.label)}</b><span class="v"></span></div>`
-  ).join("")+`</div>`:"";
-  return `<div class="statscols${!left||!right?' one':''}">${left?`<div>${left}</div>`:""}${right?`<div>${right}</div>`:""}</div>${noteHtml}`;
+  if(mode==="mini") return `<div class="pi-compact" data-stats-overview></div>`;
+  if(mode==="standard") return `<div data-stats-overview></div>`;
+  const groups=[
+    ["Picture & sound",["SOURCE","NOW DECODING"]],
+    ["Buffer & delivery",["BUFFERING / DELIVERY","NETWORK"]],
+    ["Server work",["SERVER"]],
+    ["Session & history",["PLAYBACK","SURFACE"]]
+  ];
+  return `<p class="pi-help">Source, stream and player observations are separate. Unavailable is not zero.</p>`+groups.map(([name,sections],index)=>{
+    const selected=rows.filter(row=>sections.includes(row.section));
+    if(!selected.length) return "";
+    return `<details class="pi-group" data-stats-group="${index}" ${index===0?'open':''}><summary>${esc(name)}</summary>`+selected.map(row=>
+      `<div class="pi-row" data-stats-id="${row.id}"><div><b>${esc(row.label)}</b><small>${esc(playbackInfoHelp(row.id))}</small><small data-stats-note="${row.id}"><span class="v"></span></small></div><span class="v"></span></div>`
+    ).join("")+`</details>`;
+  }).join("");
+}
+function playbackInfoHelp(id){
+  return ({stream_format:"Stream or manifest metadata; not a player picture measurement.",device_audio:"Speaker or HDMI output only when reported; never inferred from track metadata.",decode_resolution:"Attached player measurement; never inferred from source size.",source_resolution:"Original file metadata.",decode_audio:"Selected stream track; not the device's audio output.",client_loaded:"Contiguous media loaded ahead on this device.",server_ready:"Complete media ahead on the server; separate from the device buffer.",delivery_rate:"Server-completed responses; not confirmed client receipt.",observed_rate:"Player estimate during transfers; bursty by design.",stream_rate:"Stream bitrate; not connection speed.",delivered:"Bytes in server-completed responses, not proof of playback.",stalls:"Player interruptions for this playback, excluding intentional pauses.",status:"Server work state; separate from whether the picture is playing.",status_age:"Age of the most recent server response.",production_actual:"Encoder progress ahead of demand; not loaded video.",production_target:"Pacing policy, not a measurement.",http_wait:"Server responses waiting for publication; not player stalls."})[id]||"";
 }
 function patchPlaybackInfoRows(body,mode,rows,healthWord,healthStatus){
   const schema=`${mode}:`+rows.map(row=>`${row.id}:${row.placement}`).join("|");
   if(body.dataset.statsSchema!==schema){
+    const open=new Set([...body.querySelectorAll("details[open]")].map(node=>node.dataset.statsGroup));
+    const sameMode=(body.dataset.statsSchema||"").startsWith(`${mode}:`);
     body.innerHTML=playbackInfoMarkup(mode,rows,healthWord,healthStatus);
+    if(sameMode) body.querySelectorAll("details").forEach(node=>node.open=open.has(node.dataset.statsGroup));
     body.dataset.statsSchema=schema;
   }
   for(const row of rows){
     const main=body.querySelector(`[data-stats-id="${row.id}"]`);
     if(main){
-      const value=main.querySelector(".v"); if(value&&value.textContent!==row.value) value.textContent=row.value;
+      const value=main.querySelector(":scope > .v"); if(value&&value.textContent!==row.value) value.textContent=row.value;
       main.classList.toggle("stat-good",row.tone==="good");
       main.classList.toggle("stat-warn",row.tone==="warn");
       main.classList.toggle("stat-bad",row.tone==="bad");
@@ -13940,12 +13867,12 @@ let STATS_TIMER=null;
 let STATS_MODE="standard";
 try{
   const saved=localStorage.getItem("plurx_stats_mode");
-  if(["mini","standard","debug"].includes(saved)) STATS_MODE=saved;
+  if(["mini","standard","details","debug"].includes(saved)) STATS_MODE=saved;
 }catch(e){}
 function applyStatsMode(){
   const ov=document.getElementById("statsov"); if(!ov) return;
   ov.dataset.mode=STATS_MODE;
-  const title=document.getElementById("statstitle"); if(title) title.textContent=STATS_MODE==="debug"?"Playback debug":"Playback info";
+  const title=document.getElementById("statstitle"); if(title) title.textContent="Playback info";
   ov.querySelectorAll("[data-stats-mode]").forEach(button=>{
     const selected=button.dataset.statsMode===STATS_MODE;
     button.classList.toggle("on",selected);
@@ -13953,7 +13880,7 @@ function applyStatsMode(){
   });
 }
 function setStatsMode(mode){
-  if(!["mini","standard","debug"].includes(mode)) return;
+  if(!["mini","standard","details","debug"].includes(mode)) return;
   STATS_MODE=mode;
   try{ localStorage.setItem("plurx_stats_mode",mode); }catch(e){}
   applyStatsMode();
@@ -14011,7 +13938,6 @@ window.addEventListener("orientationchange",()=>setTimeout(positionStats,150));
 function clockFromSec(s){ s=Math.max(0,Math.round(s)); const h=Math.floor(s/3600),m=Math.floor(s%3600/60),ss=s%60;
   return (h?h+":":"")+String(m).padStart(h?2:1,"0")+":"+String(ss).padStart(2,"0"); }
 function hdrLabel(h){ return ({hdr10:"HDR10",hlg:"HLG",dolby_vision:"Dolby Vision"})[h]||(h?h.toUpperCase():""); }
-function statsToneClass(tone){ return tone?`stat-${tone}`:""; }
 function statsRunwayTone(seconds,suspended){
   if(suspended) return "good";
   if(seconds==null) return "muted";
@@ -14098,7 +14024,7 @@ function playbackWaitCopy(runwaySeconds,httpWaitCount){
   return {title:"Presentation waiting…",detail:`${runway.toFixed(1)} s client loaded · ${waitText}`};
 }
 function playbackStatsTelemetry(){
-  const v=document.getElementById("video"),p=PLAYER||{},s=p.source||{},h=p.health||null;
+  const p=PLAYER||{},v=playbackOwnsAttachedMedia(PLAYER)?document.getElementById("video"):null,s=p.source||{},h=p.health||null;
   const audio=p.audio&&p.audio[p.curAudio];
   const encoder=(h&&h.encoder)||p.encoder||null;
   const rung=p.autoHeight?`${p.autoHeight}p`:null;
@@ -14112,8 +14038,8 @@ function playbackStatsTelemetry(){
     audio.channels?fmtChannels(audio.channels):null,
     audio.language?(langName(audio.language)||audio.language):null,
     p.audio&&p.audio.length>1?`+${p.audio.length-1} tracks`:null].filter(Boolean).join(" · "):null;
-  let clientLoadedSeconds=0;
-  try{ clientLoadedSeconds=bufferRunway(v); }catch(e){}
+  let clientLoadedSeconds=null;
+  if(v) try{ clientLoadedSeconds=bufferRunway(v); }catch(e){}
   let frames=null,droppedCount=null,frameRate=p._fpsVal==null?null:p._fpsVal;
   try{
     const quality=v&&v.getVideoPlaybackQuality&&v.getVideoPlaybackQuality();
@@ -14133,11 +14059,12 @@ function playbackStatsTelemetry(){
   const subtitleDelivery=p.burnedSub!=null?"burned":p.curSub>=0?"native":null;
   const stalls=p.stalls||0,stallKinds=p.stallsByKind||{};
   const stallParts=[stallKinds.supply?`${stallKinds.supply} supply`:null,
-    stallKinds.decode?`${stallKinds.decode} decode`:null].filter(Boolean);
+    stallKinds.decode?`${stallKinds.decode} decode`:null,
+    stallKinds.presentation?`${stallKinds.presentation} presentation`:null].filter(Boolean);
   // Read off the presenter, not off a DOM class: the class is the projection,
   // and the model is what it is a projection OF.
   const surface=PLAYBACK_SURFACE.surface;
-  const playbackState=PlaybackPolicy.surfaceEntersFailedRouting(surface)?"Failed":
+  const playbackState=!v?"Waiting for player":PlaybackPolicy.surfaceEntersFailedRouting(surface)?"Failed":
     v&&v.ended?"Ended":v&&v.paused?"Paused":v&&v.readyState<3?"Buffering":"Playing";
   const stale=h&&!h.final&&(h.delivered_idle_ms||0)>8000;
   const delivery=h&&h.delivered_bps!=null?`${fmtMbps(h.delivered_bps)}${stale?" · idle":""}`:"Measuring";
@@ -14176,9 +14103,10 @@ function playbackStatsTelemetry(){
     source_bitrate:s.bitrate?fmtMbps(s.bitrate):null,container:s.container?String(s.container).toUpperCase():null,
     source_audio:sourceAudio,source_file:s.filename||p.filename||null,
     av_offset:`${p.aoffset||0} ms`,av_offset_note:p.declared&&p.declared!==(p.aoffset||0)?`container ${p.declared>0?"+":""}${p.declared} ms`:null,
-    decode_resolution:v&&v.videoWidth?`${v.videoWidth}×${v.videoHeight}`:null,
+    decode_resolution:v&&v.videoWidth>0&&v.videoHeight>0?`${v.videoWidth}×${v.videoHeight}`:"Not reported",
     dynamic_range:range?range.panel:null,dynamic_range_mini:range?range.text:null,
-    decode_audio:sourceAudio,
+    stream_format:level?[level.width>0&&level.height>0?`${level.width}×${level.height}`:null,level.videoCodec].filter(Boolean).join(" · ")||"Not reported":"Not reported",
+    device_audio:"Not reported",decode_audio:null,
     frames,frames_tone:droppedCount==null?"muted":droppedCount===0?"good":droppedCount<3?"warn":"bad",
     frame_rate:frameRate==null?null:`${frameRate.toFixed(1)} fps`,player_state:playbackState,
     decoder:p.decodeInfo?(p.decodeInfo.hw?"hardware":"software · this machine has no GPU path for this stream"):null,
@@ -14190,7 +14118,7 @@ function playbackStatsTelemetry(){
     later_ready:h&&h.server_next_ready_start_ms!=null&&h.server_next_ready_end_ms!=null?
       `${Math.round(h.server_next_ready_start_ms)}–${Math.round(h.server_next_ready_end_ms)} ms`:null,
     http_wait:httpWait&&httpWait.value,http_wait_note:httpWait&&httpWait.note,
-    client_loaded:`${Math.max(0,clientLoadedSeconds).toFixed(1)} s`,
+    client_loaded:clientLoadedSeconds==null?"Not reported":`${Math.max(0,clientLoadedSeconds).toFixed(1)} s`,
     client_loaded_tone:statsRunwayTone(clientLoadedSeconds,false),
     presentation,presentation_tone:playbackState==="Playing"?"good":
       playbackState==="Buffering"?"warn":playbackState==="Failed"?"bad":"",
@@ -14242,6 +14170,10 @@ function updateStats(){
   const telemetry=playbackStatsTelemetry();
   const contractRows=playbackInfoRows(STATS_MODE,telemetry);
   patchPlaybackInfoRows(body,STATS_MODE,contractRows,telemetry._health_word,telemetry._health_status);
+  const overview=body.querySelector("[data-stats-overview]");
+  if(overview) overview.innerHTML=STATS_MODE==="mini"
+    ?[["Playing resolution",telemetry.decode_resolution],["Playback",telemetry.player_state],["Buffered on device",telemetry.client_loaded]].map(([label,value])=>`<div class="pi-fact"><span class="pi-label">${esc(label)}</span><strong>${esc(value||"Not reported")}</strong></div>`).join("")
+    :playbackInfoOverview(telemetry);
   ov.classList.toggle("onecol",!!body.querySelector(".statscols.one"));
 }
 // Poll the session's server-side health while the stats overlay is open, and
@@ -14508,12 +14440,12 @@ function applyPlayerOutcome(outcome,ctx={}){
       const open=menu&&menu.classList.contains("on")?menu:document.getElementById("statsov");
       if(!open||!open.classList.contains("on")) return false;
       const items=Array.from(new Set(Array.from(
-        open.querySelectorAll('button:not([disabled]),[data-stats-mode]:not([disabled])'))));
+        open.querySelectorAll('button:not([disabled]),summary,[data-stats-mode]:not([disabled])'))));
       if(!items.length) return false;
       const at=items.indexOf(document.activeElement);
       const forward=direction==="down"||direction==="right";
       const next=at<0?(forward?0:items.length-1):(at+(forward?1:-1)+items.length)%items.length;
-      items[next].focus({preventScroll:true});
+      items[next].focus();
       return true;
     }
     case "focus_row":
@@ -14549,7 +14481,7 @@ window.addEventListener("keyup",e=>{ if(e.key===PLAYER_REPEAT_KEY){ PLAYER_REPEA
 // inside them belongs to `menu_focus` above — one answer, one place.
 ["pmenu","statsov"].forEach(id=>document.getElementById(id).addEventListener("keydown",e=>{
   if(e.key!=="Tab"||!e.currentTarget.classList.contains("on")) return;
-  const items=Array.from(e.currentTarget.querySelectorAll('button:not([disabled]),[data-stats-mode]:not([disabled])'));
+  const items=Array.from(e.currentTarget.querySelectorAll('button:not([disabled]),summary,[data-stats-mode]:not([disabled])'));
   if(!items.length) return;
   const first=items[0],last=items[items.length-1];
   if(e.shiftKey&&document.activeElement===first){ e.preventDefault(); last.focus(); }
@@ -16816,6 +16748,7 @@ function liveTvProgramme(channelId){
   return PlurxLiveTv.programmeAt(LIVE_TV.guide,channelId,liveTvNowSeconds());
 }
 function liveTvSourceProgrammeEnd(channel){
+  if(!channel) return null;
   const observed=channel&&channel.source_format&&channel.source_format.observed_at;
   const row=LIVE_TV.guide&&Array.isArray(LIVE_TV.guide.channels)
     ?LIVE_TV.guide.channels.find(entry=>entry.id===channel.id):null;
@@ -16844,7 +16777,7 @@ function liveTvTechnicalDetails(channel,status){
         String(plan.packaging||"").toUpperCase()].filter(Boolean).join(" · ")
       :["H.264",status.output_height?`${status.output_height}p`:null,"AAC"].filter(Boolean).join(" · ");
     const encoder=!plan&&status.encoder&&status.encoder!=="pending"?` · ${String(status.encoder).toUpperCase()} encoder`:"";
-    rows.push(`<div class="lt-tech-row"><b>Playing</b><span>${esc(delivery+encoder)}</span></div>`);
+    rows.push(`<div class="lt-tech-row"><b>Stream format</b><span>${esc(delivery+encoder)}</span></div>`);
     const signal=status.signal;
     if(signal){
       const metric=(label,value)=>Number.isFinite(value)
@@ -16854,6 +16787,91 @@ function liveTvTechnicalDetails(channel,status){
     }
   }
   return rows.length?`<div class="lt-tech" aria-label="Live stream details">${rows.join("")}</div>`:"";
+}
+let LIVE_TV_STATS_TIMER=null;
+let LIVE_TV_STATS_OPENER=null;
+function liveTvStatsTelemetry(){
+  const v=document.getElementById("live-tv-video"),current=LIVE_TV_LEASE.current;
+  const channel=current&&liveTvChannelById(current.channel?.id||LIVE_TV.selected);
+  const attached=!!current&&!!v&&!!(v.currentSrc||v.src);
+  const status=LIVE_TV.status,plan=status?.delivery||current?.delivery;
+  const source=PlurxLiveTv.sourceDetails(channel,liveTvNowSeconds(),liveTvSourceProgrammeEnd(channel));
+  const level=LIVE_TV.hls?.levels?.[LIVE_TV.hls.currentLevel];
+  const signal=status?.signal;
+  let edge=null,buffer=null,frames=null;
+  if(attached){
+    try{ buffer=`${bufferRunway(v).toFixed(1)} s`; }catch(e){}
+    try{ if(v.seekable.length) edge=`${Math.max(0,v.seekable.end(v.seekable.length-1)-v.currentTime).toFixed(1)} s`; }catch(e){}
+    try{ const q=v.getVideoPlaybackQuality?.(); if(q) frames=`${q.droppedVideoFrames} / ${q.totalVideoFrames} frames`; }catch(e){}
+  }
+  return {
+    method:plan?(plan.video_action==="copy"?(plan.audio_action==="copy"?"Remux":"Audio converted for this player"):"Video converted for this player"):"Not reported",
+    player_state:!attached?"Waiting for player":v.error?"Failed":v.ended?"Ended":v.paused?"Paused":v.readyState<3?"Buffering":"Playing",
+    decode_resolution:attached&&v.videoWidth>0&&v.videoHeight>0?`${v.videoWidth}×${v.videoHeight}`:"Not reported",
+    source_resolution:source.exact[0]||"Not reported",
+    source_video:source.exact.slice(1).join(" · ")||null,
+    source_resolution_note:source.observedAt?`Tuner source observed ${new Date(source.observedAt*1000).toLocaleString()}`:"Source measurement not reported.",
+    stream_format:plan?.output?[plan.output.width>0&&plan.output.height>0?`${plan.output.width}×${plan.output.height}`:null,plan.output.video_codec,plan.output.hdr].filter(Boolean).join(" · "):null,
+    decode_audio:plan?.output?[plan.output.audio_codec,plan.output.audio_channels>0?`${plan.output.audio_channels} channels`:null].filter(Boolean).join(" · "):null,
+    subtitles:attached&&v.textTracks?[...v.textTracks].filter(t=>t.mode==="showing").map(t=>t.label||t.language||"Selected").join(" · ")||"Off":"Not reported",
+    client_loaded:buffer||"Not reported",live_edge:edge||"Not reported",frames,
+    stalls:"Not reported",stalls_note:"This live player does not expose an interruption counter.",
+    observed_rate:LIVE_TV.hls?.bandwidthEstimate?fmtMbps(LIVE_TV.hls.bandwidthEstimate):null,
+    stream_rate:level?.bitrate?fmtMbps(level.bitrate):null,
+    status:status?.state||"Not reported",encoder:status?.encoder||null,
+    session:current?.session_id||null,
+    reception:signal?[signal.strength_percent,signal.quality_percent,signal.symbol_quality_percent].map((v,i)=>Number.isFinite(v)?`${["Strength","Quality","Symbol"][i]} ${v}%`:null).filter(Boolean).join(" · "):"Not reported"
+  };
+}
+function setLiveTvStatsMode(mode){
+  if(!["mini","standard","details","debug"].includes(mode)) return;
+  const panel=document.getElementById("live-tv-stats"); if(!panel) return;
+  panel.dataset.mode=mode;
+  panel.setAttribute("aria-modal",String(mode!=="mini"));
+  const backdrop=document.getElementById("live-tv-stats-backdrop");if(backdrop)backdrop.hidden=mode==="mini";
+  updateLiveTvStats();
+}
+function openLiveTvStats(){
+  closeLiveTvStats(false);
+  LIVE_TV_STATS_OPENER=document.activeElement;
+  const panel=document.createElement("section");
+  panel.id="live-tv-stats"; panel.className="statsov on live-stats"; panel.dataset.mode="standard";
+  panel.setAttribute("role","dialog");panel.setAttribute("aria-label","Playback info");panel.setAttribute("aria-modal","true");
+  panel.innerHTML=`<div class="statshd"><span>Playback info</span><div class="statsmodes" role="radiogroup" aria-label="Playback information level">${[["mini","Compact"],["standard","Overview"],["details","Details"],["debug","Diagnostics"]].map(([id,label])=>`<button type="button" data-live-stats-mode="${id}" role="radio" onclick="setLiveTvStatsMode('${id}')">${label}</button>`).join("")}</div><button class="statsx" aria-label="Close playback info" onclick="closeLiveTvStats()">×</button></div><div class="statsbody"></div>`;
+  const parent=document.fullscreenElement||document.body;
+  const backdrop=document.createElement("div");backdrop.id="live-tv-stats-backdrop";
+  backdrop.style.cssText="position:fixed;inset:0;z-index:9998";
+  backdrop.addEventListener("click",event=>{event.stopPropagation();closeLiveTvStats();});
+  parent.append(backdrop,panel);
+  panel.addEventListener("click",event=>event.stopPropagation());
+  wireLiveTvStatsKeys(panel);
+  updateLiveTvStats();panel.querySelector(".statsx").focus();
+  LIVE_TV_STATS_TIMER=setInterval(updateLiveTvStats,1000);
+}
+function closeLiveTvStats(restore=true){
+  clearInterval(LIVE_TV_STATS_TIMER);LIVE_TV_STATS_TIMER=null;
+  document.getElementById("live-tv-stats")?.remove();
+  document.getElementById("live-tv-stats-backdrop")?.remove();
+  if(restore){
+    const opener=LIVE_TV_STATS_OPENER?.isConnected?LIVE_TV_STATS_OPENER:document.querySelector("[data-live-info-opener]");
+    opener?.focus();
+  }
+  LIVE_TV_STATS_OPENER=null;
+}
+function updateLiveTvStats(){
+  const panel=document.getElementById("live-tv-stats");if(!panel)return;
+  const mode=panel.dataset.mode,t=liveTvStatsTelemetry(),body=panel.querySelector(".statsbody");
+  const rows=playbackInfoRows(mode,t);
+  const extra=(id,label,section,note)=>{if(t[id])rows.push({id,label,section,value:t[id],note,placement:"grid",tone:""});};
+  if(mode==="details"||mode==="debug"){
+
+    extra("live_edge","Behind stream live edge","BUFFERING / DELIVERY","Behind latest available media; not broadcast delay.");
+    extra("reception","Tuner reception","BUFFERING / DELIVERY","Strength, quality and symbol quality reported by the tuner.");
+  }
+  patchPlaybackInfoRows(body,mode,rows,"","");
+  const overview=body.querySelector("[data-stats-overview]");
+  if(overview)overview.innerHTML=mode==="mini"?[["Playing resolution",t.decode_resolution],["Playback",t.player_state],["Buffered on device",t.client_loaded]].map(([label,value])=>`<div class="pi-fact"><span class="pi-label">${esc(label)}</span><strong>${esc(value)}</strong></div>`).join(""):playbackInfoOverview(t,true);
+  panel.querySelectorAll("[data-live-stats-mode]").forEach(button=>{const selected=button.dataset.liveStatsMode===mode;button.classList.toggle("on",selected);button.setAttribute("aria-checked",String(selected));});
 }
 function liveTvRefreshTechnicalDetails(){
   const channel=liveTvChannelById(LIVE_TV.selected);
@@ -16935,6 +16953,7 @@ function liveTvNowBar(channel){
     ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()" title="Picture-in-picture (P)" aria-label="Picture-in-picture">⧉</button>':""}
     <button type="button" onclick="fullscreenLiveTv()" title="Fullscreen (F)" aria-label="Fullscreen">⛶</button>
     <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" title="Stop" aria-label="Stop">■</button>
+    <button type="button" data-live-info-opener onclick="openLiveTvStats()">Playback info</button>
     <div class="lt-nowtech" data-live-tv-technical>${liveTvTechnicalDetails(channel,LIVE_TV.status)}</div>
   </div>`;
 }
@@ -17229,6 +17248,7 @@ function liveTvPaint(){
         <button type="button" data-live-tv-mute onclick="muteLiveTv()" title="${muteLabel}" aria-label="${muteLabel}">${muted?"🔊":"🔇"}</button>
         ${liveTvPipSupported()?'<button type="button" onclick="toggleLiveTvPip()">PiP</button>':""}
         <button type="button" onclick="liveTvGuideSheet()">Guide</button>
+        <button type="button" data-live-info-opener onclick="openLiveTvStats()">Playback info</button>
         <button type="button" onclick="stopLiveTv().catch(liveTvFailure)" aria-label="Stop Live TV">Stop</button>
         <button type="button" onclick="exitLiveTvPresentation()">Exit</button>
       </div>
@@ -17364,7 +17384,19 @@ function liveTvApplyOutcome(outcome){
     default: return false;
   }
 }
+function wireLiveTvStatsKeys(panel){
+  panel.addEventListener("keydown",event=>{
+    if(event.key==="Escape"){event.preventDefault();closeLiveTvStats();}
+    if(event.key==="Tab"&&panel.dataset.mode!=="mini"){
+      const items=[...panel.querySelectorAll("button,summary")].filter(node=>node.getClientRects().length);
+      const at=items.indexOf(document.activeElement),next=event.shiftKey?(at-1+items.length)%items.length:(at+1)%items.length;
+      event.preventDefault();items[next]?.focus();
+    }
+    event.stopPropagation();
+  });
+}
 function liveTvKeydown(event){
+  if(document.getElementById("live-tv-stats")) return;
   const state=liveTvInputState();
   if(state===null) return;
   if(event.target&&/^(INPUT|TEXTAREA|SELECT)$/.test(event.target.tagName)) return;
@@ -18070,6 +18102,7 @@ async function dvrReminderRecord(id,channelId,airingStart){
   await dvrReminderAck(id);
 }
 function detachLiveTvMedia(){
+  closeLiveTvStats(false);
   clearInterval(LIVE_TV.timer); LIVE_TV.timer=null;
   LIVE_TV.status=null;
   if(LIVE_TV.hls){ LIVE_TV.hls.destroy(); LIVE_TV.hls=null; }
@@ -18582,10 +18615,7 @@ function developerPanel(settings,readiness){
       ${devReq(readiness,"library_channels","compatible_clients","Compatible clients","Old clients retain VOD and Live TV, but do not know the dedicated channel-session purpose or boundary controller.")}
       <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice. No tuner, metadata service, AI key, or external provider is required.</p>
       </div></details><div class="err" id="lcdeverr" role="alert"></div>${setCardFoot("saveLibraryChannelsDeveloper")}`);
-  const experimental=setCard(`${cardHead("HLS delivery comparison","A stream-format override for controlled client comparisons.",`<span class="pill warn">experimental</span>`)}
-      ${togRow("phs","Typeless sliding HLS","Changes the playlist format for new sessions only.",settings.hls_typeless_sliding)}
-      <div class="err" id="dxerr" role="alert"></div>${setCardFoot("saveExperimental")}`);
-  return `${setHead("Developer","Compatibility controls, experimental playback and device diagnostics.")}
+  return `${setHead("Developer","Compatibility controls and device diagnostics.")}
       ${destinations}${uiEnableAdvisory()}
       <div class="setsection" id="enable-recording"><h2>Recording</h2><p>Explicit enablement for capturing the tuner to a disk, with advisory deployment facts.</p></div>${dvrCard(settings,readiness)}
       <div class="setsection" id="enable-channels"><h2>Library channels</h2><p>Explicit playback enablement with advisory deployment facts.</p></div>${libraryChannels}
@@ -18593,8 +18623,7 @@ function developerPanel(settings,readiness){
       <div class="setsection"><h2>Playback surface contract</h2><p>Advisory verification status for the one fault contract every client renders. Nothing here is a switch.</p></div>${playbackSurfaceReadinessCard()}
       <div class="setsection"><h2>Web HLS startup recovery</h2><p>Always-on manifest recovery with advisory browser and server readiness.</p></div>${webHlsStartupRecoveryCard()}
       <div class="setsection"><h2>Compatibility</h2><p>Native server and protocol controls for compatible playback clients.</p></div>${windowsServerCard(settings,readiness)}${protocol}
-      <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}
-      <div class="setsection"><h2>Delivery experiments</h2><p>Use these overrides for controlled comparisons.</p></div>${experimental}`;
+      <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}`;
 }
 // Automatic decode recovery.
 //
@@ -20512,15 +20541,6 @@ async function saveAutomaticDecoderRecovery(btn){
     toast("Automatic decoder recovery setting saved"); if(btn) setCardSaved(btn);
     const card=document.getElementById("drcard");
     if(card) card.outerHTML=decodeRecoveryCard(saved);
-  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
-}
-async function saveExperimental(btn){
-  const err=document.getElementById("dxerr"); err.textContent="";
-  if(btn) btn.disabled=true;
-  try{
-    cacheSettings(await api("/settings",{method:"PUT",body:{
-      hls_typeless_sliding:document.getElementById("phs").checked}}));
-    toast("Experimental settings saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
 function monarrCardHtml(){
