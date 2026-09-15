@@ -16,6 +16,9 @@ works. Scope and phase gates live in [REQUIREMENTS.md](REQUIREMENTS.md) and
 
 ---
 
+For visual examples, see the [screenshot tour](features/SCREENSHOT-TOUR.md):
+native phones and tablets, Live TV guides, DVR, and browser library layouts.
+
 ## Browsing and recording usability
 
 The three web layouts share playback-first movie, episode and series pages.
@@ -786,11 +789,10 @@ browse and play directly against plurx — validated end-to-end with
 [ARCHITECTURE.md](ARCHITECTURE.md) §5.
 
 **Web settings:** Live TV has its own Content section for tuner enablement,
-owner recovery, and guide configuration. Playback owns experimental prepared
-quality switching ahead of the existing streaming defaults. Cluster owns the
-automatic transport-recovery guidance. Developer groups protocol
-compatibility, this-browser preparation, decoder experiments, and HLS delivery
-comparisons. Each server card saves only the setting it shows; the browser
+owner recovery, and guide configuration. Playback owns player defaults and advanced server delivery. Cluster owns the
+automatic transport-recovery guidance. Developer groups recording and library
+channel enablement, prepared quality handoff, protocol compatibility,
+this-browser preparation, decoder experiments, and HLS delivery comparisons. Each server card saves only the setting it shows; the browser
 override saves locally. Readiness and device qualification are expandable,
 textual, and advisory: missing or failed evidence never disables a toggle,
 rejects its Save, or replaces the saved choice.
@@ -972,6 +974,8 @@ Listed so the inventory above is unambiguous — these are deliberate, with reas
   admin-only, per-library Dolby Vision Profile 7 → 8.1 conversion in Settings
   → Libraries. It is off by default, builds and verifies a sibling replacement
   before changing the source path, and keeps the Profile 7 original by default.
+  DVR recording writes to its explicitly configured recording root (§4a);
+  deleting a saved recording is a separate confirmed action.
 - **Does not phone home or need the cloud.** No accounts hosted elsewhere, no
   plex.tv contact, no telemetry. It runs on a LAN with no internet.
 - **Does not push anything to other applications.** The integration in §11 is
@@ -979,15 +983,11 @@ Listed so the inventory above is unambiguous — these are deliberate, with reas
   monarr for its calendar if you paired one. plurx never tells another
   application to do something. Pushing watch state back to monarr is on the
   roadmap and is not built.
-- **Does not record television, or schedule anything.** The programme guide in
-  §4a is information: it says what is on and what is next, and offers no
-  recording, no reminders and no "tune at 9", because there is nothing behind
-  those. Live TV (§4a) plays one HDHomeRun tuner
-  and keeps nothing: no recording, no scheduling, no retention, no series
-  rules, no conflict resolution. It is also not a channel aggregator — no
-  streaming services, no discovery feed. DRM-flagged channels are listed and
-  refused because there is no licensed DRM path, and captions (608/708) are
-  not delivered until there is a fixture proving them end to end.
+- **Does not aggregate streaming services or bypass DRM.** Live TV and DVR
+  use the configured HDHomeRun tuner (§4a); library channels schedule existing
+  local media (§4b). There are no streaming-service discovery feeds.
+  DRM-flagged channels are listed and refused because there is no licensed
+  DRM path. Captions (608/708) remain bounded by end-to-end fixture coverage.
 - **Does not do a general music library** (v1 scope). The data model won't
   preclude it; it is not bolted on speculatively. Audiobooks *are* supported in
   Books libraries (§1b), and photos in Home libraries (§1a).

@@ -331,6 +331,7 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
+| [SCREENSHOT-TOUR.md](features/SCREENSHOT-TOUR.md) | What do native phone, tablet, browser, Live TV, recording, and library layouts look like with public-safe demo data? | live |
 | [HDHOMERUN-LIVE-TV-PLAN.md](features/HDHOMERUN-LIVE-TV-PLAN.md) | One tuner, every plurx client. | open |
 | [HDHOMERUN-LIVE-TV-STATUS.md](features/HDHOMERUN-LIVE-TV-STATUS.md) | What is built and what is proved on a real FLEX 4K. | open |
 | [LIVE-TV-ORIGINAL-QUALITY-IMPLEMENTATION.md](features/LIVE-TV-ORIGINAL-QUALITY-IMPLEMENTATION.md) | Preserve the broadcast when the player can use it, convert only incompatible tracks, and track the effort to main. | built |
