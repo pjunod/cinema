@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["27f91b76"]
+points = ["playback.pipeline", "apple.client", "android.client", "mobile.versioning"]
+checks = ["apple-simulators", "android-jvm", "mobile-version", "operations-contract"]
+reason = "The Apple XCTest regressions and Android JVM recovery suites keep timer-only presentation stalls explicitly unknown, forbid the legacy quality-reduction ticket on their bounded same-recipe repair, and retain the selected quality, tracks, offset, film position, pause intent, successor acknowledgement and cancellation ownership. Generic iOS and tvOS simulator builds plus Android assembleDebug compile the shipped native surfaces, while mobile-version and operations-contract bind both incremented build counters and the indexed Apple release note to the behavior commit. Actual AVPlayer and Media3 error paths retain their existing transport and compatibility classifications."
