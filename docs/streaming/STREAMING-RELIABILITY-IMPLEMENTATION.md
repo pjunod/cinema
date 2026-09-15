@@ -256,8 +256,8 @@ No requirement to complete a library-wide backfill.
 ### 4.2 Wave 2 integrates the first-play experience and native parity
 
 **C2 — preparation demand, joined outcomes and quality ownership.** After I1,
-connect missing exact plans and ingestion completion to the existing queue;
-separate foreground requests from periodic cadence; expose bounded queued,
+connect missing exact plans requested by playback to the existing queue;
+retain ingestion/discovery scheduling and separate requested work from periodic cadence; expose bounded queued,
 running, ready, failed and unavailable reasons through existing status
 surfaces. Reuse cancellation, source/recipe fences and job deduplication.
 Ensure repeated play requests cannot create duplicate full-file passes.
@@ -411,11 +411,11 @@ handoff and reassign work rather than leaving two tasks polling each other.
 | Package | Owner | State | Evidence / next step |
 |---|---|---|---|
 | Plan foundation | Coordinator | merged | [PR #322](http://192.168.4.7:3000/noirr/plurx/pulls/322); commit 05298f1c4, merged as fea5d2451; four docs checks and tracked hook passed |
-| C1 | Coordinator | verified; PR preparation | codex/streaming-control-contract; runtime commit 00a70a7b; 11 focused tests passed |
-| I1 | Sol 1 | implementing | Task 01a0a5b9-9c58-7a52-814c-db7b583e14bc; exact identity and shared consumer |
-| W1 | Sol 2 | implementing | Task 01a0a5b9-bb98-7fd2-a08e-42d1fc6747a3; recovery and obsolete playlist toggle removal |
-| C2 | Coordinator | depends on I1/W1 | Exact preparation demand and integrated outcomes |
-| I2 | Sol 1 | depends on I1 | Measurement and resource harness |
+| C1 | Coordinator | merged | [PR #323](http://192.168.4.7:3000/noirr/plurx/pulls/323); runtime 00a70a7b; 11 focused tests passed |
+| I1 | Sol 1 | merged | [PR #325](http://192.168.4.7:3000/noirr/plurx/pulls/325); runtime 2a2ec42f; seven focused identity, conversion and store tests passed |
+| W1 | Sol 2 | amendment in progress | [PR #324](http://192.168.4.7:3000/noirr/plurx/pulls/324); passive waits, transfer attribution and presented-frame corrections |
+| C2 | Coordinator | implementing | Exact preparation demand joins the existing queue; local focused verification |
+| I2 | Sol 1 | implementing | Existing playback-lab measurement extension; no production scan |
 | W2 | Sol 2 | depends on C1/W1 | Native evidence/recovery parity |
 | Final promotion | Coordinator | pending | One adversarial agent review; current-candidate main fast lane |
 | Fallback retirement | Coordinator/user | decision after Wave 2 | May remain deferred without prolonging this effort |
