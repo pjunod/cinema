@@ -50,7 +50,7 @@ class MediaFactsTest {
         )
 
         assertEquals(
-            listOf("2160P", "HEVC"),
+            listOf("2160P", "HEVC", "SDR"),
             detailMediaFacts(file).map { it.label },
         )
     }

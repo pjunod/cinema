@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 209
+One binary serves everything on one port (`:32400` by default). plurx has 210
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -942,6 +942,7 @@ missing source/recipe work. It does not wait for a full-file index pass.
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | GET | `/files/{id}/direct` | bearer | Original file bytes, full HTTP range support |
+| GET | `/files/{id}/download` | bearer or query token | Original file attachment, full HTTP range support; does not register playback |
 | GET | `/files/{id}/stream.mp4` | bearer | Progressive fragmented-MP4 remux from a live ffmpeg pipe |
 | GET | `/stream/{id}/status` | bearer, owner-checked | Progress of one progressive remux |
 

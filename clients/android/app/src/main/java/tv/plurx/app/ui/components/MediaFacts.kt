@@ -30,7 +30,7 @@ import tv.plurx.app.data.DynamicRange
 import tv.plurx.app.data.MediaFileDto
 import kotlin.math.min
 
-internal enum class MediaFactKind { Resolution, Video, DynamicRange, Audio }
+internal enum class MediaFactKind { Resolution, Video, DynamicRange, Audio, Container }
 
 /**
  * How a fact relates to what is actually happening right now
@@ -123,7 +123,8 @@ internal fun detailMediaFacts(file: MediaFileDto): List<MediaFact> = buildList {
         add(MediaFact(MediaFactKind.Video, label, "$label video"))
     }
     dynamicRangeFact(file)?.let(::add)
-    preferredAudioFact(file.audio_streams)?.let(::add)
+    if (file.video_codec != null && none { it.kind == MediaFactKind.DynamicRange }) add(MediaFact(MediaFactKind.DynamicRange, "SDR"))
+    file.container?.takeIf { it.isNotBlank() }?.let { add(MediaFact(MediaFactKind.Container, it.uppercase())) }
 }
 
 private val MediaFact.icon: ImageVector
@@ -131,6 +132,7 @@ private val MediaFact.icon: ImageVector
         MediaFactKind.Resolution -> Icons.Filled.Tv
         MediaFactKind.Video -> Icons.Filled.Movie
         MediaFactKind.DynamicRange -> Icons.Filled.AutoAwesome
+        MediaFactKind.Container -> Icons.Filled.Movie
         MediaFactKind.Audio -> Icons.Filled.GraphicEq
     }
 
@@ -143,6 +145,7 @@ private val MediaFact.brandColor: Color
         } else {
             Color(0xFF62CBBE)
         }
+        MediaFactKind.Container -> Color(0xFFABB6CA)
         MediaFactKind.Audio -> Color(0xFFA9B5FF)
     }
 

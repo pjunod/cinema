@@ -28,6 +28,8 @@ Apple build 160: [Native Live TV and shelf layouts](apple-builds/320-native-layo
 
 Native follow-up: [Phone, tablet and TV layout fixes](clients/NATIVE-LAYOUT-FOLLOWUP.md) — **open**.
 
+Library-page revision: [Quiet Home and open media details](clients/CALM-LIBRARY-PAGES.md) — **built**.
+
 ## Find it fast
 
 | You want to know… | Read |
@@ -252,6 +254,7 @@ player obeys, subtitles and overlays, layouts and themes.
 | [APPLE-CLIENT-PARITY.md](clients/APPLE-CLIENT-PARITY.md) | What the Apple client has, what it lacks, and which build proved it. | live |
 | [ANDROID-CLIENT-PARITY.md](clients/ANDROID-CLIENT-PARITY.md) | The same, for Android. | live |
 | [PLAYBACK-INFO-REDESIGN.md](clients/PLAYBACK-INFO-REDESIGN.md) | Playback info hierarchy, measurement semantics and qualification. | open |
+| [330-calm-library-pages.md](apple-builds/330-calm-library-pages.md) | Apple build 162 quiet Home and open media details. | built |
 | [playback-info-redesign.md](apple-builds/playback-info-redesign.md) | Apple build 161 playback-info changes. | open |
 | [328-native-stall-parity.md](apple-builds/328-native-stall-parity.md) | Apple release note for recipe-preserving native stall recovery. | open |
 | [PLAYER-INPUT-CONTRACT.md](clients/PLAYER-INPUT-CONTRACT.md) | One routing table every client obeys — which key does what, in which state. | live |

@@ -20,8 +20,10 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `101` — native viewer parity across phone, foldable,
-> and TV. Build 101 keeps unknown presentation stalls on the selected recipe:
+> Status: **v0.3.0**, build `102` — native viewer parity across phone, foldable,
+> and TV. Build 102 introduces a quieter library Home and an open Media section
+> with quality/container badges and collapsed searchable track lists.
+> Build 101 keeps unknown presentation stalls on the selected recipe:
 > the bounded repair no longer claims decoder starvation or sends the legacy
 > quality-reduction ticket, while actual Media3 errors retain their existing
 > transport and compatibility ladders. Build 100 groups playback information

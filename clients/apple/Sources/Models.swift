@@ -372,6 +372,19 @@ struct MediaFile: Codable, Identifiable {
     var size: Int? = nil
     var durationMs: Int? = nil
     var container: String? = nil
+    var vodIndexStatus: String? = nil
+    var vodIndexRefusal: String? = nil
+
+    var preparationSummary: String {
+        switch vodIndexStatus {
+        case "indexed": return "VOD HLS ready · seekable timeline analyzed"
+        case "partial": return "VOD HLS ready for some delivery routes"
+        case "pending": return "VOD analysis pending"
+        case "refused": return "VOD analysis refused · live recovery may be available"
+        case "unsupported": return "VOD analysis unsupported for this codec"
+        default: return "Preparation status not reported"
+        }
+    }
     var videoCodec: String? = nil
     var videoProfile: String? = nil
     var width: Int? = nil

@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["10947d7d"]
+ignore = true
+reason = "Metadata-only commit attaching the Theater restoration to its retained web regression; it changes no production code or test behavior."

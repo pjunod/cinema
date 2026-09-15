@@ -11,6 +11,7 @@ struct ItemMetadataBadge: Equatable, Identifiable {
         case video
         case dynamicRange
         case audio
+        case container
     }
 
     let kind: Kind
@@ -25,93 +26,50 @@ struct ItemMetadataBadgeRow: View {
     let badges: [ItemMetadataBadge]
 
     var body: some View {
-        #if os(tvOS)
-        badgeContent
-        #else
-        let mediaBadges = badges.filter(Self.usesStyledMediaBadge(_:))
-        let plainFacts = badges.filter { !Self.usesStyledMediaBadge($0) }
-        VStack(alignment: .leading, spacing: 6) {
-            if !mediaBadges.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(mediaBadges) { badge in
-                            IOSWebMediaBadge(badge: badge)
-                        }
-                    }
+        let media = badges.filter { [.resolution, .video, .dynamicRange, .container].contains($0.kind) }
+        let plain = badges.filter { ![.resolution, .video, .dynamicRange, .container].contains($0.kind) }
+        VStack(alignment: .leading, spacing: 8) {
+            ViewThatFits(in: .horizontal) {
+                badgeLine(media)
+                VStack(alignment: .leading, spacing: 6) {
+                    badgeLine(Array(media.prefix(2)))
+                    badgeLine(Array(media.dropFirst(2)))
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .clipped()
             }
-
-            if !plainFacts.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 13) {
-                        ForEach(plainFacts) { badge in
-                            Text(Self.compactLabel(for: badge))
-                                .lineLimit(1)
-                                .accessibilityLabel(badge.accessibilityLabel)
-                        }
-                    }
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(Palette.onBg.opacity(0.7))
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .clipped()
-            }
+            Text(plain.map(Self.compactLabel).joined(separator: " · "))
+                .font(.caption).foregroundStyle(Palette.muted)
         }
-        #endif
     }
 
-    #if os(iOS)
-    static func compactLabel(for badge: ItemMetadataBadge) -> String {
-        if badge.kind == .resolution, badge.mark == nil {
-            return badge.accessibilityLabel
+    private func badgeLine(_ values: [ItemMetadataBadge]) -> some View {
+        HStack(spacing: 6) {
+            ForEach(values) { badge in
+                Text(Self.compactLabel(for: badge))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(tint(badge))
+                    .padding(.horizontal, 8).padding(.vertical, 4)
+                    .background(tint(badge).opacity(0.14), in: Capsule())
+                    .overlay(Capsule().stroke(tint(badge).opacity(0.45), lineWidth: 0.75))
+                    .accessibilityLabel(badge.accessibilityLabel)
+            }
         }
-        guard let mark = badge.mark else { return badge.accessibilityLabel }
-        if badge.kind == .runtime {
-            return mark
-                .replacingOccurrences(of: " hr ", with: "h ")
-                .replacingOccurrences(of: " hr", with: "h")
-                .replacingOccurrences(of: " min", with: "m")
-        }
-        return mark
     }
 
-    static func usesStyledMediaBadge(_ badge: ItemMetadataBadge) -> Bool {
+    private func tint(_ badge: ItemMetadataBadge) -> Color {
         switch badge.kind {
-        case .resolution, .video, .dynamicRange, .audio:
-            return true
-        case .series, .episode, .year, .runtime, .author:
-            return false
+        case .resolution, .video: return Color(red: 0.40, green: 0.66, blue: 1)
+        case .dynamicRange: return Color(red: 0.93, green: 0.77, blue: 0.47)
+        default: return Palette.muted
         }
     }
-    #endif
 
-    #if os(tvOS)
-    private var badgeContent: some View {
-        HStack(spacing: 9) {
-            ForEach(badges) { badge in
-                HStack(spacing: 6) {
-                    Image(systemName: badge.symbol)
-                    if let mark = badge.mark {
-                        Text(mark)
-                            .fontWeight(.semibold)
-                    }
-                }
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
-                .background(Palette.surfaceHi.opacity(0.84), in: Capsule())
-                .overlay {
-                    Capsule().stroke(Palette.outline.opacity(0.72), lineWidth: 0.5)
-                }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(badge.accessibilityLabel)
-            }
-        }
-        .font(.system(size: 19, weight: .medium, design: .rounded))
-        .foregroundColor(Palette.onBg.opacity(0.86))
+    static func compactLabel(for badge: ItemMetadataBadge) -> String {
+        let value = badge.mark ?? badge.accessibilityLabel
+        return badge.kind == .runtime ? value.replacingOccurrences(of: " hr ", with: "h ").replacingOccurrences(of: " hr", with: "h").replacingOccurrences(of: " min", with: "m") : value
     }
-    #endif
+    static func usesStyledMediaBadge(_ badge: ItemMetadataBadge) -> Bool {
+        [.resolution, .video, .dynamicRange, .container].contains(badge.kind)
+    }
 }
 
 #if os(iOS)
@@ -681,6 +639,7 @@ struct DetailView: View {
     /// choice made for one file is never spent on another's stream indices.
     @State private var pendingTrackSelection = PrePlaySelection.none
     @State private var pendingTrackSelectionFileId: Int?
+    @State private var selectedMediaFileID: Int?
     #if os(iOS)
     @State private var downloadBusy = false
     @State private var reader: ReaderContext?
@@ -956,6 +915,9 @@ struct DetailView: View {
 
     @ViewBuilder
     private func content(_ detail: ItemDetail) -> some View {
+        if detail.item.isMovieOrEpisode || detail.item.kind == "video" {
+            calmContent(detail)
+        } else {
         #if os(tvOS)
         if detail.item.kind == "show" || detail.item.kind == "season" {
             tvSeriesContent(detail)
@@ -969,6 +931,68 @@ struct DetailView: View {
             standardContent(detail)
         }
         #endif
+        }
+    }
+
+    private func calmContent(_ detail: ItemDetail) -> some View {
+        let item = detail.item
+        let files = detail.files ?? []
+        let file = files.first(where: { $0.id == selectedMediaFileID }) ?? Self.playbackFile(in: detail, positionMs: item.watch?.positionMs ?? 0) ?? files.first
+        let resume = item.watch?.watched == true ? 0 : (item.watch?.positionMs ?? 0)
+        let duration = file?.durationMs ?? item.runtimeMs ?? 0
+        return DetailBodyFrame {
+            VStack(alignment: .leading, spacing: 20) {
+                if let ancestors = detail.ancestors, !ancestors.isEmpty { DetailBreadcrumb(ancestors: ancestors) }
+                HStack(alignment: .top, spacing: 18) {
+                    AuthImage(path: item.poster ?? item.backdrop)
+                        .frame(width: 90, height: 128).clipped().cornerRadius(8)
+                    VStack(alignment: .leading, spacing: 10) {
+                        Text(item.title).font(.title.bold()).fixedSize(horizontal: false, vertical: true)
+                        ItemMetadataBadgeRow(badges: Self.itemMetadataBadges(item, file: file, durationMs: duration, includeSeries: true))
+                        if let file { Text(CalmTrackList.englishAvailability(file)).font(.caption).foregroundStyle(Palette.muted) }
+                    }
+                }
+                if let overview = item.overview { Text(overview).foregroundStyle(Palette.muted).fixedSize(horizontal: false, vertical: true) }
+                if let file, file.available != false {
+                    #if os(iOS)
+                    mobileActions(detail, file: file, durationMs: duration, resumeMs: resume, canResume: resume > 3000)
+                    #else
+                    playbackActions(item: item, file: file, durationMs: duration, resumeMs: resume, canResume: resume > 3000)
+                    watchButton(detail)
+                    #endif
+                }
+                if let actionError { Text(actionError).foregroundStyle(Palette.accent) }
+                if let file {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("Media").font(.headline)
+                        if files.count > 1 {
+                            Picker("Version", selection: Binding(get: { file.id }, set: { selectedMediaFileID = $0 })) {
+                                ForEach(files) { version in Text(version.filename ?? "Version \(version.id)").tag(version.id) }
+                            }
+                        }
+                        ForEach(Self.episodeMediaInfoRows(file).filter { $0.label != "Audio" && $0.label != "File" }) { row in
+                            VStack(alignment: .leading, spacing: 4) { Text(row.label).font(.caption).foregroundStyle(Palette.muted); Text(row.value).font(.callout) }
+                        }
+                        CalmTrackList(file: file, selection: trackSelectionBinding(for: file), isSubtitle: false).id("audio-\(file.id)")
+                        CalmTrackList(file: file, selection: trackSelectionBinding(for: file), isSubtitle: true).id("subtitles-\(file.id)")
+                        TrackChoiceCostNotice(file: file, selection: trackSelection(for: file))
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Preparation").font(.caption).foregroundStyle(Palette.muted)
+                            Text(file.preparationSummary).font(.callout)
+                            if let reason = file.vodIndexRefusal { Text(reason).font(.caption).foregroundStyle(Palette.muted) }
+                        }
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Diagnostics").font(.caption).foregroundStyle(Palette.muted)
+                            Text(file.videoCodec == nil ? "Media metadata has not been read yet." : "Media metadata available.").font(.callout)
+                        }
+                        ForEach(Self.episodeMediaInfoRows(file).filter { $0.label == "File" }) { row in Text(row.value).font(.caption).foregroundStyle(Palette.muted) }
+                        if file.available == false { Text("This file is unavailable. Choose another version or check its library location.").foregroundStyle(Palette.accent) }
+                    }
+                    .padding(18).background(Palette.surface, in: RoundedRectangle(cornerRadius: 12))
+                }
+            }
+            .padding(.top, 24).padding(.bottom, 32)
+        }
     }
 
     #if os(iOS)
@@ -2027,6 +2051,12 @@ struct DetailView: View {
                 mark: sound.mark,
                 accessibilityLabel: sound.accessibilityLabel
             ))
+        }
+        if let file, file.videoCodec != nil, !badges.contains(where: { $0.kind == .dynamicRange }) {
+            badges.append(ItemMetadataBadge(kind: .dynamicRange, symbol: "sun.max", mark: "SDR", accessibilityLabel: "SDR"))
+        }
+        if let container = file?.container, !container.isEmpty {
+            badges.append(ItemMetadataBadge(kind: .container, symbol: "archivebox", mark: container.uppercased(), accessibilityLabel: container.uppercased()))
         }
         return badges
     }

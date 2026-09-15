@@ -220,6 +220,8 @@ data class MediaFileDto(
     val available: Boolean = true,
     /** Server-owned format/action verdict; absent on older servers. */
     val reader: ReaderCapability? = null,
+    val vod_index_status: String? = null,
+    val vod_index_refusal: String? = null,
     val probed: Boolean = true,
     val missing_path: String? = null,
 ) {

@@ -527,3 +527,77 @@ struct TrackChoiceCostNotice: View {
         }
     }
 }
+
+/// A bounded, searchable list. The collapsed row keeps language availability
+/// and the actual pending choice visible without listing every stream.
+struct CalmTrackList: View {
+    let file: MediaFile
+    @Binding var selection: PrePlaySelection
+    let isSubtitle: Bool
+    @State private var expanded = false
+    @State private var query = ""
+    @State private var showAll = false
+
+    private var rows: [TrackFacts.Row] { isSubtitle ? TrackFacts.subtitleRows(file) : TrackFacts.audioRows(file) }
+    private var filtered: [TrackFacts.Row] { rows.filter { query.isEmpty || $0.summary.localizedCaseInsensitiveContains(query) } }
+    private var title: String { isSubtitle ? "Subtitles" : "Audio" }
+    private var summary: String {
+        isSubtitle ? TrackFacts.subtitleSummary(file, chosen: selection.subtitleIndex) : TrackFacts.audioSummary(file, chosen: selection.audioIndex)
+    }
+    private var chosen: Int? {
+        isSubtitle ? (selection.subtitleIndex ?? file.playbackDefaults?.subtitle?.selectedIndex) : (selection.audioIndex ?? file.playbackDefaults?.audio?.selectedIndex)
+    }
+
+    static func englishNote(_ languages: [String?], kind: String, probed: Bool) -> String {
+        let normalized = languages.map { ($0 ?? "").lowercased().replacingOccurrences(of: "_", with: "-").split(separator: "-").first.map(String.init) ?? "" }
+        if normalized.contains(where: { ["en", "eng", "english"].contains($0) }) { return "English \(kind) available" }
+        if !probed || normalized.contains(where: { ["", "und", "unknown"].contains($0) }) { return "English \(kind) not confirmed" }
+        return "No English \(kind)"
+    }
+    static func englishAvailability(_ file: MediaFile) -> String {
+        [englishNote((file.audioStreams ?? []).map(\.language), kind: "audio", probed: file.videoCodec != nil), englishNote((file.subtitleStreams ?? []).map(\.language), kind: "subtitles", probed: file.videoCodec != nil)].joined(separator: " · ")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button { expanded.toggle() } label: {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(title).font(.caption).foregroundStyle(Palette.muted)
+                        Text(summary).fixedSize(horizontal: false, vertical: true)
+                        Text(Self.englishNote(isSubtitle ? (file.subtitleStreams ?? []).map(\.language) : (file.audioStreams ?? []).map(\.language), kind: isSubtitle ? "subtitles" : "audio", probed: file.videoCodec != nil)).font(.caption).foregroundStyle(Palette.muted)
+                    }
+                    Spacer()
+                    Text("\(rows.count) tracks").font(.caption)
+                    Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
+            }
+            #if os(tvOS)
+            .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
+            #else
+            .buttonStyle(.plain)
+            #endif
+            .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+            if expanded {
+                TextField("Find a language or format", text: $query)
+                Button("Use server default") {
+                    if isSubtitle { selection.subtitleIndex = nil } else { selection.audioIndex = nil }
+                }
+                if isSubtitle { Button("Off") { selection.subtitleIndex = PrePlaySelection.subtitleOff } }
+                ForEach(Array(filtered.prefix(showAll ? filtered.count : 6))) { row in
+                    Button {
+                        if isSubtitle { selection.subtitleIndex = row.index } else { selection.audioIndex = row.index }
+                    } label: {
+                        HStack(alignment: .top) {
+                            Image(systemName: chosen == row.index ? "checkmark.circle.fill" : "circle")
+                            Text(row.summary + (row.isServerDefault ? " · default" : "")).fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }.disabled(file.available == false)
+                }
+                if filtered.count > 6 { Button(showAll ? "Show fewer tracks" : "Show all \(filtered.count) tracks") { showAll.toggle() } }
+                Text(filtered.isEmpty ? "No matching tracks" : "\(min(filtered.count, showAll ? filtered.count : 6)) of \(filtered.count) matching tracks").font(.caption).foregroundStyle(Palette.muted)
+            }
+        }
+    }
+}

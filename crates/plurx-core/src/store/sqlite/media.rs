@@ -573,6 +573,7 @@ impl MediaStore for SqliteStore {
                      LEFT JOIN items show ON show.id = season.parent_id
                      WHERE i.kind IN ('movie','episode','video','folder','book','audiobook')
                        AND (?1 IS NULL OR i.library_id = ?1)
+                       AND (?1 IS NOT NULL OR NOT EXISTS (SELECT 1 FROM libraries l WHERE l.id = i.library_id AND l.kind = 'recordings'))
                  )
                  SELECT {r}, r.rail_show_title, r.rail_season_poster
                  FROM ranked r
@@ -2556,6 +2557,61 @@ mod tests {
             .expect("delete files");
         assert_eq!(store.prune_empty_items(lib.id).await.expect("prune"), 3);
         assert!(store.get_item(show).await.expect("get").is_none());
+    }
+
+    #[tokio::test]
+    async fn global_recent_additions_exclude_recordings_before_limiting() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let mut movie_id = 0;
+        let mut recordings_id = 0;
+        for (kind, count) in [(LibraryKind::Movies, 1), (LibraryKind::Recordings, 21)] {
+            let lib = store
+                .create_library(&NewLibrary {
+                    name: format!("{kind:?}"),
+                    kind,
+                    paths: vec![PathBuf::from("/media")],
+                    anime: false,
+                })
+                .await
+                .expect("library");
+            if kind == LibraryKind::Recordings {
+                recordings_id = lib.id;
+            }
+            for index in 0..count {
+                let id = store
+                    .insert_item(&NewItem {
+                        library_id: lib.id,
+                        kind: if kind == LibraryKind::Movies {
+                            ItemKind::Movie
+                        } else {
+                            ItemKind::Video
+                        },
+                        parent_id: None,
+                        title: format!("Title {index}"),
+                        year: None,
+                        season_number: None,
+                        episode_number: None,
+                    })
+                    .await
+                    .expect("item");
+                if kind == LibraryKind::Movies {
+                    movie_id = id;
+                }
+            }
+        }
+        let home = store.recently_added(None, 20).await.expect("home");
+        assert_eq!(
+            home.iter().map(|row| row.item.id).collect::<Vec<_>>(),
+            vec![movie_id]
+        );
+        let scoped = store
+            .recently_added(Some(recordings_id), 20)
+            .await
+            .expect("scoped");
+        assert_eq!(scoped.len(), 20);
+        assert!(scoped
+            .iter()
+            .all(|row| row.item.library_id == recordings_id));
     }
 
     #[tokio::test]

@@ -78,7 +78,10 @@ class DetailTrackFactsTest {
     fun everySubtitleTrackIsListedWithLanguageFormatAndItsMarkers() {
         show()
 
-        compose.onNodeWithText("Subtitles").assertIsDisplayed()
+        compose.onNodeWithText("Subtitles ·", substring = true).assertIsDisplayed()
+        compose.onNodeWithText("Japanese · PGS · Forced · SDH").assertDoesNotExist()
+        compose.onNodeWithText("Audio ·", substring = true).performClick()
+        compose.onNodeWithText("Subtitles ·", substring = true).performClick()
         compose.onNodeWithText("English · SRT").assertIsDisplayed()
         compose.onNodeWithText("Japanese · PGS · Forced · SDH").assertIsDisplayed()
         // Audio keeps its existing facts beside them.
@@ -94,6 +97,8 @@ class DetailTrackFactsTest {
         compose.onNodeWithText("English audio available — Japanese plays by default.")
             .assertIsDisplayed()
         compose.onNodeWithText("English subtitles.").assertIsDisplayed()
+        compose.onNodeWithText("Audio ·", substring = true).performClick()
+        compose.onNodeWithText("Subtitles ·", substring = true).performClick()
         // And the server's own picks are marked as the defaults — one per list.
         compose.onAllNodesWithText("Default").assertCountEquals(2)
     }
@@ -110,7 +115,7 @@ class DetailTrackFactsTest {
             ),
         )
 
-        compose.onNodeWithText("Subtitles").assertIsDisplayed()
+        compose.onNodeWithText("Subtitles ·", substring = true).assertIsDisplayed()
         compose.onNodeWithText("No subtitles in this file.").assertIsDisplayed()
     }
 
@@ -119,6 +124,8 @@ class DetailTrackFactsTest {
         var chosen = PreplayTracks.NONE
         show(tracks = chosen, onTracks = { chosen = it })
 
+        compose.onNodeWithText("Audio ·", substring = true).performClick()
+        compose.onNodeWithText("Subtitles ·", substring = true).performClick()
         compose.onNodeWithText("English · Stereo · AAC").performClick()
         assertEquals(PreplayTracks(audio = 0), chosen)
 
@@ -132,6 +139,7 @@ class DetailTrackFactsTest {
         var chosen = PreplayTracks.NONE
         show(onTracks = { chosen = it })
 
+        compose.onNodeWithText("Subtitles ·", substring = true).performClick()
         compose.onNodeWithText("Off").performClick()
         assertEquals(PreplayTracks(subtitle = SubtitleChoice(null)), chosen)
         // Which is distinct from having chosen nothing at all.

@@ -878,6 +878,7 @@ impl HiqliteAuthStore {
                  LEFT JOIN items show ON show.id = season.parent_id \
                  WHERE i.kind IN ('movie','episode','video','folder','book','audiobook') \
                    AND ($1 IS NULL OR i.library_id = $1) \
+                   AND ($1 IS NOT NULL OR NOT EXISTS (SELECT 1 FROM libraries l WHERE l.id = i.library_id AND l.kind = 'recordings')) \
              ) \
              SELECT {r}, r.rail_show_title, r.rail_season_poster \
              FROM ranked r WHERE r.rail_rank = 1 \

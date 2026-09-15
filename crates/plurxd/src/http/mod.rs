@@ -346,6 +346,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/offline/media/{token}/{segment}", get(offline::segment))
         .route("/files/{id}/direct", get(stream::direct))
+        .route("/files/{id}/download", get(stream::download))
         .route("/files/{id}/content", get(stream::book_content))
         .route("/files/{id}/publication", post(publication::open))
         .route("/publication/{session}", delete(publication::close))
@@ -821,7 +822,13 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                 "v1",
                 "files",
                 _,
-                "decision" | "offline-options" | "direct" | "content" | "stream.mp4" | "photo"
+                "decision"
+                    | "offline-options"
+                    | "direct"
+                    | "download"
+                    | "content"
+                    | "stream.mp4"
+                    | "photo"
             ] | ["api", "v1", "stream", _, "status"]
                 | ["api", "v1", "offline", "packages", _]
                 | ["api", "v1", "images", _]
@@ -1737,6 +1744,7 @@ mod tests {
             "/api/v1/files/7/offline-options",
             "/api/v1/files/7/stream.mp4",
             "/api/v1/files/7/direct",
+            "/api/v1/files/7/download",
             "/api/v1/files/7/content",
             "/api/v1/offline/media/capability/0.ts",
             "/api/v1/publication/capability/chapter.xhtml",
@@ -11961,6 +11969,51 @@ mod tests {
             .header("range", format!("bytes={from}-{to}"))
             .body(Body::empty())
             .expect("req")
+    }
+
+    #[tokio::test]
+    async fn original_download_supports_ranges_without_registering_playback() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        // The legacy seed records a 42-byte file but writes a shorter placeholder.
+        // Download serving deliberately rejects bytes that differ from the probe.
+        let file = state
+            .store
+            .get_file(seeded.file)
+            .await
+            .expect("query seeded file")
+            .expect("seeded file");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&file.path)
+            .expect("open placeholder")
+            .set_len(file.size as u64)
+            .expect("match recorded length");
+        let uri = format!("/api/v1/files/{}/download?token={admin}", seeded.file);
+        let response = app
+            .clone()
+            .oneshot(ranged(&uri, 0, 1))
+            .await
+            .expect("download");
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_DISPOSITION],
+            "attachment"
+        );
+        let (_, activity) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
+        assert!(activity["deliveries"]
+            .as_array()
+            .expect("deliveries")
+            .is_empty());
+        let unauthenticated = format!("/api/v1/files/{}/download", seeded.file);
+        assert_eq!(
+            app.oneshot(ranged(&unauthenticated, 0, 1))
+                .await
+                .expect("denied")
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     /// Direct play is a *storm* of ranged 206s, not a connection: a seeking

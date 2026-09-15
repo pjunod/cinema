@@ -2135,7 +2135,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 307 -> 300: seven direct spawn/output launch sites now route through the one
 # reviewed suspended-spawn/Job-assignment owner.
 # PR #313 ownership review: Two Ollama response.status() reads inspect bounded HTTP responses. They launch no process.
-expected_occurrences = 302
+# PR #330 ownership review: +2 Response::status() reads in
+# original_download_supports_ranges_without_registering_playback inspect the
+# in-process ranged attachment and unauthenticated denial. Neither creates a
+# child process, task, timer, or producer; the existing file-serving owner is
+# unchanged. Both matches are test-only HTTP assertions.
+expected_occurrences = 304
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
