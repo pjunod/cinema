@@ -649,13 +649,16 @@ struct LiveTvPlayerFacts: Equatable {
     let hasAccessEvents: Bool
     let attachedAt: Date?
     let asOf: Date
+    var resolution: String? = nil
+    var playerState: String = "Not reported"
 
     static func capture(
         item: AVPlayerItem?,
         behindEdgeSeconds: Double?,
         bufferedSeconds: Double?,
         attachedAt: Date?,
-        asOf: Date = Date()
+        asOf: Date = Date(),
+        playerState: String = "Not reported"
     ) -> Self {
         let events = item?.accessLog()?.events.map {
             LiveTvAccessEventFacts(
@@ -664,13 +667,18 @@ struct LiveTvPlayerFacts: Equatable {
                 stalls: $0.numberOfStalls
             )
         } ?? []
-        return from(
+        var facts = from(
             events: events,
             behindEdgeSeconds: behindEdgeSeconds,
             bufferedSeconds: bufferedSeconds,
             attachedAt: attachedAt,
             asOf: asOf
         )
+        if let size = item?.presentationSize, size.width > 0, size.height > 0 {
+            facts.resolution = "\(Int(size.width))×\(Int(size.height))"
+        }
+        facts.playerState = playerState
+        return facts
     }
 
     static func from(
@@ -755,66 +763,6 @@ struct LiveTvFormatBadges: View {
     }
 }
 
-struct LiveTvTechnicalDetails: View {
-    let channel: LiveTvChannel
-    let status: LiveTvStatus?
-    var delivery: LiveTvDelivery? = nil
-
-    private var plan: LiveTvDelivery? { status?.delivery ?? delivery }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            if let source = channel.sourceFormatDescription {
-                detailRow("Source", source)
-            }
-            if let observed = channel.sourceFormat?.observedAt {
-                detailRow(
-                    "Observed",
-                    Date(timeIntervalSince1970: TimeInterval(observed)).formatted(date: .abbreviated, time: .shortened)
-                )
-            }
-            detailRow("Method", plan?.playbackMethod ?? "Playback method unavailable")
-            if let plan {
-                detailRow("Video", plan.videoDescription)
-                detailRow("Audio", plan.audioDescription)
-                detailRow("Stream", "HLS · \(plan.packaging.uppercased())")
-                if plan.videoAction == "encode", let encoder = status?.encoder, encoder != "pending" {
-                    detailRow("Encoder", encoder)
-                }
-            }
-            if let signal = status?.signal {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("SIGNAL").font(.system(size: 9, weight: .bold)).foregroundStyle(Palette.muted)
-                    HStack(spacing: 10) {
-                        signalMeter("Strength", signal.strengthPercent)
-                        signalMeter("Quality", signal.qualityPercent)
-                        signalMeter("Symbol", signal.symbolQualityPercent)
-                    }
-                }
-            }
-        }
-        .padding(.top, 7)
-    }
-
-    private func detailRow(_ label: String, _ value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(label.uppercased()).font(.system(size: 9, weight: .bold))
-                .foregroundStyle(Palette.muted).frame(width: 54, alignment: .leading)
-            Text(value).font(.caption).foregroundStyle(Palette.muted)
-        }
-    }
-
-    @ViewBuilder private func signalMeter(_ label: String, _ value: Int?) -> some View {
-        if let value {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("\(label) \(value)%").font(.caption2).foregroundStyle(Palette.muted)
-                ProgressView(value: Double(value), total: 100).tint(Palette.accent)
-            }
-        }
-    }
-}
-
-#if os(tvOS)
 struct LiveTvStreamInfoPanel: View {
     let programme: LiveTvAiring
     let channel: LiveTvChannel
@@ -822,7 +770,7 @@ struct LiveTvStreamInfoPanel: View {
     let delivery: LiveTvDelivery?
     let player: LiveTvPlayerFacts
     let onClose: () -> Void
-    @FocusState private var closeFocused: Bool
+    @State private var mode: PlaybackStatsMode = .standard
 
     static func rows(
         programme: LiveTvAiring,
@@ -963,81 +911,47 @@ struct LiveTvStreamInfoPanel: View {
         )
     }
 
-    private func infoColumn(
-        _ sections: [LiveTvStreamInfoRow.Section]
-    ) -> some View {
-        VStack(alignment: .leading, spacing: 24) {
-            ForEach(sections, id: \.self) { section in
-                VStack(alignment: .leading, spacing: 11) {
-                    Text(section.rawValue)
-                        .font(.system(size: 17, weight: .bold, design: .monospaced))
-                        .foregroundStyle(Palette.accent)
-                        .tracking(1.7)
-                    ForEach(rows.filter { $0.section == section }) { row in
-                        infoRow(row)
-                    }
-                }
-            }
+    private var facts: [PlaybackInfoFact] {
+        let plan = status?.delivery ?? delivery
+        func seconds(_ value: Double?) -> String { value.map { String(format: "%.1f s", $0) } ?? "Not reported" }
+        let reception = [
+            status?.signal?.strengthPercent.map { "Strength \($0)%" },
+            status?.signal?.qualityPercent.map { "Quality \($0)%" },
+            status?.signal?.symbolQualityPercent.map { "Symbol \($0)%" },
+        ].compactMap { $0 }.joined(separator: " · ")
+        var facts = [
+            PlaybackInfoFact(id: "decode_resolution", label: "Playing resolution", value: player.resolution ?? "Not reported", note: playbackInfoExplanation("decode_resolution")),
+            PlaybackInfoFact(id: "source_resolution", label: "Broadcast source", value: channel.sourceFormatDescription ?? "Not reported", note: channel.sourceFormat.map { "Source observed \(Date(timeIntervalSince1970: TimeInterval($0.observedAt)).formatted())" }),
+            PlaybackInfoFact(id: "stream_format", label: "Stream format", value: plan?.videoDescription ?? "Not reported", note: "Server delivery metadata; separate from the picture reported by the player."),
+            PlaybackInfoFact(id: "method", label: "Delivery method", value: plan?.playbackMethod ?? "Not reported", group: "Server work"),
+            PlaybackInfoFact(id: "status", label: "Server state", value: status?.state ?? "Not reported", note: playbackInfoExplanation("status"), group: "Server work"),
+            PlaybackInfoFact(id: "device_audio", label: "Device audio output", value: "Not reported", note: "Track metadata does not confirm speaker or HDMI output."),
+            PlaybackInfoFact(id: "decode_audio", label: "Stream audio track", value: plan?.audioDescription ?? "Not reported", note: playbackInfoExplanation("decode_audio")),
+            PlaybackInfoFact(id: "subtitles", label: "Subtitles", value: "Not reported"),
+            PlaybackInfoFact(id: "player_state", label: "Playback", value: player.playerState),
+            PlaybackInfoFact(id: "client_loaded", label: "Buffered on device", value: seconds(player.bufferedSeconds), note: playbackInfoExplanation("client_loaded"), group: "Buffer & delivery"),
+            PlaybackInfoFact(id: "live_edge", label: "Behind stream live edge", value: seconds(player.behindEdgeSeconds), note: "Behind latest available media; not broadcast delay.", group: "Live stream & reception"),
+            PlaybackInfoFact(id: "reception", label: "Tuner reception", value: reception.isEmpty ? "Not reported" : reception, group: "Live stream & reception"),
+            PlaybackInfoFact(id: "stalls", label: "Buffering interruptions", value: player.stalls.map(String.init) ?? "Not reported", note: playbackInfoExplanation("stalls"), group: "Buffer & delivery"),
+            PlaybackInfoFact(id: "observed_rate", label: "Observed download rate", value: player.observedBitrate.map { String(format: "%.1f Mb/s", $0 / 1_000_000) } ?? "Not reported", note: playbackInfoExplanation("observed_rate"), group: "Buffer & delivery"),
+            PlaybackInfoFact(id: "sample", label: "Player sampled", value: player.asOf.formatted(date: .omitted, time: .standard), group: "Session & history"),
+        ]
+        facts += rows.map { row in
+            PlaybackInfoFact(id: "live-" + row.id, label: row.label, value: row.value,
+                group: row.section == .signal ? "Live stream & reception" : row.section == .delivery ? "Server work" : "Session & history", diagnosticOnly: true)
         }
-        .frame(maxWidth: .infinity, alignment: .topLeading)
-    }
-
-    private func infoRow(_ row: LiveTvStreamInfoRow) -> some View {
-        VStack(alignment: .leading, spacing: 5) {
-            HStack(alignment: .firstTextBaseline, spacing: 20) {
-                Text(row.label)
-                    .font(.system(size: 18, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.36))
-                    .frame(width: 150, alignment: .leading)
-                Text(row.value)
-                    .font(.system(size: 22))
-                    .lineLimit(2)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            if let percent = row.percent {
-                ProgressView(value: Double(percent), total: 100)
-                    .tint(Palette.accent)
-                    .frame(height: 6)
-                    .padding(.leading, 170)
-            }
-        }
+        return facts
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 30) {
-            HStack {
-                Text("Stream info · as of \(player.asOf.formatted(date: .omitted, time: .shortened))")
-                    .font(.system(size: 34, weight: .semibold))
-                Spacer()
-                Button(action: onClose) {
-                    Label("Close", systemImage: "xmark")
-                }
-                .buttonStyle(LiveSurfacePillStyle())
-                .focusEffectDisabled()
-                .focused($closeFocused)
-            }
-            HStack(alignment: .top, spacing: 54) {
-                infoColumn([.programme, .channel])
-                infoColumn([.delivery, .signal, .player])
-            }
-        }
-        .padding(.vertical, 40)
-        .padding(.horizontal, 44)
-        .frame(width: 1240, height: 984, alignment: .topLeading)
-        .foregroundStyle(.white)
-        .background(
-            Palette.playerChrome.opacity(0.96),
-            in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+        PlaybackInfoPanel(
+            title: programme.now?.title ?? channel.title,
+            facts: facts, mode: $mode, isLive: true, onClose: onClose
         )
-        .onAppear {
-            Task { @MainActor in
-                await Task.yield()
-                closeFocused = true
-            }
-        }
+        .frame(maxWidth: 1100, maxHeight: .infinity, alignment: .top)
+        .padding(20)
     }
 }
-#endif
 
 /// One channel row: chip, number and callsign, what is on with a bar to its
 /// end, and when it ends. A protected channel is dimmed, never hidden.
@@ -1702,7 +1616,6 @@ struct LiveTvView: View {
     @State private var showingTouchRecordings = false
     @State private var showingInfo = false
     @State private var showingDvrActivity = false
-    @State private var streamInfoPlayer: LiveTvPlayerFacts?
     @State private var showingMore = false
     @State private var showingLayout = false
     @State private var mobileGuideGrid = SettingsStore().liveTvMobileGuideUsesGrid
@@ -1844,15 +1757,7 @@ struct LiveTvView: View {
     /// case the milestone exists for. `isStarting` covers that gap.
     private var mayRelease: Bool { !pictureInPicture.isActive && !pictureInPicture.isStarting }
 
-    private func showStreamInfo() {
-        streamInfoPlayer = LiveTvPlayerFacts.capture(
-            item: live.player.currentItem,
-            behindEdgeSeconds: live.behindEdgeSeconds,
-            bufferedSeconds: live.bufferedSeconds,
-            attachedAt: live.attachedAt
-        )
-        showingInfo = true
-    }
+    private func showStreamInfo() { showingInfo = true }
 
     var body: some View {
         GeometryReader { geometry in
@@ -1955,25 +1860,24 @@ struct LiveTvView: View {
             NavigationStack { DvrCaptureActivityView() }
         }
         .sheet(isPresented: $showingInfo) {
-            #if os(tvOS)
-            if let channel = live.watching, let player = streamInfoPlayer {
-                LiveTvStreamInfoPanel(
-                    programme: live.airing(channel, now: Int(player.asOf.timeIntervalSince1970)),
-                    channel: channel,
-                    status: live.status,
-                    delivery: live.delivery,
-                    player: player,
-                    onClose: { showingInfo = false }
-                )
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                if let channel = live.watching {
+                    let state = live.player.currentItem?.status == .failed ? "Failed"
+                        : live.player.timeControlStatus == .waitingToPlayAtSpecifiedRate ? "Buffering"
+                        : live.player.timeControlStatus == .playing ? "Playing" : "Paused"
+                    let player = LiveTvPlayerFacts.capture(
+                        item: live.player.currentItem,
+                        behindEdgeSeconds: live.behindEdgeSeconds,
+                        bufferedSeconds: live.bufferedSeconds,
+                        attachedAt: live.attachedAt, asOf: context.date, playerState: state
+                    )
+                    LiveTvStreamInfoPanel(
+                        programme: live.airing(channel, now: Int(context.date.timeIntervalSince1970)),
+                        channel: channel, status: live.status, delivery: live.delivery,
+                        player: player, onClose: { showingInfo = false }
+                    )
+                }
             }
-            #else
-            if let channel = live.watching {
-                LiveTvTechnicalDetails(channel: channel, status: live.status, delivery: live.delivery)
-                    .padding(48)
-                    .frame(minWidth: 420, minHeight: 260, alignment: .topLeading)
-                    .background(Palette.bg)
-            }
-            #endif
         }
         .sheet(isPresented: $showingLayout) { layoutPanel }
         .sheet(isPresented: $showingMore) { morePanel }

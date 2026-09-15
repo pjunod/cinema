@@ -352,10 +352,10 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
                     position = "${formatTime(positionMs)} / ${formatTime(durationMs)}",
                     clientLoadedSeconds = (player.bufferedPosition - player.currentPosition)
                         .coerceAtLeast(0) / 1_000.0,
-                    decodeResolution = player.videoFormat?.takeIf { it.width > 0 && it.height > 0 }
+                    decodeResolution = player.videoSize.takeIf { it.width > 0 && it.height > 0 }
                         ?.let { "${it.width}×${it.height}" },
                     streamRate = player.videoFormat?.bitrate?.takeIf { it > 0 }?.toLong()?.let(::formatBitrate),
-                    playerState = if (player.isPlaying) "Playing" else "Paused",
+                    playerState = playerStateLabel(player),
                     transport = "Offline Media3 cache",
                 ),
                 reasons = emptyList(),

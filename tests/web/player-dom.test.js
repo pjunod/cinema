@@ -100,3 +100,28 @@ assert.match(source, /Autoplay next episode/);
 assert.match(source, /<div class="amsec">Audio sync<\/div>/);
 
 process.stdout.write("PASS player DOM follows the shared row and dialog contract\n");
+
+// Execute the production presentation functions: a cached VOD stream must
+// keep unknown player dimensions distinct from a known original picture.
+const infoStart = source.indexOf("function playbackInfoOverview(");
+const infoEnd = source.indexOf("function patchPlaybackInfoRows(", infoStart);
+const info = new Function("esc", source.slice(infoStart, infoEnd) + "\nreturn {playbackInfoOverview, playbackInfoMarkup};")(
+  value => String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;"),
+);
+const missingPicture = info.playbackInfoOverview({
+  method: "Transcode · cached", player_state: "Playing", decode_resolution: "Not reported",
+  source_resolution: "3840×2160", client_loaded: "12.0 s", stalls: "0",
+});
+assert.match(missingPicture, /pi-picture[^]*?Playing resolution[^]*?<strong>Not reported<\/strong>/);
+assert.match(missingPicture, /Original file[^]*?<strong>3840×2160<\/strong>/);
+const infoFields = require("../playback/playback-info-fields.json").fields;
+const diagnosticMarkup = info.playbackInfoMarkup("debug", infoFields.map(f => ({...f, value: "observation"})), "", "");
+for (const field of infoFields) assert.equal(diagnosticMarkup.split(`data-stats-id="${field.id}"`).length - 1, 1, `${field.id} remains reachable exactly once`);
+assert.match(diagnosticMarkup, /<summary>Picture &amp; sound<\/summary>/);
+assert.match(diagnosticMarkup, /<summary>Session &amp; history<\/summary>/);
+process.stdout.write("PASS playback information keeps unknown picture size and complete diagnostics\n");
+
+const originalAudio = info.playbackInfoOverview({method: "Transcode", source_audio: "DTS · 5.1"});
+assert.match(originalAudio, /Stream audio track[^]*?<strong>Not reported<\/strong>/);
+assert.match(originalAudio, /Original audio track[^]*?<strong>DTS · 5.1<\/strong>/);
+assert.match(source, /client_loaded:clientLoadedSeconds==null\?"Not reported"/);

@@ -6,9 +6,9 @@ import tv.plurx.app.data.Item
 
 class PlaybackInfoTest {
     @Test
-    fun playbackInfoUsesTheSharedThreeModeContract() {
+    fun playbackInfoPreservesStoredModesAndAddsDetails() {
         assertEquals(
-            listOf("Mini", "Standard", "Debug"),
+            listOf("Compact", "Overview", "Details", "Diagnostics"),
             PlaybackStatsMode.entries.map { it.label },
         )
     }
