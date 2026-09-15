@@ -4004,10 +4004,10 @@ function reportTtff(){
 // hungry for 80ms between segments is not an interruption anyone saw. And a
 // wait is classified by how much was buffered when it began, because that
 // single number separates two unrelated faults: nothing left to play (supply —
-// the server or the link ran out) versus plenty left and still not playing
-// (decode — the browser could not keep up with what it already had). Only the
-// first is a delivery problem, and only the first should ever send anyone
-// looking at pacing.
+// the server or the link ran out) versus plenty left and still not presenting.
+// The latter is an unattributed presentation wait unless the media element
+// exposes a typed error; loaded bytes alone say nothing about the decoder.
+// Only supply pressure should send anyone looking at pacing.
 const STALL_MIN_MS=350;      // shorter than this and playback did not visibly pause
 const SUPPLY_RUNWAY_SECS=1.5; // less buffered than this when it began: we ran dry
 const PERSISTENT_STALL_MS=8000; // browser nudges failed; recover instead of spinning forever
@@ -4049,8 +4049,8 @@ function noteAutoStall(p,kind,episodeAtMs){
 function recordWaitStall(p, kind, ms, runway, detail, episodeAtMs, controlTrigger){
   p.stalls=(p.stalls||0)+1;
   PLAYBACK_LIFETIME_STALLS++;
-  p.stallsByKind=p.stallsByKind||{supply:0,decode:0};
-  p.stallsByKind[kind]++;
+  p.stallsByKind=p.stallsByKind||{supply:0,decode:0,presentation:0};
+  p.stallsByKind[kind]=(p.stallsByKind[kind]||0)+1;
   noteAutoStall(p,kind,episodeAtMs);
   const ctx=playbackContext();
   clientLog(Object.assign({level:"warn",event:"stall",detail:detail||kind,ms,
@@ -4070,13 +4070,61 @@ function endWait(resumed){
   p.waitAt=null; p.waitRunway=null; p.waitNudgedAt=null; p.waitReported=false;
   if(reported) return;                       // persistentWait already emitted it
   if(!resumed || ms<STALL_MIN_MS) return;    // a hitch, not a stall
-  const kind=(runway!=null && runway<SUPPLY_RUNWAY_SECS)?"supply":"decode";
+  let video=null; try{video=document.getElementById&&document.getElementById("video");}catch(e){}
+  const kind=persistentWaitEvidence(video,runway).kind;
   recordWaitStall(p,kind,ms,runway,kind,began);
+}
+// Classify only what the browser actually exposed. A stationary film clock
+// with loaded media is a presentation wait, not a decoder verdict. Typed media
+// errors remain usable evidence, while an empty buffer identifies supply
+// pressure without guessing whether disk, producer or network caused it.
+function persistentWaitEvidence(v,runway){
+  const error=v&&v.error;
+  const code=Number(error&&error.code)||0;
+  const detail=String(error&&error.message||"").replace(/[\r\n\0]+/g," ").slice(0,120);
+  if(code===3||code===4){
+    return {kind:"decode",cause:"decoder",observation:{decoder_state:"failed",
+      error_code:"decoder",error_detail:detail||`media_error_${code}`}};
+  }
+  if(code===2){
+    return {kind:"supply",cause:"network",observation:{decoder_state:"unknown",
+      error_code:"network",error_detail:detail||"media_error_2"}};
+  }
+  if(runway!=null&&runway<SUPPLY_RUNWAY_SECS){
+    return {kind:"supply",cause:"unknown",observation:{decoder_state:"starved"}};
+  }
+  return {kind:"presentation",cause:"unknown",
+    observation:{decoder_state:"unknown"}};
+}
+// Freeze the evidence and selected delivery contract before the attachment
+// owner mutates anything. Later callbacks can describe this episode without
+// re-reading a successor's method, quality, tracks or media identity.
+function stallRecoverySnapshot(p,v,{began,kind,cause,action,position,targetHeight}){
+  const source=p&&p.source||{};
+  const selected=p&&p.audio&&p.audio[p.curAudio];
+  const recipe=Object.freeze({
+    method:p&&p.method||null,copy_hls:!!(p&&p.copyHls),quality:playQuality(),
+    height:Number((p&&p.health&&p.health.target_height)||(p&&p.autoHeight)||
+      (v&&v.videoHeight)||source.height)||null,
+    video_codec:source.video_codec||null,video_profile:source.video_profile||null,
+    width:Number(source.width)||null,
+    dynamic_range:(p&&p.deliveredRange)||source.hdr_format||source.hdr||null,
+    audio_track:selected?selected.index:0,subtitle_track:p&&p.curSub>=0?p.curSub:null,
+    subtitle_mode:p&&p.burnedSub!=null?"burn":p&&p.curSub>=0?"native":"off",
+    audio_offset_ms:Number(p&&p.aoffset)||0,
+  });
+  return Object.freeze({player:p,attachment:p&&p.mediaAttachment||null,
+    generation:p&&p._seekToken||0,intentGeneration:p&&p.controlIntentGeneration||0,
+    presentationEpoch:p&&p.controlPresentationEpoch||0,
+    sessionId:p&&p.sessionId||null,began,at:performance.now(),kind,cause,action,
+    position,targetHeight,recipe});
 }
 // A wait that never resumes used to be invisible forever: endWait() was the
 // only reporter and therefore never ran. Record it at a fixed deadline, then
-// make one method-aware attempt. Auto remuxes move to a smaller transcode;
-// explicit quality choices and already-compatible streams simply reconnect.
+// make one evidence-aware attempt. Unattributed waits keep the selected recipe;
+// independently attributed decoder failures may use the compatible path;
+// generic transfer failures reconnect without inventing a capacity verdict,
+// and explicit quality choices remain exact.
 async function persistentWait(v,p,began,generation,actionGeneration){
   if(!playbackOwnsAttachedMedia(p)) return;
   if(PLAYER!==p || p.waitAt!==began || !(p.started||p.controlSeek?.executed) ||
@@ -4086,20 +4134,18 @@ async function persistentWait(v,p,began,generation,actionGeneration){
      (v.seeking&&!p.controlSeek?.executed&&!p.progressWatch?.fired)) return;
   p.waitTimer=null;
   const ms=Math.round(performance.now()-began), runway=p.waitRunway;
-  const kind=(runway!=null && runway<SUPPLY_RUNWAY_SECS)?"supply":"decode";
+  const evidence=persistentWaitEvidence(v,runway), kind=evidence.kind;
   const firstReport=!p.waitReported;
   p.waitReported=true;
   // This exact transition owns the legacy reopen. Cadence alone is too late:
   // the replacement normally stops this reporter before its next scheduled
   // exchange, leaving the server with only the earlier `waiting` fact.
-  const controlObservation=kind==="supply"
-    ? {decoder_state:"starved"}
-    : {decoder_state:"failed",error_code:"decoder",error_detail:"persistent_decode_stall"};
+  const controlObservation=evidence.observation;
   // Presentation recovery belongs to this client, not to the producer
   // verdict. Spend the one harmless browser reevaluation before the bounded
-  // ask so a hold suppressed to `none` receives the same treatment.
+  // ask; once it resolves, a passive response leaves no work pending.
   let nativeReevaluated=false;
-  if(kind==="decode"&&p.waitNudgedAt!==began){
+  if(kind==="presentation"&&p.waitNudgedAt!==began){
     p.waitNudgedAt=began;
     nativeReevaluated=true;
     try{
@@ -4158,14 +4204,14 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   }
   if(p.stallDeferralsAt!==began){ p.stallDeferralsAt=began; p.stallDeferrals=0; }
   if(verdict&&verdict.type==="hold"){
-    if(kind==="supply"){
+    if(kind==="supply"||kind==="presentation"){
       // A hold says why the producer paused. It never says whether published
-      // bytes can be fetched, and production state is not authority over
-      // serving: this player's buffer is empty and its supply has stopped, so
-      // there is nothing left for waiting to arrive at. Fall through to the
-      // same bounded recovery an unanswered ask gets.
+      // bytes can be fetched or whether already-loaded bytes can be presented,
+      // and production state is not authority over either serving or the local
+      // presentation owner. Fall through to the same bounded local recovery an
+      // unanswered ask gets.
       clientLog({level:"warn",event:"stall_recovery",detail:"fallthrough:hold",
-        message:`server holds this stall (${verdict.reason}) — nothing left to play, recovering anyway`,
+        message:`server holds this ${kind} stall (${verdict.reason}) — recovering locally`,
         control_trigger:controlTrigger});
     }else if(controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
       // Production is deliberately not advancing, so the client's reopen would
@@ -4193,16 +4239,6 @@ async function persistentWait(v,p,began,generation,actionGeneration){
         control_trigger:controlTrigger});
     }
   }
-  if(kind==="decode"&&p.waitNudgedAt===began&&
-     (!verdict||verdict.type==="none")&&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
-    // `none` is passive: it means production has no authoritative action for
-    // this presentation wait. Observe the native reevaluation under the same
-    // absolute episode deadline instead of treating absence of a server
-    // command as an instruction to replace media immediately.
-    p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation,actionGeneration).catch(()=>{}),
-      Math.min(PERSISTENT_STALL_MS,CONTROL_STALL_DEFER_DEADLINE_MS-controlElapsedMs));
-    return;
-  }
   if(verdict&&verdict.type==="retry_resource"&&(p.stallDeferrals||0)<CONTROL_DEFER_LIMIT
      &&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
     // Production stopped for something that may not recur, and named when to
@@ -4221,7 +4257,7 @@ async function persistentWait(v,p,began,generation,actionGeneration){
     return;
   }
   const action=PlaybackPolicy.stallRecoveryAction({
-    method:p.method, quality:playQuality(),
+    method:p.method, quality:playQuality(),cause:evidence.cause,
     alreadyRecovered:(p.stallRecoveries||0)>0
   });
   if(action==='prompt'){
@@ -4244,8 +4280,8 @@ async function persistentWait(v,p,began,generation,actionGeneration){
     nowMs:performance.now()
   });
   p.stallRecoveries=(p.stallRecoveries||0)+1;
-  p.recoveringStall={at:performance.now(),action,kind,position:p.stallFrom,
-    targetHeight:recoveryHeight};
+  p.recoveringStall=stallRecoverySnapshot(p,v,{began,kind,cause:evidence.cause,
+    action,position:p.stallFrom,targetHeight:recoveryHeight});
   clientLog(Object.assign({level:"warn",event:"stall_recovery",detail:`attempt:${action}`,
     message:`persistent ${kind} stall — ${action==='transcode'?"switching to transcode":"reconnecting"}`,
     control_trigger:controlTrigger},
@@ -4253,11 +4289,13 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   const position=p.recoveringStall.position;
   endWait(false);
   raisePlaybackSurface("owner_recovery_step",{
-    title:action==='transcode'?"Buffer ran dry — optimizing…":"Playback stalled — reconnecting…",
+    title:action==='transcode'
+      ?(kind==='supply'?"Buffer ran dry — optimizing…":"Playback stalled — changing decoder path…")
+      :"Playback stalled — reconnecting…",
     detail:`resuming from ${clockFromSec(position)}`});
   if(action==='transcode') startTranscodeFallback("stall-recovery",
     `switched to a transcode after a persistent ${kind} stall`);
-  else seekTo(position,true,recoveryHeight,false);
+  else seekTo(position,true,recoveryHeight,false,p.recoveringStall);
 }
 function finishStallRecovery(outcome,note){
   const p=PLAYER, r=p&&p.recoveringStall; if(!r) return false;
@@ -8805,6 +8843,10 @@ function controlVerdictText(message){
 function supersedePlaybackControlIntent(p){
   if(!p) return 0;
   p.controlIntentGeneration=(p.controlIntentGeneration||0)+1;
+  // Viewer intent cancels an in-flight automatic episode. Automatic recovery
+  // begins its seek with `supersedeIntent=false`, so it retains this exact
+  // episode while pause, seek, track change and close fence every old callback.
+  p.recoveringStall=null;
   const startup=p.hlsStartup;
   if(startup&&startup.retry&&startup.retry.state==='reserved'){
     clearTimeout(startup.retry.timer); startup.retry.timer=null;
@@ -10387,7 +10429,8 @@ async function executePlaybackMediaChange(p,change){
   const method=p.burnedSub!=null?'transcode':change.method;
   const opts=method==='transcode'?PlaybackPolicy.stallReopenSessionOptions({
     options:transcodeOpts(pos,audio,change.height),forceReopen:!!change.forceReopen,
-    method,sessionId:change.previousSessionId||p.sessionId}):null;
+    method,sessionId:change.previousSessionId||p.sessionId,
+    cause:change.recoveryCause||"unknown"}):null;
   newAttempt(change.reason||"stream-change");
   p.stallFrom=pos;
   if(change.automatic&&p.abr) p.abr.switching=true;
@@ -12533,10 +12576,12 @@ function playbackProgressTick(v,p){
   const clock=Number(v.currentTime)||0;
   let frames=null, frameSource="none";
   if(streamHasVideo(p,v)){
-    if(p.controlHasFrameCallbacks&&p.controlPresentedFrames>0){
-      frames=p.controlPresentedFrames; frameSource="callbacks";
-    }
-    else try{
+    if(p.controlHasFrameCallbacks){
+      // Callback support is itself the observation contract. Zero presented
+      // callbacks is real evidence and must not fall through to a decoded-frame
+      // counter that can advance while the compositor remains frozen.
+      frames=Number(p.controlPresentedFrames)||0; frameSource="callbacks";
+    }else try{
       const q=v.getVideoPlaybackQuality?.();
       if(Number.isFinite(q?.totalVideoFrames)){frames=q.totalVideoFrames; frameSource="quality";}
     }catch(e){}
@@ -12562,6 +12607,7 @@ function playbackProgressTick(v,p){
         endWait(true);
         clearStall(); finishStallRecovery("recovered");
       }
+      else if(p.recoveringStall){ clearStall(); finishStallRecovery("recovered"); }
     }
   }
   // Exclude time spent paused or backgrounded. A new active watch starts a
@@ -12780,7 +12826,7 @@ function pbWireSeek(){
 }
 function playbackWaitNeedsProgress(p){
   return !!(p&&(p.pendingMediaChange||hasPendingPlaybackOpen(p)||
-    (p.progressWatch?.fired&&p.waitAt!=null)));
+    p.controlSeek||p.recoveringStall||(p.progressWatch?.fired&&p.waitAt!=null)));
 }
 function handlePlaybackPlaying(v,p){
   if(!p||PLAYER!==p) return;
@@ -13061,7 +13107,8 @@ function skipMarker(m,automatic=false){
 }
 // Seek that works for every method: direct play seeks natively; remux/transcode
 // restart the server-side stream at the new offset (the stream is one-directional).
-async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, viewerInitiated=true){
+async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, viewerInitiated=true,
+  recoveryEpisode=null){
   const v=document.getElementById("video"); if(!v||!PLAYER) return;
   targetSec=Math.max(0,targetSec);
   const markerEnd=Number(PLAYER._lastMarkerSkipEndMs)||0;
@@ -13138,7 +13185,12 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   // its await, so only the last seek attaches.
   return requestPlaybackMediaChange(PLAYER,{method:PLAYER.method,copyHls:!!PLAYER.copyHls,
     reason:forceReopen?"stall-restart":"seek",height:autoHeightOverride,
-    forceReopen,previousSessionId:PLAYER.sessionId});
+    forceReopen,previousSessionId:PLAYER.sessionId,
+    // Only an independently selected lower rung turns supply pressure into a
+    // capacity verdict. MEDIA_ERR_NETWORK alone is a failed transfer and keeps
+    // this create on the same recipe without the legacy rung-lowering ticket.
+    recoveryCause:recoveryEpisode&&recoveryEpisode.kind==="supply"&&autoHeightOverride>0
+      ?"network":"unknown"});
 }
 function autoskipOn(){ try{ return localStorage.getItem("plurx_autoskip")==="1"; }catch(e){ return false; } }
 function setAutoskip(on){ try{ localStorage.setItem("plurx_autoskip", on?"1":"0"); }catch(e){}
@@ -14133,7 +14185,8 @@ function playbackStatsTelemetry(){
   const subtitleDelivery=p.burnedSub!=null?"burned":p.curSub>=0?"native":null;
   const stalls=p.stalls||0,stallKinds=p.stallsByKind||{};
   const stallParts=[stallKinds.supply?`${stallKinds.supply} supply`:null,
-    stallKinds.decode?`${stallKinds.decode} decode`:null].filter(Boolean);
+    stallKinds.decode?`${stallKinds.decode} decode`:null,
+    stallKinds.presentation?`${stallKinds.presentation} presentation`:null].filter(Boolean);
   // Read off the presenter, not off a DOM class: the class is the projection,
   // and the model is what it is a projection OF.
   const surface=PLAYBACK_SURFACE.surface;
@@ -18582,10 +18635,7 @@ function developerPanel(settings,readiness){
       ${devReq(readiness,"library_channels","compatible_clients","Compatible clients","Old clients retain VOD and Live TV, but do not know the dedicated channel-session purpose or boundary controller.")}
       <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice. No tuner, metadata service, AI key, or external provider is required.</p>
       </div></details><div class="err" id="lcdeverr" role="alert"></div>${setCardFoot("saveLibraryChannelsDeveloper")}`);
-  const experimental=setCard(`${cardHead("HLS delivery comparison","A stream-format override for controlled client comparisons.",`<span class="pill warn">experimental</span>`)}
-      ${togRow("phs","Typeless sliding HLS","Changes the playlist format for new sessions only.",settings.hls_typeless_sliding)}
-      <div class="err" id="dxerr" role="alert"></div>${setCardFoot("saveExperimental")}`);
-  return `${setHead("Developer","Compatibility controls, experimental playback and device diagnostics.")}
+  return `${setHead("Developer","Compatibility controls and device diagnostics.")}
       ${destinations}${uiEnableAdvisory()}
       <div class="setsection" id="enable-recording"><h2>Recording</h2><p>Explicit enablement for capturing the tuner to a disk, with advisory deployment facts.</p></div>${dvrCard(settings,readiness)}
       <div class="setsection" id="enable-channels"><h2>Library channels</h2><p>Explicit playback enablement with advisory deployment facts.</p></div>${libraryChannels}
@@ -18593,8 +18643,7 @@ function developerPanel(settings,readiness){
       <div class="setsection"><h2>Playback surface contract</h2><p>Advisory verification status for the one fault contract every client renders. Nothing here is a switch.</p></div>${playbackSurfaceReadinessCard()}
       <div class="setsection"><h2>Web HLS startup recovery</h2><p>Always-on manifest recovery with advisory browser and server readiness.</p></div>${webHlsStartupRecoveryCard()}
       <div class="setsection"><h2>Compatibility</h2><p>Native server and protocol controls for compatible playback clients.</p></div>${windowsServerCard(settings,readiness)}${protocol}
-      <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}
-      <div class="setsection"><h2>Delivery experiments</h2><p>Use these overrides for controlled comparisons.</p></div>${experimental}`;
+      <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}`;
 }
 // Automatic decode recovery.
 //
@@ -20512,15 +20561,6 @@ async function saveAutomaticDecoderRecovery(btn){
     toast("Automatic decoder recovery setting saved"); if(btn) setCardSaved(btn);
     const card=document.getElementById("drcard");
     if(card) card.outerHTML=decodeRecoveryCard(saved);
-  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
-}
-async function saveExperimental(btn){
-  const err=document.getElementById("dxerr"); err.textContent="";
-  if(btn) btn.disabled=true;
-  try{
-    cacheSettings(await api("/settings",{method:"PUT",body:{
-      hls_typeless_sliding:document.getElementById("phs").checked}}));
-    toast("Experimental settings saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
 function monarrCardHtml(){
