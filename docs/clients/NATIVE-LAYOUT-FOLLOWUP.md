@@ -1,6 +1,6 @@
 # Native layouts — phone fixes and watch-first television
 
-**Status:** draft PR320; native compilation passed · **Updated:** 2026-09-14 · **Branch:** `codex/apple-layout-followup`
+**Status:** draft PR320; native compilation and Apple sample captures passed · **Updated:** 2026-09-14 · **Branch:** `codex/apple-layout-followup`
 
 Companion to the [mobile audit](MOBILE-UI-USABILITY-AUDIT.md): this records
 implementation and validation of the native follow-up after PR317 merged at
@@ -11,11 +11,11 @@ show the production problems; no screenshot is treated as proof of the fix.
 
 | Surface | Implemented behavior | Evidence / remaining work |
 |---|---|---|
-| iPhone detail | Resume stays primary; labeled secondary actions occupy an adaptive grid instead of four separate full-height rows | iOS compiled on M4 Air; visual check pending |
-| iPhone Live TV | View menu and recording activity action; summary gets its own wrapping line; bottom status reserves content space | iOS compiled on M4 Air; device check pending |
-| iPad Live TV | Large player and programme/recording actions beside the channel list in landscape; stacked watch/list regions in portrait; Guide and Recordings open above the retained player | iOS compiled on M4 Air; PiP/presentation check pending |
+| iPhone detail | Resume stays primary; labeled secondary actions occupy an adaptive grid instead of four separate full-height rows | iOS compiled on M4 Air; iPhone 17 Pro sample capture shows two labeled action rows |
+| iPhone Live TV | View menu and recording activity action; summary gets its own wrapping line; bottom status reserves content space | iOS compiled on M4 Air; iPhone sample capture shows the complete toolbar and summary |
+| iPad Live TV | Large player and programme/recording actions beside the channel list in landscape; stacked watch/list regions in portrait; Guide and Recordings open above the retained player | iOS compiled on M4 Air; 13-inch iPad sample capture shows adjacent player and channels; PiP/presentation check pending |
 | iPad fullscreen | Existing guide grid opens over the picture; closing it keeps playback; selecting through the modal guide returns to inline playback | iOS compiled on M4 Air; running-player validation pending |
-| Apple TV Home | Small mixed shelves measure their complete card height, reserve focus clearance, and allow two title lines; missing artwork has a title/symbol fallback | tvOS compiled on M4 Air; runtime focus/scroll check pending |
+| Apple TV Home | Small mixed shelves measure their complete card height, reserve focus clearance, and allow two title lines; missing artwork has a title/symbol fallback | tvOS compiled on M4 Air; Apple TV 1080p sample capture shows complete title/metadata height; moving focus/scroll remains unverified |
 | Android TV / tablets | Large player beside channels; portrait tablets stack the panes; wrapping DVR controls; Guide preview constrained by both width and height; touch Recordings overlays the retained player | Final reviewed source compiles and packages with `:app:assembleDebug`; visual/runtime check pending |
 
 No unit tests have run for this follow-up. Native compilation is separate from
@@ -91,6 +91,28 @@ its missing mapping to its existing SQLite regression, without changing Rust.
 Existing native source guards were updated for the renamed wide browser and
 touch-only semantic typography; no extra unit suite was introduced or run.
 
-Before merge: finish native visual/focus and retained-playback checks; run the single final fast lane and merge only its
-passing candidate. PR320 is draft. No app has been published to a store or
+Before merge: run the single final fast lane and merge only its passing candidate. The device acceptance limits below remain explicit follow-up work. PR320 is draft. No app has been published to a store or
 installed on a physical device by this follow-up.
+
+
+## Simulator captures — September 14 evening
+
+After the Air became reachable again, the disposable iPhone 17 Pro, 13-inch
+M4 iPad Air and 1080p Apple TV simulators rendered the production SwiftUI
+views with a temporary sample-data harness. The task's native screenshot
+gallery contains iPhone detail and Live TV, iPad Live TV, and Apple TV Home.
+The harness changes only the copied source on the Air; it is not a product
+feature, a rollout gate, or part of this pull request. Artwork and video are
+empty, and recording/selected-channel states are samples.
+
+The TV capture exposed one additional horizontal truncation: movie year and
+remaining time competed with the resolution label. TV cards now put resolution
+on its own line and allow two metadata lines. The refreshed capture shows
+“2023 62m left” in full. Both Apple targets compiled with this adjustment in
+the capture build; the release source is compiled separately after removing
+the harness.
+
+These screenshots establish the pictured static layouts, not playback,
+retained PiP, guide transitions, remote focus movement, or Android rendering.
+Those checks remain unverified and must not be represented as acceptance
+results. No unit suite was run for capture preparation.

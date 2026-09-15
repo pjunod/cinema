@@ -141,12 +141,19 @@ struct PosterCard: View {
                 }
                 EpisodeMediaSummary(badges: episodeBadges)
             } else if !metadata.isEmpty || resolutionBadge(resolutionLabel(item.resolution)) != nil {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                #if os(tvOS)
+                let metadataLayout = AnyLayout(VStackLayout(alignment: .leading, spacing: 5))
+                #else
+                let metadataLayout = AnyLayout(HStackLayout(alignment: .firstTextBaseline, spacing: 8))
+                #endif
+                metadataLayout {
                     if !metadata.isEmpty {
                         Text(metadata)
                             .font(.system(.caption2, design: .rounded).weight(.medium))
                     }
+                    #if os(iOS)
                     Spacer(minLength: 4)
+                    #endif
                     if let trailingResolution = resolutionBadge(resolutionLabel(item.resolution)) {
                         #if os(iOS)
                         IOSWebMediaBadge(badge: trailingResolution)
@@ -156,9 +163,13 @@ struct PosterCard: View {
                         #endif
                     }
                 }
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .foregroundColor(Palette.muted)
+                #if os(tvOS)
+                .lineLimit(2)
+                #else
                 .lineLimit(1)
+                #endif
             }
         }
         .frame(width: width, alignment: .leading)
