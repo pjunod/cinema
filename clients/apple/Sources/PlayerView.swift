@@ -821,7 +821,6 @@ struct PlayerView: View {
                             onDismiss: dismissPlaybackInfo
                         )
                         .frame(maxWidth: .infinity, alignment: .trailing)
-                        .padding(20)
                         .transition(.opacity.combined(with: .move(edge: .trailing)))
                         #endif
                     }

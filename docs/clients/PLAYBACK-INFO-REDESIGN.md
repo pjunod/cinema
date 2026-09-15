@@ -62,8 +62,9 @@ unknown cached-VOD picture size cannot become original size, and every diagnosti
 field remains reachable. Native regressions cover resolution availability and
 stored mode compatibility. No repeated unit suite is part of this work.
 
-Compiler, review, rendering and final lane evidence will be recorded here before
-merge. Compilation alone does not establish live playback or remote usability.
+Compiler, review and rendering evidence is recorded below. The PR records the
+final lane result against its exact candidate. Compilation alone does not
+establish live playback or remote usability.
 
 ## Adversarial review — 2026-09-15
 
@@ -89,4 +90,20 @@ passed using local Xcode 27.0, generic simulator destinations, unsigned output
 and `clients/apple/build/DerivedData`. The Air answered a version probe but
 subsequent transfers timed out; no remote build is claimed. Embedded JavaScript
 syntax, the input-adapter fence and validation catalog lint passed. The single
-final fast lane and device/rendering acceptance remain pending.
+final fast lane remains pending.
+
+
+## Native rendering evidence — 2026-09-15
+
+Disposable iPhone, iPad Air 13-inch and Apple TV 1080p simulators rendered the
+production panel with clearly labeled sample values. Captures cover phone
+Overview and Compact, iPad Live TV Overview, and Apple TV Overview and Details.
+Labels, missing-resolution text, focus styling and grouped value explanations
+were inspected. Compact uses content height. A duplicate inset in the phone
+player wrapper was removed so it does not needlessly narrow the panel.
+
+The temporary preview entry point and fixture view were removed before the
+final production rebuild. These are component captures, not evidence of live
+stream accuracy, full player/sheet integration, or remote navigation acceptance.
+Android compilation passed; Android and browser visual acceptance were not
+performed in this pass. No simulator fixture code ships.
