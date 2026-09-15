@@ -940,6 +940,7 @@ fragment index first.
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | GET | `/files/{id}/direct` | bearer | Original file bytes, full HTTP range support |
+| GET | `/files/{id}/download` | bearer or query token | Original file attachment, full HTTP range support; does not register playback |
 | GET | `/files/{id}/stream.mp4` | bearer | Progressive fragmented-MP4 remux from a live ffmpeg pipe |
 | GET | `/stream/{id}/status` | bearer, owner-checked | Progress of one progressive remux |
 

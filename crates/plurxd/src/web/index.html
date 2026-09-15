@@ -3223,6 +3223,13 @@
 @container(max-width:520px){.pi-hero,.pi-tracks,.pi-metrics,.pi-row{grid-template-columns:minmax(0,1fr);gap:14px}.pi-hero>.pi-fact+ .pi-fact{border-left:0;border-top:1px solid #343d4d;padding:14px 0 0}.pi-row>.v{text-align:left}.statsov .statsbody{padding:18px 16px}.statsov .statshd{padding:12px 16px}.statsov .statsmodes button{padding:8px;font-size:13px}}
 
 .live-stats{position:fixed!important;top:20px!important;right:20px!important;max-height:calc(100dvh - 40px)!important;z-index:9999!important}
+
+/* Quiet library pages: source facts stay visible; long track lists disclose on demand. */
+.calm-home{max-width:1180px;margin:auto}.calm-home>h1{font-size:26px;margin:8px 0 20px}.calm-home .section{font-size:18px;margin-top:28px}.resume-strip{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:24px}.resume-row{display:flex;align-items:center;gap:12px;min-width:0}.resume-thumb,.recording-station{flex:0 0 56px;height:62px;border-radius:6px;overflow:hidden;background:var(--panel);display:grid;place-items:center}.resume-thumb img{width:100%;height:100%;object-fit:cover}.recording-station{font-size:12px;overflow-wrap:anywhere;text-align:center;padding:5px;box-sizing:border-box;border:1px solid var(--line)}.resume-copy{flex:1;min-width:0}.resume-copy strong{font-size:14px;color:var(--text)}.resume-copy small,.resume-copy .cleft{display:block;font-size:12px;color:var(--muted);white-space:normal}.resume-copy .watch-progress{height:3px;margin:7px 0 0}.resume-row>.ghost{flex-shrink:0;min-height:40px;min-width:40px}.home-explore{margin-top:28px;border-top:1px solid var(--line)}.home-explore>summary{padding:16px 0;cursor:pointer}.calm-item .watch-hero{padding:12px 0;align-items:start;margin-bottom:20px}.calm-item .watch-heading h1{font-size:30px;margin:0 0 8px}.calm-item .watch-heading>p{margin:8px 0 14px}.item-quality{display:flex;flex-wrap:wrap;gap:6px}.vbadge.container{color:var(--muted);background:var(--panel);border-color:var(--line)}.item-availability{font-size:13px;color:var(--muted)}.item-primary{align-items:start;flex-wrap:wrap;gap:8px}.item-primary .watch-more{position:relative}.item-primary .watch-more>summary{border:1px solid var(--line);border-radius:var(--radius);padding:10px 14px;min-height:22px}.item-primary .watch-more .actions{display:flex;flex-wrap:wrap}.item-media{border:1px solid var(--line);border-radius:var(--radius);padding:0 20px 16px;background:var(--panel);min-width:0}.item-media-heading{display:flex;justify-content:space-between;align-items:center;gap:16px;border-bottom:1px solid var(--line);padding:16px 0}.item-media-heading h2{font-size:18px;margin:0}.item-media-heading label{display:flex;align-items:center;gap:10px;margin:0;min-width:0;max-width:70%}.item-media-heading select{min-width:0;max-width:100%}.item-media .specs{grid-template-columns:110px minmax(0,1fr);gap:16px 20px}.item-media .specs dd{min-width:0;overflow-wrap:anywhere}.item-media .mode-detail{display:block;margin:6px 0 0}.media-tracks>summary{display:flex;justify-content:space-between;align-items:start;gap:16px;cursor:pointer;min-height:44px}.media-tracks>summary>span:last-child{white-space:nowrap;color:var(--muted);font-size:12px}.media-tracks>summary>span:last-child:after{content:' ▾'}.media-tracks small{display:block;color:var(--muted);font-size:12px;margin-top:4px}.media-track-list{padding:14px 0}.media-track-list input[type=search]{width:100%;box-sizing:border-box}.media-track-option{display:flex;gap:10px;align-items:start;padding:10px 0;margin:0;cursor:pointer;border-bottom:1px solid var(--line)}.media-track-option input{width:auto;flex:0 0 auto;margin:4px 0}.media-track-option[hidden]{display:none}.item-media .analysis-brief{border:0;border-top:1px solid var(--line);padding:16px 0 0}.item-media .analysis-brief h2{font-size:15px}.item-media .fn{font-size:12px;color:var(--muted)}
+@media(max-width:900px){.resume-strip{grid-template-columns:minmax(0,1fr);gap:18px}.resume-copy .watch-progress{max-width:300px}.calm-item .watch-hero{grid-template-columns:85px minmax(0,1fr);gap:16px}.calm-item .watch-poster{width:85px}.calm-item .watch-heading h1{font-size:26px}.item-media{padding:0 14px 14px}.item-media-heading{flex-wrap:wrap}.item-media-heading label{width:100%;max-width:100%}.item-media .specs{grid-template-columns:minmax(0,1fr);gap:6px}.item-media .specs dt{margin-top:12px}.item-media .specs dd{margin-bottom:10px}.item-primary>.btnplay{min-height:44px}.item-primary .ghost{min-height:44px}.media-track-list input[type=search]{font-size:16px}}
+
+.item-quality .vbadge.res,.item-quality .vbadge.codec{color:#83baff;background:#152a42;border-color:#34577c}.item-quality .vbadge.hdr,.item-quality .vbadge.dv{color:#edc477;background:#352a17;border-color:#705931}.calm-item .watch-heading .overview{margin-top:16px}.item-primary>a.ghost{display:inline-flex;align-items:center;box-sizing:border-box;padding:10px 14px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);color:var(--text);min-height:44px}.item-diagnostics{display:grid;grid-template-columns:110px minmax(0,1fr);gap:20px;border-top:1px solid var(--line);margin-top:16px;padding-top:16px;font-size:13px}.item-diagnostics>strong{font-weight:400;color:var(--muted)}.item-media .item-diagnostics .analysis-brief{background:none;border:0;margin-top:0!important;padding:0}.item-media .ppnote{font-size:12px;color:var(--muted)}
+@media(max-width:760px){.calm-item .watch-heading{display:contents}.calm-item .watch-hero{grid-template-columns:70px minmax(0,1fr);gap:7px 14px}.calm-item .watch-poster{grid-column:1;grid-row:1/5;width:70px}.calm-item .watch-heading>h1,.calm-item .watch-heading>p,.calm-item .item-quality{grid-column:2}.calm-item .watch-heading>p{margin:0 0 7px}.calm-item .item-description{grid-column:1/-1}.calm-item .watch-heading .overview{margin:12px 0}.item-primary{gap:8px}.item-primary>.btnplay{flex:1 1 100%}.item-diagnostics{grid-template-columns:minmax(0,1fr);gap:8px}}
 </style>
 <script>
 // Theme engine. Runs in <head> before first paint so there's no flash of the
@@ -5027,14 +5034,14 @@ async function viewHome(generation=++PAGE_RENDER_GENERATION){
   setPagePhase(route,generation,"shell");
   const region=(name,promise,apply)=>promise.then(value=>{
     if(!current()) return;
-    page[`${name}Pending`]=false; const meaningful=apply(value); commit(name,meaningful);
+    page[`${name}Pending`]=false; const meaningful=apply(value); commit(name,meaningful); if(name==="previews")commit("hubs");
   }).catch(error=>{
     if(error&&error.status===401) throw error;
     if(!current()) return;
     page[`${name}Pending`]=false; page[`${name}Error`]=true;
     const visible=name==="hubs"||name==="previews";
     if(visible) setPageFailure(route,generation,`${name}_error`);
-    commit(name,visible);
+    commit(name,visible); if(name==="previews")commit("hubs");
   });
   await Promise.allSettled([
     region("hubs",api("/hubs"),value=>{
@@ -5091,38 +5098,7 @@ function layoutRegion(name, region, model){
 // Classic's Home body — byte-for-byte the markup this app has always emitted.
 // It is the zero-diff baseline every other layout is measured against, so this
 // function changes only when the shipped app is meant to change.
-function classicHomeBody(p){
-  let hubs=installBannerHtml(), soon="", previews="";
-  // The first two rails pass watchCtx: those rows are about where you are in
-  // something, so the card carries "23m left" / "watched Tuesday".
-  hubs+=viewingHubs(p);
-  
-  if(p.hubs.recently_added.length){ hubs+=rail("Recently added", p.hubs.recently_added.map(i=>card(i)).join("")); }
-  // Coming soon: what monarr expects. Absent entirely when nothing is paired
-  // or monarr had nothing to say — an empty rail is worse than no rail.
-  if(p.soon && p.soon.entries && p.soon.entries.length){
-    soon+=rail("Coming soon · future releases", p.soon.entries.map(comingCard).join(""));
-  }
-  if(p.hubsError) hubs+=`<div class="hint">Home recommendations are unavailable right now.</div>`;
-  if(p.previewsPending){
-    previews+=`<div class="empty">Loading library previews…</div>`;
-  }else if(p.previewsError){
-    previews+=`<div class="empty">Library previews are unavailable right now.</div>`;
-  }else if(p.libs.length){
-    previews+=groupToggleHtml(p.group);
-    for(const s of p.sections){
-      const count=s.total==null?"preview unavailable":`view all (${s.total})`;
-      const unavailable=s.unavailable?`<div class="hint">Some library previews are unavailable right now.</div>`:"";
-      previews+=`<h2 class="section">${esc(s.name)} <a class="muted" style="font-size:12px" href="${s.href}">· ${count}</a></h2>${unavailable}${grid(s.items)}`;
-    }
-  } else {
-    previews+=`<div class="empty">No libraries yet.${ME.is_admin?' Add one in <a href="#/settings/libraries">Settings</a>.':''}</div>`;
-  }
-  return `<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
-    `<div data-home-region="saved" data-home-slot="saved">${homeSavedHtml(p)}</div>`+
-    `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
-    `<div data-home-region="previews" data-home-slot="previews">${previews}</div>`;
-}
+function classicHomeBody(p){ return calmHomeBody(p); }
 // One rail: a heading, and a strip with an arrow at each end.
 //
 // A helper rather than four copies of the markup, because the arrows need a
@@ -5530,53 +5506,106 @@ async function viewSearch(q){
 // Shared viewing surfaces use the same playback calls and track selections in
 // every layout. Administrative detail remains reachable below the watch action.
 function playItem(id){AUTOPLAY=String(id);if(location.hash===`#/item/${id}`)viewItem(id);else location.hash=`#/item/${id}`;}
-function viewingKind(p){return ["movie","episode","show","season"].includes(p.item.kind);}
+function viewingKind(p){return ["movie","episode","show","season","video"].includes(p.item.kind);}
 function viewingEpisodeLabel(it){
   return [it.season_number!=null?`S${it.season_number}`:"",it.episode_number!=null?`E${it.episode_number}`:""].join(" · ");
 }
-function viewingCard(it,next=false){
+function viewingCard(it){
   const id=exactWireId(it),title=it.show_title||it.title;
-  const detail=it.kind==="episode"?[viewingEpisodeLabel(it),it.title].filter(Boolean).join(" · "):[it.year,it.recorded_at?`Recorded ${fmtDate(it.recorded_at)}`:""].filter(Boolean).join(" · ");
-  const pct=Math.max(0,Math.min(100,progressPct(it.watch)||0));
-  const image=it.backdrop||it.poster;
-  const playable=["movie","episode","video","audiobook"].includes(it.kind);
-  return `<article class="watch-card"><a class="watch-art" href="#/item/${id}" aria-label="Details for ${esc(title)}">${image?`<img loading="lazy" src="${esc(tok(image))}" alt="">`:`<span>${esc(title)}</span>`}</a><div class="watch-card-body"><h3><a href="#/item/${id}">${esc(title)}</a></h3><p class="muted">${esc(detail)}</p>${watchLine(it,true)}<div class="watch-progress" role="progressbar" aria-label="Watched" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}"><i style="width:${pct}%"></i></div>${playable?`<button class="${next?'ghost':'btnplay'}" onclick='playItem(${esc(JSON.stringify(id))})'>▶ ${next?'Play episode':'Resume'}</button>`:`<a class="ghost" href="#/item/${id}">Continue</a>`}</div></article>`;
+  const detail=it.kind==='episode'?[viewingEpisodeLabel(it),it.title].filter(Boolean).join(' · '):[it.year,it.kind].filter(Boolean).join(' · ');
+  const pct=Math.max(0,Math.min(100,progressPct(it.watch)||0)),image=it.poster||it.backdrop;
+  return `<article class="resume-row"><a class="resume-thumb" href="#/item/${id}" aria-label="Details for ${esc(title)}">${image?`<img loading="lazy" src="${esc(tok(image))}" alt="">`:'▶'}</a><div class="resume-copy"><a href="#/item/${id}"><strong>${esc(title)}</strong></a><small>${esc(detail)}</small>${watchLine(it,true)}<div class="watch-progress" role="progressbar" aria-label="Watched" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}"><i style="width:${pct}%"></i></div></div><button class="ghost sm" onclick='playItem(${esc(JSON.stringify(id))})' aria-label="Resume ${esc(title)}">▶</button></article>`;
 }
-function viewingHubs(p){
-  const cont=p.hubs.continue_watching||[],next=p.hubs.next_up||[];
-  const resumeIds=new Set(cont.map(exactWireId));
-  const nextRows=next.filter(it=>!resumeIds.has(exactWireId(it)));
-  return `<nav class="watch-browse" aria-label="Browse your library"><a class="ghost" href="#/category/movie">Movies</a><a class="ghost" href="#/category/show">TV</a><a class="ghost" href="#/category/book">Books</a><a class="ghost" href="#/recordings">Recordings</a></nav>`+
-    (cont.length?`<h2 class="section">Continue watching</h2><div class="watch-cards">${cont.slice(0,6).map(it=>viewingCard(it)).join("")}</div>${cont.length>6?`<details class="watch-more"><summary>More in progress (${cont.length-6})</summary><div class="watch-cards">${cont.slice(6).map(it=>viewingCard(it)).join("")}</div></details>`:""}`:"")+
-    (nextRows.length?`<h2 class="section">Next episode</h2><div class="watch-next">${nextRows.map(it=>`<article><div><h3><a href="#/item/${exactWireId(it)}">${esc(it.show_title||it.title)}</a></h3><span class="muted">${esc([viewingEpisodeLabel(it),it.title].filter(Boolean).join(" · "))}</span></div><button class="ghost" onclick='playItem(${esc(JSON.stringify(exactWireId(it)))})'>▶ Play episode</button></article>`).join("")}</div>`:"");
+function homeRecentItems(p){
+  // Wait for the library roster: guessing while it loads would briefly show DVR items.
+  if(p.previewsPending||p.previewsError)return [];
+  const kinds=new Map((p.libs||[]).map(lib=>[String(lib.id),lib.kind]));
+  return (p.hubs.recently_added||[]).filter(it=>kinds.has(String(it.library_id))&&kinds.get(String(it.library_id))!=='recordings');
+}
+function calmHomeBody(p){
+  const recent=homeRecentItems(p),cont=p.hubs.continue_watching||[];
+  const recentHtml=recent.length?rail('Recently added',recent.map(i=>card(i)).join('')):p.previewsPending?'<p class="muted">Loading your library…</p>':'';
+  const continuing=cont.length?`<h2 class="section">Continue watching</h2><div class="resume-strip">${cont.slice(0,3).map(viewingCard).join('')}</div>${cont.length>3?`<details class="watch-more"><summary>More in progress (${cont.length-3})</summary><div class="resume-strip">${cont.slice(3).map(viewingCard).join('')}</div></details>`:''}`:'';
+  const previews=(p.sections||[]).filter(section=>section.key!=='recordings').map(section=>`<h2 class="section"><a href="${esc(section.href)}">${esc(section.name)}</a></h2>${section.items.some(i=>i.kind==='photo')?grid(section.items):rail('Browse '+esc(section.name),section.items.map(i=>card(i)).join(''))}`).join('');
+  return `<div class="calm-home"><h1>Home</h1><div data-home-region="hubs" data-home-slot="hubs">${installBannerHtml()}${recentHtml}${continuing}${p.hubsError?'<p class="hint">Home history is unavailable right now.</p>':''}</div><div data-home-region="saved" data-home-slot="saved">${homeSavedHtml(p)}</div><div data-home-region="soon" data-home-slot="soon">${p.soon?.entries?.length?`<details class="home-explore"><summary>Coming soon</summary>${rail('Future releases',p.soon.entries.map(comingCard).join(''))}</details>`:''}</div><div data-home-region="previews" data-home-slot="previews">${p.previewsError?'<p class="hint">Library previews are unavailable right now.</p>':p.libs.length?`<details class="home-explore"><summary>Browse libraries</summary>${groupToggleHtml(p.group)}${previews}</details>`:p.previewsPending?'':`<p class="empty">No libraries yet.${ME?.is_admin?' Add one in <a href="#/settings/libraries">Settings</a>.':''}</p>`}</div></div>`;
 }
 function viewingMore(p){
   const it=p.item;
-  return `<details class="watch-more"><summary>More actions</summary><div class="actions">${watchControls(it)}${["movie","show","episode"].includes(it.kind)?`<button class="ghost" onclick='makeLibraryChannelFromItem(${esc(JSON.stringify(exactWireId(it)))},${esc(JSON.stringify(it.kind))},${esc(JSON.stringify(it.title))})'>Make a channel</button>`:""}${ME&&ME.is_admin?`<button class="ghost" onclick='refreshArtwork(${esc(JSON.stringify(exactWireId(it)))},this)'>Refresh artwork</button>`:""}</div></details>`;
+  return `<details class="watch-more"><summary>More actions</summary><div class="actions">${watchControls(it)}${p.editable?`<button class="ghost" onclick='openEdit(${esc(JSON.stringify(it))})'>Edit details</button>`:""}${["movie","show","episode"].includes(it.kind)?`<button class="ghost" onclick='makeLibraryChannelFromItem(${esc(JSON.stringify(exactWireId(it)))},${esc(JSON.stringify(it.kind))},${esc(JSON.stringify(it.title))})'>Make a channel</button>`:""}${ME&&ME.is_admin?`<button class="ghost" onclick='refreshArtwork(${esc(JSON.stringify(exactWireId(it)))},this)'>Refresh artwork</button>`:""}</div></details>`;
+}
+let VIEWING_PAGE=null, VIEWING_FILE=null;
+function itemHeaderBadges(f){
+  if(!f)return '';
+  const r=resLabel(f.width,f.height),h=hdrChip(f),c=codecLabel(f.video_codec);
+  const parts=[[r,'res'],[h?.text||(f.video_codec?'SDR':''),h?.cls||'hdr'],[[c,f.bit_depth>=10?`${f.bit_depth}-bit`:''].filter(Boolean).join(' '),'codec'],[f.container?.toUpperCase(),'container']];
+  return parts.filter(([label])=>label).map(([label,kind])=>`<span class="vbadge ${kind}">${esc(label)}</span>`).join('');
+}
+function englishTrackNote(tracks,kind,probed=true){
+  if(tracks.some(t=>/^(en|eng|english)([-_]|$)/i.test(t.language||'')))return `English ${kind} available`;
+  if(!probed)return `${kind==='audio'?'Audio':'Subtitle'} languages not analyzed`;
+  if(tracks.some(t=>!t.language||/^(und|unknown)$/i.test(t.language)))return `English ${kind} not confirmed · untagged tracks`;
+  return `No English ${kind}`;
+}
+function itemTrackSummary(f,kind){
+  const audio=kind==='audio',tracks=audio?(f.audio_streams||[]):(f.subtitle_streams||[]);
+  const chosen=prePlaySelection(f.id)?.[kind],defaults=f.playback_defaults?.[audio?'audio':'subtitle'];
+  const index=chosen==null?defaults?.selected_index:chosen;
+  const track=tracks.find(t=>t.index===index);
+  if(track)return (audio?audioFactLabel:subFactLabel)(track)+(chosen==null?' · default':'');
+  if(!audio)return chosen===-1||defaults?'Off':tracks.length?'Server default':'None';
+  return tracks.length?'Server default':'None';
+}
+function itemTrackRow(f,kind){
+  const audio=kind==='audio',tracks=audio?(f.audio_streams||[]):(f.subtitle_streams||[]),label=audio?'Audio':'Subtitles',id=exactWireId(f);
+  const chosen=prePlaySelection(f.id)?.[kind];
+  const option=(value,text)=>`<label class="media-track-option" data-track-option><input type="radio" name="track-${id}-${kind}" value="${value}" ${String(chosen??'')===String(value)?'checked':''} ${f.available?'':'disabled'} onchange='chooseItemTrack(${esc(JSON.stringify(id))},${esc(JSON.stringify(kind))},this.value)'><span>${esc(text)}</span></label>`;
+  const note=englishTrackNote(tracks,audio?'audio':'subtitles',!!f.video_codec||tracks.length>0);
+  return `<dt>${label}</dt><dd><details class="media-tracks" data-media-tracks><summary><span><span data-track-summary="${kind}">${esc(itemTrackSummary(f,kind))}</span><small>${esc(note)}</small></span><span>${tracks.length} tracks</span></summary><div class="media-track-list"><label>Find ${label.toLowerCase()}<input type="search" aria-label="Find ${label.toLowerCase()} tracks" placeholder="Language, format or title" oninput="filterItemTracks(this.closest('[data-media-tracks]'))"></label>${option('', 'Use server default')}${audio?'':option(-1,'Off') }<div data-track-results>${tracks.map(t=>option(t.index,(audio?audioFactLabel:subFactLabel)(t))).join('')}</div><button class="ghost sm" data-track-more ${tracks.length<=6?'hidden':''} onclick="this.closest('[data-media-tracks]').dataset.all=this.closest('[data-media-tracks]').dataset.all==='true'?'false':'true';filterItemTracks(this.closest('[data-media-tracks]'))">Show all ${tracks.length} tracks</button><small data-track-count aria-live="polite"></small></div></details></dd>`;
+}
+function filterItemTracks(details){
+  const query=details.querySelector('input[type=search]').value.trim().toLocaleLowerCase(),all=details.dataset.all==='true';
+  const rows=[...details.querySelectorAll('[data-track-results] [data-track-option]')],matches=rows.filter(row=>row.textContent.toLocaleLowerCase().includes(query));
+  rows.forEach(row=>row.hidden=true);matches.slice(0,all?matches.length:6).forEach(row=>row.hidden=false);
+  const more=details.querySelector('[data-track-more]');more.hidden=matches.length<=6;more.textContent=all?'Show fewer tracks':`Show all ${matches.length} tracks`;
+  details.querySelector('[data-track-count]').textContent=matches.length?`${all?matches.length:Math.min(6,matches.length)} of ${matches.length} matching tracks`:'No matching tracks';
+}
+function chooseItemTrack(id,kind,value){
+  setPrePlay(id,kind,value);
+  const f=VIEWING_PAGE?.files.find(file=>String(file.id)===String(id));
+  const summary=document.querySelector(`[data-track-summary="${kind}"]`);
+  if(f&&summary)summary.textContent=itemTrackSummary(f,kind);
+}
+function selectItemVersion(id){
+  if(!VIEWING_PAGE||location.hash!==`#/item/${VIEWING_PAGE.id}`)return;
+  VIEWING_FILE=String(id);
+  document.getElementById('main').innerHTML=viewingItemBody(VIEWING_PAGE);
+  document.querySelectorAll('[data-media-tracks]').forEach(filterItemTracks);
+  document.getElementById('item-version')?.focus({preventScroll:true});
+  hydrateDvFileActions(VIEWING_PAGE.files);
+  if(prePlaySelection(id))prePlayPreview(id);
 }
 function viewingItemBody(p){
-  const it=p.item, file=p.playable;
-  const trail=[{href:"#/",label:"Home"}].concat(NAV_ORIGIN?[NAV_ORIGIN]:[]).concat(p.ancestors.map(a=>({href:`#/item/${exactWireId(a)}`,label:a.title}))).concat([{label:it.title}]);
-  const years=p.years?`${p.years.from}${p.years.to>p.years.from?'–'+p.years.to:''}`:"";
-  const count=it.rollup&&it.rollup.leaves?`${it.rollup.watched} of ${it.rollup.leaves} watched`:"";
-  let content="";
+  if(VIEWING_PAGE!==p){VIEWING_PAGE=p;VIEWING_FILE=String(p.playable?.id||p.best?.id||'');}
+  const it=p.item,file=p.files.find(f=>String(f.id)===VIEWING_FILE)||p.playable||p.best;
+  const trail=[{href:'#/',label:'Home'}].concat(NAV_ORIGIN?[NAV_ORIGIN]:[]).concat(p.ancestors.map(a=>({href:`#/item/${exactWireId(a)}`,label:a.title}))).concat([{label:it.title}]);
+  const years=p.years?`${p.years.from}${p.years.to>p.years.from?'–'+p.years.to:''}`:'';
+  let actions='',content='';
+  if(file?.available){
+    actions=`<div class="actions item-primary"><button class="btnplay" onclick='${playCall(p,file,p.playStart)}'>▶ ${p.resume?'Resume '+fmtDur(p.resume):'Play'}</button>${p.resume?`<button class="ghost" onclick='${playCall(p,file,0)}'>Start over</button>`:''}<a class="ghost" download="${esc(file.filename||it.title)}" href="${esc(tok(`/api/v1/files/${exactWireId(file)}/download`))}">Download</a>${viewingMore(p)}</div>${p.resume?`<p class="muted">${fmtDur(Math.max(0,(file.duration_ms||p.runtime||0)-p.resume))} remaining</p>`:''}`;
+  }else if(p.files.length){actions='<p class="filemissing">This file is unavailable. Choose another version or check its library location.</p>';}
+  else if(['show','season'].includes(it.kind)){content='<section class="watch-resume" id="series-continue" aria-live="polite"><p class="muted">Finding your next episode…</p></section>';}
+  else{actions='<p class="filemissing">No media file available yet.</p>';}
   if(file){
-    const duration=file.duration_ms||p.runtime||0, remaining=Math.max(0,duration-p.resume);
-    const pct=duration?Math.max(0,Math.min(100,p.resume/duration*100)):0;
-    content=`<section class="watch-resume"><div class="watch-resume-main"><span class="watch-kicker">${p.resume?'Continue watching':'Watch now'}</span><h2>${esc(it.kind==='episode'?it.title:'Watch this movie')}</h2><p class="muted">${esc([it.kind==='episode'?viewingEpisodeLabel(it):"",remaining?`${fmtDur(remaining)}${p.resume?' left':''}`:""].filter(Boolean).join(" · "))}</p>${p.resume?`<div class="watch-progress" role="progressbar" aria-label="Watched" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}"><i style="width:${pct}%"></i></div>`:""}<div class="actions"><button class="btnplay" onclick='${playCall(p,file,p.playStart)}'>▶ ${p.resume?'Resume':'Play'}${it.kind==='episode'?' episode':''}</button>${p.resume?`<button class="ghost" onclick='${playCall(p,file,0)}'>Start over</button>`:""}</div></div><div class="watch-preferences"><h3>Playback preferences</h3>${prePlayPickers(file)||'<p class="muted">The server will select the available tracks.</p>'}</div></section>`;
-  }else if(p.files.length){
-    content=`<div class="filemissing">No file is currently available. Check the library location or choose another version below.</div>`;
-  }else if(["show","season"].includes(it.kind)){
-    content=`<section class="watch-resume" id="series-continue" aria-live="polite"><p class="muted">Finding your next episode…</p></section>`;
-  }else if(["movie","episode"].includes(it.kind)){
-    content='<div class="filemissing"><h2>No media file available</h2><p>This title has no media file yet. Check its library location or return after the next scan.</p></div>';
+    const version=p.files.length>1?`<label for="item-version">Version <select id="item-version" onchange="selectItemVersion(this.value)">${p.files.map(f=>`<option value="${esc(exactWireId(f))}" ${f===file?'selected':''}>${esc([resLabel(f.width,f.height),hdrChip(f)?.text,codecLabel(f.video_codec),fmtSize(f.size),f.available?'':'Missing',f.filename].filter(Boolean).join(' · '))}</option>`).join('')}</select></label>`:'';
+    const tracks=itemTrackRow(file,'audio')+itemTrackRow(file,'subtitle');
+    content+=`<section class="item-media"><div class="item-media-heading"><h2>Media</h2>${version}</div>${specBlock(file,{pickers:false,analysis:false,trackRows:tracks,plain:true})}<p class="ppnote" id="pp-n-${exactWireId(file)}" role="status">${esc(PREPLAY_SCOPE_NOTE)}</p><div class="item-diagnostics"><strong>Diagnostics</strong><div>${analysisFileControl(file).replace('<h2>Content analysis</h2>','')||'<p class="muted">'+(file.video_codec?'Media metadata available.':'Media metadata has not been read yet.')+'</p>'}${dvFileActionMount(file)}</div></div>${file.missing_path&&ME?.is_admin?`<p class="problem">${esc(file.missing_path)}</p>`:''}${unprobedNote(file,it.id)}</section>`;
   }
   if(p.children.length){
     const seasons=p.children.some(c=>c.kind==='season');
-    content+=`<section class="watch-episodes"><h2>${esc(p.childLabel)}</h2>${seasons?`<div class="watch-seasons">${p.children.map(c=>`<a class="ghost" href="#/item/${exactWireId(c)}"><strong>${esc(c.title)}</strong><small>${c.rollup&&c.rollup.leaves?`${c.rollup.watched} of ${c.rollup.leaves} watched`:'View episodes'}</small></a>`).join("")}</div>`:`<div class="eplist">${p.children.map(episodeRow).join("")}</div>`}</section>`;
+    content+=`<section class="watch-episodes"><h2>${esc(p.childLabel)}</h2>${seasons?`<div class="watch-seasons">${p.children.map(c=>`<a class="ghost" href="#/item/${exactWireId(c)}"><strong>${esc(c.title)}</strong><small>${c.rollup?.leaves?`${c.rollup.watched} of ${c.rollup.leaves} watched`:'View episodes'}</small></a>`).join('')}</div>`:`<div class="eplist">${p.children.map(episodeRow).join('')}</div>`}</section>`;
   }
-  if(p.files.length)content+=`<details class="watch-media"><summary>Media information${p.files.length>1?` · ${p.files.length} versions`:''}</summary>${p.files.map(f=>`<section class="version"><div class="vh">${specBadges(f)}${!f.available?'<span class="missbadge">Missing</span>':p.multi?`<button class="ghost sm" onclick='${playCall(p,f,p.resume)}'>Play this version</button>`:""}</div>${specBlock(f,{pickers:false,analysis:false})}${p.multi&&f.available&&f!==file?prePlayPickers(f):""}${f.missing_path&&ME&&ME.is_admin?`<p class="problem">${esc(f.missing_path)}</p>`:""}${unprobedNote(f,it.id)}</section>`).join("")}</details>${ME&&ME.is_admin?`<details class="watch-media watch-admin"><summary>Preparation and diagnostics</summary><p class="muted">Preparation status describes this file's delivery options. A failed preparation does not by itself determine whether playback can start.</p>${p.files.map(f=>analysisFileControl(f)+dvFileActionMount(f)).join("")}</details>`:""}`;
-  return `<div class="watch-page">${pageHead(trail)}<div class="watch-hero">${it.backdrop?`<div class="watch-backdrop" style="background-image:url(${esc(tok(it.backdrop))})"></div>`:""}<div class="watch-poster">${artHtml(it)}</div><div class="watch-heading"><div class="watch-kicker">${esc([years,it.kind==='show'?'Series':it.kind,count].filter(Boolean).join(" · "))}</div><h1>${esc(it.title)}</h1>${it.overview?`<p class="overview watch-about-wide">${esc(it.overview)}</p><details class="watch-about-compact"><summary>About this title</summary><p class="overview">${esc(it.overview)}</p></details>`:""}${viewingMore(p)}</div></div>${content}</div>`;
+  const availability=file?[englishTrackNote(file.audio_streams||[],'audio',!!file.video_codec),englishTrackNote(file.subtitle_streams||[],'subtitles',!!file.video_codec)].join(' · '):'';
+  return `<div class="watch-page calm-item">${pageHead(trail)}<div class="watch-hero"><div class="watch-poster">${artHtml(it)}</div><div class="watch-heading"><h1>${esc(it.title)}</h1><p class="muted">${esc([it.kind==='show'?'Series':it.kind,years,fmtDur(file?.duration_ms||p.runtime||0),it.rollup?.leaves?`${it.rollup.watched} of ${it.rollup.leaves} watched`:''].filter(Boolean).join(' · '))}</p><div class="item-quality">${itemHeaderBadges(file)}</div>${availability?`<p class="item-availability">${esc(availability)}</p>`:''}<div class="item-description">${it.overview?`<p class="overview">${esc(it.overview)}</p>`:''}${actions||viewingMore(p)}</div></div></div>${content}</div>`;
 }
 // Fetch season summaries with bounded concurrency. Resolve by IDs, never by a
 // show's name. The hub wins when present; the fallback mirrors next-up order
@@ -5926,9 +5955,8 @@ function specBlock(f,options={}){
   const analysis=analysisFileControl(f);
   return `<dl class="specs">
     ${vid||!auds.length?`<dt>Video</dt><dd>${esc(vid||"—")}</dd>`:''}
-    ${audRow}
-    ${subRow}
-    ${hlsRow}
+    ${options.trackRows??(audRow+subRow)}
+    ${options.plain?hlsRow.replaceAll('HLS capability','Preparation').replace(/class="mode-chip [^"]*"/g,''):hlsRow}
     <dt>File</dt><dd class="fn">${esc(f.filename)}${file?" · "+esc(file):""}</dd></dl>${options.pickers===false?"":prePlayPickers(f)}${options.analysis===false?"":analysis}`;
 }
 function analysisFileControl(f){
@@ -6121,10 +6149,10 @@ async function prePlayPreview(fileId){
   let d;
   try{ d=await askDecision(fileId, qualityForce(), sel); }
   catch(e){
-    if(prePlaySelection(fileId)!==sel) return;
+    if(prePlaySelection(fileId)!==sel||document.getElementById(`pp-n-${fileId}`)!==note) return;
     note.className="ppnote warn"; note.textContent=e.message||"Couldn’t check that combination"; return;
   }
-  if(prePlaySelection(fileId)!==sel) return;   // superseded while we were away
+  if(prePlaySelection(fileId)!==sel||document.getElementById(`pp-n-${fileId}`)!==note) return;   // superseded while we were away
   const applied=prePlayApplication(d, sel);
   const blocked=applied.blockedByHdr, burn=blocked||applied.burnedSub!=null;
   const method=d.method==='direct_play'?"Direct play — no conversion"
@@ -6534,6 +6562,7 @@ async function viewItem(id){
   const page=await loadItem(id);
   if(generation!==PAGE_RENDER_GENERATION||location.hash!==`#/item/${id}`)return;
   document.getElementById("main").innerHTML=layoutView("item",page);
+  document.querySelectorAll("[data-media-tracks]").forEach(filterItemTracks);
   if(["show","season"].includes(page.item.kind))loadSeriesContinuation(page,generation);
   DV_FILE_PAGE_FILES=page.files||[];
   hydrateDvFileActions(DV_FILE_PAGE_FILES).then(active=>{
@@ -18526,7 +18555,7 @@ function homeSavedHtml(p){
   if(p.savedPending)return '';
   if(p.savedError)return '<p class="hint">Recent recording history is unavailable. <a href="#/recordings/saved">Open recordings</a></p>';
   if(!rows.length)return '';
-  return `<h2 class="section">Recently recorded <a class="muted" href="#/recordings/saved">· View all</a></h2><div class="watch-cards">${rows.slice(0,3).map(row=>`<article class="dvr-saved-card"><a class="dvr-saved-art" href="#/recordings/saved?selected=${encodeURIComponent(row.id)}"><small>${esc([row.guide_number,row.channel_name||'Recorded television'].filter(Boolean).join(' · '))}</small><strong>${esc(row.title)}</strong></a><div class="dvr-saved-body">${dvrStatusMarkup(dvrSavedLabel(row),row.state==='done'&&!row.stopped_early?'saved':'warning')}<p>${esc(new Date(row.airing_start*1000).toLocaleString())}</p>${row.item_id&&row.file_id?`<button class="ghost" onclick='playItem(${esc(JSON.stringify(String(row.item_id)))})'>▶ Watch recording</button>`:`<a class="ghost" href="#/recordings/saved?selected=${encodeURIComponent(row.id)}">Recording details</a>`}</div></article>`).join('')}</div>`;
+  return `<h2 class="section">Recently recorded <a class="muted" href="#/recordings/saved">· View all</a></h2><div class="resume-strip">${rows.slice(0,3).map(row=>`<article class="resume-row"><a class="recording-station" href="#/recordings/saved?selected=${encodeURIComponent(row.id)}">${esc(row.guide_number||row.channel_name||'TV')}</a><div class="resume-copy"><a href="#/recordings/saved?selected=${encodeURIComponent(row.id)}"><strong>${esc(row.title)}</strong></a><small>${esc(new Date(row.airing_start*1000).toLocaleString())}</small><small>${esc(dvrSavedLabel(row))}</small></div>${row.item_id&&row.file_id?`<button class="ghost sm" aria-label="Watch recording ${esc(row.title)}" onclick='playItem(${esc(JSON.stringify(String(row.item_id)))})'>▶</button>`:''}</article>`).join('')}</div>`;
 }
 function toggleMobileSearch(){
   const top=document.querySelector('header.top');if(!top)return;
@@ -20949,55 +20978,7 @@ function catalogChrome(active, inner){
 // Hub headings keep the shipped wording ("Continue watching", "Next up"):
 // user-facing strings are explicitly not a layout's to change, and a layout
 // switch that renames familiar concepts would be needless churn.
-function catalogHomeBody(p){
-  // The sidebar is outside #main, so it survives the assignment that is about
-  // to replace #main with this string — filling it here is what closes the
-  // cold-paint gap on the home route.
-  catalogNavFromHome(p);
-  catalogFillNav();
-
-  const hub=k=>(p.hubs&&p.hubs[k])||[];
-  let hubs=installBannerHtml(), soon="", previews="";
-  // watchCtx on the first two rails: those rows are about where you are in
-  // something, so the card carries "23m left · ends ~10:45 PM".
-  hubs+=viewingHubs(p);
-  
-  if(hub("recently_added").length)    hubs+=rail("Recently added",    hub("recently_added").map(i=>card(i)).join(""));
-  if(p.soon&&p.soon.entries&&p.soon.entries.length) soon+=rail("Coming soon · future releases", p.soon.entries.map(comingCard).join(""));
-
-  if(p.hubsError) hubs+=`<div class="hint">Home recommendations are unavailable right now.</div>`;
-  if(p.previewsPending){
-    previews+=`<div class="empty">Loading library previews…</div>`;
-  }else if(p.previewsError){
-    previews+=`<div class="empty">Library previews are unavailable right now.</div>`;
-  }else if(p.libs.length){
-    previews+=groupToggleHtml(p.group);
-    for(const s of p.sections){
-      const total=s.total==null?"":`<span class="px-n">${esc(String(s.total))}</span>`;
-      // rail() interpolates its heading as HTML (classic passes plain text),
-      // which is what lets the "see all" link ride in the heading instead of
-      // needing a second rail function. Both interpolations are esc()'d.
-      const head=`${esc(s.name)}<a class="px-seeall" href="${esc(s.href)}">See all${total}</a>`;
-      // Two cases still take a grid. An empty section, because rail() on an
-      // empty row renders a heading over nothing while grid([]) renders the
-      // "Nothing here yet." card the rest of the app uses; and any section
-      // holding photos, because grid() is what populates PHOTO_SET and without
-      // it the lightbox opens on one picture and cannot page to the next.
-      const photos=s.items.some(i=>i.kind==="photo");
-      previews += (!s.items.length||photos)
-        ? `<h2 class="section">${head}</h2>${grid(s.items)}`
-        : rail(head, s.items.map(i=>card(i)).join(""));
-      if(s.unavailable) previews+=`<div class="hint">Some library previews are unavailable right now.</div>`;
-    }
-  }else{
-    previews+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings/libraries">Settings</a>.':""}</div>`;
-  }
-  return `<div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
-    `<div data-home-region="saved" data-home-slot="saved">${homeSavedHtml(p)}</div>`+
-    `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
-    `<div data-home-region="previews" data-home-slot="previews">${previews}</div>`;
-}
-
+function catalogHomeBody(p){ catalogNavFromHome(p); catalogFillNav(); return calmHomeBody(p); }
 LAYOUTS.catalog={name:"Catalog", surfaces:["desktop","mobile","tv"], chrome:catalogChrome, views:{home:catalogHomeBody}};
 // applyLayout() ran in the <head>, where the registry holds classic and
 // nothing else — so layoutId() could not recognise a stored "catalog" preference
@@ -21464,148 +21445,7 @@ function theaterChrome(active, inner){
 // seen is a lie about your own history; when nothing is in progress the honest
 // alternative is "new in your library", which is what the fallback says.
 const THEATER_HERO_KINDS={movie:1, episode:1, video:1};
-function theaterHeroPick(p){
-  const hubs=(p&&p.hubs)||{};
-  const ok=it=>!!it && THEATER_HERO_KINDS[it.kind]===1;
-  // Array order IS recency — the server returns both hubs newest-first, and
-  // re-sorting them here would be this layout inventing an opinion about data
-  // it does not own.
-  const cont=(hubs.continue_watching||[]).filter(ok)[0];
-  // "Resume" vs "Play" comes from WHICH HUB the item came from, never from a
-  // position threshold recomputed here. The 3-second resume rule lives in
-  // exactly one place — loadItem()'s `resume` — and the continue-watching hub
-  // is the server's own answer to "what am I in the middle of". A layout that
-  // rounded that threshold differently would offer to resume something the
-  // player then restarts, which is the class of bug R4 exists to end.
-  if(cont) return {item:cont, kick:"Continue watching", resuming:true};
-  const fresh=(hubs.recently_added||[]).filter(ok)[0];
-  if(fresh) return {item:fresh, kick:"New in your library", resuming:false};
-  // Nothing playable anywhere: a photo-only server, a brand-new install, a
-  // library of folders. The home body degrades to rails with no hero rather
-  // than throwing or fronting a folder.
-  return null;
-}
-function theaterHeroHtml(pick){
-  const it=pick.item;
-  // The backdrop the model already carries, and nothing else. artHtml() would
-  // reach for `poster` first, which is a 2:3 image and the WRONG picture for a
-  // 21:9 band — and on the cards below it is already being loaded at card
-  // size, so using it here would be a second full-resolution decode of an
-  // image the page has in another size. One URL, one request, and it is the
-  // same URL the item's own detail page uses, so clicking through is a cache
-  // hit rather than a fresh load.
-  //
-  // No backdrop — which is most home media, most episodes, and every photo —
-  // degrades to the token-mixed wash painted by .th-hero itself. Nothing to
-  // load, nothing to wait for, and it is a --bg/--accent mix so it is on-theme
-  // in all twenty-two palettes rather than a grey rectangle.
-  const bg=it.backdrop
-    ? `<div class="th-bg" style="background-image:url(${esc(tok(it.backdrop))})" aria-hidden="true"></div>` : "";
-  // The kicker carries the show name for an episode, so the headline can be
-  // the episode's own title without card()'s show-title swap being copied
-  // here — see NOTES §5.6.
-  const kick = it.kind==='episode' && it.show_title
-    ? `${pick.kick} · ${it.show_title}` : pick.kick;
-
-  const bits=[];
-  if(it.kind==='episode' && (it.season_number!=null||it.episode_number!=null))
-    bits.push(`<span>S${it.season_number||0}E${it.episode_number||0}</span>`);
-  if(it.kind==='video' && it.recorded_at) bits.push(`<span>${esc(fmtDate(it.recorded_at))}</span>`);
-  else if(it.year) bits.push(`<span>${esc(String(it.year))}</span>`);
-  // watchLine() is the shipped "23m left · ends ~10:45 PM" helper and it owns
-  // the position threshold itself, so the hero gets the same sentence the
-  // Continue-watching cards get, from the same code. It returns "" for a
-  // finished item, which is correct: nothing to say.
-  const left=watchLine(it, true);
-
-  const pct=progressPct(it.watch);
-  const prog = pct>0&&pct<100
-    ? `<div class="th-hprog" role="progressbar" aria-label="Progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}"><i style="width:${pct}%"></i></div>` : "";
-
-  // The primary action plays. It does not reimplement play(): it sets the
-  // shipped AUTOPLAY handoff and navigates, which is exactly what an episode
-  // row's ▶ button does. viewItem() then starts the file loadItem() picked, at
-  // the position loadItem() computed, with the metadata loadItem() built — so
-  // the hero needs no file id, no resume value and no /items/N fetch of its
-  // own, and the request log for the home route is unchanged.
-  const label = pick.resuming ? "▶ Resume" : "▶ Play";
-  return `<section class="th-hero${bg?'':' th-noart'}" aria-label="Featured">${bg}
-    <div class="th-scrim" aria-hidden="true"></div>
-    <div class="th-fg">
-      <div class="th-kick">${esc(kick)}</div>
-      <h1 class="th-title">${esc(it.title)}</h1>
-      <div class="th-meta">${bits.join("")}${left}</div>
-      ${it.overview?`<p class="th-desc">${esc(it.overview)}</p>`:""}
-      ${prog}
-      <div class="actions">
-        <button class="btnplay" onclick="AUTOPLAY='${exactWireId(it)}';location.hash='#/item/${exactWireId(it)}'">${label}</button>
-        <button class="ghost" onclick="location.hash='#/item/${exactWireId(it)}'">ⓘ Details</button>
-      </div>
-    </div>
-  </section>`;
-}
-
-// ---------------------------------------------------------------------------
-// 3. Home
-// ---------------------------------------------------------------------------
-// Same model, same helpers, different composition: one hero, then rails under
-// uppercase micro-labels. Hub headings keep the shipped wording ("Continue
-// watching", "Next up") and not a cinema rename — user-facing strings are
-// explicitly not a layout's to change, and a layout switch that renames things
-// the user has learned is a worse trade than the reference it buys.
-function theaterHomeBody(p){
-  const hub=k=>(p.hubs&&p.hubs[k])||[];
-  const pick=theaterHeroPick(p);
-  // The hero is emitted FIRST and outside .th-rails: styles.css cancels main's
-  // gutter and lead padding on it so it runs full-bleed under the fixed bar.
-  // With no hero, main's own padding already clears the bar and the page
-  // simply starts with the install banner — the empty-continue-hub and
-  // empty-server paths are the same code path, not a special case.
-  let hero = pick ? theaterHeroHtml(pick) : "";
-  let hubs=installBannerHtml(), soon="", previews="";
-
-  // watchCtx on the first two rails: those rows are about where you are in
-  // something, so the card carries "23m left · ends ~10:45 PM".
-  hubs+=viewingHubs(p);
-  
-  if(hub("recently_added").length)    hubs+=rail("Recently added",    hub("recently_added").map(i=>card(i)).join(""));
-  // Coming soon: absent entirely when nothing is paired or monarr had nothing
-  // to say — an empty rail is worse than no rail.
-  if(p.soon&&p.soon.entries&&p.soon.entries.length) soon+=rail("Coming soon · future releases", p.soon.entries.map(comingCard).join(""));
-
-  if(p.hubsError) hubs+=`<div class="hint">Home recommendations are unavailable right now.</div>`;
-  if(p.previewsPending){
-    previews+=`<div class="empty">Loading library previews…</div>`;
-  }else if(p.previewsError){
-    previews+=`<div class="empty">Library previews are unavailable right now.</div>`;
-  }else if(p.libs.length){
-    previews+=groupToggleHtml(p.group);
-    for(const s of p.sections){
-      const count=s.total==null?"preview unavailable":`view all (${esc(String(s.total))})`;
-      const head=`${esc(s.name)} <a class="muted" style="font-size:12px" href="${esc(s.href)}">· ${count}</a>`;
-      // Two cases still take a grid rather than a rail, both inherited from
-      // the catalog drop's reasoning. An EMPTY section, because rail() on an
-      // empty row renders a heading over nothing while grid([]) renders the
-      // "Nothing here yet." card the rest of the app uses; and any section
-      // holding PHOTOS, because grid() is what populates PHOTO_SET and
-      // without it the lightbox opens on one picture and cannot page to the
-      // next.
-      const photos=s.items.some(i=>i.kind==="photo");
-      previews += (!s.items.length||photos)
-        ? `<h2 class="section">${head}</h2>${grid(s.items)}`
-        : rail(head, s.items.map(i=>card(i)).join(""));
-      if(s.unavailable) previews+=`<div class="hint">Some library previews are unavailable right now.</div>`;
-    }
-  } else {
-    previews+=`<div class="empty">No libraries yet.${ME&&ME.is_admin?' Add one in <a href="#/settings/libraries">Settings</a>.':""}</div>`;
-  }
-  return `<div data-home-region="hubs" data-home-slot="hero">${hero}</div>`+
-    `<div class="th-rails"><div data-home-region="hubs" data-home-slot="hubs">${hubs}</div>`+
-    `<div data-home-region="saved" data-home-slot="saved">${homeSavedHtml(p)}</div>`+
-    `<div data-home-region="soon" data-home-slot="soon">${soon}</div>`+
-    `<div data-home-region="previews" data-home-slot="previews">${previews}</div></div>`;
-}
-
+function theaterHomeBody(p){ return calmHomeBody(p); }
 // ---------------------------------------------------------------------------
 // 4. Library — shell only (items and count are inherited from classic)
 // ---------------------------------------------------------------------------

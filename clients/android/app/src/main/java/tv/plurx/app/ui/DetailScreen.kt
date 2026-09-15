@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -40,6 +41,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -67,6 +69,7 @@ import tv.plurx.app.data.ItemDetail
 import tv.plurx.app.data.MediaFileDto
 import tv.plurx.app.data.ReadingState
 import tv.plurx.app.data.Session
+import tv.plurx.app.ui.components.ChoicePicker
 import tv.plurx.app.ui.components.LoadingBox
 import tv.plurx.app.ui.components.MediaFactChip
 import tv.plurx.app.ui.components.NetworkImage
@@ -193,102 +196,32 @@ private fun DetailContent(
     val durationMs = if (item.isAudiobook) item.runtime_ms ?: resumeFile?.duration_ms else resumeFile?.duration_ms ?: item.runtime_ms
     val nearlyDone = durationMs != null && durationMs > 0 && resumeMs > durationMs * 0.95
     val canResume = resumeMs > 3_000 && !nearlyDone
-    val best = playbackFile(item, detail.files, if (canResume) resumeMs else 0L)
-    val heroHeight = when (formFactor) {
-        FormFactor.Compact -> 230.dp
-        FormFactor.Expanded -> 300.dp
-        FormFactor.Television -> 360.dp
-    }
-
+    var selectedVersion by remember(item.id) { mutableStateOf<Long?>(null) }
+    val best = detail.files.find { it.id == selectedVersion } ?: playbackFile(item, detail.files, if (canResume) resumeMs else 0L)
     LazyColumn(Modifier.fillMaxSize().navigationBarsPadding()) {
         item {
-            if (formFactor == FormFactor.Compact) {
-                CompactDetailHero(
-                    item = item,
-                    file = best,
-                    durationMs = durationMs,
-                    onBack = onBack,
-                )
-            } else {
-                Box(Modifier.fillMaxWidth().height(heroHeight)) {
-                    NetworkImage(imageUrl(item.backdrop ?: item.poster), Modifier.fillMaxSize())
-                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color(0x22000000), Bg))))
-                    DetailBackButton(onBack)
-                }
-            }
-        }
-
-        item {
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = side),
-                horizontalArrangement = Arrangement.spacedBy(if (formFactor == FormFactor.Compact) 0.dp else 28.dp),
-                verticalAlignment = Alignment.Top,
-            ) {
-                if (formFactor != FormFactor.Compact && item.poster != null) {
-                    NetworkImage(
-                        imageUrl(item.poster),
-                        Modifier.width(if (formFactor == FormFactor.Television) 220.dp else 170.dp)
-                            .aspectRatio(2f / 3f).clip(MaterialTheme.shapes.large),
-                    )
-                }
-                Column(Modifier.weight(1f)) {
-                    if (formFactor != FormFactor.Compact) {
-                        if (detail.ancestors.isNotEmpty()) {
-                            AncestorBreadcrumb(
-                                ancestors = detail.ancestors,
-                                onOpenItem = onOpenItem,
-                            )
-                        }
+            Box(Modifier.fillMaxWidth().height(70.dp)) { DetailBackButton(onBack) }
+            Column(Modifier.fillMaxWidth().padding(horizontal = side), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                if (detail.ancestors.isNotEmpty()) AncestorBreadcrumb(detail.ancestors, onOpenItem)
+                Row(horizontalArrangement = Arrangement.spacedBy(18.dp), verticalAlignment = Alignment.Top) {
+                    NetworkImage(imageUrl(item.poster ?: item.backdrop), Modifier.width(if (formFactor == FormFactor.Television) 160.dp else 82.dp).aspectRatio(2f / 3f).clip(MaterialTheme.shapes.medium))
+                    Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(item.title, style = MaterialTheme.typography.headlineMedium)
-                        Text(
-                            metaLine(item, durationMs),
-                            color = Muted,
-                            style = MaterialTheme.typography.labelMedium,
-                            modifier = Modifier.padding(top = 4.dp),
-                        )
-                        if (item.tags.isNotEmpty()) {
-                            LazyRow(
-                                Modifier.padding(top = 10.dp),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            ) {
-                                items(item.tags) { tag -> SpecChip(tag) }
+                        Text(metaLine(item, best?.duration_ms ?: durationMs), color = Muted, style = MaterialTheme.typography.bodySmall)
+                        best?.let { file ->
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                detailMediaFacts(file).forEach { MediaFactChip(it) }
                             }
+                            if (item.isPlayableVideo) Text(englishAvailability(file), color = Muted, style = MaterialTheme.typography.bodySmall)
                         }
-                    }
-
-                    Actions(
-                        vm = vm,
-                        item = item,
-                        files = detail.files,
-                        seriesPlayback = seriesPlayback,
-                        resumeMs = resumeMs,
-                        canResume = canResume,
-                        trackChoices = trackChoices,
-                        requestInitialFocus = formFactor == FormFactor.Television,
-                        reading = detail.reading,
-                        onPlay = onPlay,
-                        onViewPhoto = onViewPhoto,
-                        onRead = onRead,
-                        onMakeChannel = onMakeChannel,
-                        onWatchedChanged = onWatchedChanged,
-                    )
-
-                    item.overview?.takeIf { it.isNotBlank() }?.let {
-                        if (formFactor == FormFactor.Compact) {
-                            Text(
-                                "About",
-                                style = MaterialTheme.typography.titleMedium,
-                                modifier = Modifier.padding(top = 18.dp, bottom = 6.dp),
-                            )
-                        }
-                        Text(
-                            it,
-                            color = Muted,
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(top = if (formFactor == FormFactor.Compact) 0.dp else 16.dp),
-                        )
                     }
                 }
+                item.overview?.takeIf { it.isNotBlank() }?.let { Text(it, color = Muted, style = MaterialTheme.typography.bodyMedium) }
+                Actions(vm = vm, item = item, files = if (item.isPlayableVideo && best != null) listOf(best) else detail.files,
+                    seriesPlayback = seriesPlayback, resumeMs = resumeMs, canResume = canResume,
+                    trackChoices = trackChoices, requestInitialFocus = formFactor == FormFactor.Television,
+                    reading = detail.reading, onPlay = onPlay, onViewPhoto = onViewPhoto,
+                    onRead = onRead, onMakeChannel = onMakeChannel, onWatchedChanged = onWatchedChanged)
             }
         }
 
@@ -303,12 +236,15 @@ private fun DetailContent(
                         },
                         style = MaterialTheme.typography.titleMedium,
                     )
-                    detail.files.forEachIndexed { index, file ->
+                    if (item.isPlayableVideo && detail.files.size > 1 && best != null) {
+                        ChoicePicker(label = "Version", value = best, options = detail.files, optionLabel = { it.filename }, onSelect = { selectedVersion = it.id })
+                    }
+                    (if (item.isPlayableVideo && best != null) listOf(best) else detail.files).forEachIndexed { index, file ->
                         val chosen = trackChoices[file.id] ?: PreplayTracks.NONE
                         VersionCard(
                             vm = vm,
                             file = file,
-                            showPlay = !item.isBook && detail.files.size > 1 && file.available,
+                            showPlay = !item.isPlayableVideo && !item.isBook && detail.files.size > 1 && file.available,
                             playStartMs = if (item.isAudiobook && canResume && best?.id == file.id) {
                                 audiobookLocalPosition(resumeMs, file.part_offset_ms)
                             } else {
@@ -824,11 +760,7 @@ private fun VersionCard(
             if (!file.available) SpecChip("Missing", MaterialTheme.colorScheme.error)
             if (showPlay) TvOutlinedButton(onClick = { onPlay(playStartMs) }) { Text("Play") }
         }
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            items(detailMediaFacts(file), key = { it.kind }) { fact ->
-                MediaFactChip(fact)
-            }
-        }
+        Text(detailMediaFacts(file).joinToString(" · ") { it.label }, style = MaterialTheme.typography.bodyMedium)
         Text(file.filename, color = Muted, style = MaterialTheme.typography.labelMedium)
         Text(fileSpecLine(file), color = Muted, style = MaterialTheme.typography.bodyMedium)
         if (!file.available) {
@@ -851,6 +783,20 @@ private fun VersionCard(
                 tracks = tracks,
                 onTracks = onTracks,
             )
+        }
+        if (showTracks) {
+            Text("Preparation", style = MaterialTheme.typography.labelLarge)
+            Text(when (file.vod_index_status) {
+                "indexed" -> "VOD HLS ready · seekable timeline analyzed"
+                "partial" -> "VOD HLS ready for some delivery routes"
+                "pending" -> "VOD analysis pending"
+                "refused" -> "VOD analysis refused · live recovery may be available"
+                "unsupported" -> "VOD analysis unsupported for this codec"
+                else -> "Preparation status not reported"
+            }, color = Muted)
+            file.vod_index_refusal?.let { Text(it, color = Muted, style = MaterialTheme.typography.bodySmall) }
+            Text("Diagnostics", style = MaterialTheme.typography.labelLarge)
+            Text(if (file.probed) "Media metadata available." else "Media metadata has not been read yet.", color = Muted)
         }
         if (showChapters && file.chapters.isNotEmpty()) {
             Text("Chapters", style = MaterialTheme.typography.labelLarge, modifier = Modifier.padding(top = 4.dp))
@@ -934,69 +880,68 @@ internal fun TrackFactsSection(
     val audioLine = audioPreferredLanguageLine(defaults?.audio, file.audio_streams)
     val subtitleLine = subtitlePreferredLanguageLine(defaults?.subtitle, file.subtitle_streams)
 
-    Column(
-        Modifier.fillMaxWidth().padding(top = 6.dp),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        Text("Audio", style = MaterialTheme.typography.labelLarge)
-        file.audio_streams.forEach { stream ->
-            val index = stream.index
-            TrackChoiceRow(
-                label = audioStreamLabel(stream),
-                selected = index != null && index == chosenAudio,
-                isServerDefault = index != null && index == defaults?.audio?.selected_index,
-                enabled = enabled && index != null,
-                onClick = { if (index != null) onTracks(tracks.copy(audio = index)) },
-            )
-        }
-        if (file.audio_streams.isEmpty() && audioLine == null) {
-            Text("No audio tracks in this file.", color = Muted, style = MaterialTheme.typography.bodyMedium)
-        }
-        audioLine?.let {
-            Text(it, color = Muted, style = MaterialTheme.typography.bodySmall)
-        }
-
-        Text(
-            "Subtitles",
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.padding(top = 10.dp),
-        )
-        if (file.subtitle_streams.isEmpty()) {
-            // The server's `no_tracks` line says this too; this is the fallback
-            // for a server older than the contract, so a file with no subtitles
-            // never renders as an empty gap.
-            if (subtitleLine == null) {
-                Text("No subtitles in this file.", color = Muted, style = MaterialTheme.typography.bodyMedium)
+    var audioExpanded by remember(file.id) { mutableStateOf(false) }
+    var subExpanded by remember(file.id) { mutableStateOf(false) }
+    var audioQuery by remember(file.id) { mutableStateOf("") }
+    var subQuery by remember(file.id) { mutableStateOf("") }
+    var audioAll by remember(file.id) { mutableStateOf(false) }
+    var subAll by remember(file.id) { mutableStateOf(false) }
+    val audioMatches = file.audio_streams.filter { audioStreamLabel(it).contains(audioQuery, ignoreCase = true) }
+    val subMatches = file.subtitle_streams.filter { subtitleStreamLabel(it).contains(subQuery, ignoreCase = true) }
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        TvTextButton(onClick = { audioExpanded = !audioExpanded }, modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.weight(1f)) {
+                Text("Audio · " + (file.audio_streams.find { it.index == chosenAudio }?.let(::audioStreamLabel) ?: if (file.audio_streams.isEmpty()) "None" else "Server default"))
+                Text(englishTrackNote(file.audio_streams.map { it.language }, "audio", file.probed), color = Muted, style = MaterialTheme.typography.bodySmall)
             }
-        } else {
-            TrackChoiceRow(
-                label = "Off",
-                selected = chosenSubtitle == null,
-                isServerDefault = defaults != null && defaults.subtitle.selected_index == null,
-                enabled = enabled,
-                onClick = { onTracks(tracks.copy(subtitle = SubtitleChoice(null))) },
-            )
-            file.subtitle_streams.forEach { stream ->
+            Text("${file.audio_streams.size} tracks ${if (audioExpanded) "▴" else "▾"}")
+        }
+        if (audioExpanded) {
+            OutlinedTextField(value = audioQuery, onValueChange = { audioQuery = it }, label = { Text("Find audio tracks") }, modifier = Modifier.fillMaxWidth())
+            TrackChoiceRow("Use server default", tracks.audio == null, false, enabled, { onTracks(tracks.copy(audio = null)) })
+            audioMatches.take(if (audioAll) audioMatches.size else 6).forEach { stream ->
                 val index = stream.index
-                TrackChoiceRow(
-                    label = subtitleStreamLabel(stream),
-                    selected = index != null && index == chosenSubtitle,
-                    isServerDefault = index != null && index == defaults?.subtitle?.selected_index,
-                    enabled = enabled && index != null,
-                    onClick = {
-                        if (index != null) onTracks(tracks.copy(subtitle = SubtitleChoice(index)))
-                    },
-                )
+                TrackChoiceRow(audioStreamLabel(stream), index != null && index == chosenAudio, index != null && index == defaults?.audio?.selected_index, enabled && index != null, { if (index != null) onTracks(tracks.copy(audio = index)) })
             }
+            if (audioMatches.size > 6) TvTextButton(onClick = { audioAll = !audioAll }) { Text(if (audioAll) "Show fewer tracks" else "Show all ${audioMatches.size} tracks") }
+            if (audioMatches.isEmpty()) Text("No matching tracks", color = Muted)
         }
-        subtitleLine?.let {
-            Text(it, color = Muted, style = MaterialTheme.typography.bodySmall)
+        audioLine?.let { Text(it, color = Muted, style = MaterialTheme.typography.bodySmall) }
+        TvTextButton(onClick = { subExpanded = !subExpanded }, modifier = Modifier.fillMaxWidth()) {
+            Column(Modifier.weight(1f)) {
+                Text("Subtitles · " + (file.subtitle_streams.find { it.index == chosenSubtitle }?.let(::subtitleStreamLabel) ?: "Off"))
+                Text(englishTrackNote(file.subtitle_streams.map { it.language }, "subtitles", file.probed), color = Muted, style = MaterialTheme.typography.bodySmall)
+            }
+            Text("${file.subtitle_streams.size} tracks ${if (subExpanded) "▴" else "▾"}")
         }
-        subtitleNotice?.let {
-            Text(it, color = Accent, style = MaterialTheme.typography.bodySmall)
+        if (subExpanded) {
+            OutlinedTextField(value = subQuery, onValueChange = { subQuery = it }, label = { Text("Find subtitle tracks") }, modifier = Modifier.fillMaxWidth())
+            TrackChoiceRow("Use server default", tracks.subtitle == null, false, enabled, { onTracks(tracks.copy(subtitle = null)) })
+            TrackChoiceRow("Off", chosenSubtitle == null, defaults != null && defaults.subtitle.selected_index == null, enabled, { onTracks(tracks.copy(subtitle = SubtitleChoice(null))) })
+            subMatches.take(if (subAll) subMatches.size else 6).forEach { stream ->
+                val index = stream.index
+                TrackChoiceRow(subtitleStreamLabel(stream), index != null && index == chosenSubtitle, index != null && index == defaults?.subtitle?.selected_index, enabled && index != null, { if (index != null) onTracks(tracks.copy(subtitle = SubtitleChoice(index))) })
+            }
+            if (subMatches.size > 6) TvTextButton(onClick = { subAll = !subAll }) { Text(if (subAll) "Show fewer tracks" else "Show all ${subMatches.size} tracks") }
+            if (subMatches.isEmpty()) Text("No matching tracks", color = Muted)
         }
+        subtitleLine?.let { Text(it, color = Muted, style = MaterialTheme.typography.bodySmall) }
+        subtitleNotice?.let { Text(it, color = Accent, style = MaterialTheme.typography.bodySmall) }
     }
 }
+
+internal fun englishTrackNote(languages: List<String?>, kind: String, probed: Boolean): String {
+    val normalized = languages.map { it.orEmpty().lowercase().replace('_', '-').substringBefore('-') }
+    return when {
+        normalized.any { it in listOf("en", "eng", "english") } -> "English $kind available"
+        !probed || normalized.any { it in listOf("", "und", "unknown") } -> "English $kind not confirmed"
+        else -> "No English $kind"
+    }
+}
+internal fun englishAvailability(file: MediaFileDto): String = listOf(
+    englishTrackNote(file.audio_streams.map { it.language }, "audio", file.probed),
+    englishTrackNote(file.subtitle_streams.map { it.language }, "subtitles", file.probed),
+).joinToString(" · ")
 
 @Composable
 private fun TrackChoiceRow(
@@ -1087,15 +1032,11 @@ private fun SpecChip(text: String, color: Color = Accent) {
 }
 
 private fun fileSpecLine(file: MediaFileDto): String {
-    val audio = file.audio_streams.joinToString(" / ") { stream ->
-        listOfNotNull(stream.codec?.uppercase(), stream.channels?.let { "${it}ch" }, stream.language).joinToString("  ")
-    }
     val bits = listOfNotNull(
         file.duration_ms?.takeIf { it > 0 }?.let(::formatTime),
         file.container?.uppercase(),
         file.bitrate?.let { "%.1f Mbps".format(it / 1_000_000.0) },
         file.size.takeIf { it > 0 }?.let { "%.1f GB".format(it / 1_073_741_824.0) },
-        audio.takeIf { it.isNotBlank() },
     )
     return bits.joinToString("   ")
 }

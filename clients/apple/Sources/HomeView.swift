@@ -211,11 +211,11 @@ private struct HomeDashboard: View {
 
     @ObservedObject private var dvr = DvrController.shared
 
-    private var featured: Item? {
-        (model.hubs.continueWatching ?? []).first
-            ?? (model.hubs.nextUp ?? []).first
-            ?? (model.hubs.recentlyAdded ?? []).first
+    private var recentItems: [Item] {
+        let recordings = Set(model.libraries.filter { $0.kind == "recordings" }.map(\.id))
+        return (model.hubs.recentlyAdded ?? []).filter { !recordings.contains($0.libraryId ?? -1) }
     }
+    @State private var showAllContinuing = false
 
     var body: some View {
         ScrollView {
@@ -239,6 +239,7 @@ private struct HomeDashboard: View {
             .padding(.bottom, 36)
         }
         .background(Palette.bg.ignoresSafeArea())
+        .task { await dvr.loadLibrary() }
         #if os(iOS)
         .toolbar(.hidden, for: .navigationBar)
         .refreshable { await model.loadHome() }
@@ -256,7 +257,7 @@ private struct HomeDashboard: View {
     #if os(iOS)
     private var homeHeader: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text("cinema")
+            Text("Home")
                 .font(.system(size: 32, weight: .bold, design: .monospaced))
                 .foregroundColor(Palette.accent)
             Spacer()
@@ -300,45 +301,62 @@ private struct HomeDashboard: View {
             #endif
             .padding(.horizontal, screenHPad)
         }
-        if HomeLayoutPolicy.usesFeaturedHero, let featured {
-            FeaturedHero(item: featured, compact: horizontalSizeClass == .compact)
-                #if os(tvOS)
-                .padding(.horizontal, screenHPad)
-                #endif
-                .padding(.bottom, 12)
+        MediaRow(title: "Recently Added", items: recentItems)
+        if let continuing = model.hubs.continueWatching, !continuing.isEmpty {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Continue Watching").font(.headline)
+                ForEach(Array(continuing.prefix(showAllContinuing ? continuing.count : 3))) { item in
+                    NavigationLink(value: Route.item(item.id)) {
+                        HStack(spacing: 14) {
+                            AuthImage(path: item.poster ?? item.backdrop).frame(width: 48, height: 60).clipped().cornerRadius(6)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.showTitle ?? item.title).font(.headline)
+                                Text([item.seasonNumber.map { "S\($0)" }, item.episodeNumber.map { "E\($0)" }, item.kind == "episode" ? item.title : nil].compactMap { $0 }.joined(separator: " · ")).font(.caption).foregroundStyle(Palette.muted)
+                                if let watch = item.watch, let duration = watch.durationMs, duration > 0 {
+                                    ProgressView(value: min(1, Double(watch.positionMs ?? 0) / Double(duration))).tint(Palette.muted).frame(maxWidth: 280)
+                                }
+                            }
+                            Spacer()
+                            Image(systemName: "play.fill")
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    #if os(tvOS)
+                    .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
+                    #else
+                    .buttonStyle(.plain)
+                    #endif
+                }
+                if continuing.count > 3 { Button(showAllContinuing ? "Show fewer" : "More in progress (\(continuing.count - 3))") { showAllContinuing.toggle() } }
+            }.padding(.horizontal, screenHPad).padding(.vertical, 18)
         }
-
-        MediaRow(
-            title: "Continue Watching",
-            items: HomeLayoutPolicy.continueWatchingShelfItems(
-                model.hubs.continueWatching ?? []
-            ),
-            style: .landscape,
-            landscapeCopyStyle: HomeLayoutPolicy.continueWatchingCopyStyle
-        )
-        MediaRow(
-            title: "Next Up",
-            items: model.hubs.nextUp ?? [],
-            style: .landscape
-        )
-        MediaRow(
-            title: "Recently Added",
-            items: model.hubs.recentlyAdded ?? []
-        )
-        ComingSoonRow(entries: model.comingSoon)
-
-        if featured == nil,
-           (model.hubs.nextUp ?? []).isEmpty,
-           model.comingSoon.isEmpty {
-            ContentUnavailableView(
-                "Nothing new yet",
-                systemImage: "house",
-                description: Text("Continue watching, recently added titles, and upcoming releases will appear here.")
-            )
-            .frame(maxWidth: .infinity)
-            .padding(.top, 80)
+        if !dvr.library.isEmpty {
+            VStack(alignment: .leading, spacing: 14) {
+                NavigationLink { DvrRecordingsRootView().appDestinations() } label: { Text("Recently Recorded").font(.headline) }
+                ForEach(Array(dvr.library.prefix(3))) { recording in
+                    NavigationLink { DvrRecordingDetailView(recordingId: recording.id).appDestinations() } label: {
+                        HStack {
+                            Image(systemName: "record.circle")
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(recording.title).font(.headline)
+                                Text(Date(timeIntervalSince1970: TimeInterval(recording.airingStart)), style: .date).font(.caption).foregroundStyle(Palette.muted)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                        }
+                    }
+                    #if os(tvOS)
+                    .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
+                    #else
+                    .buttonStyle(.plain)
+                    #endif
+                }
+            }.padding(.horizontal, screenHPad).padding(.vertical, 18)
+        }
+        if recentItems.isEmpty && (model.hubs.continueWatching ?? []).isEmpty && dvr.library.isEmpty {
+            Text("Your library additions and recordings will appear here.").foregroundStyle(Palette.muted).padding(screenHPad)
         }
     }
+
 }
 
 enum HomeLayoutPolicy {
@@ -352,14 +370,10 @@ enum HomeLayoutPolicy {
     static let showsLibraryShelvesOnHome = false
 
     static func continueWatchingShelfItems(_ items: [Item]) -> [Item] {
-        usesFeaturedHero ? Array(items.dropFirst()) : items
+        items
     }
 
-    #if os(tvOS)
     static let usesFeaturedHero = false
-    #else
-    static let usesFeaturedHero = true
-    #endif
 }
 
 private struct LibrariesDashboard: View {
@@ -435,259 +449,6 @@ private struct LibrariesDashboard: View {
         .padding(.top, 18)
     }
 }
-
-private struct FeaturedHero: View {
-    let item: Item
-    let compact: Bool
-
-    var body: some View {
-        NavigationLink(value: Route.item(item.id)) {
-            #if os(iOS)
-            if compact {
-                compactHero
-            } else {
-                expansiveHero
-            }
-            #else
-            expansiveHero
-            #endif
-        }
-        .featuredButtonStyle()
-        .accessibilityLabel("\(heroAction) \(item.title)")
-        #if os(iOS)
-        // The outer inset is applied to the link. The card itself separately
-        // accepts that finite width before its loaded artwork is clipped.
-        .modifier(IOSHomeHeroLayout(compact: compact))
-        #endif
-    }
-
-    #if os(iOS)
-    private var compactHero: some View {
-        ZStack(alignment: .bottomLeading) {
-            AuthImage(
-                path: item.backdrop ?? item.poster,
-                targetSize: CGSize(
-                    width: 430,
-                    height: HomeHeroMetrics.compactHeight
-                )
-            )
-            .frame(maxWidth: .infinity)
-            .frame(height: HomeHeroMetrics.compactHeight)
-            .clipped()
-
-            LinearGradient(
-                stops: [
-                    .init(color: .clear, location: 0.18),
-                    .init(color: .black.opacity(0.24), location: 0.5),
-                    .init(color: Palette.bg.opacity(0.92), location: 1)
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-
-            VStack(alignment: .leading, spacing: 7) {
-                Text((item.watch?.positionMs ?? 0) > 3_000 ? "CONTINUE WATCHING" : "PICK SOMETHING TO WATCH")
-                    .font(.system(size: 10, weight: .bold, design: .rounded))
-                    .tracking(1.7)
-                    .foregroundStyle(Palette.accent)
-
-                Text(item.showTitle ?? item.title)
-                    .font(.system(size: 25, weight: .heavy, design: .rounded))
-                    .foregroundStyle(.white)
-                    .lineLimit(2)
-                    .shadow(color: .black.opacity(0.6), radius: 8, y: 2)
-
-                if item.showTitle != nil {
-                    Text(episodeSubtitleForHero(item))
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.white.opacity(0.78))
-                        .lineLimit(1)
-                }
-
-                HStack(spacing: 12) {
-                    ForEach(compactFacts, id: \.self) { fact in
-                        Text(fact)
-                    }
-                    if let resolutionBadge {
-                        IOSWebMediaBadge(badge: resolutionBadge)
-                    }
-                }
-                .font(.system(size: 12, weight: .medium, design: .rounded))
-                .foregroundStyle(.white.opacity(0.7))
-
-                if heroProgress > 0 {
-                    GeometryReader { geometry in
-                        ZStack(alignment: .leading) {
-                            Capsule().fill(.white.opacity(0.2))
-                            Capsule()
-                                .fill(Palette.accent)
-                                .frame(width: geometry.size.width * heroProgress)
-                        }
-                    }
-                    .frame(height: 3)
-                }
-
-                HStack(spacing: 10) {
-                    Label(heroAction, systemImage: "play.fill")
-                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 14)
-                        .frame(height: 38)
-                        .background(Palette.accent, in: Capsule())
-
-                    if let remaining = continueWatchingTimeRemaining(item) {
-                        Text(remaining)
-                            .font(.system(size: 11, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.58))
-                    }
-                }
-            }
-            .padding(16)
-        }
-        .modifier(IOSHomeHeroCardLayout())
-    }
-
-    private var compactFacts: [String] {
-        var facts: [String] = []
-        if let year = item.year { facts.append(String(year)) }
-        if let runtime = item.runtimeMs, runtime > 0 {
-            facts.append(DetailView.compactRuntimeLabel(runtime))
-        }
-        return facts
-    }
-
-    private var resolutionBadge: ItemMetadataBadge? {
-        guard let resolution = resolutionLabel(item.resolution) else { return nil }
-        return ItemMetadataBadge(
-            kind: .resolution,
-            symbol: "",
-            mark: resolution,
-            accessibilityLabel: resolution
-        )
-    }
-
-    private var heroProgress: CGFloat {
-        CGFloat(progressFraction(item.watch, runtimeMs: item.runtimeMs))
-    }
-    #endif
-
-    private var expansiveHero: some View {
-        ZStack(alignment: .bottomLeading) {
-            AuthImage(path: item.backdrop ?? item.poster)
-                .frame(maxWidth: .infinity)
-                .frame(height: heroHeight)
-                .clipped()
-            LinearGradient(
-                colors: [.clear, Palette.bg.opacity(0.18), Palette.bg],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            VStack(alignment: .leading, spacing: 8) {
-                Text(item.showTitle ?? item.title)
-                    #if os(tvOS)
-                    .font(.system(size: 52, weight: .bold))
-                    #else
-                    .font(compact ? .title.bold() : .largeTitle.bold())
-                    #endif
-                    .foregroundColor(.white)
-                    .lineLimit(2)
-                if item.showTitle != nil {
-                    Text(episodeSubtitleForHero(item))
-                        .font(.headline)
-                        .foregroundColor(.white.opacity(0.82))
-                        .lineLimit(1)
-                }
-                if !heroMetadata.isEmpty {
-                    Text(heroMetadata)
-                        .font(.system(.callout, design: .monospaced).weight(.semibold))
-                        .foregroundColor(.white.opacity(0.72))
-                        .lineLimit(1)
-                }
-                Label(heroAction, systemImage: "play.fill")
-                    .font(.system(.headline, design: .monospaced).weight(.bold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16).padding(.vertical, 10)
-                    .background(Palette.accent, in: Capsule())
-            }
-            .padding(.horizontal, screenHPad)
-            .padding(.bottom, 24)
-        }
-        .clipShape(RoundedRectangle(cornerRadius: heroCornerRadius, style: .continuous))
-    }
-
-    private var heroHeight: CGFloat {
-        #if os(tvOS)
-        return 470
-        #else
-        return compact ? 290 : 430
-        #endif
-    }
-
-    private var heroCornerRadius: CGFloat {
-        #if os(tvOS)
-        return 24
-        #else
-        return 0
-        #endif
-    }
-
-    private var heroMetadata: String {
-        var parts: [String] = []
-        if let year = item.year { parts.append(String(year)) }
-        if let runtime = item.runtimeMs, runtime > 0 {
-            let totalMinutes = runtime / 60_000
-            let hours = totalMinutes / 60
-            let minutes = totalMinutes % 60
-            parts.append(hours > 0 ? "\(hours)h \(minutes)m" : "\(minutes)m")
-        }
-        if let resolution = resolutionLabel(item.resolution) { parts.append(resolution) }
-        return parts.joined(separator: "   ·   ")
-    }
-
-    private var heroAction: String {
-        progressFraction(item.watch, runtimeMs: item.runtimeMs) > 0 ? "Resume" : "View details"
-    }
-}
-
-#if os(iOS)
-enum HomeHeroMetrics {
-    static let compactHeight: CGFloat = 238
-    static let cornerRadius: CGFloat = 18
-    static let horizontalInset = screenHPad
-}
-
-struct IOSHomeHeroCardLayout: ViewModifier {
-    func body(content: Content) -> some View {
-        GeometryReader { geometry in
-            content
-                .frame(
-                    width: geometry.size.width,
-                    height: HomeHeroMetrics.compactHeight
-                )
-                .clipShape(RoundedRectangle(
-                    cornerRadius: HomeHeroMetrics.cornerRadius,
-                    style: .continuous
-                ))
-                .overlay {
-                    RoundedRectangle(
-                        cornerRadius: HomeHeroMetrics.cornerRadius,
-                        style: .continuous
-                    )
-                    .stroke(.white.opacity(0.08), lineWidth: 0.5)
-                }
-        }
-        .frame(height: HomeHeroMetrics.compactHeight)
-    }
-}
-
-struct IOSHomeHeroLayout: ViewModifier {
-    let compact: Bool
-
-    func body(content: Content) -> some View {
-        content.padding(.horizontal, compact ? HomeHeroMetrics.horizontalInset : 0)
-    }
-}
-#endif
 
 private struct EmptyLibraryCategory: View {
     let title: String

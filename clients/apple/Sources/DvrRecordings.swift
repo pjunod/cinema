@@ -155,6 +155,7 @@ final class DvrController: ObservableObject {
     /// delivery path. Failed reads retain the last snapshot and back off.
     func observe(origin: String, token: String?, highFrequency: Bool = false) async {
         await load(origin: origin, token: token)
+        await loadLibrary()
         while !Task.isCancelled {
             await refreshOverview()
             let base = highFrequency || hasObservedActivity ? 5 : 30

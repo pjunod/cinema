@@ -28,6 +28,8 @@ Apple build 160: [Native Live TV and shelf layouts](apple-builds/320-native-layo
 
 Native follow-up: [Phone, tablet and TV layout fixes](clients/NATIVE-LAYOUT-FOLLOWUP.md) — **open**.
 
+Library-page revision: [Quiet Home and open media details](clients/CALM-LIBRARY-PAGES.md) — **open**.
+
 ## Find it fast
 
 | You want to know… | Read |
