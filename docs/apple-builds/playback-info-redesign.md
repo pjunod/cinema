@@ -1,6 +1,7 @@
 # Playback information hierarchy
 
 Build: 161
+Issue: #321
 
 Apple playback information now uses Overview, Details, Diagnostics and Compact
 across library playback and Live TV. Player-reported resolution remains visible
