@@ -605,10 +605,12 @@
 
   // A wait that persists has already outlived hls.js/browser nudges, but time
   // plus buffered media does not identify a decoder fault. Only independently
-  // attributed decoder or network evidence may trade an Auto remux for a
-  // compatible transcode. An explicit quality choice is always reconnected
-  // exactly. One automatic attempt is the hard bound that prevents a bad file
-  // or dead network from restart-looping.
+  // attributed decoder evidence may trade an Auto remux for a compatible
+  // transcode. A generic network disconnect says the transfer failed, not
+  // that its recipe exceeds the link; measured capacity adaptation remains
+  // with the existing Auto controller. An explicit quality choice is always
+  // reconnected exactly. One automatic attempt is the hard bound that prevents
+  // a bad file or dead network from restart-looping.
   function stallRecoveryAction({
     method,
     quality = "auto",
@@ -619,7 +621,7 @@
     if (
       method === "remux" &&
       qualityForce(quality) === "auto" &&
-      ["decoder", "network"].includes(cause)
+      cause === "decoder"
     ) {
       return "transcode";
     }

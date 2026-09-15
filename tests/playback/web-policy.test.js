@@ -2254,13 +2254,16 @@ test("a persistent stall gets one bounded method-aware recovery", () => {
     "restart",
     "missing attribution cannot authorize a recipe change",
   );
-  for (const cause of ["decoder", "network"]) {
-    assert.equal(
-      policy.stallRecoveryAction({ method: "remux", quality: "auto", cause }),
-      "transcode",
-      `${cause} evidence keeps the compatible-recipe fallback reachable`,
-    );
-  }
+  assert.equal(
+    policy.stallRecoveryAction({ method: "remux", quality: "auto", cause: "decoder" }),
+    "transcode",
+    "typed decoder evidence keeps the compatible-recipe fallback reachable",
+  );
+  assert.equal(
+    policy.stallRecoveryAction({ method: "remux", quality: "auto", cause: "network" }),
+    "restart",
+    "a generic transfer failure does not prove that the recipe exceeds capacity",
+  );
   assert.equal(
     policy.stallRecoveryAction({
       method: "remux", quality: "original", cause: "decoder",
@@ -2333,7 +2336,7 @@ test("a persistent supply stall spends its one restart on the sustainable rung",
   );
 });
 
-test("only measured adaptation sends the legacy rung-lowering stall reason", () => {
+test("only measured capacity adaptation sends the legacy rung-lowering stall reason", () => {
   const ordinary = { start: 42, height: 720 };
   assert.deepEqual(
     policy.stallReopenSessionOptions({
@@ -2357,7 +2360,7 @@ test("only measured adaptation sends the legacy rung-lowering stall reason", () 
       forceReopen: true,
       method: "transcode",
       sessionId: "session-before-stall",
-      cause: "presentation",
+      cause: "unknown",
     }),
     ordinary,
     "a same-recipe presentation repair keeps the playback identity but sends no rung-drop ticket",
@@ -2376,6 +2379,11 @@ test("only measured adaptation sends the legacy rung-lowering stall reason", () 
     shippedSource("seekTo")+shippedSource("executePlaybackMediaChange"),
     /previousSessionId:PLAYER\.sessionId[\s\S]*recoveryCause:[\s\S]*stallReopenSessionOptions\([\s\S]*?cause:change\.recoveryCause/,
     "the shipped restart path must distinguish same-recipe repair from measured adaptation",
+  );
+  assert.match(
+    shippedSource("seekTo"),
+    /kind==="supply"&&autoHeightOverride>0[\s\S]*\?"network":"unknown"/,
+    "only an independently selected lower rung authorizes the legacy capacity ticket",
   );
 });
 

@@ -170,13 +170,22 @@ is ready and report; the coordinator dispatches Wave 2 after integration.
   `c29b0ac21931ad6ca1026af4190e5816934c9177`.
 - Observation/action policy change: loaded runway with no frame progress and no
   media error is a presentation stall with unknown cause. Its one bounded repair
-  preserves the current delivery recipe. Typed decoder/network errors and the
-  existing measured supply controller retain their compatible adaptation paths.
+  preserves the current delivery recipe. A generic network disconnect also
+  reconnects the same recipe: failed transfer is not proof of inadequate
+  capacity. Typed decoder errors and the existing measured supply controller
+  retain their compatible adaptation paths.
 - Identity and completion: the first episode freezes film position, delivery,
   resolution, dynamic range, tracks, offset, attachment and control generations.
   A play event alone does not settle it; new presented frames, or film-clock
   progress when frame counters are unavailable, settle it once. Viewer intent
   supersedes stale recovery.
+- Control and lifecycle binding: one completed native reevaluation plus a
+  passive `none`, no verdict, or an old-server hold leaves no work pending and
+  reaches the one local repair without another deferral timer. Same-recipe
+  repair omits the legacy `previous_session_id` / `reopen_reason` pair because
+  that pair requests a server rung reduction. It remains bound by the stable
+  per-page `playback_id` predecessor CAS, the accepted `control_sequence`, and
+  one `request_id` across any create retry; no new wire field is required.
 - Focused proof: `node --test tests/playback/web-policy.test.js
   tests/playback/web-control.test.js` passed. `make web-check` reached and passed
   both changed playback suites, then stopped at the unchanged

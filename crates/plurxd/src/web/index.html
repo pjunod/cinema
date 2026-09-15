@@ -4122,8 +4122,9 @@ function stallRecoverySnapshot(p,v,{began,kind,cause,action,position,targetHeigh
 // A wait that never resumes used to be invisible forever: endWait() was the
 // only reporter and therefore never ran. Record it at a fixed deadline, then
 // make one evidence-aware attempt. Unattributed waits keep the selected recipe;
-// independently attributed decoder/network failures may use the compatible
-// path, and explicit quality choices remain exact.
+// independently attributed decoder failures may use the compatible path;
+// generic transfer failures reconnect without inventing a capacity verdict,
+// and explicit quality choices remain exact.
 async function persistentWait(v,p,began,generation,actionGeneration){
   if(!playbackOwnsAttachedMedia(p)) return;
   if(PLAYER!==p || p.waitAt!==began || !(p.started||p.controlSeek?.executed) ||
@@ -4142,7 +4143,7 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   const controlObservation=evidence.observation;
   // Presentation recovery belongs to this client, not to the producer
   // verdict. Spend the one harmless browser reevaluation before the bounded
-  // ask so a hold suppressed to `none` receives the same treatment.
+  // ask; once it resolves, a passive response leaves no work pending.
   let nativeReevaluated=false;
   if(kind==="presentation"&&p.waitNudgedAt!==began){
     p.waitNudgedAt=began;
@@ -4203,14 +4204,14 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   }
   if(p.stallDeferralsAt!==began){ p.stallDeferralsAt=began; p.stallDeferrals=0; }
   if(verdict&&verdict.type==="hold"){
-    if(kind==="supply"){
+    if(kind==="supply"||kind==="presentation"){
       // A hold says why the producer paused. It never says whether published
-      // bytes can be fetched, and production state is not authority over
-      // serving: this player's buffer is empty and its supply has stopped, so
-      // there is nothing left for waiting to arrive at. Fall through to the
-      // same bounded recovery an unanswered ask gets.
+      // bytes can be fetched or whether already-loaded bytes can be presented,
+      // and production state is not authority over either serving or the local
+      // presentation owner. Fall through to the same bounded local recovery an
+      // unanswered ask gets.
       clientLog({level:"warn",event:"stall_recovery",detail:"fallthrough:hold",
-        message:`server holds this stall (${verdict.reason}) — nothing left to play, recovering anyway`,
+        message:`server holds this ${kind} stall (${verdict.reason}) — recovering locally`,
         control_trigger:controlTrigger});
     }else if(controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
       // Production is deliberately not advancing, so the client's reopen would
@@ -4237,16 +4238,6 @@ async function persistentWait(v,p,began,generation,actionGeneration){
         message:"server hold reached the client recovery deadline — recovering anyway",
         control_trigger:controlTrigger});
     }
-  }
-  if(kind==="presentation"&&p.waitNudgedAt===began&&
-     (!verdict||verdict.type==="none")&&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
-    // `none` is passive: it means production has no authoritative action for
-    // this presentation wait. Observe the native reevaluation under the same
-    // absolute episode deadline instead of treating absence of a server
-    // command as an instruction to replace media immediately.
-    p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation,actionGeneration).catch(()=>{}),
-      Math.min(PERSISTENT_STALL_MS,CONTROL_STALL_DEFER_DEADLINE_MS-controlElapsedMs));
-    return;
   }
   if(verdict&&verdict.type==="retry_resource"&&(p.stallDeferrals||0)<CONTROL_DEFER_LIMIT
      &&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
@@ -12585,10 +12576,12 @@ function playbackProgressTick(v,p){
   const clock=Number(v.currentTime)||0;
   let frames=null, frameSource="none";
   if(streamHasVideo(p,v)){
-    if(p.controlHasFrameCallbacks&&p.controlPresentedFrames>0){
-      frames=p.controlPresentedFrames; frameSource="callbacks";
-    }
-    else try{
+    if(p.controlHasFrameCallbacks){
+      // Callback support is itself the observation contract. Zero presented
+      // callbacks is real evidence and must not fall through to a decoded-frame
+      // counter that can advance while the compositor remains frozen.
+      frames=Number(p.controlPresentedFrames)||0; frameSource="callbacks";
+    }else try{
       const q=v.getVideoPlaybackQuality?.();
       if(Number.isFinite(q?.totalVideoFrames)){frames=q.totalVideoFrames; frameSource="quality";}
     }catch(e){}
@@ -13193,8 +13186,11 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   return requestPlaybackMediaChange(PLAYER,{method:PLAYER.method,copyHls:!!PLAYER.copyHls,
     reason:forceReopen?"stall-restart":"seek",height:autoHeightOverride,
     forceReopen,previousSessionId:PLAYER.sessionId,
+    // Only an independently selected lower rung turns supply pressure into a
+    // capacity verdict. MEDIA_ERR_NETWORK alone is a failed transfer and keeps
+    // this create on the same recipe without the legacy rung-lowering ticket.
     recoveryCause:recoveryEpisode&&recoveryEpisode.kind==="supply"&&autoHeightOverride>0
-      ?"network":recoveryEpisode&&recoveryEpisode.cause});
+      ?"network":"unknown"});
 }
 function autoskipOn(){ try{ return localStorage.getItem("plurx_autoskip")==="1"; }catch(e){ return false; } }
 function setAutoskip(on){ try{ localStorage.setItem("plurx_autoskip", on?"1":"0"); }catch(e){}

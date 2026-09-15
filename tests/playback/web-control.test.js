@@ -1546,6 +1546,14 @@ async function main() {
     h.v.currentTime=30;h.tick(22000);h.playing();h.v.currentTime=31;h.tick(22500);
     assert.equal(h.recovered(),3,
       'the explicit clock fallback completes recovery when frame counters are unavailable');
+    h.p.progressWatch=null;h.p.recoveringStall={at:22500,action:'restart'};
+    h.p.controlHasFrameCallbacks=true;h.p.controlPresentedFrames=0;
+    h.v.getVideoPlaybackQuality=()=>({totalVideoFrames:500});
+    h.v.currentTime=40;h.tick(23000);h.v.currentTime=41;h.tick(23500);
+    assert.equal(h.recovered(),3,
+      'decoded-ahead frames cannot settle recovery while presentation callbacks stay at zero');
+    h.p.controlPresentedFrames=1;h.v.currentTime=42;h.tick(24000);
+    assert.equal(h.recovered(),4,'the supported presentation callback settles recovery');
   }
   player.waitAt=performance.now()-9_000;
   const inferredSupply=adapter.playbackControlSnapshot(video,player);
@@ -2172,7 +2180,8 @@ async function main() {
   // player disagrees — and the supply/decode split these fixtures straddle is
   // decided by exactly one of them.
   const askConstants = ["CONTROL_ASK_MS", "CONTROL_ASK_CAP_MS", "CONTROL_MIN_EXCHANGE_MS",
-    "CONTROL_DEFER_LIMIT", "CONTROL_STALL_DEFER_DEADLINE_MS", "SUPPLY_RUNWAY_SECS"].map((name) => {
+    "CONTROL_DEFER_LIMIT", "CONTROL_STALL_DEFER_DEADLINE_MS", "SUPPLY_RUNWAY_SECS",
+    "STALL_MIN_MS"].map((name) => {
       const found = SHIPPED_UI.match(new RegExp(`const ${name}=\\d+(?:\\.\\d+)?;`));
       assert.notEqual(found, null, `index.html no longer declares ${name}`);
       return found[0];
@@ -2193,7 +2202,7 @@ async function main() {
     const stub = new Function(
       "setTimeout", "clearTimeout", "PERSISTENT_STALL_MS",
       "PlaybackPolicy", "playQuality", "recordWaitStall", "pbPosSec", "clientLog",
-      "startTranscodeFallback", "seekTo", "endWait", "playbackContext",
+      "startTranscodeFallback", "seekTo", "playbackContext",
       "clockFromSec", "CONTROL_CLIENT_ID", "playbackControlSnapshot",
       "sendPlaybackControl", "window", "PlurxPlaybackControl", "performance", "bufferRunway",
       [
@@ -2235,9 +2244,10 @@ async function main() {
         shippedSource("stopPlaybackControl"),
         shippedSource("startPlaybackControl"),
         shippedSource("persistentWaitEvidence"),
+        shippedSource("endWait"),
         shippedSource("stallRecoverySnapshot"),
         shippedSource("persistentWait"),
-        "function settlePlaybackControlSeek(){} function completeHlsStartup(){}",
+        "function settlePlaybackControlSeek(){} function completeHlsStartup(){} function clearStall(){} function finishStallRecovery(){return false;}",
         shippedSource("streamHasVideo"),
         shippedSource("samplePlaybackPresentationClock"),
         shippedSource("playbackProgressTick"),
@@ -2276,7 +2286,6 @@ async function main() {
       (entry) => log.push(entry),
       (why) => reopened.push({ kind: "transcode", why }),
       (position) => reopened.push({ kind: "seek", position }),
-      () => {},
       () => ({}),
       (sec) => `0:${sec}`,
       "33333333-3333-4333-8333-333333333333",
@@ -2669,12 +2678,10 @@ async function main() {
     assert.match(fell.message, /no_room/, "and names the reason the producer gave");
   }
 
-  // A decode stall first gives already-loaded media one native reevaluation,
-  // then defers the replacement to a hold: it holds media it cannot render
-  // rather than media it cannot get, so a reopen would churn against a server
-  // that already knows better. The deferral is of the reopen and NOT of the
-  // viewer's information — a client that only waited would leave a viewer eight
-  // seconds into a frozen picture with no UI, forever.
+  // An old server can still return a producer hold for a loaded presentation
+  // wait. It cannot suppress the client-owned repair: the browser has already
+  // completed its one native reevaluation and the hold describes production,
+  // not whether loaded bytes reached the display.
   {
     // This wait began with more buffered than the shipped supply threshold:
     // plenty left, and still not playing.
@@ -2682,52 +2689,72 @@ async function main() {
     const video=Object.assign({},stalledVideo,{play(){nudges++;return Promise.resolve();}});
     const { h, player } = await askWith({ type: "hold", reason: "no_room" },
       { player: { waitRunway: 22 }, video });
-    assert.equal(nudges,1,"loaded media receives one native reevaluation before deferral");
+    assert.equal(nudges,1,"loaded media receives one native reevaluation before repair");
     assert.notEqual(h.log.find((entry)=>entry.detail==="native_reevaluation:wait"),undefined);
-    assert.equal(h.reopened.length, 0, "a hold reopens nothing");
-    assert.equal(player.stallRecoveries, 0, "a hold spends no legacy attempt");
-    assert.equal(h.loading.length, 1, "a hold tells the viewer what is happening");
-    assert.equal(h.loading[0].detail, "The server is short of space.",
-      "in the viewer's words, not the wire's");
-    assert.equal(h.loading[0].actions.includes("force_transcode"), false,
-      "a hold offers no recipe change: the server said the recipe is not the problem");
-    assert.equal(h.loading[0].source, "control_hold",
-      "a hold is a notice beside the picture, not a screen over it");
-    assert.equal(h.stops, 0, "and stops nothing — the owner still has rungs");
+    assert.deepEqual(h.reopened,[{kind:"seek",position:12}],
+      "an old-server hold reaches one same-recipe local repair");
+    assert.equal(player.stallRecoveries,1,"the repair spends the one automatic attempt");
+    assert.equal(player.waitTimer,null,"the completed reevaluation leaves no deferral timer");
+    assert.equal(h.loading[0].source,"owner_recovery_step",
+      "the viewer is told the local repair, not an obsolete server wait");
+    assert.equal(h.stops,0,"the bounded repair keeps the owner active");
     assert.equal(h.stalls.length, 1,
-      "the stall is recorded once, not once per deferral");
-    assert.equal(player.waitReported, true,
-      "the wait stays reported, so resuming does not emit a second record for it");
-    assert.equal(h.timers.get(player.waitTimer).ms, 8_000, "and the deadline comes round again");
+      "the stall is recorded once, not once per control response");
   }
 
-  // The server suppresses a producer hold once it classifies a loaded wait as
-  // client-owned. A passive `none` still leaves time to observe the native
-  // reevaluation; it is not an instruction to replace the player immediately.
+  // A passive response leaves no pending work after the one native
+  // reevaluation. The repair starts now rather than marching the same episode
+  // through another eight-second timer callback.
   {
     let nudges=0;
     const video=Object.assign({},stalledVideo,{play(){nudges++;return Promise.resolve();}});
     const { h, player } = await askWith({ type: "none" },
       { player: { waitRunway: 22 }, video });
-    assert.equal(nudges,1,"hold suppression preserves one native reevaluation");
-    assert.equal(h.reopened.length,0,"passive control does not force immediate replacement");
-    assert.equal(player.stallRecoveries,0,"the existing absolute deadline still owns recovery");
-    assert.equal(h.timers.get(player.waitTimer).ms,8_000,"the same episode cadence observes progress");
+    assert.equal(nudges,1,"passive control preserves one native reevaluation");
+    assert.deepEqual(h.reopened,[{kind:"seek",position:12}],
+      "passive control reaches one same-recipe repair");
+    assert.equal(player.stallRecoveries,1,"the episode spends one attempt");
+    assert.equal(player.waitTimer,null,"passive control arms no repeated callback");
+  }
+
+  // Presentation progress while the bounded control ask is outstanding clears
+  // the wait identity. Its eventual passive response cannot act on the retired
+  // episode or open a replacement.
+  {
+    let now=9_000,release=null;
+    const h=stallHarness({clock:{now:()=>now}});
+    const player=Object.assign(stalledPlayer(),{waitAt:1,waitRunway:22,wantsPlayback:true,
+      controlHasFrameCallbacks:true,controlPresentedFrames:4,source:{video_codec:"h264"}});
+    const video={paused:false,seeking:false,ended:false,currentTime:10,error:null,
+      play(){return Promise.resolve();}};
+    h.stub.attach(player,video,bootstrap());h.attached.push(player);await flush();
+    h.holdWith(request=>new Promise(resolve=>{release=()=>resolve(Object.assign(response(request),
+      {action:{type:"none"}}));}));
+    const running=h.stub.stall(player,video,1,3);
+    await settleExchange();
+    assert.equal(typeof release,"function","the passive control response is outstanding");
+    h.stub.monitor(player,video);now=9_500;video.currentTime=11;
+    player.controlPresentedFrames=5;h.stub.monitor(player,video);
+    assert.equal(player.waitAt,null,"actual presentation progress retires the wait identity");
+    release();await settleExchange();await running;
+    assert.equal(h.reopened.length,0,"the late passive response cannot repair a recovered episode");
+    h.stub.detach(player);
   }
 
   {
     let now=9_500;
     const h=stallHarness({clock:{now:()=>now}});
     const player=Object.assign(stalledPlayer(),{waitAt:1,waitRunway:8});
-    h.stub.attach(player,stalledVideo,bootstrap()); h.attached.push(player);
+    const decoderVideo=Object.assign({},stalledVideo,{error:{code:3,message:"decode failed"}});
+    h.stub.attach(player,decoderVideo,bootstrap()); h.attached.push(player);
     await flush();
     h.answerWith(()=>({type:'hold',reason:'no_room'}));
-    const first=h.stub.stall(player,stalledVideo,1,3);
+    const first=h.stub.stall(player,decoderVideo,1,3);
     await settleExchange(); await first;
     assert.equal(h.reopened.length,0);
     now=17_500;
     h.holdWith(()=>new Promise(()=>{}));
-    const second=h.stub.stall(player,stalledVideo,1,3);
+    const second=h.stub.stall(player,decoderVideo,1,3);
     await settleExchange();
     const waiter=player.controlWaiters[0];
     assert.equal(waiter.hardExpiry,20_001,'the ask cap is the remaining absolute budget');
