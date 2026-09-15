@@ -413,7 +413,7 @@ handoff and reassign work rather than leaving two tasks polling each other.
 | Plan foundation | Coordinator | merged | [PR #322](http://192.168.4.7:3000/noirr/plurx/pulls/322); commit 05298f1c4, merged as fea5d2451; four docs checks and tracked hook passed |
 | C1 | Coordinator | merged | [PR #323](http://192.168.4.7:3000/noirr/plurx/pulls/323); runtime 00a70a7b; 11 focused tests passed |
 | I1 | Sol 1 | merged | [PR #325](http://192.168.4.7:3000/noirr/plurx/pulls/325); runtime 2a2ec42f; seven focused identity, conversion and store tests passed |
-| W1 | Sol 2 | amendment in progress | [PR #324](http://192.168.4.7:3000/noirr/plurx/pulls/324); passive waits, transfer attribution and presented-frame corrections |
+| W1 | Sol 2 | merged | [PR #324](http://192.168.4.7:3000/noirr/plurx/pulls/324); head e906ba04; passive waits, transfer attribution and presented-frame corrections verified |
 | C2 | Coordinator | verified; PR preparation | Runtime 298cc69d; exact demand joins the existing queue; four focused tests and tracked hook passed |
 | I2 | Sol 1 | implementing | Existing playback-lab measurement extension; no production scan |
 | W2 | Sol 2 | depends on C1/W1 | Native evidence/recovery parity |
@@ -494,3 +494,10 @@ still requires a complete source pass. Its presentation is now typeless from
 the first response (C1), and completing preparation never changes the active
 watch. Physical first-play latency and Safari recovery remain separate
 observations, not claims made by these fixture tests.
+
+Combined tree `c2770918` includes current main `2699360e7` and merged W1.
+The pinned daemon test binary was rebuilt for that tree; all four C2 filters
+passed again. The focused web policy, control, settings-section and player-DOM
+files passed together with `node --test` (four files, 31.3 seconds), covering
+the concurrent playback-info merge. This replaces the older-base evidence for
+integration; no full web or Rust suite was repeated.
