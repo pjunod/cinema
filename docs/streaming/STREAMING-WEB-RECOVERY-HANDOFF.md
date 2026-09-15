@@ -166,8 +166,8 @@ is ready and report; the coordinator dispatches Wave 2 after integration.
 
 ## 6. Result — implementation task fills this in
 
-- Tested base: `fea5d245131095f26f60d67a69e6570aa3626125`. The
-  implementation commit is the commit carrying this result.
+- Tested base: `fea5d245131095f26f60d67a69e6570aa3626125`. Implementation:
+  `c29b0ac21931ad6ca1026af4190e5816934c9177`.
 - Observation/action policy change: loaded runway with no frame progress and no
   media error is a presentation stall with unknown cause. Its one bounded repair
   preserves the current delivery recipe. Typed decoder/network errors and the
@@ -183,8 +183,8 @@ is ready and report; the coordinator dispatches Wave 2 after integration.
   `tests/web/library-channels.test.js` harness because its baseline `document`
   mock lacks `addEventListener`; the failing extracted source is outside this
   task's diff. The settings-section test for the removed HLS switch passes.
-- PR: `codex/streaming-web-recovery` into `effort/streaming-reliability`; URL is
-  recorded after Forgejo creates it.
+- PR: [Forgejo #324](http://192.168.4.7:3000/noirr/plurx/pulls/324),
+  `codex/streaming-web-recovery` into `effort/streaming-reliability`.
 - Remaining physical observation: Safari playback has not been claimed from
   fake video objects. The coordinator owns the later physical regression run.
 
