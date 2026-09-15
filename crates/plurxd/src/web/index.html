@@ -5522,12 +5522,12 @@ function homeRecentItems(p){
   const kinds=new Map((p.libs||[]).map(lib=>[String(lib.id),lib.kind]));
   return (p.hubs.recently_added||[]).filter(it=>kinds.has(String(it.library_id))&&kinds.get(String(it.library_id))!=='recordings');
 }
-function calmHomeBody(p){
+function calmHomeBody(p,showTitle=true){
   const recent=homeRecentItems(p),cont=p.hubs.continue_watching||[];
   const recentHtml=recent.length?rail('Recently added',recent.map(i=>card(i)).join('')):p.previewsPending?'<p class="muted">Loading your library…</p>':'';
   const continuing=cont.length?`<h2 class="section">Continue watching</h2><div class="resume-strip">${cont.slice(0,3).map(viewingCard).join('')}</div>${cont.length>3?`<details class="watch-more"><summary>More in progress (${cont.length-3})</summary><div class="resume-strip">${cont.slice(3).map(viewingCard).join('')}</div></details>`:''}`:'';
   const previews=(p.sections||[]).filter(section=>section.key!=='recordings').map(section=>`<h2 class="section"><a href="${esc(section.href)}">${esc(section.name)}</a></h2>${section.items.some(i=>i.kind==='photo')?grid(section.items):rail('Browse '+esc(section.name),section.items.map(i=>card(i)).join(''))}`).join('');
-  return `<div class="calm-home"><h1>Home</h1><div data-home-region="hubs" data-home-slot="hubs">${installBannerHtml()}${recentHtml}${continuing}${p.hubsError?'<p class="hint">Home history is unavailable right now.</p>':''}</div><div data-home-region="saved" data-home-slot="saved">${homeSavedHtml(p)}</div><div data-home-region="soon" data-home-slot="soon">${p.soon?.entries?.length?`<details class="home-explore"><summary>Coming soon</summary>${rail('Future releases',p.soon.entries.map(comingCard).join(''))}</details>`:''}</div><div data-home-region="previews" data-home-slot="previews">${p.previewsError?'<p class="hint">Library previews are unavailable right now.</p>':p.libs.length?`<details class="home-explore"><summary>Browse libraries</summary>${groupToggleHtml(p.group)}${previews}</details>`:p.previewsPending?'':`<p class="empty">No libraries yet.${ME?.is_admin?' Add one in <a href="#/settings/libraries">Settings</a>.':''}</p>`}</div></div>`;
+  return `<div class="calm-home">${showTitle?'<h1>Home</h1>':''}<div data-home-region="hubs" data-home-slot="hubs">${installBannerHtml()}${recentHtml}${continuing}${p.hubsError?'<p class="hint">Home history is unavailable right now.</p>':''}</div><div data-home-region="saved" data-home-slot="saved">${homeSavedHtml(p)}</div><div data-home-region="soon" data-home-slot="soon">${p.soon?.entries?.length?`<details class="home-explore"><summary>Coming soon</summary>${rail('Future releases',p.soon.entries.map(comingCard).join(''))}</details>`:''}</div><div data-home-region="previews" data-home-slot="previews">${p.previewsError?'<p class="hint">Library previews are unavailable right now.</p>':p.libs.length?`<details class="home-explore"><summary>Browse libraries</summary>${groupToggleHtml(p.group)}${previews}</details>`:p.previewsPending?'':`<p class="empty">No libraries yet.${ME?.is_admin?' Add one in <a href="#/settings/libraries">Settings</a>.':''}</p>`}</div></div>`;
 }
 function viewingMore(p){
   const it=p.item;
@@ -21445,7 +21445,94 @@ function theaterChrome(active, inner){
 // seen is a lie about your own history; when nothing is in progress the honest
 // alternative is "new in your library", which is what the fallback says.
 const THEATER_HERO_KINDS={movie:1, episode:1, video:1};
-function theaterHomeBody(p){ return calmHomeBody(p); }
+function theaterHeroPick(p){
+  const hubs=(p&&p.hubs)||{};
+  const ok=it=>!!it && THEATER_HERO_KINDS[it.kind]===1;
+  // Array order IS recency — the server returns both hubs newest-first, and
+  // re-sorting them here would be this layout inventing an opinion about data
+  // it does not own.
+  const cont=(hubs.continue_watching||[]).filter(ok)[0];
+  // "Resume" vs "Play" comes from WHICH HUB the item came from, never from a
+  // position threshold recomputed here. The 3-second resume rule lives in
+  // exactly one place — loadItem()'s `resume` — and the continue-watching hub
+  // is the server's own answer to "what am I in the middle of". A layout that
+  // rounded that threshold differently would offer to resume something the
+  // player then restarts, which is the class of bug R4 exists to end.
+  if(cont) return {item:cont, kick:"Continue watching", resuming:true};
+  const fresh=homeRecentItems(p).filter(ok)[0];
+  if(fresh) return {item:fresh, kick:"New in your library", resuming:false};
+  // Nothing playable anywhere: a photo-only server, a brand-new install, a
+  // library of folders. The home body degrades to rails with no hero rather
+  // than throwing or fronting a folder.
+  return null;
+}
+function theaterHeroHtml(pick){
+  const it=pick.item;
+  // The backdrop the model already carries, and nothing else. artHtml() would
+  // reach for `poster` first, which is a 2:3 image and the WRONG picture for a
+  // 21:9 band — and on the cards below it is already being loaded at card
+  // size, so using it here would be a second full-resolution decode of an
+  // image the page has in another size. One URL, one request, and it is the
+  // same URL the item's own detail page uses, so clicking through is a cache
+  // hit rather than a fresh load.
+  //
+  // No backdrop — which is most home media, most episodes, and every photo —
+  // degrades to the token-mixed wash painted by .th-hero itself. Nothing to
+  // load, nothing to wait for, and it is a --bg/--accent mix so it is on-theme
+  // in all twenty-two palettes rather than a grey rectangle.
+  const bg=it.backdrop
+    ? `<div class="th-bg" style="background-image:url(${esc(tok(it.backdrop))})" aria-hidden="true"></div>` : "";
+  // The kicker carries the show name for an episode, so the headline can be
+  // the episode's own title without card()'s show-title swap being copied
+  // here — see NOTES §5.6.
+  const kick = it.kind==='episode' && it.show_title
+    ? `${pick.kick} · ${it.show_title}` : pick.kick;
+
+  const bits=[];
+  if(it.kind==='episode' && (it.season_number!=null||it.episode_number!=null))
+    bits.push(`<span>S${it.season_number||0}E${it.episode_number||0}</span>`);
+  if(it.kind==='video' && it.recorded_at) bits.push(`<span>${esc(fmtDate(it.recorded_at))}</span>`);
+  else if(it.year) bits.push(`<span>${esc(String(it.year))}</span>`);
+  // watchLine() is the shipped "23m left · ends ~10:45 PM" helper and it owns
+  // the position threshold itself, so the hero gets the same sentence the
+  // Continue-watching cards get, from the same code. It returns "" for a
+  // finished item, which is correct: nothing to say.
+  const left=watchLine(it, true);
+
+  const pct=progressPct(it.watch);
+  const prog = pct>0&&pct<100
+    ? `<div class="th-hprog" role="progressbar" aria-label="Progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}"><i style="width:${pct}%"></i></div>` : "";
+
+  // The primary action plays. It does not reimplement play(): it sets the
+  // shipped AUTOPLAY handoff and navigates, which is exactly what an episode
+  // row's ▶ button does. viewItem() then starts the file loadItem() picked, at
+  // the position loadItem() computed, with the metadata loadItem() built — so
+  // the hero needs no file id, no resume value and no /items/N fetch of its
+  // own, and the request log for the home route is unchanged.
+  const label = pick.resuming ? "▶ Resume" : "▶ Play";
+  return `<section class="th-hero${bg?'':' th-noart'}" aria-label="Featured">${bg}
+    <div class="th-scrim" aria-hidden="true"></div>
+    <div class="th-fg">
+      <div class="th-kick">${esc(kick)}</div>
+      <h1 class="th-title">${esc(it.title)}</h1>
+      <div class="th-meta">${bits.join("")}${left}</div>
+      ${it.overview?`<p class="th-desc">${esc(it.overview)}</p>`:""}
+      ${prog}
+      <div class="actions">
+        <button class="btnplay" onclick="AUTOPLAY='${exactWireId(it)}';location.hash='#/item/${exactWireId(it)}'">${label}</button>
+        <button class="ghost" onclick="location.hash='#/item/${exactWireId(it)}'">ⓘ Details</button>
+      </div>
+    </div>
+  </section>`;
+}
+
+// Theater retains its cinematic, recently played feature. Classic and Catalog
+// use the quieter composition directly; asynchronous regions remain stable.
+function theaterHomeBody(p){
+  const pick=theaterHeroPick(p);
+  return `<div data-home-region="hubs" data-home-slot="hero">${pick?theaterHeroHtml(pick):''}</div>`+
+    `<div class="th-rails">${calmHomeBody(p,false)}</div>`;
+}
 // ---------------------------------------------------------------------------
 // 4. Library — shell only (items and count are inherited from classic)
 // ---------------------------------------------------------------------------

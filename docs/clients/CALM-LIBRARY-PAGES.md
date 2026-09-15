@@ -9,8 +9,9 @@ Home and item-page proposals across the web, Apple and Android clients.
 
 Recently added comes first and excludes libraries whose type is `recordings`.
 Continue watching shows three compact entries, with the remainder behind More
-in progress. Recently recorded stays separate. A generic Next up shelf and
-featured continuation hero no longer appear. Series continuation stays attached
+in progress. Recently recorded stays separate. A generic Next up shelf no longer appears. Classic, Catalog and native Home
+use compact continuation entries; web Theater retains its large recently played
+feature above the other sections, as requested in the final design refinement. Series continuation stays attached
 to the named series or season page.
 
 The web waits for the library roster before classifying recent entries; an
@@ -46,7 +47,9 @@ statistics, ingestion and recording scheduling are outside this revision.
 
 Existing native playback, download and remote input controls are reused.
 Native TV typography and controls follow the platform, with the same hierarchy
-as the web proposal. Illustration artwork in the proposal is not shipped.
+as the web proposal. Illustration artwork in the proposal is not shipped. Theater uses the existing
+backdrop and resume behavior; without an in-progress video it can feature a
+recent library video, excluding recording libraries.
 
 ## Evidence and remaining work
 

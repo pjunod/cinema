@@ -38,3 +38,13 @@ assert.equal(summary({...file, id: 'file-a'}, 'audio'), 'French · default');
 assert.equal(summary({...file, id: 'file-a'}, 'subtitle'), 'English · default');
 assert.doesNotMatch(declaration('calmHomeBody'), /next_up|theaterHero|watch-cards/);
 console.log('Calm library regressions: recording ownership, unknown languages, per-file choices, and compact Home passed.');
+
+const hero = new Function('homeRecentItems',
+  `const THEATER_HERO_KINDS={movie:1,episode:1,video:1}; ${declaration('theaterHeroPick')}; return theaterHeroPick;`)(recent);
+const continued = {id:'continue',kind:'episode',title:'The episode I was watching'};
+assert.equal(hero({...page,hubs:{...page.hubs,continue_watching:[continued]}}).item,continued);
+assert.equal(hero({...page,hubs:{...page.hubs,continue_watching:[continued]}}).resuming,true);
+assert.equal(hero({...page,hubs:{recently_added:[],next_up:[continued]}}),null);
+assert.match(declaration('theaterHomeBody'), /theaterHeroHtml/);
+assert.match(declaration('theaterHomeBody'), /data-home-slot="hero"/);
+console.log('Theater retains its recently played feature without promoting Next up.');
