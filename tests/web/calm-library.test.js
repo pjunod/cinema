@@ -36,11 +36,11 @@ assert.match(declaration('theaterHomeBody'), /theaterHeroHtml/);
 assert.match(declaration('theaterHomeBody'), /data-home-slot="hero"/);
 for (const name of ['classicHomeBody', 'catalogHomeBody', 'theaterHomeBody']) {
   const body = declaration(name);
-  assert.match(body, /viewingHubs\(p\)/);
-  assert.match(body, /homeSavedHtml\(p\)/);
+  assert.match(body, /rail\("Continue watching"/);
+  assert.match(body, /rail\("Next up"/);
+  assert.match(body, /card\(i,true\)/);
   assert.doesNotMatch(body, /calmHomeBody|<details/);
 }
-assert.match(declaration('viewingHubs'), /nextRows=next.filter/);
-assert.match(declaration('homeSavedHtml'), /dvr-saved-card/);
-assert.doesNotMatch(source, /calm-home|resume-strip|home-explore/);
+assert.doesNotMatch(source, /function viewingHubs\(|function viewingCard\(|function homeSavedHtml\(/);
+assert.doesNotMatch(source, /calm-home|resume-strip|home-explore|watch-cards|watch-next/);
 console.log('All three Home layouts retain their original shelves and Theater feature.');

@@ -8,9 +8,10 @@ Home and item-page proposals across the web, Apple and Android clients.
 ## Web Home returns to its previous layouts
 
 On September 15, 2026, the user requested restoration of the Classic, Catalog
-and Theater home pages from before PR #330. Their original viewing cards,
-Next episode list, recording cards, Coming soon shelf and library previews
-are restored. Theater keeps its full-width featured title above the shelves;
+and Theater home pages from before the usability redesign (PR #317). Their
+original Continue watching and Next up poster rails, Coming soon shelf and
+library previews are restored. The later oversized continuation cards,
+Next episode panel and Home-only recording section are removed. Theater keeps its full-width featured title above the shelves;
 Classic uses library grids and Catalog uses library rails.
 
 The compact web Home composition and its unused styles are removed. The
@@ -84,8 +85,7 @@ Android passed. The user explicitly waived Windows and the dependent
 promotion gate for that PR. No deployment, publication or physical-device
 installation was performed. The subsequent web Home restoration receives
 its own review and validation. Its single adversarial review found no
-actionable issues; the Home renderers match the pre-PR #330 source after
-whitespace normalization.
+actionable issues; the final Home renderers use the pre-PR #317 poster-rail composition.
 
 ## Review findings addressed
 
