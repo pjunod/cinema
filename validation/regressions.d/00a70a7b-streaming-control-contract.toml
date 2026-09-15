@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["00a70a7b"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "loaded_stall_recovery_does_not_require_decoder_failure covers absent/unknown/ready/starved/failed decoder observations with loaded and fetchable boundaries, plus pause refusal; the_serving_predicate_requires_an_active_stall_and_a_recoverable_boundary and a_producer_decision_still_outranks_the_predicate retain active/render/boundary and terminal precedence. served_live_playlist_advances_past_the_pruned_prefix and typeless_sliding_playlist_keeps_one_shape_across_pruning require the same typeless presentation from the initial response through retention. rolling_playlist_refuses_an_inconsistent_writer_snapshot rejects the former raw-EVENT fallback. takeover_playlist_declares_one_monotone_discontinuity and an_untouched_takeover_playlist_reports_its_epoch_floor pin takeover coordinates. retention_keeps_a_reload_margin_above_the_observed_fetch_lead exercises actual HTTP-facing serving after pruning. seeded_write_surface proves the deprecated setting cannot change the current local playlist contract. Eleven focused daemon tests passed on the C1 source; physical playback remains separate."

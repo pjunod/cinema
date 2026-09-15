@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["05298f1c"]
+reason = "Documentation foundation only: the implementation plan and two Sol handoffs describe future repairs and integration rules. They change no runtime behavior. The staged documentation-index check passed all four cases and the tracked hook passed."
+ignore = true

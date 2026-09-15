@@ -1142,36 +1142,26 @@ fn transcode_first_playlist_ready(raw: &[u8]) -> bool {
 /// for one of those stale URIs during a playlist reload or decoder reset and
 /// stall even though the current encoder is healthy.
 ///
-/// The settings-gated experiment serves a typeless sliding shape from the
-/// first response, with an explicit zero start offset, so the same URL never
-/// mutates from EVENT to live semantics under AVPlayer. Otherwise the legacy
-/// shape changes only once pruning makes EVENT impossible to serve honestly.
-/// The raw file and in-memory index stay complete in both cases.
+/// Every rolling session serves a typeless sliding shape from its first
+/// response, with an explicit zero start offset. Retention is part of this
+/// presentation's lifetime contract, so EVENT is never a valid served shape.
+/// The raw file and in-memory index retain the complete writer history.
 fn served_live_playlist(
     raw: Vec<u8>,
     first_retained: Option<i64>,
-    typeless_sliding: bool,
     takeover: Option<&SessionTakeoverStart>,
-) -> Vec<u8> {
+) -> Option<Vec<u8>> {
     // A successor's numbering starts at its epoch floor, not at zero, so the
     // "nothing has been pruned yet" baseline is that floor.
     let baseline = takeover.map_or(0, |takeover| takeover.media_sequence);
     let first_retained = first_retained
         .filter(|index| *index > baseline)
         .unwrap_or(baseline);
-    if first_retained == 0 && !typeless_sliding && takeover.is_none() {
-        return raw;
-    }
-    let Ok(text) = std::str::from_utf8(&raw) else {
-        return raw;
-    };
+    let text = std::str::from_utf8(&raw).ok()?;
     let lines: Vec<&str> = text.lines().collect();
-    let Some(header_end) = lines
+    let header_end = lines
         .iter()
-        .position(|line| line.trim_start().starts_with("#EXTINF:"))
-    else {
-        return raw;
-    };
+        .position(|line| line.trim_start().starts_with("#EXTINF:"))?;
 
     let body_start = if first_retained == 0 {
         header_end
@@ -1194,13 +1184,10 @@ fn served_live_playlist(
                 next_block = position + 1;
             }
         }
-        let Some(body_start) = body_start else {
-            // The index was derived from this playlist, so disagreement means
-            // a concurrent truncate/restart. Let the next reload observe the
-            // rebuilt index instead of manufacturing mismatched state.
-            return raw;
-        };
-        body_start
+        // A concurrent prune or producer replacement can disagree with this
+        // writer snapshot. Retry within the existing request budget; never
+        // publish the raw EVENT history or guess a different media sequence.
+        body_start?
     };
 
     let mut out = String::with_capacity(text.len());
@@ -1209,7 +1196,7 @@ fn served_live_playlist(
     let mut wrote_start = false;
     for line in &lines[..header_end] {
         let trimmed = line.trim();
-        if trimmed == "#EXT-X-PLAYLIST-TYPE:EVENT" {
+        if trimmed.starts_with("#EXT-X-PLAYLIST-TYPE:") {
             continue;
         }
         if trimmed.starts_with("#EXT-X-START:") {
@@ -1250,14 +1237,14 @@ fn served_live_playlist(
             out.push_str("#EXT-X-DISCONTINUITY\n");
         }
     }
-    if typeless_sliding && !wrote_start {
+    if !wrote_start {
         out.push_str("#EXT-X-START:TIME-OFFSET=0\n");
     }
     for line in &lines[body_start..] {
         out.push_str(line);
         out.push('\n');
     }
-    out.into_bytes()
+    Some(out.into_bytes())
 }
 
 /// How far a session has run ahead of the client, both ways it can matter.
@@ -6102,14 +6089,11 @@ struct Session {
     /// rather than only the current boolean, exposes flapping after it has
     /// already resumed.
     suspend_count: AtomicU64,
-    /// Snapshot of the EVENT-to-typeless experiment at session creation. A
-    /// settings edit must never mutate one URL's playlist type mid-play.
-    typeless_sliding: bool,
     /// Fenced successor coordinates for URI and playlist continuity.
     takeover: Option<SessionTakeoverStart>,
     /// The first retained-prefix advance gets one operational log line. A
     /// playlist reload may observe that state hundreds of times; only the
-    /// transition is evidence about the EVENT/sliding experiment.
+    /// transition records retention starting to advance the visible window.
     first_slide_logged: AtomicBool,
 }
 
@@ -7579,13 +7563,7 @@ async fn session_info(
             |lease| lease.delivery.fetched_segment,
         ),
         first_retained_segment,
-        playlist_shape: if s.cached {
-            "vod"
-        } else if s.typeless_sliding || first_retained_segment.is_some_and(|index| index > 0) {
-            "sliding"
-        } else {
-            "event"
-        },
+        playlist_shape: if s.cached { "vod" } else { "sliding" },
         ahead_seconds: ahead.map(|a| a.seconds),
         hold_reason: active_hold.map(|hold| hold.reason),
         resume_below_seconds: active_hold
@@ -9042,9 +9020,8 @@ pub struct SessionInfo {
     pub fetched_segment: Option<i64>,
     /// First segment still present after retention pruning.
     pub first_retained_segment: Option<i64>,
-    /// `event` before legacy retention advances, `sliding` afterwards (or
-    /// from the first response under the experiment), and `vod` for a cache
-    /// hit. This makes the EVENT-to-sliding transition visible at a freeze.
+    /// `sliding` for every rolling session from its first response, and `vod`
+    /// for a completed cache hit. Retention never changes this contract.
     pub playlist_shape: &'static str,
     /// Published media beyond the client's download frontier — the reserve a
     /// hiccup gets to spend. Not measured from the playhead: the client has
@@ -14835,7 +14812,6 @@ impl TranscodeManager {
             startup_grant_spent: AtomicBool::new(false),
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
-            typeless_sliding: false,
             takeover: None,
             first_slide_logged: AtomicBool::new(false),
         });
@@ -18189,28 +18165,14 @@ impl TranscodeManager {
         }
     }
 
-    /// Whether this session must serve the typeless sliding playlist shape.
-    ///
-    /// The standing answer is the `HLS_TYPELESS_SLIDING` experiment. Session
-    /// takeover adds a second, non-negotiable reason: a fenced successor
-    /// renumbers from its epoch floor and advertises none of the
-    /// predecessor's segments (§7.3), which is exactly what RFC 8216 §6.2.1
-    /// forbids an EVENT playlist from doing. A URL a successor may republish
-    /// therefore serves the stable shape from its *first* response instead of
-    /// changing shape under the client at failover.
-    /// The shape a cluster-published session will serve, asked before the
-    /// session exists so the recipe can record it. A successor may only
-    /// replace a session that was already serving this shape.
+    /// Conservative shape guarantee for a peer whose serving contract may
+    /// predate unconditional sliding playlists. Remote start v1 does not
+    /// acknowledge the actual shape. Retain the old shared-setting guarantee
+    /// for durable takeover recipes rather than claiming this binary's local
+    /// behavior for an older worker. Local rolling serving never reads it.
     pub(crate) async fn cluster_playlist_is_typeless(&self) -> bool {
-        self.stable_playlist_shape(true, false).await
-    }
-
-    async fn stable_playlist_shape(&self, cluster_published: bool, takeover: bool) -> bool {
-        if takeover || self.bool_setting(keys::HLS_TYPELESS_SLIDING).await {
-            return true;
-        }
-        cluster_published
-            && self
+        self.bool_setting(keys::HLS_TYPELESS_SLIDING).await
+            || self
                 .bool_setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
                 .await
     }
@@ -19546,9 +19508,6 @@ impl TranscodeManager {
         // neither the old encoder nor its decode surface is patched in place.
         let plan = self.resolve_movie_plan(&file, &opts, encoder).await?;
         let pacing = self.pacing(false).await;
-        let typeless_sliding = self
-            .stable_playlist_shape(replacement_deadline.is_some(), takeover.is_some())
-            .await;
         let automatic_decoder_recovery = self.automatic_decoder_recovery_enabled();
         let observation = DiagnosticObservation::for_plan(
             &plan,
@@ -19945,7 +19904,6 @@ impl TranscodeManager {
             startup_grant_spent: AtomicBool::new(false),
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
-            typeless_sliding,
             takeover,
             first_slide_logged: AtomicBool::new(false),
         });
@@ -20246,9 +20204,6 @@ impl TranscodeManager {
             );
         }
         let pacing = self.pacing(true).await;
-        let typeless_sliding = self
-            .stable_playlist_shape(replacement_deadline.is_some(), takeover.is_some())
-            .await;
         let legacy_args = || match takeover.as_ref() {
             Some(takeover) => transcode::hls_copy_args_with_sequence(
                 &file,
@@ -20481,7 +20436,6 @@ impl TranscodeManager {
             startup_grant_spent: AtomicBool::new(false),
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
-            typeless_sliding,
             takeover,
             first_slide_logged: AtomicBool::new(false),
         });
@@ -23724,12 +23678,11 @@ impl TranscodeManager {
                             &session,
                         ));
                     }
-                    let served = served_live_playlist(
-                        bytes,
-                        first_retained,
-                        session.typeless_sliding,
-                        session.takeover.as_ref(),
-                    );
+                    let Some(served) =
+                        served_live_playlist(bytes, first_retained, session.takeover.as_ref())
+                    else {
+                        continue;
+                    };
                     return Ok((
                         served,
                         MediaResponseOwner(MediaResponseOwnerKind::Rolling {
@@ -26226,7 +26179,6 @@ fn test_session_with_control(
         startup_grant_spent: AtomicBool::new(false),
         suspended_at: Mutex::new(None),
         suspend_count: AtomicU64::new(0),
-        typeless_sliding: false,
         takeover: None,
         first_slide_logged: AtomicBool::new(false),
     }
@@ -31478,18 +31430,18 @@ pub(crate) mod tests {
                    seg00002.m4s\n\
                    #EXT-X-ENDLIST\n";
 
-        assert_eq!(
-            served_live_playlist(raw.as_bytes().to_vec(), Some(0), false, None),
-            raw.as_bytes(),
-            "before pruning the client sees the writer's EVENT playlist unchanged"
-        );
+        let first = String::from_utf8(
+            served_live_playlist(raw.as_bytes().to_vec(), Some(0), None)
+                .expect("valid rolling snapshot"),
+        )
+        .expect("initial playlist");
+        assert!(!first.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "{first}");
+        assert!(first.contains("#EXT-X-START:TIME-OFFSET=0"), "{first}");
 
-        let served = String::from_utf8(served_live_playlist(
-            raw.as_bytes().to_vec(),
-            Some(2),
-            false,
-            None,
-        ))
+        let served = String::from_utf8(
+            served_live_playlist(raw.as_bytes().to_vec(), Some(2), None)
+                .expect("valid rolling snapshot"),
+        )
         .expect("playlist utf8");
         assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:2"), "{served}");
         assert!(!served.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "{served}");
@@ -31502,7 +31454,7 @@ pub(crate) mod tests {
         assert!(served.ends_with("seg00002.m4s\n#EXT-X-ENDLIST\n"));
     }
 
-    /// The experiment's promise is not merely that EVENT disappears after a
+    /// The rolling contract is not merely that EVENT disappears after a
     /// prune; it is that one session URL presents the same typeless envelope
     /// before and after that boundary. Only MEDIA-SEQUENCE and the retained
     /// body are allowed to advance.
@@ -31520,19 +31472,15 @@ pub(crate) mod tests {
                    seg00001.m4s\n\
                    #EXTINF:4.000,\n\
                    seg00002.m4s\n";
-        let before = String::from_utf8(served_live_playlist(
-            raw.as_bytes().to_vec(),
-            Some(0),
-            true,
-            None,
-        ))
+        let before = String::from_utf8(
+            served_live_playlist(raw.as_bytes().to_vec(), Some(0), None)
+                .expect("valid rolling snapshot"),
+        )
         .expect("before utf8");
-        let after = String::from_utf8(served_live_playlist(
-            raw.as_bytes().to_vec(),
-            Some(2),
-            true,
-            None,
-        ))
+        let after = String::from_utf8(
+            served_live_playlist(raw.as_bytes().to_vec(), Some(2), None)
+                .expect("valid rolling snapshot"),
+        )
         .expect("after utf8");
 
         for playlist in [&before, &after] {
@@ -31562,6 +31510,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn rolling_playlist_refuses_an_inconsistent_writer_snapshot() {
+        let raw = b"#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:4.0,\nseg00000.ts\n";
+        assert!(
+            served_live_playlist(raw.to_vec(), Some(1), None).is_none(),
+            "a missing retained boundary must not expose the raw EVENT history"
+        );
+        assert!(
+            served_live_playlist(
+                b"#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n".to_vec(),
+                Some(0),
+                None
+            )
+            .is_none(),
+            "no playable segment is not a presentation"
+        );
+    }
+
+    #[test]
     fn takeover_playlist_declares_one_monotone_discontinuity() {
         let raw = "#EXTM3U\n\
                    #EXT-X-VERSION:7\n\
@@ -31582,24 +31548,20 @@ pub(crate) mod tests {
             discontinuity_sequence: 1,
             owner_epoch: 2,
         };
-        let first = String::from_utf8(served_live_playlist(
-            raw.as_bytes().to_vec(),
-            Some(4),
-            false,
-            Some(&takeover),
-        ))
+        let first = String::from_utf8(
+            served_live_playlist(raw.as_bytes().to_vec(), Some(4), Some(&takeover))
+                .expect("valid rolling snapshot"),
+        )
         .expect("takeover playlist");
         assert!(first.contains("#EXT-X-MEDIA-SEQUENCE:4"), "{first}");
         assert!(first.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0"), "{first}");
         assert_eq!(first.matches("#EXT-X-DISCONTINUITY\n").count(), 1);
         assert!(first.contains("#EXT-X-MAP:URI=\"init-e2.mp4\""));
 
-        let slid = String::from_utf8(served_live_playlist(
-            raw.as_bytes().to_vec(),
-            Some(5),
-            false,
-            Some(&takeover),
-        ))
+        let slid = String::from_utf8(
+            served_live_playlist(raw.as_bytes().to_vec(), Some(5), Some(&takeover))
+                .expect("valid rolling snapshot"),
+        )
         .expect("slid takeover playlist");
         assert!(slid.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1"), "{slid}");
         assert!(!slid.contains("#EXT-X-DISCONTINUITY\n"), "{slid}");
@@ -31630,12 +31592,10 @@ pub(crate) mod tests {
             discontinuity_sequence: 1,
             owner_epoch: 2,
         };
-        let served = String::from_utf8(served_live_playlist(
-            raw.as_bytes().to_vec(),
-            None,
-            false,
-            Some(&takeover),
-        ))
+        let served = String::from_utf8(
+            served_live_playlist(raw.as_bytes().to_vec(), None, Some(&takeover))
+                .expect("valid rolling snapshot"),
+        )
         .expect("takeover playlist");
 
         assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:2000000"), "{served}");
@@ -37188,7 +37148,6 @@ pub(crate) mod tests {
             startup_grant_spent: AtomicBool::new(false),
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
-            typeless_sliding: false,
             takeover: None,
             first_slide_logged: AtomicBool::new(false),
         })
