@@ -2230,6 +2230,30 @@ test("recovery holds for 45 seconds, moves up once, and respects pixel height", 
   assert.equal(capped.height, 480, "the 720p rung exceeds the player");
 });
 
+test("native element transfer errors never spend a compatibility transcode", () => {
+  for (const code of [0, 1, 2, 3, 4]) {
+    const run = new Function("PlaybackPolicy", "code", [
+      "const callbacks={}, rescues=[]; let stopped=0;",
+      "const PLAYER={method:'remux',triedFallback:false};",
+      "const document={getElementById(){return {};}};",
+      "const console={warn(){}};",
+      "function playbackOwnsAttachedMedia(){return true;} function notifyPlaybackControl(){} function clearStall(){}",
+      "function finishStallRecovery(){return false;} function playbackIsReal(){return false;}",
+      "function streamRejectionFacts(){return {};} function streamRejectionNote(){return '';} function streamRejectionReport(){return {};} function streamRejectionMessage(){return '';}",
+      "function clientLog(){} function raisePlaybackSurface(){} function toast(){} function pbTick(){} function pbSyncPlayIcon(){}",
+      "function stopPlayerForExhaustion(){stopped++;} function startTranscodeFallback(reason){rescues.push(reason);}",
+      shippedSource("wirePlayerMedia"),
+      "const v={error:{code},currentSrc:'/media',getAttribute(){return '/media';},addEventListener(name,fn){callbacks[name]=fn;}};",
+      "wirePlayerMedia(v); callbacks.error(); return {rescues,stopped,tried:PLAYER.triedFallback};",
+    ].join("\n"));
+    const result = run(policy, code);
+    const decode = code === 3 || code === 4;
+    assert.equal(result.rescues.length, decode ? 1 : 0, `native code ${code}`);
+    assert.equal(result.tried, decode, "transfer failure must retain the compatible-rescue credit");
+    assert.equal(result.stopped, decode ? 0 : 1, "nondecode terminal errors use the existing failure owner");
+  }
+});
+
 test("a rejected cheap stream gets one compatibility transcode", () => {
   assert.equal(policy.fallbackAction({ method: "direct_play" }), "transcode");
   assert.equal(policy.fallbackAction({ method: "remux" }), "transcode");

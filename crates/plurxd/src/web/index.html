@@ -12829,19 +12829,15 @@ function wirePlayerMedia(v){
       method:PLAYER.method,
       alreadyTried:PLAYER.triedFallback,
       playbackIsReal:playbackIsReal(),
-      // Preserve the current <video> behavior: all element-level failures are
-      // rejections. hls.js distinguishes network failures above and never
-      // spends an encode retry on one.
-      mediaFailure:true
+      // A failed transfer or caller abort does not identify a decoder limit.
+      // Match hls.js's media/network distinction using the native error code.
+      mediaFailure:code===3||code===4
     });
     if(fallback==='transcode'){
       PLAYER.triedFallback=true;
       const rejection=streamRejectionFacts();
-      // This path calls EVERY element error a media failure for the fallback
-      // decision, deliberately — but an abort or a dropped link is not the
-      // Dolby Vision profile, and a report that says it is sends someone after
-      // a capabilities bug that did not happen. Only the two decoder codes can
-      // be the profile.
+      // Only decode/unsupported-format errors reach this compatible rescue;
+      // keep that attribution in the report as well as the action.
       const causeIsDecode=(code===3||code===4);
       const cause="code "+code+": "+(names[code]||("error "+code));
       const note=streamRejectionNote(rejection,PLAYER.method,cause+(msg?": "+msg:""),causeIsDecode);

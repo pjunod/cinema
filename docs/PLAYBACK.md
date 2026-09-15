@@ -991,40 +991,44 @@ index. A source replacement or pipeline change selects a different identity.
 
 ## Persistent stalls — one bounded recovery, with an outcome
 
-The startup watchdog diagnoses a stream that never starts. Mid-playback was
-different: `waiting` began a timer only so `playing` could calculate the
-finished gap. If `playing` never arrived, no stall beacon was emitted and no
-deadline existed. The overlay could say **Buffering…** forever even after the
-server's own transcode watchdog had correctly failed a stuck producer.
+The existing wait deadline records the original episode's runway, film position,
+recipe and attachment identity. Loaded media with stationary presentation is an
+unknown presentation fault; elapsed time does not prove decoder failure. A
+network disconnect proves transfer failure, not insufficient link capacity.
 
-Now an uninterrupted wait has an eight-second deadline. The deadline records
-the stall immediately, including runway and the active session id, then asks
-the pure `stallRecoveryAction` policy for one action:
+The client first uses the existing native reevaluation and bounded control
+request. A passive `none`, absent verdict or producer hold does not prevent the
+client from repairing its own loaded presentation. A hold describes production,
+not whether already-loaded bytes can be presented. Server control likewise
+recognizes an active loaded/fetchable stall without requiring a false decoder
+failure observation.
 
-- An Auto remux switches at the current film position to H.264/AAC transcode.
-  This covers both a source faster than the client link and a copy stream the
-  browser cannot present reliably.
-- Direct play, explicit Original, cached VOD, and an existing transcode
-  reconnect the same route. This is a real source/session replacement; the old
-  **Try again** path only assigned `currentTime` to the already-stalled element
-  for direct and VOD playback.
-- A second persistent stall never loops automatically. The viewer gets **Try
-  again**, **Force transcode** where meaningful, and **Close**.
+The existing recovery owner permits one automatic action:
 
-The attempt and its terminal `recovered` or `failed` outcome are separate
-`stall_recovery` playback events. They join the same live session truth as
-other client beacons and project to
-`plurx_stall_recoveries_total{outcome=...}`. A stall that never resumes is
-therefore visible both as the original supply/decode failure and as whether
-the player repaired it.
+- Unknown presentation or transfer faults reconnect the selected recipe,
+  retaining film position, quality and tracks.
+- An independently identified decoder error can select compatible recovery.
+  Measured capacity adaptation remains with the existing Auto controller;
+  explicit quality choices remain exact.
+- A second persistent stall offers viewer actions rather than another automatic
+  replacement. Pause, seek, close and newer attachment intent cancel stale work.
+
+The attempt and its terminal outcome are separate `stall_recovery` events.
+Accepted control, a fulfilled play promise, `playing`, or more loaded bytes do
+not establish recovery. New presentation progress owns completion; supported
+frame callbacks remain authoritative even at zero. Clients without that
+observation use the existing explicit progress fallback. A same-recipe reopen
+retains lifecycle identity without sending the legacy rung-reduction ticket.
 
 ## The error fallback — and the stale-reason trap
 
-Any direct/remux stream the browser rejects gets exactly one automatic rescue:
-restart as a guaranteed-compatible transcode.
+An actual decode or unsupported-format error on a direct/remux stream gets
+one compatible-transcode rescue. Native aborts and transfer errors use the
+existing failure owner and retain that rescue credit; re-encoding cannot
+repair a disconnected link.
 
 ```
- <video> fires "error" on a direct_play or remux stream   (once per session)
+ <video> reports decode/format error on direct_play or remux (once)
         │
         ▼
  startTranscodeFallback() ─▶ POST /files/:id/hls/sessions ─▶ full H.264 transcode
