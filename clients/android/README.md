@@ -20,8 +20,9 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `100` — native viewer parity across phone, foldable,
-> and TV. Build 100 groups playback information into Overview, Details and
+> Status: **v0.3.0**, build `101` — native viewer parity across phone, foldable,
+> and TV. Build 101 introduces a quieter library Home and an open Media section
+> with quality/container badges and collapsed searchable track lists. Build 100 groups playback information into Overview, Details and
 > Diagnostics, with a labeled Compact view and explicit missing player dimensions.
 > Build 99 adds adaptive tablet/TV Live TV panes, retained recording
 > overlays and controls that grow with text. Build 98 adds permanent Recordings, capture activity, lifecycle
