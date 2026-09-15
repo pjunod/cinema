@@ -90,8 +90,10 @@ struct PlaybackInfoPanel: View {
         .background(Palette.playerChrome.opacity(0.97), in: RoundedRectangle(cornerRadius: 20))
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(.white.opacity(0.15)))
         .clipShape(RoundedRectangle(cornerRadius: 20))
+        .buttonStyle(PlaybackInfoButtonStyle())
         #if os(tvOS)
         .onAppear { Task { @MainActor in await Task.yield(); closeFocused = true } }
+        .onChange(of: mode) { _, _ in closeFocused = true }
         #endif
     }
 
@@ -145,9 +147,6 @@ struct PlaybackInfoPanel: View {
             }
             if isLive { summary("Tuner reception", value("reception")) }
         }
-        #if os(tvOS)
-        .focusable()
-        #endif
     }
 
     private func adaptiveFacts<Content: View>(@ViewBuilder content: () -> Content) -> some View {
@@ -162,6 +161,9 @@ struct PlaybackInfoPanel: View {
             if let note, !note.isEmpty { Text(note).font(.system(size: labelSize)).foregroundStyle(muted) }
         }.frame(maxWidth: .infinity, alignment: .leading).fixedSize(horizontal: false, vertical: true)
             .accessibilityElement(children: .combine)
+            #if os(tvOS)
+            .focusable()
+            #endif
     }
 
     private func disclosure(_ title: String, rows: [PlaybackInfoFact]) -> some View {
@@ -231,5 +233,27 @@ func playbackInfoExplanation(_ id: String) -> String? {
     case "production_actual": return "Encoder progress ahead of demand; not loaded video."
     case "production_target": return "Pacing policy, not a measurement."
     default: return nil
+    }
+}
+
+func playbackInfoResolution(_ size: CGSize?) -> String {
+    guard let size, size.width.isFinite, size.height.isFinite,
+          size.width > 0, size.height > 0 else { return "Not reported" }
+    return "\(Int(size.width))×\(Int(size.height))"
+}
+
+private struct PlaybackInfoButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Body(configuration: configuration)
+    }
+    private struct Body: View {
+        let configuration: ButtonStyle.Configuration
+        @Environment(\.isFocused) private var focused
+        var body: some View {
+            configuration.label
+                .foregroundStyle(.white)
+                .background(.white.opacity(focused || configuration.isPressed ? 0.12 : 0), in: RoundedRectangle(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(focused ? Palette.accent : .clear, lineWidth: 3))
+        }
     }
 }

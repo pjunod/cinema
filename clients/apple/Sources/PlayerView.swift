@@ -2728,14 +2728,6 @@ enum PlaybackStatTone {
     }
 }
 
-/// Where a ledger section sits in the panel. The column is assigned
-/// structurally rather than measured, so the rendered order is always the
-/// declared order no matter how long the values happen to be this second.
-enum PlaybackLedgerColumn: Equatable {
-    case left
-    case right
-}
-
 struct PlaybackWaitPresentation: Equatable {
     let title: String
     let detail: String
@@ -2771,129 +2763,6 @@ enum PlaybackLedgerPlacement: Equatable {
 /// One label/value pair. Rows are plain data rather than views so the
 /// alignment and density decisions below can inspect them before anything is
 /// laid out.
-struct PlaybackLedgerRow: Identifiable {
-    var section: String = ""
-    let label: String
-    let value: String
-    var tone: PlaybackStatTone = .neutral
-    var placement: PlaybackLedgerPlacement = .grid
-
-    var id: String { "\(section)·\(label)" }
-
-    /// Values that read as a sentence rather than a datum. Membership here is
-    /// the only thing that routes a row out of the grid, so a row's column is
-    /// fixed by what it is, not by what it happens to be carrying this second.
-    static let noteLabels: Set<String> = [
-        "Session",
-        "Reason",
-        "Video",
-        "Audio",
-        "Dynamic range",
-        "Transport",
-        "Waiting reason",
-        "Last request",
-    ]
-
-    /// Placement is decided by label alone. There is deliberately no length
-    /// test: a value that grows a clause — `Server ahead` picking up
-    /// `· held · bytes release ≤120 MB` the moment the session suspends —
-    /// would otherwise hop between the grid and the notes strip on every
-    /// two-second status poll and drag its section's alignment verdict with
-    /// it. Builders whose value is a short datum plus an optional long clause
-    /// split the two into a fixed grid row and a fixed note instead; see
-    /// `ledgerSplitRows`. Builders whose value is prose outright ask for
-    /// `ledgerNote` by construction.
-    static func resolvedPlacement(label: String) -> PlaybackLedgerPlacement {
-        noteLabels.contains(label) ? .notes : .grid
-    }
-}
-
-/// A section aligns as a unit: a column of numbers reads as a column only if
-/// every value in it shares the same edge and the same digit width.
-struct PlaybackLedgerSection: Identifiable {
-    let id: String
-    let title: String
-    let column: PlaybackLedgerColumn
-    let placeholder: String?
-    /// Set on sections whose heading carries meaning the notes strip cannot.
-    /// SERVER on cached VOD holds exactly one sentence-shaped row: without
-    /// this the whole box disappears and "already transcoded" surfaces under
-    /// Notes, which reads as "no server section" rather than "cached".
-    let keepsNotesInBox: Bool
-    let rows: [PlaybackLedgerRow]
-
-    init(
-        _ title: String,
-        column: PlaybackLedgerColumn,
-        placeholder: String? = nil,
-        keepsNotesInBox: Bool = false,
-        rows: [PlaybackLedgerRow]
-    ) {
-        self.id = title
-        self.title = title
-        self.column = column
-        self.placeholder = placeholder
-        self.keepsNotesInBox = keepsNotesInBox
-        self.rows = rows.map { row in
-            var copy = row
-            copy.section = title
-            return copy
-        }
-    }
-
-    var gridRows: [PlaybackLedgerRow] {
-        rows.filter { $0.placement == .grid }
-    }
-
-    var noteRows: [PlaybackLedgerRow] {
-        rows.filter { $0.placement == .notes }
-    }
-
-    /// True when this section draws its own note rows inside its box instead
-    /// of sending them down to the shared strip. Deliberately independent of
-    /// whether the section also has grid rows: one unrelated short row — a
-    /// selected subtitle track, say — arriving in SERVER must not evict the
-    /// cached-VOD sentence this flag exists to keep in the box.
-    var ownsNotes: Bool {
-        keepsNotesInBox && placeholder == nil && !noteRows.isEmpty
-    }
-
-    /// The note rows that reach the strip under the columns.
-    var stripNoteRows: [PlaybackLedgerRow] {
-        ownsNotes ? [] : noteRows
-    }
-
-    /// A section box is drawn only when it has grid rows to show, a
-    /// placeholder to explain their absence, or notes it keeps for itself.
-    /// A section that contributes only notes otherwise reaches the notes
-    /// strip.
-    var rendersBox: Bool {
-        !gridRows.isEmpty || placeholder != nil || ownsNotes
-    }
-
-    var prefersNumericAlignment: Bool {
-        let visible = gridRows
-        guard !visible.isEmpty else { return false }
-        let numeric = visible.filter { PlaybackLedgerSection.isNumeric($0.value) }.count
-        return Double(numeric) >= Double(visible.count) * 0.7
-    }
-
-    /// Sixteen short server values waste two thirds of a television column as
-    /// one list, so a long section of short values folds into two sub-columns.
-    var prefersDenseColumns: Bool {
-        let visible = gridRows
-        return visible.count >= 10 && visible.allSatisfy { $0.value.count <= 12 }
-    }
-
-    /// The em dash counts as numeric so a section does not change alignment
-    /// the moment a value it is still waiting for arrives.
-    static func isNumeric(_ value: String) -> Bool {
-        if value == "—" { return true }
-        guard let first = value.first else { return false }
-        return first.isNumber
-    }
-}
-
 struct ApplePlaybackInfoField: Identifiable {
     let id: String
     let label: String
@@ -2922,8 +2791,8 @@ struct ApplePlaybackInfoField: Identifiable {
 /// Apple-applicable rows from playback-info-fields.json, in fixture order.
 /// The renderer and parity test both consume this list.
 let applePlaybackInfoFields: [ApplePlaybackInfoField] = [
-    .init("method", "Method", "PLAYBACK", [.mini, .standard, .details, .debug]),
-    .init("position", "Position", "PLAYBACK", [.mini, .standard, .details, .debug]),
+    .init("method", "Method", "PLAYBACK", [.standard, .details, .debug]),
+    .init("position", "Position", "PLAYBACK", [.standard, .details, .debug]),
     .init("reason", "Reason", "PLAYBACK", [.standard, .details, .debug], placement: .notes),
     .init("build", "Build", "PLAYBACK", [.debug], always: true),
     .init("transport", "Transport", "PLAYBACK", [.debug], placement: .notes),
@@ -2937,9 +2806,11 @@ let applePlaybackInfoFields: [ApplePlaybackInfoField] = [
     .init("source_file", "File", "SOURCE", [.debug], placement: .notes),
     .init("av_offset", "AV offset", "SOURCE", [.debug], always: true),
     .init("decode_resolution", "Playing resolution", "NOW DECODING", [.mini, .standard, .details, .debug], always: true),
-    .init("dynamic_range", "Dynamic range", "NOW DECODING", [.mini, .standard, .details, .debug], placement: .notes),
-    .init("decode_audio", "Stream audio track", "NOW DECODING", [.debug], placement: .notes),
-    .init("player_state", "Player state", "NOW DECODING", [.debug]),
+    .init("stream_format", "Stream format", "NOW DECODING", [.standard, .details, .debug], always: true),
+    .init("device_audio", "Device audio output", "NOW DECODING", [.standard, .details, .debug], always: true),
+    .init("dynamic_range", "Dynamic range", "NOW DECODING", [.standard, .details, .debug], placement: .notes),
+    .init("decode_audio", "Stream audio track", "NOW DECODING", [.standard, .details, .debug], placement: .notes),
+    .init("player_state", "Player state", "NOW DECODING", [.mini, .standard, .details, .debug]),
     .init("waiting_reason", "Waiting reason", "NOW DECODING", [.debug], placement: .notes),
     .init("stalls", "Buffering interruptions", "NOW DECODING", [.standard, .details, .debug]),
     .init("subtitles", "Subtitles", "NOW DECODING", [.standard, .details, .debug]),
@@ -2953,12 +2824,12 @@ let applePlaybackInfoFields: [ApplePlaybackInfoField] = [
     .init("client_loaded", "Buffered on device", "BUFFERING / DELIVERY", [.mini, .standard, .details, .debug]),
     .init("presentation", "Presentation", "BUFFERING / DELIVERY", [.standard, .details, .debug]),
     .init("presentation_age", "Last advance", "BUFFERING / DELIVERY", [.standard, .details, .debug]),
-    .init("delivery_rate", "Server response rate", "BUFFERING / DELIVERY", [.mini, .standard, .details, .debug]),
+    .init("delivery_rate", "Server response rate", "BUFFERING / DELIVERY", [.standard, .details, .debug]),
     .init("delivered", "Server responses completed", "BUFFERING / DELIVERY", [.standard, .details, .debug]),
     .init("delivery_idle", "Delivery idle", "BUFFERING / DELIVERY", [.debug]),
     .init("status_age", "Status sample age", "BUFFERING / DELIVERY", [.debug]),
-    .init("observed_rate", "Observed download rate", "NETWORK", [.debug]),
-    .init("stream_rate", "Stream rate", "NETWORK", [.debug]),
+    .init("observed_rate", "Observed download rate", "NETWORK", [.standard, .details, .debug]),
+    .init("stream_rate", "Stream rate", "NETWORK", [.standard, .details, .debug]),
     .init("transferred", "Transferred", "NETWORK", [.debug]),
     .init("requests", "Requests", "NETWORK", [.debug]),
     .init("started_in", "Started in", "NETWORK", [.debug]),
@@ -2988,15 +2859,7 @@ let applePlaybackInfoFields: [ApplePlaybackInfoField] = [
     .init("surface_history", "History", "SURFACE", [.debug], placement: .notes),
 ]
 
-/// The same three playback-info levels used by the web and Android players.
-/// Each client renders them natively, but Mini, Standard, and Debug keep the
-/// same job and information hierarchy on every screen size.
-///
-/// Standard and Debug share one ledger: a header, two structurally assigned
-/// columns of label/value rows, and a notes strip for the sentence-shaped
-/// values. Only the field set and a handful of platform metrics change
-/// between them, so switching mode grows the same block downward from the
-/// same top-trailing corner instead of relaying the screen.
+/// Adapts the attached finite player into the shared playback-info presentation.
 struct PlaybackStatsView: View {
     @ObservedObject var controller: PlayerController
     @Binding var mode: PlaybackStatsMode
@@ -3016,7 +2879,9 @@ struct PlaybackStatsView: View {
             #endif
             ZStack(alignment: .topTrailing) {
                 #if os(iOS)
-                Color.clear.contentShape(Rectangle()).onTapGesture { onDismiss() }
+                if mode != .mini {
+                    Color.clear.contentShape(Rectangle()).onTapGesture { onDismiss() }
+                }
                 #endif
                 PlaybackInfoPanel(
                     title: controller.decision?.title ?? "Current playback",
@@ -3051,52 +2916,6 @@ struct PlaybackStatsView: View {
         let value: String
         var tone: PlaybackStatTone = .neutral
         var note: String?
-    }
-
-    private func contractSections(for requestedMode: PlaybackStatsMode) -> [PlaybackLedgerSection] {
-        let definitions = applePlaybackInfoFields.filter { $0.modes.contains(requestedMode) }
-        let sectionOrder = [
-            "PLAYBACK", "SOURCE", "NOW DECODING",
-            "BUFFERING / DELIVERY", "NETWORK", "SERVER", "SURFACE",
-        ]
-        return sectionOrder.compactMap { sectionName in
-            let fields = definitions.filter { $0.section == sectionName }
-            let rows = fields.flatMap { field -> [PlaybackLedgerRow] in
-                guard let supplied = contractValue(for: field.id) else {
-                    guard field.always else { return [] }
-                    return [PlaybackLedgerRow(
-                        label: field.label,
-                        value: "—",
-                        tone: .muted,
-                        placement: field.placement
-                    )]
-                }
-                var result = [PlaybackLedgerRow(
-                    label: field.label,
-                    value: supplied.value,
-                    tone: supplied.tone,
-                    placement: field.placement
-                )]
-                if let note = supplied.note, !note.isEmpty {
-                    result.append(PlaybackLedgerRow(
-                        label: field.label,
-                        value: note,
-                        tone: supplied.tone,
-                        placement: .notes
-                    ))
-                }
-                return result
-            }
-            guard !rows.isEmpty else { return nil }
-            let column: PlaybackLedgerColumn = ["PLAYBACK", "SOURCE", "NOW DECODING"]
-                .contains(sectionName) ? .left : .right
-            return PlaybackLedgerSection(
-                sectionName.capitalized,
-                column: column,
-                keepsNotesInBox: false,
-                rows: rows
-            )
-        }
     }
 
     private func contractValue(for id: String) -> ContractFieldValue? {
@@ -3161,9 +2980,9 @@ struct PlaybackStatsView: View {
             let note = declared.flatMap { $0 != applied ? "Container declared \($0) ms" : nil }
             return ContractFieldValue(value: "\(applied) ms", note: note)
         case "decode_resolution":
-            let size = controller.presentationSize
-            guard size.width > 0, size.height > 0 else { return ContractFieldValue(value: "Not reported", tone: .muted) }
-            return ContractFieldValue(value: "\(Int(size.width))×\(Int(size.height))")
+            return ContractFieldValue(value: playbackInfoResolution(controller.presentationSize))
+        case "stream_format", "device_audio":
+            return ContractFieldValue(value: "Not reported", tone: .muted)
         case "dynamic_range":
             guard let range = PlayerView.dynamicRangeSummary(
                 source: source,
@@ -3361,11 +3180,10 @@ struct PlaybackStatsView: View {
     }
 
     private var playbackServerStatus: ContractFieldValue {
-        if controller.isPlaybackBlocked { return ContractFieldValue(value: "Failed", tone: .critical) }
-        if controller.isVOD { return ContractFieldValue(value: "Served from cache", tone: .good) }
         guard let status = controller.sessionStatus else {
             return ContractFieldValue(value: "No server-side session", tone: .muted)
         }
+        if let state = status.producerState { return ContractFieldValue(value: state) }
         if status.suspended == true {
             return ContractFieldValue(value: "Holding buffer", tone: .good)
         }
@@ -3379,23 +3197,6 @@ struct PlaybackStatsView: View {
         if raw.contains("wait") { return "Buffering" }
         if raw.contains("play") { return "Playing" }
         return controller.isPlaying ? "Playing" : "Paused"
-    }
-
-    var debugSections: [PlaybackLedgerSection] {
-        contractSections(for: .debug)
-    }
-
-    // MARK: - Standard field set
-
-    /// Standard and Debug are both rendered from the shared fixture's field
-    /// order. Platform telemetry supplies values; it never chooses labels or
-    /// moves rows between sections. The hand-written builders that used to
-    /// sit here — five Debug row lists and a second, television-only Standard
-    /// set — became unreachable when that landed, and they still carried
-    /// labels the contract abolished ("Buffer full", "Downloaded media",
-    /// "Transfer time").
-    var standardSections: [PlaybackLedgerSection] {
-        contractSections(for: .standard)
     }
 
     // MARK: - Shared values

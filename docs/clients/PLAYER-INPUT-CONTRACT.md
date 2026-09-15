@@ -499,51 +499,49 @@ Per-surface adapters map inputs as follows; anything not listed is
 
 ---
 
-## 7. The playback-info panel — one row list, three modes, three clients
+## 7. Playback info — a shared hierarchy across clients
 
-The panel is the `info` state of §2 for navigation — `back` closes it and
-returns focus to the `info` button, focus is trapped inside it, the chrome
-never hides under it, and on ten-foot every section box and the notes strip
-is focusable so the remote can scroll it. What it *shows* is this row list.
-The audit found the three clients agreeing only on the three mode names:
-Android never shows the container, Apple's Standard has no buffer row and
-files subtitles under SERVER on iOS, web Debug drops Status, Encoder and
-Subtitles, the same datum is labelled `Ahead` / `Buffer ahead` /
-`Server ahead` depending on the screen, `Transferred` means server bytes on
-one Apple screen and client bytes on another, bitrates are spelled three
-ways and bytes are 1024-based on one client only, and the health pill
-counts stalls on Apple but shows server state elsewhere.
+The expanded panel is the `info` state of §2: Back closes it, focus returns
+to the Info button, and playback chrome does not auto-hide underneath it.
+TV disclosure buttons and observation rows are focusable so the remote can
+reach every row in the scroll view. Phone rows stack; wider displays keep
+source and player measurements beside each other.
 
-**Modes.** `mini` is one line — method · position · resolution and range
-chip · buffer · delivery rate · health pill — with the mode selector and
-close inline at its right end and the transport live beneath it.
-`standard` and `debug` are the top-right two-column ledger already shipped
-(PLAYBACK · SOURCE · NOW DECODING left, NETWORK · SERVER right, sentence
-values in the NOTES strip), `debug` titled "Playback debug". The ledger's
-placement rule stands: a row's column is a property of the row, never of
-its value.
+| Stored mode | Displayed name | Purpose |
+|---|---|---|
+| `mini` | Compact | Labeled playing resolution, playback state and device buffer. |
+| `standard` | Overview | Player picture, original source, method and reason, tracks, buffer and interruptions. |
+| `details` | Details | Picture & sound, Buffer & delivery, Server work; Live stream & reception when applicable. |
+| `debug` | Diagnostics | Every available observation, including session and surface history, grouped by purpose. |
 
-**Mini ⊂ Standard ⊂ Debug.** A row never appears in the small panel and
-vanishes from the big one; the test enforces it.
+Existing persisted `mini`, `standard` and `debug` values retain their meanings;
+`details` is additive. Main players persist the choice; the Live TV sheet opens
+on Overview. Compact leaves transport behavior unchanged. The fixture's mode
+sets describe availability to each presentation, not an instruction to dump
+all rows into Overview. Its `placement` remains a classification of prose
+versus short values; both now keep explanations next to the value.
 
-**Formats are part of the row.** Bitrate is `12.3 Mb/s` / `800 kb/s`, bytes
-are decimal SI, position is `1:02:03 / 2:03:04`, resolution is `3840×2160`,
-lists join with ` · ` in every mode. The fixture's `formats` map is the
-spelling; a client with a different formatter fixes the formatter, not the
-fixture.
+**Resolution never silently disappears.** The headline uses positive dimensions
+from the attached player's presentation API. Missing, zero or invalid dimensions
+show `Not reported`. Source metadata and stream/manifest metadata have separate
+labels and never substitute for the observed picture. Web suppresses predecessor
+measurements while a replacement is pending. Native views read the current
+player/item, and Live TV samples only while its panel is open.
 
-**Unavailable is omitted, not dashed.** A row the platform cannot supply
-(`available_on`) is left out. A row marked `always` shows `—` instead,
-because its absence would itself be information (Build, AV offset, Status).
-A row the platform *can* supply and does not is a parity defect.
+**Measurements have separate meanings.** Device buffer is contiguous loaded
+media ahead of the playhead. Server-ready media is a separate observation.
+Stream bitrate describes media; observed download rate describes transfers;
+server response completion does not prove client receipt or playback. An audio
+track is not proof of speaker or HDMI output. Buffering interruptions exclude
+intentional pauses; unavailable counters say `Not reported`, not zero. Live-edge
+distance is to available stream media and is not broadcast latency.
 
-**The health pill means server state** on every client — Direct · Active ·
-Held · VOD · Filling · Complete · Failed. Apple's stall count moves into the
-`Stalls` row where the other two already keep theirs.
-
-**Mode persistence.** The chosen mode persists per client the way the web's
-already does (`plurx_stats_mode`); Apple and Android reset to Standard on
-every player instance today.
+**Diagnostics remain available.** The canonical fields below retain their IDs,
+units and platform applicability. Source, delivery, encoder, control and surface
+history are still reachable under grouped disclosures. Extra Live TV fields
+include source observation time, reception and live-edge distance. Diagnostics
+show server sample age when available; no synthetic freshness or health score is
+created for a platform that does not report it.
 
 <!-- contract:info:begin -->
 
@@ -553,9 +551,9 @@ _Generated from [`tests/playback/playback-info-fields.json`](../../tests/playbac
 
 | Row | mini | standard | details | debug | Format | Placement | Available on | Note |
 |---|---|---|---|---|---|---|---|---|
-| `Method` | ✓ | ✓ | ✓ | ✓ | text | grid | all | The delivery verdict — the same vocabulary on every client: Direct play · Remux · Transcode · Transcode · cached; the encoder and rung follow as a clause ("Transcode · nvenc · 1080p"). |
+| `Method` | – | ✓ | ✓ | ✓ | text | grid | all | The delivery verdict — the same vocabulary on every client: Direct play · Remux · Transcode · Transcode · cached; the encoder and rung follow as a clause ("Transcode · nvenc · 1080p"). |
 | `Playback mode` | – | – | – | ✓ | text | grid | web | Live HLS / VOD HLS / progressive — the web presentation kind. Native players have one presentation. |
-| `Position` | ✓ | ✓ | ✓ | ✓ | position | grid | all |  |
+| `Position` | – | ✓ | ✓ | ✓ | position | grid | all |  |
 | `Reason` | – | ✓ | ✓ | ✓ | list | notes | all | Why the server chose this method. |
 | `Build` | – | – | – | ✓ | text | grid | all | always shown |
 | `Transport` | – | – | – | ✓ | text | notes | all |  |
@@ -580,11 +578,13 @@ _Generated from [`tests/playback/playback-info-fields.json`](../../tests/playbac
 | Row | mini | standard | details | debug | Format | Placement | Available on | Note |
 |---|---|---|---|---|---|---|---|---|
 | `Playing resolution` | ✓ | ✓ | ✓ | ✓ | resolution | grid | all | always shown Positive dimensions reported by the attached player. Not reported is not zero or the original file size. |
-| `Dynamic range` | ✓ | ✓ | ✓ | ✓ | text | notes | all | Mini shows the chip form ("DV P7 → HDR10"); the ledger shows the sentence. |
-| `Stream audio track` | – | – | – | ✓ | list | notes | all | Selected stream audio track metadata; not a claim about speaker or HDMI output. |
+| `Stream format` | – | ✓ | ✓ | ✓ | text | grid | all | always shown Stream or manifest metadata. Not a player picture measurement. |
+| `Device audio output` | – | ✓ | ✓ | ✓ | text | grid | all | always shown Speaker or HDMI output only when reported by the platform; never inferred from the audio track. |
+| `Dynamic range` | – | ✓ | ✓ | ✓ | text | notes | all | Mini shows the chip form ("DV P7 → HDR10"); the ledger shows the sentence. |
+| `Stream audio track` | – | ✓ | ✓ | ✓ | list | notes | all | Selected stream audio track metadata; not a claim about speaker or HDMI output. |
 | `Frames` | – | ✓ | ✓ | ✓ | fraction | grid | web · android | dropped / total. AVPlayer does not expose it. |
 | `Frame rate` | – | – | – | ✓ | text | grid | web |  |
-| `Player state` | – | – | – | ✓ | text | grid | all | One vocabulary: Playing · Paused · Buffering · Ended · Failed. |
+| `Player state` | ✓ | ✓ | ✓ | ✓ | text | grid | all | One vocabulary: Playing · Paused · Buffering · Ended · Failed. |
 | `Waiting reason` | – | – | – | ✓ | text | notes | apple |  |
 | `Decoder` | – | – | – | ✓ | text | grid | web · android | hardware / software, with the reason when software. |
 | `Buffering interruptions` | – | ✓ | ✓ | ✓ | text | grid | all | "2 (1 supply · 1 decode)" — player-side stall count this session. |
@@ -604,7 +604,7 @@ _Generated from [`tests/playback/playback-info-fields.json`](../../tests/playbac
 | `Buffered on device` | ✓ | ✓ | ✓ | ✓ | seconds | grid | all | Contiguous native/browser loaded media ahead of the attached current playhead. Prepared successors never contribute. |
 | `Presentation` | – | ✓ | ✓ | ✓ | text | grid | all | The player's observed presentation state; it does not infer a server or network cause. |
 | `Last advance` | – | ✓ | ✓ | ✓ | millis | grid | all | Age of the last observed film-clock or frame advance. Unavailable until an advance has been observed. |
-| `Server response rate` | ✓ | ✓ | ✓ | ✓ | bitrate | grid | all | Server-reported completed-response rate; "· idle" appended when delivery has gone quiet. Completion is not proof of receipt or decode. |
+| `Server response rate` | – | ✓ | ✓ | ✓ | bitrate | grid | all | Server-reported completed-response rate; "· idle" appended when delivery has gone quiet. Completion is not proof of receipt or decode. |
 | `Server responses completed` | – | ✓ | ✓ | ✓ | bytes | grid | all | Server-reported completed response bytes for this session. Never labelled Transferred. |
 | `Delivery idle` | – | – | – | ✓ | millis | grid | all |  |
 | `Status sample age` | – | – | – | ✓ | millis | grid | all | Age since this client received the currently displayed server sample. |
@@ -613,8 +613,8 @@ _Generated from [`tests/playback/playback-info-fields.json`](../../tests/playbac
 
 | Row | mini | standard | details | debug | Format | Placement | Available on | Note |
 |---|---|---|---|---|---|---|---|---|
-| `Observed download rate` | – | – | – | ✓ | bitrate | grid | all | The player's own throughput estimate. |
-| `Stream rate` | – | – | – | ✓ | bitrate | grid | all | The declared rate of the rendition being played. |
+| `Observed download rate` | – | ✓ | ✓ | ✓ | bitrate | grid | all | The player's own throughput estimate. |
+| `Stream rate` | – | ✓ | ✓ | ✓ | bitrate | grid | all | The declared rate of the rendition being played. |
 | `Transferred` | – | – | – | ✓ | bytes | grid | apple | Client access-log bytes — a different number from Delivered, so a different label. |
 | `Requests` | – | – | – | ✓ | count | grid | apple |  |
 | `Started in` | – | – | – | ✓ | seconds | grid | all | Time to first frame. |

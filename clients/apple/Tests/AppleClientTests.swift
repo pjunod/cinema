@@ -4729,8 +4729,8 @@ final class AppleClientTests: XCTestCase {
 
     func testThePhonePanelSwallowsTheTapsThatMissIt() throws {
         let source = try playerViewSource()
-        let backdropStart = try XCTUnwrap(source.range(of: "private var ledgerBackdrop: some View {"))
-        let backdrop = String(source[backdropStart.lowerBound...].prefix(600))
+        let backdropStart = try XCTUnwrap(source.range(of: "struct PlaybackStatsView: View {"))
+        let backdrop = String(source[backdropStart.lowerBound...].prefix(1600))
         // Hit-testable, and it acts: `info × tap_surface` is `close_info` on
         // the touch table, so a tap that misses the panel closes it instead of
         // pressing whatever is behind it.
@@ -4749,7 +4749,7 @@ final class AppleClientTests: XCTestCase {
 
     func testTheLedgerHeaderPillReadsServerStateRatherThanStalls() throws {
         let source = try playerViewSource()
-        XCTAssertTrue(source.contains("private var playbackServerHealth: some View"))
+        XCTAssertTrue(source.contains("private var playbackServerStatus: ContractFieldValue"))
         XCTAssertFalse(
             source.contains("healthLabel"),
             "the stall count is the Stalls row; the pill is server state"
@@ -10087,10 +10087,17 @@ final class AppleClientTests: XCTestCase {
         )
     }
 
-    func testPlaybackInfoUsesTheSharedThreeModeContract() {
+    func testPlaybackInfoResolutionKeepsUnknownDistinctFromAValidPicture() {
+        XCTAssertEqual(playbackInfoResolution(nil), "Not reported")
+        XCTAssertEqual(playbackInfoResolution(.zero), "Not reported")
+        XCTAssertEqual(playbackInfoResolution(CGSize(width: 1920, height: 0)), "Not reported")
+        XCTAssertEqual(playbackInfoResolution(CGSize(width: 1920, height: 1080)), "1920×1080")
+    }
+
+    func testPlaybackInfoPreservesStoredModesAndAddsDetails() {
         XCTAssertEqual(
             PlaybackStatsMode.allCases.map(\.label),
-            ["Mini", "Standard", "Debug"]
+            ["Compact", "Overview", "Details", "Diagnostics"]
         )
     }
 
