@@ -2997,8 +2997,15 @@ async function main() {
     h.stub.attach(player, stalledVideo, bootstrap());
     h.attached.push(player);
     await flush();
-    h.answerWith(() => { leave(player); return { type: "none" }; });
+    let release=null;
+    h.holdWith(request=>new Promise(resolve=>{release=()=>{
+      leave(player);
+      resolve(Object.assign(response(request),{action:{type:"none"}}));
+    };}));
     const running = h.stub.stall(player, stalledVideo, 100, 3);
+    await settleExchange();
+    assert.equal(typeof release,"function",`${label}: the ask response is held`);
+    release();
     await settleExchange();
     await running;
     stalledVideo.paused = false;
