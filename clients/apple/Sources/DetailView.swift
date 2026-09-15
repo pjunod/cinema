@@ -545,31 +545,6 @@ private struct IOSDetailSecondaryActionButtonStyle: ButtonStyle {
     }
 }
 
-private struct IOSDetailIconActionButtonStyle: ButtonStyle {
-    let selected: Bool
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .font(.system(size: 16, weight: .semibold))
-            .foregroundStyle(selected ? Palette.accent : Palette.onBg.opacity(0.82))
-            .frame(width: IOSDetailMetrics.iconControlSize, height: IOSDetailMetrics.iconControlSize)
-            .background(
-                selected ? Palette.accent.opacity(0.13) : Palette.surfaceHi.opacity(0.88),
-                in: Circle()
-            )
-            .overlay {
-                Circle().stroke(
-                    selected ? Palette.accent.opacity(0.36) : Palette.outline.opacity(0.9),
-                    lineWidth: 0.75
-                )
-            }
-            .contentShape(Circle())
-            .scaleEffect(configuration.isPressed ? 0.94 : 1)
-            .opacity(configuration.isPressed ? 0.72 : 1)
-            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
-    }
-}
-
 private struct IOSDetailLabeledActionButtonStyle: ButtonStyle {
     let selected: Bool
 
@@ -2170,7 +2145,7 @@ struct DetailView: View {
                     }
                 }
                 if let file, item.isPlayable, !item.isAudiobook {
-                    mobileDownloadButton(detail: detail, file: file, compact: false)
+                    mobileDownloadButton(detail: detail, file: file)
                 }
                 if !item.isBook { watchButton(detail) }
                 if ["movie", "show", "episode"].contains(item.kind) {
@@ -2194,33 +2169,31 @@ struct DetailView: View {
                     )
                 }
 
-                ViewThatFits(in: .horizontal) {
-                    mobileSecondaryActions(detail, file: file, durationMs: durationMs, resumeMs: resumeMs, canResume: canResume, stacked: false)
-                    mobileSecondaryActions(detail, file: file, durationMs: durationMs, resumeMs: resumeMs, canResume: canResume, stacked: true)
-                }
+                mobileSecondaryActions(detail, file: file, durationMs: durationMs,
+                                       canResume: canResume)
             }
             .frame(maxWidth: hasPlayback ? .infinity : nil, alignment: .leading)
         }
     }
 
-    private func mobileSecondaryActions(_ detail: ItemDetail, file: MediaFile?, durationMs: Int, resumeMs: Int, canResume: Bool, stacked: Bool) -> some View {
+    private func mobileSecondaryActions(
+        _ detail: ItemDetail, file: MediaFile?, durationMs: Int,
+        canResume: Bool
+    ) -> some View {
         let item = detail.item
-        let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10)) : AnyLayout(HStackLayout(spacing: 10))
-        return layout {
-                    if let file, item.isPlayable, canResume {
-                        mobileStartOverButton(item: item, file: file, durationMs: durationMs)
-                    }
-
-                    if let file, item.isPlayable, !item.isAudiobook {
-                        mobileDownloadButton(detail: detail, file: file, compact: true)
-                    }
-
-                    if !item.isBook { mobileWatchButton(detail) }
-                    if ["movie", "show", "episode"].contains(item.kind) {
-                        makeChannelButton(item)
-                    }
-                }
-        .fixedSize(horizontal: !stacked, vertical: false)
+        return LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8)],
+                         alignment: .leading, spacing: 8) {
+            if let file, item.isPlayable, canResume {
+                mobileStartOverButton(item: item, file: file, durationMs: durationMs)
+            }
+            if let file, item.isPlayable, !item.isAudiobook {
+                mobileDownloadButton(detail: detail, file: file, grid: true)
+            }
+            if !item.isBook { mobileWatchButton(detail) }
+            if ["movie", "show", "episode"].contains(item.kind) {
+                makeChannelButton(item)
+            }
+        }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
@@ -2234,7 +2207,8 @@ struct DetailView: View {
         } label: {
             Label("Make channel", systemImage: "play.rectangle.on.rectangle")
                 .font(.subheadline.weight(.semibold))
-                .lineLimit(1)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 10).padding(.vertical, 8)
         }
         .buttonStyle(IOSDetailSecondaryActionButtonStyle(selected: false))
     }
@@ -2366,9 +2340,12 @@ struct DetailView: View {
                 pendingSelectionFileId: pendingTrackSelectionFileId
             )
         } label: {
-            Image(systemName: "arrow.counterclockwise")
+            Label("Start over", systemImage: "arrow.counterclockwise")
+                .font(.subheadline.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 10).padding(.vertical, 8)
         }
-        .buttonStyle(IOSDetailIconActionButtonStyle(selected: false))
+        .buttonStyle(IOSDetailSecondaryActionButtonStyle(selected: false))
         .accessibilityLabel("Start over")
     }
 
@@ -2376,7 +2353,7 @@ struct DetailView: View {
     private func mobileDownloadButton(
         detail: ItemDetail,
         file: MediaFile,
-        compact: Bool
+        grid: Bool = false
     ) -> some View {
         let existing = downloads.items.first { $0.fileId == file.id }
         let active = existing.map { item in
@@ -2419,16 +2396,15 @@ struct DetailView: View {
                 downloadBusy = false
             }
         } label: {
-            if compact {
-                Image(systemName: downloadSymbol(existing))
-            } else {
-                Label(downloadLabel(existing), systemImage: downloadSymbol(existing))
-                    .lineLimit(1)
-            }
+            Label(downloadLabel(existing), systemImage: downloadSymbol(existing))
+                .font(.subheadline.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, grid ? 10 : 0)
+                .padding(.vertical, grid ? 8 : 0)
         }
-        if compact {
+        if grid {
             button
-                .buttonStyle(IOSDetailIconActionButtonStyle(selected: active))
+                .buttonStyle(IOSDetailSecondaryActionButtonStyle(selected: active))
                 .disabled(downloadBusy || existing?.isPlayable == true)
                 .accessibilityLabel(downloadLabel(existing))
         } else {
@@ -2467,10 +2443,12 @@ struct DetailView: View {
         return Button {
             Task { await toggleWatched(detail.item, watched: watched) }
         } label: {
-            Label("Watched", systemImage: watched ? "checkmark.circle.fill" : "checkmark.circle")
-                .lineLimit(1)
+            Label(watched ? "Watched" : "Mark watched", systemImage: watched ? "checkmark.circle.fill" : "checkmark.circle")
+                .font(.subheadline.weight(.semibold))
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 10).padding(.vertical, 8)
         }
-        .buttonStyle(IOSDetailLabeledActionButtonStyle(selected: watched))
+        .buttonStyle(IOSDetailSecondaryActionButtonStyle(selected: watched))
         .disabled(watchBusy)
         .accessibilityLabel(watched ? "Mark unwatched" : "Mark watched")
     }

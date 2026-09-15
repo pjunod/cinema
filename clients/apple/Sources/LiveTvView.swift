@@ -1698,6 +1698,8 @@ struct LiveTvView: View {
     @State private var detailChannel: LiveTvChannel?
     @State private var overlayVisible = true
     @State private var temporaryGuide = false
+    @State private var showingTouchGuide = false
+    @State private var showingTouchRecordings = false
     @State private var showingInfo = false
     @State private var showingDvrActivity = false
     @State private var streamInfoPlayer: LiveTvPlayerFacts?
@@ -1855,22 +1857,35 @@ struct LiveTvView: View {
     var body: some View {
         GeometryReader { geometry in
           VStack(spacing: 0) {
-            // Not while the cover is up. Both surfaces would exist, both would
-            // call `attach` with a different layer on every body pass, and
-            // `attach` begins by detaching — so the 30-second tick alone was
-            // enough to stop a running PiP, and two AVPlayerLayers cannot both
-            // render one AVPlayer anyway.
-            #if os(iOS)
-            if live.playing && !fullscreen {
-                phonePicture(in: geometry)
-                phoneCaption
-            }
-            #endif
-            liveToolbar
             #if os(tvOS)
+            liveToolbar
             tvBrowseRegion(in: geometry)
             #else
-            browseRegion
+            if horizontalSizeClass == .regular {
+                liveToolbar
+                let wide = geometry.size.width >= 850
+                let layout = wide
+                    ? AnyLayout(HStackLayout(alignment: .top, spacing: 20))
+                    : AnyLayout(VStackLayout(spacing: 16))
+                layout {
+                    tabletWatchPanel
+                        .frame(width: wide ? geometry.size.width * 0.57 : nil,
+                               height: wide ? nil : geometry.size.height * 0.48)
+                    touchChannelList
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                .padding(.horizontal, 16)
+                .searchable(text: $query, isPresented: $showingSearch,
+                            prompt: "Number, name, or what is on")
+            } else {
+                // A fullscreen cover owns the only attached player surface.
+                if live.playing && !fullscreen {
+                    phonePicture(in: geometry)
+                    phoneCaption
+                }
+                liveToolbar
+                browseRegion
+            }
             #endif
         }
         .padding(.horizontal, liveContentInset)
@@ -1879,7 +1894,7 @@ struct LiveTvView: View {
         // three-line centred card, roughly 90 pt of the page. What is durable
         // about it — the channel count — is in the toolbar now, and the rest
         // is one muted line along the bottom of the content it describes.
-        .overlay(alignment: .bottom) { statusLine }
+        .safeAreaInset(edge: .bottom, spacing: 0) { statusLine }
         .overlay(alignment: .bottomLeading) { reminderOverlay }
         }
         .navigationTitle("Live TV")
@@ -1915,11 +1930,28 @@ struct LiveTvView: View {
         // the tvOS `back → exit` row destructive.
         .fullScreenCover(isPresented: $fullscreen) {
             fullscreenSurface
+                .sheet(item: $detail) { programme in programmeDetail(programme) }
+                .sheet(isPresented: $showingDvrActivity) {
+                    NavigationStack { DvrCaptureActivityView() }
+                }
         }
-        .sheet(item: $detail) { programme in
+        #if os(iOS)
+        .sheet(isPresented: $showingTouchRecordings) {
+            NavigationStack {
+                DvrRecordingsPanel(dvr: dvr, now: now)
+                    .navigationTitle("Recordings")
+                    .toolbar { Button("Close") { showingTouchRecordings = false } }
+            }
+        }
+        .sheet(isPresented: $showingTouchGuide) {
+            touchGuidePanel { showingTouchGuide = false }
+                .sheet(item: $detail) { programme in programmeDetail(programme) }
+        }
+        #endif
+        .sheet(item: rootProgrammeDetail) { programme in
             programmeDetail(programme)
         }
-        .sheet(isPresented: $showingDvrActivity) {
+        .sheet(isPresented: rootDvrActivity) {
             NavigationStack { DvrCaptureActivityView() }
         }
         .sheet(isPresented: $showingInfo) {
@@ -1987,10 +2019,16 @@ struct LiveTvView: View {
         }
         .onChange(of: live.channels.map(\.id)) { _, _ in tuneReminderChannel() }
         .onChange(of: pendingReminderChannelId) { _, _ in tuneReminderChannel() }
+        .onChange(of: horizontalSizeClass) { _, _ in normalizeTabletBrowse() }
+        .onChange(of: browse) { _, _ in normalizeTabletBrowse() }
         #endif
+        .onChange(of: fullscreen) { _, presented in
+            if !presented { temporaryGuide = false }
+        }
         .onAppear {
             onScreen = true
             #if os(iOS)
+            normalizeTabletBrowse()
             // The action may have arrived before this page existed to hear it.
             claimReminderChannel()
             #endif
@@ -2011,6 +2049,17 @@ struct LiveTvView: View {
         selectAiring(channel)
     }
     #endif
+
+    private var rootProgrammeDetail: Binding<LiveTvProgramme?> {
+        Binding(
+            get: { fullscreen || showingTouchGuide ? nil : detail },
+            set: { detail = $0 }
+        )
+    }
+
+    private var rootDvrActivity: Binding<Bool> {
+        Binding(get: { !fullscreen && showingDvrActivity }, set: { showingDvrActivity = $0 })
+    }
 
     private var liveInputState: LiveTvInputState {
         if temporaryGuide { return .temporaryGuide }
@@ -2203,14 +2252,11 @@ struct LiveTvView: View {
         .background(Palette.bg)
     }
 
-    /// One row, 48 pt. Everything that used to stand in its own band — the
-    /// status banner, Earlier/Now/Later, Return to live, the always-visible
-    /// search field — either moved into the content or went away, because
-    /// three bands of chrome above a television list is why the list had
-    /// nowhere to be.
+    /// Television keeps its remote toolbar; touch gives the view selector and
+    /// status separate rows so neither compresses the other on narrow screens.
     private var liveToolbar: some View {
+        #if os(tvOS)
         HStack(spacing: 12) {
-            #if os(tvOS)
             HStack(spacing: 0) {
                 segment("On now", active: browse == .list) { requestChannelFocus() }
                     .focused($focusedControl, equals: .channels)
@@ -2244,32 +2290,72 @@ struct LiveTvView: View {
             .buttonStyle(TVReadableButtonStyle(prominent: false, compact: true))
             .focusEffectDisabled()
             .focused($focusedControl, equals: .more)
-            #else
-            HStack(spacing: 0) {
-                segment("On now", active: browse == .list && !favoritesOnly) {
-                    favoritesOnly = false
-                    browse = .list
-                    browse.persist()
-                }
-                segment("Guide", active: browse == .guide) {
-                    browse = .guide
-                    browse.persist()
-                }
-                segment("Favorites", active: favoritesOnly) {
-                    favoritesOnly = true
-                    browse = .list
-                    browse.persist()
-                }
-                segment(recordingsLabel, active: browse == .recordings) { showRecordings() }
-            }
-            .overlay(RoundedRectangle(cornerRadius: 8).stroke(Palette.outline, lineWidth: 1))
-            Spacer(minLength: 8)
-            Text(toolbarSummary).font(.caption).foregroundStyle(Palette.muted).lineLimit(1)
-            #endif
         }
         .frame(height: 48)
         .padding(.horizontal, 12)
+        #else
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Menu {
+                    Button("On now") { setTouchBrowse(.list, favorites: false) }
+                    Button("Guide") { setTouchBrowse(.guide, favorites: false) }
+                    Button("Favorites") { setTouchBrowse(.list, favorites: true) }
+                    Button("Recordings") { showRecordings() }
+                } label: {
+                    Label(touchBrowseTitle, systemImage: "line.3.horizontal.decrease")
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 12).padding(.vertical, 10)
+                        .background(Palette.surfaceHi, in: RoundedRectangle(cornerRadius: 10))
+                }
+                .accessibilityLabel("Live TV view, \(touchBrowseTitle)")
+                Spacer(minLength: 8)
+                Button { showingDvrActivity = true } label: {
+                    Label("Recording activity", systemImage: "record.circle")
+                        .font(.subheadline)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Text(toolbarSummary)
+                .font(.footnote).foregroundStyle(Palette.muted)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        #endif
     }
+
+    #if os(iOS)
+    private func normalizeTabletBrowse() {
+        guard horizontalSizeClass == .regular else { return }
+        switch browse {
+        case .guide:
+            browse = .list
+            showingTouchGuide = true
+        case .recordings:
+            browse = .list
+            showingTouchRecordings = true
+        case .list: break
+        }
+    }
+
+    private var touchBrowseTitle: String {
+        switch browse {
+        case .recordings: return "Recordings"
+        case .guide: return "Guide"
+        case .list: return favoritesOnly ? "Favorites" : "On now"
+        }
+    }
+
+    private func setTouchBrowse(_ view: LiveTvBrowseView, favorites: Bool) {
+        if view == .guide && horizontalSizeClass == .regular {
+            showingTouchGuide = true
+            return
+        }
+        favoritesOnly = favorites
+        browse = view
+        browse.persist()
+    }
+    #endif
 
     /// The conflict count rides on the chip. A viewer whose Thursday has two
     /// programmes and one tuner should learn that from the toolbar, not from
@@ -2305,6 +2391,12 @@ struct LiveTvView: View {
     }
 
     private func showRecordings() {
+        #if os(iOS)
+        if horizontalSizeClass == .regular {
+            showingTouchRecordings = true
+            return
+        }
+        #endif
         browse = .recordings
         browse.persist()
         #if os(tvOS)
@@ -2459,19 +2551,7 @@ struct LiveTvView: View {
             DvrRecordingsPanel(dvr: dvr, now: now)
                 .padding(.horizontal, 12)
         case .list:
-            List(visibleChannels) { channel in
-                Button {
-                    selectAiring(channel)
-                } label: {
-                    LiveTvChannelRow(channel: channel, airing: live.airing(channel, now: now),
-                                     selected: live.watching?.id == channel.id)
-                }
-                .disabled(!channel.watchable || live.busy)
-                .buttonStyle(.plain)
-                .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
-                .listRowBackground(Color.clear)
-            }
-            .listStyle(.plain)
+            touchChannelList
         case .guide:
             if verticalSizeClass == .regular && horizontalSizeClass == .compact && !mobileGuideGrid {
                 mobileSchedule
@@ -2488,6 +2568,100 @@ struct LiveTvView: View {
                 }
             }
         }
+    }
+
+    private var touchChannelList: some View {
+        List(visibleChannels) { channel in
+                Button {
+                    selectAiring(channel)
+                } label: {
+                    LiveTvChannelRow(channel: channel, airing: live.airing(channel, now: now),
+                                     selected: live.watching?.id == channel.id)
+                }
+                .disabled(!channel.watchable || live.busy)
+                .buttonStyle(.plain)
+                .listRowInsets(EdgeInsets(top: 0, leading: 8, bottom: 0, trailing: 8))
+                .listRowBackground(Color.clear)
+            }
+            .listStyle(.plain)
+    }
+
+    private var tabletWatchPanel: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                if live.playing && !fullscreen {
+                    PlayerSurface(player: live.player, pictureInPicture: pictureInPicture,
+                                  pgsOverlay: nil, allowsPictureInPicture: true)
+                        .aspectRatio(16 / 9, contentMode: .fit)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                } else if !live.playing {
+                    ContentUnavailableView("Choose a channel", systemImage: "tv",
+                        description: Text("Watch live television and browse what is on alongside the picture."))
+                        .frame(maxWidth: .infinity)
+                        .aspectRatio(16 / 9, contentMode: .fit)
+                        .background(Palette.surface, in: RoundedRectangle(cornerRadius: 14))
+                }
+                if let channel = live.watching {
+                    let airing = live.airing(channel, now: now)
+                    Text("LIVE · \(channel.title)").font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Palette.accent)
+                    Text(airing.now?.title ?? live.title ?? "Live television")
+                        .font(.title2.bold()).fixedSize(horizontal: false, vertical: true)
+                    if let programme = airing.now {
+                        Text("\(liveTvTime(programme.start))–\(liveTvTime(programme.end))")
+                            .font(.subheadline).foregroundStyle(Palette.muted)
+                        LiveTvProgressLine(value: airing.progress ?? 0, height: 3)
+                        if let context = recordingContext(channel: channel, programme: programme) {
+                            Button { showingDvrActivity = true } label: {
+                                Label(context, systemImage: "record.circle.fill")
+                            }
+                        }
+                        programmeActions(channel, programme)
+                    }
+                    HStack {
+                        Button { fullscreen = true; overlayVisible = true } label: {
+                            Label("Fullscreen", systemImage: "arrow.up.left.and.arrow.down.right")
+                        }
+                        Button { showingTouchGuide = true } label: {
+                            Label("Guide", systemImage: "rectangle.split.3x3")
+                        }
+                        Menu("More") {
+                            Button(muted ? "Unmute" : "Mute") { muted.toggle(); live.player.isMuted = muted }
+                            if pictureInPicture.isSupported {
+                                Button("Picture in picture") { pictureInPicture.toggle() }
+                            }
+                            Button("Stream information") { showingInfo = true }
+                            Button("Stop") { Task { await live.stop() } }
+                        }
+                    }.buttonStyle(.bordered)
+                    if let next = airing.next {
+                        Button { detailChannel = channel; detail = next } label: {
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("UP NEXT · \(liveTvTime(next.start))").font(.caption.bold())
+                                Text(next.title).font(.headline)
+                            }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
+                                .background(Palette.surface, in: RoundedRectangle(cornerRadius: 12))
+                        }.buttonStyle(.plain)
+                    }
+                }
+            }.padding(.bottom, 24)
+        }
+    }
+
+    private func touchGuidePanel(onClose: @escaping () -> Void) -> some View {
+        VStack(spacing: 12) {
+            HStack {
+                Text("Guide").font(.headline)
+                Spacer()
+                Menu("Guide time") {
+                    Button("Earlier") { pageGuide(by: -1) }.disabled(!canPageGuide(by: -1))
+                    Button("Now") { returnGuideToNow() }
+                    Button("Later") { pageGuide(by: 1) }.disabled(!canPageGuide(by: 1))
+                }
+                Button("Close", action: onClose)
+            }
+            guideGrid
+        }.padding(16).background(Palette.bg)
     }
 
     private var guideGrid: some View {
@@ -3108,6 +3282,17 @@ struct LiveTvView: View {
     }
 
     private func selectAiring(_ channel: LiveTvChannel) {
+        #if os(iOS)
+        if showingTouchGuide {
+            // Close the guide into the retained inline player. A cover cannot
+            // be presented by a root that is already presenting this sheet.
+            showingTouchGuide = false
+            if !live.playing || live.watching?.id != channel.id {
+                Task { await live.watch(channel) }
+            }
+            return
+        }
+        #endif
         if live.playing && live.watching?.id == channel.id {
             fullscreen = true
         } else {
@@ -3438,7 +3623,8 @@ struct LiveTvView: View {
                         HStack {
                             Button(muted ? "Unmute" : "Mute") { muted.toggle(); live.player.isMuted = muted }
                             if pictureInPicture.isSupported { Button("PiP") { pictureInPicture.toggle() } }
-                            Button("Exit") { fullscreen = false }
+                            Button("Guide") { temporaryGuide = true; overlayGeneration &+= 1 }
+                            Button("Exit") { temporaryGuide = false; fullscreen = false }
                         }
                     }
                     Spacer()
@@ -3503,6 +3689,20 @@ struct LiveTvView: View {
                 }
                 .transition(.move(edge: .bottom))
             }
+            #else
+            if temporaryGuide {
+                GeometryReader { geometry in
+                    VStack {
+                        Spacer(minLength: 0)
+                        touchGuidePanel {
+                            temporaryGuide = false
+                            overlayGeneration &+= 1
+                        }
+                        .frame(height: max(220, geometry.size.height * 0.6))
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                    }.padding(12)
+                }
+            }
             #endif
         }
         .contentShape(Rectangle())
@@ -3515,6 +3715,7 @@ struct LiveTvView: View {
         #else
         .onTapGesture {
             // The touch surface's whole contract: a tap toggles the chrome.
+            guard !temporaryGuide else { return }
             overlayVisible.toggle()
             overlayGeneration &+= 1
         }

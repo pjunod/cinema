@@ -230,7 +230,7 @@ class LiveTvScreenWiringTest {
     @Test
     fun `tuning and layout changes do not force television fullscreen`() {
         assertFalse(screen.contains("if (television) fullscreen = state.playing"))
-        assertTrue(screen.contains("TelevisionLiveTvBrowser("))
+        assertTrue(screen.contains("WideLiveTvBrowser("))
     }
 
     @Test

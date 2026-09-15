@@ -16,6 +16,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.util.Consumer
 import androidx.core.app.PictureInPictureModeChangedInfo
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
@@ -155,6 +156,7 @@ fun LiveTvScreen(
     val backFocus = remember { FocusRequester() }
     val formFactor = currentFormFactor()
     val television = formFactor == FormFactor.Television
+    val wideBrowser = formFactor != FormFactor.Compact
     // `backFocus` is attached to the phone nav bar's Back button, which no
     // longer exists on television. Asking for it there is a silent no-op that
     // leaves the guide layouts opening with nothing focused; the television
@@ -441,6 +443,32 @@ fun LiveTvScreen(
         movableContentOf { LiveTvPlayerSurface(controller) }
     }
 
+    val touchRecordingsPanel: @Composable (Modifier) -> Unit = { panelModifier ->
+        DvrRecordingsPanel(
+            dvr = dvrState,
+            now = now,
+            chip = dvrChip,
+            onChip = { dvrChip = it },
+            onOpenItem = onOpenItem,
+            onOpenRecording = onOpenRecording,
+            onMoreLibrary = { dvr?.refreshLibrary(more = true) },
+            onMoreAttention = { dvr?.refreshAttention(more = true) },
+            onMoreUpcoming = { dvr?.refreshSchedule(more = true) },
+            onStop = ::stopRecording,
+            onRestore = { id -> dvr?.restore(id) },
+            onRuleEnabled = { id, enabled -> dvr?.setRuleEnabled(id, enabled) },
+            onRuleNewOnly = { id, newOnly -> dvr?.setRuleNewOnly(id, newOnly) },
+            onRuleDelete = { id -> dvr?.deleteRule(id) },
+            onRuleMove = { id, delta -> dvr?.moveRule(id, delta) },
+            onForgetReminder = { id -> dvr?.forgetReminder(id) },
+            onManual = { channel, start, end, title ->
+                dvr?.recordManual(channel, start, end, title)
+            },
+            modifier = panelModifier,
+        )
+    }
+
+
     val screenModifier = if (fullscreen || isInPip) {
         Modifier.fillMaxSize()
     } else {
@@ -475,8 +503,8 @@ fun LiveTvScreen(
                 onLeave = { controller.stop(); onBack() },
             )
         }
-        if (television && !fullscreen && !isInPip) {
-            TelevisionLiveTvBrowser(
+        if (wideBrowser && !fullscreen && !isInPip) {
+            WideLiveTvBrowser(
                 state = state,
                 controller = controller,
                 channels = visible,
@@ -487,7 +515,10 @@ fun LiveTvScreen(
                 favoritesOnly = favoritesOnly,
                 hideProtected = hideProtected,
                 playerSurface = playerSurface,
-                onBrowse = { browse = it },
+                onBrowse = { selected ->
+                    browse = selected
+                    scope.launch { settings.saveLiveTvView(selected.storage) }
+                },
                 onSearch = { search = it },
                 onToggleFavorites = { favoritesOnly = !favoritesOnly },
                 onToggleProtected = { hideProtected = !hideProtected },
@@ -517,10 +548,16 @@ fun LiveTvScreen(
                     hideProtected = false
                 },
                 onFullscreen = { fullscreen = true; overlayVisible = true; lastInteraction += 1 },
+                onFullscreenGuide = {
+                    fullscreen = true
+                    temporaryGuide = true
+                    overlayVisible = true
+                    lastInteraction += 1
+                },
                 onDetail = { channel, programme -> detail = channel to programme },
                 onLeave = { controller.stop(); onBack() },
                 dvr = dvrState,
-                recordingsOpen = recordingsOpen,
+                recordingsOpen = recordingsOpen && television,
                 onRecordings = { recordingsOpen = it },
                 dvrChip = dvrChip,
                 onDvrChip = { dvrChip = it },
@@ -718,28 +755,7 @@ fun LiveTvScreen(
                 // Recordings is not a saved browse view: On now and Guide are a
                 // habit, and a viewer who last checked the schedule did not ask
                 // for Live TV to open there next time.
-                DvrRecordingsPanel(
-                    dvr = dvrState,
-                    now = now,
-                    chip = dvrChip,
-                    onChip = { dvrChip = it },
-                    onOpenItem = onOpenItem,
-                    onOpenRecording = onOpenRecording,
-                    onMoreLibrary = { dvr?.refreshLibrary(more = true) },
-                    onMoreAttention = { dvr?.refreshAttention(more = true) },
-                    onMoreUpcoming = { dvr?.refreshSchedule(more = true) },
-                    onStop = ::stopRecording,
-                    onRestore = { id -> dvr?.restore(id) },
-                    onRuleEnabled = { id, enabled -> dvr?.setRuleEnabled(id, enabled) },
-                    onRuleNewOnly = { id, newOnly -> dvr?.setRuleNewOnly(id, newOnly) },
-                    onRuleDelete = { id -> dvr?.deleteRule(id) },
-                    onRuleMove = { id, delta -> dvr?.moveRule(id, delta) },
-                    onForgetReminder = { id -> dvr?.forgetReminder(id) },
-                    onManual = { channel, start, end, title ->
-                        dvr?.recordManual(channel, start, end, title)
-                    },
-                    modifier = Modifier.weight(1f),
-                )
+                touchRecordingsPanel(Modifier.weight(1f))
             } else if (browse == LiveTvBrowseView.Guide && !television &&
                 (formFactor != FormFactor.Compact || mobileGuideGrid)
             ) {
@@ -837,6 +853,12 @@ fun LiveTvScreen(
                 TextButton(onClick = { search = ""; searchOpen = false }) { Text("Clear") }
             },
         )
+    }
+    if (wideBrowser && !television && recordingsOpen) {
+        ModalBottomSheet(onDismissRequest = { recordingsOpen = false }) {
+            TextButton(onClick = { recordingsOpen = false }) { Text("Close recordings") }
+            touchRecordingsPanel(Modifier.fillMaxWidth().fillMaxHeight(0.85f))
+        }
     }
     detail?.let { (channel, programme) ->
         ModalBottomSheet(onDismissRequest = { detail = null }) {
@@ -1178,7 +1200,7 @@ private fun LiveTvMobileSchedule(
 }
 
 @Composable
-private fun TelevisionLiveTvBrowser(
+private fun WideLiveTvBrowser(
     state: LiveTvPlayerState,
     controller: LiveTvPlayer,
     channels: List<LiveTvChannel>,
@@ -1208,6 +1230,7 @@ private fun TelevisionLiveTvBrowser(
     onReload: () -> Unit,
     onClearFilters: () -> Unit,
     onFullscreen: () -> Unit,
+    onFullscreenGuide: () -> Unit,
     onDetail: (LiveTvChannel, LiveTvProgramme) -> Unit,
     onLeave: () -> Unit,
     dvr: DvrScreenState,
@@ -1276,10 +1299,10 @@ private fun TelevisionLiveTvBrowser(
     // font scale moves at all. The trailing actions are declared before the
     // status text takes the slack, so a long search term cannot push Layout
     // and More off the row.
-    Row(
-        Modifier.fillMaxWidth().heightIn(min = 28.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    FlowRow(
+        Modifier.fillMaxWidth().padding(bottom = 12.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         LiveTvSegment("On now", !recordingsOpen && browse == LiveTvBrowseView.List) {
             onRecordings(false)
@@ -1311,14 +1334,13 @@ private fun TelevisionLiveTvBrowser(
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = false),
+            modifier = Modifier.width(180.dp),
         )
         dvr.indicatorLabel()?.let { label ->
             TextButton(onClick = onOpenRecordingActivity, compact = true) {
                 Text("● $label", style = type.primary)
             }
         }
-        Spacer(Modifier.weight(1f))
         TextButton(onClick = onToggleFavorites, compact = true) {
             Text(if (favoritesOnly) "★ All" else "★ Favorites", style = type.primary)
         }
@@ -1520,29 +1542,29 @@ private fun TelevisionLiveTvBrowser(
         }
     } else if (browse == LiveTvBrowseView.Guide) {
         Column(Modifier.fillMaxSize()) {
-            // A fixed stage, never a weight: a `fillMaxSize` child of a Column
-            // takes the remaining height, so a weight shrinks the picture the
-            // moment anything above it wraps.
-            Row(
-                Modifier.fillMaxWidth().height(151.dp),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                LiveTvPicture(
-                    state, playerSurface, onFullscreen,
-                    Modifier.width(268.dp).height(151.dp),
-                )
-                Column(Modifier.weight(1f)) {
-                    LiveTvFocusedProgramme(
-                        focused, focusedAiring, state.status, focusedProgramme,
-                        eyebrow = true, technical = false,
-                        actions = {
-                            LiveTvFocusedActions(
-                                focused, focusedProgramme, dvr, now,
-                                selectAiring, onRecord, onRecordSeries, onRemind,
-                                onStopRecording, onForgetReminder,
-                            )
-                        },
+            BoxWithConstraints(Modifier.fillMaxWidth()) {
+                val previewHeight = minOf(maxWidth * 0.48f * 9f / 16f, maxHeight * 0.45f)
+                Row(
+                    Modifier.fillMaxWidth().height(previewHeight),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    LiveTvPicture(
+                        state, playerSurface, onFullscreen,
+                        Modifier.width(previewHeight * 16f / 9f).fillMaxHeight(),
                     )
+                    Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+                        LiveTvFocusedProgramme(
+                            focused, focusedAiring, state.status, focusedProgramme,
+                            eyebrow = true, technical = false,
+                            actions = {
+                                LiveTvFocusedActions(
+                                    focused, focusedProgramme, dvr, now,
+                                    selectAiring, onRecord, onRecordSeries, onRemind,
+                                    onStopRecording, onForgetReminder,
+                                )
+                            },
+                        )
+                    }
                 }
             }
             LiveTvTelevisionGrid(
@@ -1564,7 +1586,49 @@ private fun TelevisionLiveTvBrowser(
             )
         }
     } else {
-        Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        val watching = state.watching ?: focused
+        val watchingAiring = watching?.let { controller.airing(it, now) } ?: LiveTvAiring()
+        val watchPane: @Composable (Modifier) -> Unit = { paneModifier ->
+            Column(
+                paneModifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                LiveTvPicture(
+                    state, playerSurface, onFullscreen,
+                    Modifier.fillMaxWidth().aspectRatio(16f / 9f),
+                )
+                watching?.let { channel ->
+                    dvrRecordingContext(dvr, channel, watchingAiring.now, now)?.let { label ->
+                        TextButton(onClick = onOpenRecordingActivity) { Text("● $label") }
+                    }
+                }
+                LiveTvFocusedProgramme(
+                    watching, watchingAiring, state.status, watchingAiring.now,
+                    actions = {
+                        LiveTvFocusedActions(
+                            watching, watchingAiring.now, dvr, now,
+                            selectAiring, onRecord, onRecordSeries, onRemind,
+                            onStopRecording, onForgetReminder,
+                        )
+                    },
+                )
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = onFullscreen, enabled = state.playing) { Text("Fullscreen") }
+                    TextButton(onClick = {
+                        if (state.playing) onFullscreenGuide() else onBrowse(LiveTvBrowseView.Guide)
+                    }) { Text("Guide") }
+                    TextButton(onClick = controller::toggleMute, enabled = state.playing) {
+                        Text(if (state.muted) "Unmute" else "Mute")
+                    }
+                }
+                watchingAiring.next?.let { programme ->
+                    TextButton(onClick = { watching?.let { onDetail(it, programme) } }) {
+                        Text("Up next · ${liveTvTime(programme.start)} · ${programme.title}", style = type.primary)
+                    }
+                }
+            }
+        }
+        val channelPane: @Composable (Modifier) -> Unit = { paneModifier ->
             LiveTvOnNowList(
                 channels = channels,
                 controller = controller,
@@ -1573,44 +1637,19 @@ private fun TelevisionLiveTvBrowser(
                 focusedChannelId = focusedChannelId,
                 onFocused = onFocusedChannel,
                 onSelect = selectAiring,
-                modifier = Modifier.width(310.dp).fillMaxHeight(),
+                modifier = paneModifier,
             )
-            Column(Modifier.weight(1f).fillMaxHeight()) {
-                LiveTvPicture(
-                    state, playerSurface, onFullscreen,
-                    Modifier.fillMaxWidth().aspectRatio(16f / 9f),
-                )
-                LiveTvFocusedProgramme(
-                    focused, focusedAiring, state.status, focusedProgramme,
-                    actions = {
-                        LiveTvFocusedActions(
-                            focused, focusedProgramme, dvr, now,
-                            selectAiring, onRecord, onRecordSeries, onRemind,
-                            onStopRecording, onForgetReminder,
-                        )
-                    },
-                )
-                focused?.let { channel ->
-                    val upcoming = LiveTvGuideReducer.channel(state.guide, channel.id)?.programmes.orEmpty()
-                        .filter { it.end > now }.take(3)
-                    if (upcoming.isNotEmpty()) {
-                        Text(
-                            "UP NEXT",
-                            style = type.badge,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                    upcoming.forEach { programme ->
-                        TextButton(
-                            compact = true,
-                            onClick = {
-                                if (programme.start <= now && now < programme.end) selectAiring(channel)
-                                else onDetail(channel, programme)
-                            },
-                        ) {
-                            Text("${liveTvTime(programme.start)} · ${programme.title}", style = type.tertiary)
-                        }
-                    }
+        }
+        BoxWithConstraints(Modifier.fillMaxSize()) {
+            if (maxWidth >= 840.dp || currentFormFactor() == FormFactor.Television) {
+                Row(Modifier.fillMaxSize(), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                    watchPane(Modifier.weight(0.59f).fillMaxHeight())
+                    channelPane(Modifier.weight(0.41f).fillMaxHeight())
+                }
+            } else {
+                Column(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    watchPane(Modifier.weight(0.5f).fillMaxWidth())
+                    channelPane(Modifier.weight(0.5f).fillMaxWidth())
                 }
             }
         }
@@ -1824,7 +1863,7 @@ private fun LiveTvBrowserRow(
         onClick = onSelect,
         enabled = channel.watchable,
         compact = true,
-        modifier = modifier.fillMaxWidth().height(36.dp)
+        modifier = modifier.fillMaxWidth().heightIn(min = 48.dp)
             .onFocusChanged { if (it.isFocused) onFocused() },
     ) {
         Row(

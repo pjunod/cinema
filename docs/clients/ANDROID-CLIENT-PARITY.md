@@ -4,6 +4,11 @@ The Android client is the native plurx **viewer** for phones, foldables,
 tablets, Android TV, and Google TV. This page records what “web parity” means
 for that viewer and keeps server administration out of the comparison.
 
+> Status (2026-09-14): source is v0.3.0, Android build 99. Tablet and TV Live
+> TV use a larger player with nearby channel and recording actions; portrait
+> tablets stack the panes, recording controls wrap, and tablet Recordings
+> preserves the active picture. See the [native delivery ledger](NATIVE-LAYOUT-FOLLOWUP.md).
+
 > Status (2026-09-13): source is v0.3.0, Android build 93. Every source the
 > playback surface contract gives this client now has a raise site, which four
 > of them did not ([PLAYBACK-SURFACE-CONTRACT.md](PLAYBACK-SURFACE-CONTRACT.md)

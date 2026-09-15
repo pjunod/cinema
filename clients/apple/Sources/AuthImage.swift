@@ -12,6 +12,7 @@ import UIKit
 /// poster into a 132-point cell, which is what made large tvOS grids stutter.
 struct AuthImage: View {
     let path: String?
+    var placeholderTitle: String? = nil
     var contentMode: ContentMode = .fill
     /// The frame this image will be drawn into, in points. `nil` means "as
     /// large as this platform's screen" — the honest answer for a full-bleed
@@ -27,6 +28,19 @@ struct AuthImage: View {
                     .aspectRatio(contentMode: contentMode)
             } else {
                 Palette.surfaceHi
+                if let placeholderTitle {
+                    VStack(spacing: 12) {
+                        Image(systemName: "film")
+                            .font(.title2)
+                        Text(placeholderTitle)
+                            .font(.callout.weight(.semibold))
+                            .multilineTextAlignment(.center)
+                            .lineLimit(4)
+                    }
+                    .foregroundStyle(Palette.muted)
+                    .padding(16)
+                    .accessibilityHidden(true)
+                }
             }
         }
         .task(id: path) { await load() }
