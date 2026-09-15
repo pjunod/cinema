@@ -326,7 +326,13 @@ internal class SessionCreateCoordinator(
             try {
                 retainIfCurrent(callCreate(body), isCurrent)
             } catch (failure: Throwable) {
-                if (!isBadRequest(failure)) throw failure
+                // Only a bound legacy reopen can fail because its predecessor
+                // disappeared. An ordinary same-recipe repair carries no
+                // binding, so retrying every 400 under a new identity would
+                // duplicate a request rejected for another reason.
+                if (body.previous_session_id == null || body.reopen_reason == null ||
+                    !isBadRequest(failure)
+                ) throw failure
                 if (!isCurrent()) return@withLock null
                 retainIfCurrent(
                     callCreate(

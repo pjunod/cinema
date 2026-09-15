@@ -168,7 +168,7 @@ class PlaybackTelemetryTest {
     }
 
     @Test
-    fun lifecycleRefillLoadedWaitClaimsOneReevaluationAndKeepsTheAbsoluteDeadline() {
+    fun lifecycleRefillLoadedWaitClaimsOneReevaluationWithoutCreatingAnotherDeadline() {
         val tracker = OpenPlaybackStallTracker()
 
         assertNull(tracker.sample(true, false, true, 12_000, 0))
@@ -176,7 +176,6 @@ class PlaybackTelemetryTest {
         assertTrue(first?.controlMayDefer == true)
         assertTrue("the loaded wait spends one native reevaluation", tracker.claimNativeReevaluation())
         assertFalse("a repeated callback cannot nudge twice", tracker.claimNativeReevaluation())
-        assertTrue("a passive none still observes under the existing bound", tracker.defer(8_100))
 
         assertNull("presentation progress closes the old episode", tracker.sample(true, false, true, 12_300, 12_000))
         assertNull(tracker.sample(true, false, true, 12_300, 13_000))
@@ -186,8 +185,7 @@ class PlaybackTelemetryTest {
         assertNull(tracker.sample(true, false, true, 12_300, 20_000))
         tracker.sample(true, false, true, 12_300, 28_000)
         assertTrue(tracker.claimNativeReevaluation())
-        assertTrue(tracker.defer(28_100))
-        assertEquals(20_000L, tracker.sample(true, false, true, 12_300, 40_000)?.durationMs)
+        assertNull("the fired episode awaits its owner's action, not another timer", tracker.sample(true, false, true, 12_300, 40_000))
     }
 
     @Test

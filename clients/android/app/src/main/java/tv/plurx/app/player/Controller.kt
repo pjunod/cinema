@@ -68,7 +68,6 @@ import tv.plurx.app.data.Caps
 import tv.plurx.app.data.HlsStart
 import tv.plurx.app.data.CreateSessionReq
 import tv.plurx.app.data.DeviceCaps
-import tv.plurx.app.data.ReopenReason
 import tv.plurx.app.data.AudioTrack
 import tv.plurx.app.data.SubTrack
 import tv.plurx.app.data.SubtitleReadiness
@@ -1622,14 +1621,11 @@ class Controller(
     }
 
     /**
-     * Called when a detected stall measurement is available. Reopens with the
-     * stall-specific fields (previous_session_id, reopen_reason) and enforces
-     * the client-side retry budget: the budget counts consecutive reopen
-     * responses at the same resolved rung (two or more stalls at 1080 that
-     * the server answers with 1080 each time).  A multi-rung downgrade —
-     * 2160 → 1080 → 720 — resets the count at each step, so it is never
-     * stopped early.  Once the budget is exhausted at the ladder floor the
-     * session stays on that rung without further reopen attempts.
+     * Called when a detected stall measurement is available. Reopens the same
+     * recipe without the legacy stall ticket: a stationary presentation does
+     * not prove decoder failure or insufficient capacity, so it cannot ask the
+     * server to lower Auto quality. The existing same-rung budget still bounds
+     * repeated repairs that do not improve presentation.
      */
     private suspend fun onStall(event: OpenPlaybackStallTracker.Event) {
         if (stallGuard.defersPredecessorRecovery(recipeOwnership.needsMediaReplacement(currentRecipe()))) return
@@ -1673,7 +1669,7 @@ class Controller(
                 capMs = CONTROL_ASK_CAP_MS,
                 publish = {
                     reportControlEvidence(
-                        ClientObservation(decoderState = DecoderState.STARVED),
+                        presentationStallEvidence(),
                         render = RenderState.STALLED,
                     )
                 },
@@ -1695,7 +1691,6 @@ class Controller(
         if (!player.playWhenReady || player.playbackState == Player.STATE_ENDED) return
         if (kotlin.math.abs(realPosition() - positionMs) >= 250L) return
         if (verdict != null && applyStallVerdict(verdict, event)) return
-        if (nativeReevaluation && openStallTracker.defer(monotonicNowMs())) return
         // A reopen is a new recovery episode. If the replacement freezes at
         // the same playhead, it must receive its own bounded deadline rather
         // than inheriting the fired latch from the item it replaced.
@@ -1728,10 +1723,6 @@ class Controller(
         val attempt = beginPlaybackAttempt(reason, observedAtMs)
         val recipe = currentRecipe()
         val requestVersion = stallGuard.beginRequest()
-        // Use the stall-specific session body that carries the predecessor
-        // info. `sessionBody` is also called for seeks and track switches;
-        // those paths must NOT carry stall fields.
-        val prevId = sessionId
         // Capture the predecessor height for the same-rung budget
         // before nulling the session ID.  The first stall reopen
         // compares against this; subsequent stalls compare against
@@ -1775,8 +1766,6 @@ class Controller(
                         quality = recipe.recipe.quality,
                         sourceHeight = plan.sourceHeight,
                         deliveredDynamicRange = deliveredRange,
-                        previousSessionId = prevId,
-                        reopenReason = ReopenReason.Stall,
                     ),
                     caps = decisionCaps,
                     requestHDR10 = sessionHDR10Request(
@@ -2462,7 +2451,7 @@ class Controller(
         attachSurfaceGeneration()
         stallGuard.invalidateForPlaybackAttempt()
         reportControlEvidence(
-            ClientObservation(decoderState = DecoderState.STARVED),
+            presentationStallEvidence(),
             render = RenderState.STALLED,
         )
         playbackTelemetry.report(
@@ -3499,6 +3488,10 @@ internal fun loadedWaitNeedsNativeReevaluation(
     bufferedPositionMs: Long,
     currentPositionMs: Long,
 ): Boolean = bufferedPositionMs - currentPositionMs > 10_000L
+
+/** A timer-only presentation wait has no demonstrated decoder or network cause. */
+internal fun presentationStallEvidence(): ClientObservation =
+    ClientObservation(decoderState = DecoderState.UNKNOWN)
 
 /**
  * The verdict that ends an unchanged retry, or null to take it anyway.
