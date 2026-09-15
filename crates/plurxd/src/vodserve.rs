@@ -2446,14 +2446,13 @@ impl VodServe {
         })
     }
 
+    /// None means this node has no source attestation yet. The caller may
+    /// still use a local index; only a complete index miss queues analysis.
     async fn try_cluster_fragment_index(
         &self,
         file: &MediaFile,
         video: CopyVideoOptions,
-    ) -> Result<(FragmentIndex, String, String), String> {
-        if video.preserves_dolby_vision() {
-            return Err("the preserved Dolby Vision branch has no v2 artifact".to_owned());
-        }
+    ) -> Result<Option<(FragmentIndex, String, String)>, String> {
         if !crate::ffmpeg::fragment_index_engine_is_current().await {
             return Err("the fragment-index engine changed; restart is required".to_owned());
         }
@@ -2468,13 +2467,15 @@ impl VodServe {
             .as_deref()
             .ok_or_else(|| "this process has no cluster index cache root".to_owned())?;
         let object_version = crate::fragment_index_cluster::inspect_source(file).await?;
-        let observation = self
+        let Some(observation) = self
             .shared
             .store
             .fragment_index_source(node_id, file.id, &object_version)
             .await
             .map_err(|error| format!("reading source attestation: {error}"))?
-            .ok_or_else(|| "this node has not attested the current source object".to_owned())?;
+        else {
+            return Ok(None);
+        };
         let engine = crate::ffmpeg::fragment_index_engine_digest().await;
         let pipeline = crate::fragment_index_cluster::pipeline_digest(file, &engine, video);
         let cache_key = plurx_core::store::cluster_fragment_index_key(
@@ -2540,7 +2541,7 @@ impl VodServe {
                 .await;
             return Err("no verified holder could supply the v2 artifact".to_owned());
         };
-        Ok((index, object_version, artifact.cache_key))
+        Ok(Some((index, object_version, artifact.cache_key)))
     }
 
     /// Keep VOD lifecycle telemetry on the same node-local event stream as
@@ -2844,10 +2845,12 @@ impl VodServe {
         let cluster_index = if prepared.encoding.is_some() {
             Ok(None)
         } else if cluster_cache_enabled {
-            self.try_cluster_fragment_index(file, video).await.map(Some)
+            self.try_cluster_fragment_index(file, video).await
         } else {
             Ok(None)
         };
+        let needs_attestation = cluster_cache_enabled && matches!(&cluster_index, Ok(None));
+        let unavailable_reason = cluster_index.as_ref().err().cloned();
         let (index, source_object_version, cluster_cache_key) = match cluster_index {
             Ok(Some((index, object_version, cache_key))) => {
                 (Some(index), Some(object_version), Some(cache_key))
@@ -2886,9 +2889,42 @@ impl VodServe {
             }
         };
         if index.is_none() && prepared.encoding.is_none() {
+            let reason = if needs_attestation {
+                match self.shared.cluster_node_id.as_deref() {
+                    Some(node_id) => match crate::state::enqueue_copy_preparation(
+                        self.shared.store.as_ref(),
+                        node_id,
+                        file,
+                        video,
+                    )
+                    .await
+                    {
+                        Ok(request) => format!(
+                            "exact copy preparation is {}{}",
+                            request.state,
+                            if request.last_error_code.is_empty() {
+                                String::new()
+                            } else {
+                                format!(": {}", request.last_error_code)
+                            }
+                        ),
+                        Err(error) => {
+                            format!("exact copy preparation could not be queued: {error}")
+                        }
+                    },
+                    None => "this process has no cluster index identity".to_owned(),
+                }
+            } else {
+                unavailable_reason.unwrap_or_else(|| {
+                    "shared preparation is disabled; no matching local index exists".to_owned()
+                })
+            };
+            // This is a prerequisite refusal, not a claim that a worker is
+            // active. The durable analysis row and reason carry its actual
+            // queued/running/failed state; the caller keeps rolling first play.
             return Err(crate::transcode::vod_refusal_error(
                 "vod_index_pending",
-                "no fragment index stored for the file's current identity",
+                reason,
             ));
         }
         // The §2 ruling: a single immutable init cannot describe a film whose
@@ -8058,9 +8094,9 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering::AcqRel};
 
     use plurx_core::store::{
-        FragmentIndexStore, LibraryStore as _, MediaSessionStore as _, MediaStore as _,
-        PlaybackTelemetryStore as _, RenditionPlanStore as _, SqliteStore,
-        TimelineAnnotationStore as _,
+        ClusterFragmentIndexStore as _, FragmentIndexStore, LibraryStore as _,
+        MediaSessionStore as _, MediaStore as _, PlaybackTelemetryStore as _,
+        RenditionPlanStore as _, SqliteStore, TimelineAnnotationStore as _,
     };
     use plurx_core::testfixtures;
 
@@ -8238,6 +8274,196 @@ mod tests {
             .map(|video| crate::fragindex::identity_for(&file, video).argv_fingerprint)
             .collect();
         assert_eq!(fingerprints.len(), 3, "{fingerprints:?}");
+    }
+
+    /// A shared artifact for the selected converting recipe is sufficient to
+    /// open copy VOD even when this node has no legacy file-keyed index.  This
+    /// reaches the same hydrate path used for a blob fetched from a peer; the
+    /// local cache is preinstalled only to keep transport/authentication out
+    /// of a recipe-identity regression.
+    #[tokio::test]
+    async fn a_converting_cluster_artifact_hydrates_without_a_local_v1_index() {
+        testfixtures::require_ffmpeg();
+        let source_dir = crate::test_tempdir().expect("source dir");
+        let source_path = source_dir.path().join("profile-seven.mkv");
+        std::fs::write(&source_path, b"attested source bytes").expect("source");
+        let metadata = std::fs::metadata(&source_path).expect("source metadata");
+        let mtime = metadata
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("unix mtime")
+            .as_secs() as i64;
+
+        let sqlite = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let library = sqlite
+            .create_library(&plurx_core::domain::NewLibrary {
+                name: "Shared index".to_owned(),
+                kind: plurx_core::domain::LibraryKind::Movies,
+                paths: Vec::new(),
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = sqlite
+            .insert_item(&plurx_core::domain::NewItem {
+                library_id: library.id,
+                kind: plurx_core::domain::ItemKind::Movie,
+                parent_id: None,
+                title: "Profile seven".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let file_id = sqlite
+            .upsert_file(
+                item,
+                &source_path.to_string_lossy(),
+                metadata.len() as i64,
+                mtime,
+                &plurx_core::domain::ProbeResult {
+                    duration_ms: Some(12_000),
+                    container: Some("mkv".to_owned()),
+                    video_codec: Some("hevc".to_owned()),
+                    video_profile: Some("Main 10".to_owned()),
+                    width: Some(3840),
+                    height: Some(2160),
+                    bit_depth: Some(10),
+                    hdr: Some("dolby_vision".to_owned()),
+                    hdr_format: Some("Dolby Vision · Profile 7 (HDR10-compatible)".to_owned()),
+                    dolby_vision: plurx_core::domain::DolbyVisionFacts {
+                        profile: Some(7),
+                        level: Some(6),
+                        bl_compat_id: Some(1),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("file");
+        let file = sqlite
+            .get_file(file_id)
+            .await
+            .expect("read file")
+            .expect("stored file");
+        let video = copy_video_pipeline(&file, None, true, true, true);
+        assert!(video.converts_dolby_vision());
+
+        let object_version = crate::fragment_index_cluster::inspect_source(&file)
+            .await
+            .expect("source identity");
+        let source_sha256 = "a".repeat(64);
+        sqlite
+            .record_fragment_index_source(&plurx_core::store::FragmentIndexSourceObservation {
+                node_id: "node-a".to_owned(),
+                file_id,
+                object_version: object_version.clone(),
+                source_size: file.size,
+                source_mtime: file.mtime,
+                source_sha256: source_sha256.clone(),
+                observed_at_ms: 1,
+            })
+            .await
+            .expect("source observation");
+
+        let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+        let pipeline_sha256 = crate::fragment_index_cluster::pipeline_digest(&file, &engine, video);
+        let cache_key = plurx_core::store::cluster_fragment_index_key(
+            file.id,
+            file.size,
+            file.mtime,
+            &source_sha256,
+            &pipeline_sha256,
+        )
+        .expect("cache key");
+        let now = crate::fragment_index_cluster::unix_ms();
+        let queued = plurx_core::store::NewClusterFragmentIndexJob {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            priority: "foreground".to_owned(),
+            trigger: "foreground".to_owned(),
+            target_node_id: "node-a".to_owned(),
+            not_before_ms: now,
+            created_at_ms: now,
+        };
+        assert!(sqlite
+            .enqueue_cluster_fragment_index(&queued)
+            .await
+            .expect("enqueue"));
+        let claimed = sqlite
+            .claim_cluster_fragment_index("node-a", &[], now, now + 60_000)
+            .await
+            .expect("claim")
+            .expect("claimed job");
+
+        let record = plurx_core::fmp4::DolbyVisionRecord::new(8, 6, false, true, true, 1)
+            .expect("converted record");
+        let mut index = synthetic_index(3);
+        index.promotion.dolby_vision = Some(record.clone());
+        let blob = plurx_core::store::encode_cluster_fragment_index_blob(
+            &index,
+            &source_sha256,
+            &pipeline_sha256,
+        )
+        .expect("encode artifact");
+        let artifact = plurx_core::store::ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            source_sha256,
+            pipeline_sha256,
+            blob_sha256: plurx_core::store::cluster_fragment_index_blob_sha256(&blob),
+            bytes: blob.len() as i64,
+            built_by_node_id: "node-a".to_owned(),
+            built_at_ms: now + 1,
+        };
+        let location = plurx_core::store::ClusterFragmentIndexLocation {
+            cache_key: cache_key.clone(),
+            node_id: "node-a".to_owned(),
+            bytes: artifact.bytes,
+            verified_at_ms: now + 1,
+            last_seen_at_ms: now + 1,
+        };
+        assert!(sqlite
+            .complete_cluster_fragment_index(&claimed, &artifact, &location, now + 1)
+            .await
+            .expect("publish artifact"));
+        let cache = crate::test_tempdir().expect("cluster index cache");
+        crate::fragment_index_cluster::install_local_blob(cache.path(), &artifact, &blob)
+            .await
+            .expect("install cluster blob");
+        assert!(sqlite
+            .fragment_index(file.id, &crate::fragindex::identity_for(&file, video))
+            .await
+            .expect("read v1 index")
+            .is_none());
+
+        let base = crate::test_tempdir().expect("rendition root");
+        let store: Arc<dyn Store> = sqlite;
+        let serve = VodServe::new_cluster(
+            base.path().to_path_buf(),
+            store,
+            "node-a".to_owned(),
+            cache.path().to_path_buf(),
+            None,
+        );
+        let (hydrated, hydrated_version, hydrated_key) = serve
+            .try_cluster_fragment_index(&file, video)
+            .await
+            .expect("selected converting artifact hydrates")
+            .expect("source is already attested");
+        assert_eq!(hydrated_key, cache_key);
+        assert_eq!(hydrated_version, object_version);
+        assert_eq!(hydrated.promotion.dolby_vision, Some(record));
+        assert_eq!(hydrated.rows, index.rows);
     }
 
     fn fixture_file() -> MediaFile {
@@ -12174,6 +12400,138 @@ mod tests {
             .await
             .expect_err("an unindexed file must not change presentation");
         assert!(index_error.contains("vod_index_pending"));
+    }
+
+    #[tokio::test]
+    async fn first_play_queues_missing_source_preparation_with_discovery_off() {
+        use plurx_core::store::SettingsStore as _;
+        testfixtures::require_ffmpeg();
+        let base = crate::test_tempdir().expect("base");
+        let source = fixture_file();
+        let metadata = std::fs::metadata(&source.path).expect("source metadata");
+        let mtime = metadata
+            .modified()
+            .expect("mtime")
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("epoch")
+            .as_secs() as i64;
+        let sqlite = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let library = sqlite
+            .create_library(&plurx_core::domain::NewLibrary {
+                name: "First play".to_owned(),
+                kind: plurx_core::domain::LibraryKind::Movies,
+                paths: Vec::new(),
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let item = sqlite
+            .insert_item(&plurx_core::domain::NewItem {
+                library_id: library.id,
+                kind: plurx_core::domain::ItemKind::Movie,
+                parent_id: None,
+                title: "Cold source".to_owned(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        let file_id = sqlite
+            .upsert_file(
+                item,
+                &source.path.to_string_lossy(),
+                metadata.len() as i64,
+                mtime,
+                &plurx_core::domain::ProbeResult {
+                    duration_ms: source.duration_ms,
+                    container: source.container,
+                    video_codec: source.video_codec,
+                    width: source.width,
+                    height: source.height,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("file");
+        let file = sqlite.get_file(file_id).await.expect("read").expect("file");
+        sqlite
+            .put_setting(plurx_core::store::keys::VOD_INDEX_MINS, "0")
+            .await
+            .expect("disable discovery");
+        let store: Arc<dyn Store> = sqlite.clone();
+        let serve = VodServe::new_cluster(
+            base.path().join("vod"),
+            store,
+            "node-a".to_owned(),
+            base.path().join("indexes"),
+            None,
+        );
+        let mut req = request("first-play", 0.0);
+        req.file_id = file.id;
+        let disabled = serve
+            .try_create(
+                &req,
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "viewer",
+                    item_title: "Cold source",
+                    supersession_user: "viewer",
+                },
+                "disabled".to_owned(),
+            )
+            .await
+            .expect_err("missing index");
+        assert!(
+            disabled.contains("shared preparation is disabled"),
+            "{disabled}"
+        );
+        assert!(sqlite
+            .analysis_requests(10)
+            .await
+            .expect("requests")
+            .is_empty());
+
+        sqlite
+            .put_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, "1")
+            .await
+            .expect("enable shared preparation");
+        for session in ["first", "retry"] {
+            let refused = serve
+                .try_create(
+                    &req,
+                    &file,
+                    &settings(),
+                    VodAttribution {
+                        user_name: "viewer",
+                        item_title: "Cold source",
+                        supersession_user: "viewer",
+                    },
+                    session.to_owned(),
+                )
+                .await
+                .expect_err("rolling fallback is still needed");
+            assert!(refused.contains("vod_index_pending"), "{refused}");
+            assert!(
+                refused.contains("exact copy preparation is queued"),
+                "{refused}"
+            );
+        }
+        let queued = sqlite.analysis_requests(10).await.expect("requests");
+        assert_eq!(
+            queued.len(),
+            1,
+            "repeated first play joins the same preparation"
+        );
+        assert_eq!(queued[0].file_id, file.id);
+        assert_eq!(queued[0].target_node_id, "node-a");
+        assert_eq!(queued[0].state, "queued");
+        assert!(!queued[0].video_identity.is_empty());
+        assert!(
+            serve.shared.sessions.lock().await.is_empty(),
+            "no incomplete VOD session attaches"
+        );
     }
 
     #[tokio::test]

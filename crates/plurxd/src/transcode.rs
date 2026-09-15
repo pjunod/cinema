@@ -1142,36 +1142,26 @@ fn transcode_first_playlist_ready(raw: &[u8]) -> bool {
 /// for one of those stale URIs during a playlist reload or decoder reset and
 /// stall even though the current encoder is healthy.
 ///
-/// The settings-gated experiment serves a typeless sliding shape from the
-/// first response, with an explicit zero start offset, so the same URL never
-/// mutates from EVENT to live semantics under AVPlayer. Otherwise the legacy
-/// shape changes only once pruning makes EVENT impossible to serve honestly.
-/// The raw file and in-memory index stay complete in both cases.
+/// Every rolling session serves a typeless sliding shape from its first
+/// response, with an explicit zero start offset. Retention is part of this
+/// presentation's lifetime contract, so EVENT is never a valid served shape.
+/// The raw file and in-memory index retain the complete writer history.
 fn served_live_playlist(
     raw: Vec<u8>,
     first_retained: Option<i64>,
-    typeless_sliding: bool,
     takeover: Option<&SessionTakeoverStart>,
-) -> Vec<u8> {
+) -> Option<Vec<u8>> {
     // A successor's numbering starts at its epoch floor, not at zero, so the
     // "nothing has been pruned yet" baseline is that floor.
     let baseline = takeover.map_or(0, |takeover| takeover.media_sequence);
     let first_retained = first_retained
         .filter(|index| *index > baseline)
         .unwrap_or(baseline);
-    if first_retained == 0 && !typeless_sliding && takeover.is_none() {
-        return raw;
-    }
-    let Ok(text) = std::str::from_utf8(&raw) else {
-        return raw;
-    };
+    let text = std::str::from_utf8(&raw).ok()?;
     let lines: Vec<&str> = text.lines().collect();
-    let Some(header_end) = lines
+    let header_end = lines
         .iter()
-        .position(|line| line.trim_start().starts_with("#EXTINF:"))
-    else {
-        return raw;
-    };
+        .position(|line| line.trim_start().starts_with("#EXTINF:"))?;
 
     let body_start = if first_retained == 0 {
         header_end
@@ -1194,13 +1184,10 @@ fn served_live_playlist(
                 next_block = position + 1;
             }
         }
-        let Some(body_start) = body_start else {
-            // The index was derived from this playlist, so disagreement means
-            // a concurrent truncate/restart. Let the next reload observe the
-            // rebuilt index instead of manufacturing mismatched state.
-            return raw;
-        };
-        body_start
+        // A concurrent prune or producer replacement can disagree with this
+        // writer snapshot. Retry within the existing request budget; never
+        // publish the raw EVENT history or guess a different media sequence.
+        body_start?
     };
 
     let mut out = String::with_capacity(text.len());
@@ -1209,7 +1196,7 @@ fn served_live_playlist(
     let mut wrote_start = false;
     for line in &lines[..header_end] {
         let trimmed = line.trim();
-        if trimmed == "#EXT-X-PLAYLIST-TYPE:EVENT" {
+        if trimmed.starts_with("#EXT-X-PLAYLIST-TYPE:") {
             continue;
         }
         if trimmed.starts_with("#EXT-X-START:") {
@@ -1250,14 +1237,14 @@ fn served_live_playlist(
             out.push_str("#EXT-X-DISCONTINUITY\n");
         }
     }
-    if typeless_sliding && !wrote_start {
+    if !wrote_start {
         out.push_str("#EXT-X-START:TIME-OFFSET=0\n");
     }
     for line in &lines[body_start..] {
         out.push_str(line);
         out.push('\n');
     }
-    out.into_bytes()
+    Some(out.into_bytes())
 }
 
 /// How far a session has run ahead of the client, both ways it can matter.
@@ -6102,14 +6089,11 @@ struct Session {
     /// rather than only the current boolean, exposes flapping after it has
     /// already resumed.
     suspend_count: AtomicU64,
-    /// Snapshot of the EVENT-to-typeless experiment at session creation. A
-    /// settings edit must never mutate one URL's playlist type mid-play.
-    typeless_sliding: bool,
     /// Fenced successor coordinates for URI and playlist continuity.
     takeover: Option<SessionTakeoverStart>,
     /// The first retained-prefix advance gets one operational log line. A
     /// playlist reload may observe that state hundreds of times; only the
-    /// transition is evidence about the EVENT/sliding experiment.
+    /// transition records retention starting to advance the visible window.
     first_slide_logged: AtomicBool,
 }
 
@@ -7579,13 +7563,7 @@ async fn session_info(
             |lease| lease.delivery.fetched_segment,
         ),
         first_retained_segment,
-        playlist_shape: if s.cached {
-            "vod"
-        } else if s.typeless_sliding || first_retained_segment.is_some_and(|index| index > 0) {
-            "sliding"
-        } else {
-            "event"
-        },
+        playlist_shape: if s.cached { "vod" } else { "sliding" },
         ahead_seconds: ahead.map(|a| a.seconds),
         hold_reason: active_hold.map(|hold| hold.reason),
         resume_below_seconds: active_hold
@@ -9042,9 +9020,8 @@ pub struct SessionInfo {
     pub fetched_segment: Option<i64>,
     /// First segment still present after retention pruning.
     pub first_retained_segment: Option<i64>,
-    /// `event` before legacy retention advances, `sliding` afterwards (or
-    /// from the first response under the experiment), and `vod` for a cache
-    /// hit. This makes the EVENT-to-sliding transition visible at a freeze.
+    /// `sliding` for every rolling session from its first response, and `vod`
+    /// for a completed cache hit. Retention never changes this contract.
     pub playlist_shape: &'static str,
     /// Published media beyond the client's download frontier — the reserve a
     /// hiccup gets to spend. Not measured from the playhead: the client has
@@ -14835,7 +14812,6 @@ impl TranscodeManager {
             startup_grant_spent: AtomicBool::new(false),
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
-            typeless_sliding: false,
             takeover: None,
             first_slide_logged: AtomicBool::new(false),
         });
@@ -18189,28 +18165,14 @@ impl TranscodeManager {
         }
     }
 
-    /// Whether this session must serve the typeless sliding playlist shape.
-    ///
-    /// The standing answer is the `HLS_TYPELESS_SLIDING` experiment. Session
-    /// takeover adds a second, non-negotiable reason: a fenced successor
-    /// renumbers from its epoch floor and advertises none of the
-    /// predecessor's segments (§7.3), which is exactly what RFC 8216 §6.2.1
-    /// forbids an EVENT playlist from doing. A URL a successor may republish
-    /// therefore serves the stable shape from its *first* response instead of
-    /// changing shape under the client at failover.
-    /// The shape a cluster-published session will serve, asked before the
-    /// session exists so the recipe can record it. A successor may only
-    /// replace a session that was already serving this shape.
+    /// Conservative shape guarantee for a peer whose serving contract may
+    /// predate unconditional sliding playlists. Remote start v1 does not
+    /// acknowledge the actual shape. Retain the old shared-setting guarantee
+    /// for durable takeover recipes rather than claiming this binary's local
+    /// behavior for an older worker. Local rolling serving never reads it.
     pub(crate) async fn cluster_playlist_is_typeless(&self) -> bool {
-        self.stable_playlist_shape(true, false).await
-    }
-
-    async fn stable_playlist_shape(&self, cluster_published: bool, takeover: bool) -> bool {
-        if takeover || self.bool_setting(keys::HLS_TYPELESS_SLIDING).await {
-            return true;
-        }
-        cluster_published
-            && self
+        self.bool_setting(keys::HLS_TYPELESS_SLIDING).await
+            || self
                 .bool_setting(keys::CLUSTER_SESSION_TAKEOVER_ENABLED)
                 .await
     }
@@ -19546,9 +19508,6 @@ impl TranscodeManager {
         // neither the old encoder nor its decode surface is patched in place.
         let plan = self.resolve_movie_plan(&file, &opts, encoder).await?;
         let pacing = self.pacing(false).await;
-        let typeless_sliding = self
-            .stable_playlist_shape(replacement_deadline.is_some(), takeover.is_some())
-            .await;
         let automatic_decoder_recovery = self.automatic_decoder_recovery_enabled();
         let observation = DiagnosticObservation::for_plan(
             &plan,
@@ -19945,7 +19904,6 @@ impl TranscodeManager {
             startup_grant_spent: AtomicBool::new(false),
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
-            typeless_sliding,
             takeover,
             first_slide_logged: AtomicBool::new(false),
         });
@@ -20246,9 +20204,6 @@ impl TranscodeManager {
             );
         }
         let pacing = self.pacing(true).await;
-        let typeless_sliding = self
-            .stable_playlist_shape(replacement_deadline.is_some(), takeover.is_some())
-            .await;
         let legacy_args = || match takeover.as_ref() {
             Some(takeover) => transcode::hls_copy_args_with_sequence(
                 &file,
@@ -20481,7 +20436,6 @@ impl TranscodeManager {
             startup_grant_spent: AtomicBool::new(false),
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
-            typeless_sliding,
             takeover,
             first_slide_logged: AtomicBool::new(false),
         });
@@ -23504,255 +23458,243 @@ impl TranscodeManager {
                 wait_for_playlist_poll_before(deadline).await;
                 continue;
             };
-            // A startup request is allowed to span a pre-publication
-            // fallback. Fence each concrete read, not the whole wait, so old
-            // bytes are retried while valid successor bytes keep the original
-            // request alive.
-            let playlist_bytes = if let Some(manifest) = &session.cache_manifest {
-                if session
-                    .cache_location
-                    .as_ref()
-                    .is_some_and(|location| location.storage_class == "shared")
-                {
-                    let Some(shared_cache) = self.shared_cache.as_ref() else {
-                        return Err(PlaylistPublicationError::for_session(
-                            PlaylistError::SessionFailed(
-                                "shared cache coordinator is unavailable".to_owned(),
-                            ),
-                            &session,
-                        ));
-                    };
-                    let manifest = Arc::clone(manifest);
-                    let directory = session.dir.clone();
-                    shared_cache
-                        .run_mount_io("shared_playlist_read_timeout", async move {
-                            manifest
-                                .read_verified_playlist(&directory, "index.m3u8")
-                                .await
-                                .map_err(|error| error.to_string())
-                        })
-                        .await
-                        .ok()
-                        .flatten()
+            // Every rejected snapshot rejoins the same terminal/deadline/poll
+            // path. The outer HTTP timeout bounds blocked I/O; this loop owns
+            // retry pacing even when storage and actor replies are immediate.
+            'snapshot: {
+                // A startup request is allowed to span a pre-publication
+                // fallback. Fence each concrete read, not the whole wait, so old
+                // bytes are retried while valid successor bytes keep the original
+                // request alive.
+                let playlist_bytes = if let Some(manifest) = &session.cache_manifest {
+                    if session
+                        .cache_location
+                        .as_ref()
+                        .is_some_and(|location| location.storage_class == "shared")
+                    {
+                        let Some(shared_cache) = self.shared_cache.as_ref() else {
+                            return Err(PlaylistPublicationError::for_session(
+                                PlaylistError::SessionFailed(
+                                    "shared cache coordinator is unavailable".to_owned(),
+                                ),
+                                &session,
+                            ));
+                        };
+                        let manifest = Arc::clone(manifest);
+                        let directory = session.dir.clone();
+                        shared_cache
+                            .run_mount_io("shared_playlist_read_timeout", async move {
+                                manifest
+                                    .read_verified_playlist(&directory, "index.m3u8")
+                                    .await
+                                    .map_err(|error| error.to_string())
+                            })
+                            .await
+                            .ok()
+                            .flatten()
+                    } else {
+                        manifest
+                            .read_verified_playlist(&session.dir, "index.m3u8")
+                            .await
+                            .ok()
+                            .flatten()
+                    }
                 } else {
-                    manifest
-                        .read_verified_playlist(&session.dir, "index.m3u8")
-                        .await
-                        .ok()
-                        .flatten()
-                }
-            } else {
-                plurx_core::transcode::manifest::read_bounded_playlist(&session.dir, "index.m3u8")
+                    plurx_core::transcode::manifest::read_bounded_playlist(
+                        &session.dir,
+                        "index.m3u8",
+                    )
                     .await
                     .ok()
                     .flatten()
-            };
-            if session.replacing_child.load(Acquire)
-                || session.control.current_producer_attempt() != producer_attempt
-                || session.compatibility_producer_attempt() != producer_attempt
-            {
-                continue;
-            }
-            if let Some(bytes) = playlist_bytes {
-                if !bytes.is_empty() {
-                    // A response body admitted before the actor's failure
-                    // verdict owns its bytes through EOF. A later playlist
-                    // reload is new demand beyond the retained frontier and
-                    // must receive the typed terminal producer state rather
-                    // than replay this partial EVENT playlist forever.
-                    if let Some((error, _)) = session
-                        .published_producer_ended_before(producer_attempt, deadline)
-                        .await
-                    {
-                        return Err(PlaylistPublicationError::for_session(error, &session));
-                    }
-                    // ffmpeg rewrites an EVENT playlist after each segment. Do
-                    // not let hls.js race away with the first one-segment
-                    // version: its first reload is scheduled at the exact edge
-                    // of that segment, which leaves no time for request + append
-                    // and creates a deterministic startup stall. This is only a
-                    // first-response gate; cached VOD and copy have already
-                    // opened it in their constructors, and every reload after
-                    // the publication store below stays on the old fast path.
-                    let Some(playlist_published) =
-                        session.compatibility_playlist_published(producer_attempt)
-                    else {
-                        continue;
-                    };
-                    if !playlist_published && !transcode_first_playlist_ready(&bytes) {
+                };
+                if session.replacing_child.load(Acquire)
+                    || session.control.current_producer_attempt() != producer_attempt
+                    || session.compatibility_producer_attempt() != producer_attempt
+                {
+                    break 'snapshot;
+                }
+                if let Some(bytes) = playlist_bytes {
+                    if !bytes.is_empty() {
+                        // A response body admitted before the actor's failure
+                        // verdict owns its bytes through EOF. A later playlist
+                        // reload is new demand beyond the retained frontier and
+                        // must receive the typed terminal producer state rather
+                        // than replay this partial EVENT playlist forever.
                         if let Some((error, _)) = session
                             .published_producer_ended_before(producer_attempt, deadline)
                             .await
                         {
                             return Err(PlaylistPublicationError::for_session(error, &session));
                         }
-                        if tokio::time::Instant::now().into_std() >= deadline {
-                            return Err(PlaylistPublicationError::for_session(
-                                PlaylistError::StartupTimedOut(budget),
-                                &session,
-                            ));
+                        // ffmpeg rewrites an EVENT playlist after each segment. Do
+                        // not let hls.js race away with the first one-segment
+                        // version: its first reload is scheduled at the exact edge
+                        // of that segment, which leaves no time for request + append
+                        // and creates a deterministic startup stall. This is only a
+                        // first-response gate; cached VOD and copy have already
+                        // opened it in their constructors, and every reload after
+                        // the publication store below stays on the old fast path.
+                        let Some(playlist_published) =
+                            session.compatibility_playlist_published(producer_attempt)
+                        else {
+                            break 'snapshot;
+                        };
+                        if !playlist_published && !transcode_first_playlist_ready(&bytes) {
+                            break 'snapshot;
                         }
-                        wait_for_playlist_poll_before(deadline).await;
-                        continue;
-                    }
-                    // Actor readiness must come from the exact bytes this
-                    // response owns. A best-effort second filesystem read in
-                    // flow control cannot be the publication linearization
-                    // point: it may fail after these bytes were validated.
-                    let exact_index = SegmentIndex {
-                        segs: parse_playlist(&String::from_utf8_lossy(&bytes)),
-                        revision: 0,
-                    };
-                    #[cfg(test)]
-                    session.pause_playlist_publication_for_test().await;
-                    if !session
-                        .control
-                        .observe_publication_before(
-                            crate::playback_control::RollingPublicationObservation {
-                                producer_attempt,
-                                playlist_ready: true,
-                                published_segment: exact_index
-                                    .segs
-                                    .last()
-                                    .map(|segment| segment.index),
-                                published_end_ms: exact_index.produced_playable_end_ms(),
-                                next_media_sequence: exact_index.next_media_sequence(),
-                                resolved_fetched_segment: None,
-                                resolved_fetched_end_ms: None,
-                            },
-                            deadline,
-                        )
-                        .await
-                    {
+                        // Actor readiness must come from the exact bytes this
+                        // response owns. A best-effort second filesystem read in
+                        // flow control cannot be the publication linearization
+                        // point: it may fail after these bytes were validated.
+                        let exact_index = SegmentIndex {
+                            segs: parse_playlist(&String::from_utf8_lossy(&bytes)),
+                            revision: 0,
+                        };
+                        #[cfg(test)]
+                        session.pause_playlist_publication_for_test().await;
+                        if !session
+                            .control
+                            .observe_publication_before(
+                                crate::playback_control::RollingPublicationObservation {
+                                    producer_attempt,
+                                    playlist_ready: true,
+                                    published_segment: exact_index
+                                        .segs
+                                        .last()
+                                        .map(|segment| segment.index),
+                                    published_end_ms: exact_index.produced_playable_end_ms(),
+                                    next_media_sequence: exact_index.next_media_sequence(),
+                                    resolved_fetched_segment: None,
+                                    resolved_fetched_end_ms: None,
+                                },
+                                deadline,
+                            )
+                            .await
+                        {
+                            break 'snapshot;
+                        }
+                        // The exact bytes above are the response prerequisite.
+                        // Refreshing storage/accounting and signalling the child
+                        // is consequential background work, so queue it on the
+                        // session-owned worker instead of extending (or inheriting
+                        // cancellation from) this HTTP request.
+                        self.ensure_flow_worker(session_id, Arc::clone(&session));
+                        session.control.request_flow();
                         if session.control.is_retired() {
+                            if session.failed.load(Relaxed) {
+                                return Err(PlaylistPublicationError::for_session(
+                                    session.failure_reason(),
+                                    &session,
+                                ));
+                            }
                             return Err(PlaylistPublicationError::for_session(
                                 PlaylistError::StartupTimedOut(budget),
                                 &session,
                             ));
                         }
-                        continue;
-                    }
-                    // The exact bytes above are the response prerequisite.
-                    // Refreshing storage/accounting and signalling the child
-                    // is consequential background work, so queue it on the
-                    // session-owned worker instead of extending (or inheriting
-                    // cancellation from) this HTTP request.
-                    self.ensure_flow_worker(session_id, Arc::clone(&session));
-                    session.control.request_flow();
-                    if session.control.is_retired() {
-                        if session.failed.load(Relaxed) {
+                        if session.replacing_child.load(Acquire)
+                            || session.control.current_producer_attempt() != producer_attempt
+                            || session.compatibility_producer_attempt() != producer_attempt
+                        {
+                            break 'snapshot;
+                        }
+                        if session.cached {
+                            return Ok((
+                                bytes,
+                                MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+                                    session: Arc::clone(&session),
+                                    producer_attempt,
+                                }),
+                            ));
+                        }
+                        let first_retained = session.segments.lock().await.first_retained_index();
+                        // A successor begins numbering at its epoch floor, so
+                        // "has anything been pruned" is measured from that floor
+                        // and a fresh takeover does not report itself as sliding.
+                        let slide_baseline = session
+                            .takeover
+                            .as_ref()
+                            .map_or(0, |takeover| takeover.media_sequence);
+                        if let Some(first_retained_index) =
+                            first_retained.filter(|index| *index > slide_baseline)
+                        {
+                            if !session.first_slide_logged.swap(true, Relaxed) {
+                                let now_unix = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|duration| duration.as_secs() as i64)
+                                    .unwrap_or(session.started_unix);
+                                tracing::info!(
+                                    session = %session_log_id(session_id),
+                                    first_retained_index,
+                                    wall_seconds_since_start =
+                                        now_unix.saturating_sub(session.started_unix),
+                                    "served HLS playlist began sliding"
+                                );
+                                let manager = Arc::clone(self);
+                                let event_session = Arc::clone(&session);
+                                let event_session_id = session_id.to_owned();
+                                tokio::spawn(async move {
+                                    manager
+                                        .emit_session_event(
+                                            &event_session_id,
+                                            &event_session,
+                                            "playlist_slide",
+                                            SessionEventFields {
+                                                extra: Some(
+                                                    serde_json::json!({
+                                                        "first_retained_index": first_retained_index
+                                                    })
+                                                    .to_string(),
+                                                ),
+                                                ..SessionEventFields::default()
+                                            },
+                                        )
+                                        .await;
+                                });
+                            }
+                        }
+                        if session.control.is_retired() {
+                            if session.failed.load(Relaxed) {
+                                return Err(PlaylistPublicationError::for_session(
+                                    session.failure_reason(),
+                                    &session,
+                                ));
+                            }
                             return Err(PlaylistPublicationError::for_session(
-                                session.failure_reason(),
+                                PlaylistError::StartupTimedOut(budget),
                                 &session,
                             ));
                         }
-                        return Err(PlaylistPublicationError::for_session(
-                            PlaylistError::StartupTimedOut(budget),
-                            &session,
-                        ));
-                    }
-                    if session.replacing_child.load(Acquire)
-                        || session.control.current_producer_attempt() != producer_attempt
-                        || session.compatibility_producer_attempt() != producer_attempt
-                    {
-                        continue;
-                    }
-                    if session.cached {
+                        let Some(served) =
+                            served_live_playlist(bytes, first_retained, session.takeover.as_ref())
+                        else {
+                            break 'snapshot;
+                        };
                         return Ok((
-                            bytes,
+                            served,
                             MediaResponseOwner(MediaResponseOwnerKind::Rolling {
                                 session: Arc::clone(&session),
                                 producer_attempt,
                             }),
                         ));
                     }
-                    let first_retained = session.segments.lock().await.first_retained_index();
-                    // A successor begins numbering at its epoch floor, so
-                    // "has anything been pruned" is measured from that floor
-                    // and a fresh takeover does not report itself as sliding.
-                    let slide_baseline = session
-                        .takeover
-                        .as_ref()
-                        .map_or(0, |takeover| takeover.media_sequence);
-                    if let Some(first_retained_index) =
-                        first_retained.filter(|index| *index > slide_baseline)
-                    {
-                        if !session.first_slide_logged.swap(true, Relaxed) {
-                            let now_unix = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map(|duration| duration.as_secs() as i64)
-                                .unwrap_or(session.started_unix);
-                            tracing::info!(
-                                session = %session_log_id(session_id),
-                                first_retained_index,
-                                wall_seconds_since_start =
-                                    now_unix.saturating_sub(session.started_unix),
-                                "served HLS playlist began sliding"
-                            );
-                            let manager = Arc::clone(self);
-                            let event_session = Arc::clone(&session);
-                            let event_session_id = session_id.to_owned();
-                            tokio::spawn(async move {
-                                manager
-                                    .emit_session_event(
-                                        &event_session_id,
-                                        &event_session,
-                                        "playlist_slide",
-                                        SessionEventFields {
-                                            extra: Some(
-                                                serde_json::json!({
-                                                    "first_retained_index": first_retained_index
-                                                })
-                                                .to_string(),
-                                            ),
-                                            ..SessionEventFields::default()
-                                        },
-                                    )
-                                    .await;
-                            });
-                        }
-                    }
-                    if session.control.is_retired() {
-                        if session.failed.load(Relaxed) {
-                            return Err(PlaylistPublicationError::for_session(
-                                session.failure_reason(),
-                                &session,
-                            ));
-                        }
-                        return Err(PlaylistPublicationError::for_session(
-                            PlaylistError::StartupTimedOut(budget),
-                            &session,
-                        ));
-                    }
-                    let served = served_live_playlist(
-                        bytes,
-                        first_retained,
-                        session.typeless_sliding,
-                        session.takeover.as_ref(),
+                }
+                if session.cached {
+                    tracing::error!(
+                        session = %session_log_id(session_id),
+                        "cached playlist was missing, empty, oversized, or failed its manifest"
                     );
-                    return Ok((
-                        served,
-                        MediaResponseOwner(MediaResponseOwnerKind::Rolling {
-                            session: Arc::clone(&session),
-                            producer_attempt,
-                        }),
+                    self.fail_cached_session_integrity(
+                        session_id,
+                        &session,
+                        "playlist_object_mismatch",
+                    );
+                    return Err(PlaylistPublicationError::for_session(
+                        session.failure_reason(),
+                        &session,
                     ));
                 }
-            }
-            if session.cached {
-                tracing::error!(
-                    session = %session_log_id(session_id),
-                    "cached playlist was missing, empty, oversized, or failed its manifest"
-                );
-                self.fail_cached_session_integrity(
-                    session_id,
-                    &session,
-                    "playlist_object_mismatch",
-                );
-                return Err(PlaylistPublicationError::for_session(
-                    session.failure_reason(),
-                    &session,
-                ));
             }
             if let Some((error, _)) = session
                 .published_producer_ended_before(producer_attempt, deadline)
@@ -26226,7 +26168,6 @@ fn test_session_with_control(
         startup_grant_spent: AtomicBool::new(false),
         suspended_at: Mutex::new(None),
         suspend_count: AtomicU64::new(0),
-        typeless_sliding: false,
         takeover: None,
         first_slide_logged: AtomicBool::new(false),
     }
@@ -31478,18 +31419,18 @@ pub(crate) mod tests {
                    seg00002.m4s\n\
                    #EXT-X-ENDLIST\n";
 
-        assert_eq!(
-            served_live_playlist(raw.as_bytes().to_vec(), Some(0), false, None),
-            raw.as_bytes(),
-            "before pruning the client sees the writer's EVENT playlist unchanged"
-        );
+        let first = String::from_utf8(
+            served_live_playlist(raw.as_bytes().to_vec(), Some(0), None)
+                .expect("valid rolling snapshot"),
+        )
+        .expect("initial playlist");
+        assert!(!first.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "{first}");
+        assert!(first.contains("#EXT-X-START:TIME-OFFSET=0"), "{first}");
 
-        let served = String::from_utf8(served_live_playlist(
-            raw.as_bytes().to_vec(),
-            Some(2),
-            false,
-            None,
-        ))
+        let served = String::from_utf8(
+            served_live_playlist(raw.as_bytes().to_vec(), Some(2), None)
+                .expect("valid rolling snapshot"),
+        )
         .expect("playlist utf8");
         assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:2"), "{served}");
         assert!(!served.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "{served}");
@@ -31502,7 +31443,7 @@ pub(crate) mod tests {
         assert!(served.ends_with("seg00002.m4s\n#EXT-X-ENDLIST\n"));
     }
 
-    /// The experiment's promise is not merely that EVENT disappears after a
+    /// The rolling contract is not merely that EVENT disappears after a
     /// prune; it is that one session URL presents the same typeless envelope
     /// before and after that boundary. Only MEDIA-SEQUENCE and the retained
     /// body are allowed to advance.
@@ -31520,19 +31461,15 @@ pub(crate) mod tests {
                    seg00001.m4s\n\
                    #EXTINF:4.000,\n\
                    seg00002.m4s\n";
-        let before = String::from_utf8(served_live_playlist(
-            raw.as_bytes().to_vec(),
-            Some(0),
-            true,
-            None,
-        ))
+        let before = String::from_utf8(
+            served_live_playlist(raw.as_bytes().to_vec(), Some(0), None)
+                .expect("valid rolling snapshot"),
+        )
         .expect("before utf8");
-        let after = String::from_utf8(served_live_playlist(
-            raw.as_bytes().to_vec(),
-            Some(2),
-            true,
-            None,
-        ))
+        let after = String::from_utf8(
+            served_live_playlist(raw.as_bytes().to_vec(), Some(2), None)
+                .expect("valid rolling snapshot"),
+        )
         .expect("after utf8");
 
         for playlist in [&before, &after] {
@@ -31562,6 +31499,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn rolling_playlist_refuses_an_inconsistent_writer_snapshot() {
+        let raw = b"#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n#EXTINF:4.0,\nseg00000.ts\n";
+        assert!(
+            served_live_playlist(raw.to_vec(), Some(1), None).is_none(),
+            "a missing retained boundary must not expose the raw EVENT history"
+        );
+        assert!(
+            served_live_playlist(
+                b"#EXTM3U\n#EXT-X-PLAYLIST-TYPE:EVENT\n".to_vec(),
+                Some(0),
+                None
+            )
+            .is_none(),
+            "no playable segment is not a presentation"
+        );
+    }
+
+    #[test]
     fn takeover_playlist_declares_one_monotone_discontinuity() {
         let raw = "#EXTM3U\n\
                    #EXT-X-VERSION:7\n\
@@ -31582,24 +31537,20 @@ pub(crate) mod tests {
             discontinuity_sequence: 1,
             owner_epoch: 2,
         };
-        let first = String::from_utf8(served_live_playlist(
-            raw.as_bytes().to_vec(),
-            Some(4),
-            false,
-            Some(&takeover),
-        ))
+        let first = String::from_utf8(
+            served_live_playlist(raw.as_bytes().to_vec(), Some(4), Some(&takeover))
+                .expect("valid rolling snapshot"),
+        )
         .expect("takeover playlist");
         assert!(first.contains("#EXT-X-MEDIA-SEQUENCE:4"), "{first}");
         assert!(first.contains("#EXT-X-DISCONTINUITY-SEQUENCE:0"), "{first}");
         assert_eq!(first.matches("#EXT-X-DISCONTINUITY\n").count(), 1);
         assert!(first.contains("#EXT-X-MAP:URI=\"init-e2.mp4\""));
 
-        let slid = String::from_utf8(served_live_playlist(
-            raw.as_bytes().to_vec(),
-            Some(5),
-            false,
-            Some(&takeover),
-        ))
+        let slid = String::from_utf8(
+            served_live_playlist(raw.as_bytes().to_vec(), Some(5), Some(&takeover))
+                .expect("valid rolling snapshot"),
+        )
         .expect("slid takeover playlist");
         assert!(slid.contains("#EXT-X-DISCONTINUITY-SEQUENCE:1"), "{slid}");
         assert!(!slid.contains("#EXT-X-DISCONTINUITY\n"), "{slid}");
@@ -31630,12 +31581,10 @@ pub(crate) mod tests {
             discontinuity_sequence: 1,
             owner_epoch: 2,
         };
-        let served = String::from_utf8(served_live_playlist(
-            raw.as_bytes().to_vec(),
-            None,
-            false,
-            Some(&takeover),
-        ))
+        let served = String::from_utf8(
+            served_live_playlist(raw.as_bytes().to_vec(), None, Some(&takeover))
+                .expect("valid rolling snapshot"),
+        )
         .expect("takeover playlist");
 
         assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:2000000"), "{served}");
@@ -33657,6 +33606,79 @@ pub(crate) mod tests {
             "the outer absolute deadline must own every await after the playlist read"
         );
         drop(segments);
+    }
+
+    #[tokio::test]
+    async fn rejected_rolling_snapshots_obey_the_request_loop_deadline() {
+        use plurx_core::store::SqliteStore;
+
+        for missing_boundary in [false, true] {
+            let dir = crate::test_tempdir().expect("rejected snapshot dir");
+            seeded_session_dir(dir.path(), 2, 2.0).await;
+            let session = Arc::new(test_session(dir.path().to_path_buf()));
+            // Model an already-published live producer whose rewrite remains
+            // inconsistent for this whole request. Keep the fixture's retained
+            // catalog fixed; no background flow worker repairs it for the test.
+            session.playlist_published.store(true, Relaxed);
+            session.flow_worker_started.store(true, Release);
+            if missing_boundary {
+                session.segments.lock().await.segs =
+                    parse_playlist("#EXTM3U\n#EXTINF:2.000,\nseg00002.ts\n");
+            } else {
+                tokio::fs::write(dir.path().join("index.m3u8"), "#EXTM3U\n")
+                    .await
+                    .expect("header-only rewrite");
+            }
+            let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+            let mgr = Arc::new(TranscodeManager::new(
+                store,
+                dir.path().join("manager-work"),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            ));
+            let budget = Duration::from_millis(40);
+            let started = Instant::now();
+            let deadline = started + budget;
+            // Exercise the actual request loop without its outer I/O timeout:
+            // that safety net otherwise hides a loop that retries forever.
+            let refused = tokio::time::timeout(
+                Duration::from_secs(1),
+                mgr.playlist_with_owner_for_session_before(
+                    "rejected-snapshot",
+                    Arc::clone(&session),
+                    deadline,
+                    budget,
+                ),
+            )
+            .await
+            .expect("the request loop must enforce its own deadline")
+            .map_err(|error| error.error);
+            assert!(matches!(
+                refused,
+                Err(PlaylistError::StartupTimedOut(waited)) if waited == budget
+            ));
+            assert!(started.elapsed() >= budget);
+            assert!(
+                !session.failed.load(Relaxed),
+                "an inconsistent snapshot is retryable"
+            );
+
+            session.fail(PlaylistError::SessionFailed("producer failed".into()));
+            let refused = mgr
+                .playlist_with_owner_for_session_before(
+                    "rejected-snapshot",
+                    Arc::clone(&session),
+                    deadline,
+                    budget,
+                )
+                .await
+                .map_err(|error| error.error);
+            assert_eq!(
+                refused.err(),
+                Some(PlaylistError::SessionFailed("producer failed".into())),
+                "an expired request must still prefer the terminal producer cause"
+            );
+        }
     }
 
     /// The wait ends at its budget and not a poll before it.
@@ -37188,7 +37210,6 @@ pub(crate) mod tests {
             startup_grant_spent: AtomicBool::new(false),
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
-            typeless_sliding: false,
             takeover: None,
             first_slide_logged: AtomicBool::new(false),
         })

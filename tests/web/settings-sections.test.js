@@ -227,7 +227,6 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   // the id has to be listed here for the guard to mean anything.
   const verifiedDecode = ["dhqa", "dhqerr", "vdcard"];
   const automaticRecovery = ["adr", "adrerr", "drcard"];
-  const experimental = ["phs", "dxerr"];
   return Promise.all([
     run("savePlaybackDefaults", defaults)({ disabled: false }),
     run("saveStreaming", streaming)({ disabled: false }),
@@ -235,7 +234,6 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     run("savePreparedQuality", prepared)({ disabled: false }),
     run("saveVerifiedDecode", verifiedDecode)({ disabled: false }),
     run("saveAutomaticDecoderRecovery", automaticRecovery)({ disabled: false }),
-    run("saveExperimental", experimental)({ disabled: false }),
   ]).then(() => {
     assert.deepEqual(Object.keys(writes.savePlaybackDefaults.body).sort(), ["default_audio_lang", "default_sub_lang", "sub_mode"]);
     assert.deepEqual(Object.keys(writes.saveStreaming.body).sort(), [
@@ -253,7 +251,6 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     assert.equal(writes.saveVerifiedDecode.path, "/settings");
     assert.deepEqual(Object.keys(writes.saveAutomaticDecoderRecovery.body).sort(), ["automatic_decoder_recovery"]);
     assert.equal(writes.saveAutomaticDecoderRecovery.path, "/settings");
-    assert.deepEqual(Object.keys(writes.saveExperimental.body).sort(), ["hls_typeless_sliding"]);
     assert.equal(writes.savePlaybackDefaults.path, "/settings");
     assert.equal(writes.saveStreaming.path, "/settings");
     assert.equal(writes.saveDeveloper.path, "/settings");
@@ -318,7 +315,7 @@ test("an older quality save never overwrites a newer draft", async () => {
   assert.deepEqual(notices, ["Earlier quality change saved; newer edit remains unsaved"]);
 });
 
-test("Developer owns experimental enablement and keeps readiness advisory", () => {
+test("Developer keeps explicit enablement and readiness advisory", () => {
   assert.doesNotMatch(
     shippedSource("playbackPanel"),
     /preparedQualityCard/,
@@ -343,6 +340,8 @@ test("Developer owns experimental enablement and keeps readiness advisory", () =
       // has to be composed too or the panel throws on the name.
       shippedSource("windowsServerCard"),
       shippedSource("webHlsStartupRecoveryCard"),
+      "const SETTINGS_DATA=null,ME=null;",
+      shippedSource("uiEnableAdvisory"),
       shippedSource("developerPanel"),
       shippedSource("liveTvPanel"),
       "return {developerPanel,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard};",
@@ -373,7 +372,6 @@ test("Developer owns experimental enablement and keeps readiness advisory", () =
     playback_control_protocol_v1: true,
     prepared_quality_handoff: true,
     automatic_decoder_recovery: true,
-    hls_typeless_sliding: false,
     live_tv_guide_source: "hdhomerun",
     live_tv_guide_hours: 24,
     dvr_enabled: false,
@@ -386,14 +384,14 @@ test("Developer owns experimental enablement and keeps readiness advisory", () =
     dvr_webhook_url: "",
   };
   const html = panels.developerPanel(settings, readiness);
-  for (const id of ["pqh", "pcpv1", "pdp", "phs", "dhqa", "adr", "dvrenabled"])
+  for (const id of ["pqh", "pcpv1", "pdp", "dhqa", "adr", "dvrenabled"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   assert.doesNotMatch(html, /HDHomeRun Live TV|CARDHEAD:Programme guide/);
   for (const route of ["livetv", "playback", "cluster"])
     assert.ok(html.includes(`href="#/settings/${route}"`), `${route} has a destination link`);
   assert.match(html, /FOOT:saveDeveloper/);
   assert.match(html, /FOOT:savePreparedQuality/);
-  assert.match(html, /FOOT:saveExperimental/);
+  assert.doesNotMatch(html, /Typeless sliding HLS|FOOT:saveExperimental/);
   assert.match(html, /Explicit server and browser enablement with advisory safety evidence/);
   // The readiness card is rendered by Developer, not merely declared: a card
   // that stops being reachable from the panel is the same regression as a card

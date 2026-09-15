@@ -624,10 +624,13 @@ struct PlayerRecipeRevision: Equatable {
 }
 
 /// Why a create body is being posted. Everything a viewer does — a seek, a
-/// quality/audio/subtitle change, a fresh title — is `.normal` and carries no
-/// binding; exactly one stall recovery per stall is `.stallReopen`.
+/// quality/audio/subtitle change, a fresh title — is `.normal`. An observed
+/// presentation stall is `.sameDeliveryRepair`: it preserves the recovery
+/// budgets without carrying the legacy server ticket that lowers Auto quality.
+/// `.stallReopen` remains only for explicitly attributed legacy recovery.
 enum PlayerOpenIntent: Equatable {
     case normal
+    case sameDeliveryRepair
     case stallReopen(StallReopenTicket)
 }
 
@@ -1328,9 +1331,9 @@ struct PlaybackStallDetector: Equatable {
     private(set) var recoveredDurationMs: Int?
     /// How many of the current stagnation's samples were taken while AVPlayer
     /// reported `.waitingToPlayAtSpecifiedRate`. Majority picks the event
-    /// kind: mostly-waiting → `.buffering` (transport recovery only), so a
-    /// flapping network stall can never be misread as decoder evidence and
-    /// spend the codec/HDR compatibility ladder.
+    /// kind used for the accurate recovery message. Neither kind is decoder
+    /// evidence; only an actual item failure may spend the compatibility
+    /// ladder.
     private(set) var waitingSamples = 0
 
     /// The regime majority of the stagnation run that produced the most
@@ -1338,10 +1341,9 @@ struct PlaybackStallDetector: Equatable {
     /// the counters.
     private(set) var firedWaitingMajority = false
 
-    /// Ties go to `.buffering`: an ambiguous stagnation gets transport
-    /// recovery, never the codec/HDR ladder. Only a run that was mostly
-    /// "playing" — the clock stopped while the player claimed motion — may
-    /// count as decoder evidence.
+    /// Ties go to `.buffering`, the conservative description for an ambiguous
+    /// stagnation. The distinction labels the observation; it does not infer
+    /// its cause.
     static func waitingMajority(waitingSamples: Int, stagnantChecks: Int) -> Bool {
         waitingSamples * 2 >= stagnantChecks
     }
@@ -1447,10 +1449,9 @@ struct PlaybackStallDetector: Equatable {
 /// One detector, not one per regime: `timeControlStatus` crossing between
 /// `.playing` and `.waitingToPlayAtSpecifiedRate` must never restart the
 /// count (the flap itself is a symptom of the stall being measured). The
-/// regime tally only decides the event's kind — mostly-waiting stagnation is
-/// `.buffering` and stays inside transport recovery; only a stagnation that
-/// was mostly "playing" (the clock stopped while the player claimed motion)
-/// counts as `.silent`, the decoder-evidence path.
+/// regime tally only decides the event's kind — `.buffering` or `.silent` —
+/// for diagnostics and viewer wording. Neither timer-only result claims a
+/// decoder error.
 struct PlaybackRecoveryMonitor: Equatable {
     private(set) var progressDetector = PlaybackStallDetector()
     private var recoveredStagnantDurationMs: Int?
@@ -3656,10 +3657,9 @@ final class PlayerController: ObservableObject {
     /// finished `open` and the next one, so no other request can observe the
     /// gap and start a competing replacement.
     ///
-    /// Each drained request carries its own cause, so a stall reopen is issued
-    /// exactly once: whatever this loop replays next is either a viewer command
-    /// (unbound) or a genuinely new stall that minted its own ticket. One stall
-    /// can therefore never step the ladder down twice.
+    /// Each drained request carries its own cause, so a same-delivery repair is
+    /// issued exactly once. Whatever this loop replays next is either a viewer
+    /// command or a genuinely new stall; one episode can never mutate twice.
     private func openAndDrain(decision: Decision, request: PlayerReopenRequest) async throws {
         let lifecycle = lifecycleGeneration
         var request = request
@@ -3924,6 +3924,12 @@ final class PlayerController: ObservableObject {
             // lockstep with the `sessionHeight` it is measured against. An
             // unbound fallback counts too: it did not buy a lower rung either.
             if case .stallReopen = intent {
+                stallReopenBudget.resolved(
+                    height: hls.height,
+                    previousHeight: previousHeight,
+                    at: startMs
+                )
+            } else if case .sameDeliveryRepair = intent {
                 stallReopenBudget.resolved(
                     height: hls.height,
                     previousHeight: previousHeight,
@@ -4478,12 +4484,10 @@ final class PlayerController: ObservableObject {
     /// stagnation whatever `timeControlStatus` reports — a starving session
     /// flaps between `.playing` and `.waitingToPlayAtSpecifiedRate` faster
     /// than any per-regime counter's threshold, which is how real freezes
-    /// used to go undetected. The regime tally labels the fired event
-    /// instead: mostly-waiting stagnation is `.buffering` and reconnects the
-    /// exact delivery; only a mostly-"playing" stagnation may consult the
-    /// codec/HDR compatibility ladder, so the false SDR fallbacks that
-    /// originally caused buffering to be excluded stay dead. This restores
-    /// the in-player equivalent of closing and reopening a title.
+    /// used to go undetected. The regime tally labels the fired event while
+    /// both kinds reconnect the exact delivery. Actual item failures remain
+    /// the sole owner of the codec/HDR compatibility ladder. This restores the
+    /// in-player equivalent of closing and reopening a title.
     private func startPlaybackRecoveryMonitor() {
         recoveryTask?.cancel()
         recoveryTask = Task { [weak self] in
@@ -4552,24 +4556,20 @@ final class PlayerController: ObservableObject {
                     self.isPlaying = true
                 case .reopen:
                     self.currentMs = position
-                    // Only a mostly-"playing" stagnation may consult the HDR
-                    // ladder; every other kind is transport recovery.
-                    if stallEvent.kind != .silent {
-                        await self.retrySameDeliveryAfterStall(stallEvent)
-                        continue
-                    }
-                    if await self.retryEstablishedHDRDelivery(at: position) { continue }
+                    // A stationary film clock is presentation evidence, not a
+                    // decoder error. Actual AVPlayer item failures own the HDR
+                    // and codec compatibility ladder; every timer-only stall
+                    // keeps the selected recipe.
                     await self.retrySameDeliveryAfterStall(stallEvent)
                 }
             }
         }
     }
 
-    /// One bounded transport recovery shared by buffering and non-HDR silent
-    /// freezes. It changes no capability flag and no selected format, so the
-    /// replacement uses the identical recipe — but it names the session that
-    /// stalled, so the server resolves it one rung down instead of rebuilding
-    /// the rung that just starved.
+    /// One bounded same-recipe recovery shared by every timer-only stall. It
+    /// changes no capability flag or selected format and deliberately omits
+    /// the legacy bound stall ticket: that ticket asks the server to lower an
+    /// Auto selection, which an unattributed presentation wait cannot justify.
     private func retrySameDeliveryAfterStall(
         _ event: PlaybackStallEvent,
         consultControl: Bool = true
@@ -4631,12 +4631,7 @@ final class PlayerController: ObservableObject {
             #endif
             await reopen(
                 at: event.positionMs,
-                intent: stallReopenIntent(wedge: Self.isDeliveryWedge(
-                    kind: event.kind,
-                    deliveredIdleMs: sessionStatus?.deliveredIdleMs,
-                    publishedEndMs: sessionStatus?.publishedEndMs,
-                    fetchedEndMs: sessionStatus?.fetchedEndMs
-                ))
+                intent: .sameDeliveryRepair
             )
         case .stop(let terminal):
             stopForBlockingSurface(revokingPlaybackIntent: true)
@@ -4940,31 +4935,12 @@ final class PlayerController: ObservableObject {
         }
     }
 
-    /// What each stall kind is evidence *of*, in the protocol's vocabulary.
-    ///
-    /// The three kinds are not one condition. A buffering stall is a starved
-    /// decoder and says nothing about the file; a silent freeze is a decoder
-    /// that accepted the media and then stopped presenting it, which is the
-    /// Profile-5 shape the server cannot derive; a delivery wedge is the
-    /// server's own clock saying this client stopped fetching, so the decoder
-    /// is not the subject at all.
-    nonisolated static func stallEvidence(for kind: PlaybackStallKind) -> ClientObservation {
-        switch kind {
-        case .buffering:
-            return ClientObservation(decoderState: .starved)
-        case .silent:
-            return ClientObservation(
-                decoderState: .failed,
-                errorCode: .decoder,
-                errorDetail: "silent_freeze"
-            )
-        case .delivery:
-            return ClientObservation(
-                decoderState: .starved,
-                errorCode: .network,
-                errorDetail: "delivery_wedge"
-            )
-        }
+    /// Timer-only stalls establish missing presentation, not their cause.
+    /// AVPlayer item failures publish their actual error separately; a loaded
+    /// wait, silent clock, or delivery wedge therefore stays explicitly
+    /// unknown and cannot authorize decoder or quality fallback.
+    nonisolated static func stallEvidence(for _: PlaybackStallKind) -> ClientObservation {
+        ClientObservation(decoderState: .unknown)
     }
 
     nonisolated static func recoveryTransport(
@@ -6881,8 +6857,8 @@ final class PlayerController: ObservableObject {
     /// Whether this sample was taken during an explicit network wait. The
     /// shared stall clock counts regardless — crossing regimes must never
     /// restart it — but the tally of waiting samples decides the fired
-    /// event's kind, and `.buffering` never enters the codec/HDR ladder.
-    /// This applies equally to iPhone, iPad, and Apple TV.
+    /// event's kind without classifying its cause. This applies equally to
+    /// iPhone, iPad, and Apple TV.
     static func shouldMonitorBufferingStall(
         timeControlStatus: AVPlayer.TimeControlStatus
     ) -> Bool {

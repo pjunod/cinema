@@ -930,8 +930,10 @@ that.
 If the verdict looks wrong, the capabilities are the first suspect: re-run the
 same request as the `POST` form with an explicit document and compare, since
 both shapes route through one translation and must agree.
-`vod_indexed: false` means a subsequent copy session will have to build a
-fragment index first.
+`vod_indexed: false` means this node lacks the matching local copy index.
+Session creation can hydrate an exact shared artifact; otherwise it retains
+the rolling first-play fallback while enabled shared preparation queues the
+missing source/recipe work. It does not wait for a full-file index pass.
 
 ---
 
@@ -1333,9 +1335,18 @@ an `effective_selection`, and one `action`:
 |---|---|
 | `none` | The only action a passive client is always safe to receive |
 | `hold` | Production is deliberately not advancing, and this is **not** a failure. `revisit_after_ms` is 5000 for every reason except `no_room`, which is 20 000, because nothing the client does clears node capacity. It is a revisit contract, not an expiry: a hold never escalates to a terminal |
-| `terminal` | Production stopped for a reason retrying cannot change. **This is the only thing besides buffer exhaustion that authorises tearing down a player still holding buffer** — a 404 or a 410 does not |
+| `terminal` | Production stopped for a reason retrying cannot change. Ends the failed production attempt; a 404 or a 410 alone does not authorize discarding a usable buffered player |
 | `retry_resource` | Stopped for a reason that may not recur; retry on the server's cadence |
 | `prepare` | A successor session is staged, addressed exactly as its own create response would address it. The only action that is a transaction rather than a report, so it is recorded and replayed exactly rather than recomputed |
+
+Production holds do not veto bounded client presentation repair. An active
+client explicitly reporting `render_state: stalled` with substantial loaded
+runway or published-but-unfetched media receives `none` instead of an advisory
+hold, even when decoder state is `ready`, `unknown`, or omitted. This does not
+classify the decoder as failed or authorize lowering quality. Intentional
+pause and typed permanent producer decisions retain their precedence. The
+producer hold remains visible in delivery diagnostics; `none` acknowledges no
+server action, not successful presentation recovery.
 
 | Status | Code | When |
 |---|---|---|

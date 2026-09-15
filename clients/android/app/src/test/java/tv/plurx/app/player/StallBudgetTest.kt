@@ -195,6 +195,33 @@ class StallBudgetTest {
     }
 
     @Test
+    fun unboundPresentationRepairDoesNotReplayAnUnrelatedBadRequest() = runBlocking {
+        val badRequest = TestBadRequest()
+        var calls = 0
+        val coordinator = SessionCreateCoordinator(
+            createSession = {
+                calls++
+                throw badRequest
+            },
+            isBadRequest = { it === badRequest },
+            freshRequestId = { "must-not-be-used" },
+            releaseSession = {},
+        )
+        val repair = stallBody().copy(
+            previous_session_id = null,
+            reopen_reason = null,
+        )
+
+        try {
+            coordinator.reopenAfterStall(repair)
+            fail("expected the unbound create failure")
+        } catch (failure: Throwable) {
+            assertSame(badRequest, failure)
+        }
+        assertEquals(1, calls)
+    }
+
+    @Test
     fun nonBadRequestIsTerminalWithoutFallback() = runBlocking {
         val terminal = IllegalStateException("server failed")
         var calls = 0

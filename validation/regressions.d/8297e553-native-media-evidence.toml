@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["8297e553"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["web-static"]
+reason = "native element transfer errors never spend a compatibility transcode invokes the shipped wirePlayerMedia error callback for absent, aborted, network, decode and unsupported-format error codes. Only the latter two spend the existing rescue credit; other errors retain it and use the existing failure owner. The focused web-policy file and normal tracked hook passed."

@@ -124,6 +124,7 @@ Usage:
                              [--browser chrome|safari|edge|firefox]
                              [--case TEXT] [--exclude-case TEXT] [--observe SECONDS]
                              [--network-profile NAME] [--json PATH] [--junit PATH]
+                             [--preparation-measurement]
                              [--fixtures DIR] [--server PATH]
                              [--chrome PATH] [--edge PATH]
                              [--firefox PATH] [--geckodriver PATH]
@@ -153,6 +154,9 @@ records how the session answers it. The VOD suite enables the server flag and
 indexer, then proves immutable-session steady play, native seek storms, and a
 suspend/resume surrogate before the physical-device protocol.
 Reports are written below target/playback-lab/reports/ as JSON and JUnit XML.
+With --preparation-measurement, a one-case VOD run writes one compact JSON
+artifact instead: full-source index wall time, source size, shared-hydration
+availability, session startup, and first-frame latency remain separate facts.
 
 Network profiles (--network-profile), applied by a local loopback shaper:
 ${Object.keys(NETWORK_PROFILES).map((id) => `  ${id.padEnd(20)} ${NETWORK_PROFILES[id].description}`).join("\n")}
@@ -535,6 +539,7 @@ function verifyFixture(fixture, file) {
     subtitles: subtitles.map((stream) => stream.codec_name),
     duration_seconds: duration,
     bitrate_mbps: Number((bitrate / 1e6).toFixed(1)),
+    size_bytes: Number(probe.format.size || 0),
     size_mb: Number((Number(probe.format.size || 0) / 1e6).toFixed(1)),
   };
 }
@@ -1513,6 +1518,25 @@ async function startServer(options, fixtureDirectory) {
     body: { username: "playback-lab", password: "playback-lab" },
   });
   const token = setup.token;
+  const preparation = {
+    cache_condition: {
+      fragment_index_before_pass: "absent_isolated_runtime",
+      fragment_index_at_playback: options.enable_vod ? "local" : "unavailable",
+      operating_system_page_cache: "uncontrolled",
+    },
+    source_indexing: {
+      wall_status: "unavailable",
+      wall_ms: null,
+      bytes_read_status: "unavailable",
+      bytes_read: null,
+      reason: options.enable_vod ? "index pass has not completed" : "VOD indexing was not requested",
+    },
+    shared_hydration: {
+      status: "unavailable",
+      wall_ms: null,
+      reason: "the isolated playback-lab runtime has no artifact peer",
+    },
+  };
   if (options.enable_vod) {
     // VOD indexing is default-on. Pause it before publishing the fixture
     // library so the startup scheduler cannot index the first scanned file,
@@ -1552,6 +1576,7 @@ async function startServer(options, fixtureDirectory) {
   }
   if (options.enable_vod) {
     process.stdout.write("INDEX   enable VOD and wait for the node-local fragment pass\n");
+    const indexStartedAt = performance.now();
     await api(baseUrl, "/settings", {
       token,
       method: "PUT",
@@ -1577,9 +1602,18 @@ async function startServer(options, fixtureDirectory) {
       }
       return completedFragmentIndexPass(logs);
     }, 180_000, "VOD fragment indexing pass", 1_000);
+    preparation.source_indexing = {
+      wall_status: "measured",
+      wall_ms: Math.round(performance.now() - indexStartedAt),
+      bytes_read_status: "unavailable",
+      bytes_read: null,
+      reason: "request-to-completed-pass wall time includes scheduler wake-up; the daemon exposes no per-pass I/O byte counter",
+      full_source: true,
+      target_count: targets.length,
+    };
   }
   return {
-    runtime, dataDir, baseUrl, token, library, files, child, log, logFile,
+    runtime, dataDir, baseUrl, token, library, files, child, log, logFile, preparation,
     async close(keep) {
       await stopChild(child, 12_000);
       log.end();
@@ -3332,6 +3366,7 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
     return {
       name: testCase.name, fixture: fixture.id, quality: testCase.quality, operation: testCase.operation,
       status: "failed", duration_ms: Date.now() - startedAt,
+      playback_request_unix_ms: startedAt,
       errors: [error.message], warnings: [], decision, start: null, end,
     };
   }
@@ -3339,6 +3374,7 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
     return {
       name: testCase.name, fixture: fixture.id, quality: testCase.quality, operation: testCase.operation,
       status: "failed", duration_ms: Date.now() - startedAt,
+      playback_request_unix_ms: startedAt,
       errors: [`media error ${start.video.error.code}: ${start.video.error.message || "unknown"}`], warnings: [], decision, start, end: start,
     };
   }
@@ -3350,6 +3386,7 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
       status: shaped.score.errors.length ? "failed" : "passed",
       outcome: shaped.score.outcome,
       duration_ms: Date.now() - startedAt,
+      playback_request_unix_ms: startedAt,
       errors: shaped.score.errors,
       warnings: shaped.observation.shaping.transport_errors.length
         ? [`shaper reported ${shaped.observation.shaping.transport_errors.length} transport errors`] : [],
@@ -3373,6 +3410,7 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
     return {
       name: testCase.name, fixture: fixture.id, quality: testCase.quality, operation: testCase.operation,
       status: "failed", duration_ms: Date.now() - startedAt,
+      playback_request_unix_ms: startedAt,
       errors: [`${testCase.operation}: ${error.message}`], warnings: [], decision, start, end,
     };
   }
@@ -3391,6 +3429,7 @@ async function runOneCase(driver, server, manifest, fixture, testCase, browserIn
     operation: testCase.operation,
     status: score.status,
     duration_ms: Date.now() - startedAt,
+    playback_request_unix_ms: startedAt,
     errors: score.errors,
     warnings: score.warnings,
     metrics: score.metrics,
@@ -3416,6 +3455,111 @@ function junit(report) {
     return `  <testcase classname="playback.${xmlEscape(report.browser?.browser || "unknown")}" name="${xmlEscape(result.name)}" time="${(result.duration_ms / 1000).toFixed(3)}">${failure}<system-out>${output}</system-out></testcase>`;
   }).join("\n");
   return `<?xml version="1.0" encoding="UTF-8"?>\n<testsuite name="plurx playback ${xmlEscape(report.suite)}" tests="${report.results.length}" failures="${failures}" time="${totalSeconds.toFixed(3)}">\n${cases}\n</testsuite>\n`;
+}
+
+function repositoryCommit() {
+  const result = spawnSync("git", ["rev-parse", "HEAD"], {
+    cwd: ROOT,
+    encoding: "utf8",
+  });
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
+function recipeIdentityLabel(result) {
+  const decision = result?.decision || {};
+  const method = decision.method || result?.metrics?.decision_method || "unknown";
+  const delivery = decision.delivery?.mode || result?.metrics?.delivery_mode
+    || result?.metrics?.actual_method || "unknown";
+  const range = decision.delivered_dynamic_range
+    || (decision.preserve_dolby_vision ? "dolby_vision" : "unspecified_range");
+  return `${method}/${delivery}/${range}/${result?.quality || "unknown_quality"}`;
+}
+
+function unavailableMeasurement(reason) {
+  return { status: "unavailable", wall_ms: null, reason };
+}
+
+/**
+ * Reduce one real VOD case to the evidence the preparation decision needs.
+ * Unknown values stay unknown: fixture size is not disk I/O, and local index
+ * reuse is not peer hydration. The full playback report remains the debugging
+ * artifact for ordinary suites; this shape exists for one bounded measurement.
+ */
+function compactPreparationReport(report, preparation = {}, environment = {}) {
+  const result = report.results?.length === 1 ? report.results[0] : null;
+  const metadata = result ? report.corpus?.[result.fixture] || {} : {};
+  const requestAt = Number(result?.playback_request_unix_ms);
+  const attachment = (result?.server_logs || []).find((entry) =>
+    String(entry?.message || "").includes("vod session attached")
+      && Number.isFinite(Number(entry?.ts_ms)),
+  );
+  const attachedAt = Number(attachment?.ts_ms);
+  const startup = Number.isFinite(requestAt) && requestAt > 0
+      && Number.isFinite(attachedAt) && attachedAt >= requestAt
+    ? { status: "measured", wall_ms: Math.round(attachedAt - requestAt) }
+    : unavailableMeasurement("the case did not retain both playback-request and VOD-attachment timestamps");
+  const firstFrameValue = result?.start?.ttff_ms ?? result?.metrics?.ttff_ms;
+  const firstFrameMs = firstFrameValue === null || firstFrameValue === undefined
+    ? Number.NaN : Number(firstFrameValue);
+  const firstFrame = Number.isFinite(firstFrameMs)
+    ? { status: "measured", wall_ms: Math.max(0, Math.round(firstFrameMs)) }
+    : unavailableMeasurement("the player did not report a first presented frame");
+  const errors = [report.fatal_error, ...(result?.errors || [])].filter(Boolean).map(sanitizedText);
+
+  return {
+    schema_version: 1,
+    kind: "plurx_preparation_measurement",
+    generated_at: report.generated_at,
+    tested_commit: environment.tested_commit ?? repositoryCommit(),
+    host: environment.host ?? os.hostname(),
+    fixture: {
+      id: result?.fixture || null,
+      source_size_bytes: metadata.size_bytes !== null && metadata.size_bytes !== undefined
+          && Number.isFinite(Number(metadata.size_bytes))
+        ? Number(metadata.size_bytes) : null,
+      cache_condition: preparation.cache_condition || {
+        fragment_index_before_pass: "unavailable",
+        fragment_index_at_playback: "unavailable",
+        operating_system_page_cache: "unavailable",
+      },
+    },
+    recipe_identity_label: result ? recipeIdentityLabel(result) : null,
+    measurements: {
+      source_indexing: preparation.source_indexing || {
+        wall_status: "unavailable",
+        wall_ms: null,
+        bytes_read_status: "unavailable",
+        bytes_read: null,
+        reason: "the isolated server did not reach its index pass",
+      },
+      shared_hydration: preparation.shared_hydration
+        || unavailableMeasurement("the isolated server did not report peer hydration"),
+      session_startup: startup,
+      first_frame: firstFrame,
+    },
+    status: result?.status === "passed" && !report.fatal_error ? "passed" : "failed",
+    error: errors.length ? errors.join("; ") : null,
+    limits: [
+      "fixture media only; this is not physical NAS evidence",
+      "the isolated runtime has no artifact peer, so shared hydration is unavailable",
+      "operating-system page-cache state and per-pass bytes read are not controlled or exported",
+    ],
+  };
+}
+
+async function writePreparationReport(report, preparation, options, environment) {
+  await fsp.mkdir(DEFAULT_REPORT_DIR, { recursive: true });
+  const stamp = new Date().toISOString().replaceAll(":", "-").replace(/\.\d{3}Z$/, "Z");
+  const jsonPath = path.resolve(options.json || path.join(
+    DEFAULT_REPORT_DIR, `${stamp}-preparation-measurement.json`,
+  ));
+  await fsp.mkdir(path.dirname(jsonPath), { recursive: true });
+  const compact = compactPreparationReport(report, preparation, environment);
+  await fsp.writeFile(jsonPath, `${JSON.stringify(compact, null, 2)}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  return { jsonPath };
 }
 
 async function writeReport(report, options) {
@@ -3499,15 +3643,19 @@ async function writeFatalRunReport(options, error) {
     summary: { total: 1, passed: 0, failed: 1 },
     results: [result],
   };
-  const paths = await writeReport(report, options);
+  const preparationMeasurement = enabledOption(options.preparation_measurement);
+  const paths = preparationMeasurement
+    ? await writePreparationReport(report, {}, options)
+    : await writeReport(report, options);
   process.stdout.write(`\nRESULT  0/1 passed · outcome harness\n`);
   process.stdout.write(`JSON    ${paths.jsonPath}\n`);
-  process.stdout.write(`JUNIT   ${paths.junitPath}\n`);
+  if (paths.junitPath) process.stdout.write(`JUNIT   ${paths.junitPath}\n`);
   error.reportWritten = true;
 }
 
 async function runSuite(manifest, options, dependencies = {}) {
   const suite = options.suite || "smoke";
+  const preparationMeasurement = enabledOption(options.preparation_measurement);
   const browserName = options.browser || "chrome";
   if (!new Set(["chrome", "safari", "edge", "firefox"]).has(browserName)) {
     throw new Error(`unknown browser ${browserName}; choose chrome, safari, edge, or firefox`);
@@ -3519,6 +3667,12 @@ async function runSuite(manifest, options, dependencies = {}) {
   // second, not the 195 MB fixture build and a server boot.
   const profile = parseNetworkProfile(options.network_profile);
   const plan = printPlan(manifest, suite, options.case, options.exclude_case);
+  if (preparationMeasurement && (suite !== "vod" || plan.cases.length !== 1)) {
+    throw new Error("--preparation-measurement requires --suite vod and a --case filter selecting exactly one case");
+  }
+  if (preparationMeasurement && options.junit) {
+    throw new Error("--preparation-measurement writes one JSON artifact; remove --junit");
+  }
   const requiresVod = manifest.suites[suite]?.requires_vod === true;
   const shapedCases = plan.cases.filter((testCase) => testCase.operation === "shaped-cliff");
   if ((shapedCases.length || manifest.suites[suite]?.requires_network_profile) && !profile) {
@@ -3700,10 +3854,12 @@ async function runSuite(manifest, options, dependencies = {}) {
     summary: { total: results.length, passed, failed: results.length - passed },
     results,
   };
-  const paths = await writeReport(report, options);
+  const paths = preparationMeasurement
+    ? await writePreparationReport(report, server.preparation || {}, options)
+    : await writeReport(report, options);
   process.stdout.write(`\nRESULT  ${passed}/${results.length} passed · outcome ${report.outcome}\n`);
   process.stdout.write(`JSON    ${paths.jsonPath}\n`);
-  process.stdout.write(`JUNIT   ${paths.junitPath}\n`);
+  if (paths.junitPath) process.stdout.write(`JUNIT   ${paths.junitPath}\n`);
   if (fatal) {
     fatal.reportWritten = true;
     throw fatal;
@@ -4030,6 +4186,7 @@ module.exports = {
   findOrCreateCdpPageTarget,
   freePorts,
   completedFragmentIndexPass,
+  compactPreparationReport,
   diagnosticPath,
   deviceRunCommand,
   deviceProxyCommand,
@@ -4059,6 +4216,7 @@ module.exports = {
   timeToSustained,
   transitionMetrics,
   waitForDeviceAcceptance,
+  writePreparationReport,
   writeFatalRunReport,
   writeDeviceProxyControlFile,
 };

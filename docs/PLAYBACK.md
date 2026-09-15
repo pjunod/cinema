@@ -102,7 +102,7 @@ one.
 | `server.hdr-subtitle-burn-guard` | Old-client burn request on HDR | Session creation independently refuses `subtitle_burn` for a probed DV, HDR10, or HLG source with a machine-readable 422 before playback accounting or encoder creation. A client whose selected plan already delivers SDR may send `subtitle_burn_sdr: true`; this keeps a forced bitmap track on an existing tone-map without authorizing an HDR-to-SDR downgrade. SDR and unprobed sources retain burn support. | Rust HTTP refusal/acknowledgement contract plus helper matrix |
 | `server.pgs-overlay` | PGS capability and artifact delivery | Only a PGS track receives additive `overlay: "pgs-v1"`, and only while the default-off gate is enabled. Authenticated cold manifests return preparation without blocking playback; warm manifests and content-addressed PNGs are published atomically. This does not choose or change video transport. | Auth/type/cache HTTP contract plus parser/cache Rust units |
 | `server.session-kind` | Copy HLS vs transcode HLS | `SessionKind::Copy` preserves video and optionally converts audio/strips DV; `Transcode` runs the video recipe. A matching completed cache entry bypasses the encoder but does not change the logical kind. | Transcode-manager lifecycle unit |
-| `server.live-playlist-window` | Writer history vs client window | A live writer keeps its full EVENT history internally. The default served view becomes sliding only after retention deletes a prefix. The default-off iPad experiment instead serves a typeless playlist plus `EXT-X-START:TIME-OFFSET=0` from the first response, preserving one envelope across that boundary. Completed cached VOD stays whole. | Rust retention/serving integration + typeless shape-stability unit; physical-iPad comparison pending |
+| `server.live-playlist-window` | Writer history vs client window | A rolling writer keeps its full EVENT history internally. Every served rolling view is typeless with `EXT-X-START:TIME-OFFSET=0` from its first response; retention advances the sequence and visible window without changing the playlist type. Inconsistent writer/retention snapshots are retried within the existing request budget. Completed cached VOD stays whole. | Rust retention/serving integration + shape-stability and inconsistent-snapshot tests; updated physical playback pending |
 | `server.auto-rung` | Auto output height | Software follows the source up to 720p. Proven hardware preserves a known SDR source up to 2160p; HDR and unknown geometry stay at the separately-probed 1080p ceiling. A node-local network prior may step that choice down, but absence of a prior is not evidence for a resolution loss. Every route clamps to the source and never upscales. | Encoder-aware Rust matrix plus the 4K AV1 SDR regression |
 | `server.encoder` | Hardware family vs software | Honor a usable admin preference; otherwise take the first probed usable hardware encoder; software x264 is the unconditional fallback. Probe success, not advertised presence, is authority. | Every-family encoder units |
 | `server.tone-map-pipeline` | GPU graph vs CPU graph | A probed vendor graph is used only with its matching encoder and PQ HDR source. Bitmap overlay or a failed/incompatible graph declines to the recorded fallback; CPU is total. | Pipeline decision and fallback units |
@@ -869,16 +869,24 @@ Three details, each load-bearing:
     larger than the bound returns every byte that was asked for, and is
     reported as a skipped inspection rather than as a truncated response.
 
-**Playlist-envelope decision (2026-08-09): experiment, not yet adopted.** The
-default remains the established EVENT-then-sliding behavior until the batched
-physical-iPad run compares a long control playback with the gated variant.
-Enable **Settings → Playback → Experimental typeless sliding HLS** for the
-variant; it is snapshotted when a new session opens, strips EVENT before the
-first client response, adds `EXT-X-START:TIME-OFFSET=0`, and retains that same
-header shape when `MEDIA-SEQUENCE` begins advancing. The server logs the first
-slide once with the session id, first retained index, and seconds since start;
-compare that timestamp with client stall evidence. Keep the setting off if the
-variant does not materially reduce stalls or changes AVPlayer seek behavior.
+**Rolling playlist contract (2026-09-15).** Retention removes old segment
+entries, so a served rolling movie playlist cannot promise append-only EVENT
+semantics. It is typeless from its first response, with
+`EXT-X-START:TIME-OFFSET=0`; `MEDIA-SEQUENCE` and the visible segment window
+advance while that type stays fixed. The complete writer history remains
+internal for duration accounting. A writer snapshot inconsistent with the
+retained boundary is retried within the existing request budget rather than
+exposing raw EVENT history. Completed cached VOD remains unchanged.
+
+The old `hls_typeless_sliding` API field remains accepted for older settings
+clients and peers during upgrades. It no longer selects this binary's local
+playlist format; GET reports the actual local contract as true. No settings
+migration changes saved values. Until remote start acknowledges the actual
+worker shape, durable peer recipes retain the conservative legacy guarantee;
+a new ingress must not assert its local behavior for an older worker. This
+contract correction does not by itself prove Safari's initiating freeze was
+caused by the playlist transition. Physical playback validation remains
+separate from the parser and retention tests.
 
 **Seek and audio-switch stay on this path.** A copy-HLS session sets
 `PLAYER.method = 'remux'` (honest — no video re-encode) and `PLAYER.copyHls =
@@ -928,10 +936,10 @@ first leaves a monotonic lifetime verdict that refuses any later replacement.
 
 ## The fragment index — a file's segmentation, computed once
 
-Nothing below serves a viewer today. It is written down here because it is
-running on the server as of 2026-08-23 and an operator reading logs will see
-it, and because [VOD-PRESENTATION-PLAN.md](streaming/VOD-PRESENTATION-PLAN.md) §2.2 is
-the contract it exists to satisfy.
+Copy VOD uses a complete index for the exact source and output recipe.
+A missing index keeps the current watch on the rolling presentation; it does
+not make the viewer wait for a full source pass. See
+[VOD-PRESENTATION-PLAN.md](streaming/VOD-PRESENTATION-PLAN.md) §2.2.
 
 **What it is.** One row per fragment of a file, produced by the production copy
 pipe with the audio dropped and the input unpaced: first-sample decode time,
@@ -952,14 +960,21 @@ twice, is a typed failure and an index invalidation — which is also how a
 re-fragmenting ffmpeg upgrade announces itself rather than silently
 misaligning.
 
-**When one is built.** A background job, `playback.vod_index_mins` minutes
-apart, **defaulting to 0, which is off.** M0-P1 exists to price a full read of
-a library over NFS and its numbers are not in yet. When it does run it takes at
-most four files and two minutes per pass, examines at most two hundred, gives
-up on any single file after ninety seconds, and stands down entirely while the
-pre-transcode worker is busy. A pass that ends short is discarded rather than
-stored: an index built from a partial read places every later boundary in the
-wrong part of the film.
+**When one is built.** Periodic discovery follows `playback.vod_index_mins`;
+`0` stops discovery. Queue execution is independent. With shared preparation
+enabled, a copy-VOD lookup that lacks both a source attestation and a usable
+local index persists one exact-recipe analysis request. Repeated plays join
+that generation. The existing worker attests the source, builds the complete
+index and publishes it under its existing admission, lease and retry rules.
+Automatic preparation uses normal background priority so media production
+keeps precedence. An already-attested source missing its exact artifact uses
+the existing shared-index job queue instead.
+
+Preparation does not change a running session's presentation. A later create
+can use the completed immutable plan. Existing analysis-request status reports
+queued, running or terminal state; `vod_index_pending` describes an unmet VOD
+prerequisite and its reason, not a promise that an index worker is running.
+A partial source pass is never published as a complete index.
 
 **How one stops being valid.** By mismatch, never by deletion. The stored
 identity carries the source's size and mtime *and* a fingerprint of the video
@@ -967,49 +982,53 @@ branch's ffmpeg arguments, so a replaced file, a Dolby Vision preservation
 path, or an ffmpeg upgrade all simply stop matching. Nothing has to notice the
 change, and nothing can fail to.
 
-**Where it lives.** Node-local on both backends — SQLite migration v25,
-and a hiqlite voter's per-voter sidecar rather than Raft. An index describes
-what one machine's ffmpeg produced from one machine's copy of a file, and the
-landing match compares exactly those numbers; one node's answer governing
-another node's landings would put a viewer in the wrong part of the film with
-nothing to report it.
+**Where it lives.** Legacy indexes remain local. Shared artifacts require a
+matching attested source digest and exact pipeline identity before hydration.
+The identity includes the post-mux Dolby Vision conversion revision, so a
+converted P7-to-P8.1 stream cannot consume an ordinary-copy index. Verified
+shared artifacts can supply that converting recipe without a local legacy
+index. A source replacement or pipeline change selects a different identity.
 
 ## Persistent stalls — one bounded recovery, with an outcome
 
-The startup watchdog diagnoses a stream that never starts. Mid-playback was
-different: `waiting` began a timer only so `playing` could calculate the
-finished gap. If `playing` never arrived, no stall beacon was emitted and no
-deadline existed. The overlay could say **Buffering…** forever even after the
-server's own transcode watchdog had correctly failed a stuck producer.
+The existing wait deadline records the original episode's runway, film position,
+recipe and attachment identity. Loaded media with stationary presentation is an
+unknown presentation fault; elapsed time does not prove decoder failure. A
+network disconnect proves transfer failure, not insufficient link capacity.
 
-Now an uninterrupted wait has an eight-second deadline. The deadline records
-the stall immediately, including runway and the active session id, then asks
-the pure `stallRecoveryAction` policy for one action:
+The client first uses the existing native reevaluation and bounded control
+request. A passive `none`, absent verdict or producer hold does not prevent the
+client from repairing its own loaded presentation. A hold describes production,
+not whether already-loaded bytes can be presented. Server control likewise
+recognizes an active loaded/fetchable stall without requiring a false decoder
+failure observation.
 
-- An Auto remux switches at the current film position to H.264/AAC transcode.
-  This covers both a source faster than the client link and a copy stream the
-  browser cannot present reliably.
-- Direct play, explicit Original, cached VOD, and an existing transcode
-  reconnect the same route. This is a real source/session replacement; the old
-  **Try again** path only assigned `currentTime` to the already-stalled element
-  for direct and VOD playback.
-- A second persistent stall never loops automatically. The viewer gets **Try
-  again**, **Force transcode** where meaningful, and **Close**.
+The existing recovery owner permits one automatic action:
 
-The attempt and its terminal `recovered` or `failed` outcome are separate
-`stall_recovery` playback events. They join the same live session truth as
-other client beacons and project to
-`plurx_stall_recoveries_total{outcome=...}`. A stall that never resumes is
-therefore visible both as the original supply/decode failure and as whether
-the player repaired it.
+- Unknown presentation or transfer faults reconnect the selected recipe,
+  retaining film position, quality and tracks.
+- An independently identified decoder error can select compatible recovery.
+  Measured capacity adaptation remains with the existing Auto controller;
+  explicit quality choices remain exact.
+- A second persistent stall offers viewer actions rather than another automatic
+  replacement. Pause, seek, close and newer attachment intent cancel stale work.
+
+The attempt and its terminal outcome are separate `stall_recovery` events.
+Accepted control, a fulfilled play promise, `playing`, or more loaded bytes do
+not establish recovery. New presentation progress owns completion; supported
+frame callbacks remain authoritative even at zero. Clients without that
+observation use the existing explicit progress fallback. A same-recipe reopen
+retains lifecycle identity without sending the legacy rung-reduction ticket.
 
 ## The error fallback — and the stale-reason trap
 
-Any direct/remux stream the browser rejects gets exactly one automatic rescue:
-restart as a guaranteed-compatible transcode.
+An actual decode or unsupported-format error on a direct/remux stream gets
+one compatible-transcode rescue. Native aborts and transfer errors use the
+existing failure owner and retain that rescue credit; re-encoding cannot
+repair a disconnected link.
 
 ```
- <video> fires "error" on a direct_play or remux stream   (once per session)
+ <video> reports decode/format error on direct_play or remux (once)
         │
         ▼
  startTranscodeFallback() ─▶ POST /files/:id/hls/sessions ─▶ full H.264 transcode

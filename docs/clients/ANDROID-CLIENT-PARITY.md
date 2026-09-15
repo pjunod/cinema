@@ -4,6 +4,17 @@ The Android client is the native plurx **viewer** for phones, foldables,
 tablets, Android TV, and Google TV. This page records what “web parity” means
 for that viewer and keeps server administration out of the comparison.
 
+> Status (2026-09-15): source is v0.3.0, Android build 101. A timer-only
+> presentation stall stays explicitly unknown and its one bounded replacement
+> preserves Auto or manual quality, audio, subtitles, offset, film position,
+> pause intent, and request ownership. The replacement omits the legacy
+> `previous_session_id` / `reopen_reason: stall` pair that asks the server to
+> lower Auto quality. A completed native reevaluation followed by passive
+> control does not create another deadline. Actual `onPlayerError` codes keep
+> the existing transport-versus-decoder classification and compatibility
+> ladder; stale returned sessions are still released and prepared successors
+> are still acknowledged when abandoned.
+
 > Status (2026-09-14): source is v0.3.0, Android build 99. Tablet and TV Live
 > TV use a larger player with nearby channel and recording actions; portrait
 > tablets stack the panes, recording controls wrap, and tablet Recordings

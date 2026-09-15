@@ -677,6 +677,26 @@ class SubtitlePolicyTest {
         assertEquals(true, body.quality_auto)
     }
 
+    @Test
+    fun presentationStallRepairPreservesRecipeWithoutQualityReductionTicket() {
+        val body = subtitleSessionBody(
+            playbackId = "pb", requestId = "rq-repair", startSeconds = 18.310,
+            delivery = SubtitleDelivery.Burn, subtitleIndex = 1,
+            copyableVideo = true, aac = false, preserveDolbyVision = false,
+            audioIndex = 2, audioOffsetMs = 125,
+            quality = PlaybackQuality.Auto, sourceHeight = 2160,
+            deliveredDynamicRange = "sdr",
+        )
+
+        assertNull(body.previous_session_id)
+        assertNull(body.reopen_reason)
+        assertEquals(true, body.quality_auto)
+        assertEquals(2160, body.height)
+        assertEquals(2, body.audio)
+        assertEquals(1, body.subtitle_burn)
+        assertEquals(125L, body.audio_offset_ms)
+    }
+
     // ---- qualityAuto helper tests -------------------------------------------
 
     @Test
