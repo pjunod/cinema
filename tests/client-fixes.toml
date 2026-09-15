@@ -2042,3 +2042,11 @@ source_anchor = "case sameDeliveryRepair"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testPresentationStallRepairPreservesTheRecipeWithoutAQualityTicket"
 
+
+[[fixes]]
+id = "clients.original-native-home"
+commits = ["cb878f70"]
+source = "clients/apple/Sources/HomeView.swift"
+source_anchor = "usesFeaturedHero ? Array(items.dropFirst()) : items"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPhoneHomeUsesOneCompactContinueFeature"

@@ -32,7 +32,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -152,10 +151,8 @@ fun HomeScreen(
                 RequestInitialFocus(
                     shelfFocus[visibleShelfKeys.firstOrNull()] ?: fallbackFocus,
                     enabled = !claimedInitialFocus && visibleShelfKeys.isNotEmpty(),
+                    onFocusRequested = { claimedInitialFocus = true },
                 )
-                LaunchedEffect(visibleShelfKeys) {
-                    if (visibleShelfKeys.isNotEmpty()) claimedInitialFocus = true
-                }
                 fun previousShelf(key: String): FocusRequester? {
                     val index = visibleShelfKeys.indexOf(key)
                     return visibleShelfKeys.getOrNull(index - 1)?.let { shelfFocus[it] }

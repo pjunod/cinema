@@ -4,6 +4,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.ui.Modifier
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.semantics.SemanticsActions
@@ -40,6 +44,23 @@ class TvFocusTest {
             "D-pad focus must activate the high-contrast focus treatment",
             action.fetchSemanticsNode().config[TvFocusVisibleKey],
         )
+    }
+
+    @Test
+    fun initialFocusCanDisableItselfOnlyAfterTheTargetAcceptsFocus() {
+        val claimed = mutableStateOf(false)
+        compose.setContent {
+            PlurxTheme {
+                val target = remember { FocusRequester() }
+                RequestInitialFocus(target, enabled = !claimed.value,
+                    onFocusRequested = { claimed.value = true })
+                TvButton(onClick = {}, modifier = Modifier.focusRequester(target).testTag("home-card")) {
+                    Text("Continue watching")
+                }
+            }
+        }
+        compose.waitUntil(timeoutMillis = 2_000) { claimed.value }
+        compose.onNodeWithTag("home-card").assertIsFocused()
     }
 
     /**
