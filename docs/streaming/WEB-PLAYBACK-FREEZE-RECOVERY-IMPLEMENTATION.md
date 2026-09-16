@@ -164,6 +164,48 @@ Inspect only relevant evidence. Do not commit private film data, raw browser
 URLs, credentials, session tokens, or unfiltered logs. Build synthetic media
 fixtures for repeatable validation.
 
+### 2.5 Follow-up: misleading restart requirement at 12:53 Eastern
+
+Paul supplied a screenshot taken at 12:53:14 Eastern showing: “this server
+must restart before it can serve this title again.” The new log capture is
+`/private/tmp/freefall-restart-required.log`. It establishes the exact chain:
+
+| UTC | Observation |
+|---|---|
+| 16:52:50.931 | Auto changed 360p to 480p with about 53,047 kbps estimated bandwidth |
+| 16:52:51.174 | Generation began at entry 1162 |
+| 16:52:51.663 | Init mismatch failed the producer with decision `engine_changed`; segment 1162 returned 502 |
+| 16:52:59.268 | Client recorded `terminal:engine_changed` and displayed the restart sentence |
+| Through 16:53:31.442 | Segment retries continued after the terminal stopped surface |
+| 16:53:31.500–16:53:33.554 | Late `fragLoadError` led to a recovering surface, then startup exhaustion |
+| 16:53:36.446 | Stopped surface cleared with reason `user` |
+| 16:53:38.119–16:53:39.928 | Failed rendition was replaced; a new attachment presented at 480p |
+
+The rejected generation hash was
+`a125a568a6da1563c32e4fd91e3fb9c51d96d9e5df7b68f4420f4c5d5a16d2d1`;
+the stored hash was
+`0b762616a49528bc18c4c53c61695019a4780b41a04e550091292d6a65814ad4`.
+This is another confirmed init-identity failure. Its individual changed MP4
+leaf was not reprobed; chapter drift is strongly supported by the earlier
+exact reproduction, not separately proved for this particular hash pair.
+
+Container inspection after this event reported start time
+`2026-09-16T14:57:41.55302531Z` and restart count zero. Thus playback resumed
+without the server restart the message claimed was necessary.
+
+The deployed `vodserve.rs::classify_failure` maps both `Failure::InitDrift`
+and `Failure::EngineChanged` to `ProducerDecisionReason::EngineChanged`;
+the specialized init-drift path records the same class. The permanent
+`EngineChanged` contract describes a process-wide fragment-index engine
+baseline held in a `OnceCell`. A rendition init byte mismatch does not prove
+that process-wide condition. `playback_control.rs::terminal_message` then
+turns this overbroad classification into the restart instruction.
+
+This adds two required regressions to the existing repair: distinguish
+rendition init drift from actual process engine-baseline failure (§5), and
+prevent late loader errors from reopening recovery after an owned terminal
+stop (§6). User-initiated retry remains a new owned attempt.
+
 ## 3. Execution order and shared contracts
 
 First establish the pinned compiler loop (§9) and inspect current ownership
@@ -268,6 +310,21 @@ If improving the error message, distinguish byte identity mismatch from a
 proved codec change. Keep diagnostics bounded and avoid embedding raw init
 bytes or source paths in user-facing failures.
 
+The follow-up in §2.5 makes failure classification a required part of this
+milestone. Do not classify arbitrary `InitDrift` as proof of process-wide
+`EngineChanged`. Trace both `classify_failure` and the specialized
+`on_init_drift` path. Preserve the real engine-baseline restart requirement,
+but give rendition identity refusal an accurate scope and explanation.
+Reuse a suitable typed reason or extend the contract consistently across
+server serialization, clients, telemetry, and exhaustive tests. Inspect all
+consumers before adding a public reason.
+
+Do not make every init mismatch endlessly retryable. The current immutable
+presentation must still refuse incompatible bytes. Any fresh-rendition
+recovery must respect existing publication/cache safety and bounded owner
+budgets. A truthful stopped surface is preferable to inventing either a
+required server restart or a guaranteed successful retry.
+
 ### 5.3 Acceptance
 
 Add a unit regression asserting explicit chapter exclusion in the shared
@@ -281,6 +338,11 @@ references. Prove the fixture actually contains chapters; an unchaptered
 fixture would not test this failure. Check init identity acceptance across
 both generations and continued segment delivery. Retain a negative test
 that genuine incompatible init bytes are rejected.
+
+Add separate controls for actual process engine-baseline change and local
+rendition init drift. Only evidence of the former may produce the process
+restart instruction. Test the specialized drift handler as well as the
+generic classification function so their verdicts cannot diverge.
 
 Use software encoding for portable coverage where suitable, and record
 hardware-backed evidence separately if available without disrupting nynuc.
@@ -326,6 +388,13 @@ Audit `clearStreamFailureFor` and successful playlist responses. A healthy
 playlist must not clear an attachment's terminal failed-producer evidence.
 Clear by the appropriate owned recovery/replacement or stronger relevant
 success, following the existing failure contract.
+
+After the owner accepts a terminal stop, cancel or retire current loader
+activity through the existing lifecycle. Late nonfatal/fatal events and
+reserved retry timers must not start another recovery or replace the
+terminal explanation with startup exhaustion. Fence by the stopped attempt,
+while allowing a deliberate user retry to create a new owned attempt. The
+16:52:59–16:53:33 sequence in §2.5 is the regression case.
 
 ### 6.3 Acceptance
 
@@ -506,9 +575,15 @@ The completed change preserves the existing owners and budgets:
 - encoded VOD output explicitly passes `-map_chapters -1`; the argument is
   part of the existing argv-based encoding identity, and strict init-byte
   validation remains unchanged;
+- local init drift now records `rendition_init_changed` and tells the viewer
+  to reopen that rendition; only an attested process engine-baseline change
+  retains `engine_changed` and the server-restart instruction;
 - text, JSON, ArrayBuffer, and Blob failure bodies use response-type-safe,
   size-bounded decoding, with attachment, intent, and request-order checks
   around asynchronous completion;
+- an owned terminal stop retires the current HLS attempt, aborts startup
+  loaders, cancels reserved retries, and fences late events; deliberate Retry
+  becomes eligible only after a fresh attachment is minted;
 - Auto suppresses changes for fresh producer, authority, delivery, and loader
   causes. Starvation without a fresh completed slow transfer is insufficient;
   a demonstrated capacity shortfall and a fresh bandwidth cliff retain their
@@ -520,10 +595,14 @@ Local validation used the repository-pinned compiler and FFmpeg 9.0.1:
 |---|---|
 | `rustup run 1.97.1 rustc --version` | `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | `node --test tests/playback/web-policy.test.js` | passed |
-| `node tests/playback/web-control.test.js --free-fall` | passed; manual and native resume, safe binary refusal decoding, stale decode ownership, and the actual vendored loader |
+| `node tests/playback/web-control.test.js --free-fall` | passed; manual and native resume, terminal loader retirement and fresh-retry ownership, safe binary refusal decoding, stale decode ownership, and the actual vendored loader |
 | `rustup run 1.97.1 cargo test -p plurx-core transcode::vod::tests::encoded_vod_recipe_explicitly_excludes_source_chapters -- --exact` | passed |
 | `rustup run 1.97.1 cargo test -p plurx-core fmp4::tests::encoded_vod_restarts_keep_init_identity_across_chapters -- --exact --nocapture` | passed with a real synthetic chaptered FFmpeg fixture; both generations emitted fragments and identical init bytes |
 | `rustup run 1.97.1 cargo test -p plurxd renditiondir::tests::a_changed_video_pipeline_is_refused_before_a_segment_is_written -- --exact` | passed; genuine pipeline drift is still refused before publication |
+| `rustup run 1.97.1 cargo test -p plurxd playback_control::tests::local_init_drift_and_process_engine_change_have_distinct_verdicts -- --exact` | passed; only the process verdict instructs a server restart |
+| `rustup run 1.97.1 cargo test -p plurxd vodserve::tests::every_generation_failure_names_what_actually_happened -- --exact` | passed; generic init drift and engine change have distinct classes |
+| `rustup run 1.97.1 cargo test -p plurxd vodserve::tests::specialized_init_drift_records_only_the_rendition_scope -- --exact` | passed; the specialized handler matches the generic classifier |
+| `rustup run 1.97.1 cargo test -p plurxd ffmpeg::tests::process_fragment_engine_baseline_detects_an_actual_object_change -- --exact` | passed; an actual attested object replacement invalidates the process baseline |
 | `rustup run 1.97.1 cargo fmt --all -- --check` | passed |
 | `rustup run 1.97.1 cargo check -p plurx-core -p plurxd --all-targets` | passed |
 | `rustup run 1.97.1 cargo clippy -p plurx-core -p plurxd --all-targets -- -D warnings` | passed |

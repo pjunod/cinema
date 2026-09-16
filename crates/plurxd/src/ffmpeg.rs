@@ -762,6 +762,10 @@ pub async fn fragment_index_engine_is_current() -> bool {
     let engine = FRAGMENT_INDEX_ENGINE
         .get_or_init(fragment_index_engine_inner)
         .await;
+    fragment_index_engine_snapshot_is_current(engine)
+}
+
+fn fragment_index_engine_snapshot_is_current(engine: &FragmentIndexEngine) -> bool {
     engine.usable && engine_objects_are_current(&engine.objects)
 }
 
@@ -2585,6 +2589,26 @@ mod tests {
         std::fs::remove_file(&path).expect("unlink original");
         std::fs::rename(replacement, &path).expect("install replacement");
         assert!(!engine_objects_are_current(&objects));
+    }
+
+    #[test]
+    fn process_fragment_engine_baseline_detects_an_actual_object_change() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("libavcodec");
+        let replacement = directory.path().join("replacement");
+        std::fs::write(&path, b"engine-baseline-a").expect("write baseline");
+        std::fs::write(&replacement, b"engine-baseline-b").expect("write replacement");
+        let expected = engine_path_version(&path).expect("object version");
+        let baseline = FragmentIndexEngine {
+            digest: "process-baseline".to_owned(),
+            objects: vec![(path.clone(), expected)],
+            usable: true,
+        };
+
+        assert!(fragment_index_engine_snapshot_is_current(&baseline));
+        std::fs::remove_file(&path).expect("unlink original");
+        std::fs::rename(replacement, &path).expect("install replacement");
+        assert!(!fragment_index_engine_snapshot_is_current(&baseline));
     }
 
     /// The pacing answer comes from `ffmpeg -h full`, and that listing has been

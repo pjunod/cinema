@@ -122,7 +122,7 @@ function fullOpenHarness() {
     shippedSource("retirePlaybackPredecessor"),
     shippedSource("handlePlaybackTransportEvent"),
     shippedSource("beginPlaybackMediaAttachment"), shippedSource("applyPlaybackAttachmentPosition"),
-    shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
+    shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
     shippedSource("hlsStartupManifestRequest"),shippedSource("abortHlsStartupLoaders"),
     shippedSource("cancelHlsStartup"),shippedSource("completeHlsStartup"),
     shippedSource("configureHlsStartupDeadline"),shippedSource("diagnoseHlsStartup"),
@@ -4893,7 +4893,7 @@ async function main() {
       `let PLAYER={hls,hlsRetryUsed:0,wantsPlayback:true,mediaAttachment:attachment,controlIntentGeneration:1,stallTimer:null};`,
       `const episode={player:PLAYER,attachment,playlistUrl:'/captured/index.m3u8',hls,state:'active',manifestState:${JSON.stringify(manifestState)},mediaLoaded:false,startedAt:0,deadlineMs:${deadlineMs},dispatches:0,loaders:new Set(),latestFailure:null,establishedSuspension:null,retry:{state:'unused',dueMs:null,detail:null,timer:null,intentGeneration:null}};PLAYER.hlsStartup=episode;`,
       "class StockLoader{constructor(){this.aborted=0;this.destroyed=0;this.reads=0;}openAndSendXhr(xhr,context){sends.push({xhr,context,at:now});}readystatechange(){this.reads++;}abort(){this.aborted++;}destroy(){this.destroyed++;}}",
-      shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
+      shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
       shippedSource("hlsStartupManifestRequest"),shippedSource("abortHlsStartupLoaders"),
       shippedSource("cancelHlsStartup"),shippedSource("completeHlsStartup"),
       shippedSource("configureHlsStartupDeadline"),shippedSource("diagnoseHlsStartup"),
@@ -5054,7 +5054,7 @@ function establishedHlsResumeTests(){
     "const player={hls,mediaAttachment:attachment,wantsPlayback:true,controlIntentGeneration:1};PLAYER=player;",
     "const episode={player,attachment,hls,state:'presenting',establishedSuspension:null,retry:{state:'reserved',timer:null}};player.hlsStartup=episode;",
     "const video={currentTime:80};function clearTimeout(){}",
-    shippedSource("hlsStartupCurrent"),shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
+    shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
     "return {calls,player,episode,video,pause:()=>pauseHlsStartup(player),resume:()=>resumeHlsStartup(video,player),replace(){attachment.current=()=>false;}};",
   ].join("\n"))();
   assert.equal(h.pause(),true);
@@ -5079,7 +5079,7 @@ function establishedHlsResumeTests(){
     "const episode={player,attachment,hls,state:'presenting',establishedSuspension:null,retry:{state:'unused',timer:null}};player.hlsStartup=episode;",
     "const video={paused:false,ended:false,error:null,currentTime:44,pause(){this.paused=true;},play(){this.paused=false;return Promise.resolve();}};",
     "const document={getElementById:id=>id==='video'?video:null};",
-    shippedSource("hlsStartupCurrent"),shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
+    shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
     shippedSource("resetPlaybackTransportEvents"),shippedSource("playbackTransportEvents"),
     shippedSource("pausePlaybackInternally"),shippedSource("rememberPlaybackTransportIntent"),
     shippedSource("applyPlaybackTransportIntent"),shippedSource("handlePlaybackTransportEvent"),
@@ -5099,8 +5099,46 @@ function establishedHlsResumeTests(){
     "native media events use the same established-loader resume owner");
 }
 
+function terminalHlsStopTests(){
+  const policy=require("../../crates/plurxd/src/web/playback-policy.js");
+  const h=new Function("PlaybackPolicy",[
+    "let PLAYER=null;const calls=[];let surface='terminal';",
+    "function clearTimeout(timer){calls.push(['clear',timer]);}function setTimeout(fn){calls.push(['timer']);return 9;}",
+    "function playbackSurfaceGeneration(p){return p&&p.attemptId;}function playbackSurfaceStep(event){calls.push(['surface',event.attach]);}",
+    "const token={id:1};const attachment={current:()=>PLAYER===player&&player.mediaAttachment===token};",
+    "const loader={abort(){calls.push(['abort']);},destroy(){calls.push(['destroy']);}};",
+    "const hls={stopLoad(){calls.push(['stop']);},startLoad(at){calls.push(['start',at]);}};",
+    "const player={hls,mediaAttachment:token,attemptId:'a1',controlIntentGeneration:4,hlsRetryUsed:0};PLAYER=player;",
+    "const episode={player,attachment,mediaAttachment:token,hls,state:'presenting',establishedSuspension:{},loaders:new Set([loader]),retry:{state:'reserved',timer:17}};player.hlsStartup=episode;",
+    "const video={currentTime:52};const document={getElementById:()=>video};",
+    "function pausePlaybackInternally(){calls.push(['pause']);}function stopPlayerTimers(){calls.push(['timers']);}",
+    shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),
+    shippedSource("abortHlsStartupLoaders"),shippedSource("retireHlsTerminalAttempt"),
+    shippedSource("stopPlayerForExhaustion"),shippedSource("scheduleHlsNetworkRetry"),
+    shippedSource("beginPlaybackMediaAttachment"),
+    "const owned=()=>attachment.current()&&player.hls===hls&&!playbackAttemptTerminallyStopped(player,token);",
+    "return {calls,player,episode,stop:stopPlayerForExhaustion,current:()=>hlsStartupCurrent(player,episode),retry:()=>scheduleHlsNetworkRetry(video,player,'late fatal'),late(){if(owned())surface='recovering';return surface;},reopen(){player.attemptId='a2';const next=beginPlaybackMediaAttachment(player);return {current:next.current(),terminal:player.terminalStop};}};",
+  ].join("\n"))(policy);
+
+  assert.equal(h.current(),true);
+  h.stop();
+  assert.equal(h.episode.state,"cancelled");
+  assert.equal(h.episode.cancelledReason,"owner_stopped");
+  assert.equal(h.current(),false,"the stopped attempt no longer owns callbacks");
+  assert.equal(h.retry(),false,"a reserved or late network retry cannot restart it");
+  assert.equal(h.late(),"terminal","a late fatal cannot replace the terminal surface");
+  assert.equal(h.calls.some(call=>call[0]==="start"),false);
+  for(const event of ["abort","destroy","stop","pause","timers"])
+    assert.equal(h.calls.some(call=>call[0]===event),true,event);
+
+  const reopened=h.reopen();
+  assert.equal(reopened.current,true,"a deliberate retry owns a fresh attachment");
+  assert.equal(reopened.terminal,null,"the fresh attachment is not fenced by its predecessor");
+}
+
 async function freeFallPlaybackTests(){
   establishedHlsResumeTests();
+  terminalHlsStopTests();
   await streamFailureBodyTests();
   await vendoredHlsStartupTests();
   process.stdout.write("PASS Free Fall loader resume and binary refusal regressions\n");
@@ -5152,7 +5190,7 @@ async function vendoredHlsStartupTests(){
         "function closeMenu(){}function endWait(){}function subNeedsBurn(s){return !!s?.burn;}function positionForPlaybackIntent(){return 91;}function notifyPlaybackControl(){}function rememberPlaybackSelection(){}function restartPendingPlaybackOpen(){return false;}function pbSyncSubIcon(){}function clearSubs(){}function subLabelFor(){return 'English';}function subUrl(){return '/subtitle';}function nativeHlsSubtitleOrdinal(){return -1;}function clearPlaybackControlWaiters(){}",
         "const hls={loadSource(){},startLoad(){},stopLoad(){}};let PLAYER={hls,hlsRetryUsed:0,wantsPlayback:true,mediaAttachment:attachment,controlIntentGeneration:1};",
         "const episode={player:PLAYER,attachment,playlistUrl:'/delayed/index.m3u8',hls,state:'active',manifestState:'unknown',mediaLoaded:false,decoderFailed:false,startedAt:0,deadlineMs:40000,dispatches:0,loaders:new Set(),latestFailure:null,establishedSuspension:null,retry:{state:'unused',dueMs:null,detail:null,timer:null,intentGeneration:null}};PLAYER.hlsStartup=episode;",
-        shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
+        shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
         shippedSource("hlsStartupManifestRequest"),shippedSource("abortHlsStartupLoaders"),
         shippedSource("cancelHlsStartup"),shippedSource("completeHlsStartup"),
         shippedSource("configureHlsStartupDeadline"),shippedSource("diagnoseHlsStartup"),

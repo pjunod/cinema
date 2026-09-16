@@ -6958,9 +6958,15 @@ function vodClientContract(){
     }}
   };
 }
+function playbackAttemptTerminallyStopped(player,attachment){
+  const stopped=player&&player.terminalStop;
+  return !!(stopped&&stopped.attachment===(attachment||player.mediaAttachment));
+}
 function hlsStartupCurrent(player,episode){
   return !!(player&&episode&&PLAYER===player&&player.hlsStartup===episode
-    &&player.hls===episode.hls&&episode.attachment.current());
+    &&player.hls===episode.hls&&episode.attachment.current()
+    &&!playbackAttemptTerminallyStopped(player,
+      episode.mediaAttachment||player.mediaAttachment));
 }
 function hlsStartupIncomplete(player){
   const episode=player&&player.hlsStartup;
@@ -7211,7 +7217,8 @@ function createHlsStartupLoader(StockLoader,episode){
 // established-stream network recovery. An unloaded manifest must be reloaded;
 // startLoad has no levels to start in that state.
 function scheduleHlsNetworkRetry(video,player,detail){
-  if(!player||player.hls==null) return false;
+  if(!player||player.hls==null||playbackAttemptTerminallyStopped(player,player.mediaAttachment))
+    return false;
   const episode=player.hlsStartup;
   if(episode&&hlsStartupCurrent(player,episode)
     &&['active','presenting'].includes(episode.state)){
@@ -7226,9 +7233,10 @@ function scheduleHlsNetworkRetry(video,player,detail){
   }
   if(!PlaybackPolicy.hlsRetryAllowed({used:player.hlsRetryUsed||0})) return false;
   player.hlsRetryUsed=(player.hlsRetryUsed||0)+1;
-  const hls=player.hls,attempt=player.attemptId||null;
+  const hls=player.hls,attempt=player.attemptId||null,attachment=player.mediaAttachment;
   setTimeout(()=>{
-    if(!PLAYER||PLAYER!==player||PLAYER.hls!==hls||PLAYER.attemptId!==attempt) return;
+    if(!PLAYER||PLAYER!==player||PLAYER.hls!==hls||PLAYER.attemptId!==attempt
+      ||playbackAttemptTerminallyStopped(player,attachment)) return;
     const at=Math.max(0,Number(video&&video.currentTime)||0);
     try{hls.startLoad(at)}catch(e){}
   },PlaybackPolicy.HLS_RETRY.delay_ms);
@@ -7287,10 +7295,12 @@ function attachHls(video, playlistUrl, startAt){
       dispatches:0,loaders:new Set(),latestFailure:null,
       intentGeneration:attachedPlayer.controlIntentGeneration||0,
       evidenceOrdinal:0,establishedSuspension:null,
+      mediaAttachment:attachedPlayer.mediaAttachment,
       retry:{state:'unused',dueMs:null,detail:null,timer:null,intentGeneration:null}};
     attachedPlayer.hlsStartup=startup;
     const observesCurrent=()=>attachment.current()&&attachedPlayer.hls===hls
-      &&playbackOwnsAttachedMedia(attachedPlayer);
+      &&playbackOwnsAttachedMedia(attachedPlayer)
+      &&!playbackAttemptTerminallyStopped(attachedPlayer,startup.mediaAttachment);
     const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
     const hls=new Hls({
       enableWorker:false,
@@ -10186,7 +10196,8 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     controlPresentedFrames:0,controlHasFrameCallbacks:false,
     wantsPlayback:fullIntent.wantsPlayback,
     mediaPredecessor:outgoing,
-    internalMediaReset:true,pendingOpenAttempt:openAttempt,libraryChannel, };
+    internalMediaReset:true,pendingOpenAttempt:openAttempt,libraryChannel,
+    terminalStop:null, };
   const openedPlayer=PLAYER;
   const openIsAttached=()=>openIsCurrent()&&PLAYER===openedPlayer
     &&PLAYER.openToken===openAttempt.token;
@@ -11460,6 +11471,9 @@ function beginPlaybackMediaAttachment(p){
   const token={id:(p._mediaAttachmentOrdinal||0)+1};
   p._mediaAttachmentOrdinal=token.id;
   p.mediaAttachment=token;
+  // A deliberate reopen mints a new attachment. Clear the retired attempt
+  // only after the old attachment can no longer pass its identity closure.
+  p.terminalStop=null;
   // Where this attempt's generation takes the picture: every attach on every
   // route runs through here, and faults about any other generation are dropped.
   // That is what bounds a fault's life — identity, not a clock. (`STREAM_FAILURE`
@@ -12237,9 +12251,27 @@ function playbackSurfaceSourceIsBlocking(source,context){
 // keeps `wantsPlayback`, so Try again still knows the viewer wanted this
 // playing. Nothing else about the sites that call this changes.
 function stopPlayerForExhaustion(){
+  const p=PLAYER;
+  if(p) retireHlsTerminalAttempt(p);
   const v=document.getElementById("video");
   if(v) pausePlaybackInternally(v);
   stopPlayerTimers();
+}
+function retireHlsTerminalAttempt(p){
+  if(!p) return;
+  const mediaAttachment=p.mediaAttachment||null;
+  const episode=p.hlsStartup;
+  const ownsEpisode=!!(episode&&p.hls===episode.hls&&episode.attachment.current());
+  p.terminalStop={attachment:mediaAttachment,attemptId:p.attemptId||null,
+    intentGeneration:p.controlIntentGeneration||0};
+  if(ownsEpisode){
+    episode.state='cancelled';
+    episode.cancelledReason='owner_stopped';
+    episode.establishedSuspension=null;
+    clearTimeout(episode.retry.timer);episode.retry.timer=null;
+    abortHlsStartupLoaders(episode);
+  }
+  try{if(p.hls)p.hls.stopLoad();}catch(e){}
 }
 // A button the presenter drew. The reducer clears the fault the action belonged
 // to; the EFFECT is the recovery owner’s, which is why it happens here and not

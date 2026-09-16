@@ -3110,7 +3110,8 @@ test("the stall-recovery prompt stops the player before it raises", () => {
   const order = [];
   let raised = null;
   const build = new Function(
-    "PLAYER", "document", "pausePlaybackInternally", "stopPlayerTimers", "raisePlaybackSurface",
+    "PLAYER", "document", "pausePlaybackInternally", "stopPlayerTimers",
+    "retireHlsTerminalAttempt", "raisePlaybackSurface",
     [
       shippedSource("playbackStallActions"),
       shippedSource("playbackExhaustedActions"),
@@ -3126,10 +3127,11 @@ test("the stall-recovery prompt stops the player before it raises", () => {
     { getElementById: (id) => (id === "video" ? video : null) },
     (element) => { assert.equal(element, video); order.push("pause"); },
     () => order.push("timers"),
+    (owner) => { assert.equal(owner, player); order.push("retire"); },
     (source, fault) => { order.push("raise"); raised = { source, fault }; },
   )("the reopen failed");
 
-  assert.deepEqual(order, ["pause", "timers", "raise"],
+  assert.deepEqual(order, ["retire", "pause", "timers", "raise"],
     "the owner stops the player, and only then raises (contract §3.4)");
   assert.equal(raised.source, "owner_exhausted");
   assert.equal(raised.fault.player_stopped, true);
