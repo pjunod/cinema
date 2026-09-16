@@ -215,7 +215,7 @@ fun ConnectScreen(vm: AppViewModel, busy: Boolean, error: String?) {
                 value = url,
                 onValueChange = { url = it },
                 label = "Server address",
-                placeholder = "10.42.1.10:32400",
+                placeholder = "192.168.1.10:32400",
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
                 modifier = Modifier.fillMaxWidth(),
             )

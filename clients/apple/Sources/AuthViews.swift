@@ -167,7 +167,7 @@ struct ConnectView: View {
             #endif
 
             if showManual {
-                TextField("10.42.1.10:32400", text: $url)
+                TextField("192.168.1.10:32400", text: $url)
                     .plurxFieldStyle()
                     .font(.system(.body, design: .monospaced))
                     #if os(iOS)

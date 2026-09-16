@@ -910,12 +910,16 @@ mod tests {
         // "Season 1"'s parent is the clean show folder, so it wins the title.
         assert_eq!(e.show_title, "Paper Moons");
         assert_eq!((e.season, e.episode), (1, 6));
-        assert_eq!(e.episode_title.as_deref(), Some("The Long Wednesday Number 2"));
+        assert_eq!(
+            e.episode_title.as_deref(),
+            Some("The Long Wednesday Number 2")
+        );
     }
 
     #[test]
     fn release_folder_supplies_title_and_year_with_no_show_dir() {
-        let e = ep("/tv/The.Kitchen.2022.S02E05.1080p.WEB.h264-GROUP/a1b2c3d4.mkv").expect("parsed");
+        let e =
+            ep("/tv/The.Kitchen.2022.S02E05.1080p.WEB.h264-GROUP/a1b2c3d4.mkv").expect("parsed");
         assert_eq!(e.show_title, "The Kitchen");
         assert_eq!(e.show_year, Some(2022));
         assert_eq!((e.season, e.episode), (2, 5));
