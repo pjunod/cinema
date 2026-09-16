@@ -27,4 +27,31 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: https://github.com/Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c # v2
-      - run: make fmt-check lint
+      - name: Run rustfmt and Clippy
+        id: lint
+        continue-on-error: true
+        run: make fmt-check lint
+      - name: Publish the lint result
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          LINT_RESULT: ${{ steps.lint.outcome }}
+        run: |
+          if [ "$LINT_RESULT" = success ]; then
+            message=passing; fill='#4c1'; color=brightgreen
+          else
+            message=failing; fill='#e05d44'; color=red
+          fi
+          scripts/publish-badge \
+            --branch badges-lint \
+            --alias codex/badges-lint \
+            --filename lint \
+            --label lint \
+            --message "$message" \
+            --fill "$fill" \
+            --json-color "$color" \
+            --label-width 27 \
+            --message-width 48
+      - name: Preserve the lint verdict
+        if: steps.lint.outcome != 'success'
+        run: exit 1
