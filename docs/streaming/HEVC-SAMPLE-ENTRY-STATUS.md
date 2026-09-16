@@ -16,10 +16,10 @@ browser or Apple evidence remains pending until it is actually observed.
 |---|---|---|---|
 | S01 · source fact and bounded recovery | source complete; compiled | one normalized first-playable-video parser; SQLite and Hiqlite schema/write/read/import/publication paths; separately leased 256-row stored-probe backfill with exact source/probe fencing | retain the written regressions for the final focused run |
 | S02 · validated caps and shared admission | source complete; compiled | nullable/empty/exact-list semantics flow through caps and profile; invalid present claims receive typed `invalid_capabilities` before fallback; packaging-only mismatch selects Remux with truthful reasons | retain the written decision and HTTP regressions for the final focused run |
-| S03 · progressive web probes and downgrade protection | not started | existing HEVC probes and POST-to-GET fallback identified | implement after the server wire contract is stable |
-| S04 · Apple serialization and propagation | not started | Apple capability and request surfaces identified | claim one build and compile iOS/tvOS after request propagation is complete |
-| S05 · execution guard and refusal | not started | segmented and progressive copy builders remain separate | verify the actual output tag, then add `requires_hls` and typed refusal |
-| S06 · documentation, evidence, review, and promotion | not started | this ledger is indexed with the implementation | update API/playback docs, obtain one adversarial review, run the fast lane once, then merge a green unchanged head |
+| S03 · progressive web probes and downgrade protection | source complete; syntax checked | bounded file-only tier/tag/PQ probes; explicit empty claim; settled decision/create snapshot; constrained POST cannot downgrade; required-HLS and cold-index routes pinned | retain the written Node matrices for the final focused run |
+| S04 · Apple serialization and propagation | source complete; iOS/tvOS compile green | build 165; HEVC emits `hvc1`, non-HEVC omits; decision snapshot reaches every create/reopen; constrained fallback refused; old plans decode | retain the written XCTest cases for the final focused run |
+| S05 · execution guard and refusal | source complete; compiled | progressive output tag mirrors its builder; incompatible output serializes `requires_hls`; missing HLS returns typed 409; the actual create seam and preparation path validate before admission | retain the written decision/create regressions for the final focused run |
+| S06 · documentation, evidence, review, and promotion | in progress | API, playback inventory, routing catalog, Developer advisory, and this ledger updated | finish the receipt, obtain one adversarial review, run the fast lane once, then merge a green unchanged head |
 
 ## Current decisions and boundaries
 
@@ -48,6 +48,8 @@ browser or Apple evidence remains pending until it is actually observed.
 | Reviewed source anchor | `3129ce993`; relevant current-main changes are cosmetic only |
 | Rust compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | S01/S02 compile | `cargo check -p plurx-core --all-targets --locked`; Hiqlite feature compile; `cargo check -p plurxd --all-targets --locked` passed |
+| S03/S05 compile and syntax | `cargo check -p plurxd --all-targets --locked`; `scripts/js-check crates/plurxd/src/web/index.html`; Node syntax checks passed |
+| Apple build | build 165 claimed; `make apple-build` passed for iOS and tvOS after rerunning outside the filesystem sandbox required by SwiftUI macros |
 | Unit and integration tests | deferred; not run |
 | Browser capability observations | pending; no real-browser claim |
 | Physical Apple playback | pending; no device claim |

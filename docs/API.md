@@ -838,10 +838,18 @@ and reading its fields as if they meant what v2's mean is how a device is
 handed a stream it never claimed. Inside: `video[]` (per codec: `profiles`,
 `max_height`, `max_bitrate_bps`, `present[]` of `sdr`/`pq`/`hlg`,
 `dv_profiles`), `audio[]`, `containers[]`, `transports[]`, `dv_transport`,
-`display: {hdr, dolby_vision, max_nits}`, `learned_limits[]`, `max_height`.
+`progressive_hevc_sample_entries`, `display: {hdr, dolby_vision, max_nits}`,
+`learned_limits[]`, `max_height`.
 An unrecognized `present` value deserializes to `Unknown` and matches nothing
 rather than failing the whole document. Empty `containers` defaults to
 `mp4,webm,mov`; empty `audio` to `aac,mp3`.
+
+`progressive_hevc_sample_entries` is an additive, bounded progressive
+packaging constraint. Missing or `null` preserves legacy behavior; `[]`
+explicitly admits no progressive HEVC sample entry. A present list contains at
+most four unique exact lowercase values from `hvc1`, `hev1`, `dvh1`, `dvhe`.
+Semantic violations return typed **400 `invalid_capabilities`**. The field does
+not grant HEVC decode, a profile, HDR presentation, or Dolby Vision support.
 
 Both wire shapes translate into one `DeviceCaps` and then one `DeviceProfile`,
 so a client upgrading from the query form to the document must get the same
@@ -874,9 +882,12 @@ verdict for the same hardware.
 - `{"mode":"direct","url":"/api/v1/files/{id}/direct"}`
 - `{"mode":"remux", "url":"…/stream.mp4[?audio=N]",
   "sessions_url":"…/hls/sessions", "aac":<bool>,
-  "preserve_dolby_vision":<bool>}` — the same bytes in two envelopes. A
+  "preserve_dolby_vision":<bool>, "requires_hls":true?}` — the same bytes in
+  two envelopes. A
   player needing HLS transport POSTs `sessions_url` with `copy: true` and
-  this `aac` instead of fetching `url`.
+  this `aac` instead of fetching `url`. `requires_hls` is omitted when false;
+  when true the progressive URL is not an executable alternative for this
+  caps snapshot, including on cold-index fallback.
 - `{"mode":"transcode","sessions_url":"…"}` — POST it *omitting* `height`:
   Auto is the server's choice, because the rung depends on which encoder wins
   and only the create response knows that.
@@ -906,7 +917,10 @@ before acting and falls back to the progressive path.
 Errors: 404 for a missing row; **409** when the row exists but the path is not
 on disk (*"this media file is missing on the server — its library path may be
 unmounted, moved, or renamed"*); 400 for an unknown track index or an
-unrecognized capabilities-document version.
+unrecognized capabilities-document version. Typed **409
+`unsupported_hevc_delivery`** means the actual progressive copy output was not
+admitted and the document did not claim HLS; session create performs the same
+check before durable session admission.
 
 ### 7.3 How to read the decision
 
