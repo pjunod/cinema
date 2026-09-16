@@ -1834,6 +1834,26 @@ pub struct DecisionBody {
     pub caps: playback::DeviceCaps,
 }
 
+/// Validate the additive packaging claim before any caller can fall through
+/// to a legacy trust path or allocate playback work.
+pub(crate) fn validate_device_caps(caps: &playback::DeviceCaps) -> Result<(), ApiError> {
+    if let Err(message) = caps.validate_progressive_hevc_sample_entries() {
+        return Err(ApiError::typed(
+            StatusCode::BAD_REQUEST,
+            "invalid_capabilities",
+            message,
+        ));
+    }
+    if caps.progressive_hevc_sample_entries.is_some() && caps.v != playback::DeviceCaps::VERSION {
+        return Err(ApiError::typed(
+            StatusCode::BAD_REQUEST,
+            "invalid_capabilities",
+            "progressive_hevc_sample_entries requires capabilities document version 2",
+        ));
+    }
+    Ok(())
+}
+
 /// POST /api/v1/files/:id/decision — the same verdict, from a capabilities
 /// document.
 ///
@@ -1850,6 +1870,7 @@ pub async fn decision_post(
     remote: super::network::RemoteAddress,
     Json(body): Json<DecisionBody>,
 ) -> Result<Json<DecisionResponse>, ApiError> {
+    validate_device_caps(&body.caps)?;
     if body.caps.v != playback::DeviceCaps::VERSION {
         return Err(ApiError::BadRequest(format!(
             "capabilities document version {} is not understood by this server (expected {})",
@@ -3574,6 +3595,7 @@ mod tests {
             duration_ms: Some(120_000),
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
+            video_codec_tag: None,
             video_profile: Some("Main 10".into()),
             width: Some(3840),
             height: Some(2160),
@@ -4973,6 +4995,7 @@ mod tests {
             duration_ms: Some(1_000),
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
+            video_codec_tag: None,
             video_profile: None,
             width: Some(1920),
             height: Some(1080),

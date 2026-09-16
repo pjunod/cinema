@@ -464,6 +464,10 @@ pub struct MediaFile {
     /// Container short name derived from the file extension ("mkv", "mp4").
     pub container: Option<String>,
     pub video_codec: Option<String>,
+    /// Four-character sample-entry label reported by the first playable video
+    /// stream (`hvc1`, `hev1`, `dvh1`, `dvhe`, `avc1`, …). This is packaging
+    /// identity, not a second spelling of the codec family.
+    pub video_codec_tag: Option<String>,
     pub video_profile: Option<String>,
     pub width: Option<i64>,
     pub height: Option<i64>,
@@ -506,6 +510,7 @@ pub struct ProbeResult {
     pub duration_ms: Option<i64>,
     pub container: Option<String>,
     pub video_codec: Option<String>,
+    pub video_codec_tag: Option<String>,
     pub video_profile: Option<String>,
     pub width: Option<i64>,
     pub height: Option<i64>,

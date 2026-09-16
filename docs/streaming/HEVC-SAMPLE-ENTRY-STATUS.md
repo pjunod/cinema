@@ -14,8 +14,8 @@ browser or Apple evidence remains pending until it is actually observed.
 
 | Package | State | Current evidence | Next action |
 |---|---|---|---|
-| S01 · source fact and bounded recovery | in progress | clean independent clone; Rust 1.97.1 confirmed; reviewed source base still matches current contracts | add the normalized probe fact, both backend mappings, migration, and fenced 256-row backfill |
-| S02 · validated caps and shared admission | not started | contract mapped to current `DeviceCaps`, `DeviceProfile`, and playback evaluator | implement after S01 compiles |
+| S01 · source fact and bounded recovery | source complete; compiled | one normalized first-playable-video parser; SQLite and Hiqlite schema/write/read/import/publication paths; separately leased 256-row stored-probe backfill with exact source/probe fencing | retain the written regressions for the final focused run |
+| S02 · validated caps and shared admission | source complete; compiled | nullable/empty/exact-list semantics flow through caps and profile; invalid present claims receive typed `invalid_capabilities` before fallback; packaging-only mismatch selects Remux with truthful reasons | retain the written decision and HTTP regressions for the final focused run |
 | S03 · progressive web probes and downgrade protection | not started | existing HEVC probes and POST-to-GET fallback identified | implement after the server wire contract is stable |
 | S04 · Apple serialization and propagation | not started | Apple capability and request surfaces identified | claim one build and compile iOS/tvOS after request propagation is complete |
 | S05 · execution guard and refusal | not started | segmented and progressive copy builders remain separate | verify the actual output tag, then add `requires_hls` and typed refusal |
@@ -47,6 +47,7 @@ browser or Apple evidence remains pending until it is actually observed.
 | Clean Forgejo base | `df3721320a8efe5967d95ce331cc30ccf6f0e3ea` |
 | Reviewed source anchor | `3129ce993`; relevant current-main changes are cosmetic only |
 | Rust compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
+| S01/S02 compile | `cargo check -p plurx-core --all-targets --locked`; Hiqlite feature compile; `cargo check -p plurxd --all-targets --locked` passed |
 | Unit and integration tests | deferred; not run |
 | Browser capability observations | pending; no real-browser claim |
 | Physical Apple playback | pending; no device claim |

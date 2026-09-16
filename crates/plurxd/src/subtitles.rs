@@ -2066,6 +2066,7 @@ mod tests {
             duration_ms: Some(60_000),
             container: Some("mkv".into()),
             video_codec: Some("h264".into()),
+            video_codec_tag: None,
             video_profile: None,
             width: Some(1920),
             height: Some(1080),

@@ -1454,6 +1454,7 @@ mod tests {
             duration_ms: Some(1_000),
             container: Some("mkv".to_owned()),
             video_codec: Some("h264".to_owned()),
+            video_codec_tag: None,
             video_profile: None,
             width: Some(1920),
             height: Some(1080),

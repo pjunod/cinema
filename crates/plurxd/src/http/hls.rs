@@ -1683,6 +1683,9 @@ async fn create_with_purpose(
     req: CreateSession,
     library_channel: Option<crate::http::library_channels::LibraryChannelPlaybackPurpose>,
 ) -> Result<Json<StartResponse>, ApiError> {
+    if let Some(caps) = req.caps.as_ref() {
+        super::stream::validate_device_caps(caps)?;
+    }
     let planning_caps = req
         .caps
         .as_ref()
@@ -7684,6 +7687,9 @@ async fn plan_preparation_candidate(
     source: &MediaFile,
     delivered_height: i64,
 ) -> Result<crate::transcode::SessionRequest, ApiError> {
+    if let Some(caps) = planning_caps {
+        super::stream::validate_device_caps(caps)?;
+    }
     let Some(caps) = planning_caps
         .filter(|caps| caps.v == plurx_core::playback::DeviceCaps::VERSION && !caps.is_empty())
     else {
@@ -15731,6 +15737,7 @@ mod tests {
             duration_ms: file.duration_ms,
             container: file.container.clone(),
             video_codec: file.video_codec.clone(),
+            video_codec_tag: file.video_codec_tag.clone(),
             video_profile: file.video_profile.clone(),
             width: file.width,
             height: file.height,
@@ -20544,6 +20551,7 @@ mod tests {
             duration_ms: Some(3_600_000),
             container: Some("mkv".into()),
             video_codec: Some("h264".into()),
+            video_codec_tag: None,
             video_profile: None,
             width: Some(3840),
             height: Some(2160),
@@ -22900,6 +22908,7 @@ mod tests {
             duration_ms: Some(120_000),
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
+            video_codec_tag: None,
             video_profile: None,
             width: Some(3840),
             height: Some(2160),

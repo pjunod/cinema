@@ -132,6 +132,7 @@ pub fn parse_probe_json(json: &Value) -> ProbeResult {
                 }
                 video_seen = true;
                 result.video_codec = str_field(stream, "codec_name");
+                result.video_codec_tag = video_codec_tag(stream);
                 result.video_profile = str_field(stream, "profile");
                 result.width = int_field(stream, "width");
                 result.height = int_field(stream, "height");
@@ -204,6 +205,22 @@ fn str_field(stream: &Value, key: &str) -> Option<String> {
         .and_then(|v| v.as_str())
         .map(str::to_owned)
         .filter(|s| !s.is_empty())
+}
+
+/// Normalize ffprobe's sample-entry spelling without inventing one.
+///
+/// A tag is useful only when it is the exact four-byte ASCII alphanumeric
+/// label carried by the selected stream. ffprobe's zero sentinels mean
+/// "unknown", and accepting punctuation, whitespace, or Unicode would make a
+/// source-admission value that no ISO-BMFF sample entry can match.
+fn video_codec_tag(stream: &Value) -> Option<String> {
+    let raw = stream.get("codec_tag_string")?.as_str()?;
+    let bytes = raw.as_bytes();
+    if bytes.len() != 4 || !bytes.iter().all(u8::is_ascii_alphanumeric) {
+        return None;
+    }
+    let normalized = raw.to_ascii_lowercase();
+    (!matches!(normalized.as_str(), "0000" | "[0][0][0][0]")).then_some(normalized)
 }
 
 fn int_field(stream: &Value, key: &str) -> Option<i64> {
@@ -664,5 +681,66 @@ mod tests {
         let p = parse_probe_json(&j);
         assert_eq!(p.video_codec.as_deref(), Some("h264"));
         assert_eq!(p.width, Some(1280));
+    }
+
+    #[test]
+    fn video_codec_tag_uses_first_non_attached_video() {
+        let j = json!({
+            "streams": [
+                { "codec_type": "video", "codec_name": "mjpeg",
+                  "codec_tag_string": "jpeg",
+                  "disposition": { "attached_pic": 1 } },
+                { "codec_type": "audio", "codec_name": "aac",
+                  "codec_tag_string": "mp4a" },
+                { "codec_type": "video", "codec_name": "hevc",
+                  "codec_tag_string": "HeV1" },
+                { "codec_type": "video", "codec_name": "hevc",
+                  "codec_tag_string": "hvc1" }
+            ]
+        });
+        assert_eq!(
+            parse_probe_json(&j).video_codec_tag.as_deref(),
+            Some("hev1")
+        );
+    }
+
+    #[test]
+    fn video_codec_tag_rejects_unknown_and_malformed_values() {
+        for value in [
+            Value::Null,
+            json!(7),
+            json!(""),
+            json!("0000"),
+            json!("hev"),
+            json!("hevc1"),
+            json!("hv-1"),
+            json!("hév1"),
+        ] {
+            let j = json!({
+                "streams": [{
+                    "codec_type": "video",
+                    "codec_name": "hevc",
+                    "codec_tag_string": value
+                }]
+            });
+            assert_eq!(parse_probe_json(&j).video_codec_tag, None, "{value}");
+        }
+
+        let missing = json!({
+            "streams": [{ "codec_type": "video", "codec_name": "hevc" }]
+        });
+        assert_eq!(parse_probe_json(&missing).video_codec_tag, None);
+
+        let valid_other = json!({
+            "streams": [{
+                "codec_type": "video",
+                "codec_name": "h264",
+                "codec_tag_string": "avc1"
+            }]
+        });
+        assert_eq!(
+            parse_probe_json(&valid_other).video_codec_tag.as_deref(),
+            Some("avc1")
+        );
     }
 }
