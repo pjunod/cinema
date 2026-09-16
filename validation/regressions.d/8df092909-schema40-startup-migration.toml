@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["8df092909"]
+points = ["cluster.auth", "cluster.membership"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "`daemon_schema_gate_accepts_the_complete_supported_chain` now enumerates every supported predecessor from v5 through v39, so omitting the production schema from the migration admission gate fails before release; `a_learner_refuses_a_behind_schema_that_a_voter_migrates` boots real Hiqlite processes and proves a voter advances that immediately previous schema while a learner remains read-only. The Rust gate also keeps the public-sanitization test fixtures lint-clean under `-D warnings`."

@@ -2867,7 +2867,7 @@ mod tests {
         use axum::routing::get as axget;
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let sink = seen.clone();
-        let Curator = axum::Router::new().route(
+        let curator = axum::Router::new().route(
             "/api/v1/calendar",
             axget(move |headers: axum::http::HeaderMap| {
                 let sink = sink.clone();
@@ -2887,7 +2887,7 @@ mod tests {
             .expect("bind");
         let base = format!("http://{}", listener.local_addr().expect("addr"));
         tokio::spawn(async move {
-            let _ = axum::serve(listener, Curator).await;
+            let _ = axum::serve(listener, curator).await;
         });
 
         let app = test_app();
@@ -2935,7 +2935,7 @@ mod tests {
     #[tokio::test]
     async fn the_rail_wears_the_artwork_plurx_already_has() {
         use axum::routing::get as axget;
-        let Curator = axum::Router::new().route(
+        let curator = axum::Router::new().route(
             "/api/v1/calendar",
             axget(|| async {
                 axum::Json(json!([
@@ -2959,7 +2959,7 @@ mod tests {
             .expect("bind");
         let base = format!("http://{}", listener.local_addr().expect("addr"));
         tokio::spawn(async move {
-            let _ = axum::serve(listener, Curator).await;
+            let _ = axum::serve(listener, curator).await;
         });
 
         let (app, state) = test_state();
@@ -3114,7 +3114,7 @@ mod tests {
             .expect("bind");
         let base = format!("http://{}", listener.local_addr().expect("addr"));
         tokio::spawn(async move {
-            let Curator = axum::Router::new().route(
+            let curator = axum::Router::new().route(
                 "/api/v1/system/status",
                 axget(|headers: axum::http::HeaderMap| async move {
                     if headers.get("x-api-key").and_then(|v| v.to_str().ok()) != Some("right") {
@@ -3123,7 +3123,7 @@ mod tests {
                     axum::Json(json!({ "version": "0.9.0" })).into_response()
                 }),
             );
-            let _ = axum::serve(listener, Curator).await;
+            let _ = axum::serve(listener, curator).await;
         });
 
         call(
