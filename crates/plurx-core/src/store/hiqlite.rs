@@ -4232,7 +4232,8 @@ fn schema_migration_action(
         | LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE
         | DVR_SCHEMA_MIGRATION_SOURCE
         | DVR_SCHEMA_VERSION
-        | DVR_EVENT_SCHEMA_MIGRATION_SOURCE => {
+        | DVR_EVENT_SCHEMA_MIGRATION_SOURCE
+        | VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -6119,9 +6120,32 @@ mod tests {
             "v36 must advance exactly one step to the DVR schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 32,
+            DVR_SCHEMA_VERSION + 1,
+            SUBJECT_SCHEMA_VERSION,
+            "v37 must advance exactly one step to the subject schema"
+        );
+        assert_eq!(
+            DVR_EVENT_SCHEMA_MIGRATION_SOURCE, SUBJECT_SCHEMA_VERSION,
+            "the DVR-event migration must start from the exact v38 shape"
+        );
+        assert_eq!(
+            DVR_EVENT_SCHEMA_MIGRATION_SOURCE + 1,
+            DVR_EVENT_SCHEMA_VERSION,
+            "v38 must advance exactly one step to the DVR-event schema"
+        );
+        assert_eq!(
+            VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE, DVR_EVENT_SCHEMA_VERSION,
+            "the video-codec-tag migration must start from the exact v39 shape"
+        );
+        assert_eq!(
+            VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE + 1,
+            VIDEO_CODEC_TAG_SCHEMA_VERSION,
+            "v39 must advance exactly one step to the video-codec-tag schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 35,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v37 step"
+            "this implementation contains every additive v5→v40 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
@@ -6133,6 +6157,16 @@ mod tests {
                 .expect("current schema"),
             SchemaMigrationAction::Current
         );
+        for schema_version in AUTH_SCHEMA_MIGRATION_SOURCE..AUTH_SCHEMA_VERSION {
+            assert_eq!(
+                schema_migration_action(&[row(schema_version)], ClusterCompatibility::CURRENT,)
+                    .unwrap_or_else(|error| {
+                        panic!("schema v{schema_version} must reach the current schema: {error}")
+                    }),
+                SchemaMigrationAction::MigrateFrom(schema_version),
+                "schema v{schema_version} must be admitted to the migration chain"
+            );
+        }
         assert_eq!(
             schema_migration_action(
                 &[row(AUTH_SCHEMA_MIGRATION_SOURCE)],
