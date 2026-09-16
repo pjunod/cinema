@@ -2,6 +2,6 @@ version = 1
 
 [[coverage]]
 commits = ["8a48bda2"]
-points = ["core.media"]
+points = ["server.api"]
 checks = ["rust-gate"]
 reason = "Test-only: the URL-normalisation fixtures' expected side carries the same bare host as their input again after a prose rename reached it. The normalisation tests in the Rust gate are the evidence."
