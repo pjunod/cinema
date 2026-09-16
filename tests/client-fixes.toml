@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "apple.hevc-sample-entry-capability"
+commits = ["8daba4af"]
+source = "clients/apple/Sources/Caps.swift"
+source_anchor = "progressiveHevcSampleEntries: hevc ? [\"hvc1\"] : nil"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testAppleCapsDocumentCoversTheProbeMatrixWithoutInventingAHeight"
+
+[[fixes]]
 id = "android.live-tv-playlist-hold-back"
 commits = ["ad524065"]
 source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"

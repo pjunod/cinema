@@ -19,7 +19,7 @@ browser or Apple evidence remains pending until it is actually observed.
 | S03 · progressive web probes and downgrade protection | focused evidence green | 157 web-policy tests cover file-only tier/tag/PQ evidence, holes below ceilings, settled snapshots, and no downgrade | capture real Safari/Chrome answers when available |
 | S04 · Apple serialization and propagation | compile and focused evidence green | build 165; iOS/tvOS compile; five focused iOS capability/request tests passed | physical iOS/tvOS playback remains pending |
 | S05 · execution guard and refusal | focused evidence green | actual progressive tags, `requires_hls`, typed 409, cold-index policy, and pre-admission create refusal passed | physical minimal-hvcC delivery remains pending |
-| S06 · documentation, evidence, review, and promotion | remote gate requested | API, playback inventory, routing catalog, Developer advisory, qualification receipt, one adversarial review, and 280 focused checks are complete | require the exact-head `Main promotion gate`, then merge the unchanged green head |
+| S06 · documentation, evidence, review, and promotion | preflight correction ready | API, playback inventory, routing catalog, Developer advisory, qualification receipt, one adversarial review, and 280 focused checks are complete; the first remote preflight's missing history mappings and ownership count are corrected | require the rerun exact-head `Main promotion gate`, then merge the unchanged green head |
 
 ## Current decisions and boundaries
 
@@ -55,7 +55,7 @@ browser or Apple evidence remains pending until it is actually observed.
 | Physical Apple playback | pending; no device claim |
 | Adversarial review | two findings; tier-complete progressive evidence and explicit copy-HLS transport admission fixed in `1092acda` |
 | Focused runtime window | 280 final checks passed; exact commands and corrections are in the qualification receipt |
-| Fast lane | requested on the final status-only commit; the API ready transition did not emit `ready_for_review`, so this ready-PR synchronization supplies the exact-head trigger |
+| Fast lane | first exact-head run stopped at historical-evidence preflight; corrective mappings, Apple anchor, and the reviewed 511 → 512 startup-task inventory are ready for rerun |
 
 ## Open acceptance — software first, devices honestly pending
 

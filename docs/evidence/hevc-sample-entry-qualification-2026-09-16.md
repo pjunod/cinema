@@ -83,6 +83,15 @@ new card dependency, and the isolated decision function omitted the shipped
 selection-query dependency. The harnesses were corrected without weakening
 the production assertions; both complete web files then passed.
 
+The first Forgejo promotion run stopped in the historical-evidence preflight.
+The five corrective implementation commits now have explicit durable evidence:
+four `regressions.d` mappings and one Apple source-to-test anchor. Reproducing
+the rest of preflight also found the module-wide task inventory still recorded
+511 namespaced spawns before the finite HEVC backfill task was added. Its
+ownership review now records 512. The complete 198-test validation contract,
+357-test operations contract, player-input contract, and player DOM contract
+then passed locally before the rerun head was pushed.
+
 ## Review findings F1–F10
 
 | Finding | Disposition |
