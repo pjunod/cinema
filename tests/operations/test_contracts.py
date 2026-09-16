@@ -1561,11 +1561,20 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertIn("git add coverage.json coverage.svg", coverage)
 
-        # The public-facing README must not depend on authenticated LAN badges
-        # or clone URLs. Workflow/coverage behavior is checked above; removing
-        # a private badge is valid and must not require publishing its metadata
-        # through an external proxy instead.
+        # Checked-in informational badges render from the current repository
+        # on Forgejo and GitHub. Dynamic workflow and orphan-branch badge URLs
+        # are host-specific, so neither belongs in the mirrored README.
         readme = read("README.md")
+        for badge in ("ci.svg", "lint.svg", "coverage.svg", "audit.svg"):
+            self.assertIn(
+                f"docs/img/badges/{badge}",
+                readme,
+            )
+        self.assertGreaterEqual(readme.count("](docs/VALIDATION.md)"), 4)
+        self.assertNotRegex(
+            readme,
+            r"https?://[^)]+/actions/workflows/[^)]+/badge\.svg",
+        )
         self.assertNotIn("http://forge.lan:3000", readme)
         self.assertNotRegex(
             readme,
