@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["896f6424"]
+points = ["live.dvr"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "every_assembled_statement_introduces_its_placeholders_in_order in crates/plurx-core/src/store/hiqlite_dvr.rs now covers attention_page_statement and attention_count_statement for both sections and every keyset shape; it fails against the previous $6-before-$2 ordering, which hiqlite refuses at runtime and which made /api/v1/dvr/attention answer 500 on a replicated store."
