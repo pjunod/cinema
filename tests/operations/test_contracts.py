@@ -1559,18 +1559,25 @@ assert.equal(context.ACT_TIMER, null);
             "cargo llvm-cov --workspace --locked --exclude plurx-cluster-check",
             coverage,
         )
-        self.assertIn("git add coverage.json coverage.svg", coverage)
+        self.assertIn("scripts/publish-badge", coverage)
+        self.assertIn("--branch badges", coverage)
+        self.assertIn('--message "${msg}%"', coverage)
 
-        # Checked-in informational badges render from the current repository
-        # on Forgejo and GitHub. Dynamic workflow and orphan-branch badge URLs
-        # are host-specific, so neither belongs in the mirrored README.
+        # Branch-relative badge paths render through the viewer's authenticated
+        # Forgejo or GitHub session. From main, `../badges/coverage.svg` moves
+        # from the main branch segment to the sibling badges branch segment.
         readme = read("README.md")
-        for badge in ("ci.svg", "lint.svg", "coverage.svg", "audit.svg"):
-            self.assertIn(
-                f"docs/img/badges/{badge}",
-                readme,
-            )
-        self.assertGreaterEqual(readme.count("](docs/VALIDATION.md)"), 4)
+        for badge in (
+            "../badges-ci/ci.svg",
+            "../badges-lint/lint.svg",
+            "../badges/coverage.svg",
+        ):
+            self.assertIn(badge, readme)
+        self.assertEqual(
+            sum(line.startswith("[![") for line in readme.splitlines()),
+            3,
+        )
+        self.assertNotIn("docs/img/badges/", readme)
         self.assertNotRegex(
             readme,
             r"https?://[^)]+/actions/workflows/[^)]+/badge\.svg",
@@ -1582,6 +1589,13 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertNotIn("img.shields.io/endpoint", readme)
         self.assertNotIn("raw.githubusercontent.com/pjunod/plurx/badges", readme)
+
+        badge = workflow_job_blocks(".github/workflows/ci.yml")["badge"]
+        self.assertIn("if: always()", badge)
+        self.assertIn("scripts/publish-badge", badge)
+        self.assertIn("--branch badges-ci", badge)
+        self.assertIn("--message \"$message\"", badge)
+        self.assertIn("success|skipped", badge)
 
         package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
         self.assertNotIn("needs: check", package)
@@ -1618,6 +1632,15 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("\n  merge_group:\n", lint)
         self.assertIn("workflow_dispatch:", lint)
         self.assertIn("run: make fmt-check lint", lint)
+        lint_job = workflow_job_blocks(".github/workflows/lint.yml")["lint"]
+        lint_steps = workflow_step_blocks(lint_job)
+        self.assertIn("continue-on-error: true", lint_steps["Run rustfmt and Clippy"])
+        self.assertIn("if: always()", lint_steps["Publish the lint result"])
+        self.assertIn("--branch badges-lint", lint_steps["Publish the lint result"])
+        self.assertIn(
+            "if: steps.lint.outcome != 'success'",
+            lint_steps["Preserve the lint verdict"],
+        )
 
         self.assertIn("target: release-binaries", package)
         self.assertIn("scripts/release-package-candidate", package)
