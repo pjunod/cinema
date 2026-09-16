@@ -1,6 +1,6 @@
 # HEVC sample-entry admission — implementation status
 
-**Status:** implementation in progress · **Updated:** 2026-09-16 ·
+**Status:** software candidate qualified locally; promotion gate pending · **Updated:** 2026-09-16 ·
 **Base:** `df3721320a8efe5967d95ce331cc30ccf6f0e3ea` · **Branch:**
 `codex/hevc-sample-entry`
 
@@ -14,12 +14,12 @@ browser or Apple evidence remains pending until it is actually observed.
 
 | Package | State | Current evidence | Next action |
 |---|---|---|---|
-| S01 · source fact and bounded recovery | source complete; compiled | one normalized first-playable-video parser; SQLite and Hiqlite schema/write/read/import/publication paths; separately leased 256-row stored-probe backfill with exact source/probe fencing | retain the written regressions for the final focused run |
-| S02 · validated caps and shared admission | source complete; compiled | nullable/empty/exact-list semantics flow through caps and profile; invalid present claims receive typed `invalid_capabilities` before fallback; packaging-only mismatch selects Remux with truthful reasons | retain the written decision and HTTP regressions for the final focused run |
-| S03 · progressive web probes and downgrade protection | source complete; syntax checked | bounded file-only tier/tag/PQ probes; explicit empty claim; settled decision/create snapshot; constrained POST cannot downgrade; required-HLS and cold-index routes pinned | retain the written Node matrices for the final focused run |
-| S04 · Apple serialization and propagation | source complete; iOS/tvOS compile green | build 165; HEVC emits `hvc1`, non-HEVC omits; decision snapshot reaches every create/reopen; constrained fallback refused; old plans decode | retain the written XCTest cases for the final focused run |
-| S05 · execution guard and refusal | source complete; compiled | progressive output tag mirrors its builder; incompatible output serializes `requires_hls`; missing HLS returns typed 409; the actual create seam and preparation path validate before admission | retain the written decision/create regressions for the final focused run |
-| S06 · documentation, evidence, review, and promotion | in progress | API, playback inventory, routing catalog, Developer advisory, and this ledger updated | finish the receipt, obtain one adversarial review, run the fast lane once, then merge a green unchanged head |
+| S01 · source fact and bounded recovery | focused evidence green | parser, SQLite/Hiqlite round trips, 257-row pagination, and exact stale-snapshot fencing passed | observe bounded production completion after server rollout |
+| S02 · validated caps and shared admission | focused evidence green | nullable/empty/exact-list validation and packaging-only Auto/Original verdicts passed in the 59-test playback module | no software action pending |
+| S03 · progressive web probes and downgrade protection | focused evidence green | 157 web-policy tests cover file-only tier/tag/PQ evidence, holes below ceilings, settled snapshots, and no downgrade | capture real Safari/Chrome answers when available |
+| S04 · Apple serialization and propagation | compile and focused evidence green | build 165; iOS/tvOS compile; five focused iOS capability/request tests passed | physical iOS/tvOS playback remains pending |
+| S05 · execution guard and refusal | focused evidence green | actual progressive tags, `requires_hls`, typed 409, cold-index policy, and pre-admission create refusal passed | physical minimal-hvcC delivery remains pending |
+| S06 · documentation, evidence, review, and promotion | ready for remote gate | API, playback inventory, routing catalog, Developer advisory, qualification receipt, one adversarial review, and 280 focused checks are complete | mark PR #337 ready, require the exact-head `Main promotion gate`, then merge the unchanged green head |
 
 ## Current decisions and boundaries
 
@@ -50,17 +50,18 @@ browser or Apple evidence remains pending until it is actually observed.
 | S01/S02 compile | `cargo check -p plurx-core --all-targets --locked`; Hiqlite feature compile; `cargo check -p plurxd --all-targets --locked` passed |
 | S03/S05 compile and syntax | `cargo check -p plurxd --all-targets --locked`; `scripts/js-check crates/plurxd/src/web/index.html`; Node syntax checks passed |
 | Apple build | build 165 claimed; `make apple-build` passed for iOS and tvOS after rerunning outside the filesystem sandbox required by SwiftUI macros |
-| Unit and integration tests | deferred; not run |
+| Unit and integration tests | one post-review focused window: 280 final checks passed; full suites intentionally deferred |
 | Browser capability observations | pending; no real-browser claim |
 | Physical Apple playback | pending; no device claim |
-| Adversarial review | pending until the merge candidate is frozen |
-| Fast lane | pending until review findings are addressed |
+| Adversarial review | two findings; tier-complete progressive evidence and explicit copy-HLS transport admission fixed in `1092acda` |
+| Focused runtime window | 280 final checks passed; exact commands and corrections are in the qualification receipt |
+| Fast lane | pending on the final documentation-only receipt commit; result remains authoritative on PR #337 so recording it cannot invalidate the tested head |
 
 ## Open acceptance — software first, devices honestly pending
 
-The final software receipt must name exact commands, executed counts, Apple
-build results, the PR head/base, F1–F10 disposition, and both follow-up
-safeguards. Safari, Chrome, physical iOS, and physical tvOS results will be
-recorded only if those environments are available. Missing hardware evidence
-does not become a fabricated pass and does not weaken the server-side safety
+The [software qualification receipt](../evidence/hevc-sample-entry-qualification-2026-09-16.md)
+names exact commands, executed counts, Apple build results, the PR head/base,
+F1–F10 disposition, and both follow-up safeguards. Safari, Chrome, physical
+iOS, and physical tvOS results remain pending. Missing hardware evidence does
+not become a fabricated pass and does not weaken the server-side safety
 contract.
