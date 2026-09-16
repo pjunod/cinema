@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["15f236ce"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["web-static"]
+reason = "The vendoredHlsStartupTests cases in tests/playback/web-control.test.js compose the shipped setSub and supersedePlaybackControlIntent functions with the actual bundled HLS loader. With xhrSetup holding manifest dispatch, selecting text subtitle 0 or Off must still send exactly one manifest when released. Reverting startup preservation sends zero and fails those assertions. Companion cases prove that an older fenced loader stays cancelled, pending open/retirement/media changes do not retain startup, and a reserved retry retains its timer and executes once without renewing its budget. Run the focused regression with node tests/playback/web-control.test.js --hls-startup; the same cases also run in the full web-static suite."
