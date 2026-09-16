@@ -1445,20 +1445,20 @@ test("a bandwidth cliff drops from 1080p to the sustainable rung in one move", (
     ladder: serverLadder,
     currentHeight: 1080,
     estimateKbps: 1500,
+    recentEstimateKbps: 1500,
+    recentEstimateAtMs: 9_000,
     runwaySeconds: 8,
     nowMs: 10_000,
     lastSwitchAtMs: 9_000,
   });
-  assert.deepEqual(decision, {
-    height: 360,
-    reason: "bandwidth cliff",
-    emergency: true,
-    mildSamples: 0,
-    upgradeSinceMs: null,
-  });
+  assert.equal(decision.height, 360);
+  assert.equal(decision.reason, "bandwidth cliff");
+  assert.equal(decision.action, "switch");
+  assert.equal(decision.evidence.kind, "bandwidth-limited");
+  assert.equal(decision.emergency, true);
 });
 
-test("an active supply stall spends its one restart on the floor", () => {
+test("an active supply stall without a completed slow transfer retains quality", () => {
   const decision = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 720,
@@ -1467,12 +1467,13 @@ test("an active supply stall spends its one restart on the floor", () => {
     nowMs: 20_000,
     lastSwitchAtMs: 19_999,
   });
-  assert.equal(decision.height, 360);
-  assert.equal(decision.reason, "supply stalls");
-  assert.equal(decision.emergency, true);
+  assert.equal(decision.height, 720);
+  assert.equal(decision.reason, "insufficient-evidence");
+  assert.equal(decision.action, "suppressed");
+  assert.equal(decision.emergency, false);
 });
 
-test("an empty-buffer supply stall spends its one restart on the floor", () => {
+test("an empty buffer with a fast completed transfer retains quality", () => {
   const decision = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 720,
@@ -1485,12 +1486,13 @@ test("an empty-buffer supply stall spends its one restart on the floor", () => {
     activeSupplyStall: true,
     nowMs: 10_000,
   });
-  assert.equal(decision.height, 360);
-  assert.equal(decision.reason, "supply stalls");
-  assert.equal(decision.emergency, true);
+  assert.equal(decision.height, 720);
+  assert.equal(decision.reason, "insufficient-evidence");
+  assert.equal(decision.action, "suppressed");
+  assert.equal(decision.emergency, false);
 });
 
-test("near-empty runway spends its one restart on the floor", () => {
+test("near-empty runway alone is not a bandwidth verdict", () => {
   const decision = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 720,
@@ -1499,9 +1501,10 @@ test("near-empty runway spends its one restart on the floor", () => {
     estimateKbps: 5_000,
     runwaySeconds: 0.1,
   });
-  assert.equal(decision.height, 360);
-  assert.equal(decision.reason, "buffer ran dry");
-  assert.equal(decision.emergency, true);
+  assert.equal(decision.height, 720);
+  assert.equal(decision.reason, "insufficient-evidence");
+  assert.equal(decision.action, "suppressed");
+  assert.equal(decision.emergency, false);
 });
 
 test("an emergency downgrade cannot be stranded by the player-height ceiling", () => {
@@ -1509,6 +1512,9 @@ test("an emergency downgrade cannot be stranded by the player-height ceiling", (
     ladder: serverLadder,
     currentHeight: 720,
     estimateKbps: 1541,
+    recentEstimateKbps: 1541,
+    recentEstimateAtMs: 9_000,
+    nowMs: 10_000,
     runwaySeconds: 0.1,
     activeSupplyStall: true,
     supplyStalls: 3,
@@ -1516,7 +1522,7 @@ test("an emergency downgrade cannot be stranded by the player-height ceiling", (
   for (const playerHeight of [469, 300]) {
     const decision = policy.decideRung({ ...input, playerHeight });
     assert.equal(decision.height, 360, `player height ${playerHeight}`);
-    assert.equal(decision.reason, "supply stalls", `player height ${playerHeight}`);
+    assert.equal(decision.reason, "bandwidth cliff", `player height ${playerHeight}`);
     assert.equal(decision.emergency, true, `player height ${playerHeight}`);
   }
 });
@@ -1549,7 +1555,8 @@ test("one cliff episode uses fresh throughput and cannot restart twice", () => {
     nowMs: 10_000,
   });
   assert.equal(duplicateSupplySignal.height, 360);
-  assert.equal(duplicateSupplySignal.reason, null);
+  assert.equal(duplicateSupplySignal.reason, "insufficient-evidence");
+  assert.equal(duplicateSupplySignal.action, "suppressed");
   assert.equal(duplicateSupplySignal.emergency, false);
 
   const staleSample = policy.decideRung({
@@ -1561,18 +1568,21 @@ test("one cliff episode uses fresh throughput and cannot restart twice", () => {
     runwaySeconds: 8,
     nowMs: 20_001,
   });
-  assert.equal(staleSample.height, 480, "a stale transfer cannot steer a switch");
+  assert.equal(staleSample.height, 720, "a stale transfer cannot steer a switch");
+  assert.equal(staleSample.mildSamples, 1,
+    "the stable EWMA may begin the sustained-pressure counter without causing an emergency");
 });
 
-test("three supply stalls act while decode stalls never choose a rung", () => {
+test("three unattributed supply stalls and decode stalls never choose a rung", () => {
   const supply = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 720,
     estimateKbps: 7000,
     supplyStalls: 3,
   });
-  assert.equal(supply.height, 360);
-  assert.equal(supply.emergency, true);
+  assert.equal(supply.height, 720);
+  assert.equal(supply.reason, "insufficient-evidence");
+  assert.equal(supply.action, "suppressed");
 
   const decode = policy.decideRung({
     ladder: serverLadder,
@@ -1583,6 +1593,56 @@ test("three supply stalls act while decode stalls never choose a rung", () => {
   });
   assert.equal(decode.height, 720);
   assert.equal(decode.reason, null);
+});
+
+test("producer, authority, and loader causes suppress the 149180 kbps floor choice", () => {
+  for (const kind of ["producer-failed", "authority-refused", "loader-suspended"]) {
+    const decision = policy.decideRung({
+      ladder: serverLadder,
+      currentHeight: 720,
+      estimateKbps: 149_180,
+      recentEstimateKbps: 149_180,
+      recentEstimateAtMs: 9_000,
+      runwaySeconds: 0,
+      activeSupplyStall: true,
+      nowMs: 10_000,
+      causeEvidence: { kind, ageMs: 500 },
+    });
+    assert.equal(decision.height, 720, kind);
+    assert.equal(decision.reason, kind, kind);
+    assert.equal(decision.action, "suppressed", kind);
+    assert.equal(decision.evidence.throughput_kbps, 149_180, kind);
+
+    const upgrade = policy.decideRung({
+      ladder: serverLadder,
+      currentHeight: 480,
+      estimateKbps: 149_180,
+      runwaySeconds: 30,
+      nowMs: 60_000,
+      upgradeSinceMs: 0,
+      lastSwitchAtMs: 0,
+      causeEvidence: { kind, ageMs: 500 },
+    });
+    assert.equal(upgrade.height, 480, `${kind} also fences upgrades`);
+    assert.equal(upgrade.action, "suppressed", kind);
+  }
+});
+
+test("empty runway with unknown or stale health is bounded insufficient evidence", () => {
+  for (const causeEvidence of [{ kind: "unknown", ageMs: null }, { kind: "producer-failed", ageMs: 15_001 }]) {
+    const decision = policy.decideRung({
+      ladder: serverLadder,
+      currentHeight: 720,
+      estimateKbps: 149_180,
+      runwaySeconds: 0,
+      activeSupplyStall: true,
+      nowMs: 20_000,
+      causeEvidence,
+    });
+    assert.equal(decision.height, 720);
+    assert.equal(decision.reason, "insufficient-evidence");
+    assert.equal(decision.action, "suppressed");
+  }
 });
 
 test("two long supply-stall episodes do not satisfy the three-stall rescue", () => {
@@ -1648,21 +1708,20 @@ test("the shipped counter records one event per pause reported at both edges", (
     "two supply pauses must not reach the three-episode rescue",
   );
 
-  // A third distinct pause still reaches it, so the correction narrows the
-  // counter without disarming the rescue.
+  // A third distinct pause reaches the attribution gate, but cannot itself
+  // manufacture a bandwidth cause.
   player.waitAt = 45_000;
   nowMs = 45_100;
   noteAutoStall(player, "supply", player.waitAt);
   assert.equal(player.abr.stallEvents.supply.length, 3);
-  assert.equal(
-    policy.decideRung({
-      ladder: serverLadder,
-      currentHeight: 720,
-      estimateKbps: 7000,
-      supplyStalls: player.abr.stallEvents.supply.length,
-    }).emergency,
-    true,
-  );
+  const decision=policy.decideRung({
+    ladder: serverLadder,
+    currentHeight: 720,
+    estimateKbps: 7000,
+    supplyStalls: player.abr.stallEvents.supply.length,
+  });
+  assert.equal(decision.emergency,false);
+  assert.equal(decision.action,"suppressed");
 });
 
 test("every shipped stall report carries the wait's start as its identity", () => {
@@ -1742,6 +1801,7 @@ function autoRescueHarness(player, autoAbr = true) {
       shippedSourceIfPresent("claimAutoFallback"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       shippedSourceIfPresent("releaseAutoFallback"),
+      shippedSource("autoCauseEvidence"),shippedSource("recordAutoDecision"),
       shippedSource("maybeDecodeRescue"),
       shippedSource("rescueAutoSupply"),
       shippedSource("autoControllerTick"),
@@ -1809,13 +1869,14 @@ async function autoRungTick(autoAbr) {
     offset: 0,
     ladder: serverLadder,
     autoHeight: 720,
-    health: { target_height: 720, recent_speed: 2 },
+    health: { target_height: 720, recent_speed: 2, producer_state: "running" },
+    healthObservedAt: 89_000,
     hls: { bandwidthEstimate: 1_000_000 },
     abr: {
       switching: false,
       stallEvents: { supply: [], decode: [] },
-      recentEstimateKbps: null,
-      recentEstimateAtMs: null,
+      recentEstimateKbps: 1_000,
+      recentEstimateAtMs: 89_000,
       lastStallAtMs: null,
       lastSwitchAtMs: 0,
       mildSamples: 0,
@@ -1839,8 +1900,14 @@ async function autoRungTick(autoAbr) {
     "playerPixelHeight",
     "switchAutoRung",
     "rememberAutoRung",
+    "clientLog",
+    "playbackContext",
     `${shippedSource("hasPendingPlaybackOpen")}
-${shippedSource("playbackOwnsAttachedMedia")}\n${shippedSource("autoControllerTick")}\nreturn autoControllerTick;`,
+let STREAM_FAILURE=null;
+${shippedSource("playbackOwnsAttachedMedia")}
+${shippedSource("autoCauseEvidence")}
+${shippedSource("recordAutoDecision")}
+${shippedSource("autoControllerTick")}\nreturn autoControllerTick;`,
   )(
     player,
     { playback_auto_abr: autoAbr },
@@ -1855,6 +1922,8 @@ ${shippedSource("playbackOwnsAttachedMedia")}\n${shippedSource("autoControllerTi
     () => 720,
     async (from, decision) => { switches.push([from, decision.height]); },
     () => {},
+    () => {},
+    () => ({}),
   );
 
   await tick();
@@ -1959,7 +2028,7 @@ asyncTest(
 
     // The other order: the supply rescue wins the interval, and the decode
     // verdict lands on the next sample while its session-open is still pending.
-    const rescue = h.rescueAutoSupply();
+    const rescue = h.rescueAutoSupply({ kind: "capacity-shortfall", ageMs: 100 });
     await h.settle();
     h.maybeDecodeRescue();
     await h.settle();
@@ -2001,7 +2070,7 @@ asyncTest("a failed automatic session-open releases the claim", async () => {
 
   // The supply rescue that was refused while the decode rescue was in flight
   // can now run, so the guard costs nothing once the failure is known.
-  const rescue = h.rescueAutoSupply();
+  const rescue = h.rescueAutoSupply({ kind: "capacity-shortfall", ageMs: 100 });
   await h.settle();
   assert.deepEqual(h.opened, ["decode-rescue", "auto-supply"]);
   await h.finishOpen();
@@ -2109,7 +2178,7 @@ asyncTest("the decode rescue raises its notice as a degraded fault", async () =>
 asyncTest("the supply rescue raises its notice once the switch has landed", async () => {
   const player = pressuredRemuxPlayer();
   const h = autoRescueHarness(player);
-  const rescue = h.rescueAutoSupply();
+  const rescue = h.rescueAutoSupply({ kind: "capacity-shortfall", ageMs: 100 });
   await h.settle();
   // While the switch is in flight the only fault is the recovery step. A
   // `degraded` notice beside it would be outranked by that rank-2 progress
@@ -2129,12 +2198,22 @@ asyncTest("a supply rescue that did not land says nothing", async () => {
   const player = pressuredRemuxPlayer();
   const h = autoRescueHarness(player);
   h.failNextOpen();
-  const rescue = h.rescueAutoSupply();
+  const rescue = h.rescueAutoSupply({ kind: "capacity-shortfall", ageMs: 100 });
   await h.settle();
   await h.finishOpen();
   await rescue;
   assert.deepEqual(h.raises.map((entry) => entry.source), ["owner_recovery_step"],
     "a rescue whose open failed never claims the quality moved");
+});
+
+asyncTest("unattributed remux starvation cannot invent a transcode rescue", async () => {
+  const player = pressuredRemuxPlayer();
+  const h = autoRescueHarness(player);
+  await h.rescueAutoSupply({ kind: "unknown", ageMs: null });
+  assert.deepEqual(h.opened, []);
+  assert.equal(player.abr.supplyRescued,false,
+    "suppression does not consume the existing one-shot rescue latch");
+  assert.equal(player.autoFallbackInFlight,false);
 });
 
 test("mild pressure needs two samples plus cooldown, dwell, and switch gain", () => {
@@ -2186,6 +2265,7 @@ test("a slow server with draining runway is actionable before a stall", () => {
     currentHeight: 720,
     estimateKbps: 9000,
     recentSpeed: 0.8,
+    causeEvidence: { kind: "capacity-shortfall", ageMs: 1_000 },
     runwaySeconds: 7,
     previousRunwaySeconds: 10,
     mildSamples: 1,
@@ -2194,6 +2274,24 @@ test("a slow server with draining runway is actionable before a stall", () => {
   });
   assert.equal(decision.height, 480);
   assert.equal(decision.reason, "server supply");
+});
+
+test("healthy producer capacity evidence survives an empty-runway urgency signal", () => {
+  const decision = policy.decideRung({
+    ladder: serverLadder,
+    currentHeight: 720,
+    estimateKbps: 149_180,
+    recentSpeed: 0.8,
+    causeEvidence: { kind: "capacity-shortfall", ageMs: 1_000 },
+    runwaySeconds: 0.5,
+    previousRunwaySeconds: 2,
+    mildSamples: 1,
+    nowMs: 60_000,
+    lastSwitchAtMs: 0,
+  });
+  assert.equal(decision.height,480);
+  assert.equal(decision.reason,"server supply");
+  assert.equal(decision.emergency,false);
 });
 
 test("recovery holds for 45 seconds, moves up once, and respects pixel height", () => {
@@ -3790,7 +3888,7 @@ test("a successful playlist retry immediately clears its 503 explanation", () =>
   // LEVEL_LOADED proves only that a retryable playlist request recovered. It
   // must not erase a terminal refusal captured from another HLS request.
   shipped.noteStreamFailure(
-    502,
+    503,
     JSON.stringify({
       code: "producer_failed",
       message: "the encoder exited before it produced video",
@@ -5282,6 +5380,8 @@ test("an upgrade needs encode headroom, not just a bandwidth estimate", () => {
     recentSpeed: 3.0,
     blockedHeights: new Set([1080]),
     estimateKbps: 1_000,
+    recentEstimateKbps: 1_000,
+    recentEstimateAtMs: 499_000,
     runwaySeconds: 0.5,
   });
   assert.equal(pressured.height, 480, "starvation reaches the available ladder floor");

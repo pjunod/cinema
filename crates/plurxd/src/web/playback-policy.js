@@ -32,6 +32,9 @@
     dwellMs: 60_000,
     nearEmptyRunwaySeconds: 1.5,
     restartCostSeconds: 2.5,
+    // Cause evidence older than three controller samples cannot explain the
+    // starvation in front of the viewer. Unknown is not bandwidth pressure.
+    causeMaxAgeMs: 15_000,
     recentSampleMaxAgeMs: 15_000,
   });
 
@@ -310,6 +313,7 @@
     upgradeSinceMs = null,
     playerHeight = Infinity,
     blockedHeights = null,
+    causeEvidence = null,
     defaults = AUTO_DEFAULTS,
   }) {
     // Pressure decisions need the complete ladder. Filtering it by the player
@@ -353,11 +357,48 @@
       runway < priorRunway - 0.25;
     const nearEmpty =
       Number.isFinite(runway) && runway <= defaults.nearEmptyRunwaySeconds;
-    const farBelow =
-      estimate > 0 &&
-      estimate < current.total_kbps * defaults.severeEstimateRatio;
+    const freshBandwidthCliff =
+      freshRecentEstimate > 0 &&
+      freshRecentEstimate < current.total_kbps * defaults.severeEstimateRatio;
     const supplyBurst = supplyStalls >= 3;
-    const severe = activeSupplyStall || nearEmpty || farBelow || supplyBurst;
+    const starvation = activeSupplyStall || nearEmpty || supplyBurst;
+    const causeKind = causeEvidence && typeof causeEvidence.kind === "string"
+      ? causeEvidence.kind
+      : "unknown";
+    const causeAgeMs = causeEvidence && Number.isFinite(Number(causeEvidence.ageMs))
+      ? Math.max(0, Number(causeEvidence.ageMs))
+      : null;
+    const causeFresh = causeAgeMs == null || causeAgeMs <= defaults.causeMaxAgeMs;
+    const namedSuppression = causeFresh && [
+      "producer-failed",
+      "authority-refused",
+      "loader-suspended",
+      "delivery-refused",
+    ].includes(causeKind)
+      ? causeKind
+      : null;
+
+    if (
+      namedSuppression ||
+      (starvation && !freshBandwidthCliff && causeKind !== "capacity-shortfall")
+    ) {
+      return {
+        height: current.height,
+        reason: namedSuppression || "insufficient-evidence",
+        action: "suppressed",
+        evidence: {
+          kind: namedSuppression || (causeFresh ? causeKind : "stale"),
+          age_ms: causeAgeMs,
+          runway_seconds: Number.isFinite(runway) ? runway : null,
+          throughput_kbps: freshRecentEstimate > 0 ? freshRecentEstimate : null,
+        },
+        emergency: false,
+        mildSamples: 0,
+        upgradeSinceMs: null,
+      };
+    }
+
+    const severe = freshBandwidthCliff;
 
     if (severe && currentIndex > 0) {
       // hls.js's EWMA intentionally carries history. At a sharp cliff that
@@ -375,25 +416,20 @@
       const safeIndex = safe
         ? closestRungIndex(available, safe.height)
         : currentIndex - 1;
-      // Starvation can surface as a supply wait, empty runway, or the rolling
-      // stall burst on different controller ticks. Any one of those signals
-      // spends the one allowed automatic restart on the ladder floor: the
-      // transfer that proves the lower link may not complete before this
-      // decision, leaving both EWMA inputs biased by the pre-cliff rate. A
-      // one-rung restart can then starve again after the restart claim is
-      // already spent. A bandwidth estimate alone keeps the safe-rung logic.
-      const starvation = activeSupplyStall || nearEmpty || supplyBurst;
-      const target = starvation
-        ? available[0]
-        : available[Math.min(currentIndex - 1, safeIndex)];
-      const reason = supplyBurst || activeSupplyStall
-        ? "supply stalls"
-        : nearEmpty
-          ? "buffer ran dry"
-          : "bandwidth cliff";
+      // Empty runway establishes urgency, not cause. The target comes from a
+      // fresh completed transfer, so a server refusal or stopped loader can
+      // never be translated into the ladder floor.
+      const target = available[Math.min(currentIndex - 1, safeIndex)];
       return {
         height: target.height,
-        reason,
+        reason: "bandwidth cliff",
+        action: "switch",
+        evidence: {
+          kind: "bandwidth-limited",
+          age_ms: nowMs - recentEstimateAt,
+          runway_seconds: Number.isFinite(runway) ? runway : null,
+          throughput_kbps: freshRecentEstimate,
+        },
         emergency: true,
         mildSamples: 0,
         upgradeSinceMs: null,
@@ -411,7 +447,8 @@
 
     const estimatePressure =
       estimate > 0 && estimate < current.total_kbps * defaults.mildHeadroom;
-    const serverPressure = recentSpeed > 0 && recentSpeed < 1 && draining;
+    const serverPressure = causeFresh && causeKind === "capacity-shortfall"
+      && recentSpeed > 0 && recentSpeed < 1 && draining;
     const nextMildSamples = estimatePressure || serverPressure
       ? mildSamples + 1
       : 0;

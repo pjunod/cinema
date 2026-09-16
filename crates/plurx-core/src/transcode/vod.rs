@@ -253,6 +253,14 @@ pub fn vod_pipe_args(
         args[index + 1] = format!("expr:eq(mod(n,{}),0)", grid.frames_per_segment);
     }
     args.extend([
+        // Chapters are library metadata, not part of an immutable media
+        // rendition. ffmpeg maps them independently of the explicit video
+        // and audio stream maps; when a generation starts at a later film
+        // offset, the remaining chapter table changes the `moov` bytes even
+        // though the codec recipe is identical. Excluding them keeps init
+        // identity strict while making it depend only on the media recipe.
+        "-map_chapters".to_owned(),
+        "-1".to_owned(),
         "-t".to_owned(),
         format!("{:.9}", (duration_seconds - audio_anchor).max(0.0)),
         "-ar".to_owned(),
@@ -300,6 +308,98 @@ pub fn vod_pipe_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encoded_vod_recipe_explicitly_excludes_source_chapters() {
+        let source = crate::domain::MediaFile {
+            id: 1,
+            item_id: 1,
+            path: "/media/chaptered.mkv".into(),
+            size: 1,
+            mtime: 1,
+            duration_ms: Some(12_000),
+            container: Some("mkv".into()),
+            video_codec: Some("hevc".into()),
+            video_codec_tag: None,
+            video_profile: Some("Main".into()),
+            width: Some(640),
+            height: Some(360),
+            bit_depth: Some(8),
+            hdr: None,
+            hdr_format: None,
+            bitrate: Some(1_000_000),
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            scanned_at: 1,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: crate::domain::DolbyVisionFacts::default(),
+        };
+        let options = crate::transcode::TranscodeOptions::default();
+        let facts = crate::transcode::DecodeFacts::from_ffprobe_json(
+            &serde_json::json!({"streams":[{
+                "index":0,"codec_type":"video","codec_name":"hevc",
+                "profile":"Main","width":640,"height":360,
+                "pix_fmt":"yuv420p","avg_frame_rate":"24/1",
+                "r_frame_rate":"24/1","disposition":{"attached_pic":0}
+            }]}),
+            crate::transcode::DecodeSourceIdentity::from_sha256("a".repeat(64))
+                .expect("source identity"),
+        )
+        .expect("decode facts");
+        let capabilities = crate::transcode::DecodeCapabilities::new(
+            crate::transcode::DecodeCapabilitySnapshotIdentity::new(
+                "f".repeat(64),
+                "vod-chapter-test".to_owned(),
+                Some("e".repeat(64)),
+            )
+            .expect("capability identity"),
+            vec![],
+            vec![crate::transcode::SoftwareDecoder {
+                codec: "hevc".to_owned(),
+                implementation: Some("hevc".to_owned()),
+            }],
+        )
+        .expect("capabilities");
+        let plan = crate::transcode::resolve_transcode(
+            &crate::transcode::TranscodeRequest::new(
+                crate::transcode::Encoder::Software,
+                crate::transcode::TranscodeMediaOptions::from_options(&source, &options),
+            ),
+            &facts,
+            &capabilities,
+            &crate::transcode::DecodePolicySnapshot::new(
+                crate::transcode::DecodePlanPolicy::Legacy,
+                None,
+            ),
+            &crate::transcode::AttemptRestrictions::none(),
+        )
+        .expect("software plan");
+        let execution = crate::transcode::TranscodeExecution::from_options(
+            &source,
+            &options,
+            crate::transcode::Pacing::unpaced(),
+            ".",
+        )
+        .expect("execution");
+        let args = vod_pipe_args(
+            &source,
+            &plan,
+            &execution,
+            VodFrameGrid::new(24, 1).expect("grid"),
+            12.0,
+        );
+        let chapter_options = args
+            .windows(2)
+            .filter(|pair| pair[0] == "-map_chapters")
+            .collect::<Vec<_>>();
+        assert_eq!(chapter_options.len(), 1);
+        assert_eq!(chapter_options[0][1], "-1");
+        assert!(
+            args.iter().position(|arg| arg == "-map_chapters")
+                < args.iter().position(|arg| arg == "pipe:1")
+        );
+    }
 
     #[test]
     fn ntsc_grid_preserves_cadence_and_exact_restart_boundaries() {
