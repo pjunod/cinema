@@ -3181,19 +3181,17 @@
   .lc-preview{position:sticky;top:16px;align-self:start}.lc-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
   .lc-following #ptimeline,.lc-following #pbback,.lc-following #pbforward{display:none!important}
   @media(max-width:760px){.lc-editor{grid-template-columns:minmax(0,1fr)}.lc-preview{position:static}.lc-programme{grid-template-columns:76px minmax(0,1fr)}.lc-programme>button{grid-column:2}.lc-grid{grid-template-columns:minmax(0,1fr)}}
-/* Viewing hierarchy shared by every layout; colors inherit the chosen theme. */
-.watch-page{max-width:1180px;margin:0 auto;min-width:0}.watch-hero{position:relative;isolation:isolate;display:grid;grid-template-columns:150px minmax(0,1fr);gap:28px;padding:24px 0;margin-bottom:24px}.watch-backdrop{position:absolute;inset:0;z-index:-1;background-size:cover;background-position:center;opacity:.12;border-radius:var(--radius)}.watch-poster{width:150px}.watch-poster .art{width:100%;border-radius:var(--radius)}.watch-heading h1{margin:8px 0 14px;font-size:36px;line-height:1.15}.watch-heading .overview{max-width:750px;margin:0 0 14px}.watch-kicker{font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)}.watch-more summary,.watch-media summary{cursor:pointer;font-weight:600;padding:12px 0}.watch-more .actions{margin-top:8px}.watch-resume{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(240px,1fr);gap:24px;margin:18px 0 28px}.watch-resume-main,.watch-preferences{border:1px solid var(--line);background:var(--panel);border-radius:var(--radius);padding:22px;min-width:0}.watch-resume-main{border-left:3px solid var(--accent)}.watch-resume-main h2{font-size:23px;margin:10px 0}.watch-resume-main .actions{margin-bottom:0}.watch-resume>p,.watch-resume>div:only-child{grid-column:1/-1}.watch-preferences h3{margin:0 0 12px}.watch-preferences .preplay{margin:0;border:0;padding:0}.watch-preferences select{max-width:100%;min-width:0}.watch-progress{height:4px;border-radius:4px;overflow:hidden;background:var(--line);margin:18px 0 14px}.watch-progress i{display:block;height:100%;background:var(--accent)}.watch-episodes{margin:26px 0}.watch-seasons{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:12px}.watch-seasons a{padding:18px;display:flex;flex-direction:column;gap:6px}.watch-seasons small{color:var(--muted)}.watch-media{border-top:1px solid var(--line);margin-top:12px}.watch-media .version{margin:12px 0}.watch-media .preplay{max-width:700px}.watch-admin>summary{color:var(--muted)}.watch-browse{display:flex;gap:10px;flex-wrap:wrap;margin:4px 0 22px}.search-group{margin:28px 0}.search-group h2{font-size:19px}.search-group .meta .t,.search-group .meta .stxt{white-space:normal;overflow:visible;text-overflow:clip}.search-group .poster{align-self:start}.search-tools{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:16px 0}.search-tools label{display:flex;gap:8px;align-items:center;margin:0}.search-tools select{width:auto}
-@media(max-width:760px){.watch-hero{grid-template-columns:90px minmax(0,1fr);gap:16px;padding:12px 0}.watch-poster{width:90px}.watch-heading h1{font-size:27px}.watch-heading .overview{font-size:14px}.watch-resume{grid-template-columns:1fr;gap:12px}.watch-resume-main,.watch-preferences{padding:18px}.watch-seasons{grid-template-columns:repeat(2,minmax(0,1fr))}.watch-page .pagehead{margin-bottom:6px}}
-@media(max-width:480px){.watch-browse .ghost{min-height:44px}.watch-kicker{letter-spacing:.5px}.watch-heading .watch-more .actions{flex-direction:column;align-items:stretch}.watch-resume .actions{flex-wrap:wrap}}
+.search-group{margin:28px 0}.search-group h2{font-size:19px}.search-group .meta .t,.search-group .meta .stxt{white-space:normal;overflow:visible;text-overflow:clip}.search-group .poster{align-self:start}.search-tools{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:16px 0}.search-tools label{display:flex;gap:8px;align-items:center;margin:0}.search-tools select{width:auto}
 
 .lc-editor{align-items:start;gap:24px}.lc-editor>section,.lc-editor>.lc-preview{min-width:0}.lc-editor textarea{width:100%;min-height:112px;resize:vertical;font:inherit;padding:14px;background:var(--panel2);color:var(--text);border:1px solid var(--line);border-radius:var(--radius)}.lc-editor .lc-steps{display:flex;gap:8px;margin-bottom:24px;flex-wrap:wrap}.lc-editor .lc-steps button{border-radius:6px;padding:10px 12px;min-height:44px}.lc-editor .lc-steps .on{color:var(--accent);border-color:var(--accent)}.lc-editor .lc-actions{gap:8px;flex-wrap:wrap}.lc-editor .lc-selected{margin:14px 0}.lc-editor .lc-selected b{font-size:13px;color:var(--muted)}.lc-editor details{margin:18px 0}.lc-editor details summary{cursor:pointer;font-weight:600;margin-bottom:12px}.lc-editor .lc-preview h2{font-size:24px}.lc-editor .lc-checks label{min-height:40px;align-items:center}.lc-editor .lc-checks input{flex-shrink:0}.lc-editor-footer{border-top:1px solid var(--line);padding-top:18px;margin-top:24px}.lc-editor .lc-intro{font-size:24px;margin:0 0 18px}.lc-empty-start{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin:22px 0}.lc-empty-start button{padding:22px;text-align:left}.lc-empty-start strong{display:block;font-size:18px;margin-bottom:8px}.lc-empty-start span{display:block;color:var(--muted);font-size:13px}@media(max-width:760px){.lc-editor{grid-template-columns:1fr}.lc-editor textarea,.lc-editor input,.lc-editor select{font-size:16px}.lc-editor .lc-steps{gap:4px}.lc-editor .lc-steps button{font-size:13px;padding:8px}}
 
+.watch-kicker{font-size:12px;letter-spacing:1px;text-transform:uppercase;color:var(--muted)}.watch-browse{display:flex;gap:10px;flex-wrap:wrap;margin:4px 0 22px}@media(max-width:480px){.watch-browse .ghost{min-height:44px}.watch-kicker{letter-spacing:.5px}}
 .activity-viewing{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(280px,1fr);gap:22px;align-items:start;margin-bottom:24px}.activity-viewer{display:flex;width:100%;align-items:center;gap:14px;text-align:left;border:1px solid var(--line);background:var(--panel);padding:16px;margin:0 0 10px}.activity-viewer.selected{border-color:var(--accent);background:var(--panel2)}.activity-viewer strong,.activity-viewer small{display:block}.activity-viewer strong{font-size:16px}.activity-viewer small{margin-top:4px;color:var(--muted)}.activity-viewer-mark{color:var(--accent)}.activity-viewer-state{font-size:12px;margin-left:auto;color:var(--muted)}.activity-viewer-detail{margin:0;min-width:0}.activity-viewer-detail h2{font-size:22px;margin:10px 0 18px}.activity-viewer-detail .specs{grid-template-columns:100px minmax(0,1fr)}.activity-viewer-detail summary{cursor:pointer;margin:14px 0}.activity-idle{padding:14px 18px;background:var(--panel);border-radius:var(--radius);color:var(--muted);margin-bottom:18px}.activity-idle details{margin:8px 0}.analysis-causes{padding:18px;border:1px solid var(--line);background:var(--panel);border-radius:var(--radius);margin:16px 0}.analysis-causes h2{font-size:18px;margin:0}.analysis-causes p{font-size:13px}.analysis-table .analysis-file{font-size:15px}.analysis-table .analysis-sub{overflow-wrap:anywhere}.analysis-table td{vertical-align:top}.analysis-summary-line{display:flex;gap:18px;flex-wrap:wrap;margin:14px 0}.analysis-summary-line>span{display:flex;gap:5px;align-items:baseline}.system-attention{padding:18px;background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:var(--radius);margin:18px 0}.system-attention h2{font-size:19px;margin:0 0 8px}.system-attention p{margin:8px 0}.enable-advisory{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px}.enable-advisory>div{padding:15px;background:var(--panel2);border-radius:var(--radius)}.enable-advisory strong,.enable-advisory small{display:block}.enable-advisory small{color:var(--muted);margin-top:6px}@media(max-width:760px){.activity-viewing{grid-template-columns:1fr}.activity-viewer-state{white-space:normal}.search-tools{align-items:stretch}.search-tools label{flex-wrap:wrap;width:100%}.search-tools select,.search-tools input{max-width:100%;font-size:16px}.analysis-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}.analysis-summary-line{gap:12px}}
 
 
 .mobile-search{display:none}@media(max-width:600px){header.top .mobile-search{display:inline-flex;width:40px;align-items:center;justify-content:center;font-size:22px}header.top:not(.search-open)>.search{display:none}header.top nav a{white-space:nowrap}header.top #activity{display:none}header.top .dvr-global{max-width:120px}header.top nav{padding-bottom:0;min-height:40px}header.top .topctl{gap:4px}}
 
-.watch-about-compact{display:none}@media(max-width:760px){.watch-about-wide{display:none}.watch-about-compact{display:block;margin:12px 0}.watch-about-compact summary{cursor:pointer;padding:8px 0}.watch-hero{grid-template-columns:70px minmax(0,1fr);gap:14px}.watch-poster{width:70px}}@media(max-width:600px){header.top nav{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;overflow:visible;gap:0}header.top nav a{padding:10px 4px;font-size:12px;text-align:center;white-space:normal;min-width:0}}
+@media(max-width:600px){header.top nav{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:100%;overflow:visible;gap:0}header.top nav a{padding:10px 4px;font-size:12px;text-align:center;white-space:normal;min-width:0}}
 @media(max-width:899px){[data-layout=theater]:has(.th-top .dvr-global.on){--th-top:100px}[data-layout=theater] .th-top{flex-wrap:wrap;padding-top:4px;padding-bottom:4px;gap:8px}[data-layout=theater] .th-top .search{flex:1 1 80px;width:80px;min-width:0}[data-layout=theater] .th-top .dvr-global{order:4;max-width:100%;white-space:normal;margin-right:auto}[data-layout=theater] .th-top .dvr-global.on{flex-basis:100%;width:100%;justify-content:center}[data-layout=theater] .th-pills{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));width:calc(100% - 28px);border-radius:18px;gap:2px}[data-layout=theater] .th-pills a{text-align:center;padding:8px 4px;min-width:0;font-size:12px;white-space:normal}[data-layout=theater] main#main{padding-bottom:120px}[data-layout=catalog] .px-foot .dvr-global{order:5;max-width:100%;white-space:normal;flex-basis:100%}}
 
 /* Playback info: the same reading order on phones, tablets and desktop. */
@@ -3224,12 +3222,6 @@
 
 .live-stats{position:fixed!important;top:20px!important;right:20px!important;max-height:calc(100dvh - 40px)!important;z-index:9999!important}
 
-/* Item pages: source facts stay visible; long track lists disclose on demand. */
-.calm-item .watch-hero{padding:12px 0;align-items:start;margin-bottom:20px}.calm-item .watch-heading h1{font-size:30px;margin:0 0 8px}.calm-item .watch-heading>p{margin:8px 0 14px}.item-quality{display:flex;flex-wrap:wrap;gap:6px}.vbadge.container{color:var(--muted);background:var(--panel);border-color:var(--line)}.item-availability{font-size:13px;color:var(--muted)}.item-primary{align-items:start;flex-wrap:wrap;gap:8px}.item-primary .watch-more{position:relative}.item-primary .watch-more>summary{border:1px solid var(--line);border-radius:var(--radius);padding:10px 14px;min-height:22px}.item-primary .watch-more .actions{display:flex;flex-wrap:wrap}.item-media{border:1px solid var(--line);border-radius:var(--radius);padding:0 20px 16px;background:var(--panel);min-width:0}.item-media-heading{display:flex;justify-content:space-between;align-items:center;gap:16px;border-bottom:1px solid var(--line);padding:16px 0}.item-media-heading h2{font-size:18px;margin:0}.item-media-heading label{display:flex;align-items:center;gap:10px;margin:0;min-width:0;max-width:70%}.item-media-heading select{min-width:0;max-width:100%}.item-media .specs{grid-template-columns:110px minmax(0,1fr);gap:16px 20px}.item-media .specs dd{min-width:0;overflow-wrap:anywhere}.item-media .mode-detail{display:block;margin:6px 0 0}.media-tracks>summary{display:flex;justify-content:space-between;align-items:start;gap:16px;cursor:pointer;min-height:44px}.media-tracks>summary>span:last-child{white-space:nowrap;color:var(--muted);font-size:12px}.media-tracks>summary>span:last-child:after{content:' ▾'}.media-tracks small{display:block;color:var(--muted);font-size:12px;margin-top:4px}.media-track-list{padding:14px 0}.media-track-list input[type=search]{width:100%;box-sizing:border-box}.media-track-option{display:flex;gap:10px;align-items:start;padding:10px 0;margin:0;cursor:pointer;border-bottom:1px solid var(--line)}.media-track-option input{width:auto;flex:0 0 auto;margin:4px 0}.media-track-option[hidden]{display:none}.item-media .analysis-brief{border:0;border-top:1px solid var(--line);padding:16px 0 0}.item-media .analysis-brief h2{font-size:15px}.item-media .fn{font-size:12px;color:var(--muted)}
-@media(max-width:900px){.calm-item .watch-hero{grid-template-columns:85px minmax(0,1fr);gap:16px}.calm-item .watch-poster{width:85px}.calm-item .watch-heading h1{font-size:26px}.item-media{padding:0 14px 14px}.item-media-heading{flex-wrap:wrap}.item-media-heading label{width:100%;max-width:100%}.item-media .specs{grid-template-columns:minmax(0,1fr);gap:6px}.item-media .specs dt{margin-top:12px}.item-media .specs dd{margin-bottom:10px}.item-primary>.btnplay{min-height:44px}.item-primary .ghost{min-height:44px}.media-track-list input[type=search]{font-size:16px}}
-
-.item-quality .vbadge.res,.item-quality .vbadge.codec{color:#83baff;background:#152a42;border-color:#34577c}.item-quality .vbadge.hdr,.item-quality .vbadge.dv{color:#edc477;background:#352a17;border-color:#705931}.calm-item .watch-heading .overview{margin-top:16px}.item-primary>a.ghost{display:inline-flex;align-items:center;box-sizing:border-box;padding:10px 14px;border:1px solid var(--line);border-radius:var(--radius);background:var(--panel);color:var(--text);min-height:44px}.item-diagnostics{display:grid;grid-template-columns:110px minmax(0,1fr);gap:20px;border-top:1px solid var(--line);margin-top:16px;padding-top:16px;font-size:13px}.item-diagnostics>strong{font-weight:400;color:var(--muted)}.item-media .item-diagnostics .analysis-brief{background:none;border:0;margin-top:0!important;padding:0}.item-media .ppnote{font-size:12px;color:var(--muted)}
-@media(max-width:760px){.calm-item .watch-heading{display:contents}.calm-item .watch-hero{grid-template-columns:70px minmax(0,1fr);gap:7px 14px}.calm-item .watch-poster{grid-column:1;grid-row:1/5;width:70px}.calm-item .watch-heading>h1,.calm-item .watch-heading>p,.calm-item .item-quality{grid-column:2}.calm-item .watch-heading>p{margin:0 0 7px}.calm-item .item-description{grid-column:1/-1}.calm-item .watch-heading .overview{margin:12px 0}.item-primary{gap:8px}.item-primary>.btnplay{flex:1 1 100%}.item-diagnostics{grid-template-columns:minmax(0,1fr);gap:8px}}
 </style>
 <script>
 // Theme engine. Runs in <head> before first paint so there's no flash of the
@@ -5570,125 +5562,6 @@ async function viewSearch(q){
   document.getElementById("main").innerHTML=`${head}<div class="search-tools"><span id="search-result-count" class="muted" aria-live="polite"></span><label>Type <select id="search-kind" onchange="paintSearchResults()"><option value="all">All types</option>${kinds.map(k=>`<option value="${esc(k)}">${esc(k==='show'?'Series':k)}</option>`).join('')}</select></label></div><div id="search-results"></div>`;
   paintSearchResults();
 }
-// Shared viewing surfaces use the same playback calls and track selections in
-// every layout. Administrative detail remains reachable below the watch action.
-function playItem(id){AUTOPLAY=String(id);if(location.hash===`#/item/${id}`)viewItem(id);else location.hash=`#/item/${id}`;}
-function viewingKind(p){return ["movie","episode","show","season","video"].includes(p.item.kind);}
-function viewingEpisodeLabel(it){
-  return [it.season_number!=null?`S${it.season_number}`:"",it.episode_number!=null?`E${it.episode_number}`:""].join(" · ");
-}
-
-
-
-function viewingMore(p){
-  const it=p.item;
-  return `<details class="watch-more"><summary>More actions</summary><div class="actions">${watchControls(it)}${p.editable?`<button class="ghost" onclick='openEdit(${esc(JSON.stringify(it))})'>Edit details</button>`:""}${["movie","show","episode"].includes(it.kind)?`<button class="ghost" onclick='makeLibraryChannelFromItem(${esc(JSON.stringify(exactWireId(it)))},${esc(JSON.stringify(it.kind))},${esc(JSON.stringify(it.title))})'>Make a channel</button>`:""}${ME&&ME.is_admin?`<button class="ghost" onclick='refreshArtwork(${esc(JSON.stringify(exactWireId(it)))},this)'>Refresh artwork</button>`:""}</div></details>`;
-}
-let VIEWING_PAGE=null, VIEWING_FILE=null;
-function itemHeaderBadges(f){
-  if(!f)return '';
-  const r=resLabel(f.width,f.height),h=hdrChip(f),c=codecLabel(f.video_codec);
-  const parts=[[r,'res'],[h?.text||(f.video_codec?'SDR':''),h?.cls||'hdr'],[[c,f.bit_depth>=10?`${f.bit_depth}-bit`:''].filter(Boolean).join(' '),'codec'],[f.container?.toUpperCase(),'container']];
-  return parts.filter(([label])=>label).map(([label,kind])=>`<span class="vbadge ${kind}">${esc(label)}</span>`).join('');
-}
-function englishTrackNote(tracks,kind,probed=true){
-  if(tracks.some(t=>/^(en|eng|english)([-_]|$)/i.test(t.language||'')))return `English ${kind} available`;
-  if(!probed)return `${kind==='audio'?'Audio':'Subtitle'} languages not analyzed`;
-  if(tracks.some(t=>!t.language||/^(und|unknown)$/i.test(t.language)))return `English ${kind} not confirmed · untagged tracks`;
-  return `No English ${kind}`;
-}
-function itemTrackSummary(f,kind){
-  const audio=kind==='audio',tracks=audio?(f.audio_streams||[]):(f.subtitle_streams||[]);
-  const chosen=prePlaySelection(f.id)?.[kind],defaults=f.playback_defaults?.[audio?'audio':'subtitle'];
-  const index=chosen==null?defaults?.selected_index:chosen;
-  const track=tracks.find(t=>t.index===index);
-  if(track)return (audio?audioFactLabel:subFactLabel)(track)+(chosen==null?' · default':'');
-  if(!audio)return chosen===-1||defaults?'Off':tracks.length?'Server default':'None';
-  return tracks.length?'Server default':'None';
-}
-function itemTrackRow(f,kind){
-  const audio=kind==='audio',tracks=audio?(f.audio_streams||[]):(f.subtitle_streams||[]),label=audio?'Audio':'Subtitles',id=exactWireId(f);
-  const chosen=prePlaySelection(f.id)?.[kind];
-  const option=(value,text)=>`<label class="media-track-option" data-track-option><input type="radio" name="track-${id}-${kind}" value="${value}" ${String(chosen??'')===String(value)?'checked':''} ${f.available?'':'disabled'} onchange='chooseItemTrack(${esc(JSON.stringify(id))},${esc(JSON.stringify(kind))},this.value)'><span>${esc(text)}</span></label>`;
-  const note=englishTrackNote(tracks,audio?'audio':'subtitles',!!f.video_codec||tracks.length>0);
-  return `<dt>${label}</dt><dd><details class="media-tracks" data-media-tracks><summary><span><span data-track-summary="${kind}">${esc(itemTrackSummary(f,kind))}</span><small>${esc(note)}</small></span><span>${tracks.length} tracks</span></summary><div class="media-track-list"><label>Find ${label.toLowerCase()}<input type="search" aria-label="Find ${label.toLowerCase()} tracks" placeholder="Language, format or title" oninput="filterItemTracks(this.closest('[data-media-tracks]'))"></label>${option('', 'Use server default')}${audio?'':option(-1,'Off') }<div data-track-results>${tracks.map(t=>option(t.index,(audio?audioFactLabel:subFactLabel)(t))).join('')}</div><button class="ghost sm" data-track-more ${tracks.length<=6?'hidden':''} onclick="this.closest('[data-media-tracks]').dataset.all=this.closest('[data-media-tracks]').dataset.all==='true'?'false':'true';filterItemTracks(this.closest('[data-media-tracks]'))">Show all ${tracks.length} tracks</button><small data-track-count aria-live="polite"></small></div></details></dd>`;
-}
-function filterItemTracks(details){
-  const query=details.querySelector('input[type=search]').value.trim().toLocaleLowerCase(),all=details.dataset.all==='true';
-  const rows=[...details.querySelectorAll('[data-track-results] [data-track-option]')],matches=rows.filter(row=>row.textContent.toLocaleLowerCase().includes(query));
-  rows.forEach(row=>row.hidden=true);matches.slice(0,all?matches.length:6).forEach(row=>row.hidden=false);
-  const more=details.querySelector('[data-track-more]');more.hidden=matches.length<=6;more.textContent=all?'Show fewer tracks':`Show all ${matches.length} tracks`;
-  details.querySelector('[data-track-count]').textContent=matches.length?`${all?matches.length:Math.min(6,matches.length)} of ${matches.length} matching tracks`:'No matching tracks';
-}
-function chooseItemTrack(id,kind,value){
-  setPrePlay(id,kind,value);
-  const f=VIEWING_PAGE?.files.find(file=>String(file.id)===String(id));
-  const summary=document.querySelector(`[data-track-summary="${kind}"]`);
-  if(f&&summary)summary.textContent=itemTrackSummary(f,kind);
-}
-function selectItemVersion(id){
-  if(!VIEWING_PAGE||location.hash!==`#/item/${VIEWING_PAGE.id}`)return;
-  VIEWING_FILE=String(id);
-  document.getElementById('main').innerHTML=viewingItemBody(VIEWING_PAGE);
-  document.querySelectorAll('[data-media-tracks]').forEach(filterItemTracks);
-  document.getElementById('item-version')?.focus({preventScroll:true});
-  hydrateDvFileActions(VIEWING_PAGE.files);
-  if(prePlaySelection(id))prePlayPreview(id);
-}
-function viewingItemBody(p){
-  if(VIEWING_PAGE!==p){VIEWING_PAGE=p;VIEWING_FILE=String(p.playable?.id||p.best?.id||'');}
-  const it=p.item,file=p.files.find(f=>String(f.id)===VIEWING_FILE)||p.playable||p.best;
-  const trail=[{href:'#/',label:'Home'}].concat(NAV_ORIGIN?[NAV_ORIGIN]:[]).concat(p.ancestors.map(a=>({href:`#/item/${exactWireId(a)}`,label:a.title}))).concat([{label:it.title}]);
-  const years=p.years?`${p.years.from}${p.years.to>p.years.from?'–'+p.years.to:''}`:'';
-  let actions='',content='';
-  if(file?.available){
-    actions=`<div class="actions item-primary"><button class="btnplay" onclick='${playCall(p,file,p.playStart)}'>▶ ${p.resume?'Resume '+fmtDur(p.resume):'Play'}</button>${p.resume?`<button class="ghost" onclick='${playCall(p,file,0)}'>Start over</button>`:''}<a class="ghost" download="${esc(file.filename||it.title)}" href="${esc(tok(`/api/v1/files/${exactWireId(file)}/download`))}">Download</a>${viewingMore(p)}</div>${p.resume?`<p class="muted">${fmtDur(Math.max(0,(file.duration_ms||p.runtime||0)-p.resume))} remaining</p>`:''}`;
-  }else if(p.files.length){actions='<p class="filemissing">This file is unavailable. Choose another version or check its library location.</p>';}
-  else if(['show','season'].includes(it.kind)){content='<section class="watch-resume" id="series-continue" aria-live="polite"><p class="muted">Finding your next episode…</p></section>';}
-  else{actions='<p class="filemissing">No media file available yet.</p>';}
-  if(file){
-    const version=p.files.length>1?`<label for="item-version">Version <select id="item-version" onchange="selectItemVersion(this.value)">${p.files.map(f=>`<option value="${esc(exactWireId(f))}" ${f===file?'selected':''}>${esc([resLabel(f.width,f.height),hdrChip(f)?.text,codecLabel(f.video_codec),fmtSize(f.size),f.available?'':'Missing',f.filename].filter(Boolean).join(' · '))}</option>`).join('')}</select></label>`:'';
-    const tracks=itemTrackRow(file,'audio')+itemTrackRow(file,'subtitle');
-    content+=`<section class="item-media"><div class="item-media-heading"><h2>Media</h2>${version}</div>${specBlock(file,{pickers:false,analysis:false,trackRows:tracks,plain:true})}<p class="ppnote" id="pp-n-${exactWireId(file)}" role="status">${esc(PREPLAY_SCOPE_NOTE)}</p><div class="item-diagnostics"><strong>Diagnostics</strong><div>${analysisFileControl(file).replace('<h2>Content analysis</h2>','')||'<p class="muted">'+(file.video_codec?'Media metadata available.':'Media metadata has not been read yet.')+'</p>'}${dvFileActionMount(file)}</div></div>${file.missing_path&&ME?.is_admin?`<p class="problem">${esc(file.missing_path)}</p>`:''}${unprobedNote(file,it.id)}</section>`;
-  }
-  if(p.children.length){
-    const seasons=p.children.some(c=>c.kind==='season');
-    content+=`<section class="watch-episodes"><h2>${esc(p.childLabel)}</h2>${seasons?`<div class="watch-seasons">${p.children.map(c=>`<a class="ghost" href="#/item/${exactWireId(c)}"><strong>${esc(c.title)}</strong><small>${c.rollup?.leaves?`${c.rollup.watched} of ${c.rollup.leaves} watched`:'View episodes'}</small></a>`).join('')}</div>`:`<div class="eplist">${p.children.map(episodeRow).join('')}</div>`}</section>`;
-  }
-  const availability=file?[englishTrackNote(file.audio_streams||[],'audio',!!file.video_codec),englishTrackNote(file.subtitle_streams||[],'subtitles',!!file.video_codec)].join(' · '):'';
-  return `<div class="watch-page calm-item">${pageHead(trail)}<div class="watch-hero"><div class="watch-poster">${artHtml(it)}</div><div class="watch-heading"><h1>${esc(it.title)}</h1><p class="muted">${esc([it.kind==='show'?'Series':it.kind,years,fmtDur(file?.duration_ms||p.runtime||0),it.rollup?.leaves?`${it.rollup.watched} of ${it.rollup.leaves} watched`:''].filter(Boolean).join(' · '))}</p><div class="item-quality">${itemHeaderBadges(file)}</div>${availability?`<p class="item-availability">${esc(availability)}</p>`:''}<div class="item-description">${it.overview?`<p class="overview">${esc(it.overview)}</p>`:''}${actions||viewingMore(p)}</div></div></div>${content}</div>`;
-}
-// Fetch season summaries with bounded concurrency. Resolve by IDs, never by a
-// show's name. The hub wins when present; the fallback mirrors next-up order
-// for shows outside the hub's bounded twenty-row window.
-async function loadSeriesContinuation(p,generation){
-  const current=()=>generation===PAGE_RENDER_GENERATION&&location.hash===`#/item/${p.id}`;
-  const slot=()=>document.getElementById('series-continue');
-  try{
-    const seasons=p.children.filter(c=>c.kind==='season');
-    const parents=new Set((seasons.length?seasons:[p.item]).map(exactWireId));
-    const hubs=await api('/hubs');if(!current())return;
-    let episodeCount=p.children.filter(c=>c.kind==='episode').length;
-    let target=[...(hubs.continue_watching||[]),...(hubs.next_up||[])].find(it=>parents.has(String(it.parent_id)));
-    if(!target){
-      let episodes=p.children.filter(c=>c.kind==='episode');
-      for(let at=0;at<seasons.length;at+=3){
-        const batch=await Promise.all(seasons.slice(at,at+3).map(c=>api(`/items/${exactWireId(c)}`)));
-        if(!current())return;episodes.push(...batch.flatMap(d=>d.children||[]).filter(c=>c.kind==='episode'));
-      }
-      episodeCount=episodes.length;
-      const order=it=>(it.season_number||0)*100000+(it.episode_number||0);
-      const last=Math.max(-1,...episodes.filter(it=>it.watch&&it.watch.watched).map(order));
-      target=episodes.filter(it=>it.watch&&!it.watch.watched&&it.watch.position_ms>0).sort((a,b)=>(b.watch.updated_at||0)-(a.watch.updated_at||0))[0]
-        ||episodes.filter(it=>!(it.watch&&(it.watch.watched||it.watch.position_ms>0))&&order(it)>last).sort((a,b)=>order(a)-order(b))[0];
-    }
-    if(!current()||!slot())return;
-    if(!target){slot().innerHTML=episodeCount?'<div><h2>You’re all caught up</h2><p class="muted">Browse the seasons below to rewatch an episode.</p></div>':'<div><h2>No episodes yet</h2><p class="muted">Episodes will appear here once they have been added to the library.</p></div>';return;}
-    const duration=itemDurMs(target),resume=target.watch&&!target.watch.watched&&target.watch.position_ms>3000?target.watch.position_ms:0;
-    slot().innerHTML=`<div class="watch-resume-main"><span class="watch-kicker">${resume?'Continue watching':'Next episode'}</span><h2>${esc(target.title)}</h2><p class="muted">${esc([viewingEpisodeLabel(target),duration?`${fmtDur(Math.max(0,duration-resume))}${resume?' left':''}`:""].filter(Boolean).join(' · '))}</p>${resume&&duration?`<div class="watch-progress"><i style="width:${Math.min(100,resume/duration*100)}%"></i></div>`:""}<div class="actions"><button class="btnplay" onclick='playItem(${esc(JSON.stringify(exactWireId(target)))})'>▶ ${resume?'Resume episode':'Play episode'}</button><a class="ghost" href="#/item/${exactWireId(target)}">Episode details</a></div></div>`;
-  }catch(error){if(current()&&slot())slot().innerHTML='<div><h2>Continue watching is unavailable</h2><p class="muted">Your seasons are still available below. Open an episode to play it.</p></div>';}
-}
-
 // ---- detail helpers -------------------------------------------------------
 function fmtChannels(n){ return n===8?"7.1":n===7?"6.1":n===6?"5.1":n===2?"2.0":n===1?"Mono":(n?n+"ch":""); }
 function fmtMbps(bps){ return bps? (bps>=1000000? (bps/1000000).toFixed(bps>=10000000?0:1)+" Mb/s" : Math.round(bps/1000)+" kb/s") : ""; }
@@ -5966,7 +5839,7 @@ function trackFactRow(label, tracks, selectedIndex, chip, note, collapse=false){
   }
   return `<dt>${label}</dt><dd>${chips}${note?`<div class="langnote">${esc(note)}</div>`:""}</dd>`;
 }
-function specBlock(f,options={}){
+function specBlock(f){
   const vid=[f.video_codec&&f.video_codec.toUpperCase(),(f.width&&f.height)?`${f.width}×${f.height}`:null,(f.hdr_format||f.hdr),f.bit_depth?`${f.bit_depth}-bit`:null,fmtMbps(f.bitrate)].filter(Boolean).join(" · ");
   const file=[f.container&&f.container.toUpperCase(),fmtSize(f.size),fmtDur(f.duration_ms)].filter(Boolean).join(" · ");
   const auds=f.audio_streams||[], subs=f.subtitle_streams||[];
@@ -6006,9 +5879,10 @@ function specBlock(f,options={}){
   const analysis=analysisFileControl(f);
   return `<dl class="specs">
     ${vid||!auds.length?`<dt>Video</dt><dd>${esc(vid||"—")}</dd>`:''}
-    ${options.trackRows??(audRow+subRow)}
-    ${options.plain?hlsRow.replaceAll('HLS capability','Preparation').replace(/class="mode-chip [^"]*"/g,''):hlsRow}
-    <dt>File</dt><dd class="fn">${esc(f.filename)}${file?" · "+esc(file):""}</dd></dl>${options.pickers===false?"":prePlayPickers(f)}${options.analysis===false?"":analysis}`;
+    ${audRow}
+    ${subRow}
+    ${hlsRow}
+    <dt>File</dt><dd class="fn">${esc(f.filename)}${file?" · "+esc(file):""}</dd></dl>${prePlayPickers(f)}${analysis}`;
 }
 function analysisFileControl(f){
   if(!ME||!ME.is_admin||!f.available||!f.video_codec) return "";
@@ -6620,8 +6494,6 @@ async function viewItem(id){
   const page=await loadItem(id);
   if(generation!==PAGE_RENDER_GENERATION||location.hash!==`#/item/${id}`)return;
   document.getElementById("main").innerHTML=layoutView("item",page);
-  document.querySelectorAll("[data-media-tracks]").forEach(filterItemTracks);
-  if(["show","season"].includes(page.item.kind))loadSeriesContinuation(page,generation);
   DV_FILE_PAGE_FILES=page.files||[];
   hydrateDvFileActions(DV_FILE_PAGE_FILES).then(active=>{
     if(active&&generation===PAGE_RENDER_GENERATION&&location.hash.startsWith("#/item/")) armDvFilePoll(DV_FILE_PAGE_FILES,generation);
@@ -6638,7 +6510,6 @@ async function viewItem(id){
 }
 // Classic's item body — byte-for-byte what this app has always emitted.
 function classicItemBody(p){
-  if(viewingKind(p))return viewingItemBody(p);
   const d={files:p.files, ancestors:p.ancestors, children:p.children};
   const it=p.item, id=p.id, editable=p.editable;
   const channelBtn=["movie","show","episode"].includes(it.kind)
@@ -18750,7 +18621,7 @@ function uiEnableAdvisory(){
   const browser=typeof CSS!=='undefined'&&CSS.supports('display','grid')&&typeof fetch==='function';
   const libs=SETTINGS_DATA&&SETTINGS_DATA.libs;
   const row=(title,state,detail)=>`<div><strong>${esc(title)} · ${esc(state)}</strong><small>${esc(detail)}</small></div>`;
-  return `<section class="card" id="ui-enable"><h2>Enable</h2><p>The updated browsing, continuation and activity layouts are enabled in this build. They need no rollout flag.</p><div class="enable-advisory">${row('Browser support',browser?'Met':'Not confirmed','Responsive layout and API support. This observation is advisory.')}${row('Signed-in account',ME?'Met':'Not confirmed','Watch state and recording visibility use the signed-in account.')}${row('Library data',Array.isArray(libs)?libs.length?'Available':'No libraries configured':'Not loaded','Readable files and accurate metadata make continuation and preview useful. Missing data is shown in context.')}${row('Playback and recording','Your saved choices','Use the controls below to enable recording, channel playback or quality handoff. Readiness results never override your choice.')}</div><p class="hint">Advisory only: unmet or unknown checks do not hide features or disable enable switches. Existing authorization, file availability and operational safety rules still apply.</p><nav class="watch-browse" aria-label="Enable controls"><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-recording')?.scrollIntoView({behavior:'smooth',block:'start'})">Recording ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-channels')?.scrollIntoView({behavior:'smooth',block:'start'})">Library channels ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-quality')?.scrollIntoView({behavior:'smooth',block:'start'})">Quality handoff ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-hevc-sample-entry')?.scrollIntoView({behavior:'smooth',block:'start'})">HEVC admission ↓</a></nav></section>`;
+  return `<section class="card" id="ui-enable"><h2>Enable</h2><p>The updated search and activity layouts are enabled in this build. They need no rollout flag.</p><div class="enable-advisory">${row('Browser support',browser?'Met':'Not confirmed','Responsive layout and API support. This observation is advisory.')}${row('Signed-in account',ME?'Met':'Not confirmed','Watch state and recording visibility use the signed-in account.')}${row('Library data',Array.isArray(libs)?libs.length?'Available':'No libraries configured':'Not loaded','Readable files and accurate metadata make continuation and preview useful. Missing data is shown in context.')}${row('Playback and recording','Your saved choices','Use the controls below to enable recording, channel playback or quality handoff. Readiness results never override your choice.')}</div><p class="hint">Advisory only: unmet or unknown checks do not hide features or disable enable switches. Existing authorization, file availability and operational safety rules still apply.</p><nav class="watch-browse" aria-label="Enable controls"><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-recording')?.scrollIntoView({behavior:'smooth',block:'start'})">Recording ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-channels')?.scrollIntoView({behavior:'smooth',block:'start'})">Library channels ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-quality')?.scrollIntoView({behavior:'smooth',block:'start'})">Quality handoff ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-hevc-sample-entry')?.scrollIntoView({behavior:'smooth',block:'start'})">HEVC admission ↓</a></nav></section>`;
 }
 function systemAttentionHtml(sys){
   const storage=sys.storage||{}, mounts=(storage.mounts||[]).filter(m=>m.read_bps==null||m.cache_suspect);
@@ -21411,7 +21282,6 @@ function catalogLibraryShell(m){
 // is on the page; the file-missing warning stays WITH the play lockup because
 // it is the answer to "can I play this", not a footnote.
 function catalogItemBody(p){
-  if(viewingKind(p))return viewingItemBody(p);
   const d={files:p.files, ancestors:p.ancestors, children:p.children};
   const it=p.item, id=p.id, editable=p.editable;
 
@@ -21874,7 +21744,6 @@ function theaterLibraryShell(m){
 // the play lockup because it is the answer to "can I play this", not a
 // footnote.
 function theaterItemBody(p){
-  if(viewingKind(p))return viewingItemBody(p);
   const it=p.item;
 
   // Admin affordances. .th-admin is the hook the television surface hides them

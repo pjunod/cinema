@@ -1,8 +1,28 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-13 · Kept current by the working agent in the same
+**Updated:** 2026-09-16 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## The web item page is back to its pre-#317 layout
+
+**Branch `revert/web-item-page-pre-317`, stacked on `fix/dvr-attention-placeholders`
+([#340](http://forge.lan:3000/noirr/plurx/pulls/340)); both open as drafts,
+adversarial review done and its findings folded, full lane still to run once.**
+Paul compared real renders of the web item page before PR #317, after PR #317
+and at current main and chose the pre-#317 page. The branch removes the shared
+"viewing" item body and its styles so every layout renders its own original
+item body again; the item route renders pixel-identical to the pre-#317 tree at
+1280 px for movie, series, season and episode against the ui-baseline fixture
+library. Grid and rail poster cards were never changed by either PR. Native
+item pages are out of scope and keep the PR #330 design. Regenerating the
+structural golden for the restoration turned up a real bug on `main`:
+`GET /api/v1/dvr/attention` answers 500 on every replicated store because the
+Hiqlite page statement named its placeholders out of order — fixed in #340
+with the assembled-statement census extended to cover it. The committed
+`tests/ui-structure.golden` still predates PR #317 and every route's header
+chrome has drifted since (Recordings link, DVR indicator, mobile search); that
+regeneration is a separate chore, not part of these two PRs.
 
 ## Live TV start, stall, and tvOS surface has landed on main
 

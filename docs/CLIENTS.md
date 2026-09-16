@@ -267,6 +267,7 @@ Native Home also uses its original featured cards, media shelves and platform
 navigation. Apple TV retains its shared card-clipping repairs.
 Global Recently added excludes DVR libraries before the server limit. The
 [revision record](clients/CALM-LIBRARY-PAGES.md) records the web Home restoration
-and the Apple and Android restoration. Item pages show source quality/container badges and
-English track availability above an open Media section. Long audio and subtitle
-lists are collapsed, searchable, and show six matches before Show all.
+and the Apple and Android restoration, and the web item page's return to its
+original per-layout body. Native item pages show source quality/container badges
+and English track availability above an open Media section; their long audio
+and subtitle lists are collapsed, searchable, and show six matches before Show all.

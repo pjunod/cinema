@@ -30,7 +30,7 @@ Native follow-up: [Phone, tablet and TV layout fixes](clients/NATIVE-LAYOUT-FOLL
 
 Native Home restoration: [Original Apple Home screens](apple-builds/334-original-home.md) — **open**.
 
-Library-page revision: [Quiet Home and open media details](clients/CALM-LIBRARY-PAGES.md) — **built**.
+Library-page revision: [Quiet Home and open media details](clients/CALM-LIBRARY-PAGES.md) — **built**; web Home and item page since restored to their originals.
 
 ## Find it fast
 

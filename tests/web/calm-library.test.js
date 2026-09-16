@@ -8,23 +8,20 @@ function declaration(name) {
   const tail = source.slice(start);
   return tail.slice(0, tail.indexOf('\n}') + 2);
 }
-const english = new Function(`${declaration('englishTrackNote')}; return englishTrackNote;`)();
-assert.match(english([{language: 'en-US'}], 'audio'), /available/);
-assert.match(english([{language: 'fra'}, {language: null}], 'audio'), /not confirmed/);
-assert.equal(english([{language: 'fra'}], 'subtitles'), 'No English subtitles');
-assert.match(english([], 'audio', false), /not analyzed/);
-const summary = new Function('prePlaySelection', 'audioFactLabel', 'subFactLabel',
-  `${declaration('itemTrackSummary')}; return itemTrackSummary;`
-)(id => id === 'file-b' ? {audio: 7, subtitle: -1} : null,
-  track => track.language, track => track.language);
-const file = {id: 'file-b', audio_streams: [{index: 0, language: 'French'}, {index: 7, language: 'English'}],
-  subtitle_streams: [{index: 9, language: 'English'}],
-  playback_defaults: {audio: {selected_index: 0}, subtitle: {selected_index: 9}}};
-assert.equal(summary(file, 'audio'), 'English');
-assert.equal(summary(file, 'subtitle'), 'Off');
-assert.equal(summary({...file, id: 'file-a'}, 'audio'), 'French · default');
-assert.equal(summary({...file, id: 'file-a'}, 'subtitle'), 'English · default');
-console.log('Item regressions: unknown languages and per-file track choices passed.');
+// The item page is the original one on every layout: no per-layout dispatch to a
+// shared "viewing" body, no calm-item hero, no collapsible track lists. Each
+// layout's item body starts at its own model line, so a dispatch inserted above
+// it would move that line and fail here.
+for (const [name, first] of [['classicItemBody', 'const d={files:p.files, ancestors:p.ancestors, children:p.children};'],
+                             ['catalogItemBody', 'const d={files:p.files, ancestors:p.ancestors, children:p.children};'],
+                             ['theaterItemBody', 'const it=p.item;']]) {
+  const body = declaration(name);
+  assert.equal(body.split('\n')[1].trim(), first, `${name} opens with its own model, not a dispatch`);
+}
+assert.doesNotMatch(source, /function viewingItemBody\(|function viewingKind\(|function loadSeriesContinuation\(|function itemTrackSummary\(|function englishTrackNote\(/);
+assert.doesNotMatch(source, /calm-item|watch-hero|watch-resume|item-quality|media-tracks|series-continue/);
+assert.match(declaration('specBlock'), /\$\{audRow\}\n\s*\$\{subRow\}\n\s*\$\{hlsRow\}/);
+console.log('Item pages use the original per-layout bodies with open track facts.');
 
 const hero = new Function(
   `const THEATER_HERO_KINDS={movie:1,episode:1,video:1}; ${declaration('theaterHeroPick')}; return theaterHeroPick;`)();
