@@ -601,6 +601,14 @@ struct PreparedReplacementAction: Equatable {
 struct ControlDelivery: Codable, Equatable {
     /// Extensible relay value: only the exact value `ready` has client meaning.
     var subtitleReadiness: String?
+    /// How far the server has got with a preparation for the newest ask:
+    /// `staging`, `offered`, or `none`.
+    ///
+    /// Optional because it is optional on the wire. An older server, or a
+    /// relay that predates the field, sends nothing — and **absence must never
+    /// be read as a decline**. `PreparedOfferWait` is where that rule is
+    /// written down and tested; this is only the field it reads.
+    var preparation: String?
 }
 
 enum SubtitleReadinessDecision {
