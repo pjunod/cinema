@@ -1,11 +1,11 @@
 # Library pages — scan your library and inspect one file
 
-**Status:** built in PR #330; web Home restoration in PR #331 · **Updated:** 2026-09-15
+**Status:** built in PR #330; web Home restored in PR #331; native restoration in PR #334 · **Updated:** 2026-09-15
 
 Companion to [CLIENTS.md](../CLIENTS.md). This revision implements the approved
 Home and item-page proposals across the web, Apple and Android clients.
 
-## Web Home returns to its previous layouts
+## Home returns to its previous layouts on every device
 
 On September 15, 2026, the user requested restoration of the Classic, Catalog
 and Theater home pages from before the usability redesign (PR #317). Their
@@ -17,11 +17,26 @@ Classic uses library grids and Catalog uses library rails.
 The compact web Home composition and its unused styles are removed. The
 server still excludes recording libraries from global Recently added before
 the limit. Item pages and playback information retain the PR #330 design.
-This restoration targets the three web layouts; native Home is unchanged.
+The follow-up restores the original native Home composition too. iPhone and
+iPad regain their featured title, landscape Continue Watching and Next Up
+shelves, Recently Added and Coming Soon. Apple TV regains its original media
+shelves while retaining the later card-height and text-clipping repairs.
+Android phones regain the compact featured continuation; tablets and
+Android TV/Google TV regain their original shelves, library grouping and
+D-pad focus chain. The compact three-entry lists and Home-only recording
+sections are removed. Recording activity remains available in Live TV and
+Recordings, including the Apple tab's attention count.
 
-Apple and Android Home still lead with Recently added, with three compact
-Continue watching entries, a disclosure for the remainder, and a separate
-Recently recorded section. Their generic Next up shelf remains removed.
+Home navigation and rendering are the scope of the restoration. Item pages,
+track selection, playback information, Live TV and shared card repairs remain
+intact. Existing native Home regression expectations are restored with their
+original layouts. The one adversarial review found an Android TV focus race
+in the historical source: its pending request could be cancelled by setting
+claimed state too early. Home now marks the request claimed only after the
+focus helper reports success. The focused Compose regression is compiled;
+device execution is not claimed. Local iOS, tvOS and Android compilation
+passed. The final lane runs once after the review finding is addressed;
+no broad native unit suite is added.
 
 ## The item header describes the selected file
 
