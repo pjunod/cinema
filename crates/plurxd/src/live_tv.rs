@@ -8817,19 +8817,23 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
                 bytes.extend_from_slice(b"Unexpected end of SEI NAL Unit parsing size.\nprivate-path: unknown failure\n");
                 let feed = async {
                     writer.write_all(&bytes).await.expect("diagnostic input");
-                    drop(writer);
+                    writer.shutdown().await.expect("stderr EOF");
                 };
-                tokio::join!(
-                    feed,
-                    capture_live_stderr(
-                        &mut reader,
-                        Arc::clone(&decoder),
-                        Arc::clone(&diagnostic),
-                        Arc::new(StdMutex::new(None)),
-                        Arc::new(AtomicI64::new(0)),
-                        changed,
-                    )
-                );
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::join!(
+                        feed,
+                        capture_live_stderr(
+                            &mut reader,
+                            Arc::clone(&decoder),
+                            Arc::clone(&diagnostic),
+                            Arc::new(StdMutex::new(None)),
+                            Arc::new(AtomicI64::new(0)),
+                            changed,
+                        )
+                    );
+                })
+                .await
+                .expect("bounded stderr collection");
                 assert!(
                     !decoder.load(Ordering::Acquire),
                     "an encoder failure is not missing decode support"
@@ -8878,19 +8882,23 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
             };
             let feed = async {
                 writer.write_all(bytes).await.expect("stderr");
-                drop(writer);
+                writer.shutdown().await.expect("stderr EOF");
             };
-            tokio::join!(
-                feed,
-                capture_live_stderr(
-                    &mut reader,
-                    Arc::clone(&decoder),
-                    Arc::clone(&diagnostic),
-                    Arc::new(StdMutex::new(None)),
-                    Arc::new(AtomicI64::new(0)),
-                    Arc::new(AtomicBool::new(false)),
-                )
-            );
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(
+                    feed,
+                    capture_live_stderr(
+                        &mut reader,
+                        Arc::clone(&decoder),
+                        Arc::clone(&diagnostic),
+                        Arc::new(StdMutex::new(None)),
+                        Arc::new(AtomicI64::new(0)),
+                        Arc::new(AtomicBool::new(false)),
+                    )
+                );
+            })
+            .await
+            .expect("bounded stderr collection");
             assert_eq!(*diagnostic.lock().expect("diagnostic lock"), initial);
             assert!(!decoder.load(Ordering::Acquire));
         }
