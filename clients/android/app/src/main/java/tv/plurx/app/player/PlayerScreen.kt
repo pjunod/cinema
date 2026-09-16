@@ -1528,11 +1528,13 @@ private fun PlayerContent(
                 audioOffsetMs = controller.audioOffsetMs,
                 declaredOffsetMs = plan.declaredOffsetMs,
                 currentPosition = controller::positionForPlaybackIntent,
-                onReload = { position, reason, quality ->
-                    // Publish the new quality and destination on the old
-                    // reporter before Compose tears its player down. The next
-                    // controller inherits the same intent and identity.
-                    controller.prepareReplacement(position, quality) { preparedPosition, preparedQuality ->
+                onReload = { _, reason, quality ->
+                    // Publish the new rung on the old reporter and wait for the
+                    // server to offer a successor. The position is deliberately
+                    // not carried in: a rung change is not a seek, and a
+                    // fallback samples the playhead when it actually reopens.
+                    // The next controller inherits the same intent and identity.
+                    controller.prepareReplacement(quality) { preparedPosition, preparedQuality ->
                         onReload(preparedPosition, reason, preparedQuality)
                     }
                 },
