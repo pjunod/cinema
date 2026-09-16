@@ -41,6 +41,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **The Activity page's recording-attention rows load again on a cluster.**
+  `GET /api/v1/dvr/attention` answered 500 on every replicated store because
+  the Hiqlite page statement named its keyset placeholders out of order and
+  Hiqlite binds `$N` by first appearance; SQLite did not care, so only cluster
+  nodes saw it. The statement is assembled in bound order now and the
+  placeholder census test holds it there.
+
 - **CI runners stop filling up, because every cache path is bounded now.** A
   Forgejo runner serves `actions/cache` from a directory of its own, and
   `forgejo-runner` 13.1.0 evicts nothing from it — no size cap, no TTL, no
