@@ -1668,6 +1668,18 @@ async fn validate_hevc_copy_transport(
     let probe_json = state.store.get_file_probe_json(source.id).await?;
     let promotes =
         plurx_core::transcode::hevc_parameter_set_promotion_required(source, probe_json.as_deref());
+    let Some(actual) =
+        super::stream::progressive_hevc_output_tag(source, preserve_dolby_vision, promotes)
+    else {
+        return Ok(());
+    };
+    if !caps.transports.iter().any(|transport| transport == "hls") {
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            "unsupported_hevc_delivery",
+            format!("HEVC copy-HLS output uses {actual}, but HLS was not claimed by this client"),
+        ));
+    }
     super::stream::hevc_copy_requires_hls(source, caps, preserve_dolby_vision, promotes)?;
     Ok(())
 }
@@ -23475,7 +23487,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn incompatible_hevc_create_is_refused_before_request_admission() {
+    async fn constrained_hevc_create_without_hls_is_refused_before_request_admission() {
         use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
 
         let state = resolver_state();
@@ -23495,103 +23507,105 @@ mod tests {
                 library_id: library.id,
                 kind: ItemKind::Movie,
                 parent_id: None,
-                title: "Minimal hvcC".into(),
+                title: "HEVC copy ingress".into(),
                 year: Some(2026),
                 season_number: None,
                 episode_number: None,
             })
             .await
             .expect("item");
-        let file_id = state
-            .store
-            .upsert_file(
-                item,
-                "/media/minimal-hvcc.mp4",
-                1_000,
-                1,
-                &ProbeResult {
-                    duration_ms: Some(60_000),
-                    container: Some("mp4".into()),
-                    video_codec: Some("hevc".into()),
-                    video_codec_tag: Some("hvc1".into()),
-                    video_profile: Some("Main".into()),
-                    width: Some(1920),
-                    height: Some(1080),
-                    bit_depth: Some(8),
-                    raw_json: Some(
-                        r#"{"streams":[{"codec_type":"video","codec_name":"hevc","codec_tag_string":"hvc1","extradata_size":23}]}"#
-                            .into(),
-                    ),
-                    ..Default::default()
-                },
-            )
-            .await
-            .expect("file");
         let user = state
             .store
             .create_user("hevc-guard", "hash", false)
             .await
             .expect("user");
-        let request_id = "hevc-guard-request";
-        let caps = caps_v2(
-            r#"{"v":2,
-                "video":[{"codec":"hevc","present":["sdr"],"max_height":2160}],
-                "audio":["aac"],"containers":["mp4"],
-                "transports":["progressive"],
-                "progressive_hevc_sample_entries":["hvc1"],
-                "display":{"hdr":false,"dolby_vision":false}}"#,
-        );
-        let error = match create(
-            crate::http::extract::AuthUser(user.clone()),
-            State(state.clone()),
-            AxPath(file_id),
-            HeaderMap::new(),
-            super::super::network::RemoteAddress(None),
-            Json(CreateSession {
-                playback_id: "hevc-guard-player".into(),
-                request_id: Some(request_id.into()),
-                copy: Some(true),
-                caps: Some(caps),
-                ..bare_create()
-            }),
-        )
-        .await
-        {
-            Ok(_) => panic!("the progressive-only client cannot execute the copy"),
-            Err(error) => error,
-        };
-        assert!(matches!(
-            error,
-            ApiError::Typed {
-                status: StatusCode::CONFLICT,
-                code: "unsupported_hevc_delivery",
-                ..
-            }
-        ));
-
-        let incarnation = uuid::Uuid::new_v4().to_string();
-        let now = unix_ms();
-        assert!(matches!(
-            state
+        for (case, extradata_size) in [("minimal", 23), ("complete", 97)] {
+            let file_id = state
                 .store
-                .claim_media_session_request(
-                    user.id,
-                    request_id,
-                    &"c".repeat(64),
-                    "hevc-guard-player",
-                    &incarnation,
-                    now,
-                    now.saturating_add(60_000),
+                .upsert_file(
+                    item,
+                    &format!("/media/{case}-hvcc.mp4"),
+                    1_000 + extradata_size,
+                    1,
+                    &ProbeResult {
+                        duration_ms: Some(60_000),
+                        container: Some("mp4".into()),
+                        video_codec: Some("hevc".into()),
+                        video_codec_tag: Some("hvc1".into()),
+                        video_profile: Some("Main".into()),
+                        width: Some(1920),
+                        height: Some(1080),
+                        bit_depth: Some(8),
+                        raw_json: Some(format!(
+                            r#"{{"streams":[{{"codec_type":"video","codec_name":"hevc","codec_tag_string":"hvc1","extradata_size":{extradata_size}}}]}}"#
+                        )),
+                        ..Default::default()
+                    },
                 )
                 .await
-                .expect("inspect request admission"),
-            MediaSessionRequestClaim::Acquired { .. }
-        ));
-        assert!(state
-            .store
-            .fail_media_session_request(user.id, request_id, &incarnation, unix_ms())
+                .expect("file");
+            let request_id = format!("hevc-guard-{case}");
+            let playback_id = format!("hevc-guard-player-{case}");
+            let caps = caps_v2(
+                r#"{"v":2,
+                    "video":[{"codec":"hevc","present":["sdr"],"max_height":2160}],
+                    "audio":["aac"],"containers":["mp4"],
+                    "transports":["progressive"],
+                    "progressive_hevc_sample_entries":["hvc1"],
+                    "display":{"hdr":false,"dolby_vision":false}}"#,
+            );
+            let error = match create(
+                crate::http::extract::AuthUser(user.clone()),
+                State(state.clone()),
+                AxPath(file_id),
+                HeaderMap::new(),
+                super::super::network::RemoteAddress(None),
+                Json(CreateSession {
+                    playback_id: playback_id.clone(),
+                    request_id: Some(request_id.clone()),
+                    copy: Some(true),
+                    caps: Some(caps),
+                    ..bare_create()
+                }),
+            )
             .await
-            .expect("settle inspection claim"));
+            {
+                Ok(_) => panic!("{case}: a client that omitted HLS cannot execute copy-HLS"),
+                Err(error) => error,
+            };
+            assert!(matches!(
+                error,
+                ApiError::Typed {
+                    status: StatusCode::CONFLICT,
+                    code: "unsupported_hevc_delivery",
+                    ..
+                }
+            ));
+
+            let incarnation = uuid::Uuid::new_v4().to_string();
+            let now = unix_ms();
+            assert!(matches!(
+                state
+                    .store
+                    .claim_media_session_request(
+                        user.id,
+                        &request_id,
+                        &"c".repeat(64),
+                        &playback_id,
+                        &incarnation,
+                        now,
+                        now.saturating_add(60_000),
+                    )
+                    .await
+                    .expect("inspect request admission"),
+                MediaSessionRequestClaim::Acquired { .. }
+            ));
+            assert!(state
+                .store
+                .fail_media_session_request(user.id, &request_id, &incarnation, unix_ms())
+                .await
+                .expect("settle inspection claim"));
+        }
     }
 
     /// The ask is durable before the create is answered — proved by a create

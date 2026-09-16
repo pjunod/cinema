@@ -9416,11 +9416,24 @@ async function progressiveHevcSampleEntries(claimedTiers, claimedPqTiers, dvProf
     }catch(e){ return null; }
   };
   const admitted=[];
+  const summary=hevcTierSummary(claimedTiers,claimedPqTiers);
+  const depths=summary.depth10?[8,10]:(summary.depth8?[8]:[]);
+  const required=[];
+  for(const depth of depths){
+    let profile=HEVC_TIERS.map((tier,index)=>({tier,index}))
+      .filter(row=>row.tier.depth===depth&&row.tier.height<=summary.maxheight);
+    // Main10's lowest configured probe is 1080p. If the shared ceiling was
+    // lowered below that by Main, still require the lowest Main10 file probe:
+    // the wire document emits both profiles whenever Main10 is claimed.
+    if(!profile.length){
+      const first=HEVC_TIERS.findIndex(tier=>tier.depth===depth);
+      if(first>=0) profile=[{tier:HEVC_TIERS[first],index:first}];
+    }
+    required.push(...profile.map(row=>row.index));
+  }
   for(const tag of ["hvc1","hev1"]){
-    let covered=false, complete=true;
-    for(let i=0;i<HEVC_TIERS.length;i++){
-      if(!claimedTiers||!claimedTiers[i]) continue;
-      covered=true;
+    let complete=true;
+    for(const i of required){
       const tier=HEVC_TIERS[i];
       const codec=tier.codec.replace(/^hvc1/,tag);
       const type=`video/mp4; codecs="${codec}"`;
@@ -9429,12 +9442,12 @@ async function progressiveHevcSampleEntries(claimedTiers, claimedPqTiers, dvProf
       // `canPlayType` has no transfer-function axis. If the general ladder
       // claimed PQ for this rung, only a progressive file answer for PQ can
       // extend the sample-entry claim to that presentation.
-      if(claimedPqTiers&&claimedPqTiers[i]){
+      if(summary.pq10&&tier.depth>=10){
         const pq=await fileAnswer(type,tier.width,tier.height,tier.bitrate,"pq");
         if(pq!==true){ complete=false; break; }
       }
     }
-    if(covered&&complete) admitted.push(tag);
+    if(required.length&&complete) admitted.push(tag);
   }
   const dvCodec=(tag,profile)=>`${tag}.${profile===5?"05.06":"08.07"}`;
   const profiles=(dvProfiles||[]).filter(profile=>profile===5||profile===8);

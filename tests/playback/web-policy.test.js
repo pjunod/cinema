@@ -4873,6 +4873,34 @@ asyncTest("packaging_claim_covers_every_advertised_hevc_tier", async () => {
   assert.deepEqual(entries, [], "one admitted rung cannot authorize the flat label");
 });
 
+asyncTest("packaging_claim_rejects_a_hole_below_the_advertised_ceiling", async () => {
+  const h = hevcHarness();
+  const claimed = h.HEVC_TIERS.map((_, index) => index === 0 || index === 2);
+  const entries = await h.progressiveHevcSampleEntries(claimed, [], [], {
+    mediaCapabilities: {
+      decodingInfo({ video }) {
+        return Promise.resolve({ supported: video.height !== 1080 });
+      },
+    },
+    videoElement: { canPlayType: () => "probably" },
+  });
+  assert.deepEqual(entries, [], "a 2160p ceiling also covers its 1080p sources");
+});
+
+asyncTest("main10_only_success_still_requires_the_emitted_main_profile", async () => {
+  const h = hevcHarness();
+  const claimed = h.HEVC_TIERS.map((tier) => tier.depth === 10);
+  const entries = await h.progressiveHevcSampleEntries(claimed, [], [], {
+    mediaCapabilities: {
+      decodingInfo({ video }) {
+        return Promise.resolve({ supported: video.contentType.includes(".2.4.") });
+      },
+    },
+    videoElement: { canPlayType: () => "probably" },
+  });
+  assert.deepEqual(entries, [], "the wire claim contains Main as well as Main10");
+});
+
 asyncTest("mse_only_pq_does_not_authorize_progressive_hevc", async () => {
   const h = hevcHarness();
   const claimed = h.HEVC_TIERS.map((_, index) => index === 0);
