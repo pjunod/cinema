@@ -762,6 +762,10 @@ struct Delivery: Codable {
     var url: String?            // direct: the file; remux: progressive fMP4
     var sessionsUrl: String?    // POST target for a copy or transcode session
     var aac: Bool?              // remux: the copy session must re-encode audio
+    /// True means the progressive remux URL is not an executable alternative
+    /// for this capability snapshot. Optional so old responses decode as the
+    /// legacy false/default behavior.
+    var requiresHls: Bool? = nil
     var preserveDolbyVision: Bool?
     /// The audio stream index this plan carries when the caller selected one.
     /// It is already applied to `url`; the HLS transport takes it in the

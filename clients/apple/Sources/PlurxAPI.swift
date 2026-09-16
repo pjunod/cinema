@@ -387,7 +387,7 @@ struct PlurxAPI {
                 body: DecisionBody(caps: caps)
             )
         } catch {
-            guard Self.shouldFallBackToLegacyDecision(after: error) else { throw error }
+            guard Self.shouldFallBackToLegacyDecision(after: error, caps: caps) else { throw error }
             return try await get("files/\(fileId)/decision", query: legacyQuery())
         }
     }
@@ -396,7 +396,15 @@ struct PlurxAPI {
     /// explains its 400/404/405 in a typed body answers `.refused` rather than
     /// `.http`, and the legacy decision fallback has to keep firing for it or
     /// an older server becomes unreachable the day it grows a code.
-    static func shouldFallBackToLegacyDecision(after error: Error) -> Bool {
+    static func shouldFallBackToLegacyDecision(after error: Error, caps: DeviceCaps) -> Bool {
+        // Never erase an explicit packaging constraint, including an empty
+        // list. That would turn a refused request into the unrestricted legacy
+        // query. All serving nodes roll before clients publish this field.
+        guard caps.progressiveHevcSampleEntries == nil else { return false }
+        if let code = (error as? APIError)?.refusalCode,
+           code == "invalid_capabilities" || code == "unsupported_hevc_delivery" {
+            return false
+        }
         guard let status = (error as? APIError)?.httpStatus else { return false }
         return status == 400 || status == 404 || status == 405
     }

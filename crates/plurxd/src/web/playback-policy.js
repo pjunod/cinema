@@ -562,8 +562,13 @@
     selectedAudioIndex = 0,
     nativeHls = false,
     segmentedRemux = false,
+    requiresHls = false,
+    hlsAvailable = false,
   }) {
     if (method === "transcode") return "transcode_hls";
+    if (method === "remux" && requiresHls) {
+      return hlsAvailable ? "copy_hls" : "unsupported_hevc_delivery";
+    }
     if (method === "remux" && (nativeHls || segmentedRemux)) {
       return "copy_hls";
     }
@@ -583,8 +588,10 @@
     code = null,
     method = null,
     nativeHls = false,
+    requiresHls = false,
   } = {}) {
     return code === "vod_index_pending" && method === "remux" && !nativeHls
+      && !requiresHls
       ? "progressive_remux"
       : "fail";
   }

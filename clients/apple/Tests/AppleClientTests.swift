@@ -4588,12 +4588,19 @@ final class AppleClientTests: XCTestCase {
         XCTAssertNil(try answer(204, nil), "a 2xx is not an error")
 
         // And the two matchers that read a status keep reading one.
-        XCTAssertTrue(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(404)))
+        let legacyCaps = Caps.capsDocument(
+            hevc: false, av1: false, displayHDR: false, dolbyVision: false
+        )
         XCTAssertTrue(PlurxAPI.shouldFallBackToLegacyDecision(
-            after: APIError.refused(status: 405, code: "gone", message: "no", positionMs: nil)
+            after: APIError.http(404), caps: legacyCaps
+        ))
+        XCTAssertTrue(PlurxAPI.shouldFallBackToLegacyDecision(
+            after: APIError.refused(status: 405, code: "gone", message: "no", positionMs: nil),
+            caps: legacyCaps
         ))
         XCTAssertFalse(PlurxAPI.shouldFallBackToLegacyDecision(
-            after: APIError.refused(status: 503, code: "x", message: "y", positionMs: nil)
+            after: APIError.refused(status: 503, code: "x", message: "y", positionMs: nil),
+            caps: legacyCaps
         ))
         var body = createBody()
         body.previousSessionId = "session-a"
@@ -7714,6 +7721,7 @@ final class AppleClientTests: XCTestCase {
                     XCTAssertEqual(document.display.hdr, displayHDR)
                     XCTAssertEqual(document.dvTransport, "hls")
                     XCTAssertEqual(document.transports, ["progressive", "hls"])
+                    XCTAssertEqual(document.progressiveHevcSampleEntries, hevc ? ["hvc1"] : nil)
                     XCTAssertEqual(document.learnedLimits, [])
 
                     let supportsDolbyVision = hevc && displayHDR && dolbyVision
@@ -7739,17 +7747,61 @@ final class AppleClientTests: XCTestCase {
         )
         XCTAssertEqual(json["v"] as? Int, 2)
         XCTAssertEqual(json["dv_transport"] as? String, "hls")
+        XCTAssertEqual(json["progressive_hevc_sample_entries"] as? [String], ["hvc1"])
         XCTAssertEqual((json["learned_limits"] as? [Any])?.count, 0)
         XCTAssertNil(json["max_height"])
+
+        let noHEVC = Caps.capsDocument(
+            hevc: false, av1: true, displayHDR: false, dolbyVision: false
+        )
+        let noHEVCJSON = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoder.encode(noHEVC)) as? [String: Any]
+        )
+        XCTAssertNil(noHEVCJSON["progressive_hevc_sample_entries"])
+    }
+
+    func testDeliveryRequiresHLSDecodesAndDefaultsForOldResponses() throws {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let required = try decoder.decode(
+            Delivery.self,
+            from: Data(#"{"mode":"remux","requires_hls":true}"#.utf8)
+        )
+        XCTAssertEqual(required.requiresHls, true)
+
+        let legacy = try decoder.decode(
+            Delivery.self,
+            from: Data(#"{"mode":"remux"}"#.utf8)
+        )
+        XCTAssertNil(legacy.requiresHls)
     }
 
     func testDecisionPostFallsBackOnlyForTheMixedFleetStatuses() {
-        XCTAssertTrue(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(400)))
-        XCTAssertTrue(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(404)))
-        XCTAssertTrue(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(405)))
-        XCTAssertFalse(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(401)))
-        XCTAssertFalse(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(500)))
-        XCTAssertFalse(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.transport("offline")))
+        let legacy = Caps.capsDocument(
+            hevc: false, av1: false, displayHDR: false, dolbyVision: false
+        )
+        let constrained = Caps.capsDocument(
+            hevc: true, av1: false, displayHDR: false, dolbyVision: false
+        )
+        XCTAssertTrue(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(400), caps: legacy))
+        XCTAssertTrue(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(404), caps: legacy))
+        XCTAssertTrue(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(405), caps: legacy))
+        XCTAssertFalse(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(401), caps: legacy))
+        XCTAssertFalse(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(500), caps: legacy))
+        XCTAssertFalse(PlurxAPI.shouldFallBackToLegacyDecision(
+            after: APIError.transport("offline"), caps: legacy
+        ))
+        for status in [400, 404, 405] {
+            XCTAssertFalse(PlurxAPI.shouldFallBackToLegacyDecision(
+                after: APIError.http(status), caps: constrained
+            ), "a non-null sample-entry constraint must never be erased")
+        }
+        XCTAssertFalse(PlurxAPI.shouldFallBackToLegacyDecision(
+            after: APIError.refused(
+                status: 400, code: "invalid_capabilities", message: "invalid", positionMs: nil
+            ),
+            caps: legacy
+        ))
     }
 
     func testSessionCreateCarriesTheCapabilitiesDocument() throws {
@@ -7769,6 +7821,7 @@ final class AppleClientTests: XCTestCase {
         )
         let caps = try XCTUnwrap(json["caps"] as? [String: Any])
         XCTAssertEqual(caps["v"] as? Int, 2)
+        XCTAssertEqual(caps["progressive_hevc_sample_entries"] as? [String], ["hvc1"])
         XCTAssertEqual((caps["display"] as? [String: Any])?["dolby_vision"] as? Bool, false)
     }
 
