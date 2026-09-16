@@ -8,8 +8,9 @@
 Companion to the
 [implementation ledger](../streaming/HEVC-SAMPLE-ENTRY-STATUS.md). This receipt
 records the exact reviewed source and the one focused runtime-test window. The
-final documentation commit changes no runtime or test behavior; Forgejo's
-`Main promotion gate` is the authoritative exact-head result for that commit.
+final documentation and status commits change no runtime or test behavior;
+Forgejo's `Main promotion gate` is the authoritative exact-head result for the
+promotion candidate.
 
 ## Outcome
 
@@ -113,4 +114,3 @@ the web client refresh and Apple build 165 publish. Old clients omit the field
 and retain the legacy limitation; old servers may silently ignore the additive
 v2 field. No library mutation, media rewrite, deployment, TestFlight upload,
 or App Store publication is part of this receipt.
-
