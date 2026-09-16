@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["796705de"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "web-static"]
+reason = "repeated_seeks_with_old_buffers_remain_accepted_at_the_control_endpoint sends 24 alternating old-buffer/new-target snapshots through the real HTTP handler and actor, then verifies settled playback still reports; the old validator returned 400 buffered_through_ms or buffered_from_ms. seek_buffers_are_valid_and_wire_and_producer_runway_agree covers all three platforms and missing/disjoint/contiguous ranges, and seeking_still_rejects_malformed_buffers_and_targets preserves bounds. seek_buffer_gap_is_not_counted_as_producer_runway prevents a seek gap from inflating the production target. node --test tests/playback/seek-control.test.js runs from make web-check and verifies shipped snapshot capture, terminal handling for genuinely malformed packets, and bounded invalid_field preservation."
