@@ -510,6 +510,11 @@ pub enum DeliveryPlan {
         url: String,
         sessions_url: String,
         aac: bool,
+        /// The progressive copy output carries a sample entry the caller did
+        /// not admit, so this remux must use the HLS envelope. Omitted when
+        /// false to preserve the plan read by older clients.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        requires_hls: bool,
         /// Keep Dolby Vision signaling and dynamic metadata through the copy
         /// remux. False means expose the compatible HDR base for this client.
         preserve_dolby_vision: bool,
@@ -545,6 +550,7 @@ fn delivery_plan(
     file_id: i64,
     decision: &Decision,
     selected_audio: Option<i64>,
+    requires_hls: bool,
 ) -> (String, DeliveryPlan) {
     let direct_url = format!("/api/v1/files/{file_id}/direct");
     let remux_url = match selected_audio {
@@ -562,6 +568,7 @@ fn delivery_plan(
                 url: remux_url,
                 sessions_url,
                 aac: decision.transcode_audio,
+                requires_hls,
                 preserve_dolby_vision: decision.preserve_dolby_vision,
                 audio: selected_audio,
             },
@@ -576,6 +583,70 @@ fn delivery_plan(
             },
         ),
     }
+}
+
+/// The sample entry the progressive copy builder will actually write.
+///
+/// This deliberately mirrors `progressive_hevc_copy_args` rather than the
+/// segmented builder: the admission question is whether that exact
+/// progressive alternative is safe for this caller.
+pub(crate) fn progressive_hevc_output_tag(
+    file: &MediaFile,
+    preserve_dolby_vision: bool,
+    promote_hevc_parameter_sets: bool,
+) -> Option<&'static str> {
+    let hevc = file
+        .video_codec
+        .as_deref()
+        .is_some_and(|codec| matches!(codec.to_ascii_lowercase().as_str(), "hevc" | "h265"));
+    if !hevc {
+        return None;
+    }
+    if promote_hevc_parameter_sets {
+        return Some(
+            if file.hdr.as_deref() == Some("dolby_vision") && preserve_dolby_vision {
+                "dvhe"
+            } else {
+                "hev1"
+            },
+        );
+    }
+    Some(plurx_core::transcode::hevc_copy_tag(
+        file.hdr.as_deref(),
+        preserve_dolby_vision,
+    ))
+}
+
+/// Enforce an explicit progressive HEVC packaging constraint at the delivery
+/// boundary. The caller either receives the same copy through HLS or a typed
+/// refusal before any session is allocated.
+pub(crate) fn hevc_copy_requires_hls(
+    file: &MediaFile,
+    caps: &playback::DeviceCaps,
+    preserve_dolby_vision: bool,
+    promote_hevc_parameter_sets: bool,
+) -> Result<bool, ApiError> {
+    let Some(admitted) = caps.progressive_hevc_sample_entries.as_ref() else {
+        return Ok(false);
+    };
+    let Some(actual) =
+        progressive_hevc_output_tag(file, preserve_dolby_vision, promote_hevc_parameter_sets)
+    else {
+        return Ok(false);
+    };
+    if admitted.iter().any(|entry| entry == actual) {
+        return Ok(false);
+    }
+    if caps.transports.iter().any(|transport| transport == "hls") {
+        return Ok(true);
+    }
+    Err(ApiError::typed(
+        StatusCode::CONFLICT,
+        "unsupported_hevc_delivery",
+        format!(
+            "progressive HEVC output uses {actual}, which this client did not admit, and HLS was not claimed"
+        ),
+    ))
 }
 
 /// Effective request-local choices returned only when the caller supplied an
@@ -1985,6 +2056,22 @@ pub async fn decision(
         .fragment_index(id, &vod_identity)
         .await?
         .is_some();
+    let requires_hls = if decision.method == playback::PlaybackMethod::Remux {
+        q.caps_v2
+            .as_ref()
+            .map(|caps| {
+                hevc_copy_requires_hls(
+                    &file,
+                    caps,
+                    decision.preserve_dolby_vision,
+                    vod_video.promotes_parameter_sets(),
+                )
+            })
+            .transpose()?
+            .unwrap_or(false)
+    } else {
+        false
+    };
 
     tracing::info!(
         user_id = user.id,
@@ -2020,7 +2107,7 @@ pub async fn decision(
         "playback capability decision"
     );
 
-    let (play_url, delivery) = delivery_plan(id, &decision, requested_audio);
+    let (play_url, delivery) = delivery_plan(id, &decision, requested_audio, requires_hls);
     // Only a remux has a transport choice to make. Direct play is already a
     // range-served file, which is the case Chrome buffers *well* — it was the
     // control in §4.3bis, at 10.8 s against the progressive path's 2.2 — and a
@@ -3152,6 +3239,33 @@ mod tests {
     /// re-test window.
     const NOW_MS: i64 = 1_756_400_000_000;
 
+    fn hevc_file(hdr: Option<&str>) -> MediaFile {
+        MediaFile {
+            id: 42,
+            item_id: 1,
+            path: "/movies/hevc.mp4".into(),
+            size: 1,
+            mtime: 1,
+            duration_ms: Some(1_000),
+            container: Some("mp4".into()),
+            video_codec: Some("hevc".into()),
+            video_codec_tag: Some("hvc1".into()),
+            video_profile: Some("Main 10".into()),
+            width: Some(3840),
+            height: Some(2160),
+            bit_depth: Some(10),
+            hdr: hdr.map(str::to_owned),
+            hdr_format: None,
+            bitrate: Some(20_000_000),
+            audio_streams: Vec::new(),
+            subtitle_streams: Vec::new(),
+            scanned_at: 1,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: Default::default(),
+        }
+    }
+
     /// PLAYBACK-CAPS-V2-PLAN §4.2: two wire shapes, one translation, one
     /// profile.
     ///
@@ -3374,6 +3488,81 @@ mod tests {
         assert!(!stripped.contains("-strict"), "{stripped}");
     }
 
+    #[test]
+    fn minimal_hvcc_hvc1_only_requires_hls() {
+        let caps = playback::DeviceCaps {
+            v: playback::DeviceCaps::VERSION,
+            transports: vec!["hls".into()],
+            progressive_hevc_sample_entries: Some(vec!["hvc1".into()]),
+            ..Default::default()
+        };
+        assert!(hevc_copy_requires_hls(&hevc_file(None), &caps, false, true)
+            .expect("HLS is an admitted fallback"));
+    }
+
+    #[test]
+    fn progressive_dolby_vision_output_tag_matches_the_builder() {
+        let file = hevc_file(Some("dolby_vision"));
+        assert_eq!(
+            progressive_hevc_output_tag(&file, true, false),
+            Some("dvh1"),
+            "complete hvcC follows the progressive builder's preserved-DV branch"
+        );
+        assert_eq!(
+            progressive_hevc_output_tag(&file, true, true),
+            Some("dvhe"),
+            "minimal hvcC follows the builder's in-band preserved-DV branch"
+        );
+        assert_eq!(
+            progressive_hevc_output_tag(&file, false, true),
+            Some("hev1"),
+            "stripping DV leaves the in-band ordinary HEVC sample entry"
+        );
+    }
+
+    #[test]
+    fn progressive_only_incompatible_hevc_returns_409() {
+        let caps = playback::DeviceCaps {
+            v: playback::DeviceCaps::VERSION,
+            transports: vec!["progressive".into()],
+            progressive_hevc_sample_entries: Some(vec!["hvc1".into()]),
+            ..Default::default()
+        };
+        let error = hevc_copy_requires_hls(&hevc_file(None), &caps, false, true)
+            .expect_err("hev1 is not admitted and HLS was not claimed");
+        assert!(matches!(
+            error,
+            ApiError::Typed {
+                status: StatusCode::CONFLICT,
+                code: "unsupported_hevc_delivery",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compatible_progressive_hevc_does_not_require_hls() {
+        let caps = playback::DeviceCaps {
+            v: playback::DeviceCaps::VERSION,
+            progressive_hevc_sample_entries: Some(vec!["hev1".into()]),
+            ..Default::default()
+        };
+        assert!(
+            !hevc_copy_requires_hls(&hevc_file(None), &caps, false, true)
+                .expect("the actual progressive tag is admitted")
+        );
+
+        let hvc1_caps = playback::DeviceCaps {
+            v: playback::DeviceCaps::VERSION,
+            progressive_hevc_sample_entries: Some(vec!["hvc1".into()]),
+            ..Default::default()
+        };
+        assert!(
+            !hevc_copy_requires_hls(&hevc_file(None), &hvc1_caps, false, false)
+                .expect("the complete-hvcC progressive output is admitted")
+        );
+    }
+
     fn planned(method: playback::PlaybackMethod) -> Decision {
         Decision {
             convert_dolby_vision: false,
@@ -3402,7 +3591,7 @@ mod tests {
     #[test]
     fn decision_body_carries_the_delivered_dolby_vision_profile_at_top_level() {
         fn body(decision: Decision) -> serde_json::Value {
-            let (play_url, delivery) = delivery_plan(42, &decision, None);
+            let (play_url, delivery) = delivery_plan(42, &decision, None, false);
             serde_json::to_value(DecisionResponse {
                 file_id: 42,
                 vod_indexed: false,
@@ -3468,15 +3657,20 @@ mod tests {
 
     #[test]
     fn every_verdict_has_one_server_owned_execution_plan() {
-        let (legacy, direct) =
-            delivery_plan(42, &planned(playback::PlaybackMethod::DirectPlay), None);
+        let (legacy, direct) = delivery_plan(
+            42,
+            &planned(playback::PlaybackMethod::DirectPlay),
+            None,
+            false,
+        );
         assert_eq!(legacy, "/api/v1/files/42/direct");
         assert!(matches!(
             direct,
             DeliveryPlan::Direct { url } if url == "/api/v1/files/42/direct"
         ));
 
-        let (legacy, remux) = delivery_plan(42, &planned(playback::PlaybackMethod::Remux), None);
+        let (legacy, remux) =
+            delivery_plan(42, &planned(playback::PlaybackMethod::Remux), None, false);
         assert_eq!(legacy, "/api/v1/files/42/stream.mp4");
         assert!(matches!(
             remux,
@@ -3484,20 +3678,42 @@ mod tests {
                 url,
                 sessions_url,
                 aac: true,
+                requires_hls: false,
                 preserve_dolby_vision: true,
                 audio: None,
             } if url == "/api/v1/files/42/stream.mp4"
                 && sessions_url == "/api/v1/files/42/hls/sessions"
         ));
 
-        let (legacy, transcode) =
-            delivery_plan(42, &planned(playback::PlaybackMethod::Transcode), None);
+        let (legacy, transcode) = delivery_plan(
+            42,
+            &planned(playback::PlaybackMethod::Transcode),
+            None,
+            false,
+        );
         assert_eq!(legacy, "/api/v1/files/42/stream.mp4");
         assert!(matches!(
             transcode,
             DeliveryPlan::Transcode { sessions_url, audio: None }
                 if sessions_url == "/api/v1/files/42/hls/sessions"
         ));
+    }
+
+    #[test]
+    fn remux_plan_serializes_the_hls_requirement_only_when_true() {
+        let (_, ordinary) =
+            delivery_plan(42, &planned(playback::PlaybackMethod::Remux), None, false);
+        let ordinary = serde_json::to_value(ordinary).expect("serialize ordinary remux");
+        assert!(ordinary.get("requires_hls").is_none(), "{ordinary}");
+
+        let (_, constrained) =
+            delivery_plan(42, &planned(playback::PlaybackMethod::Remux), None, true);
+        let constrained = serde_json::to_value(constrained).expect("serialize constrained remux");
+        assert_eq!(
+            constrained.get("requires_hls"),
+            Some(&serde_json::json!(true)),
+            "{constrained}"
+        );
     }
 
     /// The loop review finding 1 named: a plan is only executable if following
@@ -3531,8 +3747,12 @@ mod tests {
         // The policy default is track 0, so a bare plan URL would deliver it.
         assert_eq!(remux_audio_index(&tracks, None, &prefs), 0);
 
-        let (play_url, remux) =
-            delivery_plan(42, &planned(playback::PlaybackMethod::Remux), Some(1));
+        let (play_url, remux) = delivery_plan(
+            42,
+            &planned(playback::PlaybackMethod::Remux),
+            Some(1),
+            false,
+        );
         assert_eq!(play_url, "/api/v1/files/42/stream.mp4?audio=1");
         let DeliveryPlan::Remux { url, audio, .. } = remux else {
             panic!("a remux verdict must plan a remux");
@@ -3548,8 +3768,12 @@ mod tests {
             "following the plan must deliver the selected French track, not the policy default"
         );
 
-        let (_, transcode) =
-            delivery_plan(42, &planned(playback::PlaybackMethod::Transcode), Some(1));
+        let (_, transcode) = delivery_plan(
+            42,
+            &planned(playback::PlaybackMethod::Transcode),
+            Some(1),
+            false,
+        );
         assert!(
             matches!(transcode, DeliveryPlan::Transcode { audio: Some(1), .. }),
             "an HLS session create takes the selection in its body, so the plan carries it"

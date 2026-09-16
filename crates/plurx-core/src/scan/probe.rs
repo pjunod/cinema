@@ -220,7 +220,7 @@ fn video_codec_tag(stream: &Value) -> Option<String> {
         return None;
     }
     let normalized = raw.to_ascii_lowercase();
-    (!matches!(normalized.as_str(), "0000" | "[0][0][0][0]")).then_some(normalized)
+    (normalized != "0000").then_some(normalized)
 }
 
 fn int_field(stream: &Value, key: &str) -> Option<i64> {
