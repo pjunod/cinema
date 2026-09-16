@@ -8545,8 +8545,12 @@ async function sendPlaybackControl(url,body,signal){
     let failure=null;
     try{ failure=await response.json(); }catch(e){}
     const code=failure&&typeof failure.code==="string"?failure.code:null;
-    const error=new Error(code?`playback control ${code}`:"playback control HTTP "+response.status);
+    const invalidField=failure&&typeof failure.invalid_field==="string"
+      &&/^[a-z][a-z0-9_.]{0,63}$/.test(failure.invalid_field)?failure.invalid_field:null;
+    const error=new Error((code?`playback control ${code}`:"playback control HTTP "+response.status)
+      +(invalidField?` (${invalidField})`:""));
     error.status=response.status; error.code=code;
+    if(invalidField) error.invalidField=invalidField;
     if(failure&&typeof failure.generation==="string") error.generation=failure.generation;
     if(failure&&Number.isSafeInteger(failure.control_epoch)) error.controlEpoch=failure.control_epoch;
     if(failure&&Number.isSafeInteger(failure.retry_after_ms)) error.retryAfterMs=failure.retry_after_ms;

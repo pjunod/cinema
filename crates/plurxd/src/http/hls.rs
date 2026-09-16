@@ -17808,6 +17808,83 @@ mod tests {
         (fixture, session_id, route)
     }
 
+    #[tokio::test]
+    async fn repeated_seeks_with_old_buffers_remain_accepted_at_the_control_endpoint() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let (fixture, _session_id, route) = staging_fixture(dir.path()).await;
+        let mut request = control_request(route.incarnation_id.clone());
+        request.position_ms = 10_000;
+        request.buffered_from_ms = Some(8_000);
+        request.buffered_through_ms = 24_000;
+        let (status, _) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let seeks = [
+            (10_000, Some(8_000), 24_000, 600_000),
+            (600_000, Some(598_000), 620_000, 10_000),
+            // Retained incident: the requested landing and media clock
+            // disagreed; that evidence must still reach the control actor.
+            (797_711, Some(797_711), 809_211, 729_643),
+            (797_711, None, 797_711, 729_643),
+        ];
+        for (index, (position, from, through, target)) in
+            seeks.into_iter().cycle().take(24).enumerate()
+        {
+            // Honor the real exchange cadence rather than bypassing the
+            // handler/actor boundary that the previous seek-storm test missed.
+            tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+            let sequence = index as u64 + 2;
+            request.sequence = sequence;
+            request.position_ms = position;
+            request.buffered_from_ms = from;
+            request.buffered_through_ms = through;
+            request.render_state = crate::playback_control::RenderState::Seeking;
+            request.seek_target_ms = Some(target);
+            let (status, body) = control_body(
+                control_local_inner(
+                    &fixture.state,
+                    &route,
+                    request.clone(),
+                    unix_ms().saturating_add(4_000),
+                )
+                .await,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "sequence {sequence}: {body}");
+            assert_eq!(body["accepted_sequence"], sequence);
+            assert_eq!(body["delivery"]["client_runway_ms"], 0);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(260)).await;
+        request.sequence += 1;
+        request.position_ms = 729_643;
+        request.buffered_from_ms = Some(729_643);
+        request.buffered_through_ms = 749_643;
+        request.render_state = crate::playback_control::RenderState::Rendering;
+        request.seek_target_ms = None;
+        let (status, body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                &route,
+                request,
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "settled playback: {body}");
+        assert_eq!(body["accepted_sequence"], 26);
+        assert_eq!(body["delivery"]["client_runway_ms"], 20_000);
+    }
+
     /// M6 §3.4's acceptance, stated in the handoff: *"with a test client
     /// reporting `dual_player_preparation: true` on a resolution-and-delivery-
     /// method change with headroom, the ledger holds a staged successor and
