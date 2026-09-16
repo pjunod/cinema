@@ -7,8 +7,8 @@ underscore is part of the visual wordmark, not part of spoken product names.
 
 | Public name | Current project | Job |
 |---|---|---|
-| **Noirr Curator** | `monarr` | Finds, evaluates, imports, and organizes media |
-| **Noirr Runner** | `nzbd` | Downloads, repairs, extracts, and hands off files |
+| **Noirr Curator** | — | Finds, evaluates, imports, and organizes media |
+| **Noirr Runner** | — | Downloads, repairs, extracts, and hands off files |
 | **Noirr Cinema** | `plurx` | Serves the library and plays it on every screen |
 
 Repository names, executables, API paths, bundle identifiers, URL schemes,
@@ -28,7 +28,7 @@ metadata, where punctuation should not make the name harder to read aloud.
 
 Do not use the retired working names `watch`, `fetch`, `screen`,
 `Catalog`, or `Boundlight` in new public material. Historical technical names
-such as `plurx`, `monarr`, and `nzbd` remain valid when they identify a binary,
+such as `plurx` remain valid when they identify a binary,
 configuration key, network service, or compatibility surface.
 
 ## Marks — related silhouettes with one shared signal

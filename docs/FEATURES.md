@@ -870,7 +870,7 @@ page (3-second refresh) instead of dumping you into Settings.
 
 ## 11. Integrations — "something else fills the library; plurx notices at once"
 
-**What it does:** lets another application on the same box — monarr, today —
+**What it does:** lets another application on the same box — Curator, today —
 tell plurx that a file has landed, instead of plurx finding out on its next
 sweep. Nothing here is required: plurx with no integration configured behaves
 exactly as it did before, on scheduled and manual scans alone.
@@ -918,38 +918,38 @@ exactly as it did before, on scheduled and manual scans alone.
   [CHEATSHEET.md](CHEATSHEET.md); the credential model in
   [SECURITY.md](SECURITY.md).
 
-- **Coming soon rail** — the one thing plurx asks monarr for. Settings →
-  monarr takes a URL and a monarr API key; the home screen then carries a
-  **Coming soon** rail of what monarr expects in the next four weeks
+- **Coming soon rail** — the one thing plurx asks Curator for. Settings →
+  Curator takes a URL and a Curator API key; the home screen then carries a
+  **Coming soon** rail of what Curator expects in the next four weeks
   ("Expected Friday", "Expected Aug 1"). plurxd makes the call and caches it
-  for 15 minutes, so the key never reaches a browser — it can edit monarr's
+  for 15 minutes, so the key never reaches a browser — it can edit Curator's
   whole library, which is exactly why it stays on the server. Unpaired, the
-  rail is absent rather than empty; a monarr that is down leaves it absent
+  rail is absent rather than empty; a Curator that is down leaves it absent
   too, because the home screen must not depend on another application being
   up. Cards prefer artwork already in the local library; titles that have not
-  arrived yet use monarr's provider poster path, which plurxd downloads into
+  arrived yet use Curator's provider poster path, which plurxd downloads into
   its own cache before returning the rail. Clients never call TMDB, TVmaze, or
   Open Library themselves.
 
-- **Watch state → monarr**, *off by default*. When enabled (Settings →
-  monarr), finishing something — the 95% crossing or an explicit mark —
-  queues a note to monarr saying what was watched, by id, **and which plurx
-  user watched it**. monarr uses it to prefer upgrades for shows somebody is
+- **Watch state → Curator**, *off by default*. When enabled (Settings →
+  Curator), finishing something — the 95% crossing or an explicit mark —
+  queues a note to Curator saying what was watched, by id, **and which plurx
+  user watched it**. Curator uses it to prefer upgrades for shows somebody is
   actually following. The per-user part is why this is opt-in and says so on
   the settings page: viewing history is personal, and this copies it into an
   application with no other reason to hold it. Queued in a table with
-  5s/30s/2m retries, so a monarr that was restarting still hears; an item
-  with no TMDB/IMDb id is not sent at all, because monarr matches on ids and
+  5s/30s/2m retries, so a Curator that was restarting still hears; an item
+  with no TMDB/IMDb id is not sent at all, because Curator matches on ids and
   a title would only make it guess. **Nothing is ever deleted as a result** —
   there is no delete path on either side.
 
-- **The pairing says whether it works.** Settings → monarr has a **Test
-  connection** button that asks monarr directly and reports what came back:
-  connected with monarr's version, "cannot reach", or "rejected the API key"
+- **The pairing says whether it works.** Settings → Curator has a **Test
+  connection** button that asks Curator directly and reports what came back:
+  connected with Curator's version, "cannot reach", or "rejected the API key"
   — three different problems with three different fixes, which a single
   "failed" would hide. Saving also tests, because saving without checking is
   how a typo survives a week. The watch-notification queue is shown beside
-  it (sent / waiting / failed): a reachable monarr with a hundred waiting
+  it (sent / waiting / failed): a reachable Curator with a hundred waiting
   notifications is a different problem from an unreachable one, and both look
   identical without it.
 
@@ -976,8 +976,8 @@ Listed so the inventory above is unambiguous — these are deliberate, with reas
   plex.tv contact, no telemetry. It runs on a LAN with no internet.
 - **Does not push anything to other applications.** The integration in §11 is
   inbound, plus one read: other apps tell plurx to index, and plurx *asks*
-  monarr for its calendar if you paired one. plurx never tells another
-  application to do something. Pushing watch state back to monarr is on the
+  Curator for its calendar if you paired one. plurx never tells another
+  application to do something. Pushing watch state back to Curator is on the
   roadmap and is not built.
 - **Does not record television, or schedule anything.** The programme guide in
   §4a is information: it says what is on and what is next, and offers no

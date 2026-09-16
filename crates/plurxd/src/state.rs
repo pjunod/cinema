@@ -676,9 +676,9 @@ pub struct AppState {
     pub logs: Arc<LogBuffer>,
     /// Replication/membership detail kept out of the general diagnostics ring.
     pub cluster_logs: Arc<LogBuffer>,
-    /// The coming-soon rail's cached answer from monarr (plan §11.2).
+    /// The coming-soon rail's cached answer from Curator (plan §11.2).
     pub coming_soon: Arc<crate::http::ComingSoonCache>,
-    /// Pushes watch state to monarr when enabled (plan §11.1).
+    /// Pushes watch state to Curator when enabled (plan §11.1).
     pub watched: Arc<crate::watched::WatchedNotifier>,
     /// Leading/trailing progress write coalescer. Every player may report as
     /// often as it likes; durable watch commits stay bounded for Raft.
@@ -4370,7 +4370,7 @@ impl JobManager {
 
         // The rows exist; without this they would have no artwork until
         // somebody pressed Scan. Bounded to what this request placed (and the
-        // seasons/shows/folders above it) because monarr is holding the HTTP
+        // seasons/shows/folders above it) because Curator is holding the HTTP
         // connection open on this call — enriching the whole library here
         // would turn a per-episode import notification into a per-episode
         // full-library metadata pass.
@@ -11340,7 +11340,7 @@ mod tests {
 
     /// The bug this whole change exists for, in one test.
     ///
-    /// monarr POSTs `/api/v1/scan` the moment an import finishes and waits for
+    /// Curator POSTs `/api/v1/scan` the moment an import finishes and waits for
     /// the answer. Before this, the handler placed the row and stopped — no
     /// enrichment, no artwork — and the item sat with a blank card until
     /// somebody pressed Scan on the whole library. A home library is the

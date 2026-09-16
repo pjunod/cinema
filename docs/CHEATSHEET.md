@@ -100,7 +100,7 @@ stat -c '%g' /dev/dri/renderD128           # the render group id for group_add
 
 Full symptom→cause table: [OPERATIONS.md](OPERATIONS.md#common-problems--cause).
 
-## 4. Pairing another application (monarr)
+## 4. Pairing another application (Curator)
 
 Two commands. The first is run once by an admin; the second is what the other
 application does on every import.
@@ -111,7 +111,7 @@ application does on every import.
 curl -s localhost:32400/api/v1/keys \
   -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
   -d '{"name":"monarr","scopes":["scan:trigger","status:read"]}'
-# → {"id":1,"name":"monarr",…,"key_secret":"plx_…"}   ← paste into monarr
+# → {"id":1,"name":"monarr",…,"key_secret":"plx_…"}   ← paste into Curator
 
 # 2. Tell plurx a file landed. The path is what the PLURX process sees.
 curl -s localhost:32400/api/v1/scan \
@@ -130,7 +130,7 @@ curl -s localhost:32400/api/v1/scan \
 | `202` every time | That library is scanning; the request is queued, not lost — poll the `request_id` |
 | Item appears, stays named after the file | Enrichment has no TMDB key (Settings → Metadata); the scan itself worked |
 
-Runbook, with monarr's side too: [OPERATIONS.md](OPERATIONS.md).
+Runbook, with Curator's side too: [OPERATIONS.md](OPERATIONS.md).
 
 ## 5. Turning on Live TV (one HDHomeRun)
 

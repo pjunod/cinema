@@ -67,7 +67,7 @@ runtime:
 ```
 response at 2%   = {"position_ms":2000, ..., "watched":true}
 durable row      = (0, Some(100000), false)
-watched_outbox   = (1,0,0) -> (2,0,0)          # spurious monarr webhook
+watched_outbox   = (1,0,0) -> (2,0,0)          # spurious Curator webhook
 ```
 
 The same path calls `state.trakt.on_progress(user, id, 2.0, true)`, and
@@ -251,7 +251,7 @@ crossing response:  {"duration_ms":null,"position_ms":96000,"watched":false}
 after flush:        (96000, Some(100000), true)   outbox (0,0,0) -> (0,0,0)
 ```
 
-The monarr event is lost outright. Trakt is not: the next beat sees
+The Curator event is lost outright. Trakt is not: the next beat sees
 `committed.watched == true` and `plan_sync` pushes it via `push_add` — only
 the real-time scrobble-stop is missed. Needs a probe failure plus a repair
 landing mid-session, so: should-fix.
@@ -279,7 +279,7 @@ Cannot convert column index 'pending' to requested type
 
 SQLite's backend returns `(0,0,0)`. This is the *default state of every
 fresh install*, and the callers are `/metrics` (`http/system.rs:1677`) and
-the monarr status endpoint (`http/comingsoon.rs:194`) — the
+the Curator status endpoint (`http/comingsoon.rs:194`) — the
 `.unwrap_or((0,0,0))` cannot help because the panic is inside the call.
 `cluster-check` never hits it because it only reads counts after enqueuing.
 
@@ -305,7 +305,7 @@ count.
 state transition and no owner column; `settle_watched` (`:532`) is an
 unconditional `UPDATE … WHERE id = $6`. `watched.rs:192` ticks every second
 in every process. Three voters read the same pending row in the same second
-and all three POST to monarr; then node A writes `status='ok'` and node B's
+and all three POST to Curator; then node A writes `status='ok'` and node B's
 timeout writes `status='pending', attempts=1` over it — redelivered forever.
 The schema has no `owner`/`claimed_at`/`lease` column to fix this with.
 

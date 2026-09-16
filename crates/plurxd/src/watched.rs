@@ -1,4 +1,4 @@
-//! Pushing watch state to monarr (master plan §11.1).
+//! Pushing watch state to Curator (master plan §11.1).
 //!
 //! The only thing plurx tells another application to do. Everything else in
 //! the integration is inbound, or a read; this is a push, and pushes are
@@ -22,9 +22,9 @@ use plurx_core::domain::ItemKind;
 use plurx_core::store::{keys, OutboxEntry, Store};
 use serde::{Deserialize, Serialize};
 
-/// Attempt schedule. Long enough to ride out a monarr restart, short enough
+/// Attempt schedule. Long enough to ride out a Curator restart, short enough
 /// that a genuinely dead one is marked failed while somebody could still act
-/// on it. Same shape as monarr's own delivery queue, deliberately: two
+/// on it. Same shape as Curator's own delivery queue, deliberately: two
 /// applications retrying on wildly different clocks is a thing nobody can
 /// reason about at 1 a.m.
 const BACKOFF: [Duration; 3] = [
@@ -34,14 +34,14 @@ const BACKOFF: [Duration; 3] = [
 ];
 
 /// How many to drain per tick. A backlog clears over several passes rather
-/// than opening fifty connections to a monarr that has just come back up and
+/// than opening fifty connections to a Curator that has just come back up and
 /// is, by definition, least able to take them.
 const BATCH: i64 = 20;
 
-/// What monarr receives. Field names are the contract (master plan §11.1).
+/// What Curator receives. Field names are the contract (master plan §11.1).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WatchedEvent {
-    /// Always `"watched"` today; present so monarr's webhook can grow other
+    /// Always `"watched"` today; present so Curator's webhook can grow other
     /// events without a second route.
     pub event: String,
     /// `movie` | `episode`.
@@ -76,7 +76,7 @@ impl WatchedNotifier {
     /// Queue a watched notification for one item, if the feature is on.
     ///
     /// Deliberately swallowing its own errors: this is called from the
-    /// playback path, and a monarr that is unreachable — or a settings read
+    /// playback path, and a Curator that is unreachable — or a settings read
     /// that failed — must never make marking something watched fail. The
     /// worst outcome here is a notification that does not happen.
     pub async fn on_watched(self: &Arc<Self>, user_id: i64, item_id: i64) {
@@ -123,10 +123,10 @@ impl WatchedNotifier {
         on == "1"
     }
 
-    /// Assemble the event, or `None` when there is nothing monarr could act
+    /// Assemble the event, or `None` when there is nothing Curator could act
     /// on.
     ///
-    /// An item with no TMDB id is skipped rather than sent: monarr matches on
+    /// An item with no TMDB id is skipped rather than sent: Curator matches on
     /// ids, and a title alone would make it guess — which is the mistake this
     /// whole integration exists to stop, just pointed the other way.
     async fn build(&self, user_id: i64, item_id: i64) -> Result<Option<WatchedEvent>, String> {
@@ -156,14 +156,14 @@ impl WatchedNotifier {
                     item.episode_number,
                 )
             }
-            // Shows, seasons, folders, photos: nothing monarr tracks.
+            // Shows, seasons, folders, photos: nothing Curator tracks.
             _ => return Ok(None),
         };
         if tmdb.is_none() && imdb.is_none() {
             tracing::debug!(
                 target: "plurxd::integrate",
                 item = item_id,
-                "not notifying: the item has no ids, and monarr matches on ids"
+                "not notifying: the item has no ids, and Curator matches on ids"
             );
             return Ok(None);
         }
@@ -295,15 +295,15 @@ async fn post(url: &str, key: &str, payload: &str) -> Result<(), (String, bool)>
                 deepest = next.to_string();
                 cause = next;
             }
-            (format!("cannot reach monarr at {url}: {deepest}"), false)
+            (format!("cannot reach Curator at {url}: {deepest}"), false)
         })?;
     let status = resp.status();
     if status.is_success() {
         return Ok(());
     }
-    // 401/403 is a key that will not grow rights; 404 is a monarr too old to
+    // 401/403 is a key that will not grow rights; 404 is a Curator too old to
     // have the route; 400/422 is a payload it will reject just as firmly the
-    // fourth time. 5xx is monarr having a moment.
+    // fourth time. 5xx is Curator having a moment.
     let permanent = status.is_client_error();
     Err((format!("monarr returned {status}"), permanent))
 }
@@ -672,7 +672,7 @@ mod tests {
             .await
             .expect_err("connect fails");
         assert!(!permanent);
-        assert!(message.contains("cannot reach monarr"));
+        assert!(message.contains("cannot reach Curator"));
 
         let runner = tokio::spawn(Arc::clone(&retry_notifier).run(Arc::new(
             plurx_core::cluster::coordination::UnclusteredJobAuthority,
@@ -690,7 +690,7 @@ mod tests {
     /// learner delivering the whole cluster's watched notifications alongside
     /// the voters — and left every test green.
     ///
-    /// The observable is the outbox itself. With monarr unpaired a delivery
+    /// The observable is the outbox itself. With Curator unpaired a delivery
     /// attempt is a permanent failure, so a row moving from pending to failed
     /// is proof the drain ran and a row staying pending is proof it did not.
     #[tokio::test]
@@ -739,7 +739,7 @@ mod tests {
         assert_eq!(
             store.watched_outbox_counts().await.expect("counts"),
             (0, 0, 1),
-            "unpaired monarr is a permanent failure, which is what a real drain records"
+            "unpaired Curator is a permanent failure, which is what a real drain records"
         );
 
         runner.abort();

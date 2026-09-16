@@ -62,7 +62,7 @@ KNOWN_NON_ROUTES = {
     "/sync/watched/movies",
     "/sync/watched/shows",
     "/users/settings",
-    "/api/v1/calendar",                       # monarr's endpoints, §18.2
+    "/api/v1/calendar",                       # Curator's endpoints, §18.2
     "/api/v1/system/status",
     "/api/v1/webhooks/plurx",
     "/t/p/w500",                              # a TMDB artwork path
@@ -220,7 +220,7 @@ def tabulated_paths() -> set[str]:
     """Only the paths in a table row — the document's actual inventory.
 
     Prose cites route families (`/files/`, `/hls/`) and other applications'
-    endpoints (Trakt's `/oauth/token`, monarr's `/api/v1/calendar`), so
+    endpoints (Trakt's `/oauth/token`, Curator's `/api/v1/calendar`), so
     sweeping prose for invented routes would mostly find sentences. The tables
     are the claim that something exists here; they are what gets checked.
     """

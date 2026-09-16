@@ -4021,7 +4021,7 @@ Activity without disabling offline work for everyone else. Look for
 `offline package ready`, `offline preparation failed`, and
 `offline expiry sweep failed` in Settings → Logs when diagnosing preparation.
 
-## Pairing another application (monarr) — the runbook
+## Pairing another application (Curator) — the runbook
 
 Another application can ask plurx to index exactly the folder it just wrote,
 instead of plurx finding it on the next scheduled sweep. Three steps.

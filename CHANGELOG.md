@@ -201,7 +201,7 @@ bump may break compatibility and a **patch** bump never does.
   Outside (Integrations) — and collapses to a chip strip on narrow screens.
   A new **Maintenance** section gathers the scheduled jobs, pre-transcoding,
   telemetry retention and Dolby Vision on-disk conversion that used to sit
-  under Libraries; a new **Integrations** section holds Trakt and monarr, so
+  under Libraries; a new **Integrations** section holds Trakt and Curator, so
   Metadata is only the TMDB and OMDb providers. Libraries keeps a table that
   only reports — a library's schedule and Dolby Vision mode open in a drawer
   under its row, and Add library is a drawer from the header. Playback is
@@ -2717,7 +2717,7 @@ begin with 0.2.7.
 
 ### Fixed
 
-- **An item imported by another application never got artwork.** monarr POSTs
+- **An item imported by another application never got artwork.** Curator POSTs
   `/api/v1/scan` the moment an import finishes; the handler placed the row and
   stopped. Enrichment lived only in the *full* scan, so a peer-ingested episode
   got a database row and a blank card, and stayed that way — the full scan that

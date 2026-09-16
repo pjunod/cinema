@@ -70,7 +70,7 @@ Maintained documents describing the current system. Everything here is
 | [PLAYBACK.md](PLAYBACK.md) | How a file becomes a stream — the end-to-end delivery path. |
 | [PLAYBACK-TESTING.md](PLAYBACK-TESTING.md) | Turning a playback failure into a reproducible matrix. |
 | [CLIENTS.md](CLIENTS.md) | The client strategy and the platform matrix — what runs native, what runs web. |
-| [INTEGRATION.md](INTEGRATION.md) | Every seam with monarr, and how to prove each one works. |
+| [INTEGRATION.md](INTEGRATION.md) | Every seam with Curator, and how to prove each one works. |
 | [SECURITY.md](SECURITY.md) | What plurx protects, and what it leaves to the network. |
 | [VALIDATION.md](VALIDATION.md) | The functionality-point system: what CI gates and how impact is selected. |
 | [REQUIREMENTS.md](REQUIREMENTS.md) | The product requirements, and the decision behind each. |
@@ -354,7 +354,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [LIVE-TV-START-STALL-AND-TVOS-SURFACE-IMPLEMENTATION.md](features/LIVE-TV-START-STALL-AND-TVOS-SURFACE-IMPLEMENTATION.md) | The plan Sol builds, v2 after Astra's review — three PRs on one lane: uniform 1 s segments, the listed-media publish gate, progress as the newest listed segment, the rebuilt graph probe, one Android line, the `threshold + 1` lag budget, the controller's `waiting`/behind-live publishers, the band, focus rules, the Info ledger, tests, milestones with acceptance, and the reviewer's attack list. | built |
 | [SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md](features/SETTINGS-NAVIGATION-AND-DEVELOPER-STATUS.md) | What is built, reviewed, and proved for the settings navigation and Developer-page redesign. | open |
 | [HOMEVIDEO-PLAN.md](features/HOMEVIDEO-PLAN.md) | Home video and photos — the `home` libraries. | built |
-| [INTEGRATION-PLAN.md](features/INTEGRATION-PLAN.md) | plurx's side of the monarr pipeline. | built |
+| [INTEGRATION-PLAN.md](features/INTEGRATION-PLAN.md) | plurx's side of the Curator pipeline. | built |
 | [WINDOWS-PORT-PLAN.md](features/WINDOWS-PORT-PLAN.md) | Decisions and acceptance contract used to build the native `plurxd.exe`. | built |
 | [WINDOWS-PORT-STATUS.md](features/WINDOWS-PORT-STATUS.md) | What is built, blocked, and proved for the native Windows server effort. | open |
 

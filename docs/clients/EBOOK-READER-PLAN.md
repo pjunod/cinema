@@ -3,7 +3,7 @@
 **Status:** M0–M5 complete · M4 physical-device acceptance pending · M6
 registry complete, Apple PDF implementation complete, physical acceptance
 pending · **Written:** 2026-08-20 · **Verified against:** `plurx` `e0af2a04`
-and `monarr` `bd168b02`
+and `Curator` `bd168b02`
 
 Companion to [FEATURES.md](../FEATURES.md) (what Books libraries do today),
 [INTEGRATION.md](../INTEGRATION.md) (the Curator → Cinema handoff),

@@ -1415,14 +1415,14 @@ pub mod keys {
     /// trakt.tv/oauth/applications; empty/absent disables the integration).
     pub const TRAKT_CLIENT_ID: &str = "trakt.client_id";
     pub const TRAKT_CLIENT_SECRET: &str = "trakt.client_secret";
-    /// Where monarr lives, and the key to read its calendar with. Both are
+    /// Where Curator lives, and the key to read its calendar with. Both are
     /// server-side only: plurxd proxies the call so the key never reaches a
     /// browser (plan §11.2). Unset = no coming-soon rail, which is the
     /// default and changes nothing.
     pub const MONARR_URL: &str = "monarr.url";
     pub const MONARR_API_KEY: &str = "monarr.api_key";
-    /// Push watch state to monarr ("1" = on). Off by default and separate
-    /// from the URL/key pair, because reading monarr's calendar and sending
+    /// Push watch state to Curator ("1" = on). Off by default and separate
+    /// from the URL/key pair, because reading Curator's calendar and sending
     /// it your household's viewing history are very different consents.
     pub const MONARR_WATCHED_SYNC: &str = "monarr.watched_sync";
     /// Preferred default audio language (ISO 639 code, e.g. "eng").
@@ -2498,7 +2498,7 @@ pub trait MediaStore: Send + Sync + 'static {
     ) -> Result<Vec<Item>, StoreError>;
     /// Movies and shows to enrich: normally those no provider has answered
     /// for yet, which is *not* the same as "those with no TMDB id" — an item
-    /// can arrive carrying an id from another application (a monarr scan
+    /// can arrive carrying an id from another application (a Curator scan
     /// request) and still need every other field. `force` includes
     /// already-enriched items too (a metadata refresh, e.g. to backfill
     /// season posters onto shows enriched before that existed).

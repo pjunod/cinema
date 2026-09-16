@@ -55,11 +55,11 @@ scope in [REQUIREMENTS.md](REQUIREMENTS.md) §5a.
 
 **Exit:** ✅ browse folders, play clips, view photos, edit metadata, thumbnails everywhere.
 
-## Integrations — plurx's side of the monarr pipeline ✅ DONE
+## Integrations — plurx's side of the Curator pipeline ✅ DONE
 
 Another shippable slice, HA-neutral (targeted scans ride the same
 leader-scheduled scanner singleton as full scans). Design record:
-[INTEGRATION-PLAN.md](features/INTEGRATION-PLAN.md); the master plan lives in monarr's
+[INTEGRATION-PLAN.md](features/INTEGRATION-PLAN.md); the master plan lives in Curator's
 repo. Behaviour in [FEATURES.md](FEATURES.md) §11.
 
 - ✅ **Migration v8 — scoped API keys:** `plx_…`, SHA-256 at rest, shown once, scope list, admin CRUD. A second credential kind, so another application never needs a token that IS a user.
@@ -68,11 +68,11 @@ repo. Behaviour in [FEATURES.md](FEATURES.md) §11.
 - ✅ **Scheduled reconcile scan:** per-library intervals with completion-stamped clocks — the slow sweep underneath the fast path, catching what nobody announced.
 - ✅ **Migration v9 — enrich by id:** an id the caller supplied is used directly (movie/show detail; an IMDb id resolved in one lookup) and the title search is skipped, because the search is the step that can be wrong and a wrong TMDB id does not stay local — Trakt sync matches on it too. `metadata_at` replaces "has an id" as the enrichment marker: an item that *arrives* carrying an id needs enriching, not skipping.
 
-**Exit:** ✅ monarr finishes an import and the file is in the library seconds
-later, carrying the ids monarr already knew, with one `correlation_id`
+**Exit:** ✅ Curator finishes an import and the file is in the library seconds
+later, carrying the ids Curator already knew, with one `correlation_id`
 traceable across both applications.
 
-- ✅ **Coming-soon rail (master plan §11.2):** `GET /api/v1/coming-soon` proxies monarr's calendar server-side with a monarr API key from DB settings, cached 15 minutes, rendered as a home rail. Read-only, one endpoint, no monarr changes. The proxying *is* the feature: that key can edit monarr's library, so it never reaches a browser.
+- ✅ **Coming-soon rail (master plan §11.2):** `GET /api/v1/coming-soon` proxies Curator's calendar server-side with a Curator API key from DB settings, cached 15 minutes, rendered as a home rail. Read-only, one endpoint, no Curator changes. The proxying *is* the feature: that key can edit Curator's library, so it never reaches a browser.
 
 **Still to come from the master plan §11.1:** plurx pushing watch state back
 to monarr. Deliberately not started — the plan lists three open questions

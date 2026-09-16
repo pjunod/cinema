@@ -2177,7 +2177,7 @@ fn build_state(
 
 /// Every loop that has to keep running whether or not a request arrives.
 ///
-/// A retry scheduled two minutes out has no request to wake it, and a monarr
+/// A retry scheduled two minutes out has no request to wake it, and a Curator
 /// that is down must not stall anything a viewer is waiting on — so each of
 /// these owns its own timing rather than riding on traffic.
 struct BackgroundLoopGuard {
@@ -2361,7 +2361,7 @@ fn spawn_background_loops(
     );
     tokio::spawn(std::sync::Arc::clone(&state.trakt).sweep_loop());
     // The watched outbox. Its own loop because a retry scheduled two minutes
-    // out has no request to wake it, and a monarr that is down must not stall
+    // out has no request to wake it, and a Curator that is down must not stall
     // anything a viewer is waiting on.
     tokio::spawn(
         std::sync::Arc::clone(&state.watched).run(std::sync::Arc::new(state.membership.clone())),

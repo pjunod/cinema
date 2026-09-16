@@ -4927,7 +4927,7 @@ function installBannerHtml(){
 //
 // There is still nothing to PLAY — the file does not exist yet — but there is
 // something to show. The server prefers a local poster resolved by external
-// id, then downloads and caches the provider poster path monarr supplied. The
+// id, then downloads and caches the provider poster path Curator supplied. The
 // browser only ever sees plurx's image route; a title whose provider named no
 // poster gets the same initials tile the grids use.
 //
@@ -5142,8 +5142,8 @@ function classicHomeBody(p){
   if(p.hubs.continue_watching.length){ hubs+=rail("Continue watching", p.hubs.continue_watching.map(i=>card(i,true)).join("")); }
   if(p.hubs.next_up && p.hubs.next_up.length){ hubs+=rail("Next up", p.hubs.next_up.map(i=>card(i,true)).join("")); }
   if(p.hubs.recently_added.length){ hubs+=rail("Recently added", p.hubs.recently_added.map(i=>card(i)).join("")); }
-  // Coming soon: what monarr expects. Absent entirely when nothing is paired
-  // or monarr had nothing to say — an empty rail is worse than no rail.
+  // Coming soon: what Curator expects. Absent entirely when nothing is paired
+  // or Curator had nothing to say — an empty rail is worse than no rail.
   if(p.soon && p.soon.entries && p.soon.entries.length){
     soon+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
   }
@@ -16356,7 +16356,7 @@ function metadataPanel(settings){
     ${keyCard("ok","OMDb","Rotten Tomatoes, Metacritic and IMDb ratings on the item page — TMDB doesn't carry these.",settings.omdb_configured,settings.omdb_api_key,`<a href="https://www.omdbapi.com/apikey.aspx" target="_blank" rel="noopener">omdbapi.com</a>`,"saveOmdb","oerr")}
     <div class="card">${cardHead("Providers with no key","Anime uses AniList. Books and home-video libraries use no provider.")}</div>`;
 }
-// The section for services plurx talks to. Trakt is a two-way sync, monarr a
+// The section for services plurx talks to. Trakt is a two-way sync, Curator a
 // calendar seam; both are the opposite direction of the Metadata providers,
 // which is why they no longer share a page with them.
 function integrationsPanel(settings,trakt){
@@ -20579,13 +20579,13 @@ function monarrCardHtml(){
   const url=(SETTINGS&&SETTINGS.monarr_url)||"";
   const key=(SETTINGS&&SETTINGS.monarr_api_key)||"";
   const on=(SETTINGS&&SETTINGS.monarr_configured);
-  return setCard(`${cardHead("monarr","A <b>Coming soon</b> rail on the home screen from monarr's calendar — episodes airing and films due in the next four weeks. Optional; leave empty for no rail.",`<span class="pill${on?" ok":""}">${on?"paired":"not paired"}</span>`)}
+  return setCard(`${cardHead("Curator","A <b>Coming soon</b> rail on the home screen from Curator's calendar — episodes airing and films due in the next four weeks. Optional; leave empty for no rail.",`<span class="pill${on?" ok":""}">${on?"paired":"not paired"}</span>`)}
     <div class="setfields">
-      <div><label for="mnurl">monarr URL</label><input id="mnurl" placeholder="http://monarr:7676" value="${esc(url)}" style="min-width:220px"></div>
-      <div><label for="mnkey">API key <span class="muted">— Settings → Security in monarr</span></label><input id="mnkey" type="password" autocomplete="off" value="${esc(key)}" onfocus="this.type='text'" onblur="this.type='password'" style="min-width:220px"></div>
+      <div><label for="mnurl">Curator URL</label><input id="mnurl" placeholder="http://curator:7676" value="${esc(url)}" style="min-width:220px"></div>
+      <div><label for="mnkey">API key <span class="muted">— Settings → Security in Curator</span></label><input id="mnkey" type="password" autocomplete="off" value="${esc(key)}" onfocus="this.type='text'" onblur="this.type='password'" style="min-width:220px"></div>
     </div>
-    <div class="hint">plurx keeps the key server-side and calls monarr for you, so it is never sent to a browser.</div>
-    ${togRow("mnsync","Send watch state to monarr","Off by default. When on, plurx tells monarr what was watched <b>and by which Cinema user</b>, so Curator can prefer upgrades for shows someone is following. That is viewing history leaving plurx — turn it on only if you want monarr to have it. Nothing is ever deleted as a result.",SETTINGS&&SETTINGS.monarr_watched_sync)}
+    <div class="hint">plurx keeps the key server-side and calls Curator for you, so it is never sent to a browser.</div>
+    ${togRow("mnsync","Send watch state to monarr","Off by default. When on, plurx tells Curator what was watched <b>and by which Cinema user</b>, so Curator can prefer upgrades for shows someone is following. That is viewing history leaving plurx — turn it on only if you want Curator to have it. Nothing is ever deleted as a result.",SETTINGS&&SETTINGS.monarr_watched_sync)}
     <div class="err" id="mnerr"></div>
     <div class="setfoot"><button class="primary sm" disabled onclick="saveMonarr(this)">Save</button>
       <button class="ghost sm" onclick="testMonarr()">Test connection</button>
@@ -20599,9 +20599,9 @@ async function testMonarr(){
     const st=await api("/monarr/status");
     if(!st.configured){ el.textContent="✗ not configured"; return; }
     el.textContent = st.reachable
-      ? `✓ connected${st.version?` · monarr ${st.version}`:""}`
+      ? `✓ connected${st.version?` · Curator ${st.version}`:""}`
       : `✗ ${st.error||"no answer"}`;
-    // The outbox is the other half of "is it working": a reachable monarr
+    // The outbox is the other half of "is it working": a reachable Curator
     // with a hundred pending notifications is a different problem from an
     // unreachable one, and both look identical without this.
     if(q && (st.watched_pending||st.watched_sent||st.watched_failed)){
@@ -21632,7 +21632,7 @@ function theaterHomeBody(p){
   if(hub("continue_watching").length) hubs+=rail("Continue watching", hub("continue_watching").map(i=>card(i,true)).join(""));
   if(hub("next_up").length)           hubs+=rail("Next up",           hub("next_up").map(i=>card(i,true)).join(""));
   if(hub("recently_added").length)    hubs+=rail("Recently added",    hub("recently_added").map(i=>card(i)).join(""));
-  // Coming soon: absent entirely when nothing is paired or monarr had nothing
+  // Coming soon: absent entirely when nothing is paired or Curator had nothing
   // to say — an empty rail is worse than no rail.
   if(p.soon&&p.soon.entries&&p.soon.entries.length) soon+=rail("Coming soon", p.soon.entries.map(comingCard).join(""));
 

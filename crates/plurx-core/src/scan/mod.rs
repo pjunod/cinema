@@ -1082,7 +1082,7 @@ async fn record_candidates(
             .await?;
         if let Some(sink) = placed_sink.as_deref_mut() {
             // The caller of a targeted scan is owed an answer, not a shrug:
-            // "which item did my file become" is the whole question monarr
+            // "which item did my file become" is the whole question Curator
             // asks, and reconstructing it from a path afterwards would race
             // with the next scan.
             sink.push(PlacedFile {
@@ -1725,7 +1725,7 @@ mod tests {
         assert_eq!(item.title, "Heat");
     }
 
-    /// A single file is a legitimate target — monarr imports one episode at a
+    /// A single file is a legitimate target — Curator imports one episode at a
     /// time as often as it imports a folder.
     #[tokio::test]
     async fn a_single_file_is_a_valid_target() {
@@ -1790,7 +1790,7 @@ mod tests {
     }
 
     /// A path that does not exist is refused rather than silently scanning
-    /// nothing — monarr sending a path plurx cannot see (the classic
+    /// nothing — Curator sending a path plurx cannot see (the classic
     /// container path-mapping mistake) must hear about it.
     #[tokio::test]
     async fn a_missing_path_is_refused() {

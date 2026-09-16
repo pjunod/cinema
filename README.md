@@ -91,7 +91,7 @@ before that path can ship, and with
 [docs/streaming/STUTTER-4K.md](docs/streaming/STUTTER-4K.md) as the open investigation into the one
 fork that misbehaves: what is already ruled out and the experiment that ruled it
 out, so the next attempt starts where the last one stopped. If you run plurx
-beside monarr,
+beside Curator,
 [docs/INTEGRATION.md](docs/INTEGRATION.md) documents every seam between them —
 what each does, where you watch it, and the command that proves it works.
 [docs/clients/PLAYER-INPUT-CONTRACT.md](docs/clients/PLAYER-INPUT-CONTRACT.md) is the one

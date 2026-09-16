@@ -1,14 +1,14 @@
-//! `GET /api/v1/coming-soon` — what monarr expects to have soon (plan §11.2).
+//! `GET /api/v1/coming-soon` — what Curator expects to have soon (plan §11.2).
 //!
-//! plurx does not know what is on the way; monarr does, and already answers
+//! plurx does not know what is on the way; Curator does, and already answers
 //! `GET /api/v1/calendar`. So this is a proxy, and the proxying is the
-//! feature: the monarr API key stays on the server. A browser calling monarr
+//! feature: the Curator API key stays on the server. A browser calling Curator
 //! directly would need that key in its own JavaScript, which means every
 //! logged-in viewer holds a credential that can edit the whole library. One
 //! server-side hop removes that entirely.
 //!
-//! Read-only, one endpoint, no monarr changes. Unset settings mean no rail,
-//! which is the default: a plurx that has never heard of monarr behaves
+//! Read-only, one endpoint, no Curator changes. Unset settings mean no rail,
+//! which is the default: a plurx that has never heard of Curator behaves
 //! exactly as it did.
 
 use std::collections::{BTreeMap, HashMap};
@@ -33,12 +33,12 @@ use crate::state::AppState;
 ///
 /// A calendar changes when a release date changes — days, not seconds — and
 /// the home screen is the most-loaded page there is. Fifteen minutes means a
-/// household of six opening plurx all evening costs monarr four requests an
+/// household of six opening plurx all evening costs Curator four requests an
 /// hour rather than several hundred.
 const CACHE_TTL: Duration = Duration::from_secs(15 * 60);
 
 /// How far ahead to look. Four weeks is the horizon a "coming soon" rail is
-/// for; past that it is a calendar, and monarr already has one of those.
+/// for; past that it is a calendar, and Curator already has one of those.
 const HORIZON_DAYS: i64 = 28;
 
 /// Bound one provider image before it reaches memory or disk. Posters are
@@ -52,8 +52,8 @@ const MAX_ARTWORK_BYTES: u64 = 15 * 1024 * 1024;
 /// keeping the request count low enough to remain polite to those providers.
 const ARTWORK_DOWNLOAD_CONCURRENCY: usize = 4;
 
-/// One thing monarr expects. Deliberately a subset of monarr's own
-/// `CalendarEntry`: `mediaItemId` is monarr's id and means nothing here, and
+/// One thing Curator expects. Deliberately a subset of Curator's own
+/// `CalendarEntry`: `mediaItemId` is Curator's id and means nothing here, and
 /// forwarding an id from another application invites somebody to build on
 /// it.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -64,17 +64,17 @@ pub struct ComingSoon {
     pub title: String,
     /// "S01E03 — Pilot", "by Author", or empty.
     pub detail: String,
-    /// True when monarr already has the file. Kept because "expected
+    /// True when Curator already has the file. Kept because "expected
     /// tomorrow" and "arrived early" are different things to look at.
     pub has_file: bool,
-    /// monarr's ids for the item — the SHOW's, for an episode. Not rendered;
+    /// Curator's ids for the item — the SHOW's, for an episode. Not rendered;
     /// they are how the entry is resolved against plurx's own library.
     #[serde(skip_serializing)]
     pub tmdb_id: Option<i64>,
     #[serde(skip_serializing)]
     pub imdb_id: Option<String>,
     /// Artwork served from plurx's own cache. A local library poster wins;
-    /// otherwise plurx downloads the provider path monarr named and keeps the
+    /// otherwise plurx downloads the provider path Curator named and keeps the
     /// browser/native app off that external network surface.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub poster: Option<String>,
@@ -101,7 +101,7 @@ struct MonarrEntry {
     #[serde(default, rename = "imdbId")]
     imdb_id: Option<String>,
     /// TMDB-relative for films/most shows; HTTPS for provider-chain shows and
-    /// books. The downloader below accepts only the providers monarr uses.
+    /// books. The downloader below accepts only the providers Curator uses.
     #[serde(default, rename = "posterPath")]
     poster_path: Option<String>,
 }
@@ -125,7 +125,7 @@ impl From<MonarrEntry> for ComingSoon {
 
 #[derive(Serialize)]
 pub struct ComingSoonResponse {
-    /// Empty and `configured: false` when no monarr is paired — an absent
+    /// Empty and `configured: false` when no Curator is paired — an absent
     /// rail rather than an error, because not pairing is a valid choice and
     /// the home screen must not show a red box for it.
     pub configured: bool,
@@ -154,13 +154,13 @@ impl ComingSoonCache {
     }
 }
 
-/// The state of the monarr pairing, for the settings page.
+/// The state of the Curator pairing, for the settings page.
 #[derive(Serialize)]
 pub struct MonarrStatus {
     pub configured: bool,
-    /// True once monarr has answered a real request.
+    /// True once Curator has answered a real request.
     pub reachable: bool,
-    /// monarr's version, when it said.
+    /// Curator's version, when it said.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -176,7 +176,7 @@ pub struct MonarrStatus {
 /// Deliberately an active probe rather than a cached flag. Somebody opening
 /// this page has just typed a URL and a key and wants to know whether they
 /// typed them right; an answer from fifteen minutes ago cannot tell them.
-/// It reads monarr's own status endpoint, which changes nothing.
+/// It reads Curator's own status endpoint, which changes nothing.
 pub async fn monarr_status(
     _admin: super::extract::AdminUser,
     State(state): State<AppState>,
@@ -263,12 +263,12 @@ pub fn normalize_monarr_url(raw: &str) -> String {
     {
         // Looks like a scheme, and is followed by nothing that could be an
         // authority. Not ours to guess at. The `rest` test is what keeps
-        // `monarr:9000` on the bare-host path — a colon followed by digits
+        // `Curator:9000` on the bare-host path — a colon followed by digits
         // is a port, not a scheme, however scheme-shaped the word before it.
         return typed.to_owned();
     } else {
         // A bare host, which is what an operator reaches for. Assume http,
-        // and monarr's own default port when none was given — there is
+        // and Curator's own default port when none was given — there is
         // nothing else it could sensibly mean.
         format!("http://{repaired}")
     };
@@ -328,7 +328,7 @@ async fn probe_monarr(url: &str, key: &str) -> Result<Option<String>, String> {
         .header("X-Api-Key", key)
         .send()
         .await
-        .map_err(|e| format!("cannot reach monarr at {url}: {}", root_cause(&e)))?;
+        .map_err(|e| format!("cannot reach Curator at {url}: {}", root_cause(&e)))?;
     let status = resp.status();
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
         return Err("monarr rejected the API key".to_owned());
@@ -373,7 +373,7 @@ pub async fn coming_soon(
     }
 
     let entries = fetch(&url, &key).await.unwrap_or_else(|e| {
-        // A monarr that is down must not take the home screen with it. The
+        // A Curator that is down must not take the home screen with it. The
         // rail simply has nothing in it this quarter-hour, and the reason is
         // in the log rather than in the viewer's face.
         tracing::warn!(target: "plurxd::integrate", error = %e, "coming-soon fetch failed");
@@ -388,7 +388,7 @@ pub async fn coming_soon(
 
 /// Attach a locally served poster to every entry whose provider named one.
 ///
-/// Done AFTER the cache read, not before it: the cache holds monarr's answer
+/// Done AFTER the cache read, not before it: the cache holds Curator's answer
 /// for fifteen minutes, and artwork resolved into it would be frozen there
 /// too — so a show that finished scanning two minutes ago would stay
 /// pictureless for the rest of the quarter-hour. Local library artwork wins;
@@ -513,9 +513,9 @@ async fn with_artwork(state: &AppState, entries: Vec<ComingSoon>) -> Vec<ComingS
     out
 }
 
-/// Turn monarr's provider artwork reference into the one URL plurx may fetch.
+/// Turn Curator's provider artwork reference into the one URL plurx may fetch.
 ///
-/// The allowlist is the SSRF boundary. monarr normally sends a TMDB-relative
+/// The allowlist is the SSRF boundary. Curator normally sends a TMDB-relative
 /// path, but provider-chain shows and books carry absolute TVmaze/Open Library
 /// URLs. Accepting arbitrary absolute URLs from a peer would let that peer
 /// make plurxd probe private services, so only those three public artwork
@@ -675,7 +675,7 @@ async fn fetch(url: &str, key: &str) -> Result<Vec<ComingSoon>, String> {
         .header("X-Api-Key", key)
         .send()
         .await
-        .map_err(|e| format!("cannot reach monarr at {url}: {}", root_cause(&e)))?;
+        .map_err(|e| format!("cannot reach Curator at {url}: {}", root_cause(&e)))?;
     if !resp.status().is_success() {
         return Err(format!("monarr returned {}", resp.status()));
     }
