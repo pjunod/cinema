@@ -11,7 +11,7 @@ and a mean hides exactly the starts people remember.
     scripts/bench fixtures                 # build the corpus (once, ~2 min)
     scripts/bench run --token TOKEN        # play everything, print the table
     scripts/bench run --only 4k-hdr10      # one fixture, while iterating
-    scripts/bench rate-control --base http://nynuc:32400 --token TOKEN \
+    scripts/bench rate-control --base http://media1:32400 --token TOKEN \
       --corpus scripts/perf2-rate-control-smoke-corpus.json --modes vbr \
       --vmaf-ffmpeg ffmpeg --vmaf-model vmaf_v0.6.1 \
       --json out/rate-control.json

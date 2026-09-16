@@ -11,6 +11,12 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# The fleet registry reaches every workflow through one repository variable,
+# and every use carries the same fallback so an unset variable can never
+# resolve to Docker Hub (an empty registry means docker.io to `docker login`
+# and to `docker/login-action`).
+FLEET_REGISTRY_EXPR = "${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"
+
 
 def duplicate_mapping_keys(path: Path) -> list[tuple[int, str]]:
     """Find repeated plain keys in the GitHub YAML subset used by this repo."""
@@ -477,7 +483,6 @@ class CiCacheContractCase(unittest.TestCase):
         action = (ROOT / ".github/actions/buildx-cache/action.yml").read_text(
             encoding="utf-8"
         )
-        config = (ROOT / ".github/buildkitd.toml").read_text(encoding="utf-8")
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 
         self.assertIn("keep-state: true", action)
@@ -488,9 +493,10 @@ class CiCacheContractCase(unittest.TestCase):
         self.assertNotIn("inputs.persistent-eligible", action)
         self.assertIn("builder_name=plurx-$runner_name", action)
         self.assertNotIn("plurx-$runner_name-$CACHE_LANE", action)
-        self.assertIn("buildkitd-config:", action)
-        self.assertIn('[registry."192.168.4.7:3000"]', config)
-        self.assertIn("http = true", config)
+        self.assertIn("buildkitd-config-inline:", action)
+        self.assertNotIn("buildkitd.toml", action)
+        self.assertIn('[registry."%s"]' % FLEET_REGISTRY_EXPR, action)
+        self.assertIn("http = true", action)
         self.assertIn(
             'run: scripts/ci-buildkit-prune "$BUILDER_NAME" 50', workflow
         )
@@ -661,7 +667,7 @@ class CiCacheContractCase(unittest.TestCase):
                     "DU_BEFORE": "\n".join(
                         (record.format("30GB"), record.format("31GB"))
                     ),
-                    # 8.192kB is verbatim what buildx 0.30.1 printed on nynuc.
+                    # 8.192kB is verbatim what buildx 0.30.1 printed on media1.
                     "DU_AFTER": "\n".join(
                         (record.format("20GB"), record.format("8.192kB"))
                     ),
@@ -699,7 +705,7 @@ class CiCacheContractCase(unittest.TestCase):
         """The runner can talk to the daemon and still not enter its directory.
 
         `/var/lib/docker` is root:root 0710 on a stock engine, so a runner in
-        the `docker` group cannot `cd` into it. `gha-mbp-linux-arm-01` failed
+        the `docker` group cannot `cd` into it. `gha-macb-linux-arm-01` failed
         the arm64 package lane on exactly that, after its build had already
         succeeded. The budget does not need the filesystem — only the reserve
         does — so the budget is still enforced and the reserve is reported as
@@ -918,7 +924,7 @@ class CiCacheContractCase(unittest.TestCase):
             fake_bin = tool_cache / "bin"
             fake_bin.mkdir()
             fake_df = fake_bin / "df"
-            # 78 GiB total, 40 GiB available: gha-m6-general-01's root volume.
+            # 78 GiB total, 40 GiB available: gha-lab6-general-01's root volume.
             fake_df.write_text(
                 "#!/bin/sh\n"
                 "printf '%s\\n' "
@@ -992,7 +998,7 @@ class CiCacheContractCase(unittest.TestCase):
             environment.update(
                 {
                     "GITHUB_STEP_SUMMARY": str(summary),
-                    "RUNNER_NAME": "gha-m6-general-01",
+                    "RUNNER_NAME": "gha-lab6-general-01",
                     "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
                     "FIXTURE_USED_KB": str(41 * 1024 * 1024),
                 }
@@ -1016,14 +1022,14 @@ class CiCacheContractCase(unittest.TestCase):
             self.assertEqual(loud.returncode, 0, loud.stderr)
             report = summary.read_text()
             self.assertIn("### Runner cache server", report)
-            self.assertIn("gha-m6-general-01", report)
+            self.assertIn("gha-lab6-general-01", report)
             self.assertIn("in 3 entries", report)
             self.assertIn("eviction: none", report)
             self.assertIn("retained: 41 GiB", report)
             self.assertIn("retained: 3 GiB", report)
             # Discriminating in both directions: over the threshold it names
             # the runner, under it says nothing at all.
-            self.assertIn("::warning::gha-m6-general-01's cache server holds 41G", loud.stdout)
+            self.assertIn("::warning::gha-lab6-general-01's cache server holds 41G", loud.stdout)
             self.assertNotIn("::warning::", quiet.stdout)
             for name in ("11", "12", "13"):
                 self.assertTrue((blobs / name).is_file())
@@ -1127,8 +1133,8 @@ class CiCacheContractCase(unittest.TestCase):
                 if "=" in line
             )
             self.assertEqual(outputs["local"], "true")
-            # Unique per runner INSTANCE, not per host: nynuc runs four runners
-            # and rogg16 five, and two sharing a Cargo root would prune each
+            # Unique per runner INSTANCE, not per host: media1 runs four runners
+            # and lab5 five, and two sharing a Cargo root would prune each
             # other's target directories mid-build.
             self.assertIn("forgejo-runner-03", outputs["cache_root"])
             self.assertTrue(outputs["cache_root"].startswith(str(tool_cache.resolve())))

@@ -168,7 +168,6 @@ ANDROID_DEVICE_PATHS = (
 RELEASE_BUILD_PATHS = (
     ".dockerignore",
     ".github/actions/buildx-cache/**",
-    ".github/buildkitd.toml",
     ".github/workflows/ci.yml",
     ".github/workflows/publish-release.yml",
     "Cargo.lock",

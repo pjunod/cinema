@@ -2,7 +2,7 @@
 """Accept Live TV against a real HDHomeRun, and measure what only hardware knows.
 
 Run: python3 scripts/live-tv-hardware --self-host \
-         --device 192.168.4.20 --tuners 2 --out target/live-tv-hardware
+         --device 10.42.4.20 --tuners 2 --out target/live-tv-hardware
 
 Relay: scripts/live-tv-hardware --via <ingress> --token <bearer> \
          --device <ipv4> --channel <ATSC 3.0> --copy

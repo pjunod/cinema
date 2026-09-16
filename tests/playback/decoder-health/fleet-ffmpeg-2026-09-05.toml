@@ -15,7 +15,7 @@ container_image_id = "docker inspect --format '{{.Image}}' plurxd"
 canonicalization = "hash exact command bytes including line order and terminating newlines; no filtering"
 
 [[nodes]]
-name = "nynuc"
+name = "media1"
 host_ffmpeg = "8.0.1-3ubuntu2"
 host_binary_sha256 = "bdf6aabffdba7411edff8d36c389d695257fcdf823d196020176e117612862f6"
 host_buildconf_sha256 = "a6db4aa7f56c4a335b059cd54e0482b91b47d28c4c7629ad7dfdb54e5ceb7f52"
@@ -28,7 +28,7 @@ container_hwaccels_sha256 = "20ab7f793d9e1f683ae9691ecdc33960831e50080d79deb273e
 advertised_hwaccels = ["vdpau", "cuda", "vaapi", "qsv", "drm", "opencl", "vulkan"]
 
 [[nodes]]
-name = "m6"
+name = "lab6"
 host_ffmpeg = "not-on-PATH"
 container_image = "plurx/plurxd:latest"
 container_image_id = "sha256:939f7d0b900e40f3f0f96902ed83a6dbc82feb9e7d576ac040c88106bfb4f174"
@@ -39,7 +39,7 @@ container_hwaccels_sha256 = "20ab7f793d9e1f683ae9691ecdc33960831e50080d79deb273e
 advertised_hwaccels = ["vdpau", "cuda", "vaapi", "qsv", "drm", "opencl", "vulkan"]
 
 [[nodes]]
-name = "nuc4"
+name = "lab4"
 host_ffmpeg = "8.0.1-3ubuntu2"
 host_binary_sha256 = "bdf6aabffdba7411edff8d36c389d695257fcdf823d196020176e117612862f6"
 host_buildconf_sha256 = "a6db4aa7f56c4a335b059cd54e0482b91b47d28c4c7629ad7dfdb54e5ceb7f52"
@@ -52,7 +52,7 @@ container_hwaccels_sha256 = "20ab7f793d9e1f683ae9691ecdc33960831e50080d79deb273e
 advertised_hwaccels = ["vdpau", "cuda", "vaapi", "qsv", "drm", "opencl", "vulkan"]
 
 [[nodes]]
-name = "nuc3"
+name = "lab3"
 host_ffmpeg = "8.0.1-3ubuntu2"
 host_binary_sha256 = "bdf6aabffdba7411edff8d36c389d695257fcdf823d196020176e117612862f6"
 host_buildconf_sha256 = "a6db4aa7f56c4a335b059cd54e0482b91b47d28c4c7629ad7dfdb54e5ceb7f52"

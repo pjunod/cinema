@@ -7268,16 +7268,16 @@ final class AppleClientTests: XCTestCase {
     func testOriginNormalizationAcceptsHostnamesAndRemovesTrailingSlashes() {
         XCTAssertEqual(AppModel.normalizeOrigin("  media-box:32400///  "), "http://media-box:32400")
         XCTAssertEqual(AppModel.normalizeOrigin("media-box"), "http://media-box:32400")
-        XCTAssertEqual(AppModel.normalizeOrigin("192.168.1.20"), "http://192.168.1.20:32400")
-        XCTAssertEqual(AppModel.normalizeOrigin("http://192.168.1.20"), "http://192.168.1.20:32400")
+        XCTAssertEqual(AppModel.normalizeOrigin("10.42.1.20"), "http://10.42.1.20:32400")
+        XCTAssertEqual(AppModel.normalizeOrigin("http://10.42.1.20"), "http://10.42.1.20:32400")
         XCTAssertEqual(AppModel.normalizeOrigin("https://media.example.test/"), "https://media.example.test")
         XCTAssertEqual(AppModel.normalizeOrigin("   "), "")
     }
 
     func testConnectionCodesAcceptServerAddressesAndRejectUnrelatedPayloads() {
         XCTAssertEqual(
-            ConnectionCode.origin(from: "http://192.168.4.10:32400/"),
-            "http://192.168.4.10:32400"
+            ConnectionCode.origin(from: "http://10.42.4.10:32400/"),
+            "http://10.42.4.10:32400"
         )
         XCTAssertEqual(
             ConnectionCode.origin(
@@ -7435,11 +7435,11 @@ final class AppleClientTests: XCTestCase {
         address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         address.sin_family = sa_family_t(AF_INET)
         XCTAssertEqual(
-            "192.168.4.42".withCString { inet_pton(AF_INET, $0, &address.sin_addr) },
+            "10.42.4.42".withCString { inet_pton(AF_INET, $0, &address.sin_addr) },
             1
         )
         let data = Data(bytes: &address, count: MemoryLayout<sockaddr_in>.size)
-        XCTAssertEqual(BonjourAddress.numericHost(from: [data]), "192.168.4.42")
+        XCTAssertEqual(BonjourAddress.numericHost(from: [data]), "10.42.4.42")
     }
 
     func testRelativeMediaURLCarriesTokenAndPreservesExistingQuery() throws {

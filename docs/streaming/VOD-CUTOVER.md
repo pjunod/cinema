@@ -149,7 +149,7 @@ Linux repository gates remain the full Rust authority.
 
 ## Remaining physical evidence
 
-The M4 nynuc checks remain physical evidence, not CI work:
+The M4 media1 checks remain physical evidence, not CI work:
 
 1. one two-hour indexed 4K remux from beginning to end;
 2. twenty non-linear seeks in one session; and

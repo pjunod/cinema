@@ -2177,7 +2177,7 @@ fn build_state(
 
 /// Every loop that has to keep running whether or not a request arrives.
 ///
-/// A retry scheduled two minutes out has no request to wake it, and a monarr
+/// A retry scheduled two minutes out has no request to wake it, and a Curator
 /// that is down must not stall anything a viewer is waiting on — so each of
 /// these owns its own timing rather than riding on traffic.
 struct BackgroundLoopGuard {
@@ -2361,7 +2361,7 @@ fn spawn_background_loops(
     );
     tokio::spawn(std::sync::Arc::clone(&state.trakt).sweep_loop());
     // The watched outbox. Its own loop because a retry scheduled two minutes
-    // out has no request to wake it, and a monarr that is down must not stall
+    // out has no request to wake it, and a Curator that is down must not stall
     // anything a viewer is waiting on.
     tokio::spawn(
         std::sync::Arc::clone(&state.watched).run(std::sync::Arc::new(state.membership.clone())),
@@ -4238,10 +4238,10 @@ mod startup_tests {
     /// Bonjour record no client on the LAN can connect to.
     #[test]
     fn the_advertised_port_is_the_one_the_host_published() {
-        let (base, port, info) = discovery_endpoints("http://192.168.1.9:8096").expect("endpoints");
+        let (base, port, info) = discovery_endpoints("http://10.42.1.9:8096").expect("endpoints");
         assert_eq!(port, 8096);
-        assert_eq!(info.as_str(), "http://192.168.1.9:8096/api/v1/server");
-        assert_eq!(base.as_str(), "http://192.168.1.9:8096/");
+        assert_eq!(info.as_str(), "http://10.42.1.9:8096/api/v1/server");
+        assert_eq!(base.as_str(), "http://10.42.1.9:8096/");
 
         // A scheme's default port is a real answer.
         let (_, port, info) = discovery_endpoints("https://plurx.example").expect("endpoints");
@@ -5860,7 +5860,7 @@ mod startup_tests {
                 "Living Room",
                 "Living Room",
                 None,
-                "192.168.1.9:32400".parse().expect("addr"),
+                "10.42.1.9:32400".parse().expect("addr"),
                 "0.2.0",
             )
             .expect("a daemon that accepts both calls registers");
@@ -5908,7 +5908,7 @@ mod startup_tests {
                 &"Living Room ".repeat(30),
                 &"Living Room ".repeat(30),
                 None,
-                "192.168.1.9:32400".parse().expect("addr"),
+                "10.42.1.9:32400".parse().expect("addr"),
                 "0.2.0",
             )
             .expect_err("a record that cannot be built is an error")
@@ -6032,7 +6032,7 @@ mod startup_tests {
                 "Living Room",
                 "Living Room",
                 None,
-                "192.168.1.9:32400".parse().expect("addr"),
+                "10.42.1.9:32400".parse().expect("addr"),
                 "0.2.0",
             )
             .expect_err("an unmonitorable daemon is an error")
@@ -6061,7 +6061,7 @@ mod startup_tests {
                 "Living Room",
                 "Living Room",
                 None,
-                "192.168.1.9:32400".parse().expect("addr"),
+                "10.42.1.9:32400".parse().expect("addr"),
                 "0.2.0",
             )
             .expect_err("a daemon that refuses the record is an error")
@@ -6082,7 +6082,7 @@ mod startup_tests {
                 vec![
                     mdns_sd::DaemonEvent::Announce(
                         "plurx".to_owned(),
-                        "192.168.1.9:32400".to_owned(),
+                        "10.42.1.9:32400".to_owned(),
                     ),
                     mdns_sd::DaemonEvent::Error(mdns_sd::Error::Msg(
                         "no usable multicast interface".to_owned(),
@@ -6206,17 +6206,17 @@ mod startup_tests {
     /// a registration failure would be worse than a less specific label.
     #[test]
     fn a_name_too_long_for_dns_sd_keeps_the_name_and_drops_the_address() {
-        let address: IpAddr = "192.168.100.200".parse().expect("IP");
+        let address: IpAddr = "10.42.100.200".parse().expect("IP");
         let long = "L".repeat(60);
         assert_eq!(
-            display_name(&long, Some("m6"), Some(&address)),
+            display_name(&long, Some("lab6"), Some(&address)),
             long,
             "the address must be dropped rather than overflow the label"
         );
         // One that still fits keeps both.
         assert_eq!(
-            display_name("Loft", Some("m6"), Some(&address)),
-            "Loft · 192.168.100.200"
+            display_name("Loft", Some("lab6"), Some(&address)),
+            "Loft · 10.42.100.200"
         );
     }
 
@@ -6256,7 +6256,7 @@ mod startup_tests {
             "{:#}",
             dispatch(
                 Command::Advertise {
-                    server: "ftp://192.168.1.9:21".to_owned(),
+                    server: "ftp://10.42.1.9:21".to_owned(),
                 },
                 config_in(tmp.path()),
                 None,
@@ -6407,15 +6407,15 @@ mod startup_tests {
 
     #[test]
     fn default_discovery_name_uses_the_machine_but_custom_names_win() {
-        let address: IpAddr = "192.168.1.20".parse().expect("IP");
+        let address: IpAddr = "10.42.1.20".parse().expect("IP");
         assert_eq!(
-            display_name("plurx", Some("m6"), Some(&address)),
-            "m6 · 192.168.1.20"
+            display_name("plurx", Some("lab6"), Some(&address)),
+            "lab6 · 10.42.1.20"
         );
-        assert_eq!(display_name("PLURX", Some("nuc4.local."), None), "nuc4");
+        assert_eq!(display_name("PLURX", Some("lab4.local."), None), "lab4");
         assert_eq!(
-            display_name("Living Room", Some("m6"), Some(&address)),
-            "Living Room · 192.168.1.20"
+            display_name("Living Room", Some("lab6"), Some(&address)),
+            "Living Room · 10.42.1.20"
         );
         assert_eq!(display_name("plurx", Some("localhost"), None), "plurx");
         assert_eq!(display_name("plurx", None, None), "plurx");
@@ -6436,19 +6436,19 @@ mod startup_tests {
     /// a UUID prefix a person can read them.
     #[test]
     fn a_clustered_node_is_named_for_its_machine_not_its_uuid() {
-        let address: IpAddr = "192.168.4.8".parse().expect("IP");
+        let address: IpAddr = "10.42.4.8".parse().expect("IP");
         let node = "6b98c6cb-8388-48ba-8c2b-69c9dc6fc8a9";
         assert_eq!(
             instance_label(
-                &discovery_name("plurx", Some("nuc4"), Some(&address)),
+                &discovery_name("plurx", Some("lab4"), Some(&address)),
                 Some(node),
             ),
-            "nuc4 · 192.168.4.8"
+            "lab4 · 10.42.4.8"
         );
         // A hostname is already unique on one LAN, address or no address.
         assert_eq!(
-            instance_label(&discovery_name("plurx", Some("nuc4"), None), Some(node)),
-            "nuc4"
+            instance_label(&discovery_name("plurx", Some("lab4"), None), Some(node)),
+            "lab4"
         );
     }
 
@@ -6457,7 +6457,7 @@ mod startup_tests {
     /// the second identical row DNS-SD would have to rename.
     #[test]
     fn a_clustered_node_with_nothing_to_tell_it_apart_keeps_its_node_id() {
-        let address: IpAddr = "192.168.4.8".parse().expect("IP");
+        let address: IpAddr = "10.42.4.8".parse().expect("IP");
         let node = "6b98c6cb-8388-48ba-8c2b-69c9dc6fc8a9";
         assert_eq!(
             instance_label(&discovery_name("plurx", None, None), Some(node)),
@@ -6467,7 +6467,7 @@ mod startup_tests {
         // of the cluster, so it does not distinguish one either.
         assert_eq!(
             instance_label(
-                &discovery_name("Living Room", Some("nuc4"), None),
+                &discovery_name("Living Room", Some("lab4"), None),
                 Some(node),
             ),
             "Living Room · 6b98c6cb8388"
@@ -6475,10 +6475,10 @@ mod startup_tests {
         // With this node's own address it does.
         assert_eq!(
             instance_label(
-                &discovery_name("Living Room", Some("nuc4"), Some(&address)),
+                &discovery_name("Living Room", Some("lab4"), Some(&address)),
                 Some(node),
             ),
-            "Living Room · 192.168.4.8"
+            "Living Room · 10.42.4.8"
         );
         // A standalone server has no peers to be confused with.
         assert_eq!(
@@ -6596,13 +6596,13 @@ mod startup_tests {
 
     #[test]
     fn explicit_bind_advertises_only_that_address() {
-        let address = "192.168.1.20".parse().expect("IP address");
+        let address = "10.42.1.20".parse().expect("IP address");
         let info = mdns_service_info(
             "server-id",
             "plurx",
             "plurx",
             None,
-            "192.168.1.20:32400".parse().expect("socket address"),
+            "10.42.1.20:32400".parse().expect("socket address"),
             "0.2.0",
         )
         .expect("service info");

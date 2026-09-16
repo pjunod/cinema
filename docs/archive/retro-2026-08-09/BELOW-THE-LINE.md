@@ -86,7 +86,7 @@ Paul approved all five recommendations on 2026-08-09.
   wrote 13,230,798 SUP bytes through source timestamp `00:52:11.253`, and
   produced SHA-256
   `d48091d6960e0fd6831479c12c5190d7c78509b28d726549a12ba65ea651d9cc`.
-  A same-day QNAP NFS not-responding/recovered event makes transient storage or
+  A same-day NAS NFS not-responding/recovered event makes transient storage or
   cache state the leading inference, not a proved cause. The unchanged command
   refutes a deterministic 600-second demux defect; it does not complete the
   default-off production/device gate.
@@ -198,17 +198,17 @@ simulator tests are not substitutes:
   Chrome case passed at 0.994× with zero hitches and zero measured stalls, and
   the playback-fix exact-head hosted deep-validation job passed.
 - **Pass after repair — live backup invariant.** An adversarial check found
-  nynuc and nuc4 on `v0.2.7-66-g3603923` without `/srv/plurx/backups`, proving
+  media1 and lab4 on `v0.2.7-66-g3603923` without `/srv/plurx/backups`, proving
   the earlier deployment bypassed or predated current automation. The clean
   private-Ansible backup implementation from
   [#2](https://github.com/pjunod/ansible/pull/2) (`be16fb71`) then ran through
   the stamped deploy path corrected by
   [#3](https://github.com/pjunod/ansible/pull/3) (`4c74d27`), serially with
   rebuild disabled: it stopped each stack, copied the closed database,
-  restarted the unchanged image, and passed both health probes. nynuc's
+  restarted the unchanged image, and passed both health probes. media1's
   `plurx.db.predeploy-20260810T004048Z-3603923cce64.bak` is 69,574,656 bytes
   with SHA-256 `56f80771de22ca17ee8fd7d077ba52b902162cabd496a8cbcbbe755ddf521090`;
-  nuc4's `plurx.db.predeploy-20260810T004143Z-3603923cce64.bak` is 81,661,952
+  lab4's `plurx.db.predeploy-20260810T004143Z-3603923cce64.bak` is 81,661,952
   bytes with SHA-256
   `9fef22305d92507a8396e3937405f1a62e128348a470e2332bf13456d8da61ee`.
   Both read-only snapshots return `PRAGMA quick_check = ok`; both services
@@ -217,7 +217,7 @@ simulator tests are not substitutes:
   live-snapshot gap.
 - **Pass — live fleet contract.** The original direct inspection found both
   nodes stamped at `e8a910f` on schema 15, every media bind read-only, both
-  containers exposing `/dev/dri`, and nuc4 retaining TCP 32402 plus GDM UDP
+  containers exposing `/dev/dri`, and lab4 retaining TCP 32402 plus GDM UDP
   32415. The private deploy play invokes `make docker-up`, and its contract
   test pins that call. The later backup repair ran with rebuild disabled and
   left the then-running `v0.2.7-66-g3603923` image unchanged; these are retained

@@ -160,7 +160,7 @@ These came from the original commission and hold for the rest of the effort.
 
 - **Forgejo only. Do not push to GitHub.** Run `git remote -v` before every
   push and verify the destination.
-- **Do not use or modify `/Users/pjunod/code/plurx`** — that is Paul's own
+- **Do not use or modify `~/code/plurx`** — that is Paul's own
   working clone. Make your own clone. This session used
   `/private/tmp/claude-plurx-decoder-m3`.
 - **Do not print or copy credential contents** into logs, commits, archives,

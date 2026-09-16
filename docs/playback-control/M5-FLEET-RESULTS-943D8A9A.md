@@ -54,7 +54,7 @@ The retained release worktree is:
 
 ### Web rendered video but never asked the server
 
-The web client played file 247, item 264, *Good Cop / Bad Cop*, against nuc3.
+The web client played file 247, item 264, *Good Cop / Bad Cop*, against lab3.
 It rendered VOD HLS using a remux and reported an approximately 2.9-second
 start. Its Control panel remained:
 
@@ -94,10 +94,10 @@ versionCode 56 playback and therefore cannot be attributed to this run.
 
 | Node | Platform | `complete="true"` | `complete="false"` | suppressed | accepted | `none` | `hold` |
 |---|---|---:|---:|---:|---:|---:|---:|
-| m6 | Apple | 0 | 4,657 | 0 | 4,657 | 1,218 | 3,439 |
-| nynuc | Android | 0 | 3 | 0 | 3 | 1 | 2 |
+| lab6 | Apple | 0 | 4,657 | 0 | 4,657 | 1,218 | 3,439 |
+| media1 | Android | 0 | 3 | 0 | 3 | 1 | 2 |
 
-nuc3 and nuc4 were zero for all requested counters. Every unlisted
+lab3 and lab4 were zero for all requested counters. Every unlisted
 node/platform pair was also zero. The non-zero rows declare
 `complete="false"`, which identifies incomplete older clients rather than the
 full M5 vocabulary required for acceptance.
@@ -107,8 +107,8 @@ full M5 vocabulary required for acceptance.
 | Platform | `vocabulary_total{complete="true"}` | `vocabulary_total{complete="false"}` | `actions_suppressed_total` | Terminal seen | Hold seen |
 |---|---:|---:|---:|---|---|
 | Web | 0 | 0 | 0 | No; reporter failed before exchange one | No |
-| Apple | 0 attributable to build 99 | 4,657 old-client exchanges on m6 | 0 | Not run; hardware locked/asleep | Not observed |
-| Android | 0 attributable to versionCode 56 | 3 old-client exchanges on nynuc | 0 | Not run; Pixel locked | Not observed |
+| Apple | 0 attributable to build 99 | 4,657 old-client exchanges on lab6 | 0 | Not run; hardware locked/asleep | Not observed |
+| Android | 0 attributable to versionCode 56 | 3 old-client exchanges on media1 | 0 | Not run; Pixel locked | Not observed |
 
 **How to read this table:** zero `complete="true"` means no full-vocabulary
 client proved an exchange. The non-zero `complete="false"` values are

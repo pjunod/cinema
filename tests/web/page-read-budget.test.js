@@ -231,8 +231,8 @@ test("Activity names missing cluster nodes and attributes delivered rows", () =>
   // Named when the roster could name it. tests/web/activity-node-names.test.js
   // owns the rest of this contract; this is the budget page's own call site.
   assert.equal(
-    harness.activityNodeFailureText(missing[0], { "node-b": "m6" }),
-    "Node m6 · timed out",
+    harness.activityNodeFailureText(missing[0], { "node-b": "lab6" }),
+    "Node lab6 · timed out",
   );
   assert.equal(
     harness.activityNodeFailureText(missing[2], {}),

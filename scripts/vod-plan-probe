@@ -23,7 +23,7 @@ told to cut here can, deterministically, and the bytes stay inside the
 ceiling". Every clause above is measured on real ffmpeg output — asserting on
 an argument list proves nothing (VOD-PRESENTATION-IMPLEMENTATION-HANDOFF §2).
 
-Standard library only, like scripts/gop-census: this has to run on nynuc with
+Standard library only, like scripts/gop-census: this has to run on media1 with
 nothing installed. Box parsing, sample resolution, and `classify` are imported
 from scripts/gop-census rather than reimplemented, so the two tools cannot
 drift onto different verdicts for the same fragment.

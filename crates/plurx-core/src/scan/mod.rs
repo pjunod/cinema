@@ -106,7 +106,7 @@ pub struct ScanReport {
     /// no `S01E02` skips *every episode*, so a single mis-named series produced
     /// two dozen near-identical lines and a real library produced hundreds. The
     /// per-file list was technically complete and practically unreadable — the
-    /// operator had to infer "oh, it's Drawn Together" from twenty-four paths
+    /// operator had to infer "oh, it's Paper Moons" from twenty-four paths
     /// that differed only in the episode number.
     ///
     /// One row per folder with a count says the same thing in one line, and
@@ -135,7 +135,7 @@ pub struct PlacedFile {
 pub struct SkipGroup {
     /// The folder the files sit under — the show directory, not the release
     /// subfolder. Grouping any deeper reproduces the per-file list one level
-    /// up: `Season 1/Drawn.Together.S01E02.DVDRip.XviD-MEDiEVAL/` is still one
+    /// up: `Season 1/Paper.Moons.S01E02.DVDRip.XviD-GROUP/` is still one
     /// row per episode.
     pub folder: String,
     /// How many files were skipped there. Never capped — the samples are.
@@ -1082,7 +1082,7 @@ async fn record_candidates(
             .await?;
         if let Some(sink) = placed_sink.as_deref_mut() {
             // The caller of a targeted scan is owed an answer, not a shrug:
-            // "which item did my file become" is the whole question monarr
+            // "which item did my file become" is the whole question Curator
             // asks, and reconstructing it from a path afterwards would race
             // with the next scan.
             sink.push(PlacedFile {
@@ -1371,8 +1371,8 @@ async fn find_or_create_season(
 /// beneath the library root that contains it — the show, not the season and
 /// not the release folder.
 ///
-/// Grouping deeper defeats the point. `Drawn Together/Season 1/` is one row per
-/// season, and `Season 1/Drawn.Together.S01E02.DVDRip.XviD-MEDiEVAL/` is one
+/// Grouping deeper defeats the point. `Paper Moons/Season 1/` is one row per
+/// season, and `Season 1/Paper.Moons.S01E02.DVDRip.XviD-GROUP/` is one
 /// row per episode again, which is the list this replaces.
 fn skip_group_folder(library: &Library, path: &Path) -> String {
     for root in &library.paths {
@@ -1725,7 +1725,7 @@ mod tests {
         assert_eq!(item.title, "Heat");
     }
 
-    /// A single file is a legitimate target — monarr imports one episode at a
+    /// A single file is a legitimate target — Curator imports one episode at a
     /// time as often as it imports a folder.
     #[tokio::test]
     async fn a_single_file_is_a_valid_target() {
@@ -1790,7 +1790,7 @@ mod tests {
     }
 
     /// A path that does not exist is refused rather than silently scanning
-    /// nothing — monarr sending a path plurx cannot see (the classic
+    /// nothing — Curator sending a path plurx cannot see (the classic
     /// container path-mapping mistake) must hear about it.
     #[tokio::test]
     async fn a_missing_path_is_refused() {
@@ -2503,7 +2503,7 @@ mod tests {
         for ep in 1..=6 {
             write_fake_video(
                 dir.path(),
-                &format!("Drawn Together/Season 1/drawn.together-med-{ep}.avi"),
+                &format!("Paper Moons/Season 1/paper.moons-med-{ep}.avi"),
             )
             .await;
         }
@@ -2532,7 +2532,7 @@ mod tests {
         );
         // Worst first: the folder costing the most files is the one to rename.
         assert_eq!(r.skip_groups[0].count, 6);
-        assert!(r.skip_groups[0].folder.ends_with("Drawn Together"));
+        assert!(r.skip_groups[0].folder.ends_with("Paper Moons"));
         assert_eq!(r.skip_groups[1].count, 2);
         assert!(r.skip_groups[1].folder.ends_with("Other Show"));
         // Samples are a taste, not the list this replaces.

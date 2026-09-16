@@ -45,9 +45,9 @@ class RequireDiskCase(unittest.TestCase):
         On a fleet of eighteen, the job log is the only place that mapping
         survives — the failure itself carries no hostname at all.
         """
-        result = run(ROOT, "999999", runner="gha-rogg16-general-03")
+        result = run(ROOT, "999999", runner="gha-lab5-general-03")
         self.assertEqual(result.returncode, 1)
-        self.assertIn("gha-rogg16-general-03", result.stderr)
+        self.assertIn("gha-lab5-general-03", result.stderr)
         self.assertIn("out of disk", result.stderr)
 
     def test_it_explains_the_symptom_it_is_pre_empting(self) -> None:

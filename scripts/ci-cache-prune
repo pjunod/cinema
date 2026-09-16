@@ -50,7 +50,7 @@ budget_kb=$((budget_gb * 1024 * 1024))
 #
 # It used to be a flat 100 GiB, with 20 % taking over on larger disks. The
 # runner fleet is not all large disks: the Incus guests carrying
-# `gha-m6-general-01`, `gha-nuc1-general-01` and their siblings are 78-97 GB
+# `gha-lab6-general-01`, `gha-lab1-general-01` and their siblings are 78-97 GB
 # volumes, so a 100 GiB floor is larger than the entire filesystem and
 # `healthy` can never become true there. The pruner would delete every cache
 # it is permitted to delete and then fail the job regardless -- the worst of

@@ -61,7 +61,7 @@ design's value depends on and no fixture in this container can stand in for
 it:
 
 ```bash
-scripts/gop-census "/path/to/Wicked (2024) Remux-2160p.mkv"     # and a few others
+scripts/gop-census "/path/to/Harbor Lights (2023) Remux-2160p.mkv"     # and a few others
 ```
 
 It prints what percentage of cuts the shipped floor and ceiling would take

@@ -21,7 +21,7 @@ explicit state, nearby actions, and detail when selected.
 
 ### Evidence and limits
 
-Live inspection used the desktop web application at `m6:32400`, reporting
+Live inspection used the desktop web application at `lab6:32400`, reporting
 build `v0.3.0-2481-gb59e421d`. Source inspection used commit
 `482a757c5c50e1beedb1e795d7089f07398a3cf0`, the DVR fidelity branch.
 These are different snapshots; re-check findings against the intended

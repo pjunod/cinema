@@ -23,7 +23,7 @@ decision table.
 
 **On the root cause: partially confirmed, leaning confirm.** The code-verifiable
 half of the diagnosis is accurate in every particular I checked. The two
-compounding faults the brief names — a broken replica (`nuc4` missing Raft log
+compounding faults the brief names — a broken replica (`lab4` missing Raft log
 `520000`) meeting an all-or-nothing render contract — are both real: the render
 contract is exactly as described (§2), and the WAL crash window that can
 manufacture a missing-log state is real and *not* closed by the existing
@@ -88,7 +88,7 @@ means the code says what the plan says it says.
 | 18 | `ClusterAvailability` is pure topology arithmetic | Confirmed | `membership.rs:321–327`, computed from voter count `:1157–1161` |
 | 19 | `ReplicationStatus` has no `scope`/`reason`/`confirmed_peer_count` today (PR-C adds them) | Confirmed | `migration.rs:3911–3934`; `voter_count` exists only as an *input* to `ReplicationObservation:3945`, not in the output |
 | 20 | Current WAL purge is physical-delete-first, metadata-publish-second | Confirmed | `writer.rs:290` `shift_delete_logs` (physical `remove_file` `wal.rs:977,1000`) precedes `Metadata::write:293–295` |
-| 21 | `localhost` advertisement on `nynuc` is a real config path | Confirmed | `configured_advertise_host` fallback `"127.0.0.1"` `migration.rs:1926`; rendered as `"localhost"` `membership.rs:2344–2348` |
+| 21 | `localhost` advertisement on `media1` is a real config path | Confirmed | `configured_advertise_host` fallback `"127.0.0.1"` `migration.rs:1926`; rendered as `"localhost"` `membership.rs:2344–2348` |
 
 Nothing in the plan was **refuted**. The only inaccuracies are cosmetic
 (Home line numbers) or a mechanism nuance (§4.2).
@@ -168,12 +168,12 @@ supported path will not *silently* do the wrong thing; a bad precondition return
 a typed refusal, not corruption.
 
 The real gate is the one the plan already names as a stop condition: removal
-itself needs a functioning quorum, and `nuc4` is one of four voters, so the
+itself needs a functioning quorum, and `lab4` is one of four voters, so the
 surviving three *are* the exact quorum of the current config — a second fault
 during removal halts it. That is a live-cluster fact (are the other three
 converging and answering `/readyz` twice, ten seconds apart?) that cannot be
 read from source. **The plan's OP-0 preflight (§5.1) asks for precisely this
-evidence before touching `nuc4`, and its stop conditions are correct.** No
+evidence before touching `lab4`, and its stop conditions are correct.** No
 change needed to OP-0 except that it must run against a build that includes the
 merged quorum-watermark metrics (P0-2) so the preflight can read apply-lag
 truthfully instead of inferring it.
@@ -231,7 +231,7 @@ Two things the plan must add:
   argues *for* the plan's stale-metadata window and *against* snapshot-install as
   the cause, but does not settle it. Closing the loop needs the on-disk
   `meta.hql` `last_purged_log_id` versus the retained WAL floor from the
-  preserved `nuc4` copy. The plan's PR-B §6.2 builds exactly that inspector and
+  preserved `lab4` copy. The plan's PR-B §6.2 builds exactly that inspector and
   runs it against the forensic copy *before* committing any repair. Keep that
   ordering; do not let the reorder merge ahead of the inspector's verdict.
 
@@ -242,8 +242,8 @@ re-pin.
 
 `reachable` is a 30 s heartbeat window (`membership.rs:35,1153`) with no Raft
 input, while `ClusterAvailability` is pure voter-count arithmetic
-(`:321–327,1157–1161`). So the UI can show `nuc4` "reachable" and the cluster
-"HighAvailability" while `nuc4`'s Raft core rejects every append — exactly the
+(`:321–327,1157–1161`). So the UI can show `lab4` "reachable" and the cluster
+"HighAvailability" while `lab4`'s Raft core rejects every append — exactly the
 brief's observation. PR-C's fix (separate heartbeat from replication proof, label
 the column "Heartbeat") is the right shape. Post-P0-1, its `confirmed_peer_count`
 and apply-lag can be sourced from the merged quorum watermark rather than
@@ -347,9 +347,9 @@ in a subject will trip the gate) and for delivering this review (see §9).
 - **`localhost` advertisement is a real path, correctly demoted.** The advertised
   cluster address falls back to the literal `"127.0.0.1"`
   (`migration.rs:1926`) and renders as `"localhost"`
-  (`membership.rs:2344–2348`) — so `nynuc`'s display is a real config artifact,
+  (`membership.rs:2344–2348`) — so `media1`'s display is a real config artifact,
   not a rendering bug. The brief is right to call it "a review item, not a proven
-  cause." Worth a P2 to verify `nynuc`'s committed `raft_address`/`api_address`
+  cause." Worth a P2 to verify `media1`'s committed `raft_address`/`api_address`
   are LAN-routable, since a loopback advertisement on a real voter *would* be a
   quorum-path problem — just not the one causing this incident.
 - **Probe-loop backoff (PR-D) is still warranted, but its observability is
@@ -410,8 +410,8 @@ in a subject will trip the gate) and for delivering this review (see §9).
 
 | Operation | Prerequisites | Blast radius | Rollback | Approval |
 |---|---|---|---|---|
-| Preserve forensic copy of stopped `nuc4` | `nuc4` process + data-dir lock gone | none (read/copy only) | n/a | operator |
-| `DELETE …/nodes/{nuc4_id}` (4→3) | 3 non-target voters ready twice @10 s; target not leader; offline work quiesced; `settle_offline_work` path healthy | membership change; below 3 voters a second fault halts progress | pre-commit: restart unchanged voter · post-commit: identity tombstoned, only a fresh join recovers capacity | explicit operator |
+| Preserve forensic copy of stopped `lab4` | `lab4` process + data-dir lock gone | none (read/copy only) | n/a | operator |
+| `DELETE …/nodes/{lab4_id}` (4→3) | 3 non-target voters ready twice @10 s; target not leader; offline work quiesced; `settle_offline_work` path healthy | membership change; below 3 voters a second fault halts progress | pre-commit: restart unchanged voter · post-commit: identity tombstoned, only a fresh join recovers capacity | explicit operator |
 | WAL metadata-first reorder (PR-B) | inspector verdict on forensic copy; pre-removal header flush preserved; on-disk format unchanged | vendored WAL write path on every node it deploys to | preceding binary reopens a healthy voter (confirm with restart test) | reviewer + operator |
 | `/home/previews` + Store primitive (PR-E) | Store-call gate cardinality-independent; parity on both backends | additive endpoint; no client uses it until PR-F | revert directly (unused) | standard PR |
 | Web hydration rewrite (PR-F) | PR-E deployed; generation fence preserved; UI golden reviewed | embedded web app behavior | deploy preceding binary; additive endpoint harmless | standard PR |
@@ -422,7 +422,7 @@ in a subject will trip the gate) and for delivering this review (see §9).
 - **Operator-supplied, not container-reproducible:** the live log counts (1,014
   read-confirmation failures, 2,071 `LogIndexNotFound`, 218 probe failures / 2
   min), the per-route timings (761 ms / 3.2 s), the fleet build stamps, and the
-  `nuc4` on-disk WAL state. These are diagnoses from Paul's running cluster; they
+  `lab4` on-disk WAL state. These are diagnoses from Paul's running cluster; they
   are internally consistent and consistent with the code paths, and they are
   left to stand on their own evidence rather than converted into tasks. The one
   measurement that would upgrade the root cause from strong-inference to fact —

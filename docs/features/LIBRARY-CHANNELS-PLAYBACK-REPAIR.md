@@ -79,7 +79,7 @@ An unavailable advisory measurement is not a reason to reject a tune.
 
 ### 2.1 The screenshot's failure is reproduced on the deployed build
 
-At 15:26:35 EDT / 19:26:35 UTC on 2026-09-10, nynuc build
+At 15:26:35 EDT / 19:26:35 UTC on 2026-09-10, media1 build
 `v0.3.0-1996-g9a857b2e` attempted file **5310**, *Leave the World Behind*, at
 **6275.560 seconds**. The source is HEVC in Matroska with E-AC-3 audio. The
 recorded sequence was:
@@ -431,7 +431,7 @@ be marked passed until they have actually run against the implemented change.
 | Item | Result / revision / remaining action |
 |---|---|
 | Production failure and metadata reproduction | Confirmed at `9a857b2e5`, 2026-09-10; §2 |
-| Normalization-preserving native HLS experiment | Passed 2026-09-10 on nynuc, deployed `v0.3.0-1996-g9a857b2e`; configured Jellyfin FFmpeg 8.1.2, file 5310, seek 6275.560 s; 12 s native HLS, two distinct complete HEVC descriptions, 328 decoded frames, AAC 48 kHz / six channels with non-silent RMS; scratch media deleted |
+| Normalization-preserving native HLS experiment | Passed 2026-09-10 on media1, deployed `v0.3.0-1996-g9a857b2e`; configured Jellyfin FFmpeg 8.1.2, file 5310, seek 6275.560 s; 12 s native HLS, two distinct complete HEVC descriptions, 328 decoded frames, AAC 48 kHz / six channels with non-silent RMS; scratch media deleted |
 | Selected implementation route and reason | Preferred §4.1: retain frozen normalization in native HLS retry; candidate decoded with both original descriptions and trex default index 1. SDR BT.709 only; no HDR/DV qualification claimed |
 | Stored/live probe field comparison | Captured from authoritative Hiqlite SQLite file, read-only. File 5310 differs only by six omitted audio report fields: dmix_mode, loro_cmixlev, loro_surmixlev, ltrt_cmixlev, ltrt_surmixlev, mime_codec_string. File 70 has additional version-reporting omissions. No source or stored probe changed |
 | Integrated startup and decode checks | Focused current-head run passed after review: plurx-core 2/2, plurxd 3/3; production Jellyfin FFmpeg diagnostic decoded 328 frames plus non-silent AAC. Browser playback-control suite passed after aligning its full-open harness with the shipped channel state |
@@ -479,7 +479,7 @@ narrow alignment during the repair’s fast lane; no runtime suites were run.
 `/private/tmp/plurx-channel-diagnostic.py` and `.log` contain the bounded muxer
 experiment and output; `/private/tmp/plurx-probe-diagnostic.py` and `.log`
 contain the read-only probe comparison. The scripts were streamed through SSH,
-not installed on nynuc. Media remained on nynuc and its experiment directory
+not installed on media1. Media remained on media1 and its experiment directory
 was deleted in `finally`. No production setting or probe was changed.
 
 **Implementation seams:** The native-HLS recipe now receives the already frozen
@@ -502,11 +502,11 @@ separate issue. No replicated database row is written directly.
 probe. Existing generation fences still prevent a stale result from labeling a
 replacement playback.
 
-**Tools and access:** SSH to nynuc works with the user-specified deployment
+**Tools and access:** SSH to media1 works with the user-specified deployment
 key. Forgejo helper `/private/tmp/plurx-forgejo.py` reads the token from the
 user-specified file without printing it. Forgejo’s run listing ignored the
 requested limit and returned all runs; filter summaries before printing.
-The helper’s API base is `http://192.168.4.7:3000/api/v1`. Rust commands must
+The helper’s API base is `http://forge.lan:3000/api/v1`. Rust commands must
 use `rustup run 1.97.1 cargo`; the host’s plain `rustc` is Homebrew 1.98.0.
 A warm local `target/` exists. No pre-commit hook was installed. An in-app
 browser was selected but no tab was opened and no browser test was run.

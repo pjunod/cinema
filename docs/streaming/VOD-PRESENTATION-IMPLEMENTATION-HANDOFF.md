@@ -321,9 +321,9 @@ produced bytes, never by asserting on args (§2's rule). Legacy invariance:
 
 Send the flag + budget from `attachHls` config; treat every VOD session
 like today's cached-VOD arm; raise `fragLoadingTimeOut`/retry per P3;
-`node --check` the extracted script; playback-lab suites + the nynuc
+`node --check` the extracted script; playback-lab suites + the media1
 protocol (2 h 4K remux, 20-seek storm with a server-log zero-create
-assertion, sleep/wake) — the nynuc runs are gpt's, protocol into
+assertion, sleep/wake) — the media1 runs are gpt's, protocol into
 STATUS.html. **No deletions** (M8).
 
 ### M5 — `agent/vod-m5` — Apple adoption
@@ -349,7 +349,7 @@ landed as independent PRs — check `main` first. Kotlin gates run in-sandbox
 ### M7 — `agent/vod-m7` — fleet flip + burn-in
 
 Deploy via `scripts/ship` (gpt runs it; verify `/api/v1/server` build on
-all three nodes — nynuc, m6, nuc4); flip `playback.vod_presentation`; the
+all three nodes — media1, lab6, lab4); flip `playback.vod_presentation`; the
 comparison week reads `playback_events` (stall rate, reopen rate,
 `session_end` reasons, TTFF) against the prior week; the power-pull test
 (plan §8 M7) needs Paul physically — protocol + rollback note ("one

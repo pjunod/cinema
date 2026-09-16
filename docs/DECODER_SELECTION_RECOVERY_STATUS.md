@@ -5,9 +5,9 @@ and daemon suites green · broader fleet qualification remains optional
 post-merge evidence · **Updated:** 2026-09-09 · **Current `main`:**
 `633a32ad`
 
-**Live checkpoint:** [Forgejo #203](http://192.168.4.7:3000/noirr/plurx/pulls/203)
+**Live checkpoint:** [Forgejo #203](http://forge.lan:3000/noirr/plurx/pulls/203)
 merged at `9a765bff`. Promotion
-[PR #189](http://192.168.4.7:3000/noirr/plurx/pulls/189), its post-merge
+[PR #189](http://forge.lan:3000/noirr/plurx/pulls/189), its post-merge
 repairs, and the remaining M6 server work are complete on `main`: a successor
 is durably reserved,
 its real VOD worker is attached before the actor announces it, staged media is
@@ -23,11 +23,11 @@ observations can drive the one-shot recovery but can never qualify an artifact
 for cache reuse. The post-merge fast Rust gate found one test fixture that
 still assumed recovery was on by default. The repair opts that recovery-only
 fixture into the switch; it does not change production behavior. The repair
-[Forgejo #209](http://192.168.4.7:3000/noirr/plurx/pulls/209) merged as
+[Forgejo #209](http://forge.lan:3000/noirr/plurx/pulls/209) merged as
 `bde7d8b3`. On the current `main`, 1,063 `plurx-core` tests and 2,147 `plurxd`
 tests pass with zero failures, including all 53 decoder-selection integration
 tests and the repaired offline recovery path. Cleanup
-[Forgejo #208](http://192.168.4.7:3000/noirr/plurx/pulls/208) then removed the
+[Forgejo #208](http://forge.lan:3000/noirr/plurx/pulls/208) then removed the
 redundant second fixture opt-in and merged as `633a32ad` after its fast policy,
 Fast Rust and web lanes passed.
 
@@ -53,10 +53,10 @@ An unchecked item is not implied by a nearby passing check.
 | Stage | State | What remains |
 |---|---|---|
 | M0–M5 · selection, observation, receipts, admission and bounded prepublication recovery | Done on the effort branch | No planned build work |
-| M6 · prepared replacement contract, clients, and server prime | Merged in [PR #203](http://192.168.4.7:3000/noirr/plurx/pulls/203) | Physical first-frame smoke on the devices of interest and the cross-client fleet receipt remain evidence, not code gates |
+| M6 · prepared replacement contract, clients, and server prime | Merged in [PR #203](http://forge.lan:3000/noirr/plurx/pulls/203) | Physical first-frame smoke on the devices of interest and the cross-client fleet receipt remain evidence, not code gates |
 | M7a · advisory Developer settings | Merged in #203 | Automatic decoder recovery has its own immediate checkbox; retained contract coverage remains advisory and cannot override it |
-| M7b · hardware diagnostic path | Merged | [Forgejo #174](http://192.168.4.7:3000/noirr/plurx/pulls/174) merged approved head `0a685526` into the effort at `0c831b88` after the complete Effort development gate. Backend-aware measurement, path-scoped qualification, same-codec recovery pairing, compatible v2 reporting, and advisory Developer readiness are implemented. A real hardware contract is separate M8 fleet evidence |
-| M7 remainder · offline durability and handoff enforcement | Merged | [Forgejo #179](http://192.168.4.7:3000/noirr/plurx/pulls/179) fast-forwarded approved head `990bf334` into the effort after its adversarial findings were fixed and the Effort development gate passed; the repair includes one replicated cluster-wide kill-switch transaction |
+| M7b · hardware diagnostic path | Merged | [Forgejo #174](http://forge.lan:3000/noirr/plurx/pulls/174) merged approved head `0a685526` into the effort at `0c831b88` after the complete Effort development gate. Backend-aware measurement, path-scoped qualification, same-codec recovery pairing, compatible v2 reporting, and advisory Developer readiness are implemented. A real hardware contract is separate M8 fleet evidence |
+| M7 remainder · offline durability and handoff enforcement | Merged | [Forgejo #179](http://forge.lan:3000/noirr/plurx/pulls/179) fast-forwarded approved head `990bf334` into the effort after its adversarial findings were fixed and the Effort development gate passed; the repair includes one replicated cluster-wide kill-switch transaction |
 | Promotion to `main` | Merged | #189, the post-merge repairs, and #203 are present in `main`; #203 merged as `9a765bff` |
 | Post-merge CI | Decoder suites green | The current `main` passed 1,063 core tests, 53 decoder-selection integration tests and 2,147 daemon tests with zero failures. Remaining jobs are broader CI observation, not decoder implementation work |
 | M8 · broader fleet qualification | Post-merge continuation | Hardware diagnostic capture · workload matrix · false-positive classification · startup/concurrency/recovered-latency evidence · three-client replacement runs; any code failure gets a new PR |
@@ -75,7 +75,7 @@ automatic decoder recovery.
 |---|---|
 | Milestone | Verify the merged decoder selection, prepared handoff and automatic recovery implementation on current `main` |
 | Task base | Effort head `990bf334` was the historical promotion candidate; current evidence is against Forgejo `main` at `633a32ad` |
-| Repair | [Forgejo #209](http://192.168.4.7:3000/noirr/plurx/pulls/209) merged as `bde7d8b3`; it is present in current `main` |
+| Repair | [Forgejo #209](http://forge.lan:3000/noirr/plurx/pulls/209) merged as `bde7d8b3`; it is present in current `main` |
 | Status branch | `codex/decoder-effort-final-status` in the agent-owned clone at `/private/tmp/codex-plurx-decoder.RRcx8j/repo` |
 | Working compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` via `rustup run 1.97.1` |
 | Audit scope | The repaired offline manager path, decoder-selection integration contracts, and current post-merge core and daemon suites |
@@ -92,14 +92,14 @@ automatic decoder recovery.
 
 | Milestone | State | Exit evidence |
 |---|---|---|
-| M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://192.168.4.7:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
-| M1 · explicit plan and facts | Merged | [Forgejo #63](http://192.168.4.7:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
+| M0 · baseline and diagnostic qualification | Merged | [Forgejo #62](http://forge.lan:3000/noirr/plurx/pulls/62) fast-forwarded qualified receipt head `a8bbe574` into the effort after two final approvals and the Forgejo effort gate |
+| M1 · explicit plan and facts | Merged | [Forgejo #63](http://forge.lan:3000/noirr/plurx/pulls/63) fast-forwarded qualified head `f7f98b01` into the effort after three whole-PR adversarial reviews at `11f3f096`, their four consolidated findings repaired together in `81d46577`, the Forgejo effort gate, and one exact-head `make validate-full` at 23/0/2 |
 | M2 · arguments and identity use one plan | Merged | Movie HLS command construction and recipe v3 consume one `ResolvedTranscode`; the recipe remains in `decoder-plan-v1-unqualified`, so M2 cannot claim health-qualified cache artifacts. Retry, resumable/speculative, live, offline, cache lookup, and direct Live TV builder migrations are present but not yet reviewed or qualified |
-| M3 · owned observation and health receipts | Complete — M3a–M3f and M3c5 merged | M3a's grammar ([#79](http://192.168.4.7:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://192.168.4.7:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://192.168.4.7:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://192.168.4.7:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://192.168.4.7:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://192.168.4.7:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://192.168.4.7:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d ([#89](http://192.168.4.7:3000/noirr/plurx/pulls/89), head `a8403e10`) measures which decoder the running build actually selects, without which no attempt could ever be classified. M3e ([#90](http://192.168.4.7:3000/noirr/plurx/pulls/90), head `c54fb052`) makes the diagnostic wording a contract field, because FFmpeg 9 does not print FFmpeg 8's. M3c5 ([#92](http://192.168.4.7:3000/noirr/plurx/pulls/92), head `5e0f7f1f`) gives the two non-queue publication paths a manifest, so a qualified generation they produce can actually be kept. M3f ([#99](http://192.168.4.7:3000/noirr/plurx/pulls/99), head `02831892`) originally added an operator request and node-level effective-mode intersection. M7b replaces the latter with a path-scoped policy: the setting remains enabled, prerequisite state is advisory, and only an exactly measured path with one contract uses the qualified artifact identity |
-| M4 · mixed resource admission | Merged | [Forgejo #81](http://192.168.4.7:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
-| M5 · durable budget and prepublication recovery | Complete | The M5a census landed at `b2dcf458`; `media_session_producer_recovery` exists on both backends, a server-owned `recovery_epoch` follows one playback across continuations, and the producer reserves, settles and refuses a second recovery. M5c1–M5c3 are merged through [#156](http://192.168.4.7:3000/noirr/plurx/pulls/156) |
+| M3 · owned observation and health receipts | Complete — M3a–M3f and M3c5 merged | M3a's grammar ([#79](http://forge.lan:3000/noirr/plurx/pulls/79)), M3b1's owned readers ([#83](http://forge.lan:3000/noirr/plurx/pulls/83)) and M3b2's health barrier ([#84](http://forge.lan:3000/noirr/plurx/pulls/84)) are in. M3c1 ([#85](http://forge.lan:3000/noirr/plurx/pulls/85), head `bf75c62c`) makes the generation manifest carry and authenticate the joined producer receipt. M3c2 ([#86](http://forge.lan:3000/noirr/plurx/pulls/86), head `ff10c2db`) makes a part carry its own receipt across a resume, without which no long film could ever be certified. M3c3 ([#87](http://forge.lan:3000/noirr/plurx/pulls/87), head `b602b9f2`) gives qualified production its own artifact identity. M3c4 ([#88](http://forge.lan:3000/noirr/plurx/pulls/88), head `86647b37`) enforces the receipt contract under that identity. M3d ([#89](http://forge.lan:3000/noirr/plurx/pulls/89), head `a8403e10`) measures which decoder the running build actually selects, without which no attempt could ever be classified. M3e ([#90](http://forge.lan:3000/noirr/plurx/pulls/90), head `c54fb052`) makes the diagnostic wording a contract field, because FFmpeg 9 does not print FFmpeg 8's. M3c5 ([#92](http://forge.lan:3000/noirr/plurx/pulls/92), head `5e0f7f1f`) gives the two non-queue publication paths a manifest, so a qualified generation they produce can actually be kept. M3f ([#99](http://forge.lan:3000/noirr/plurx/pulls/99), head `02831892`) originally added an operator request and node-level effective-mode intersection. M7b replaces the latter with a path-scoped policy: the setting remains enabled, prerequisite state is advisory, and only an exactly measured path with one contract uses the qualified artifact identity |
+| M4 · mixed resource admission | Merged | [Forgejo #81](http://forge.lan:3000/noirr/plurx/pulls/81) fast-forwarded `f0f7aec8` into the effort after one whole-PR adversarial review, its three blockers repaired, and the Forgejo effort gate |
+| M5 · durable budget and prepublication recovery | Complete | The M5a census landed at `b2dcf458`; `media_session_producer_recovery` exists on both backends, a server-owned `recovery_epoch` follows one playback across continuations, and the producer reserves, settles and refuses a second recovery. M5c1–M5c3 are merged through [#156](http://forge.lan:3000/noirr/plurx/pulls/156) |
 | M6 · postpublication replacement and client intent | Merged in #203; fleet acceptance open | Server reserve-and-prime, media-only staged authority, commit publication and cleanup now join the already-shipped Apple, Android and web adapters. The Developer server checkbox is default-on and independent of advisory readiness. The three-client measured receipt belongs to M8 |
-| M7 · offline, shared cache, handoff enforcement, and direct activation | Merged through #203 | M7a and M7b are merged through `0c831b88`; M7 remainder [#179](http://192.168.4.7:3000/noirr/plurx/pulls/179) closes durable offline one-shot recovery/result identity, exact-claim and cache publication, crash-before-install rehome, software-survivor binding, replicated disable, and legacy-worker fencing at `990bf334`. PR #203 makes automatic recovery an immediate operator switch instead of a contract-qualified action gate |
+| M7 · offline, shared cache, handoff enforcement, and direct activation | Merged through #203 | M7a and M7b are merged through `0c831b88`; M7 remainder [#179](http://forge.lan:3000/noirr/plurx/pulls/179) closes durable offline one-shot recovery/result identity, exact-claim and cache publication, crash-before-install rehome, software-survivor binding, replicated disable, and legacy-worker fencing at `990bf334`. PR #203 makes automatic recovery an immediate operator switch instead of a contract-qualified action gate |
 | M8 · fleet qualification and promotion | Promotion complete; evidence continues | Post-merge CI is under watch. Physical hardware capture and the three-client measured replacement receipt remain evidence work |
 
 ## M2 working tree — one plan names and builds the attempt
@@ -2428,7 +2428,7 @@ this document does not claim it is.
 
 ### M5c1, merged: the ordering question is answered, and by a fourth option
 
-[Forgejo #114](http://192.168.4.7:3000/noirr/plurx/pulls/114), branched from
+[Forgejo #114](http://forge.lan:3000/noirr/plurx/pulls/114), branched from
 the M5b merged head `7f2cb598c6ed89dd24996e06783077f1e29c0678` and merged at
 effort head `67216de972c1e39f1ef6aefb2541cf542619cb0c`. The three candidates
 above were not chosen between; building the
@@ -2740,7 +2740,7 @@ the renderer — so admission has to be re-asked, not adjusted.
 
 ## M5c3, merged: the budget is spent, and a second recovery is refused
 
-Slices three and four landed together as [#156](http://192.168.4.7:3000/noirr/plurx/pulls/156),
+Slices three and four landed together as [#156](http://forge.lan:3000/noirr/plurx/pulls/156),
 because separating them ships a reserve with no settle — a row left `reserved`
 withholds every later alternate for that playback, and the schema never deletes
 one.
@@ -2797,7 +2797,7 @@ whoever has to find it.
 
 ## The effort has merged current `main`, ahead of promotion
 
-[#164](http://192.168.4.7:3000/noirr/plurx/pulls/164), Paul's call, so the
+[#164](http://forge.lan:3000/noirr/plurx/pulls/164), Paul's call, so the
 divergence is closed rather than met at the promotion gate.
 
 The M6 Android client had merged *into this effort* as #118, #129, #131 and
@@ -3489,7 +3489,7 @@ the shared bound plan rather than a second Live TV policy.
 
 The reproducible
 [`decoder-media-baseline`](../scripts/decoder-media-baseline) ran three actual
-encoded sources through the baseline software HLS command on `nynuc` FFmpeg
+encoded sources through the baseline software HLS command on `media1` FFmpeg
 8.0.1. Source hashes, probe facts, playlist/segment hashes, decoded-frame
 digests, output facts, generator hash, and binary identity are retained in
 [`decoder-media-baseline-2026-09-05.toml`](../tests/playback/decoder-media-baseline-2026-09-05.toml).
@@ -3500,7 +3500,7 @@ and compares build identity, generator hash, source/playlist/segment/frame
 hashes, and probe facts with the TOML.
 
 The exact verifier was copied with only its evidence TOML to a task-scoped
-directory on `nynuc`. Its first run rejected the evidence: repeated identical
+directory on `media1`. Its first run rejected the evidence: repeated identical
 probe rows exposed ambiguous extraction, Matroska/x265 output was not byte
 reproducible, and encoder scheduling changed the MPEG-4-derived HLS segment.
 The repaired generator collapses only identical repeated probe rows, rejects
@@ -3584,10 +3584,10 @@ complete decoder-list output are retained per node in
 
 | Node | Host FFmpeg | Running `plurxd` FFmpeg | Advertised container acceleration | Qualification |
 |---|---|---|---|---|
-| `nynuc` | 8.0.1 Ubuntu | 5.1.9 Debian | VDPAU, CUDA, VA-API, QSV, DRM, OpenCL, Vulkan | Advertised only |
-| `m6` | Not on host `PATH` | 5.1.9 Debian | VDPAU, CUDA, VA-API, QSV, DRM, OpenCL, Vulkan | Advertised only |
-| `nuc4` | 8.0.1 Ubuntu | 5.1.9 Debian | VDPAU, CUDA, VA-API, QSV, DRM, OpenCL, Vulkan | Advertised only |
-| `nuc3` | 8.0.1 Ubuntu | 5.1.9 Debian | VDPAU, CUDA, VA-API, QSV, DRM, OpenCL, Vulkan | Advertised only |
+| `media1` | 8.0.1 Ubuntu | 5.1.9 Debian | VDPAU, CUDA, VA-API, QSV, DRM, OpenCL, Vulkan | Advertised only |
+| `lab6` | Not on host `PATH` | 5.1.9 Debian | VDPAU, CUDA, VA-API, QSV, DRM, OpenCL, Vulkan | Advertised only |
+| `lab4` | 8.0.1 Ubuntu | 5.1.9 Debian | VDPAU, CUDA, VA-API, QSV, DRM, OpenCL, Vulkan | Advertised only |
+| `lab3` | 8.0.1 Ubuntu | 5.1.9 Debian | VDPAU, CUDA, VA-API, QSV, DRM, OpenCL, Vulkan | Advertised only |
 | Local Apple build host | Full Homebrew FFmpeg 8.1.2 with `zscale`, run through a task-scoped x265 ABI 216 wrapper | No deployed daemon inspected | VideoToolbox | Qualified only as the local validation toolchain; not fleet evidence |
 
 All four containers advertise software MPEG-4 plus QSV/CUVID families. None of
@@ -3674,7 +3674,7 @@ full-base diff. The exact head then passed the full PR suite recorded below.
 | Fixture hash and parse used different opens | One descriptor now supplies both the streaming digest and classified records before action is decided |
 | Light VA-API and legacy override spellings were not frozen | A sixteenth argv case proves light VA-API stays on software decode; a pure table covers `off`, `0`, `false`, and `no` |
 | `dv_disk` subprocess inventory was incomplete and ambiguous | Capability, bound probe, unbound conversion, and Unix bound conversion have distinct rows; every retained anchor must occur exactly once |
-| Media evidence was not rerunnable from the ledger | The exact `nynuc` verifier rejected three nondeterminism defects; after repair, two fresh generations matched byte-for-byte and the exact verifier returned `"verified": true` |
+| Media evidence was not rerunnable from the ledger | The exact `media1` verifier rejected three nondeterminism defects; after repair, two fresh generations matched byte-for-byte and the exact verifier returned `"verified": true` |
 | Image IDs and hardware acceleration lacked exact per-node capture | Exact prefixed image IDs and per-node `-hwaccels` output/hash evidence are retained for all four nodes |
 
 | Fifth-pass finding | Resolution on working tree |
@@ -3817,7 +3817,7 @@ promotion. Remaining promotion, fleet, and client suites continue against
 | Pre-rebase `195b7574` | `git diff --check` | Pass |
 | Pre-rebase `a16db3da` | `python3 -m unittest tests/operations/test_decoder_diagnostic_qualification.py` | Pass · 23 tests, including direct single/duplicate/empty/conflicting probe-row coverage |
 | Pre-rebase `a16db3da` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
-| Pre-rebase `a16db3da` | `/tmp/codex-decoder-m0-review5/decoder-media-baseline --verify /tmp/codex-decoder-m0-review5/decoder-media-baseline-2026-09-05.toml /tmp/plurx-decoder-m0-media-review8` on `nynuc` | Pass · `"verified": true` |
+| Pre-rebase `a16db3da` | `/tmp/codex-decoder-m0-review5/decoder-media-baseline --verify /tmp/codex-decoder-m0-review5/decoder-media-baseline-2026-09-05.toml /tmp/plurx-decoder-m0-media-review8` on `media1` | Pass · `"verified": true` |
 | Pre-rebase `7649ccdd` | Fifth diagnostic and scope adversarial re-reviews | Pass · both approve; no actionable findings |
 | Pre-rebase `7649ccdd` | `make operations-check` | Pass · 209 tests; run outside restricted socket sandbox |
 | Pre-rebase `7649ccdd` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
@@ -3826,8 +3826,8 @@ promotion. Remaining promotion, fleet, and client suites continue against
 | Pre-rebase `4ec13f3b` | `make validation-lint` | Pass · 23 points, 28 checks, 1,384 files |
 | Pre-rebase `4ec13f3b` | `CARGO='rustup run 1.97.1 cargo' make effort-rust-check` | Pass · format and all locked workspace targets compiled |
 | Pre-rebase `4ec13f3b` | `python3 -m py_compile scripts/decoder-media-baseline scripts/decoder-diagnostic-qualification` | Pass |
-| Pre-rebase `4ec13f3b` | two fresh `scripts/decoder-media-baseline` generations on `nynuc` | Pass · every retained artifact digest matches byte-for-byte |
-| Pre-rebase `4ec13f3b` | `/tmp/codex-decoder-m0-review4/decoder-media-baseline --verify /tmp/codex-decoder-m0-review4/decoder-media-baseline-2026-09-05.toml /tmp/plurx-decoder-m0-media-review7` on `nynuc` | Pass · `"verified": true` |
+| Pre-rebase `4ec13f3b` | two fresh `scripts/decoder-media-baseline` generations on `media1` | Pass · every retained artifact digest matches byte-for-byte |
+| Pre-rebase `4ec13f3b` | `/tmp/codex-decoder-m0-review4/decoder-media-baseline --verify /tmp/codex-decoder-m0-review4/decoder-media-baseline-2026-09-05.toml /tmp/plurx-decoder-m0-media-review7` on `media1` | Pass · `"verified": true` |
 | Pre-rebase `4ec13f3b` | `git diff --check` | Pass |
 | Pre-rebase `3fe6a6ca` | `CARGO='rustup run 1.97.1 cargo' make unit` | Invalid environment run · 143 FFmpeg-backed tests failed because Homebrew FFmpeg could not load retained `libx265.216.dylib`; no non-loader failure observed |
 | Pre-rebase `3fe6a6ca` | `PLURX_FFMPEG=/private/tmp/codex-ffmpeg-abi216 PLURX_FFPROBE=/private/tmp/codex-ffprobe-abi216 CARGO='rustup run 1.97.1 cargo' make unit` | Pass · 2,785 tests; 3 declared ignores; task-scoped wrappers use the retained installed x265 ABI 216 library without modifying the host |

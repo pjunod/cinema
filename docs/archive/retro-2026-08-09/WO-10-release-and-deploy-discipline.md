@@ -21,7 +21,7 @@ The deploy tooling itself reviewed well (clean ship/ansible interface split afte
    Acceptance: `make release-check` exits 0 (option A) or is retired from the docs (option B); unraid template names a real registry path.
 
 3. **P1 — verify the fleet, refresh the ledger.**
-   The deployment ledger (`docs/clients/APPLE-NATIVE-SUBTITLES-HANDOFF.md:340-342`, echoed by STATUS.html:269) says every node runs `787eaa6` — 2026-08-01, ~47 merges behind main. Either the week's work is deployed nowhere, or the ledger lies. On the control host: `curl -s http://<node>:32400/api/v1/server` on nynuc + nuc4 → record actual build stamp + schema version; if it reports "(unstamped build)", the private deploy play is using raw `docker compose up -d --build` instead of `make docker-up` — switch it so stamps work. Update the ledger + STATUS.html fleet line with reality.
+   The deployment ledger (`docs/clients/APPLE-NATIVE-SUBTITLES-HANDOFF.md:340-342`, echoed by STATUS.html:269) says every node runs `787eaa6` — 2026-08-01, ~47 merges behind main. Either the week's work is deployed nowhere, or the ledger lies. On the control host: `curl -s http://<node>:32400/api/v1/server` on media1 + lab4 → record actual build stamp + schema version; if it reports "(unstamped build)", the private deploy play is using raw `docker compose up -d --build` instead of `make docker-up` — switch it so stamps work. Update the ledger + STATUS.html fleet line with reality.
    Acceptance: both nodes report a stamped build; ledger matches.
 
 4. **P1 — re-pin the mobile-deploy contracts #49 deleted.**

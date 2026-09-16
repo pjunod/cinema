@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["a48285d7"]
+points = ["core.media"]
+checks = ["rust-gate"]
+reason = "The commit renames test fixture titles only — one scanner scene-name fixture and the library seeds derived from it — and moves the assertions that read those titles back with them. No production path changes; the scanner and library tests in the Rust gate are the evidence, and they pass exactly as before the rename."

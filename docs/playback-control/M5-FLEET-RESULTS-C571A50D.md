@@ -26,7 +26,7 @@ Do not remove a client recovery path on this evidence.
 The Ansible deployment ran with `serial: 1` in inventory order:
 
 ```text
-nynuc -> m6 -> nuc4 -> nuc3
+media1 -> lab6 -> lab4 -> lab3
 ```
 
 Each node completed deployment, container health, and the published `readyz`
@@ -35,10 +35,10 @@ commit directly from every node.
 
 | Node | Commit | Reported build | `readyz` |
 |---|---|---|---|
-| nynuc | `c571a50d5fc58b32bdbc3d32efdea133e619b79f` | `v0.2.8-210-gc571a50d` | `ready` |
-| m6 | `c571a50d5fc58b32bdbc3d32efdea133e619b79f` | `v0.2.8-210-gc571a50d` | `ready` |
-| nuc4 | `c571a50d5fc58b32bdbc3d32efdea133e619b79f` | `v0.2.8-210-gc571a50d` | `ready` |
-| nuc3 | `c571a50d5fc58b32bdbc3d32efdea133e619b79f` | `v0.2.8-210-gc571a50d` | `ready` |
+| media1 | `c571a50d5fc58b32bdbc3d32efdea133e619b79f` | `v0.2.8-210-gc571a50d` | `ready` |
+| lab6 | `c571a50d5fc58b32bdbc3d32efdea133e619b79f` | `v0.2.8-210-gc571a50d` | `ready` |
+| lab4 | `c571a50d5fc58b32bdbc3d32efdea133e619b79f` | `v0.2.8-210-gc571a50d` | `ready` |
+| lab3 | `c571a50d5fc58b32bdbc3d32efdea133e619b79f` | `v0.2.8-210-gc571a50d` | `ready` |
 
 ## 3. Physical deployment — final installed roster
 
@@ -70,7 +70,7 @@ The retained release worktree is:
 
 ### Normal web playback produced a picture but no verdict exchange
 
-The web client played *Good Cop / Bad Cop* against nuc3. VOD HLS remux
+The web client played *Good Cop / Bad Cop* against lab3. VOD HLS remux
 rendered a picture and reported an approximately 2.6-second start. The Control
 panel remained:
 
@@ -131,10 +131,10 @@ The order in each triplet below is `web / apple / android`.
 
 | Node | `complete="true"` | `complete="false"` | suppressed | accepted by platform | global accepted |
 |---|---:|---:|---:|---:|---:|
-| nuc3 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 |
-| nuc4 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 |
-| m6 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 |
-| nynuc | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 |
+| lab3 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 |
+| lab4 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 |
+| lab6 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 |
+| media1 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 |
 
 “Accepted by platform” is
 `plurx_playback_control_platform_exchanges_total{outcome="accepted",platform="..."}`.

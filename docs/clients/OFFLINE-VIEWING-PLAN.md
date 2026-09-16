@@ -1036,7 +1036,7 @@ remains deferred.
 Downloading and package transfer never write progress, call
 `note_playback_started`, scrobble, or show **Watching now**. Only opening the
 local player creates the local progress record. On reconnection the ordinary
-monarr watched outbox runs from the applied final state. Trakt scrobbling may
+Curator watched outbox runs from the applied final state. Trakt scrobbling may
 be absent when no live playback session exists, matching current behavior.
 
 ## 11. Security and privacy — bounded capabilities, honest local limits

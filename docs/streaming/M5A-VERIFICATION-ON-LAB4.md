@@ -12,8 +12,8 @@ about a real disc remux's timeline. This is that check.
 
 **Read §2 before §3.** The first attempt to run this document failed on
 prerequisites, not on the measurement, and the corrections are in §2. The
-file name says nuc4; the check runs on whichever node owns the session, which
-is usually not nuc4. See §2.1.
+file name says lab4; the check runs on whichever node owns the session, which
+is usually not lab4. See §2.1.
 
 ---
 
@@ -48,10 +48,10 @@ anywhere else reports an empty cache and tells you nothing.
 
 | Node | Address |
 |---|---|
-| nuc4 | 192.168.4.8 |
-| nuc3 | 192.168.4.7 |
-| m6 | 192.168.4.14 |
-| nynuc | 192.168.5.236 |
+| lab4 | 10.42.4.8 |
+| lab3 | 10.42.4.7 |
+| lab6 | 10.42.4.14 |
+| media1 | 10.42.5.236 |
 
 Which node owns a playback is not something you choose, so read it back
 rather than assuming:
@@ -150,7 +150,7 @@ tonemapped a 4K Dolby Vision title to SDR H.264, which then failed to load.
 With §2 satisfied, on the **owning node**:
 
 ```bash
-~/dv-timeline-check                       # default source: Nosferatu (2024)
+~/dv-timeline-check "/path/to/profile7.mkv"  # a Profile 7 remux
 ~/dv-timeline-check "/path/to/other.mkv"  # any other Profile 7 remux
 ```
 
@@ -225,7 +225,7 @@ this branch can establish.
    detail and dropping it is not. Nosferatu's captured RPU reads as **FEL**,
    so expect the "its residual detail is lost" clause.
 
-3. **Throughput.** M5a's acceptance asks for ≥ 1.5× realtime on nuc4 for a 4K
+3. **Throughput.** M5a's acceptance asks for ≥ 1.5× realtime on lab4 for a 4K
    remux. The rewrite is per-NAL over samples the muxer already produced, so
    it should be nearly free relative to the I/O — but "should be" is not a
    measurement.

@@ -14,12 +14,12 @@ checkbox means retained evidence, not intent.
 
 | Item | Current evidence |
 |---|---|
-| Product implementation | PR [#191](http://192.168.4.7:3000/noirr/plurx/pulls/191) merged as `c14ddba6`; M0–M5 are active in `main` with no product feature gate. |
+| Product implementation | PR [#191](http://forge.lan:3000/noirr/plurx/pulls/191) merged as `c14ddba6`; M0–M5 are active in `main` with no product feature gate. |
 | Review | The requested single adversarial review is complete and all nine findings were implemented before merge. No second review was run. |
-| Main verification | Run [#1384](http://192.168.4.7:3000/noirr/plurx/actions/runs/1384) tested `18ddffc1`. Rust, Store, WAL, daemon, web, Android, packaging, coverage, and transport contracts passed, and the independent voter role passed 20/20 cycles. Merge `cfe9f67f` from unrelated PR #202 then superseded the main run during learner cycle 1, so no learner or aggregate pass is claimed from it. |
-| Infrastructure repair | The first VOD attempt never started on `gha-nuc4-general-02`: 42 GB free against the 45 GB floor. Installing its repository janitor and removing one inactive 4.9 GB generated Cargo target restored 50 GB. PR #205 run [#1398](http://192.168.4.7:3000/noirr/plurx/actions/runs/1398) then selected `gha-nuc4-general-01`, which stopped at 43 GB before testing. That runner was idle; removing only its unused 3.5 GB generated Rust target restored 47 GB. Both failures are infrastructure preflights, not VOD test verdicts. |
+| Main verification | Run [#1384](http://forge.lan:3000/noirr/plurx/actions/runs/1384) tested `18ddffc1`. Rust, Store, WAL, daemon, web, Android, packaging, coverage, and transport contracts passed, and the independent voter role passed 20/20 cycles. Merge `cfe9f67f` from unrelated PR #202 then superseded the main run during learner cycle 1, so no learner or aggregate pass is claimed from it. |
+| Infrastructure repair | The first VOD attempt never started on `gha-lab4-general-02`: 42 GB free against the 45 GB floor. Installing its repository janitor and removing one inactive 4.9 GB generated Cargo target restored 50 GB. PR #205 run [#1398](http://forge.lan:3000/noirr/plurx/actions/runs/1398) then selected `gha-lab4-general-01`, which stopped at 43 GB before testing. That runner was idle; removing only its unused 3.5 GB generated Rust target restored 47 GB. Both failures are infrastructure preflights, not VOD test verdicts. |
 | Apple repair | The original iPhone leg passed all 472 tests; the fresh iPad destination then stalled before XCTest and exhausted the job deadline. Fix-forward commit `4c93b342` removes only stale workflow-owned simulators and explicitly boots each isolated destination to runtime readiness before testing. Run #1398 proved the correction: iPhone and iPad each passed 472 tests and tvOS passed 458, all with zero failures. |
-| Remaining merge work | Draft PR [#205](http://192.168.4.7:3000/noirr/plurx/pulls/205) contains current `main` `cfe9f67f`. Run #1398 was cancelled after the second VOD runner's pre-test disk refusal made the gate unattainable. Run one fresh complete attempt, then merge only if every required job—including VOD, both 20-cycle roles, and their aggregate—passes. |
+| Remaining merge work | Draft PR [#205](http://forge.lan:3000/noirr/plurx/pulls/205) contains current `main` `cfe9f67f`. Run #1398 was cancelled after the second VOD runner's pre-test disk refusal made the gate unattainable. Run one fresh complete attempt, then merge only if every required job—including VOD, both 20-cycle roles, and their aggregate—passes. |
 
 ## Current position — the one M6 adversarial review is complete
 
@@ -30,14 +30,14 @@ reviewable milestones use `codex/transport-recovery-ci-m*` branches and the
 effort development gate.
 
 Forgejo run
-[#1034](http://192.168.4.7:3000/noirr/plurx/actions/runs/1034) remains the
+[#1034](http://forge.lan:3000/noirr/plurx/actions/runs/1034) remains the
 timing baseline: about 123 seconds before the campaign, about 100 minutes for
 voter warmup plus 20 recoveries, then a resource-envelope failure. The newer
 main run
-[#1100](http://192.168.4.7:3000/noirr/plurx/actions/runs/1100) had not reached
+[#1100](http://forge.lan:3000/noirr/plurx/actions/runs/1100) had not reached
 a qualification verdict; its old combined campaign was cancelled on
 2026-09-08 at the operator's request. The older queued run
-[#1098](http://192.168.4.7:3000/noirr/plurx/actions/runs/1098) was cancelled at
+[#1098](http://forge.lan:3000/noirr/plurx/actions/runs/1098) was cancelled at
 the same time. No smoke or partial run is recorded as qualification.
 
 **How to read it:** M1–M5 development stays on the compile-and-policy effort
@@ -46,9 +46,9 @@ and runs the full voter and learner qualification once the final candidate is
 frozen.
 
 Draft promotion PR
-[#191](http://192.168.4.7:3000/noirr/plurx/pulls/191) contains the current
+[#191](http://forge.lan:3000/noirr/plurx/pulls/191) contains the current
 `main` merge and remains unqualified. Its automatically started pre-review run
-[#1214](http://192.168.4.7:3000/noirr/plurx/actions/runs/1214) was cancelled
+[#1214](http://forge.lan:3000/noirr/plurx/actions/runs/1214) was cancelled
 before expensive work so it cannot be mistaken for the one final candidate
 run. Exactly one adversarial agent review is complete. Its nine findings are
 implemented in the local promotion candidate: a frozen Make execution ID;
@@ -65,10 +65,10 @@ transport-recovery tests.
 Current `main` moved after that review completed. The first corrected candidate
 included `2e77e2e1`, including the decoder selection and recovery promotion and
 the Apple terminal-settlement retry. Forgejo run
-[#1256](http://192.168.4.7:3000/noirr/plurx/actions/runs/1256) stopped at fast
+[#1256](http://forge.lan:3000/noirr/plurx/actions/runs/1256) stopped at fast
 preflight because the final status-only commit `0247c428` lacked the required
 non-runtime history-ledger entry. Run
-[#1259](http://192.168.4.7:3000/noirr/plurx/actions/runs/1259) then reached the
+[#1259](http://forge.lan:3000/noirr/plurx/actions/runs/1259) then reached the
 ordinary matrix but never started either 20-cycle role. It exposed a full
 Apple-suite teardown race and current-base Store migration failures; the fast
 Rust and web jobs stopped at a runner disk floor, the Android emulator stopped
@@ -84,12 +84,12 @@ Rust 1.97.1: the v5 migration chain, v32 producer-recovery migration and replay,
 analysis stale-marker replay, and current SQLite import. The same source passes
 the all-target `plurx-core` check and Clippy with warnings denied. Formatting and
 whitespace checks are clean. Final-candidate run
-[#1281](http://192.168.4.7:3000/noirr/plurx/actions/runs/1281) stopped in the
+[#1281](http://forge.lan:3000/noirr/plurx/actions/runs/1281) stopped in the
 mobile-version preflight because the Apple source correction still claimed
 current `main` build 124. No transport role started. The repository-owned build
 tool has now claimed build 125 across every generated release surface. The next
 run
-[#1286](http://192.168.4.7:3000/noirr/plurx/actions/runs/1286) passed mobile
+[#1286](http://forge.lan:3000/noirr/plurx/actions/runs/1286) passed mobile
 versioning, preflight, WAL, Android JVM and instrumented UI, and both package
 architectures before it was cancelled. Its cluster-daemon job never executed a
 test because a second runner sat below the 25 GB disk floor; restarting its idle
@@ -100,7 +100,7 @@ snapshot. Commit `20c047ec` makes that test helper describe the file it actually
 generated. The exact HDR10 restart regression, all-target `plurxd` check, and
 Clippy with warnings denied pass on archived Rust 1.97.1 source. Neither
 20-cycle role started in either rejected run. Run
-[#1293](http://192.168.4.7:3000/noirr/plurx/actions/runs/1293) passed the
+[#1293](http://forge.lan:3000/noirr/plurx/actions/runs/1293) passed the
 2,142-test Rust suite, then the separately serialized VFR restart regression
 proved that `fps:start_time` could relabel decoded preroll before `trim`
 discarded it. The run was cancelled before either recovery role started. The
@@ -108,7 +108,7 @@ corrected filter graph trims film-clock preroll before sampling the declared
 output grid. On the exact source with Rust 1.97.1, the VFR and bitmap restart
 regressions pass, the full fast workspace unit suite passes, formatting is
 clean, and workspace Clippy passes with warnings denied. Run
-[#1302](http://192.168.4.7:3000/noirr/plurx/actions/runs/1302) then stopped in
+[#1302](http://forge.lan:3000/noirr/plurx/actions/runs/1302) then stopped in
 fast preflight before any unit, platform, or recovery-role job started. Its
 injected cleanup-denial regression sampled a child immediately after the
 fallback queued unmaskable `SIGKILL`, while Linux could still report that
@@ -119,7 +119,7 @@ stress passes cover 20 injected discovery-denial positions, and the complete
 198-test validation suite passes.
 
 Forgejo run
-[#1305](http://192.168.4.7:3000/noirr/plurx/actions/runs/1305) then passed its
+[#1305](http://forge.lan:3000/noirr/plurx/actions/runs/1305) then passed its
 unit, Apple, Android, package, validation, WAL, and daemon work on candidate
 `aa757d85`. It found two Store migration-fixture failures while current `main`
 advanced to `1566118a`; that main merge contains the independently qualified
@@ -139,7 +139,7 @@ remain. Exact archived source on Rust 1.97.1 passes formatting, the `plurxd`
 all-target check, both Store migrations that failed on the stale base, and the
 real-FFmpeg VFR and bitmap restart regressions. The same integrated tree passes
 all 198 validation and 294 operations tests. Run
-[#1317](http://192.168.4.7:3000/noirr/plurx/actions/runs/1317) reached the full
+[#1317](http://forge.lan:3000/noirr/plurx/actions/runs/1317) reached the full
 matrix after its one-line history-anchor correction. One daemon contract then
 missed node B's exact two-second Activity deadline during a shared-runner load
 spike; the unchanged binary passed immediately on the same now-idle runner.
@@ -176,7 +176,7 @@ all 67 validation-runner tests pass on Linux. This is the candidate for the
 final full qualification push.
 
 Final-candidate run
-[#1330](http://192.168.4.7:3000/noirr/plurx/actions/runs/1330) passed
+[#1330](http://forge.lan:3000/noirr/plurx/actions/runs/1330) passed
 preflight, the 2,149-test Rust gate, the daemon regression, WAL recovery, both
 Android lanes, and both package architectures. Its web lane matched all 7,650
 golden facts across 78 captures with no console or page errors, then reproduced
@@ -201,7 +201,7 @@ completed with bounded tuner ownership. It is ready for the replacement full
 qualification push.
 
 Replacement run
-[#1343](http://192.168.4.7:3000/noirr/plurx/actions/runs/1343) passed
+[#1343](http://forge.lan:3000/noirr/plurx/actions/runs/1343) passed
 validation scope, mobile versioning, preflight, both packages, both Android
 lanes, WAL recovery, and the cluster shard graph before the real-daemon
 activity contract exposed a different loaded-runner boundary. Node B was
@@ -219,7 +219,7 @@ unit, and the real two-daemon activity regression. No additional review was
 requested: the one adversarial review remains the only review for this PR.
 
 The exact corrected candidate then started Forgejo run
-[#1348](http://192.168.4.7:3000/noirr/plurx/actions/runs/1348). Preflight,
+[#1348](http://forge.lan:3000/noirr/plurx/actions/runs/1348). Preflight,
 Android JVM, arm64 packaging, and the audit workflow passed with no failed job,
 but synchronization of unrelated PR #200 cancelled every unfinished #191 job
 after eight minutes. The measured cause is workflow identity, not test logic:
@@ -268,7 +268,7 @@ and no pass is inferred from it.
 
 Commit `b9547a2b03bc5bd5a499a5437b51575ef1c5f359` was archived without
 repository metadata or credentials and built in the Rust 1.97.1 Linux image
-on `nynuc`. One shared execution ID, `m1-linux-b9547a2b`, produced two closed
+on `media1`. One shared execution ID, `m1-linux-b9547a2b`, produced two closed
 smoke reports:
 
 | Role | Warmup | Measured cycles | Recovery | Envelope | Report SHA-256 |
@@ -398,8 +398,8 @@ branches:
 
 | Policy | First run | Superseding run | Observed result |
 |---|---|---|---|
-| `cancel-in-progress: false` | [#1194](http://192.168.4.7:3000/noirr/plurx/actions/runs/1194) | [#1195](http://192.168.4.7:3000/noirr/plurx/actions/runs/1195) | Both passed; the second waited for the first's 30-second hold |
-| `cancel-in-progress: true` | [#1196](http://192.168.4.7:3000/noirr/plurx/actions/runs/1196) | [#1198](http://192.168.4.7:3000/noirr/plurx/actions/runs/1198) | The first was cancelled when the second started; the second passed |
+| `cancel-in-progress: false` | [#1194](http://forge.lan:3000/noirr/plurx/actions/runs/1194) | [#1195](http://forge.lan:3000/noirr/plurx/actions/runs/1195) | Both passed; the second waited for the first's 30-second hold |
+| `cancel-in-progress: true` | [#1196](http://forge.lan:3000/noirr/plurx/actions/runs/1196) | [#1198](http://forge.lan:3000/noirr/plurx/actions/runs/1198) | The first was cancelled when the second started; the second passed |
 
 The exact temporary branches were deleted after the results were retained;
 no real user run or repository workflow was cancelled for this test. The

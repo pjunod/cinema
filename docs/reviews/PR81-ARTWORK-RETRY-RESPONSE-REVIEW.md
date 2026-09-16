@@ -167,7 +167,7 @@ folder trees are legitimate here", and `http/browse.rs:203` already uses 16.
 `scan_path` uses `WalkDir` with no sort, so the triggering order occurs
 roughly half the time and is not under anyone's control.
 
-**Observable consequence — minimal production repro**, monarr scanning
+**Observable consequence — minimal production repro**, Curator scanning
 `ROOT/F1/F2`:
 
 ```
@@ -192,7 +192,7 @@ miss sticky.
 Simulation quantifies the difference between full and partial scans: over
 2.9M simulated *full* home imports, 90,577 had differing targets and **zero**
 lost a poster (a folder with a media child always gets pushed at step 2 by
-that child's own walk). Over 2.19M *partial* imports — monarr's actual usage —
+that child's own walk). Over 2.19M *partial* imports — Curator's actual usage —
 68,381 differed and **2,900 lost a real poster**.
 
 **Fix.** Keep the `HashSet` (the O(1) dedupe is the real win over

@@ -8,7 +8,7 @@ the three things that must hold are that it never resets a runner that is
 working, that it always brings a runner it stopped back, and that it does
 nothing at all while the cache is inside its budget.
 
-A fourth was added on 2026-09-08, after `gha-nuc4-general-01` refused two jobs
+A fourth was added on 2026-09-08, after `gha-lab4-general-01` refused two jobs
 in a row while this janitor reported it healthy: **the reserve it keeps has to
 be at least the free space a job is refused for not having.** The preflight
 demanded 25 G and the reserve was 20 % of the filesystem, 15.6 G on a 78 GB
@@ -285,7 +285,7 @@ class JanitorContractCase(unittest.TestCase):
         self.assertFalse((self.state / "last-run.json").exists())
 
     def test_the_blob_tree_alone_is_enough_to_recognize_a_cache_server(self):
-        """`gha-nuc4-general-01` had 13G of blobs and no `bolt.db` beside them.
+        """`gha-lab4-general-01` had 13G of blobs and no `bolt.db` beside them.
 
         Requiring both markers made the janitor walk past the fullest runner in
         the fleet and report nothing, which is the failure mode this whole
@@ -326,7 +326,7 @@ class JanitorContractCase(unittest.TestCase):
         self.assertFalse(self.cache.exists())
 
     def test_the_reserve_is_never_below_what_a_job_is_refused_for(self):
-        """`gha-nuc4-general-01`, 2026-09-08, the exact numbers.
+        """`gha-lab4-general-01`, 2026-09-08, the exact numbers.
 
         A 78 GB guest with 18 G free and a 4 G cache. The preflight refused two
         jobs in a row for wanting 25 G; 20 % of 78 GB is 15.6 G, so the janitor
@@ -353,7 +353,7 @@ class JanitorContractCase(unittest.TestCase):
         The janitor is installed standalone on each host -- it cannot read the
         workflow at run time -- so the shared constant has to be a contract
         rather than an import. If `disk-gb`'s default is ever raised without
-        raising `REQUIRED_GB`, the band that refused `gha-nuc4-general-01`
+        raising `REQUIRED_GB`, the band that refused `gha-lab4-general-01`
         reopens silently and every runner reports healthy while jobs are turned
         away.
 
@@ -612,7 +612,7 @@ class JanitorContractCase(unittest.TestCase):
 
         `BUDGET_GB` has always been validated; `REQUIRED_GB` was not, and an
         unusable value there does not fail -- it drops the floor back to the
-        20 % rule that let `gha-nuc4-general-01` sit refused at 18 G while this
+        20 % rule that let `gha-lab4-general-01` sit refused at 18 G while this
         reported healthy.
         """
         # An empty value is NOT in this list and must not be: `${VAR:-25}`
@@ -884,7 +884,7 @@ class JanitorContractCase(unittest.TestCase):
         self.assertEqual(substituted, 1, "the documented command no longer uses sudo")
         command, substituted = re.subn(
             re.escape(
-                "http://192.168.4.7:3000/noirr/plurx/raw/branch/main"
+                "http://forge.lan:3000/noirr/plurx/raw/branch/main"
                 "/deploy/runner-janitor/bootstrap"
             ),
             f"file://{forge}/bootstrap",
@@ -994,7 +994,7 @@ class MacosJanitorContractCase(unittest.TestCase):
     """
 
     SCRIPT = ROOT / "deploy/runner-janitor/macos/plurx-ci-janitor"
-    LABEL = "org.forgejo.actions.runner.plurx.gha-mba-apple-01"
+    LABEL = "org.forgejo.actions.runner.plurx.gha-maca-apple-01"
 
     def setUp(self):
         subprocess.run(["bash", "-n", str(self.SCRIPT)], check=True)
@@ -1068,7 +1068,7 @@ class MacosJanitorContractCase(unittest.TestCase):
                 "PLURX_JANITOR_STATE_DIR": str(self.state),
                 "PLURX_JANITOR_DAEMON_DIR": str(self.daemons),
                 # plutil escapes every forward slash, and the real plist
-                # on gha-mba-apple-01 does exactly that. A fixture that did not
+                # on gha-maca-apple-01 does exactly that. A fixture that did not
                 # would pass a script that reads a path naming nothing.
                 "FIXTURE_PLIST_JSON": self.plist_json(),
                 "FIXTURE_LOG": str(self.log),

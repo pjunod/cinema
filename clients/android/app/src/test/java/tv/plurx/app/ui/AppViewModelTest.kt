@@ -40,7 +40,7 @@ class AppViewModelTest {
 
     @Test
     fun manualOriginsUseThePlurxPortWhenHttpHasNone() {
-        assertEquals("http://192.168.1.20:32400", normalizeOrigin("192.168.1.20"))
+        assertEquals("http://10.42.1.20:32400", normalizeOrigin("10.42.1.20"))
         assertEquals("http://media-box:32400", normalizeOrigin("media-box"))
         assertEquals("http://media-box:32400", normalizeOrigin("http://media-box"))
     }
@@ -55,8 +55,8 @@ class AppViewModelTest {
     @Test
     fun qrCodesAcceptServerAddressesAndRejectUnrelatedPayloads() {
         assertEquals(
-            "http://192.168.4.10:32400",
-            connectionOriginFromQr("http://192.168.4.10:32400/"),
+            "http://10.42.4.10:32400",
+            connectionOriginFromQr("http://10.42.4.10:32400/"),
         )
         assertEquals(
             "http://media-box:32400",

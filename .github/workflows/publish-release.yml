@@ -19,7 +19,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  REGISTRY_IMAGE: 192.168.4.7:3000/noirr/plurxd
+  REGISTRY_IMAGE: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/plurxd
 
 jobs:
   resolve:
@@ -82,10 +82,16 @@ jobs:
           echo "packaging_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
-          buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml
+          buildkitd-config-inline: |
+            # The fleet registry is deliberately plain HTTP on the private LAN. A
+            # BuildKit container does not inherit Docker daemon insecure-registry
+            # settings, so the builder needs the same trust decision explicitly.
+            # Only requests to this exact address are affected.
+            [registry."${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"]
+              http = true
       - uses: https://github.com/docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
-          registry: 192.168.4.7:3000
+          registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
           username: fleet
           password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
       - name: Detect an existing immutable version index
@@ -148,10 +154,16 @@ jobs:
       - uses: https://github.com/docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
-          buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml
+          buildkitd-config-inline: |
+            # The fleet registry is deliberately plain HTTP on the private LAN. A
+            # BuildKit container does not inherit Docker daemon insecure-registry
+            # settings, so the builder needs the same trust decision explicitly.
+            # Only requests to this exact address are affected.
+            [registry."${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"]
+              http = true
       - uses: https://github.com/docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
-          registry: 192.168.4.7:3000
+          registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
           username: fleet
           password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
       - name: Compile and export the exact tagged binaries
@@ -269,10 +281,16 @@ jobs:
       - uses: https://github.com/docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
-          buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml
+          buildkitd-config-inline: |
+            # The fleet registry is deliberately plain HTTP on the private LAN. A
+            # BuildKit container does not inherit Docker daemon insecure-registry
+            # settings, so the builder needs the same trust decision explicitly.
+            # Only requests to this exact address are affected.
+            [registry."${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"]
+              http = true
       - uses: https://github.com/docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
-          registry: 192.168.4.7:3000
+          registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
           username: fleet
           password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
       - name: Verify architecture binding, labels, version, and runtime
@@ -352,10 +370,16 @@ jobs:
       - uses: https://github.com/docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
       - uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
-          buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml
+          buildkitd-config-inline: |
+            # The fleet registry is deliberately plain HTTP on the private LAN. A
+            # BuildKit container does not inherit Docker daemon insecure-registry
+            # settings, so the builder needs the same trust decision explicitly.
+            # Only requests to this exact address are affected.
+            [registry."${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"]
+              http = true
       - uses: https://github.com/docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
-          registry: 192.168.4.7:3000
+          registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
           username: fleet
           password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
       - name: Reconfirm the remote tag has not moved

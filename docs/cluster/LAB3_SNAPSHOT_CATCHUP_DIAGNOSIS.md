@@ -1,4 +1,4 @@
-# nuc3 snapshot catch-up — why a live learner waited fifteen idle minutes
+# lab3 snapshot catch-up — why a live learner waited fifteen idle minutes
 
 **Status:** confirmed live diagnosis; implementation fix not started ·
 **Incident window:** 2026-09-05 18:09–18:43 UTC · **Written:** 2026-09-05 ·
@@ -7,7 +7,7 @@
 Companion to [OPERATIONS.md](../OPERATIONS.md) (the supported cluster and snapshot
 runbook) and [WAL_GENERATION_REPAIR_PLAN.md](WAL_GENERATION_REPAIR_PLAN.md)
 (the snapshot-transfer timeout rationale). This document answers one narrower
-question: why did `nuc3` remain labelled *Catching up* during the 2026-09-05
+question: why did `lab3` remain labelled *Catching up* during the 2026-09-05
 rollout, and what must a corrective change prove?
 
 The implementation references below name the production tree at commit
@@ -18,7 +18,7 @@ evidence.
 
 ## Executive finding — catch-up was waiting on an idle snapshot RPC
 
-`nuc3` was not steadily applying a backlog. Its first offset-zero snapshot retry
+`lab3` was not steadily applying a backlog. Its first offset-zero snapshot retry
 stopped after writing exactly 15 MiB and then transferred no application data
 for fifteen minutes. The Raft heartbeat stream remained active throughout, so
 the cluster could still observe the learner while the learner could not pass
@@ -26,9 +26,9 @@ its bounded-read or process-readiness gates.
 
 The sequence is confirmed:
 
-1. `m6` sent a snapshot chunk at offset 6 MiB after the restarted receiver
+1. `lab6` sent a snapshot chunk at offset 6 MiB after the restarted receiver
    expected offset zero.
-2. `nuc3` returned `SnapshotMismatch`; OpenRaft logged that it reset the sender
+2. `lab3` returned `SnapshotMismatch`; OpenRaft logged that it reset the sender
    offset to zero and retried.
 3. The retry produced a 15 MiB temporary file, then stopped making progress.
    The snapshot TCP stream stayed established with empty send and receive
@@ -37,7 +37,7 @@ The sequence is confirmed:
    snapshot transport uses OpenRaft's 75% soft deadline, so the idle RPC was
    canceled after 900 seconds.
 5. Cancellation reset the WebSocket. The temporary file disappeared, the next
-   transfer installed an 88,559,616-byte snapshot, and `nuc3` opened HTTP 73
+   transfer installed an 88,559,616-byte snapshot, and `lab3` opened HTTP 73
    seconds after the timeout.
 
 The user-facing symptom was therefore truthful but incomplete. The Cluster
@@ -62,7 +62,7 @@ the complete root cause.
 | Cluster page | Tell the operator whether a learner is progressing, retrying, or stalled. | All four states collapse to *Catching up*. |
 | Automatic recovery | Cancel an abandoned RPC, reconnect, and complete a clean transfer. | This worked, but only after the full 15-minute soft timeout. |
 
-The safety gates behaved correctly: `nuc3` did not open port 32400 or serve
+The safety gates behaved correctly: `lab3` did not open port 32400 or serve
 bounded reads from an unproved database image. The recovery latency and the
 operator explanation did not behave well enough.
 
@@ -72,16 +72,16 @@ All timestamps are UTC on 2026-09-05.
 
 | Time | Evidence | Interpretation |
 |---|---|---|
-| 17:40:56 | `nynuc` container start | Rolling deployment had begun. |
-| 17:49:59 | `m6` container start | All observed fleet images later reported the same build. |
-| 18:08:14 | `nuc4` container start | Third production voter restarted. |
-| 18:09:47 onward | `m6` repeatedly logged replication timeouts for target Raft id 7. | `nuc3` was already not accepting normal replication before its own restart. The first causal event before 18:09 was not captured. |
-| 18:26:47.579 | `nuc3` container start, restart count zero | The learner restarted as Raft id 7. This was a fresh process, not a crash loop. |
-| 18:26:50.446 | `m6` logged `SnapshotMismatch`: receiver expected offset 0, sender sent 6,291,456. | An interrupted or stale sender-side transfer position met a fresh receiver-side snapshot state. |
+| 17:40:56 | `media1` container start | Rolling deployment had begun. |
+| 17:49:59 | `lab6` container start | All observed fleet images later reported the same build. |
+| 18:08:14 | `lab4` container start | Third production voter restarted. |
+| 18:09:47 onward | `lab6` repeatedly logged replication timeouts for target Raft id 7. | `lab3` was already not accepting normal replication before its own restart. The first causal event before 18:09 was not captured. |
+| 18:26:47.579 | `lab3` container start, restart count zero | The learner restarted as Raft id 7. This was a fresh process, not a crash loop. |
+| 18:26:50.446 | `lab6` logged `SnapshotMismatch`: receiver expected offset 0, sender sent 6,291,456. | An interrupted or stale sender-side transfer position met a fresh receiver-side snapshot state. |
 | 18:26:50.446 | OpenRaft logged `snapshot mismatch, reset offset and retry`. | The remote error survived translation and reached OpenRaft's offset recovery. |
 | 18:26:50.678 | `/srv/plurx/hiqlite/state_machine/snapshots/temp` reached 15,728,640 bytes. | The offset-zero retry began and wrote five 3 MiB chunks. |
 | 18:26:50–18:41:50 | File size and modification time did not change. Snapshot socket remained established and idle; heartbeat socket remained active. | This was a stalled RPC, not slow catch-up or a host/network outage. |
-| 18:41:50.682 | `m6` logged `InstallSnapshot RPC ... deadline has elapsed`. | Exactly 900 seconds after the temp file's last progress: 75% of the configured 1,200-second hard timeout. |
+| 18:41:50.682 | `lab6` logged `InstallSnapshot RPC ... deadline has elapsed`. | Exactly 900 seconds after the temp file's last progress: 75% of the configured 1,200-second hard timeout. |
 | 18:42:03 | The temporary snapshot file no longer existed. | Cancellation/reset cleanup had crossed a transport and receiver-state boundary. |
 | 18:42 | New snapshot `01a072e0-de58-7293-8f22-d109de80100f`, 88,559,616 bytes, became `current`. | The clean retry completed. |
 | 18:43:04.106 | `plurxd starting` appeared in the learner log. | Store selection and startup catch-up gate completed. |
@@ -154,12 +154,12 @@ During the initial sample:
 
 | Host | `/readyz` | Role relevant to impact |
 |---|---|---|
-| `nynuc` | HTTP 200, `ready` | voter |
-| `m6` | HTTP 200, `ready` | voter and observed snapshot sender |
-| `nuc4` | HTTP 200, `ready` | voter |
-| `nuc3` | connection reset/refused before listener startup | committed learner, Raft id 7 |
+| `media1` | HTTP 200, `ready` | voter |
+| `lab6` | HTTP 200, `ready` | voter and observed snapshot sender |
+| `lab4` | HTTP 200, `ready` | voter |
+| `lab3` | connection reset/refused before listener startup | committed learner, Raft id 7 |
 
-The cluster retained its three voting members. `nuc3` held no vote, so this
+The cluster retained its three voting members. `lab3` held no vote, so this
 event removed learner read/media capacity but did not reduce voting quorum.
 
 ### The learner process was alive, small, and waiting
@@ -183,7 +183,7 @@ whole-host network partition. It also rules out the benign reading of
 
 ### The leader named the protocol failure
 
-The essential `m6` log sequence was:
+The essential `lab6` log sequence was:
 
 ```text
 18:26:50.446 ERROR target 7 ... SnapshotMismatch ... expect offset 0,
@@ -200,9 +200,9 @@ requests.
 ### The old Raft id warning was a red herring
 
 Healthy nodes also logged that historical SQLite node 4 was absent from the
-current membership `[1, 5, 6, 7]`. `nuc3`'s active identity is node 7 with role
+current membership `[1, 5, 6, 7]`. `lab3`'s active identity is node 7 with role
 `learner`; node 4 was its earlier incarnation. The failing snapshot RPC named
-target 7 and the correct `192.168.4.7` addresses. No evidence connects the
+target 7 and the correct `10.42.4.7` addresses. No evidence connects the
 historical node-4 warning to the stalled stream, so a fix must not delete or
 rewrite membership state on that basis.
 
@@ -294,7 +294,7 @@ reproduction or additional trace points.
 
 The post-mismatch snapshot request made no progress and had no failure boundary
 shorter than its 900-second soft TTL. Because startup correctly waits for local
-application of a quorum-confirmed watermark, `nuc3` remained unavailable and
+application of a quorum-confirmed watermark, `lab3` remained unavailable and
 the membership projection kept `bounded_read_ready` false until timeout-driven
 transport reset allowed a clean snapshot.
 
@@ -325,7 +325,7 @@ returns to offset zero.
    becomes the optimistic phrase *Catching up* even when no byte has moved.
 3. **Startup logs begin after store selection.** The learner emitted no useful
    progress line while waiting before the HTTP listener. Diagnosis had to come
-   from `m6`, Docker state, the temp file, and TCP counters.
+   from `lab6`, Docker state, the temp file, and TCP counters.
 4. **Existing regressions prove the mechanisms separately.** Tests cover typed
    mismatch preservation, retained reset epochs, canceled queue entries,
    backpressured writers, and forced cleanup. They do not reproduce a real
@@ -337,12 +337,12 @@ returns to offset zero.
 
 ## Impact and safety assessment
 
-**User impact:** `nuc3` could not accept HTTP traffic, bounded catalogue reads,
+**User impact:** `lab3` could not accept HTTP traffic, bounded catalogue reads,
 or declared node-local learner work for at least 16 minutes 17 seconds after
 its restart. The earlier target-7 replication errors may extend that window
 back to 18:09:47.
 
-**Cluster impact:** the three voters remained ready. Because `nuc3` was a
+**Cluster impact:** the three voters remained ready. Because `lab3` was a
 committed non-voting learner, the event did not lower quorum tolerance. It did
 reduce worker capacity and made the Cluster page appear inexplicably stale.
 
@@ -442,7 +442,7 @@ code. CI is not the compiler for this fix.
    worth risking quorum for.
 2. On the current leader, filter for target 7 `SnapshotMismatch`,
    `InstallSnapshot`, and deadline lines.
-3. On `nuc3`, sample the temp snapshot size and modification time twice. A
+3. On `lab3`, sample the temp snapshot size and modification time twice. A
    fixed value plus an established idle snapshot socket is a stall, regardless
    of the UI wording.
 4. If the voters are healthy, allow the bounded automatic cancellation to run
@@ -459,20 +459,20 @@ Useful read-only checks:
 
 ```bash
 # Prove voter readiness before touching the learner.
-for host in nynuc m6 nuc4; do
+for host in media1 lab6 lab4; do
   ssh "$host" 'curl -fsS http://127.0.0.1:32400/readyz'
 done
 
 # Check learner process and current health state.
-ssh nuc3 'docker inspect --format \
+ssh lab3 'docker inspect --format \
   "status={{.State.Status}} restart={{.RestartCount}} health={{.State.Health.Status}}" \
   plurxd'
 
 # Compare snapshot progress twice; unchanged size and mtime mean no file progress.
-ssh nuc3 'stat /srv/plurx/hiqlite/state_machine/snapshots/temp'
+ssh lab3 'stat /srv/plurx/hiqlite/state_machine/snapshots/temp'
 
 # Read the sender-side reason without unrelated application logs.
-ssh m6 'docker logs --since 20m plurxd 2>&1 | \
+ssh lab6 'docker logs --since 20m plurxd 2>&1 | \
   grep -Ei "snapshot|target=7|node 7"'
 ```
 
@@ -483,7 +483,7 @@ or mismatch line anchors the expected automatic retry deadline.
 
 ## Non-goals — do not solve the wrong problem
 
-- **Do not promote `nuc3` to a voter.** Its learner role is deliberate and did
+- **Do not promote `lab3` to a voter.** Its learner role is deliberate and did
   not cause the transport to stall.
 - **Do not weaken the startup watermark gate.** That gate prevented unproved
   local state from serving.

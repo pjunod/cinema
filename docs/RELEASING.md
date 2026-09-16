@@ -145,7 +145,7 @@ Open Forgejo → `noirr/plurx` → Actions → `publish release image`, choose
 run to finish green before checking the registry aliases:
 
 ```bash
-image=192.168.4.7:3000/noirr/plurxd
+image=forge.lan:3000/noirr/plurxd
 version_digest=$(docker buildx imagetools inspect "$image:0.2.7" \
   | sed -n 's/^Digest:[[:space:]]*//p' | head -1)
 for alias in 0.2.7 0.2 latest; do

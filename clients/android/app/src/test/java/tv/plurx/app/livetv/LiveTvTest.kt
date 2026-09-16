@@ -319,7 +319,7 @@ class LiveTvTest {
     }
 
     @Test fun configurationEnableAndExactOwnerRecoveryHaveSeparateCasShapes() {
-        val configuration = LiveTvSettingsChange.Configure("192.168.4.20", "owner-new", 2, 720).body(19)
+        val configuration = LiveTvSettingsChange.Configure("10.42.4.20", "owner-new", 2, 720).body(19)
         assertEquals(setOf("live_tv_config_generation", "live_tv_device_ipv4", "live_tv_owner_node_id", "live_tv_max_sessions", "live_tv_output_height", "live_tv_max_output_height"), configuration.keys)
         assertEquals("0", configuration.getValue("live_tv_max_output_height").jsonPrimitive.content)
         val enabled = LiveTvSettingsChange.Enabled(true).body(20)
@@ -334,7 +334,7 @@ class LiveTvTest {
 
     @Test fun actualSnakeCaseSettingsContractPreservesOldOwnerTuple() {
         val settings = Net.json.decodeFromString<LiveTvSettings>("""{
-            "live_tv_enabled":false,"live_tv_device_ipv4":"192.168.4.20",
+            "live_tv_enabled":false,"live_tv_device_ipv4":"10.42.4.20",
             "live_tv_owner_node_id":"next","live_tv_max_sessions":2,"live_tv_output_height":720,
             "live_tv_config_generation":23,"live_tv_transition_from_owner_node_id":"original",
             "live_tv_transition_drain_before":21,"unrelated_secret":"ignored"
@@ -345,9 +345,9 @@ class LiveTvTest {
     }
 
     @Test fun playlistStaysAtOriginalOriginAndDoesNotCarryAccountToken() {
-        val api = LiveTvApi("http://192.168.4.10:32400", "fixture-account-secret")
+        val api = LiveTvApi("http://10.42.4.10:32400", "fixture-account-secret")
         val playlist = api.playlistUrl("cap/with?reserved#text")
-        assertEquals("http://192.168.4.10:32400/api/v1/live-tv/sessions/cap%2Fwith%3Freserved%23text/index.m3u8", playlist)
+        assertEquals("http://10.42.4.10:32400/api/v1/live-tv/sessions/cap%2Fwith%3Freserved%23text/index.m3u8", playlist)
         assertFalse(playlist.contains("fixture-account-secret"))
         assertTrue(api.mediaClient.interceptors.isEmpty())
         assertFalse(api.mediaClient.followRedirects)

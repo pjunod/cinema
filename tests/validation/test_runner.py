@@ -206,7 +206,6 @@ class CatalogCase(unittest.TestCase):
         self.assertTrue(packaging["container"])
         for build_only_path in (
             ".github/actions/buildx-cache/action.yml",
-            ".github/buildkitd.toml",
             "crates/plurxd/build.rs",
             "scripts/ci-buildkit-prune",
             "scripts/ci-execution-mode",

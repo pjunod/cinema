@@ -151,7 +151,7 @@ pub struct SystemDto {
     /// [`BlockedGetsDto`].
     pub blocked_gets: BlockedGetsDto,
     /// Recent targeted-scan requests from other applications, newest last.
-    /// The one place an operator can see that monarr is actually talking to
+    /// The one place an operator can see that Curator is actually talking to
     /// plurx — and what it asked for — without reading the log.
     pub scan_requests: Vec<crate::state::ScanRequestRecord>,
     /// The integration at a glance: has another application ever reached
@@ -161,8 +161,8 @@ pub struct SystemDto {
     /// library — a path-mapping mistake is rejected before one exists, so a
     /// server being called constantly and rejecting everything looks
     /// identical there to one nobody is calling. These counters tell those
-    /// two apart, which is the difference between "fix monarr's path
-    /// mapping" and "check monarr's URL and key".
+    /// two apart, which is the difference between "fix Curator's path
+    /// mapping" and "check Curator's URL and key".
     pub integration: IntegrationDto,
     /// What the libraries' storage reads at, last time anyone measured. The
     /// input side of the pipeline, and until this existed the only side that
@@ -1577,7 +1577,7 @@ pub struct SettingsDto {
     pub trakt_configured: bool,
     pub trakt_client_id: String,
     pub trakt_client_secret: String,
-    /// Where monarr lives, and the key plurxd reads its calendar with — the
+    /// Where Curator lives, and the key plurxd reads its calendar with — the
     /// coming-soon rail (plan §11.2). Server-side only: plurxd proxies the
     /// call, so this key never reaches a browser. Same admin-only,
     /// mask-until-clicked treatment as the others.
@@ -1585,7 +1585,7 @@ pub struct SettingsDto {
     pub monarr_url: String,
     pub monarr_api_key: String,
     /// Push watch state to monarr. Off by default, and separate from the
-    /// pair above on purpose: reading monarr's calendar and sending it your
+    /// pair above on purpose: reading Curator's calendar and sending it your
     /// household's viewing history are very different consents.
     pub monarr_watched_sync: bool,
     /// Playback language defaults (docs/FEATURES.md §7): ISO 639 codes and the
@@ -2214,7 +2214,7 @@ pub struct UpdateSettings {
     /// Trakt app credentials; same empty-clears semantics.
     pub trakt_client_id: Option<String>,
     pub trakt_client_secret: Option<String>,
-    /// monarr pairing for the coming-soon rail; same empty-clears semantics.
+    /// Curator pairing for the coming-soon rail; same empty-clears semantics.
     pub monarr_url: Option<String>,
     pub monarr_api_key: Option<String>,
     pub monarr_watched_sync: Option<bool>,
@@ -3163,8 +3163,8 @@ pub async fn update_settings(
     ];
     for (key, value) in pairs {
         if let Some(value) = value {
-            // The monarr URL is canonicalized on the way in, not at each use
-            // site: a bare `monarr:7676` or `host.docker.internal` is what a
+            // The Curator URL is canonicalized on the way in, not at each use
+            // site: a bare `Curator:7676` or `host.docker.internal` is what a
             // person types, and reqwest answers a schemeless address with
             // "builder error" — a message about our HTTP client rather than
             // about their setting. Storing the completed form means every
@@ -4833,7 +4833,7 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
          # HELP plurx_cache_pinned_bytes Completed cache bytes protected by offline packages.\n\
          # TYPE plurx_cache_pinned_bytes gauge\n\
          plurx_cache_pinned_bytes{{reason=\"offline\"}} {}\n\
-         # HELP plurx_watched_outbox Watched notifications queued for monarr, by state.\n\
+         # HELP plurx_watched_outbox Watched notifications queued for Curator, by state.\n\
          # TYPE plurx_watched_outbox gauge\n\
          plurx_watched_outbox{{status=\"pending\"}} {pending}\n\
          plurx_watched_outbox{{status=\"ok\"}} {ok}\n\
@@ -6007,7 +6007,7 @@ mod tests {
     /// `ttff_ms` over the log ring returned a series that was part start times
     /// and part stall lengths — with the stalls, being longer, owning the whole
     /// tail. That is the one number M0 exists to produce, wrong in the
-    /// direction that makes the server look worse than it is: on nynuc a real
+    /// direction that makes the server look worse than it is: on media1 a real
     /// p90 of 1.5 s read as 4.6 s.
     #[test]
     fn a_stalls_duration_is_never_reported_as_a_start_time() {

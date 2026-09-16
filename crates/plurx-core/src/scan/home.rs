@@ -232,7 +232,7 @@ pub(crate) fn relative_dirs(library: &Library, path: &Path) -> Option<Vec<String
     // it is what stops `root/../../etc` escaping the library), while the full
     // scan walks from `library.paths` and hands us the configured spelling. A
     // root reached through a symlink therefore matched its own files on a full
-    // scan and none of them on a targeted one, so monarr's import placed
+    // scan and none of them on a targeted one, so Curator's import placed
     // nothing and said it succeeded.
     let rest: PathBuf = library
         .paths

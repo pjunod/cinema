@@ -132,7 +132,7 @@ Goal: existing third-party Plex clients can point at plurx and work, without plu
 | Docker / Compose | Official multi-arch images (amd64/arm64); documented GPU/QSV device passthrough; example HA compose |
 | Bare metal | Single static binary + systemd unit; Linux amd64/arm64 first, macOS/Windows server later |
 | Kubernetes | Helm chart: StatefulSet (3 replicas), pod anti-affinity, device-plugin notes for GPU transcode |
-| NAS packages | Unraid template + TrueNAS SCALE app first (Docker-based); Synology/QNAP native packages later |
+| NAS packages | Unraid template + TrueNAS SCALE app first (Docker-based); Synology/NAS native packages later |
 
 - **REQ-OPS-1 —** Prometheus `/metrics`, structured logs, health/readiness endpoints per node + cluster.
 - **REQ-OPS-2 —** Config = sane defaults + one file + env overrides; secrets never logged; settings edited in the web admin replicate cluster-wide.

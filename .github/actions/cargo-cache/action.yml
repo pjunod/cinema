@@ -65,7 +65,7 @@ runs:
         # lives outside the workspace, so 21G is what a job actually grows by.
         # 25G is that plus link headroom.
         #
-        # It was 30G for a few hours and that was too high. `gha-m6-general-02`
+        # It was 30G for a few hours and that was too high. `gha-lab6-general-02`
         # has 30G free with nothing left to prune — its cache is live and its
         # images are already gone — so a 30G bar refused a job on a healthy
         # runner over one gigabyte. That is the worse failure: the bus error
@@ -80,7 +80,7 @@ runs:
         # and `ci-require-disk` below ends in `exit 1`. Run the refusal first
         # and the audit never runs on the hosts where its number is the only
         # thing that answers "can the janitor reclaim enough here?". Three
-        # refusals on `gha-nuc4-general-01` on 2026-09-08 all said `18G
+        # refusals on `gha-lab4-general-01` on 2026-09-08 all said `18G
         # available` and none of them carried a cache figure.
         if [ -d "${RUNNER_TOOL_CACHE:-}" ]; then
           "$GITHUB_WORKSPACE/scripts/ci-runner-cache-audit" \
@@ -106,7 +106,7 @@ runs:
         # own `generate-config` offers `enabled`, `dir`, `host`, `proxy_port`
         # and the secrets, and nothing else: no size cap, no TTL, no GC. So
         # every entry it is ever handed is permanent. Measured on
-        # `gha-m6-general-01` on 2026-09-07: 118 entries, 41G, every one of them
+        # `gha-lab6-general-01` on 2026-09-07: 118 entries, 41G, every one of them
         # created in the previous three days, on a 78G disk. The whole fleet
         # was carrying ~167G of cache blobs that nothing would ever delete, and
         # runners were failing jobs for want of space while a bounded cache
@@ -148,7 +148,7 @@ runs:
         # down the hosted path instead.
         #
         # The fallback has to stay unique per runner INSTANCE, not per host:
-        # nynuc runs four runners and rogg16 five, and two of them sharing a
+        # media1 runs four runners and lab5 five, and two of them sharing a
         # Cargo cache root would have them pruning each other's target
         # directories mid-build. Each instance already has its own runner root
         # -- /opt/forgejo-runner, -02, -03 -- and RUNNER_TOOL_CACHE sits inside

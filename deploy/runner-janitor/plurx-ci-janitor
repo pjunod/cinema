@@ -6,7 +6,7 @@
 # 13.1.0 evicts nothing from it: its `generate-config` offers `enabled`, `dir`,
 # `host`, `proxy_port` and the shared secrets, and nothing else. No size cap, no
 # TTL, no garbage collection. So the directory only grows, and on 2026-09-07 it
-# had grown to 41G on `gha-m6-general-01`'s 78G disk while the fleet failed jobs
+# had grown to 41G on `gha-lab6-general-01`'s 78G disk while the fleet failed jobs
 # with linker bus errors, which is what a full disk looks like from inside a
 # build.
 #
@@ -28,7 +28,7 @@
 # What it will not do: touch `_work`. That holds other jobs' checkouts, several
 # repositories deep, and nothing outside a job can tell which trees are
 # finished. It is also small: the preflight's own diagnostic on
-# `gha-nuc4-general-01`, 2026-09-08, listed the whole checkout at about 58 MB
+# `gha-lab4-general-01`, 2026-09-08, listed the whole checkout at about 58 MB
 # (`20M docs`, `19M crates`, `4.6M brand`, and down from there). A reaper for
 # it was written and withdrawn on that measurement -- see the reserve below for
 # what was actually wrong, and do not rewrite it without measuring `_work`
@@ -81,7 +81,7 @@ done
 }
 # Same guard, and it matters more: an empty or negative REQUIRED_GB does not
 # fail, it quietly degrades the reserve back to the 20 % rule that let
-# `gha-nuc4-general-01` sit refused at 18 G free while this reported healthy.
+# `gha-lab4-general-01` sit refused at 18 G free while this reported healthy.
 # A bound that silently cannot be met is the failure this whole change is about.
 [[ "$REQUIRED_GB" =~ ^[1-9][0-9]*$ ]] || {
   echo "plurx-ci-janitor: required space must be whole gigabytes" >&2; exit 2
@@ -97,7 +97,7 @@ done
 # What that missed is that a job is refused against a different number. The
 # preflight demands REQUIRED_GB (25) and this reserved 20 % -- 15.6 G on a 78 GB
 # guest -- so between those two figures the fleet refuses jobs while the janitor
-# reports every runner healthy and reclaims nothing. `gha-nuc4-general-01` sat
+# reports every runner healthy and reclaims nothing. `gha-lab4-general-01` sat
 # in that band on 2026-09-08 with 18 G free: two jobs refused, `18G >= 15.6G`,
 # nothing done, and the same failure on every re-push because the labels pin the
 # job to that guest. The band is the defect.
@@ -277,7 +277,7 @@ while IFS= read -r unit; do
   case "$dir" in */*runner*/cache) ;; *) continue ;; esac
   [ ! -L "$dir" ] && [ -d "$dir" ] || continue
   # The index or the blob tree -- either proves what this directory is, and
-  # requiring both was wrong: `gha-nuc4-general-01` was carrying 13G of blobs
+  # requiring both was wrong: `gha-lab4-general-01` was carrying 13G of blobs
   # with no `bolt.db` beside them, and the janitor walked straight past the
   # fullest runner in the fleet reporting nothing at all.
   [ -f "$dir/bolt.db" ] || [ -d "$dir/cache" ] || continue
@@ -327,7 +327,7 @@ done < <(systemctl list-units --type=service --no-legend --all 'forgejo-runner*'
   awk '{ print $1 }')
 
 # Docker last, and only under pressure. Nothing bounds the image store: every
-# packaging job loads a new `plurx/plurxd:ci-<arch>`, and nynuc was carrying
+# packaging job loads a new `plurx/plurxd:ci-<arch>`, and media1 was carrying
 # 101G of images with four of a hundred and thirty-one in use. The named
 # BuildKit builders are bounded per job, so only cache older than a week is
 # taken here — pruning it wholesale would throw away exactly the state the

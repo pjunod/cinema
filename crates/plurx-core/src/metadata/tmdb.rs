@@ -393,7 +393,7 @@ impl TmdbClient {
 
     /// The TMDB id behind an IMDb id, or `None` if TMDB does not know it.
     ///
-    /// An item can reach plurx carrying only an IMDb id — monarr's movie side
+    /// An item can reach plurx carrying only an IMDb id — Curator's movie side
     /// tracks IMDb, and a hand-written NFO usually does too. Spending one
     /// lookup to turn it into a TMDB id is worth it: the alternative is a
     /// title search, and a title search is the thing that gets it wrong.

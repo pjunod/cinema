@@ -63,8 +63,8 @@ These constraints bind every milestone:
 3. Missing, empty, or unrecognized `CI_EXECUTION_MODE` resolves to `legacy`.
 4. The rollout switch is separate from `CI_RUNNER_MODE`; changing where jobs
    run must not silently change what jobs mean.
-5. Heavy CI jobs do not run on the four production Plurx voters: `m6`, `nuc3`,
-   `nuc4`, or `nynuc`. Fleet image builds performed by deployment tooling are
+5. Heavy CI jobs do not run on the four production Plurx voters: `lab6`, `lab3`,
+   `lab4`, or `media1`. Fleet image builds performed by deployment tooling are
    a separate, explicit operator action and are not CI capacity.
 6. No cluster timing assertion runs on a user laptop or on a host with an
    interactive Apple build tenant.
@@ -122,13 +122,13 @@ The 2026-09-01 read-only audit found:
 
 | Host | Production voter | Observed runner capacity | Free disk | Docker build cache |
 |---|---:|---|---:|---:|
-| `m6` | yes | generic `general` / `high-cpu` labels | ~329 GB | ~8.8 GB |
-| `nuc3` | yes | generic `general` / `high-cpu` labels | ~183 GB | ~9.2 GB |
-| `nuc4` | yes | generic `general` / `high-cpu` labels | ~210 GB | ~12.2 GB |
-| `nynuc` | yes | generic `general` / `high-cpu` labels | ~281 GB | ~13.8 GB |
-| `nuc1` | no | one runner labeled `ci-store` (see §4.1) | not yet measured | not yet measured |
-| `nuc2` | no | Android runners; one labeled `ci-store` after the Cargo-home repair (see §4.2) | not yet measured | not yet measured |
-| `rogg16` | no | one runner labeled `ci-topology`, one labeled `ci-store`; other generic runners online (see §4.1) | not yet measured | not yet measured |
+| `lab6` | yes | generic `general` / `high-cpu` labels | ~329 GB | ~8.8 GB |
+| `lab3` | yes | generic `general` / `high-cpu` labels | ~183 GB | ~9.2 GB |
+| `lab4` | yes | generic `general` / `high-cpu` labels | ~210 GB | ~12.2 GB |
+| `media1` | yes | generic `general` / `high-cpu` labels | ~281 GB | ~13.8 GB |
+| `lab1` | no | one runner labeled `ci-store` (see §4.1) | not yet measured | not yet measured |
+| `lab2` | no | Android runners; one labeled `ci-store` after the Cargo-home repair (see §4.2) | not yet measured | not yet measured |
+| `lab5` | no | one runner labeled `ci-topology`, one labeled `ci-store`; other generic runners online (see §4.1) | not yet measured | not yet measured |
 | MacBook Pro | no | Linux ARM64 VM `ci-arm64` primary | ~371 GB host free | new native guest |
 | MacBook Air | no | macOS ARM64 `apple` / `xcode-26`; Linux ARM64 VM `ci-arm64` backup | ~70 GB host free | new native guest |
 
@@ -147,9 +147,9 @@ jobs, so the desired isolation is not yet true. Before `shadow` is enabled:
 6. retain `general` only for short policy/scope jobs if production load policy
    permits it; otherwise create a lightweight non-voter label too.
 
-The supplied deployment key is not authorized for `nuc1` or `rogg16`.
-`nuc2` additionally presents a changed ED25519 host key (observed fingerprint
-`SHA256:LI8rEpqCBeVnsn54PLNJy2UqbmWYQaB+cuxP/A5QSoE`). The old known-hosts
+The supplied deployment key is not authorized for `lab1` or `lab5`.
+`lab2` additionally presents a changed ED25519 host key (observed fingerprint
+`SHA256:<lab2 host key fingerprint>`). The old known-hosts
 entry has not been replaced and the new key has not been trusted: independent
 verification is required before any host *access*. That remains a security
 boundary, and it is not permission to bypass host verification.
@@ -168,15 +168,15 @@ had already cost a day of queue: with exactly one runner carrying `ci-store`,
 
 Registered labels are a GitHub-side property of an already-registered runner,
 not host access, so the rebalance was applied through the Actions API without
-touching `nuc2`'s SSH host key. The fleet carries three `ci-store` slots:
+touching `lab2`'s SSH host key. The fleet carries three `ci-store` slots:
 
 | runner | host | production voter | eligibility proved by |
 |---|---|---|---|
-| `gha-nuc1-general-01` | `nuc1` | no | run 2838, green, 26.8 min |
-| `gha-rogg16-general-02` | `rogg16` | no | run 2837, green, 22.1 min |
-| `gha-nuc2-android-01` | `nuc2` | no | run 2840 attempt 3, green, 27.9 min (see §4.2) |
+| `gha-lab1-general-01` | `lab1` | no | run 2838, green, 26.8 min |
+| `gha-lab5-general-02` | `lab5` | no | run 2837, green, 22.1 min |
+| `gha-lab2-android-01` | `lab2` | no | run 2840 attempt 3, green, 27.9 min (see §4.2) |
 
-with `ci-topology` on `gha-rogg16-general-01`. One slot per physical host is a
+with `ci-topology` on `gha-lab5-general-01`. One slot per physical host is a
 deliberate invariant, not an accident of counting: two three-voter hiqlite
 tests on one loaded host is the quorum flake behind the artwork-fence
 failures. No voter carries either label.
@@ -190,7 +190,7 @@ adding it to a runner first. See
 
 ### 4.2 A runner is not a slot until the lane passes on it
 
-`gha-nuc2-android-01` was added as a third `ci-store` slot on 2026-09-02 and
+`gha-lab2-android-01` was added as a third `ci-store` slot on 2026-09-02 and
 failed `replicated Store contracts (legacy)` three runs in a row — 2840, 2842
 and 2845 — about twelve seconds into each job, before compiling anything:
 
@@ -202,7 +202,7 @@ Permission denied (os error 13)
 ##[error]Process completed with exit code 2.
 ```
 
-`gha-nuc1-general-01` (run 2838) and `gha-rogg16-general-02` (run 2837) ran the
+`gha-lab1-general-01` (run 2838) and `gha-lab5-general-02` (run 2837) ran the
 same lane green in the same hour, so this was the host and not the lane. The
 label was revoked and the shard count dropped from three to two.
 
@@ -228,7 +228,7 @@ one-machine patch.
 **The proof.** The label came back only after the lane was re-run on that exact
 runner: run 2840 attempt 3, dispatched while both other slots were busy so it
 had to land there, passed in **27.9 minutes** — in family with
-`gha-nuc1-general-01` (25.7–29.1 min) and `gha-rogg16-general-02` (21.8–22.7
+`gha-lab1-general-01` (25.7–29.1 min) and `gha-lab5-general-02` (21.8–22.7
 min) on the same lane, against roughly twelve seconds to failure before the
 fix. `SHARD_COUNT` was raised to three only then.
 
@@ -241,12 +241,12 @@ machine that cannot serve it.
 
 **Open follow-up.** The rebalance was applied to the live runners through the
 API. `pjunod/ansible`'s `github-runners/inventory/` does not carry the current
-label sets for `gha-nuc1-general-01`, `gha-nuc2-android-01`,
-`gha-rogg16-general-01` or `gha-rogg16-general-02` — it still describes them as
+label sets for `gha-lab1-general-01`, `gha-lab2-android-01`,
+`gha-lab5-general-01` or `gha-lab5-general-02` — it still describes them as
 generic `general` builders. Re-running the runner playbook before that
 inventory is corrected would revert the fleet to the one-slot state and
 reintroduce the queue. `pjunod/ansible` PR #20 is open to reconcile it. Disk
-facts for `nuc1`, `nuc2` and `rogg16` also remain unmeasured.
+facts for `lab1`, `lab2` and `lab5` also remain unmeasured.
 
 ## 5. Persistent Cargo cache contract
 
@@ -316,10 +316,12 @@ Legacy and hosted jobs keep an ephemeral builder and the existing GitHub cache
 backend. Persistent jobs rely on the named builder's local state, avoiding a
 save/upload after every run.
 
-The builder uses `.github/buildkitd.toml`:
+The builder passes an inline BuildKit config (`buildkitd-config-inline`)
+built from the `FLEET_REGISTRY` repository variable, which names the fleet
+registry's `host:port`:
 
 ```toml
-[registry."192.168.4.7:3000"]
+[registry."${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"]
   http = true
 ```
 
@@ -676,23 +678,23 @@ These are explicitly separate efforts:
 - Authorized host provisioning created native Ubuntu 26.04 ARM64 Lima VMs on
   the MacBook Pro (12 CPU, 24 GB, sparse 180 GB disk) and MacBook Air (6 CPU,
   16 GB, sparse 140 GB disk). Repository-scoped runners
-  `gha-mbp-linux-arm-01` and `gha-mba-linux-arm-01` are online with the
+  `gha-macb-linux-arm-01` and `gha-maca-linux-arm-01` are online with the
   dedicated `ci-arm64` label; the Air is the backup. The guest Docker daemons
   are independent of Docker Desktop and production Docker.
 - M0's voter audit is complete for the active Store/topology labels.
 - The Store matrix fans out to one shard per `ci-store` slot after the
-  2026-09-02 label rebalance (§4.1) — three today, on `nuc1`, `rogg16` and
-  `nuc2`. The
+  2026-09-02 label rebalance (§4.1) — three today, on `lab1`, `lab5` and
+  `lab2`. The
   unassignable `ci-store-shard-1` row is gone, and
   `validation/runner-fleet.toml` plus `make operations-check` make an
   unschedulable `runs-on` a preflight failure rather than a queue.
   `workflow_dispatch` on `store-shards.yml` proves the path on demand.
-- A third slot on `gha-nuc2-android-01` was tried, revoked the same day for an
+- A third slot on `gha-lab2-android-01` was tried, revoked the same day for an
   unwritable Cargo home, repaired, proved by a green 27.9-minute Store run on
   that runner, and restored (§4.2). The slot bound caught the oversized shard
   count at preflight in both directions. The rule the episode leaves behind:
   label the runner, prove the lane on it, then raise the count.
-- Disk facts for `nuc1`, `nuc2` and `rogg16`, the changed `nuc2` host key, and
+- Disk facts for `lab1`, `lab2` and `lab5`, the changed `lab2` host key, and
   the ansible inventory reconciliation (`pjunod/ansible` PR #20) remain open;
   none of them now blocks scheduling.
 - No Docker daemon was restarted or reconfigured for this implementation.

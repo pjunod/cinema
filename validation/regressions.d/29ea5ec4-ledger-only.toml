@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["29ea5ec4"]
+points = []
+checks = []
+reason = "This commit adds a regression-ledger entry and touches nothing else; there is no runtime behaviour to validate."
+ignore = true

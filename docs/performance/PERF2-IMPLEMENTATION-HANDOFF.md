@@ -138,7 +138,7 @@ and must follow the stop-and-flag rule.
    exactly; recipe-affecting values go through `effective_recipe()`
    (§11.4) and get hash fixtures in the same PR.
 4. **Tests locally**, gate green, **then the acceptance run on the
-   machine the plan names** — nynuc for encoder/pacing behavior,
+   machine the plan names** — media1 for encoder/pacing behavior,
    physical devices for client behavior. CI asserts selection from
    logs; pixels and timing are proven on real hardware (plan
    principle 4). Record numbers in the PR body.
@@ -147,7 +147,7 @@ and must follow the stop-and-flag rule.
    body lists: what changed, contracts touched, acceptance evidence,
    docs updated, and any stop-and-flag items. Wait for review; answer
    findings with evidence, not assertion.
-6. **After merge**: deploy nynuc first, run the milestone's acceptance
+6. **After merge**: deploy media1 first, run the milestone's acceptance
    there, then the fleet (`scripts/ship` wraps the last mile;
    the mobile deploy path is documented in
    [PUBLISHING.md](../PUBLISHING.md)). Client milestones ride the normal
@@ -333,7 +333,7 @@ probe result and pacing caps beside it if not already exposed, so one
 fleet sweep answers: per node — encoder families validated, tone-map
 pipeline selected, ffmpeg build, readrate/burst support. Record the
 table for all nodes in the N0 PR (this is the fleet census PERF2-PLAN
-§3.5 requires; the AMD tone-map numbers ride the nynuc acceptance
+§3.5 requires; the AMD tone-map numbers ride the media1 acceptance
 visit).
 
 ### 4.11 Tests
@@ -351,7 +351,7 @@ against the atomics); endpoint auth + caps.
 
 - Restart plurxd: last week's TTFF/stall distributions still render
   from `perf-report` (table path, not ring).
-- Play the known 4K-remux-stall title on nynuc: the stored rows carry
+- Play the known 4K-remux-stall title on media1: the stored rows carry
   `delivered_bps`, `readrate`, `runway`, and stall instants in the same
   records — PERF-PLAN §10's open question is now answerable from data
   (answering it is analysis, not N0 scope — but the rows must suffice).
@@ -378,10 +378,10 @@ facts and the per-milestone stop-and-flag list. Do them in this order
 (production Jellyfin FFmpeg creates real, uncached plurxd HLS sessions; an
 explicit separate FFmpeg with a behavior-probed `libvmaf` filter may score the
 captured bytes offline after each encode, but never encodes production
-playback; no scorer is installed or needed on nynuc or in compose) and the
+playback; no scorer is installed or needed on media1 or in compose) and the
 golden-hash fixtures land **before** any flag changes. Full comparison uses a
 pinned, balanced SDR corpus with unique filename/path/hash identities plus an
-operator-captured nynuc `sha256sum` manifest, with the node reserved for
+operator-captured media1 `sha256sum` manifest, with the node reserved for
 maintenance. Full acceptance also requires the exact VMAF model,
 `n_subsample=1`, 10-second window, 0.25-second poll, 3-second settle delay,
 recorded timing, usable server video facts, identical cross-mode ladder facts,
@@ -416,7 +416,7 @@ exactly; or a driver family needs flags that `validation_args`'s
 beyond that ratified single column; or implementation would change the
 ratified 10-second binding peak. Such a change is a new §11 contract decision,
 not an implementation detail.
-*Acceptance:* plan §4's block, on nynuc, numbers in the PR.
+*Acceptance:* plan §4's block, on media1, numbers in the PR.
 
 ### N2 — per-title analysis (plan §5)
 
@@ -427,7 +427,7 @@ rescan-overwrite of `probe_json` is correct behavior, don't fight it;
 bias clamp ±30% applied at `transcode.rs:2342` through
 `effective_recipe()`; attribution card + stop control (producer
 template); bounded batches (artwork-retry style, `store/mod.rs:411`).
-*Stop-and-flag if:* the sampled analysis wants > ~1 min/title on nynuc
+*Stop-and-flag if:* the sampled analysis wants > ~1 min/title on media1
 (budget smell), or the clamp wants widening (that is a §14-class
 decision).
 
@@ -531,6 +531,6 @@ PERF2-PLAN §12 in full, plus operationally:
 
 A milestone is done when: gate green · plan-§ acceptance run and quoted
 · docs updated in the same commits · STATUS.html row moved · deployed
-to nynuc and then the fleet without incident · and the next agent could
+to media1 and then the fleet without incident · and the next agent could
 pick up the following milestone from the plan + this handoff without
 asking what state the tree is in.

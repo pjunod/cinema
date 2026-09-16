@@ -187,7 +187,7 @@ impl Encoder {
     }
 
     /// Family defaults. QSV 22 is the highest passing value from the
-    /// 2026-08-14 nynuc D5 sweep; the other families remain candidates until
+    /// 2026-08-14 media1 D5 sweep; the other families remain candidates until
     /// the same corpus runs on hardware that can select them. Explicit
     /// `transcode.quality` overrides keep those sweeps out of code changes.
     pub fn default_quality(self) -> u8 {
@@ -231,7 +231,7 @@ impl Encoder {
     ///
     /// `hevc_qsv` is admitted from a real-node measurement, not merely because
     /// the binary lists it: Profile 5 software decode → tonemapx passthrough →
-    /// QSV Main10 ran at 1.52× realtime at 1080p and 1.26× at 2160p on nynuc
+    /// QSV Main10 ran at 1.52× realtime at 1080p and 1.26× at 2160p on media1
     /// (2026-08-22). The 4K output probed as Main 10, yuv420p10le, PQ,
     /// BT.2020/BT.2020NC, limited range. Boot still exercises the exact device
     /// init, upload and encode graph before a session may select it; a driver
@@ -305,7 +305,7 @@ impl Encoder {
     /// answer with an I-frame that is not an IDR, and a non-IDR I-frame does
     /// not carry `AV_PKT_FLAG_KEY`. The HLS muxer can only cut at a flagged
     /// key frame, so it ignores every boundary asked for and falls back to
-    /// cutting at the encoder's own GOP — measured on nynuc as **10.4-second
+    /// cutting at the encoder's own GOP — measured on media1 as **10.4-second
     /// segments from a 2-second request**, which is the original
     /// "~10 s to start streaming" symptom this entire plan is about, still
     /// present on the one box with hardware.
@@ -342,7 +342,7 @@ impl Encoder {
     /// setting in disguise — the point is to clip the outliers that hurt
     /// delivery, not to flatten the bitrate curve a VBR encoder exists to
     /// produce (PERF-PLAN §4.6, ADAPTIVE-QUALITY.md Phase 1). Measured on
-    /// nynuc's QSV at 9.05 Mb/s peak over a 10 s window against a 13.6 Mb/s
+    /// media1's QSV at 9.05 Mb/s peak over a 10 s window against a 13.6 Mb/s
     /// bound, on a 1080p rung — the model holds.
     ///
     /// `force_idr` asks for [`Encoder::forced_idr_flag`] to be set. It is a

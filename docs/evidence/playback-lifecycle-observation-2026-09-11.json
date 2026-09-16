@@ -1,10 +1,10 @@
 {
   "schema": 1,
   "captured_utc": "2026-09-12",
-  "source": "m6 node-local playback_events, read-only SELECT",
+  "source": "lab6 node-local playback_events, read-only SELECT",
   "title": "Ronny Chieng: Speakeasy",
   "source_revision": "efd54247adddeb3978812e55ebbb6a7f08adc9d9",
-  "revision_basis": "m6, nuc4 and nynuc metrics independently reported v0.3.0-2059-gefd54247; origin/main resolved to the recorded full revision",
+  "revision_basis": "lab6, lab4 and media1 metrics independently reported v0.3.0-2059-gefd54247; origin/main resolved to the recorded full revision",
   "limits": [
     "Selected title only, from a newest-first 2000-row capped query; not a complete fleet census.",
     "AVPlayer user-agent does not prove tvOS or installed app build; Apple TV identity is supplied by the viewer.",

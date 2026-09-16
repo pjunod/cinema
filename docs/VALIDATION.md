@@ -45,7 +45,7 @@ policy; a child job cannot rescue a cancelled parent workflow.
 
 ## CI control plane — Forgejo is authoritative
 
-Forgejo at `http://192.168.4.7:3000/noirr/plurx` owns repository events,
+Forgejo at `http://forge.lan:3000/noirr/plurx` owns repository events,
 workflow state, logs, artifacts, packages, and runner assignment. GitHub
 Actions is disabled. Forgejo pushes refs to `pjunod/plurx` as an external
 mirror; GitHub does not send source, credentials, or jobs back into the local
@@ -321,9 +321,9 @@ physical host may carry either, and neither may sit on a production plurx
 voter. Two heavy replicated-cluster runs on one loaded host is the quorum flake
 that produced the artwork-fence failures.
 
-Today that means three `ci-store` slots — `gha-nuc1-general-01` on `nuc1`,
-`gha-rogg16-general-02` on `rogg16` and `gha-nuc2-android-01` on `nuc2` — and
-one `ci-topology` slot on `gha-rogg16-general-01`.
+Today that means three `ci-store` slots — `gha-lab1-general-01` on `lab1`,
+`gha-lab5-general-02` on `lab5` and `gha-lab2-android-01` on `lab2` — and
+one `ci-topology` slot on `gha-lab5-general-01`.
 
 Because one host may hold only one slot, the Store shard count is *bounded by*
 the number of slots rather than chosen: a surplus shard has no runner of its
@@ -332,7 +332,7 @@ that bound in both directions, which is worth one worked example.
 
 #### A runner is not a slot until the lane passes on it
 
-`gha-nuc2-android-01` was made the third slot on 2026-09-02 and immediately
+`gha-lab2-android-01` was made the third slot on 2026-09-02 and immediately
 failed `replicated Store contracts (legacy)` three runs in a row — 2840, 2842
 and 2845 — about twelve seconds into each job, before compiling anything:
 
@@ -344,7 +344,7 @@ Permission denied (os error 13)
 ##[error]Process completed with exit code 2.
 ```
 
-`gha-nuc1-general-01` (run 2838) and `gha-rogg16-general-02` (run 2837) ran the
+`gha-lab1-general-01` (run 2838) and `gha-lab5-general-02` (run 2837) ran the
 same lane green in the same hour, so it was the host and not the lane. The
 label was revoked, and the shard count had to drop with it — the roster edit
 alone, with the workflow still asking for three shards, failed preflight with
@@ -360,7 +360,7 @@ only the `bin` subdirectory and leaves the root-owned parent alone. Both are now
 The label came back only after the lane was proved **on that exact runner**:
 run 2840 attempt 3 was re-run while both other slots were busy so it had to
 land there, and it passed in 27.9 minutes — in family with
-`gha-nuc1-general-01` (25.7–29.1 min) and `gha-rogg16-general-02` (21.8–22.7
+`gha-lab1-general-01` (25.7–29.1 min) and `gha-lab5-general-02` (21.8–22.7
 min). An ownership fix, a successful write probe and a convincing explanation
 are not together evidence that a 27-minute three-voter hiqlite test will run on
 a machine. One green run of that test is. **Add a `ci-store` label, then prove
@@ -546,9 +546,9 @@ PID 1. The root group is safe to address here because `_run_shell` created it
 as a new session and its unreaped live leader still owns that numeric identity.
 The Linux-only regression injects this exact census failure, binds fixture
 identities through `/proc` start ticks and pidfds, and requires the child PID
-to be gone or non-executable before the test returns. The nynuc incident and its
+to be gone or non-executable before the test returns. The media1 incident and its
 process-to-run correlation are recorded in
-[NYNUC-RUNNER-ORPHANED-PROCESSES.md](ci/NYNUC-RUNNER-ORPHANED-PROCESSES.md).
+[MEDIA1-RUNNER-ORPHANED-PROCESSES.md](ci/MEDIA1-RUNNER-ORPHANED-PROCESSES.md).
 
 This is ownership for trusted validation checks, not containment for hostile
 code. A check may create process groups and sessions, but every live child

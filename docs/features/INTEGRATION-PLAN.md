@@ -1,15 +1,15 @@
-# Integration plan — plurx's side of the monarr pipeline
+# Integration plan — plurx's side of the Curator pipeline
 
 **Status:** ready to build · **Written:** 2026-07-26 ·
-**Master plan:** `monarr/docs/plan-integration.md` (contract §3, phasing §7)
+**Master plan:** Curator's `docs/plan-integration.md` (contract §3, phasing §7)
 
 This document is self-contained: everything plurx must build, with the
 exact contract slice it implements, so a session opened in this repo
-alone can do the work. The master plan in the monarr repo holds the
+alone can do the work. The master plan in the Curator repo holds the
 cross-app rationale and phasing; if this file and the master disagree,
 the master wins and this copy is the bug.
 
-The shape of the whole thing: when monarr finishes importing media into
+The shape of the whole thing: when Curator finishes importing media into
 a library folder, it will call plurx — "scan exactly this path, here
 are the TMDB/IMDb ids, tell me what you made of it." plurx's job is to
 make that call possible (today nothing accepts a path), safe (today the
@@ -64,7 +64,7 @@ Responses (normative):
 
 - Path not under any library root →
   `422 {"error":"path is not under any library root","roots":[…]}` —
-  self-explaining so a path-mapping mistake in monarr diagnoses itself.
+  self-explaining so a path-mapping mistake in Curator diagnoses itself.
 - Scanner idle for that library → scan the subtree **synchronously**,
   return `200 {"status":"scanned","library_id":3,"report":{added,
   updated,unchanged,removed_files,skipped,errors,problems[]},
@@ -90,7 +90,7 @@ Responses (normative):
 
 The gap: auth is user tokens only (`crates/plurxd/src/http/auth.rs`,
 extractors in `http/extract.rs`); the only tier is `is_admin`, and
-admin can read secrets out of `GET /api/v1/settings`. monarr must hold
+admin can read secrets out of `GET /api/v1/settings`. Curator must hold
 a credential that can trigger scans and *nothing else*.
 
 - Storage: new table (schema bump — CHANGELOG says v6 today, so this
@@ -161,7 +161,7 @@ external system asked for anything.
 
 - `POST /api/v1/scan` + `GET /api/v1/scan/requests/{id}` per §1,
   key-scoped.
-- Library resolution from the path (plurx-side, so monarr never needs
+- Library resolution from the path (plurx-side, so Curator never needs
   to know plurx's library ids).
 - `JobManager` gains a per-library pending set: targeted requests
   arriving while that library scans are coalesced (dedup by path) and
@@ -176,7 +176,7 @@ external system asked for anything.
   greppable in `GET /api/v1/system/logs`; (b) the request ring exposed
   in `GET /api/v1/activity/detail` next to the existing `scans` block;
   (c) a `last notification` line (source · path · result · when) in
-  `GET /api/v1/system` for the monarr Connections panel to read;
+  `GET /api/v1/system` for the Curator Connections panel to read;
   (d) metrics: `plurx_scan_total{trigger="api|create|update|schedule|
   notify"}`, `plurx_notify_received_total{source,result}`,
   `plurx_scan_duration_seconds`. `/metrics` currently has no scan
@@ -215,7 +215,7 @@ to the id's canonical title, and the fuzzy search fn is never called
 The gap: plurx has **no scheduled scans** — today the library drifts
 until someone presses the button. With targeted scans as the fast
 path, a slow full reconcile underneath catches everything else
-(manual file moves, deletes, anything not announced by monarr).
+(manual file moves, deletes, anything not announced by Curator).
 
 - New DB setting `scan.interval_hours` (store `keys::` constant +
   `SettingsDto`/`UpdateSettings`; default `12`, `0` = off). **Not** a
@@ -249,7 +249,7 @@ library, just slower, for as long as nobody looks.
 `plurx_notify_received_total` counts every inbound scan request **before**
 the path is resolved, so a request rejected for a container path-mapping
 mistake still proves the caller reached plurx with a working key. That is
-what separates "fix monarr's path mapping" from "check monarr's URL and
+what separates "fix Curator's path mapping" from "check Curator's URL and
 key", and `scan_requests` alone cannot: a rejected request never gets as far
 as having one.
 
@@ -259,10 +259,10 @@ without Prometheus.
 #### Docs
 
 Same-commit rule: `docs/SECURITY.md` (keys — done in P1),
-`docs/FEATURES.md` (integrations section: what arrives from monarr and
+`docs/FEATURES.md` (integrations section: what arrives from Curator and
 what plurx does with it), `docs/OPERATIONS.md` (pairing runbook: create
-a `scan:trigger` key → paste into monarr's plurx notifier → import
-something → verify on monarr's Connections panel and in plurx activity),
+a `scan:trigger` key → paste into Curator's plurx notifier → import
+something → verify on Curator's Connections panel and in plurx activity),
 `docs/ROADMAP.md` (Phase-1's deferred watcher note gets a pointer:
 inotify remains future work; scheduled + targeted scans are what
 shipped instead), `docs/CHEATSHEET.md` (the two curl lines: create a
@@ -277,16 +277,16 @@ CHEATSHEET.
 
 Committed in principle (master plan §11), not designed in detail here:
 
-- **P7 watched → monarr:** DB settings `monarr.url` / `monarr.api_key`
+- **P7 watched → Curator:** DB settings `monarr.url` / `monarr.api_key`
   / `monarr.watched_sync` (default off); on scrobble / the existing 95%
   auto-watch crossing, queue
-  `POST {monarr}/api/v1/webhooks/plurx {event:"watched", kind, tmdb,
+  `POST {Curator}/api/v1/webhooks/plurx {event:"watched", kind, tmdb,
   imdb, season, episode, watched_at}` — aggregate signal, no usernames;
   retry with backoff; visible in the same `plurxd::integrate` log
   stream. This is plurx's first outbound webhook — build the tiny
   delivery queue then, not now.
 - **P8 coming-soon rail:** plurxd proxies `GET /api/v1/coming-soon` →
-  monarr `GET /api/v1/calendar` using a monarr API key from DB
+  Curator `GET /api/v1/calendar` using a Curator API key from DB
   settings (server-side only; the key never reaches a browser), cached
   15 minutes, rendered as a home rail.
 
@@ -294,7 +294,7 @@ Committed in principle (master plan §11), not designed in detail here:
 
 1. **plurx never writes to media storage** — existing invariant
    (ARCHITECTURE §8). The scan request names a path to *read*.
-2. **Keys are least-privilege or they are wrong** — if the monarr key
+2. **Keys are least-privilege or they are wrong** — if the Curator key
    can read `/api/v1/settings` or list users, P1 has failed its point.
 3. **Targeted scans never prune.** No exceptions, including "the
    folder is empty now" — deletion is the reconcile scan's job.

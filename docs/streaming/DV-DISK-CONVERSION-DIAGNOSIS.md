@@ -1,7 +1,7 @@
 # Dolby Vision disk conversion — diagnosis and proposal
 
 **Status:** diagnosis complete, proposal unbuilt · **Written:** 2026-09-03 ·
-**Evidence:** live fleet reads on nynuc, m6, nuc4, nuc3 at
+**Evidence:** live fleet reads on media1, lab6, lab4, lab3 at
 `v0.3.0-575-gaa486f4b` · **Reviewer:** please check §2 against the code and
 §5 against your own arithmetic before agreeing with any of it.
 
@@ -33,17 +33,17 @@ All four nodes run `v0.3.0-575-gaa486f4b`. Automatic conversion is on.
 
 ```
 22:19:24  INFO  plurxd::state: queued automatic Dolby Vision conversions
-                queued=29 saturated=false                        [nynuc]
+                queued=29 saturated=false                        [media1]
 22:21:41  INFO  plurxd::state: queued automatic Dolby Vision conversions
-                queued=9  saturated=false                        [m6]
+                queued=9  saturated=false                        [lab6]
 
 22:30:14  WARN  plurxd::state: Dolby Vision conversion failed file_id=23
-                error=creating /20t/movies/Bring Her Back (2025)/
-                .Bring Her Back (2025) Remux-2160p.mkv.plurx-dv-23:
+                error=creating /20t/movies/Salt Harvest (2024)/
+                .Salt Harvest (2024) Remux-2160p.mkv.plurx-dv-23:
                 Read-only file system (os error 30)
 22:38:03  WARN  plurxd::state: Dolby Vision conversion failed file_id=34
-                error=creating /20t/movies/Deep Blue Sea (1999)/
-                .Deep Blue Sea (1999) Remux-2160p.mkv.plurx-dv-34:
+                error=creating /20t/movies/Iron Reef (1998)/
+                .Iron Reef (1998) Remux-2160p.mkv.plurx-dv-34:
                 Read-only file system (os error 30)
 ```
 
@@ -63,9 +63,9 @@ let directory     = parent.join(&directory_name);
 so for file 34 the workspace is:
 
 ```
-/20t/movies/Deep Blue Sea (1999)/
-    Deep Blue Sea (1999) Remux-2160p.mkv          ← the source
-    .Deep Blue Sea (1999) Remux-2160p.mkv.plurx-dv-34/
+/20t/movies/Iron Reef (1998)/
+    Iron Reef (1998) Remux-2160p.mkv          ← the source
+    .Iron Reef (1998) Remux-2160p.mkv.plurx-dv-34/
         BL_RPU.hevc            extracted video elementary stream
         BL_RPU.p81.hevc        the same stream, RPU rewritten to 8.1
         RPU.bin                extracted metadata
@@ -85,10 +85,10 @@ directory itself to be writable.**
 
 | Layer | State | Verdict |
 |---|---|---|
-| QNAP NFS export, host mount | `qnap-storage:/20T on /mnt/qnap/20t nfs4 (rw,…)` | writable |
+| NAS NFS export, host mount | `nas-storage:/20T on /mnt/nas/20t nfs4 (rw,…)` | writable |
 | Directory permissions | `drwxrwxrwx 220 1000 1000 /20t/movies` | writable |
 | Container user | `Config.User=[1000:1000]`, `uid=1000 gid=1000 groups=1000,992` | owner |
-| **Docker bind mount** | **`/mnt/qnap/20t:/20t:ro` → `RW=false`** | **the blocker** |
+| **Docker bind mount** | **`/mnt/nas/20t:/20t:ro` → `RW=false`** | **the blocker** |
 
 The container runs as the directory's owner, on a mode-0777 directory, on a
 read-write NFS export. The single reason the write fails is the `:ro` flag
@@ -96,10 +96,10 @@ on the bind mount in `deploy/docker-compose.override.yml` lines 18-21:
 
 ```yaml
     volumes:
-      - /mnt/qnap/media:/media:ro
-      - /mnt/qnap/20t:/20t:ro
-      - /mnt/qnap/8tb:/8tb:ro
-      - /mnt/qnap/8t-2:/8t-2:ro
+      - /mnt/nas/media:/media:ro
+      - /mnt/nas/20t:/20t:ro
+      - /mnt/nas/8tb:/8tb:ro
+      - /mnt/nas/8t-2:/8t-2:ro
 ```
 
 Identical on all four nodes; `docker inspect` reports `RW=false` for every
@@ -158,8 +158,8 @@ stream are already on disk.
 
 ## 3. The cost model
 
-Measured on a real title from the queue — *Deep Blue Sea (1999)*,
-`/20t/movies/Deep Blue Sea (1999)/Deep Blue Sea (1999) Remux-2160p.mkv`:
+Measured on a real title from the queue — *Iron Reef (1998)*,
+`/20t/movies/Iron Reef (1998)/Iron Reef (1998) Remux-2160p.mkv`:
 
 ```
 size            68.7 GiB
@@ -253,7 +253,7 @@ dovi_tool info -i head.rpu --summary
 
 | Title | Size | Extract | Time | Verdict |
 |---|---|---|---|---|
-| Deep Blue Sea (1999) | 68.7 GiB | 70 MiB | 2 s | `Profile: 7 (MEL)` |
+| Iron Reef (1998) | 68.7 GiB | 70 MiB | 2 s | `Profile: 7 (MEL)` |
 | The Sound of Music (1965) | 77.0 GiB | 49 MiB | 2 s | `Profile: 7 (FEL)` |
 
 Two seconds and ~60 MiB, versus ~124 GiB and roughly an hour of NFS I/O, for

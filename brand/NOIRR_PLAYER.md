@@ -15,7 +15,6 @@ renamed by this exploration.
 
 | Product | Job | Naming status |
 |---|---|---|
-| `monarr` | Decides what is wanted and manages acquisition | Keep |
 | Downloader | Transfers, repairs, extracts, and hands off | Name still open |
 | `noirr` | Serves the library and plays it on every client | Test this direction |
 

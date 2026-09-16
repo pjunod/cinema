@@ -2,7 +2,7 @@
 
 **Status:** diagnosis complete, fix ruled on by Paul 2026-09-13 (§7), building on `effort/live-tv-reliability` ·
 **Written:** 2026-09-13 · **Against:** `main` at `a124876` · **Evidence:**
-nynuc's `/metrics` and container log, 2026-09-13 00:29 UTC (§10)
+media1's `/metrics` and container log, 2026-09-13 00:29 UTC (§10)
 
 Companion to [LIVE-TV-GUIDE-AND-UI-PLAN.md](LIVE-TV-GUIDE-AND-UI-PLAN.md)
 (what the guide feed and the page are) and
@@ -21,7 +21,7 @@ Every file:line below is against `a124876`; re-verify at build time.
 
 | You see | What is true at that moment |
 |---|---|
-| Live TV opens with channel numbers and callsigns but no programmes, on every client, until you go to Settings → Live TV and press *Refresh now* | The owner (nynuc) restarted — every deploy restarts every node — and the guide lives only in its memory. Its refresh loop ran once before the node was admitted to serve, was skipped, and went to sleep for the full 20 minutes. The web page asked once at open and never asks again; Apple and Android ask again 20 minutes after *they* opened. Nobody asks at the moment the data arrives. |
+| Live TV opens with channel numbers and callsigns but no programmes, on every client, until you go to Settings → Live TV and press *Refresh now* | The owner (media1) restarted — every deploy restarts every node — and the guide lives only in its memory. Its refresh loop ran once before the node was admitted to serve, was skipped, and went to sleep for the full 20 minutes. The web page asked once at open and never asks again; Apple and Android ask again 20 minutes after *they* opened. Nobody asks at the moment the data arrives. |
 | "Start response was lost. Wait 90 seconds for any unclaimed tuner session to expire, then select the channel again." — with the tuner idle | Nothing is wrong with the server or the tuner. A marker file the client wrote when you last watched is still there, because the last session ended without a confirmed DELETE (tab closed, Apple TV suspended the app, the server was redeployed mid-stream). The client cannot ask the server what became of that session, so it refuses to start anything for 90 seconds from the moment you *open Live TV* — long after the server reaped the old session at 45 seconds idle. |
 
 The tuner was never the constraint in either case.
@@ -56,7 +56,7 @@ but the consequence is that the fleet's deploy habit (`ansible` → every node
 is spawned from [main.rs 2223](../../crates/plurxd/src/main.rs) and runs its
 first tick immediately. The tick refreshes only when
 `ours && config.guide_fetches() && self.serving.admit().is_some()`
-(line 3220). At boot the serving fence has not admitted the node yet — nynuc's
+(line 3220). At boot the serving fence has not admitted the node yet — media1's
 log shows `serving authority recovered from a fresh quorum watermark` **9 s**
 after the container started (23:40:12 → 23:40:21). So the first tick takes the
 `else` branch at 3244–3247: it records `outcome="skipped"` and sets
@@ -215,9 +215,9 @@ the rest, because each decides for itself and the three lists disagree:
 | untyped 4xx | clears | **arms** | **arms** |
 
 Two of the always-arm rows are common in this fleet. The ingress fence
-refusal fires on every node restart, on every *other* node: nuc4 restarting
+refusal fires on every node restart, on every *other* node: lab4 restarting
 at 00:04 produced `serving authority expired; mutable media is self-fenced`
-on nynuc, m6 and nuc3 simultaneously at 00:03:58 for 0.2–0.4 s (§10). A
+on media1, lab6 and lab3 simultaneously at 00:03:58 for 0.2–0.4 s (§10). A
 start pressed inside that window costs 90 s on every client — and the
 ingress that refused it *knows* no tuner was touched, because it never
 reached the owner. `startup_timeout` is the owner saying, after reaping,
@@ -269,7 +269,7 @@ live_tv.rs 3409–3427); only a session that published in the last instant
 and whose answer was lost survives, for ≤ 40 s (`provisional_expired`,
 4015–4020). `owner_start`'s timeout path (713–721) has no capability to
 stop, so it cannot close that window today. This only bites when the
-client's node is not the owner (the Apple TV talks to nynuc, which *is* the
+client's node is not the owner (the Apple TV talks to media1, which *is* the
 owner, so today it does not), but it is the same class of defect and §6.6
 folds it in.
 
@@ -680,7 +680,7 @@ never `NaN` and `guide_refresh_total{outcome="skipped"}` stops growing.
 
 §5.4 on all three; the web loop is the new part. **Accept:** open Live TV
 < 60 s after a deploy on each client and watch the grid fill without
-touching Settings; `make web-check`, `make apple-test` on `mba`,
+touching Settings; `make web-check`, `make apple-test` on `maca`,
 `testDebugUnitTest` in the container.
 
 ### 8.4 M3 — public `request_id`, the starts endpoints, session-end logging (server)
@@ -729,9 +729,9 @@ verification prompt for the GPT session.
 
 ---
 
-## 10. Evidence — nynuc, 2026-09-13 00:29 UTC
+## 10. Evidence — media1, 2026-09-13 00:29 UTC
 
-Owner is nynuc (`192.168.5.236`); the Apple TV talks to it directly.
+Owner is media1 (`10.42.5.236`); the Apple TV talks to it directly.
 Container `plurxd` started `2026-09-12T23:40:12Z`; all four nodes restarted
 within three minutes of each other (deploy).
 
@@ -755,9 +755,9 @@ plurx_live_tv_guide_programmes 1709
 2026-09-13T00:03:58Z ERROR GET /api/v1/live-tv/sessions/[REDACTED]/segment-000232.ts → 503   (×4, 00:03:58–00:04:01)
 ```
 
-m6, nuc4 and nuc3 (non-owners): `guide_age_seconds NaN`,
+lab6, lab4 and lab3 (non-owners): `guide_age_seconds NaN`,
 `guide_refresh_total{outcome="skipped"}` 2–3 each, one identical fence blip
-at 00:03:58 on m6 and nuc3, coinciding with nuc4's second restart of the
+at 00:03:58 on lab6 and lab3, coinciding with lab4's second restart of the
 evening at 00:04 (it also restarted with the others at 23:40). No
 Live TV request is logged at INFO on any node; only the `on_failure` lines
 above exist, so start latency and end reasons are not recoverable from the

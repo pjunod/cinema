@@ -657,7 +657,7 @@ entry, `files.probe_json` holds whole ffprobe documents, and `hiqlite` panics it
 WAL writer on an entry past the usable capacity: 64 rows of a real library
 serialized to 3,137,236 bytes, and a 16-row bound overflowed the former 2 MiB
 segment whenever 16 adjacent rows averaged more than ~131 KB — which is how
-node `m6` exited mid-import and restarted into unreplicated SQLite while
+node `lab6` exited mid-import and restarted into unreplicated SQLite while
 reporting healthy.
 `IMPORT_CHUNK_ROWS` survives as a secondary bound only: it is the source read
 page and a ceiling on rows per transaction, no longer the safety property. A

@@ -16,7 +16,7 @@ M1–M5 are integrated on the effort branch at `94816046`. M5 passed three
 independent exact-head adversarial reviews, Rust 1.97.1 workspace check and
 denied-warning Clippy, all 27 focused transport-recovery tests, operations and
 history contracts, the green Effort development gate, one full voter warmup,
-and four consecutive counted large-image voter recoveries on `nynuc`.
+and four consecutive counted large-image voter recoveries on `media1`.
 
 Paul explicitly directed promotion after three or four clean voter recoveries
 so the implementation can run while exhaustive checking continues. This is a
@@ -67,12 +67,12 @@ change.
 
 | Milestone | Task branch | PR | State | Blocking evidence |
 |---|---|---|---|---|
-| M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://192.168.4.7:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
+| M1 · frame completion | `codex/cluster-transport-m1` | [!56](http://forge.lan:3000/noirr/plurx/pulls/56) | merged into the effort after three exact-candidate adversarial reviews and the green effort gate | Both raw buffered-write failures are reproduced after transport writability returns; every production writer and terminal path passes its focused regression |
 | M2 · connection and snapshot ownership | `codex/cluster-transport-m1` | same merged review | foundations merged; end-to-end acceptance in progress | Cancellation-safe admission, shutdown ordering, node-owned snapshot execution, real-file partial-write ownership, and 100 in-memory WebSocket reader/writer task cycles pass; production Raft install/socket-disconnect coverage is reserved for the M5 harness and is not yet claimed |
-| M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://192.168.4.7:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
-| M4 · transport status | `codex/cluster-transport-m4` | [!66](http://192.168.4.7:3000/noirr/plurx/pulls/66) | merged into the effort at `abe2ad9a` after the final clean candidate passed the complete focused lane, exact pinned workspace check and denied-warning Clippy, static/operations/web preflight, three exact-candidate adversarial reviews, and the green replacement effort gate | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging · rollback-safe credential mutation |
-| M5 · recovery campaign | `codex/cluster-transport-m5-final-v2` | [!70](http://192.168.4.7:3000/noirr/plurx/pulls/70) | merged into the effort at `94816046` after three clean exact-head reviews, the green effort gate, and four counted voter recoveries following one warmup | Actual TLS transport matrix implemented; retained 20 voter plus 20 learner qualification deferred |
-| Final promotion | `codex/cluster-transport-promotion` | [!71](http://192.168.4.7:3000/noirr/plurx/pulls/71) | deploy-first promotion authorized after four clean voter cycles; current `main` is integrated before merge | Full suite once · 20+20 retained campaign · current-tree qualification receipt · publication and rollout verification |
+| M3 · recovery budgets | `codex/cluster-transport-m3` | [!60](http://forge.lan:3000/noirr/plurx/pulls/60) | merged into the effort at `f5c688a9` after three exact-candidate adversarial reviews and the green effort gate | Virtual-time exact bounds · config/env/Compose precedence · pulled-image revision proof |
+| M4 · transport status | `codex/cluster-transport-m4` | [!66](http://forge.lan:3000/noirr/plurx/pulls/66) | merged into the effort at `abe2ad9a` after the final clean candidate passed the complete focused lane, exact pinned workspace check and denied-warning Clippy, static/operations/web preflight, three exact-candidate adversarial reviews, and the green replacement effort gate | Authenticated non-cacheable pre-HTTP status · exact executor-admission identity · stage-accurate deadlines · bounded identities · local-monotonic replay aging · rollback-safe credential mutation |
+| M5 · recovery campaign | `codex/cluster-transport-m5-final-v2` | [!70](http://forge.lan:3000/noirr/plurx/pulls/70) | merged into the effort at `94816046` after three clean exact-head reviews, the green effort gate, and four counted voter recoveries following one warmup | Actual TLS transport matrix implemented; retained 20 voter plus 20 learner qualification deferred |
+| Final promotion | `codex/cluster-transport-promotion` | [!71](http://forge.lan:3000/noirr/plurx/pulls/71) | deploy-first promotion authorized after four clean voter cycles; current `main` is integrated before merge | Full suite once · 20+20 retained campaign · current-tree qualification receipt · publication and rollout verification |
 
 ## Current evidence — Rust 1.97.1 is the compiler of record
 
@@ -326,7 +326,7 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
 | M4 chronology total-order correction | pass · committed `794a4d30` and `b54f5c2c`, exact review pending | The selector orders all non-expired attempts before applying fingerprint-local completion authority, uses one clock basis for a mixed-version cohort, handles explicit null attempt ages as absent, and preserves retry chronology across different fingerprints. Per-response monotonic receipts normalize independently sampled ages before selection. Both input-order and all six mixed-cohort permutations plus the delayed-peer collector regression pass. |
 | M4 sixteenth-review corrections | pass · committed `c9ae845f` and `a76860d2`, exact-tree qualification pending | Request-to-receipt transit is retained as an explicit age interval; predecessor completion cannot bypass a newer receiver attempt; token creation is bound to the password hash that login authenticated; and durable replicated transaction-intent triggers close the rollback/readiness-poll interval for credential mutations. Focused browser, Rust, and three-voter Store regressions plus workspace check and denied-warning Clippy pass. |
 | M4 interval-frontier correction | pass · committed `ea7b8476`, exact review pending | Successive non-dominated frontiers preserve every provable interval ordering even when a third uncertainty interval overlaps both endpoints. All six input permutations of the adversarial bridge case pass, and `58c1b00a` records the current-check mappings. |
-| M5 Linux host preflight | pass · execution pending | `nynuc` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`; the existing Linux/amd64 container was executed and reported `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
+| M5 Linux host preflight | pass · execution pending | `media1` accepts the supplied deploy key and has 16 CPUs, about 36 GiB available memory, about 153 GiB available under writable `/var/tmp`; the existing Linux/amd64 container was executed and reported `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Full repository suite | deferred | Run once on the final fixed promotion candidate, as requested |
 
 ## Decisions to review — autonomous choices
@@ -359,8 +359,8 @@ The local Homebrew default is Rust 1.95.0, so every recorded Rust command uses
    snapshot executor still admitted work under the old fixed frame-write
    timeout. The node-owned executor now captures the validated C value at
    startup, and its capacity-one regression uses a non-default scaled budget.
-7. **Use `nynuc` for the Linux campaign, without installing host tools.** It
-   has materially more free memory and disk than `nuc3`, and already carries
+7. **Use `media1` for the Linux campaign, without installing host tools.** It
+   has materially more free memory and disk than `lab3`, and already carries
    the pinned Rust container image. Source will be transferred with
    `git archive`; neither `.git` nor repository credentials leave the clone.
 8. **Fail closed above 64 committed Raft members on diagnostic roster reads.**

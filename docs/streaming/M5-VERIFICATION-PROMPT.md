@@ -11,7 +11,7 @@ a shut gate is the answer, not an obstacle.
 
 ## 0. What you have
 
-- SSH to the four nodes as `pjunod@{nynuc,m6,nuc4,nuc3}` with the key at
+- SSH to the four nodes as `operator@{media1,lab6,lab4,lab3}` with the key at
   `~/code/plurx-agent/.ssh-deploy-key` (copy it to `~/.ssh/id_ed25519`,
   chmod 600).
 - The plurx API needs a bearer token. Get one the way a browser does, or
@@ -32,9 +32,9 @@ The last two readings, both taken while writing this: 19:17 UTC all four on
 and a half hours, one whole generation. Read it yourself:
 
 ```bash
-for h in nynuc m6 nuc4 nuc3; do
+for h in media1 lab6 lab4 lab3; do
   printf '%-7s ' "$h"
-  ssh pjunod@$h 'docker logs plurxd 2>&1 | grep -m1 "plurxd starting";
+  ssh operator@$h 'docker logs plurxd 2>&1 | grep -m1 "plurxd starting";
                  echo "checkout=$(cd /opt/noirr/plurx && git describe --tags --always)"' \
     | sed -E 's/\x1b\[[0-9;]*m//g; s/.*build="([^"]+)".*/\1/' | paste -sd' '
 done
@@ -80,7 +80,7 @@ say so — it may open on its own once 2 drains.
 ## 3. The reads that decide it
 
 On file 70's **owning** node, with `T` a bearer token and `NODE` its base
-URL. Follow `M5A-VERIFICATION-ON-NUC4.md` §3 for the shared steps, plus
+URL. Follow `M5A-VERIFICATION-ON-LAB4.md` §3 for the shared steps, plus
 these web-specific ones:
 
 ```bash
@@ -132,7 +132,7 @@ What each tells you:
 
 `GET /api/v1/system` → `plan_derivation`. After a web play on a #869 build,
 `rederived` should move and `legacy_trusted` should not. As of the check
-above, nuc4 had logged **no** plan-derivation traffic in 12 hours — these
+above, lab4 had logged **no** plan-derivation traffic in 12 hours — these
 counters only move when someone actually plays something, so read them
 immediately before and after your play, not in the abstract.
 

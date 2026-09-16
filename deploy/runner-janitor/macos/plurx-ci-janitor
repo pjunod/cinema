@@ -68,7 +68,7 @@ available_kb_for() { df -Pk "$1" | awk 'NR == 2 { print $4 }'; }
 # contract test can substitute it. The runner's own plist is the authority on
 # both its label and which config it reads.
 # `plutil -convert json` escapes every forward slash -- the real plist on
-# `gha-mba-apple-01` yields `\/Users\/githubrunner\/forgejo-runner\/config.yml`
+# `gha-maca-apple-01` yields `\/Users\/githubrunner\/forgejo-runner\/config.yml`
 # -- so a path read straight out of it names nothing.
 plist_field() {
   plutil -convert json -o - "$1" 2>/dev/null |

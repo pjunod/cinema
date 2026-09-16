@@ -57,7 +57,7 @@ function. This is a scope budget, not a reason to combine unrelated changes.
 
 ### 1.2 What the incident proves, and what it does not
 
-Read-only September 15 telemetry for TRON: Ares, file 5418, on nynuc:
+Read-only September 15 telemetry for TRON: Ares, file 5418, on media1:
 
 | UTC | Recorded fact |
 |---|---|
@@ -410,14 +410,14 @@ handoff and reassign work rather than leaving two tasks polling each other.
 
 | Package | Owner | State | Evidence / next step |
 |---|---|---|---|
-| Plan foundation | Coordinator | merged | [PR #322](http://192.168.4.7:3000/noirr/plurx/pulls/322); commit 05298f1c4, merged as fea5d2451; four docs checks and tracked hook passed |
-| C1 | Coordinator | merged | [PR #323](http://192.168.4.7:3000/noirr/plurx/pulls/323); runtime 00a70a7b; 11 focused tests passed |
-| I1 | Sol 1 | merged | [PR #325](http://192.168.4.7:3000/noirr/plurx/pulls/325); runtime 2a2ec42f; seven focused identity, conversion and store tests passed |
-| W1 | Sol 2 | merged | [PR #324](http://192.168.4.7:3000/noirr/plurx/pulls/324); head e906ba04; passive waits, transfer attribution and presented-frame corrections verified |
-| C2 | Coordinator | merged | [PR #326](http://192.168.4.7:3000/noirr/plurx/pulls/326); runtime 298cc69d; four focused tests and combined web proof passed |
-| I2 | Sol 1 | merged | [PR #327](http://192.168.4.7:3000/noirr/plurx/pulls/327); one isolated fixture, focused harness and priority/cancellation proof |
-| W2 | Sol 2 | merged | [PR #328](http://192.168.4.7:3000/noirr/plurx/pulls/328); runtime 27f91b76; native builds and focused tests passed |
-| Final promotion | Coordinator | ready | [PR #329](http://192.168.4.7:3000/noirr/plurx/pulls/329); one adversarial review complete, sole finding corrected in 19d9911bb; current-candidate main fast lane required |
+| Plan foundation | Coordinator | merged | [PR #322](http://forge.lan:3000/noirr/plurx/pulls/322); commit 05298f1c4, merged as fea5d2451; four docs checks and tracked hook passed |
+| C1 | Coordinator | merged | [PR #323](http://forge.lan:3000/noirr/plurx/pulls/323); runtime 00a70a7b; 11 focused tests passed |
+| I1 | Sol 1 | merged | [PR #325](http://forge.lan:3000/noirr/plurx/pulls/325); runtime 2a2ec42f; seven focused identity, conversion and store tests passed |
+| W1 | Sol 2 | merged | [PR #324](http://forge.lan:3000/noirr/plurx/pulls/324); head e906ba04; passive waits, transfer attribution and presented-frame corrections verified |
+| C2 | Coordinator | merged | [PR #326](http://forge.lan:3000/noirr/plurx/pulls/326); runtime 298cc69d; four focused tests and combined web proof passed |
+| I2 | Sol 1 | merged | [PR #327](http://forge.lan:3000/noirr/plurx/pulls/327); one isolated fixture, focused harness and priority/cancellation proof |
+| W2 | Sol 2 | merged | [PR #328](http://forge.lan:3000/noirr/plurx/pulls/328); runtime 27f91b76; native builds and focused tests passed |
+| Final promotion | Coordinator | ready | [PR #329](http://forge.lan:3000/noirr/plurx/pulls/329); one adversarial review complete, sole finding corrected in 19d9911bb; current-candidate main fast lane required |
 | Fallback retirement | Coordinator | retain | Exact copy plans still need complete source passes; preserve prompt first play and close the retirement question for this effort |
 
 Record task IDs and PRs here as they become known. Never record a test pass
@@ -530,7 +530,7 @@ pass. No additional index-algorithm project is required to close this effort.
 
 ### W2 native evidence
 
-[PR #328](http://192.168.4.7:3000/noirr/plurx/pulls/328), runtime `27f91b76`,
+[PR #328](http://forge.lan:3000/noirr/plurx/pulls/328), runtime `27f91b76`,
 keeps timer-only Apple/Android stalls unknown and requests the same delivery
 without the legacy Auto-quality reduction ticket. Existing request ownership,
 intent cancellation, successor cleanup and recovery budgets remain in use.

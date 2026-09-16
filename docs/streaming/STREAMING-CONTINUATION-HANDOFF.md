@@ -21,8 +21,8 @@ addition. That mistake has already been made once and caught in review.
 ## 1. Access and the rules that are not negotiable
 
 **Forgejo is the sole write, PR, CI and merge authority.**
-`http://192.168.4.7:3000/noirr/plurx` · SSH
-`ssh://git@192.168.4.7:222/noirr/plurx.git`. GitHub is historical and
+`http://forge.lan:3000/noirr/plurx` · SSH
+`ssh://git@forge.lan:222/noirr/plurx.git`. GitHub is historical and
 read-only; PR numbers below 900 in old docs are GitHub, current ones are
 Forgejo.
 
@@ -74,11 +74,11 @@ the previously merged #91 / #97 / #105 / #127 / #128 / #141 / #146.
 
 | PR | What it did |
 |---|---|
-| [#148](http://192.168.4.7:3000/noirr/plurx/pulls/148) | §4 step 2 server half — every node accepts `switched` and releases the predecessor's drain on it |
-| [#153](http://192.168.4.7:3000/noirr/plurx/pulls/153) | The last three hidden gates, plus takeover honouring the live-HLS switch |
-| [#160](http://192.168.4.7:3000/noirr/plurx/pulls/160) / [#161](http://192.168.4.7:3000/noirr/plurx/pulls/161) | `docs/playback-control/CLIENT-PREPARED-SWITCH-CONTRACT.md`, the client adapters' brief |
-| [#162](http://192.168.4.7:3000/noirr/plurx/pulls/162) | The finding that §4's remaining server work is blocked |
-| [#163](http://192.168.4.7:3000/noirr/plurx/pulls/163) | Status page |
+| [#148](http://forge.lan:3000/noirr/plurx/pulls/148) | §4 step 2 server half — every node accepts `switched` and releases the predecessor's drain on it |
+| [#153](http://forge.lan:3000/noirr/plurx/pulls/153) | The last three hidden gates, plus takeover honouring the live-HLS switch |
+| [#160](http://forge.lan:3000/noirr/plurx/pulls/160) / [#161](http://forge.lan:3000/noirr/plurx/pulls/161) | `docs/playback-control/CLIENT-PREPARED-SWITCH-CONTRACT.md`, the client adapters' brief |
+| [#162](http://forge.lan:3000/noirr/plurx/pulls/162) | The finding that §4's remaining server work is blocked |
+| [#163](http://forge.lan:3000/noirr/plurx/pulls/163) | Status page |
 
 **§4 step 2, in one paragraph.** A client that reports its successor is on
 screen (`switched`) releases the predecessor's ten-second drain immediately

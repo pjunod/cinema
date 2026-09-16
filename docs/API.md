@@ -4,7 +4,7 @@ Companion to [ARCHITECTURE.md](ARCHITECTURE.md) (why there are two façades)
 and [PLAYBACK.md](PLAYBACK.md) (how a file becomes a stream) — this is *what
 you can call, which credential it takes, and what comes back*. Read
 [SECURITY.md](SECURITY.md) for the trust model the credentials below
-implement, and [INTEGRATION.md](INTEGRATION.md) for the monarr seam in
+implement, and [INTEGRATION.md](INTEGRATION.md) for the Curator seam in
 particular.
 
 **There is no OpenAPI document.** The native API was designed to have one and
@@ -32,7 +32,7 @@ count above stops matching.
 ```
                          ┌────────────────────────────┐
    browsers, native      │        plurxd :32400       │
-   clients, monarr ─────▶│                            │
+   clients, Curator ─────▶│                            │
                          │  /api/v1/…      native API │  §4–§18
    Kodi-family Plex ────▶│  /library/…     Plex Tier 1│  §20
    clients (X-Plex-Token)│  /identity, /:/timeline    │
@@ -452,8 +452,8 @@ full node (`pool_full`) — and only the second argues for raising the cap.
 exists because `scan_requests` only holds requests that got as far as a
 library. A path-mapping mistake is rejected before a record exists, so a
 server being called constantly and rejecting everything looks identical there
-to one nobody is calling — which is the difference between "fix monarr's path
-mapping" and "check monarr's URL and key".
+to one nobody is calling — which is the difference between "fix Curator's path
+mapping" and "check Curator's URL and key".
 
 `GET /api/v1/system/library-shape` is a separate route rather than a field
 here because it is a table scan, and `/system` is polled by the settings page
@@ -633,7 +633,7 @@ clients must tolerate both absent-optional and unknown-extra keys.
 
 ### 6.3 The targeted-scan seam
 
-`POST /api/v1/scan` is how monarr says "index exactly this path". It is
+`POST /api/v1/scan` is how Curator says "index exactly this path". It is
 deliberately **not** under `/libraries/{id}`: the caller knows a filesystem
 path, not a plurx library id, and plurx resolving it is one less thing for two
 applications to keep in sync.
@@ -2161,7 +2161,7 @@ unavailable authoritative store refuses the exchange with `503
 channel_store_unavailable`. Detached **Watch from start** playback has ordinary
 VOD purpose and is unaffected by later channel state.
 
-## 18. Trakt and the monarr seam
+## 18. Trakt and the Curator seam
 
 | Method | Path | Auth | What it does |
 |---|---|---|---|
@@ -2169,8 +2169,8 @@ VOD purpose and is unaffected by later channel state.
 | POST | `/api/v1/trakt/link` | admin | Begins the device-code flow |
 | DELETE | `/api/v1/trakt/link` | admin | Deletes the stored token pair |
 | POST | `/api/v1/trakt/sync` | admin | Nudges the sync loop; returns status immediately |
-| GET | `/api/v1/coming-soon` | bearer | monarr calendar proxy, 28-day horizon, 15-minute cache |
-| GET | `/api/v1/monarr/status` | admin | Active probe of monarr, plus watch-outbox counters |
+| GET | `/api/v1/coming-soon` | bearer | Curator calendar proxy, 28-day horizon, 15-minute cache |
+| GET | `/api/v1/monarr/status` | admin | Active probe of Curator, plus watch-outbox counters |
 
 ### 18.1 Trakt
 
@@ -2208,27 +2208,27 @@ chunks of 500. Live scrobbling runs separately from the playback handlers.
 ### 18.2 `GET /api/v1/coming-soon`
 
 Readable by any signed-in user, because it feeds the home screen. It proxies
-monarr's calendar over a 28-day horizon with a 10-second timeout.
+Curator's calendar over a 28-day horizon with a 10-second timeout.
 
-**The proxy is the feature.** A browser calling monarr directly would need
-monarr's API key in its own JavaScript, and that key can edit the whole monarr
+**The proxy is the feature.** A browser calling Curator directly would need
+Curator's API key in its own JavaScript, and that key can edit the whole Curator
 library. One server-side hop removes it.
 
 The cache is process-global with a 15-minute TTL, not keyed by user — so each
 node in a cluster keeps its own — and **the failure result is cached too**. A
-monarr outage therefore produces an empty rail for the full quarter-hour even
-after monarr returns.
+Curator outage therefore produces an empty rail for the full quarter-hour even
+after Curator returns.
 
-When monarr is unreachable the fetch error is swallowed and logged, and the
+When Curator is unreachable the fetch error is swallowed and logged, and the
 response is still `200 {"configured": true, "entries": []}`. **There is no
 distinction on the wire between "monarr is down", "the key was rejected", and
 "the calendar is genuinely empty."** Unset settings return
 `{"configured": false, "entries": []}` instead — an absent rail rather than an
-error, because not pairing monarr is a valid choice.
+error, because not pairing Curator is a valid choice.
 
 Each entry is `{date, kind, title, detail, has_file, poster?, item_id?}`.
 `poster` is always a plurx URL, and `item_id` is the local item so the card is
-clickable. monarr's own ids are used server-side to resolve the entry and are
+clickable. Curator's own ids are used server-side to resolve the entry and are
 deliberately **not** serialized: forwarding another application's ids invites
 someone to build on them.
 
@@ -2244,7 +2244,7 @@ declared and the streamed length.
 ### 18.3 `GET /api/v1/monarr/status`
 
 Deliberately an active probe rather than a cached flag: the person looking at
-it has just typed a URL and a key. It reads monarr's status endpoint and
+it has just typed a URL and a key. It reads Curator's status endpoint and
 changes nothing.
 
 `{configured, reachable, version?, error?, watched_pending, watched_sent,
@@ -2252,8 +2252,8 @@ watched_failed}`. When `configured` is false it returns without probing, so
 `reachable: false` with no `error` means "not configured" while
 `reachable: false` with an `error` means the probe ran and failed. The three
 error strings separate the three failures that look identical from a settings
-screen: `cannot reach monarr at <url>: <root cause>`, `monarr rejected the API
-key`, and `monarr returned <status>`. The root cause is the *deepest* error in
+screen: `cannot reach Curator at <url>: <root cause>`, `Curator rejected the API
+key`, and `Curator returned <status>`. The root cause is the *deepest* error in
 the chain, not the HTTP client's outer wrapper — the difference between a DNS
 failure and a refused connection is the entire diagnosis in a two-container
 setup, and the outer message discards it.
@@ -2262,14 +2262,14 @@ setup, and the outer message discards it.
 and goes true the moment a URL and a key are saved, correct or not.
 `reachable` is live *only for the moment you called it*. And
 `reachable: true` does **not** imply the coming-soon rail works: this probe
-hits monarr's status endpoint, the rail hits its calendar. A key monarr
+hits Curator's status endpoint, the rail hits its calendar. A key Curator
 accepts for one and not the other reads as connected beside a permanently
 empty rail, and §18.2 explains why `/coming-soon` will not tell you either.
 When status says connected and the rail is empty, the answer is in the log at
 target `plurxd::integrate`, message `coming-soon fetch failed` — and remember
 the empty result is cached, so a fix takes up to 15 minutes to show. The three
 `watched_*` counters are an unrelated fourth answer: `watched_pending` climbing
-means monarr is down and the outbox is doing its job, while `watched_failed`
+means Curator is down and the outbox is doing its job, while `watched_failed`
 is terminal.
 
 ### 18.4 Where the scoped-key wall actually stands
@@ -2280,10 +2280,10 @@ it is real — but it stands on `POST /api/v1/scan` and
 `/coming-soon` takes a bearer and `/monarr/status` takes an admin; neither
 accepts a scoped key, and a `plx_` key on them is a 401.
 
-That is the direction of the data, not an oversight: scan is monarr calling
-**into** plurx and needs a narrow credential monarr can hold, whereas these
-two are plurx calling **out** to monarr, holding monarr's key server-side. The
-credential that matters here is monarr's key in plurx's settings, and keeping
+That is the direction of the data, not an oversight: scan is Curator calling
+**into** plurx and needs a narrow credential Curator can hold, whereas these
+two are plurx calling **out** to Curator, holding Curator's key server-side. The
+credential that matters here is Curator's key in plurx's settings, and keeping
 it off the client is the whole reason both routes exist.
 
 ---

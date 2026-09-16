@@ -6,9 +6,9 @@ first.
 
 ## Live TV start, stall, and tvOS surface has landed on main
 
-**[#301](http://192.168.4.7:3000/noirr/plurx/pulls/301), merge
+**[#301](http://forge.lan:3000/noirr/plurx/pulls/301), merge
 `04cbb2e44` into `main`; final adversarial findings were folded and
-[Main promotion gate run 2005](http://192.168.4.7:3000/noirr/plurx/actions/runs/2005)
+[Main promotion gate run 2005](http://forge.lan:3000/noirr/plurx/actions/runs/2005)
 passed on the exact merged-base candidate.** The server, Android, and Apple
 task PRs are merged and their focused automated evidence is green. The
 four-case documentation-index regression passes for this closeout.
@@ -20,7 +20,7 @@ forbidden input-routing, remote-adapter, fixture, wire-shape, or timeout seams.
 
 ## Apple Live TV now distinguishes a stall and owns its fullscreen surface
 
-**[#300](http://192.168.4.7:3000/noirr/plurx/pulls/300), from
+**[#300](http://forge.lan:3000/noirr/plurx/pulls/300), from
 `codex/live-tv-start-stall-apple` into `effort/live-tv-start-stall`;
 implementation complete, adversarial review and focused qualification green,
 physical evidence pending.** The promotion ships Apple build 154, which
@@ -64,7 +64,7 @@ pending.
 
 ## Live TV starts now use a stable one-second cadence
 
-**[#298](http://192.168.4.7:3000/noirr/plurx/pulls/298), from
+**[#298](http://forge.lan:3000/noirr/plurx/pulls/298), from
 `codex/live-tv-start-stall-server` into `effort/live-tv-start-stall`;
 implementation complete, physical evidence pending.** The server half now has
 the reviewed 24-entry uniform one-second HLS
@@ -84,7 +84,7 @@ timeout, signed request, route, client input contract, or feature gate moved.
 
 ## plurx records now, and tells you before a programme starts
 
-**[#294](http://192.168.4.7:3000/noirr/plurx/pulls/294), titled `WIP:`.**
+**[#294](http://forge.lan:3000/noirr/plurx/pulls/294), titled `WIP:`.**
 Built on `effort/live-tv-dvr` as one PR to `main`, mine to merge once the
 qualification run on the merged tree is green. Executes
 [LIVE-TV-DVR-IMPLEMENTATION.md](docs/features/LIVE-TV-DVR-IMPLEMENTATION.md)
@@ -128,7 +128,7 @@ six rows are advisory. Nothing has touched the tuner yet: the hardware pass is
 the only unproved step, and §8 of the plan carries its prompts.
 ## Apple's notice strip was a dead end, and two rows of the readiness card were false
 
-**[#297](http://192.168.4.7:3000/noirr/plurx/pulls/297), titled `WIP:`.**
+**[#297](http://forge.lan:3000/noirr/plurx/pulls/297), titled `WIP:`.**
 Paul's to merge, and this branch has not been. (Worded carefully for the
 same reason #291 was: `test_status_pr_claims` reads that number as landed,
 because this repository's history carries a GitHub-era `(#297)` from before
@@ -203,7 +203,7 @@ it. It joins §6's eight runs, none of which has happened.
 
 ## Every class in the playback surface contract can now be drawn on Apple
 
-**[#291](http://192.168.4.7:3000/noirr/plurx/pulls/291), titled `WIP:`.**
+**[#291](http://forge.lan:3000/noirr/plurx/pulls/291), titled `WIP:`.**
 Paul's to merge, and this branch has not been. (The wording is careful
 because `test_status_pr_claims` reads that number as landed: this
 repository's history carries a GitHub-era `Merge pull request #291` from
@@ -350,7 +350,7 @@ On Linux: both fences PASS with no new `MIGRATION_BUDGET` entries,
 
 ## The Android playback surface has no unreachable sources left
 
-**Landed as [#289](http://192.168.4.7:3000/noirr/plurx/pulls/289).** An audit of
+**Landed as [#289](http://forge.lan:3000/noirr/plurx/pulls/289).** An audit of
 the merged playback-surface work found four of
 the contract's sources with no Android raise site at all, so four rows of §3.3
 described behaviour the client could not produce. All four are closed, one is
@@ -506,7 +506,7 @@ stands for.
 
 ### Evidence
 
-`clients/android`, in the pinned image on m6 (`make android-test` / `make
+`clients/android`, in the pinned image on lab6 (`make android-test` / `make
 android`): `:app:compileDebugKotlin`, `:app:testDebugUnitTest`,
 `:app:lintDebug`, `:app:assembleDebug`. Counts read from
 `app/build/test-results/testDebugUnitTest/*.xml`, not from the log —
@@ -527,7 +527,7 @@ remain unclaimed.
 
 ## The web half of the playback surface contract is reachable, and four rulings are closed
 
-**Landed as [#290](http://192.168.4.7:3000/noirr/plurx/pulls/290).** An audit found parts of the
+**Landed as [#290](http://forge.lan:3000/noirr/plurx/pulls/290).** An audit found parts of the
 merged work unreachable — two contract rows that no web site ever raised, an
 action in the vocabulary that no site ever offered, and a deadline that could
 not fire. All of it is closed here, together with the four rulings that were
@@ -574,7 +574,7 @@ in the pull request.
 
 ## `make web-check` is green, and `rust-gate` has actually been run
 
-**[#286](http://192.168.4.7:3000/noirr/plurx/pulls/286), WIP, not merged.**
+**[#286](http://forge.lan:3000/noirr/plurx/pulls/286), WIP, not merged.**
 Two gaps the playback surface effort left behind: its own acceptance command
 could not go green, and its Rust gate had never been executed at all.
 
@@ -821,11 +821,11 @@ prompt predicted, and the field route is §6.6.
 2. **The Kotlin compiles and its JVM tests pass. Nothing has run on a
    device.** M3 and M5's Android code was written on Linux with no SDK and no
    disk for a Gradle build; it was compiled for the first time on 2026-09-13,
-   on both of the hand-off's routes. The **pinned image** on `m6`
-   (192.168.4.14, x86_64, Docker 29.1.3, so `linux/amd64` is native and
+   on both of the hand-off's routes. The **pinned image** on `lab6`
+   (10.42.4.14, x86_64, Docker 29.1.3, so `linux/amd64` is native and
    nothing is emulated): `make android-image`, `make android-test` and
    `make android` all green — this is the run CI does. The **local SDK** on
-   `pauls.macbook.air.lan`: JDK 25, Homebrew command-line tools, platform
+   `maca.lan`: JDK 25, Homebrew command-line tools, platform
    `android-37.0`, build-tools 36.0.0 and 37.0.0, Gradle 9.7.1, with
    `:app:compileDebugKotlin`, `:app:testDebugUnitTest`, `:app:lintDebug` and
    `:app:assembleDebug` all green. Both routes report the same
@@ -982,7 +982,7 @@ loop, so a widened exemption fails here.
 
 ## Live TV: the empty guide and the "wait 90 seconds" refusal, diagnosed
 
-**Diagnosis in [#273](http://192.168.4.7:3000/noirr/plurx/pulls/273); Paul
+**Diagnosis in [#273](http://forge.lan:3000/noirr/plurx/pulls/273); Paul
 ruled 2026-09-13 (doc §7): cache the guide, the client never guesses, and a
 possibly-held tuner is never a reason to refuse a viewer — Opus builds it from
 [docs/features/LIVE-TV-RELIABILITY-IMPLEMENTATION.md](docs/features/LIVE-TV-RELIABILITY-IMPLEMENTATION.md)
@@ -991,7 +991,7 @@ plan §8); lane `effort/live-tv-reliability`.** Both complaints trace to a clien
 the owner knows. The guide is memory-only on the owner, its first refresh
 after a restart is a full 20 minutes away (the first loop tick runs before
 the serving fence admits the node, is *skipped*, and the skip path sleeps the
-whole interval — nynuc's metrics show exactly one skip at boot and the first
+whole interval — media1's metrics show exactly one skip at boot and the first
 success 20 minutes later), a refresh cannot run until a client has read the
 lineup, and the web never re-asks while Apple and Android re-ask 20 minutes
 after *they* opened. `start_outcome_unknown` is never sent by the server: it
@@ -1217,7 +1217,7 @@ filled by someone who was not there.
 ## A prepared commit hands the viewer a session that is refused from its first request
 
 **Merged into `main` as `4c93ef29`, 2026-09-08, from
-[its pull request](http://192.168.4.7:3000/noirr/plurx/pulls/137).
+[its pull request](http://forge.lan:3000/noirr/plurx/pulls/137).
 Documentation and one test comment; no runtime change.** Found while writing
 the plan for M6's missing server phase, and it is about code that has been
 merged for days rather than anything new.
@@ -1270,7 +1270,7 @@ anything. See the entry at the top of this page.
 ## The third client speaks the protocol, on a platform the server will not use it for
 
 **Merged into `main` as `b266341e`, 2026-09-08, from
-[its pull request](http://192.168.4.7:3000/noirr/plurx/pulls/136). With it,
+[its pull request](http://forge.lan:3000/noirr/plurx/pulls/136). With it,
 all three client halves of M6 are on `main`.** The work was built on
 `effort/decoder-selection-recovery`, where it merged as four pull requests,
 and reconciled here against `main`'s restructured seek path, control session
@@ -1299,7 +1299,7 @@ twice.
 ## Apple viewers were paying for encoders nobody told them about
 
 **Merged into `main` as `9c5e1f9b`, 2026-09-08, from
-[its pull request](http://192.168.4.7:3000/noirr/plurx/pulls/122). Not
+[its pull request](http://forge.lan:3000/noirr/plurx/pulls/122). Not
 deployed, and not yet on any physical device.**
 Apple is the only platform whose `dual_player_preparation` is `true`,
 measured on an iPhone 17 Pro Max and an Apple TV 4K at 20/20 on both cases.
@@ -1417,12 +1417,12 @@ to 50 G — and both were gated on `persistent-eligible: true` *and*
 on this repository. So the condition was false on every job ever run, every job
 took the unbounded branch, and nothing in the fleet was bounded by anything.
 
-Measured 2026-09-07 on `gha-m6-general-01`: 118 cache entries, 41 G, every one
+Measured 2026-09-07 on `gha-lab6-general-01`: 118 cache entries, 41 G, every one
 created in the previous three days — about 13 G/day on a 78 G disk, which fills
-a runner guest in a week. Fleet-wide the cache servers held ~167 G, and nynuc
+a runner guest in a week. Fleet-wide the cache servers held ~167 G, and media1
 carried another 101 G of Docker images (4 of 131 in use) and 58 G of BuildKit
 cache. ~340 G was reclaimed by hand the same day: Docker build cache and
-dangling images on nynuc, m6 and nuc4, and the cache servers of the five idle
+dangling images on media1, lab6 and lab4, and the cache servers of the five idle
 runner guests reset index-and-blobs together while each was stopped.
 
 The branch removes both gates — where a cache lives follows the runner, not a
@@ -1440,22 +1440,22 @@ That last part is `deploy/runner-janitor/`: a script, a systemd unit, an hourly
 timer and a one-command installer, on the same numbers — 20 G budget, 20 %
 reserve, graceful stop before any delete. It never resets a working runner,
 never leaves one stopped, and refuses any `cache.dir` that is not one; each of
-those is mutation-proven. Installed and running hourly on nynuc, rogg16, every reachable
-Incus runner guest, and the Lima VM that carries `gha-mbp-linux-arm-01` — which
+those is mutation-proven. Installed and running hourly on media1, lab5, every reachable
+Incus runner guest, and the Lima VM that carries `gha-macb-linux-arm-01` — which
 was holding 24G of its own and gave all of it back on the first pass.
 `deploy/runner-janitor/macos/` is the launchd equivalent for
-`gha-mba-apple-01`, the one runner with no systemd, and it is installed and
+`gha-maca-apple-01`, the one runner with no systemd, and it is installed and
 verified there: it read the runner's label and config out of the launchd plist,
 unloaded the daemon, reset a 4 G cache and loaded it again, and the runner was
 back `idle` in Forgejo twenty seconds later. **The cache is bounded fleet-wide.**
 
 **The band between two bounds, found and closed 2026-09-08.**
-`gha-nuc4-general-01` refused two jobs in a row — tasks 3753 and 3780 — with
-`::error::gha-nuc4-general-01 is out of disk: 18G available at
+`gha-lab4-general-01` refused two jobs in a row — tasks 3753 and 3780 — with
+`::error::gha-lab4-general-01 is out of disk: 18G available at
 /opt/forgejo-runner/_work/<hash>/hostexecutor, need 25G`, identical to the
 gigabyte across both. **Not because anything pinned the job there** — that
 was this session's assumption and it is wrong: eight runners carry the
-`general` label, and `gha-m6-general-02` ran the same lane green with 42 G
+`general` label, and `gha-lab6-general-02` ran the same lane green with 42 G
 free. A runner that refuses in fifteen seconds returns to idle immediately and
 is therefore first in line for the next job, so **a full runner starves the
 pool precisely because it fails fast**. That is worth its own fix — the
@@ -1543,7 +1543,7 @@ arithmetically.
 
 ## Settings put the operator on the login page, and the cause was a tombstone
 
-**PR [#101](http://192.168.4.7:3000/noirr/plurx/pulls/101) — merged into
+**PR [#101](http://forge.lan:3000/noirr/plurx/pulls/101) — merged into
 `main` as `a1b1fa34`, 2026-09-07. Not deployed.** Opening Settings
 on the fleet returned the sign-in screen. The credential was valid the whole
 time.
@@ -1561,7 +1561,7 @@ the Store-free admin proof cache closed on every node; `/cluster/status`, whose
 guard consulted only that cache, answered **401** to an administrator; and the
 web client, reading any 401 as "your session is over", called `logout()`.
 Settings remembers its last section, so an operator whose last section was
-Cluster met the login page on every attempt. `tcpdump` on nynuc confirms the
+Cluster met the login page on every attempt. `tcpdump` on media1 confirms the
 shape: not one Begin fanout ever leaves the node — every attempt dies at the
 lease. `plurx_cluster_removals_pending` correctly reported `0` throughout,
 because the gauge already counts only untombstoned removals; the acquire SQL
@@ -1592,9 +1592,9 @@ that dies mid-tick must still end it.
 
 ## A deploy that refused itself over an unmaintainable pair
 
-**PR [#37](http://192.168.4.7:3000/noirr/plurx/pulls/37) merged as
+**PR [#37](http://forge.lan:3000/noirr/plurx/pulls/37) merged as
 `c661d387`.** `make
-docker-up` on nynuc refused to change a container: the health start period was
+docker-up` on media1 refused to change a container: the health start period was
 the tracked five minutes, and `/srv/plurx/plurx.toml` sets
 `install_snapshot_timeout_secs = 1200`, which with the three named startup
 phases requires 1,335 seconds. The preflight was right. The design was not: the
@@ -1607,7 +1607,7 @@ prose and the first report of a mismatch was a refused deploy on the host.
 refusal is computed from, proves that value, and applies the value it proved. A
 grace an operator wrote is passed through untouched and still refused by name
 if it is too short, because a deliberately short grace is how a permanently
-broken build gets reported instead of waited out. Verified on nynuc itself:
+broken build gets reported instead of waited out. Verified on media1 itself:
 the same command that refused now reports `health=1335s, snapshot=1200s
 (/srv/plurx/plurx.toml)`. `make operations-check` — 185 tests — passes.
 
@@ -1809,12 +1809,12 @@ Store lane passes locally: 120 of 120.
 SSH on 2026-09-03. The handoff's premise holds: #842 (`60e1be68`) is an
 ancestor of every binary now running, so the arm it closed is closed in
 production. At that reading three nodes ran `v0.3.0-515-gc2702f61`, matching
-their checkouts, while **nuc4 ran `v0.3.0-487-gd7194b05`** against a checkout
+their checkouts, while **lab4 ran `v0.3.0-487-gd7194b05`** against a checkout
 at 515 — twenty-eight commits of drift, on the node the M5 verification
 document names. *That drift is closed:* the deploy recorded below brought all
 four to one build, and the version table has been taken out of
 `M5-VERIFICATION-PROMPT.md` §1 entirely, because a version written into a
-document is stale the day after. nuc4's `plurxd` logged no plan-derivation traffic
+document is stale the day after. lab4's `plurxd` logged no plan-derivation traffic
 at all in twelve hours, which is the honest reason the `plan_derivation`
 counters cannot be re-tested from the outside: they only move when someone
 plays something. The live store is hiqlite; `/var/lib/plurx/plurx.db` was
@@ -1835,10 +1835,10 @@ schema migration (#872) — v45 broke three "wind a current database backwards"
 fixtures at once, in three files none of which the appending change touched,
 and the worst of them took twenty minutes of `cluster-store-check` to surface.
 
-**Deployed to the four servers 2026-09-03, `v0.3.0-568-gd4c67ff4`** — nynuc,
-m6, nuc4, nuc3, all healthy, all answering `/readyz`. The first attempt did
+**Deployed to the four servers 2026-09-03, `v0.3.0-568-gd4c67ff4`** — media1,
+lab6, lab4, lab3, all healthy, all answering `/readyz`. The first attempt did
 not get there: a `deploy.yml` run from an agent session
-restarted nynuc and was then killed mid-task by that session's own command
+restarted media1 and was then killed mid-task by that session's own command
 timeout, leaving the node out of the cluster for forty minutes while the
 other three were never touched. What that node did while it was out is worth
 recording, because the obvious reading of it was wrong. It looked like a
@@ -1952,7 +1952,7 @@ until production ran.
 
 The blast radius was every *fallback*: a session that escalates from a refused
 remux to a transcode is a fresh session, so a delivery fault that the fallback
-exists to recover became a dead player instead. Observed on nuc4, file 70.
+exists to recover became a dead player instead. Observed on lab4, file 70.
 
 A session below `EXPLICIT_STARTUP_FLOOR_SECS` of published media is *starting*,
 and starting suspends the demand hold and the time limiter both — exempting the
@@ -1989,7 +1989,7 @@ advertised that bare name plus twelve characters of its node id — three rows
 of `plurx · 5deeeebc8f39` in the Apple TV picker, on a fleet whose machines
 have perfectly good names. It regressed `474e2ee1`, and neither
 `deploy/README.md` nor the compose comments ever stopped promising
-`m6 · 192.168.1.20`; the discovery companion still runs `uts: host`
+`lab6 · 10.42.1.20`; the discovery companion still runs `uts: host`
 specifically so it can read the machine hostname.
 
 The name a node computes for itself is what it advertises now, in both
@@ -2275,7 +2275,7 @@ answers is why the producer paused.**
 
 **PRs [#806](https://github.com/pjunod/plurx/pull/806) (`b4a1f108`) and
 [#821](https://github.com/pjunod/plurx/pull/821) (`27e751ef`) — both MERGED to
-main, 2026-09-02.** Started from one screenshot: `nuc3`, a committed learner,
+main, 2026-09-02.** Started from one screenshot: `lab3`, a committed learner,
 showing a fresh heartbeat, zero apply lag and a green *Read worker ready* pill
 while the same card said *Not observed · unreachable*. Two independent defects,
 both of the same shape — code that asked whether the local node is a voter by
@@ -2316,7 +2316,7 @@ peer directory pointing at a door the matrix had nailed shut.
 Thirteen mutations across the two branches, all caught. `package and smoke
 (amd64)` flaked once on a host-wide port collision with a concurrent job on the
 same runner (`127.0.0.1:32402 … Address already in use`); re-run, green. **Not
-yet verified on hardware** — when the fleet next takes a build, nuc3 should read
+yet verified on hardware** — when the fleet next takes a build, lab3 should read
 *Direct status ready* rather than *Not observed*, and its active-stream count
 should stop being structurally zero.
 

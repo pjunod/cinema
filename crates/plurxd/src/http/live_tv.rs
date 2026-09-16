@@ -1875,7 +1875,7 @@ mod tests {
     #[test]
     fn public_device_errors_never_disclose_the_private_url() {
         let error = api_error(LiveTvError::DeviceUnavailable(
-            "request failed for http://192.168.4.20/discover.json".to_owned(),
+            "request failed for http://10.42.4.20/discover.json".to_owned(),
         ));
         let ApiError::TypedDetail {
             message: rendered, ..
@@ -1883,7 +1883,7 @@ mod tests {
         else {
             panic!("expected typed owner error");
         };
-        assert!(!rendered.contains("192.168.4.20"), "{rendered}");
+        assert!(!rendered.contains("10.42.4.20"), "{rendered}");
         assert!(!rendered.contains("http://"), "{rendered}");
     }
 

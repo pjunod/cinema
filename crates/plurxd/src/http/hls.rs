@@ -7483,7 +7483,7 @@ fn take_preparation_candidate_completion(incarnation_id: &str) -> bool {
 /// Last delivered selection of each *playback*, so a session that replaces
 /// another can be measured against the one it replaced.
 ///
-/// This exists because of what m6 measured on 2026-09-02: 949 accepted
+/// This exists because of what lab6 measured on 2026-09-02: 949 accepted
 /// exchanges and one recorded decision. `ControlState::last_selection` sees a
 /// selection change only *within* one session, and Apple does not change a
 /// selection within a session — `PlayerController.selectQuality` calls
@@ -13590,7 +13590,7 @@ mod tests {
     /// The replacement seam, which is where a viewer's quality change actually
     /// arrives.
     ///
-    /// m6 recorded one decision against 949 accepted exchanges because
+    /// lab6 recorded one decision against 949 accepted exchanges because
     /// `ControlState::last_selection` only sees a change *within* a session,
     /// and Apple's `selectQuality` replaces the session instead. Keyed by
     /// playback id rather than by `previous_session_id`, which the Apple

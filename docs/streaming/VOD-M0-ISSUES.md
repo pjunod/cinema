@@ -222,7 +222,7 @@ Named so nobody reads a green run as coverage it is not.
   number is the **minimum across all three**. Protocols are in STATUS.html's
   VOD operator checklist.
 - **P1 on real titles.** Sandbox throughput (40–549 MB of source per second on
-  local disk) says nothing about nynuc over NFS with a cold cache, which is the
+  local disk) says nothing about media1 over NFS with a cold cache, which is the
   number that sizes the background indexing job.
 - **P0 on ≥10 representative real files.** §8 M0-P0 asks for the corpus *and*
   real files; only the corpus ran. The fixtures are adversarial, not

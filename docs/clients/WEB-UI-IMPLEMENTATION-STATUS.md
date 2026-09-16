@@ -4,7 +4,7 @@
 
 Executes the approved [usability audit](WEB-UI-USABILITY-AUDIT.md).
 The [status page](WEB-UI-STATUS.html) is the visual companion to this ledger.
-Work uses a fresh agent-owned clone; no user checkout is modified. Draft PR: http://192.168.4.7:3000/noirr/plurx/pulls/317.
+Work uses a fresh agent-owned clone; no user checkout is modified. Draft PR: http://forge.lan:3000/noirr/plurx/pulls/317.
 
 PR317 is now merged. New device reports are tracked in the
 [native layout follow-up](NATIVE-LAYOUT-FOLLOWUP.md); the ledger below preserves

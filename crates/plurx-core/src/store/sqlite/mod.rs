@@ -2346,7 +2346,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("open");
         let first = [
             ("live_tv.enabled", "0"),
-            ("live_tv.device_ipv4", "192.168.4.20"),
+            ("live_tv.device_ipv4", "10.42.4.20"),
             ("live_tv.config_generation", "1"),
         ];
         assert!(store
@@ -2355,7 +2355,7 @@ mod tests {
             .expect("first CAS"));
         let stale = [
             ("live_tv.enabled", "1"),
-            ("live_tv.device_ipv4", "192.168.4.21"),
+            ("live_tv.device_ipv4", "10.42.4.21"),
             ("live_tv.config_generation", "1"),
         ];
         assert!(!store
@@ -2369,7 +2369,7 @@ mod tests {
         );
         assert_eq!(
             snapshot.get("live_tv.device_ipv4").map(String::as_str),
-            Some("192.168.4.20")
+            Some("10.42.4.20")
         );
         assert_eq!(
             snapshot
