@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b4a6d59c"]
+points = ["core.media"]
+checks = ["rust-gate"]
+reason = "The Store contract exercises the additive video_codec_tag migration through SQLite and the shared backend contract, retaining the statement terminator required before the SQLite migration wrapper commits."

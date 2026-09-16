@@ -1034,6 +1034,14 @@ test("every server verdict reaches exactly one initial web transport", () => {
     [{ method: "remux", nativeHls: true }, "copy_hls"],
     [{ method: "remux", segmentedRemux: true }, "copy_hls"],
     [
+      { method: "remux", requiresHls: true, hlsAvailable: true },
+      "copy_hls",
+    ],
+    [
+      { method: "remux", requiresHls: true, hlsAvailable: false },
+      "unsupported_hevc_delivery",
+    ],
+    [
       { method: "remux", nativeHls: true, segmentedRemux: true },
       "copy_hls",
     ],
@@ -1044,7 +1052,7 @@ test("every server verdict reaches exactly one initial web transport", () => {
   }
 });
 
-test("a missing node-local VOD index falls back only where progressive remux works", () => {
+test("required_hls_never_falls_back_to_progressive", () => {
   assert.equal(
     policy.indexPendingFallback({
       code: "vod_index_pending",
@@ -1055,6 +1063,12 @@ test("a missing node-local VOD index falls back only where progressive remux wor
   );
   for (const input of [
     { code: "vod_index_pending", method: "remux", nativeHls: true },
+    {
+      code: "vod_index_pending",
+      method: "remux",
+      nativeHls: false,
+      requiresHls: true,
+    },
     { code: "vod_index_pending", method: "transcode", nativeHls: false },
     { code: "producer_failed", method: "remux", nativeHls: false },
   ]) {
@@ -4634,11 +4648,12 @@ function hevcHarness({
       shippedBinding("const", "HEVC_TIERS"),
       shippedSource("hevcTierSummary"),
       shippedSource("hevcTiersSync"),
+      shippedSource("progressiveHevcSampleEntries"),
       shippedSource("hevcTiersMediaCapabilities"),
       shippedSource("buildPlayCaps"),
       shippedSource("capsQuery"),
       "return {HEVC_TIERS, hevcTierSummary, hevcTiersSync," +
-        " hevcTiersMediaCapabilities, buildPlayCaps, capsQuery};",
+        " progressiveHevcSampleEntries, hevcTiersMediaCapabilities, buildPlayCaps, capsQuery};",
     ].join("\n"),
   );
   const shipped = build(win, doc, MediaSource, nav, () => hdrDisplay);
@@ -4820,6 +4835,99 @@ asyncTest(
     assert.equal((await throws.refinedCaps()).maxheight, 2160);
   },
 );
+
+asyncTest("mse_support_does_not_claim_progressive_hev1", async () => {
+  const h = hevcHarness();
+  const entries = await h.progressiveHevcSampleEntries(
+    h.HEVC_TIERS.map(() => true),
+    [],
+    [],
+    {
+      mediaCapabilities: {
+        decodingInfo({ video }) {
+          // A usable file answer is authoritative. The synchronous positive
+          // models an implementation whose MSE/general decoder probe says yes.
+          return Promise.resolve({ supported: !video.contentType.includes("hev1") });
+        },
+      },
+      videoElement: { canPlayType: () => "probably" },
+    },
+  );
+  assert.deepEqual(entries, ["hvc1"]);
+});
+
+asyncTest("packaging_claim_covers_every_advertised_hevc_tier", async () => {
+  const h = hevcHarness();
+  const claimed = h.HEVC_TIERS.map((_, index) => index < 2);
+  const entries = await h.progressiveHevcSampleEntries(claimed, [], [], {
+    mediaCapabilities: {
+      decodingInfo({ video }) {
+        const secondTier = video.height === h.HEVC_TIERS[1].height;
+        return Promise.resolve({
+          supported: video.contentType.includes("hvc1") && !secondTier,
+        });
+      },
+    },
+    videoElement: { canPlayType: () => "probably" },
+  });
+  assert.deepEqual(entries, [], "one admitted rung cannot authorize the flat label");
+});
+
+asyncTest("packaging_claim_rejects_a_hole_below_the_advertised_ceiling", async () => {
+  const h = hevcHarness();
+  const claimed = h.HEVC_TIERS.map((_, index) => index === 0 || index === 2);
+  const entries = await h.progressiveHevcSampleEntries(claimed, [], [], {
+    mediaCapabilities: {
+      decodingInfo({ video }) {
+        return Promise.resolve({ supported: video.height !== 1080 });
+      },
+    },
+    videoElement: { canPlayType: () => "probably" },
+  });
+  assert.deepEqual(entries, [], "a 2160p ceiling also covers its 1080p sources");
+});
+
+asyncTest("main10_only_success_still_requires_the_emitted_main_profile", async () => {
+  const h = hevcHarness();
+  const claimed = h.HEVC_TIERS.map((tier) => tier.depth === 10);
+  const entries = await h.progressiveHevcSampleEntries(claimed, [], [], {
+    mediaCapabilities: {
+      decodingInfo({ video }) {
+        return Promise.resolve({ supported: video.contentType.includes(".2.4.") });
+      },
+    },
+    videoElement: { canPlayType: () => "probably" },
+  });
+  assert.deepEqual(entries, [], "the wire claim contains Main as well as Main10");
+});
+
+asyncTest("mse_only_pq_does_not_authorize_progressive_hevc", async () => {
+  const h = hevcHarness();
+  const claimed = h.HEVC_TIERS.map((tier, index) => tier.depth === 10 && index === 3);
+  const pq = h.HEVC_TIERS.map((tier, index) => tier.depth === 10 && index === 3);
+  const entries = await h.progressiveHevcSampleEntries(claimed, pq, [], {
+    mediaCapabilities: {
+      decodingInfo({ video }) {
+        return Promise.resolve({ supported: video.transferFunction !== "pq" });
+      },
+    },
+    videoElement: { canPlayType: () => "probably" },
+  });
+  assert.deepEqual(entries, [], "a synchronous/MSE yes cannot replace a file PQ no");
+});
+
+asyncTest("progressive packaging falls back only when file probes are unavailable", async () => {
+  const h = hevcHarness();
+  const claimed = h.HEVC_TIERS.map((_, index) => index === 0);
+  const entries = await h.progressiveHevcSampleEntries(claimed, [], [5, 8], {
+    mediaCapabilities: { decodingInfo: () => Promise.reject(new TypeError("unsupported")) },
+    videoElement: {
+      canPlayType: (type) =>
+        type.includes("hvc1") || type.includes("dvh1") ? "probably" : "",
+    },
+  });
+  assert.deepEqual(entries, ["hvc1", "dvh1"]);
+});
 
 asyncTest("the Dolby Vision probe is unchanged by the tiering", async () => {
   // Chrome answers no to dvh1.05.06 and must keep doing so; Safari answers yes
@@ -5208,6 +5316,7 @@ test("the caps document says the two things the flat query could not", () => {
       dvprofile: "5,8",
       maxheight: 2160,
       hdr10t: 1,
+      progressiveHevcSampleEntries: ["hvc1"],
     },
     {},
   );
@@ -5237,6 +5346,7 @@ test("the caps document says the two things the flat query could not", () => {
   // `hdr` is a DISPLAY fact, kept separate from what any codec can emit.
   assert.equal(both.display.hdr, true);
   assert.deepEqual(hevc[0].dv_profiles, [5, 8]);
+  assert.deepEqual(both.progressive_hevc_sample_entries, ["hvc1"]);
 
   // A browser with no HEVC decoder claims no HEVC, and one with a single
   // HEVC ceiling sends a single entry rather than a fabricated ladder.
@@ -5248,6 +5358,11 @@ test("the caps document says the two things the flat query could not", () => {
   assert.deepEqual(plain.video.map((entry) => entry.codec), ["h264"]);
   assert.equal(plain.display.hdr, false);
   assert.equal(plain.max_height, undefined, "absent is not a claim");
+  assert.deepEqual(
+    plain.progressive_hevc_sample_entries,
+    [],
+    "empty_packaging_claim_is_not_omitted",
+  );
 
   // There is no way to spell the blanket Dolby Vision claim in this shape.
   assert.deepEqual(plain.video[0].dv_profiles, undefined);
@@ -5288,25 +5403,43 @@ test("a learned limit reaches the server with the identity it was keyed by", () 
   );
 });
 
-test("the caps document POST falls back to the query a mixed fleet still answers", () => {
-  // Mid-deploy, some nodes predate the POST. It has to degrade to the GET
-  // rather than fail a play — and it can, because the server puts both wire
-  // shapes through one translation and returns the same verdict.
-  const source = shippedSource("askDecision");
-  assert.match(source, /method:\s*"POST"/);
-  assert.match(source, /caps:\s*currentCapsDocument\(\)/);
-  assert.match(
-    shippedSource("currentCapsDocument"),
-    /capsDocument\(PLAY_CAPS,\s*decodeLimits\(\)\)/,
-    "the document the decision is asked with is still built from this browser's own probe",
-  );
-  for (const status of [404, 405, 400]) {
-    assert.ok(
-      new RegExp(`e\\.status===${status}`).test(source),
-      `a ${status} from an older or stricter node must fall back, not fail the play`,
+asyncTest("new_caps_failure_does_not_retry_legacy_decision", async () => {
+  async function callsFor(caps, failure) {
+    const calls = [];
+    const ask = new Function(
+      "api",
+      "currentCapsDocument",
+      "decisionUrl",
+      "prePlaySelectionQuery",
+      `${shippedSource("askDecision")}\nreturn askDecision;`,
+    )(
+      async (url, options) => {
+        calls.push({ url, options });
+        if (calls.length === 1) throw failure;
+        return { method: "direct_play" };
+      },
+      () => caps,
+      () => "/legacy-decision",
+      () => "",
     );
+    let error = null;
+    try { await ask(42, "auto", null); } catch (caught) { error = caught; }
+    return { calls, error };
   }
-  assert.match(source, /return api\(decisionUrl\(fileId, force, sel\),\{signal\}\)/);
+
+  for (const status of [400, 404, 405]) {
+    const constrained = await callsFor(
+      { v: 2, progressive_hevc_sample_entries: [] },
+      { status, code: status === 400 ? "invalid_capabilities" : null },
+    );
+    assert.equal(constrained.calls.length, 1, `status ${status} must not issue GET`);
+    assert.ok(constrained.error);
+  }
+
+  const legacy = await callsFor({ v: 2, video: [{ codec: "h264" }] }, { status: 404 });
+  assert.equal(legacy.error, null);
+  assert.equal(legacy.calls.length, 2, "field-absent documents keep legacy compatibility");
+  assert.equal(legacy.calls[1].url, "/legacy-decision");
 });
 
 test("the browser and the server key a learned limit identically", () => {

@@ -80,6 +80,7 @@ pub fn caps_profile(
         supports_dolby_vision,
         dolby_vision_profiles: Vec::new(),
         remux_dolby_vision: false,
+        progressive_hevc_sample_entries: None,
         presents: BTreeMap::new(),
         profile_max_heights: BTreeMap::new(),
         learned_limits: Vec::new(),
@@ -174,6 +175,10 @@ pub struct DeviceProfile {
     /// video sample/RPU while rebuilding the delivery signaling it expects.
     #[serde(default)]
     pub remux_dolby_vision: bool,
+    /// Explicit labels accepted for original progressive HEVC-in-ISO-BMFF.
+    /// `None` is the legacy path; an empty list admits no progressive label.
+    #[serde(default)]
+    pub progressive_hevc_sample_entries: Option<Vec<String>>,
     /// Per codec: the transfer functions this client can PRESENT, not merely
     /// decode. Empty means the caller built this profile the old way — a
     /// named profile, or a `caps_profile` call — and the boolean fields above
@@ -721,6 +726,7 @@ struct Checks {
     bitrate_ok: bool,
     hdr_ok: bool,
     container_ok: bool,
+    packaging_normalization: bool,
     audio_ok: bool,
 }
 
@@ -796,10 +802,13 @@ fn evaluate(file: &MediaFile, profile: &DeviceProfile) -> (Checks, Vec<String>) 
     }
 
     let dolby_vision_needs_remux = profile.remux_dolby_vision && dolby_vision_claimed;
-    let container_ok = profile.allows_container(&file.container) && !dolby_vision_needs_remux;
+    let packaging_normalization = progressive_hevc_requires_normalization(file, profile);
+    let container_ok = profile.allows_container(&file.container)
+        && !dolby_vision_needs_remux
+        && !packaging_normalization;
     if dolby_vision_needs_remux {
         reasons.push("Dolby Vision normalized through copy-video HLS for this device".to_owned());
-    } else if !container_ok {
+    } else if !container_ok && !packaging_normalization {
         reasons.push(format!(
             "container {} not browser-native",
             file.container.as_deref().unwrap_or("unknown")
@@ -831,10 +840,45 @@ fn evaluate(file: &MediaFile, profile: &DeviceProfile) -> (Checks, Vec<String>) 
             bitrate_ok,
             hdr_ok,
             container_ok,
+            packaging_normalization,
             audio_ok,
         },
         reasons,
     )
+}
+
+/// Whether an otherwise supported progressive HEVC source needs a copy-video
+/// delivery because the client explicitly constrained ISO-BMFF sample entries.
+pub fn progressive_hevc_requires_normalization(file: &MediaFile, profile: &DeviceProfile) -> bool {
+    let hevc = file
+        .video_codec
+        .as_deref()
+        .is_some_and(|codec| matches!(codec.to_ascii_lowercase().as_str(), "hevc" | "h265"));
+    let iso_bmff = file.container.as_deref().is_some_and(|container| {
+        matches!(
+            container.to_ascii_lowercase().as_str(),
+            "mp4" | "m4v" | "mov"
+        )
+    });
+    let Some(admitted) = profile.progressive_hevc_sample_entries.as_ref() else {
+        return false;
+    };
+    hevc && iso_bmff
+        && file
+            .video_codec_tag
+            .as_ref()
+            .is_none_or(|tag| !admitted.iter().any(|entry| entry == tag))
+}
+
+fn progressive_hevc_normalization_reason(file: &MediaFile) -> String {
+    match file.video_codec_tag.as_deref() {
+        Some(tag) => format!(
+            "HEVC sample entry {tag} not admitted for progressive playback; normalizing through \
+             copy-video delivery"
+        ),
+        None => "HEVC sample entry unknown; normalizing for the reported packaging constraint"
+            .to_owned(),
+    }
 }
 
 /// Is this source Dolby Vision — i.e. does it carry a DV configuration a
@@ -1385,6 +1429,9 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
     } else {
         PlaybackMethod::DirectPlay
     };
+    if method == PlaybackMethod::Remux && c.packaging_normalization {
+        reasons.push(progressive_hevc_normalization_reason(file));
+    }
 
     // A verdict that did not end up a transcode encodes nothing, so it has no
     // grade to report. Leaving a stale Hdr10 here would put an HDR10 badge on
@@ -1488,6 +1535,9 @@ pub fn decide_forced(
                 PlaybackMethod::Remux
             };
             let mut reasons = vec!["forced original quality (no video transcode)".to_owned()];
+            if c.packaging_normalization {
+                reasons.push(progressive_hevc_normalization_reason(file));
+            }
             if dv == DvHandling::Strip {
                 reasons.push(
                     "Dolby Vision metadata removed for this device; compatible HDR base kept"
@@ -1580,6 +1630,7 @@ mod tests {
             duration_ms: Some(1000),
             container: Some(container.to_owned()),
             video_codec: Some(vcodec.to_owned()),
+            video_codec_tag: None,
             video_profile: None,
             width: Some(1920),
             height: Some(1080),
@@ -1708,6 +1759,171 @@ mod tests {
             decide(&hevc_mkv, &caps, &RenderCaps::proven(true)).method,
             PlaybackMethod::Remux
         );
+    }
+
+    fn constrained_hevc_profile(entries: &[&str]) -> DeviceProfile {
+        let mut profile = caps_profile(
+            vec!["mp4".into(), "m4v".into(), "mov".into(), "mkv".into()],
+            vec!["h264".into(), "hevc".into()],
+            vec!["aac".into()],
+            None,
+            true,
+            false,
+        );
+        profile.progressive_hevc_sample_entries =
+            Some(entries.iter().map(|entry| (*entry).to_owned()).collect());
+        profile
+    }
+
+    #[test]
+    fn sdr_hev1_requires_copy_remux() {
+        let mut source = file("mp4", "hevc", "aac");
+        source.video_codec_tag = Some("hev1".into());
+        let decision = decide(
+            &source,
+            &constrained_hevc_profile(&["hvc1"]),
+            &RenderCaps::proven(true),
+        );
+        assert_eq!(decision.method, PlaybackMethod::Remux);
+        assert_eq!(
+            decision.reasons,
+            ["HEVC sample entry hev1 not admitted for progressive playback; normalizing through \
+              copy-video delivery"]
+        );
+        assert!(!decision.transcode_audio);
+    }
+
+    #[test]
+    fn avatar_p8_hev1_requires_copy_remux() {
+        let mut source = file("mp4", "hevc", "aac");
+        source.video_codec_tag = Some("hev1".into());
+        source.video_profile = Some("Main 10".into());
+        source.bit_depth = Some(10);
+        source.hdr = Some("dolby_vision".into());
+        source.hdr_format = Some("Dolby Vision · Profile 8 (HDR10-compatible)".into());
+        source.dolby_vision = DolbyVisionFacts {
+            profile: Some(8),
+            bl_compat_id: Some(1),
+            rpu_present: Some(true),
+            ..DolbyVisionFacts::default()
+        };
+        let mut profile = constrained_hevc_profile(&["hvc1"]);
+        profile.dolby_vision_profiles = vec![8];
+        let decision = decide(&source, &profile, &RenderCaps::proven(true));
+        assert_eq!(decision.method, PlaybackMethod::Remux);
+        assert!(decision.preserve_dolby_vision);
+        assert_eq!(decision.delivered_dynamic_range, "dolby_vision");
+        assert_eq!(decision.delivered_dolby_vision_profile, Some(8));
+        assert!(decision.reasons.iter().any(|reason| {
+            reason
+            == "HEVC sample entry hev1 not admitted for progressive playback; normalizing through \
+                copy-video delivery"
+        }));
+    }
+
+    #[test]
+    fn original_preserves_packaging_reason() {
+        let mut source = file("mp4", "hevc", "aac");
+        source.video_codec_tag = None;
+        let decision = decide_forced(
+            &source,
+            &constrained_hevc_profile(&["hvc1"]),
+            Force::Original,
+            &RenderCaps::proven(true),
+        );
+        assert_eq!(decision.method, PlaybackMethod::Remux);
+        assert_eq!(
+            decision.reasons,
+            [
+                "forced original quality (no video transcode)",
+                "HEVC sample entry unknown; normalizing for the reported packaging constraint",
+            ]
+        );
+    }
+
+    #[test]
+    fn admitted_and_unaffected_sample_entries_keep_existing_routes() {
+        let hvc1_profile = constrained_hevc_profile(&["hvc1"]);
+
+        let mut hvc1 = file("mp4", "hevc", "aac");
+        hvc1.video_codec_tag = Some("hvc1".into());
+        assert_eq!(
+            decide(&hvc1, &hvc1_profile, &RenderCaps::proven(true)).method,
+            PlaybackMethod::DirectPlay
+        );
+
+        let mut hev1 = hvc1.clone();
+        hev1.video_codec_tag = Some("hev1".into());
+        assert_eq!(
+            decide(
+                &hev1,
+                &constrained_hevc_profile(&["hvc1", "hev1"]),
+                &RenderCaps::proven(true)
+            )
+            .method,
+            PlaybackMethod::DirectPlay
+        );
+
+        let h264 = file("mp4", "h264", "aac");
+        assert_eq!(
+            decide(&h264, &hvc1_profile, &RenderCaps::proven(true)).method,
+            PlaybackMethod::DirectPlay
+        );
+
+        let mut mkv = hvc1;
+        mkv.container = Some("mkv".into());
+        mkv.video_codec_tag = Some("hev1".into());
+        assert_eq!(
+            decide(&mkv, &hvc1_profile, &RenderCaps::proven(true)).method,
+            PlaybackMethod::DirectPlay,
+            "the progressive ISO-BMFF constraint does not govern MKV"
+        );
+    }
+
+    #[test]
+    fn packaging_reason_does_not_claim_copy_delivery_for_a_transcode() {
+        let mut source = file("mp4", "hevc", "aac");
+        source.video_codec_tag = Some("hev1".into());
+        source.height = Some(2160);
+        let mut profile = constrained_hevc_profile(&["hvc1"]);
+        profile.max_height = Some(1080);
+        let decision = decide(&source, &profile, &RenderCaps::proven(true));
+        assert_eq!(decision.method, PlaybackMethod::Transcode);
+        assert!(decision
+            .reasons
+            .iter()
+            .all(|reason| !reason.contains("copy-video delivery")));
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason == "resolution above device maximum"));
+    }
+
+    #[test]
+    fn progressive_hevc_sample_entry_validation_is_exact_and_bounded() {
+        for entries in [vec![], vec!["hvc1"], vec!["hvc1", "hev1", "dvh1", "dvhe"]] {
+            let caps = DeviceCaps {
+                progressive_hevc_sample_entries: Some(
+                    entries.into_iter().map(str::to_owned).collect(),
+                ),
+                ..DeviceCaps::default()
+            };
+            assert!(caps.validate_progressive_hevc_sample_entries().is_ok());
+        }
+        for entries in [
+            vec!["HVC1"],
+            vec![" hvc1"],
+            vec!["hvc1", "hvc1"],
+            vec!["hvc1", "hev1", "dvh1", "dvhe", "avc1"],
+        ] {
+            let caps = DeviceCaps {
+                progressive_hevc_sample_entries: Some(
+                    entries.into_iter().map(str::to_owned).collect(),
+                ),
+                ..DeviceCaps::default()
+            };
+            assert!(caps.validate_progressive_hevc_sample_entries().is_err());
+        }
     }
 
     #[test]

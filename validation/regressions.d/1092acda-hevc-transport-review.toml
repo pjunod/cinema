@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1092acda"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "web-static"]
+reason = "The Rust HLS and shipped web-policy regressions require explicit HLS transport for constrained copy sessions and tier-complete progressive proof for every profile and rung implied by the capability document."

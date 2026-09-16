@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["7dcdd10f"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The Rust playback, probe, and Store regressions retain exact HEVC sample-entry validation, packaging-only Remux selection, normalized source-tag recovery, and stale-snapshot fencing."

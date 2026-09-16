@@ -93,6 +93,8 @@ one.
 | `server.dolby-vision` | Preserve vs strip vs re-encode DV | A client-approved profile is preserved — and for the *dual-layer* profiles (7, and 4) "client-approved" means the client enumerated that number, because the legacy blanket "I do Dolby Vision" bit is a claim about the format and no consumer decoder outside Blu-ray hardware takes dual-layer. An unsupported profile with a compatible base and `dovi_rpu` becomes a strip remux. Without both, re-encode. Apple-supported DV profiles still request a normalized copy-HLS envelope. Profile 5 has no backward-compatible HDR base: its compatibility transcode software-decodes the RPU side data and applies Dolby Vision reshaping through `tonemapx` before any scale or SDR conversion. Boot proves the renderer mechanics, then the first request for each source must prove that enabling RPU application changes sampled pixels; unknown, non-compatible, or unproved routes are refused. | DV profile matrix in `playback/mod.rs`; Profile 5 graph/admission regressions in `transcode/mod.rs` and `plurxd/transcode.rs` |
 | `server.manual-quality` | Auto vs Original vs a rung | Auto uses the ordinary verdict. Original never re-encodes video; it may direct or remux and lets the client rescue a rejection. Any numbered rung forces transcode. Unknown force values degrade to Auto. | Force matrix in `playback/mod.rs` |
 | `server.execution-plan` | Verdict to API action | Direct owns `/direct`; remux owns `/stream.mp4` plus a copy-session URL and flags; transcode owns the HLS-session URL. A caller's `audio=` selection travels in the plan — applied to the remux URL and repeated as `audio` for the session body — and a selection the container's own default cannot deliver reports remux instead of an unexecutable direct plan. Clients execute this plan instead of rebuilding it from `method`. | Exhaustive `DeliveryPlan` Rust unit plus a follow-the-plan selection regression |
+| `server.hevc-sample-entry-admission` | Progressive HEVC source packaging | For otherwise compatible HEVC in MP4/M4V/MOV, an explicit client list admits only the stored sample entry it names. Unknown or disallowed packaging selects a copy remux with a packaging reason; field absence preserves legacy behavior, and Original preserves the reason without permitting a video encode. | SDR, Avatar-shaped DV P8, Original, absent, empty, and permissive-list Rust matrix |
+| `server.hevc-delivery-transport` | Progressive copy output vs HLS requirement | The server computes the sample entry the progressive builder will actually emit. If the explicit list does not admit it, the remux plan carries `requires_hls: true` when HLS was claimed; otherwise decision/create refuse with typed `unsupported_hevc_delivery` before session admission. Minimal 23-byte `hvcC` promotion is `hev1`/`dvhe`; ordinary progressive copy keeps its current builder policy. | Progressive-tag, serialized-plan, typed-refusal, and pre-allocation Rust regressions |
 | `server.selected-audio-compatibility` | Selected track to remux audio recipe | Audio compatibility follows the track selected by language policy or the viewer, not the container's scan-time default. An unsupported preferred TrueHD track is converted to AAC while the HDR video remains copied. | Mixed E-AC-3/TrueHD Dolby Vision Rust regression |
 | `server.apple-high-tier-master` | High-tier Apple HLS playlist envelope | HDR HEVC High-tier sessions without native text renditions serve their media playlist directly, avoiding AVPlayer's multivariant eligibility rejection without changing video samples. | High/Main-tier, HDR/SDR, and subtitle-gate Rust matrix |
 | `server.apple-high-tier-init` | High-tier Apple HLS initialization record | The generated initialization segment clears only its HEVC High-tier declaration for the same narrowly gated HDR sessions, allowing VideoToolbox to inspect otherwise decodable picture data. | Synthetic High-tier `hvcC` Rust regression |
@@ -111,7 +113,8 @@ one.
 
 | ID | Fork | Current rule | Regression pin |
 |---|---|---|---|
-| `web.initial-route` | First browser delivery | Transcode verdict → HLS. Remux → copy HLS when Safari needs it or the server hint passes the MSE codec gate; otherwise progressive fMP4. Direct stays range-served unless a nonzero preferred audio track requires remux. | Node table over the shipped policy module |
+| `web.initial-route` | First browser delivery | Transcode verdict → HLS. A remux with `requires_hls` takes copy HLS when native HLS or the proved hls.js/MSE adapter is available and fails visibly otherwise; it never reaches progressive fallback, including under **Original · one stream**. Other remuxes use copy HLS when Safari needs it or the server hint passes the MSE codec gate, then progressive fMP4. Direct stays range-served unless a nonzero preferred audio track requires remux. | Node table over the shipped policy module and cold-index fallback matrix |
+| `web.progressive-hevc-admission` | Progressive HEVC packaging claim | Probe every advertised Main/Main10 tier separately as `hvc1` and `hev1` through MediaCapabilities `type: file`; a usable false wins, unavailable file queries may fall back to media-element `canPlayType`, and MSE never supplies progressive evidence. Each DV label must cover every DV profile already claimed. Decision and create retain one settled snapshot, and a non-null claim can never be dropped into legacy GET fallback. | Injected progressive/MSE, partial-tier, missing/throwing API, DV-label, empty-list, and no-downgrade Node matrices |
 | `web.hls-transport` | Native HLS vs hls.js | Native capability counts only with WebKit's playback-target API, or when hls.js/MSE is unavailable. Even on Safari, native HLS is reserved for copied HEVC; other HLS uses hls.js so plurx keeps its controls and timeline. | Node native/MSE matrix |
 | `web.manual-quality` | Force and session height | Cold Auto omits height unless a burn/refused remux must preserve a direct/remux resolution promise. Once Auto knows the active rung, later transcode opens carry it across seeks and track changes. Original and `nomse` preserve source height; every numbered choice requests its server rung. | Node force/height matrix |
 | `web.auto-rung` | Auto transcode rung | The menu and controller consume the source-filtered server ladder. Every 5 s Auto samples hls.js bandwidth, runway, stalls, and server speed; emergencies jump directly to the highest sustainable lower rung, while voluntary moves pay the 60 s dwell and restart-cost gates. Upgrades move one rung, never exceed the player height, and remain pinned across later session opens. | Node Auto-policy matrix |
@@ -126,7 +129,9 @@ one.
 
 | ID | Fork | Current rule | Regression pin |
 |---|---|---|---|
-| `apple.transport-and-dv` | AVPlayer caps and direct vs HLS | Probe HEVC, AV1, HDR output, and Dolby Vision output once for every decision; bind both wire spellings to that player and repeat its v2 snapshot on every session create. A 400/404/405 falls back to the matching legacy query, including `hdr10t`, without re-probing. An HDR10 transcode decision echoes `hdr10: true` on create. Execute the server mode, except normalize even a legacy direct Dolby Vision answer through preserving copy HLS. Apple claims only DV Profiles 5 and 8, and preserved DV always uses HLS because raw progressive MP4 can advance while rendering black. | XCTest caps matrix, fallback-status contract, HDR10/create-body encoding, and legacy direct-DV normalization |
+| `apple.transport-and-dv` | AVPlayer caps and direct vs HLS | Probe HEVC, AV1, HDR output, and Dolby Vision output once for every decision; bind both wire spellings to that player and repeat its v2 snapshot on every session create. A field-absent legacy document may fall back on 400/404/405 without re-probing; an explicit HEVC packaging claim may not. An HDR10 transcode decision echoes `hdr10: true` on create. Execute the server mode, except normalize even a legacy direct Dolby Vision answer through preserving copy HLS. Apple claims only DV Profiles 5 and 8, and preserved DV always uses HLS because raw progressive MP4 can advance while rendering black. | XCTest caps matrix, fallback-status contract, HDR10/create-body encoding, and legacy direct-DV normalization |
+| `apple.hevc-sample-entry-claim` | AVPlayer progressive HEVC packaging | A capability snapshot that claims HEVC emits only `progressive_hevc_sample_entries: ["hvc1"]`; a snapshot without HEVC omits the field. Existing DV transport/profile, display, audio, container, and ceiling claims remain unchanged. | XCTest probe matrix plus actual snake-case encoder assertions |
+| `apple.hevc-claim-no-downgrade` | Constrained POST failure vs legacy GET | A non-null sample-entry list—including `[]`—or typed `invalid_capabilities`/`unsupported_hevc_delivery` is surfaced. Only a field-absent document retains 400/404/405 compatibility fallback. | XCTest status/code and constrained/legacy matrix |
 | `apple.compatibility-fallback` | Apple startup decode failure recovery | Before real playback, a preserved DV stream with an HDR10/HLG base strips to that base first; only the next media rejection uses the universal transcode. Each rescue is once and resumes the last truthful film position. | XCTest recovery ladder |
 | `apple.established-hdr-recovery` | Interruption after HDR rendered | Once the item has advanced for ≥5 s, a stall or item failure reconnects the same HDR delivery once. An immediate repeat stops visibly instead of falling through to the SDR compatibility transcode. | XCTest established-delivery guard |
 | `apple.buffering-recovery` | Sustained or self-recovered wait after playback began | Each newly opened item must advance for ≥5 s before six stagnant two-second samples during an explicit AVPlayer buffer wait may reopen the same delivery. The third sample first nudges Play; an immediate repeat stops with network-specific copy. Every report carries the HLS session, a per-item attempt, contiguous loaded runway, AVPlayer wait/buffer flags, access-log request/transfer counters, and the last polled server supply state; the server replaces that snapshot with a fresher live join when possible. Recovery TTFF is measured separately, and copy-HLS replacements seek forward from the preceding keyframe origin instead of replaying it. None of this is codec/HDR evidence. | XCTest recovery, runway, keyframe correction, status decode, and beacon-payload suite; Rust snapshot-race and live-join regressions; physical-iPad throttling pending |
@@ -203,12 +208,15 @@ profile guessed conservatively.
 | `hdr10t` | codec decode + HDR display probes | `1` only when HEVC output can be presented as PQ. This is the legacy spelling of an HEVC v2 entry whose `present` contains `pq`. |
 | `dvprofile` | platform codec APIs | Exact Dolby Vision profiles the decoder and current display both accept. Apple advertises Profiles 5 and 8. Android may advertise P7 only when `MediaCodec` enumerates `DvheDtb`; neither client infers it from generic HDR. |
 | `dvhls` | platform policy | Apple sends `1`: an approved DV stream still needs normalized copy HLS rather than a raw progressive file. Browser/Android omit it unless they need the same envelope. |
+| `progressive_hevc_sample_entries` | progressive file-path probes / Apple policy | V2-only, exact labels admitted for original progressive HEVC in ISO-BMFF. Missing/null preserves the legacy unconstrained path; `[]` admits none. It does not grant codec, profile, HDR, or DV support. |
 
 Android re-runs these probes for every decision because its passthrough audio
 answer belongs to the active HDMI route. Each player retains that decision's
 snapshot, repeats it on every session create and reopen, and uses its matching
-legacy query only when the POST returns 400, 404, or 405 during a mixed-fleet
-rollout. Detail-screen preflights cannot replace a running player's snapshot.
+legacy query only when the document omits the progressive packaging field and
+the POST returns a legacy-compatible 400, 404, or 405. A non-null field is
+never erased on retry. Detail-screen preflights cannot replace a running
+player's snapshot.
 
 The native clients use platform codec/display APIs instead of browser probes.
 Android also includes audio support exposed by the active HDMI/audio sink,
@@ -255,6 +263,8 @@ curl -X POST "$PLURX/api/v1/files/1234/decision?force=auto" \
         ],
         "audio": ["aac","ac3","eac3"],
         "containers": ["mp4","mov"],
+        "transports": ["progressive","hls"],
+        "progressive_hevc_sample_entries": ["hvc1"],
         "dv_transport": "hls",
         "display": {"hdr":true,"dolby_vision":true,"max_nits":1600}
       }}'
@@ -267,15 +277,17 @@ curl -X POST "$PLURX/api/v1/files/1234/decision?force=auto" \
 | `video[].present` | `hdr`, `hdr10t` | transfer functions this codec can present: `sdr` · `pq` · `hlg` |
 | `video[].dv_profiles` | `dv`, `dvprofile` | exhaustive; `[]` means none, and there is no way to claim "all" |
 | `dv_transport` | `dvhls` | `hls` when preserved DV must ride the copy-video envelope |
+| `progressive_hevc_sample_entries` | no flat-query equivalent | exact lowercase `hvc1`, `hev1`, `dvh1`, `dvhe` labels admitted for progressive HEVC; `[]` is explicit none, missing/null is legacy |
 | `display` | folded into `hdr` | facts about the attached output, separate from decode |
 
 The web sends this document (`capsDocument`, `askDecision`) and keeps
-`CAPS_Q` for the progressive `play_url`, which still needs a query string. A
-node that predates the POST answers 404/405 and one that cannot read the
-version answers 400; both fall back to the GET, which returns the same verdict
-— so a fleet mid-deploy is a non-event rather than a broken player, and that
-is the only reason it is safe to send the document while nodes are still
-rolling.
+`CAPS_Q` for legacy progressive URLs. A document carrying
+`progressive_hevc_sample_entries` never falls back to GET after 400/404/405:
+dropping `[]` or a restrictive list would silently broaden the claim. This is
+not negotiated feature discovery—an older v2 server may ignore the unknown
+field and answer 200—so **every serving node must be upgraded before refreshed
+web or Apple clients are published**. Field-absent clients retain the former
+mixed-fleet fallback.
 
 Both wire shapes reach `DeviceProfile` through one function
 (`DeviceCaps::from_caps_v2`), and a test asserts a legacy `CAPS_Q` and the

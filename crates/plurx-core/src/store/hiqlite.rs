@@ -93,7 +93,8 @@ const LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION: i64 = 36;
 const DVR_SCHEMA_VERSION: i64 = 37;
 const SUBJECT_SCHEMA_VERSION: i64 = 38;
 const DVR_EVENT_SCHEMA_VERSION: i64 = 39;
-pub const AUTH_SCHEMA_VERSION: i64 = DVR_EVENT_SCHEMA_VERSION;
+const VIDEO_CODEC_TAG_SCHEMA_VERSION: i64 = 40;
+pub const AUTH_SCHEMA_VERSION: i64 = VIDEO_CODEC_TAG_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -133,6 +134,7 @@ const LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE: i64 = OFFLINE_RECOVERY_CLAIM_SCH
 const LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_CHANNELS_SCHEMA_VERSION;
 const DVR_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION;
 const DVR_EVENT_SCHEMA_MIGRATION_SOURCE: i64 = SUBJECT_SCHEMA_VERSION;
+const VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE: i64 = DVR_EVENT_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -2449,6 +2451,26 @@ impl HiqliteAuthStore {
                     ));
                     let attempt = self.client().txn(statements).await;
                     self.settle_migration_attempt(DVR_EVENT_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (super::FILES_VIDEO_CODEC_TAG_COLUMN, params!()),
+                            (
+                                "UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 \
+                                 WHERE singleton=1 AND schema_version=$3",
+                                params!(
+                                    VIDEO_CODEC_TAG_SCHEMA_VERSION,
+                                    now,
+                                    VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {

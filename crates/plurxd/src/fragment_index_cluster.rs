@@ -1112,6 +1112,7 @@ mod tests {
             duration_ms: Some(1_000),
             container: Some("mkv".to_owned()),
             video_codec: Some("hevc".to_owned()),
+            video_codec_tag: None,
             video_profile: Some("Main 10".to_owned()),
             width: Some(3840),
             height: Some(2160),

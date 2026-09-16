@@ -6084,19 +6084,26 @@ function decisionUrl(fileId, force, sel){
 // writes nothing. `force`, `audio` and `subtitle` stay on the query string —
 // they are request-local choices, not capabilities.
 //
-// A server that predates the document answers 404/405, and a server that
-// cannot read this version answers 400. Both fall back to the GET, which is
-// still the exact same decision: the server puts both wire shapes through one
-// translation. So a mixed fleet mid-deploy is a non-event rather than a
-// broken player, which is the only reason it is safe to send this at all
-// while nodes are still rolling.
+// A legacy document may still fall back to GET on the old compatibility
+// statuses. A document carrying the progressive packaging constraint never
+// does: dropping even [] would silently turn a restrictive claim into the
+// unrestricted legacy path. Serving nodes therefore roll before this client.
 async function askDecision(fileId, force, sel, signal=null){
   const query=`force=${force}${prePlaySelectionQuery(sel)}`;
+  const caps=currentCapsDocument();
   try{
-    return await api(`/files/${fileId}/decision?${query}`,
-      {method:"POST", body:{caps:currentCapsDocument()},signal});
+    const decision=await api(`/files/${fileId}/decision?${query}`,
+      {method:"POST", body:{caps},signal});
+    // The create must act on the exact settled snapshot that produced this
+    // decision, even if the page refreshes capability state in between.
+    Object.defineProperty(decision,"_capsSnapshot",{value:caps,enumerable:false});
+    return decision;
   }catch(e){
-    if(e && (e.status===404 || e.status===405 || e.status===400)){
+    const constrained=Object.prototype.hasOwnProperty.call(
+      caps,"progressive_hevc_sample_entries")
+      &&caps.progressive_hevc_sample_entries!==null;
+    if(!constrained && e && (e.status===404 || e.status===405 || e.status===400)
+      &&e.code!=="invalid_capabilities"&&e.code!=="unsupported_hevc_delivery"){
       return api(decisionUrl(fileId, force, sel),{signal});
     }
     throw e;
@@ -9051,7 +9058,8 @@ async function openSession(fileId, opts, signal=null, requestId=null){
   // transcode fallback, seeks and audio switches all send it from one place.
   // It is also the last build on the fleet holding
   // `plan_derivation.legacy_trusted` off zero.
-  const caps=currentCapsDocument();
+  const caps=(typeof PLAYER!=="undefined"&&PLAYER&&PLAYER.capsSnapshot)
+    ||currentCapsDocument();
   if(capsDocumentIsUsable(caps)){
     body.caps=caps;
     // The other half of the same question. `/decision` is asked with the
@@ -9387,6 +9395,74 @@ function hevcTiersSync(can, mse){
     return can(type)||mse(type);
   });
 }
+
+// Progressive packaging is a separate claim from decoder availability. A
+// MediaSource success cannot authorize a plain <video src>, and a successful
+// hvc1 probe says nothing about hev1 (or either Dolby Vision label).
+async function progressiveHevcSampleEntries(claimedTiers, claimedPqTiers, dvProfiles, injected){
+  const probe=injected||{};
+  let mc=probe.mediaCapabilities;
+  if(mc===undefined){ try{ mc=navigator&&navigator.mediaCapabilities; }catch(e){ mc=null; } }
+  let video=probe.videoElement;
+  if(video===undefined){ try{ video=document.createElement("video"); }catch(e){ video=null; } }
+  const can=type=>{ try{ return !!video&&video.canPlayType(type)!==""; }catch(e){ return false; } };
+  const fileAnswer=async(type,width,height,bitrate,transferFunction)=>{
+    if(!mc||typeof mc.decodingInfo!=="function") return null;
+    const config={contentType:type,width,height,bitrate,framerate:24};
+    if(transferFunction) config.transferFunction=transferFunction;
+    try{
+      const answer=await mc.decodingInfo({type:"file",video:config});
+      return answer&&typeof answer.supported==="boolean"?answer.supported:null;
+    }catch(e){ return null; }
+  };
+  const admitted=[];
+  const summary=hevcTierSummary(claimedTiers,claimedPqTiers);
+  const depths=summary.depth10?[8,10]:(summary.depth8?[8]:[]);
+  const required=[];
+  for(const depth of depths){
+    let profile=HEVC_TIERS.map((tier,index)=>({tier,index}))
+      .filter(row=>row.tier.depth===depth&&row.tier.height<=summary.maxheight);
+    // Main10's lowest configured probe is 1080p. If the shared ceiling was
+    // lowered below that by Main, still require the lowest Main10 file probe:
+    // the wire document emits both profiles whenever Main10 is claimed.
+    if(!profile.length){
+      const first=HEVC_TIERS.findIndex(tier=>tier.depth===depth);
+      if(first>=0) profile=[{tier:HEVC_TIERS[first],index:first}];
+    }
+    required.push(...profile.map(row=>row.index));
+  }
+  for(const tag of ["hvc1","hev1"]){
+    let complete=true;
+    for(const i of required){
+      const tier=HEVC_TIERS[i];
+      const codec=tier.codec.replace(/^hvc1/,tag);
+      const type=`video/mp4; codecs="${codec}"`;
+      const answer=await fileAnswer(type,tier.width,tier.height,tier.bitrate,null);
+      if(answer===false || (answer===null&&!can(type))){ complete=false; break; }
+      // `canPlayType` has no transfer-function axis. If the general ladder
+      // claimed PQ for this rung, only a progressive file answer for PQ can
+      // extend the sample-entry claim to that presentation.
+      if(summary.pq10&&tier.depth>=10){
+        const pq=await fileAnswer(type,tier.width,tier.height,tier.bitrate,"pq");
+        if(pq!==true){ complete=false; break; }
+      }
+    }
+    if(required.length&&complete) admitted.push(tag);
+  }
+  const dvCodec=(tag,profile)=>`${tag}.${profile===5?"05.06":"08.07"}`;
+  const profiles=(dvProfiles||[]).filter(profile=>profile===5||profile===8);
+  for(const tag of ["dvh1","dvhe"]){
+    if(!profiles.length) continue;
+    let complete=true;
+    for(const profile of profiles){
+      const type=`video/mp4; codecs="${dvCodec(tag,profile)}"`;
+      const answer=await fileAnswer(type,3840,2160,30000000,"pq");
+      if(answer===false || (answer===null&&!can(type))){ complete=false; break; }
+    }
+    if(complete) admitted.push(tag);
+  }
+  return admitted;
+}
 // The real probe. `navigator.mediaCapabilities.decodingInfo` is the only API
 // that takes a resolution, a bitrate and a transfer function and answers about
 // the combination — which is what a decoder ceiling actually is. Each Main10
@@ -9485,10 +9561,15 @@ function buildPlayCaps(hevc){
 }
 // The boot-time answer, from the synchronous ladder so that CAPS_Q exists
 // before anything can ask for it. MediaCapabilities refines it below.
-let PLAY_CAPS=buildPlayCaps(hevcTierSummary(hevcTiersSync(
+let PLAY_HEVC_TIERS=hevcTiersSync(
   t=>{ try{ const v=document.createElement("video"); return v.canPlayType(t)!==""; }catch(e){ return false; } },
   t=>{ try{ return !!(window.MediaSource && MediaSource.isTypeSupported(t)); }catch(e){ return false; } }
-), null));
+);
+let PLAY_HEVC_PQ_TIERS=[];
+let PLAY_CAPS=buildPlayCaps(hevcTierSummary(PLAY_HEVC_TIERS, null));
+// Safe even before the async probe settles: [] is an explicit restrictive
+// claim, never the legacy/unrestricted omission.
+PLAY_CAPS.progressiveHevcSampleEntries=[];
 // The capability query string every /decision and /stream.mp4 carries.
 //
 //   vcodec     CSV of decodable video codecs. `hevc` = an HEVC decoder exists;
@@ -9579,6 +9660,8 @@ function capsDocument(c, limits){
     audio:String(c.acodec||"").split(",").filter(Boolean),
     containers:String(c.container||"").split(",").filter(Boolean),
     transports:["progressive","hls"],
+    progressive_hevc_sample_entries:Array.isArray(c.progressiveHevcSampleEntries)
+      ?c.progressiveHevcSampleEntries.slice(0,4):[],
     // Only when this browser has one; absent is not a claim.
     ...(c.dv?{dv_transport:"progressive"}:{}),
     display:{hdr:!!c.hdrDisplay, dolby_vision:dvProfiles.length>0},
@@ -9716,7 +9799,9 @@ function streamRejectionReport(facts, base){
 // create asks this.
 function capsDocumentIsUsable(doc){
   return !!doc && ((doc.video||[]).length>0 || (doc.audio||[]).length>0
-    || (doc.containers||[]).length>0);
+    || (doc.containers||[]).length>0
+    || (Object.prototype.hasOwnProperty.call(doc,"progressive_hevc_sample_entries")
+      &&doc.progressive_hevc_sample_entries!==null));
 }
 // Re-probe through MediaCapabilities and rebuild the wire string. Async because
 // decodingInfo is, and the server only ever hears one answer per session — so
@@ -9727,9 +9812,16 @@ const PLAY_CAPS_READY=(async()=>{
   try{
     const mc=await hevcTiersMediaCapabilities();
     if(mc){
+      PLAY_HEVC_TIERS=mc.passed.slice();
+      PLAY_HEVC_PQ_TIERS=mc.pqPassed.slice();
       PLAY_CAPS=buildPlayCaps(hevcTierSummary(mc.passed, mc.pqPassed));
-      CAPS_Q=capsQuery(PLAY_CAPS);
     }
+    const dvProfiles=String(PLAY_CAPS.dvprofile||"").split(",")
+      .map(Number).filter(n=>n===5||n===8);
+    PLAY_CAPS.progressiveHevcSampleEntries=
+      await progressiveHevcSampleEntries(
+        PLAY_HEVC_TIERS,PLAY_HEVC_PQ_TIERS,dvProfiles);
+    CAPS_Q=capsQuery(PLAY_CAPS);
   }catch(e){}
   return PLAY_CAPS;
 })();
@@ -10067,6 +10159,8 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   PLAYER={fileId, timer:null, offset:0, hls:null, knownDur:knownDurMs||0,
     decodeRetest:retestDecodeLimit,
     durMs:(src.duration_ms||knownDurMs||0), method:decision.method, encoder:null,
+    capsSnapshot:decision._capsSnapshot||currentCapsDocument(),
+    requiresHls:!!(decision.delivery&&decision.delivery.requires_hls),
     // `method` mutates as the session moves (a burn sets it to 'transcode');
     // this keeps the DECISION's verdict, which is what sessionHeight() needs
     // to tell a burn-over-remux from a burn on a genuine transcode.
@@ -10173,7 +10267,9 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
 
   const nativeHls=useNativeHls(video);
   const segmentedRemux=segmentedRemuxOk(decision,video);
-  let initialRoute=playbackInitialRoute(decision,initialAudio,nativeHls,segmentedRemux,sessionAudioOffset);
+  const hlsAvailable=!noSegments()&&(nativeHls||copyHlsMseOk(decision,video));
+  let initialRoute=playbackInitialRoute(
+    decision,initialAudio,nativeHls,segmentedRemux,sessionAudioOffset,hlsAvailable);
   // Following always uses the finite-HLS session boundary where its durable
   // purpose and history isolation are enforced. Copy-HLS retains source video
   // when the decision does not require an encode.
@@ -10189,6 +10285,12 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     PLAYER.method='transcode'; PLAYER.copyHls=false;
     PLAYER.reasons=[`subtitle burn-in (${subLabelFor(PLAYER.subs.find(s=>s.index===preBurn),preBurn)}) `+
                     `— drawing subtitles into the picture forces a re-encode`].concat(PLAYER.reasons||[]);
+  }
+  if(initialRoute==='unsupported_hevc_delivery'){
+    failPreparation(Object.assign(
+      new Error("This browser cannot execute the required HEVC HLS delivery. Disable one-stream mode or use a browser with HLS support."),
+      {code:"unsupported_hevc_delivery"}));
+    return;
   }
   if(initialRoute==='transcode_hls'){
     // Transcode: start an HLS session (server re-encodes + tone-maps).
@@ -10306,10 +10408,11 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
 }
 // Audio correction needs server muxing even if the file itself is directly
 // playable. Re-reading /decision must not undo that delivery requirement.
-function playbackInitialRoute(decision,audio,nativeHls,segmentedRemux,audioOffsetMs){
+function playbackInitialRoute(decision,audio,nativeHls,segmentedRemux,audioOffsetMs,hlsAvailable){
   return PlaybackPolicy.initialRoute({
     method:audioOffsetMs&&decision.method==='direct_play'?'remux':decision.method,
-    selectedAudioIndex:audio,nativeHls,segmentedRemux
+    selectedAudioIndex:audio,nativeHls,segmentedRemux,
+    requiresHls:!!(decision.delivery&&decision.delivery.requires_hls),hlsAvailable
   });
 }
 // Commands arriving while a full open is awaiting a decision/session replace
@@ -10457,7 +10560,8 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
     // progressive remux below — so it is answered locally instead of retried.
     const retry={context:playbackCreateRetryContext(),preparation,
       answeredLocally:failure=>PlaybackPolicy.indexPendingFallback({
-        code:failure&&failure.code,method:PLAYER&&PLAYER.method,nativeHls:native
+        code:failure&&failure.code,method:PLAYER&&PLAYER.method,nativeHls:native,
+        requiresHls:!!(PLAYER&&PLAYER.requiresHls)
       })==="progressive_remux"};
     // Both shipped call sites pass a preparation owner, and this is the only
     // thing that bounds and CANCELS an open — a create with no signal cannot
@@ -10473,7 +10577,8 @@ async function startCopyHls(v, startSec, live, openAttempt, preparation, beforeA
   }catch(error){
     if(live && !live()) return false;
     const fallback=PlaybackPolicy.indexPendingFallback({
-      code:error&&error.code,method:PLAYER&&PLAYER.method,nativeHls:native
+      code:error&&error.code,method:PLAYER&&PLAYER.method,nativeHls:native,
+      requiresHls:!!(PLAYER&&PLAYER.requiresHls)
     });
     if(fallback!=="progressive_remux") throw error;
     // The immutable index is node-local and may still be catching up after a
@@ -10608,9 +10713,8 @@ function mseCanTake(srcCodec, audioCodec, bitDepth){
 // transient path gap. This function is the browser's veto: only it knows
 // whether hls.js and its MediaSource implementation accept the exact codec
 // pair. A veto keeps progressive playback — stuttery is preferable to black.
-function segmentedRemuxOk(decision, video){
-  if(!decision || !decision.prefer_segmented) return false;
-  if(noSegments()) return false;             // the viewer asked for one stream
+function copyHlsMseOk(decision, video){
+  if(!decision) return false;
   if(!(window.Hls && Hls.isSupported())) return false;
   if(useNativeHls(video)) return false;      // Safari already routes here below
   const src=decision.source||{};
@@ -10619,6 +10723,11 @@ function segmentedRemuxOk(decision, video){
   const track=(decision.audio||[]).find(a=>a.default) || (decision.audio||[])[0];
   const audio=decision.transcode_audio? "aac" : (track&&track.codec);
   return mseCanTake(src.video_codec, audio, src.bit_depth);
+}
+function segmentedRemuxOk(decision, video){
+  if(!decision || !decision.prefer_segmented) return false;
+  if(noSegments()) return false;             // the viewer asked for one stream
+  return copyHlsMseOk(decision,video);
 }
 // Catch the hitch itself, frame by frame.
 //
@@ -18614,11 +18723,34 @@ function webHlsStartupRecoveryCard(){
       <p class="devcheck-note">Advisory only. Native-HLS playback continues to use the platform player; this card describes the hls.js/MSE path.</p>
       </div></details>`);
 }
+function hevcSampleEntryAdmissionCard(){
+  const caps=currentCapsDocument();
+  const entries=caps.progressive_hevc_sample_entries;
+  const constrained=Array.isArray(entries);
+  const hls=(caps.transports||[]).includes("hls");
+  return setCard(`${cardHead("HEVC sample-entry admission",
+      "Keep incompatible progressive HEVC packaging on a safe copy-HLS route.",
+      `<span class="pill ok">automatic</span>`)}
+      <div class="hint"><b>No feature flag is used.</b> Enforcement is active whenever a client sends the additive packaging claim. These checks are rollout advice only and never disable playback policy.</div>
+      <details class="setdetails" open><summary>Safe enablement and rollout readiness</summary><div class="setdetails-body">
+      ${devStaticReq("This browser's progressive claim",constrained?`settled · ${entries.length?entries.join(", "):"none"}`:"not reported",
+        "Capability discovery must finish before playback. Each listed label is proven on the progressive file path across every advertised HEVC tier; MSE evidence cannot widen it.",constrained?"ok":"warn")}
+      ${devStaticReq("HLS fallback transport",hls?"met":"not claimed",
+        "A copy whose actual progressive label is not admitted requires an explicitly claimed HLS transport. Session creation refuses before allocation when no safe transport exists.",hls?"ok":"warn")}
+      ${devStaticReq("Serving-fleet order","operator confirmation required",
+        "Upgrade every serving node before publishing refreshed web or Apple clients. A pre-repair v2 server may silently ignore the additive field.","warn")}
+      ${devStaticReq("Stored source-tag recovery","automatic · observe completion",
+        "The bounded catalogue backfill reads stored probe JSON only, under its own lease. Confirm its completion receipt before treating unknown-tag remux volume as steady state.","")}
+      ${devStaticReq("Physical browser and Apple evidence","not recorded by this page",
+        "Record Safari, Chrome, iOS and tvOS observations separately. Missing device evidence never turns into permission to broaden a claim.","warn")}
+      <p class="devcheck-note">Advisory only. Unmet or unknown rows do not gate the feature, rewrite capability claims, or override the server's typed refusal.</p>
+      </div></details>`);
+}
 function uiEnableAdvisory(){
   const browser=typeof CSS!=='undefined'&&CSS.supports('display','grid')&&typeof fetch==='function';
   const libs=SETTINGS_DATA&&SETTINGS_DATA.libs;
   const row=(title,state,detail)=>`<div><strong>${esc(title)} · ${esc(state)}</strong><small>${esc(detail)}</small></div>`;
-  return `<section class="card" id="ui-enable"><h2>Enable</h2><p>The updated browsing, continuation and activity layouts are enabled in this build. They need no rollout flag.</p><div class="enable-advisory">${row('Browser support',browser?'Met':'Not confirmed','Responsive layout and API support. This observation is advisory.')}${row('Signed-in account',ME?'Met':'Not confirmed','Watch state and recording visibility use the signed-in account.')}${row('Library data',Array.isArray(libs)?libs.length?'Available':'No libraries configured':'Not loaded','Readable files and accurate metadata make continuation and preview useful. Missing data is shown in context.')}${row('Playback and recording','Your saved choices','Use the controls below to enable recording, channel playback or quality handoff. Readiness results never override your choice.')}</div><p class="hint">Advisory only: unmet or unknown checks do not hide features or disable enable switches. Existing authorization, file availability and operational safety rules still apply.</p><nav class="watch-browse" aria-label="Enable controls"><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-recording')?.scrollIntoView({behavior:'smooth',block:'start'})">Recording ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-channels')?.scrollIntoView({behavior:'smooth',block:'start'})">Library channels ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-quality')?.scrollIntoView({behavior:'smooth',block:'start'})">Quality handoff ↓</a></nav></section>`;
+  return `<section class="card" id="ui-enable"><h2>Enable</h2><p>The updated browsing, continuation and activity layouts are enabled in this build. They need no rollout flag.</p><div class="enable-advisory">${row('Browser support',browser?'Met':'Not confirmed','Responsive layout and API support. This observation is advisory.')}${row('Signed-in account',ME?'Met':'Not confirmed','Watch state and recording visibility use the signed-in account.')}${row('Library data',Array.isArray(libs)?libs.length?'Available':'No libraries configured':'Not loaded','Readable files and accurate metadata make continuation and preview useful. Missing data is shown in context.')}${row('Playback and recording','Your saved choices','Use the controls below to enable recording, channel playback or quality handoff. Readiness results never override your choice.')}</div><p class="hint">Advisory only: unmet or unknown checks do not hide features or disable enable switches. Existing authorization, file availability and operational safety rules still apply.</p><nav class="watch-browse" aria-label="Enable controls"><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-recording')?.scrollIntoView({behavior:'smooth',block:'start'})">Recording ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-channels')?.scrollIntoView({behavior:'smooth',block:'start'})">Library channels ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-quality')?.scrollIntoView({behavior:'smooth',block:'start'})">Quality handoff ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-hevc-sample-entry')?.scrollIntoView({behavior:'smooth',block:'start'})">HEVC admission ↓</a></nav></section>`;
 }
 function systemAttentionHtml(sys){
   const storage=sys.storage||{}, mounts=(storage.mounts||[]).filter(m=>m.read_bps==null||m.cache_suspect);
@@ -18669,6 +18801,7 @@ function developerPanel(settings,readiness){
       <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Explicit server and browser enablement with advisory safety evidence.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection"><h2>Playback surface contract</h2><p>Advisory verification status for the one fault contract every client renders. Nothing here is a switch.</p></div>${playbackSurfaceReadinessCard()}
       <div class="setsection"><h2>Web HLS startup recovery</h2><p>Always-on manifest recovery with advisory browser and server readiness.</p></div>${webHlsStartupRecoveryCard()}
+      <div class="setsection" id="enable-hevc-sample-entry"><h2>HEVC sample-entry admission</h2><p>Always-on packaging admission with advisory deployment and evidence status.</p></div>${hevcSampleEntryAdmissionCard()}
       <div class="setsection"><h2>Compatibility</h2><p>Native server and protocol controls for compatible playback clients.</p></div>${windowsServerCard(settings,readiness)}${protocol}
       <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}`;
 }

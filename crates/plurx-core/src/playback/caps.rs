@@ -180,6 +180,11 @@ pub struct DeviceCaps {
     pub containers: Vec<String>,
     #[serde(default)]
     pub transports: Vec<String>,
+    /// Sample-entry labels admitted for original progressive HEVC in an
+    /// ISO-BMFF container. `None` preserves the legacy unconstrained path;
+    /// `Some([])` is an explicit claim that no progressive label is admitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progressive_hevc_sample_entries: Option<Vec<String>>,
     /// `hls` when preserved Dolby Vision has to ride the copy-video HLS
     /// envelope rather than a progressive MP4. Apple's AVPlayer can report a
     /// healthy Profile 8 pipeline, advance the raw file's timeline, and still
@@ -279,6 +284,7 @@ impl DeviceCaps {
             audio: legacy.audio_codecs.clone(),
             containers: legacy.containers.clone(),
             transports: Vec::new(),
+            progressive_hevc_sample_entries: None,
             dv_transport: legacy.dvhls.then(|| "hls".to_owned()),
             display: Some(DisplayCaps {
                 hdr: legacy.hdr,
@@ -295,7 +301,33 @@ impl DeviceCaps {
     /// that sent only a named profile produces, which must keep taking the
     /// named-profile path rather than being read as "decodes nothing".
     pub fn is_empty(&self) -> bool {
-        self.video.is_empty() && self.audio.is_empty() && self.containers.is_empty()
+        self.video.is_empty()
+            && self.audio.is_empty()
+            && self.containers.is_empty()
+            && self.progressive_hevc_sample_entries.is_none()
+    }
+
+    /// Validate the bounded progressive HEVC packaging claim.
+    ///
+    /// Syntax/type errors are rejected by Serde. This covers semantic errors
+    /// that would otherwise turn a restrictive claim into a different one.
+    pub fn validate_progressive_hevc_sample_entries(&self) -> Result<(), &'static str> {
+        let Some(entries) = self.progressive_hevc_sample_entries.as_ref() else {
+            return Ok(());
+        };
+        if entries.len() > 4 {
+            return Err("progressive_hevc_sample_entries must contain at most 4 entries");
+        }
+        let mut seen = BTreeSet::new();
+        for entry in entries {
+            if !matches!(entry.as_str(), "hvc1" | "hev1" | "dvh1" | "dvhe") {
+                return Err("progressive_hevc_sample_entries contains an unsupported entry");
+            }
+            if !seen.insert(entry.as_str()) {
+                return Err("progressive_hevc_sample_entries contains a duplicate entry");
+            }
+        }
+        Ok(())
     }
 }
 
@@ -421,6 +453,7 @@ impl DeviceProfile {
             dolby_vision_profiles,
             supports_hdr10_transcode,
             remux_dolby_vision: caps.dv_transport.as_deref() == Some("hls"),
+            progressive_hevc_sample_entries: caps.progressive_hevc_sample_entries.clone(),
             presents,
             profile_max_heights,
             learned_limits: caps
