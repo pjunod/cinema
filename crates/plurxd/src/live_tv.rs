@@ -29,7 +29,10 @@ use crate::state::SystemInfo;
 
 pub(crate) mod dvr;
 pub(crate) mod guide;
+
 pub(crate) mod schedule;
+#[cfg(all(test, target_os = "macos"))]
+mod videotoolbox_tests;
 pub(crate) mod webhook;
 
 pub(crate) use guide::{
@@ -5995,6 +5998,7 @@ fn live_ffmpeg_command_for_input(
                 plan.force_idr,
                 plan.software_threads,
             ));
+            command.args(live_caption_args(encoder));
         }
     }
     match plan.delivery.audio_action {
@@ -6136,6 +6140,17 @@ fn live_video_filter(
         },
     }
     filters.join(",")
+}
+
+fn live_caption_args(encoder: Encoder) -> &'static [&'static str] {
+    match encoder {
+        // MPEG-2 broadcasts carry A/53 captions as frame side data. FFmpeg's
+        // VideoToolbox SEI insertion can reject them with AVERROR_INVALIDDATA
+        // and kill otherwise valid live video. Live captions are unsupported;
+        // disable this encoder-only forwarding, leaving copy routes intact.
+        Encoder::VideoToolbox => &["-a53cc", "0"],
+        _ => &[],
+    }
 }
 
 async fn capture_live_stderr(
@@ -9107,6 +9122,68 @@ Output #0, hls, to 'index.m3u8':
             "512 KiB was the smallest value measured; below it nothing was \
              won and detection has less to work with"
         );
+    }
+
+    #[test]
+    fn live_caption_forwarding_is_disabled_only_for_videotoolbox_encoding() {
+        let system = SystemInfo {
+            ffmpeg: "/fixture/ffmpeg".into(),
+            ..SystemInfo::default()
+        };
+        for input in [LiveTvFfmpegInput::Tuner, LiveTvFfmpegInput::GraphProbe] {
+            for encoder in [
+                Encoder::VideoToolbox,
+                Encoder::Software,
+                Encoder::Qsv,
+                Encoder::Vaapi,
+                Encoder::Nvenc,
+            ] {
+                let plan = LiveTvTranscodePlan::new(
+                    &system,
+                    test_encode_delivery(720),
+                    Some(encoder),
+                    None,
+                )
+                .expect("encode plan");
+                let command = live_ffmpeg_command_for_input(
+                    &system,
+                    &plan,
+                    Path::new("/fixture/live"),
+                    input,
+                )
+                .expect("encode command");
+                let args: Vec<_> = command.as_std().get_args().collect();
+                let caption_args: Vec<_> =
+                    args.windows(2).filter(|pair| pair[0] == "-a53cc").collect();
+                if encoder == Encoder::VideoToolbox {
+                    assert_eq!(caption_args.len(), 1);
+                    assert_eq!(caption_args[0][1], "0");
+                } else {
+                    assert!(caption_args.is_empty(), "leave {encoder:?} unchanged");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn live_caption_forwarding_leaves_video_copy_routes_unchanged() {
+        let system = SystemInfo {
+            ffmpeg: "/fixture/ffmpeg".into(),
+            ..SystemInfo::default()
+        };
+        for audio_action in [LiveTrackAction::Copy, LiveTrackAction::Encode] {
+            let mut delivery = test_encode_delivery(720);
+            delivery.video_action = LiveTrackAction::Copy;
+            delivery.audio_action = audio_action;
+            let plan = LiveTvTranscodePlan::new(&system, delivery, None, None).expect("copy plan");
+            let command = live_ffmpeg_command(&system, &plan, Path::new("/fixture/live"))
+                .expect("copy command");
+            let args: Vec<_> = command.as_std().get_args().collect();
+            assert!(args
+                .windows(2)
+                .any(|pair| pair[0] == "-c:v" && pair[1] == "copy"));
+            assert!(!args.iter().any(|arg| *arg == "-a53cc"));
+        }
     }
 
     /// Live TV has no pre-body codec facts, so its plan freezes the explicit

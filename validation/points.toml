@@ -710,6 +710,7 @@ paths = [
   "crates/plurxd/src/live_tv.rs",
   "crates/plurxd/src/live_tv_delivery.rs",
   "crates/plurxd/src/live_tv/guide.rs",
+  "crates/plurxd/src/live_tv/videotoolbox_tests.rs",
   "crates/plurxd/src/http/live_tv.rs",
   "crates/plurxd/src/http/internal_live_tv.rs",
   "crates/plurxd/src/web/live-tv.js",
