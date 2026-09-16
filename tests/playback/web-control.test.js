@@ -4748,6 +4748,7 @@ async function main() {
       "const hls={startLoad(at){loads.push({at,now});}};",
       "const video={currentTime:0};",
       "let PLAYER={attemptId:'a1',hls,hlsRetryUsed:0};",
+      shippedSource("playbackAttemptTerminallyStopped"),
       shippedSource("scheduleHlsNetworkRetry"),
       "return {loads,logs,player:()=>PLAYER,video,hls,",
       "  retry(detail){return scheduleHlsNetworkRetry(video,PLAYER,detail);},",
