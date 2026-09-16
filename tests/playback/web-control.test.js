@@ -79,6 +79,8 @@ function fullOpenHarness() {
     surfaceSeam(),
     "const loading=[],posted=[],ITEM_FOR_FILE={film:'film-item','new-title':'new-item'};function api(path,{body}={}){posted.push({path,body});return Promise.resolve({});}function wirePlayer(){} function setLoading(...args){loading.push(args);} function toast(){} function closeMenu(){} const location={hash:'#/'};function exitPresentationModes(){}function cancelPendingSeek(){}",
     "function clientLog(){} function playbackContext(){return {};} function decodeLimits(){return {};} function playerPixelHeight(){return 1080;}",
+    // Capability probing is a seam here; play retains this snapshot for routing.
+    "function currentCapsDocument(){return {video:[],audio:[]};}",
     "function askDecision(file,force,selection,signal){return new Promise(resolve=>decisions.push({file,selection:selection&&{...selection},signal,resolve}));}",
     "function openSession(file,opts,signal,requestId){return new Promise((resolve,reject)=>sessions.push({file,opts,signal,requestId,reject,resolve(info={}){resolve({...info,session_id:info.session_id||'session-'+sessions.length,opts});}}));}",
     "function attachSession(v,p,info,pos){p.sessionId=info.session_id;p.offset=0;p.vod=true;media.push({attached:info.opts});markPlaybackControlSeekExecuted(p,pos);return pos;}",
@@ -107,6 +109,7 @@ function fullOpenHarness() {
     shippedSource("takePlaybackAttemptReason"), shippedSource("playbackSelection"),
     shippedSource("positionForPlaybackIntent"), shippedSource("supersedePlaybackControlIntent"),
     shippedSource("beginPlaybackControlSeek"), shippedSource("rememberPlaybackSelection"),
+    shippedSource("noSegments"), shippedSource("copyHlsMseOk"),
     shippedSource("playbackInitialRoute"), shippedSource("restartPendingPlaybackOpen"),
     shippedSource("requestPlaybackMediaChange"),shippedSource("executePlaybackMediaChange"),
     shippedSource("streamGeneration"),shippedSource("transcodeOpts"),shippedSource("transcodeHeight"),shippedSource("sessionHeight"),
