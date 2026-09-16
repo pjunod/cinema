@@ -1,6 +1,7 @@
 # Quality switch continuity — why every rung change is still a reopen, and the plan to make it a handoff
 
-**Status:** assessment complete, plan awaiting Paul's rulings in §9 ·
+**Status:** ruled 2026-09-16 — §9's five decisions are taken; the build plan is
+[QUALITY-SWITCH-CONTINUITY-BUILD.md](QUALITY-SWITCH-CONTINUITY-BUILD.md) ·
 **Anchors:** `main` at `c9e4edf4` (2026-09-16, deployed to nynuc/m6 the same
 evening) · **Written:** 2026-09-16 · **Companions:**
 [PLAYBACK-CONTROL-STATUS.md](PLAYBACK-CONTROL-STATUS.md) (what M6 built),
@@ -10,9 +11,9 @@ wire), [M6-SERVER-PRIME-HANDOFF.md](M6-SERVER-PRIME-HANDOFF.md) (the prime),
 ladder and Auto).
 
 Read §1 and §2 first: they say what the tree does today and why the viewer
-still sees a gap, with the line numbers. §3–§6 are the plan. §9 lists the
-decisions that are Paul's; nothing in §5 should be built before they are
-taken. Line numbers are from `c9e4edf4` — re-verify against the file before
+still sees a gap, with the line numbers. §3–§6 are the plan. §9 records the
+decisions Paul took on 2026-09-16; the executing agent builds from the build
+plan, not from this document. Line numbers are from `c9e4edf4` — re-verify against the file before
 editing, this tree moves daily.
 
 The one-sentence finding: **the prepared handoff is built and deployed on
@@ -190,9 +191,12 @@ A rung change the viewer cannot detect except by the picture changing:
   incumbent — and only then, if the change was directed, falls back to the
   reopen they get today. A failed preparation must never cost more than no
   preparation would have.
-- The time from tap to new quality on screen is allowed to be several
-  seconds. It is not the metric. The metric is *frames lost*, which should be
-  zero, and *audio glitch at the switch*, which should be inaudible.
+- The time from tap to new quality on screen is bounded but not the metric:
+  the client stops waiting for an offer 12 s after the tap and reopens; after
+  an offer, M6's existing readiness and first-frame bounds apply and their
+  failure also ends in that one reopen (build plan §1). The metric is
+  *frames lost*, which should be zero, and *audio glitch at the switch*,
+  which should be inaudible.
 
 Bandwidth is not the concern; encoder capacity is. The server already runs
 the successor at `Priority::Speculative` and pre-empts it for any foreground
@@ -200,6 +204,14 @@ start (`admission.rs:220-222`, `hls.rs:7307-7329`), which is the right
 trade. The plan keeps that.
 
 ## 4. Protocol changes — small, additive, gated on declared vocabulary
+
+The build plan is the executable version of §4–§6 and supersedes them where
+they differ; Astra's 2026-09-16 review corrected this section's first
+draft in four places (the `staging` state must cover planning before
+reservation; the fallback position is sampled at the reopen; Android's
+alignment is a rendezvous hold, not a chase; the web commit must finish its
+corrective seek before exposing). The build plan's §11 carries the
+disposition.
 
 Every new field is optional on the wire and is emitted only to a client
 whose request declares the action or capability that reads it, because
@@ -278,17 +290,21 @@ The shape is the same on all three and Apple already has most of it:
    selection (`reportIntent` / `notifyUrgently` / `notifyPlaybackControl`).
 2. Wait for one of: a `Prepare` (→ existing build path), `preparation:
    "none"` after the ask was accepted (server declined → reopen now),
-   or the bound. **Bound: 12 s** from the accepted exchange. Rationale: the
-   viewer is watching the old quality throughout, so waiting costs nothing
-   visible; 12 s covers store reservation (5 s budget) plus a cold encoder
-   admission (`QUEUE_WAIT = 5s`, `admission.rs:46`) with margin, and is far
-   below the 45 s prime budget the server allows itself. A prime that has not
-   produced a `Prepare` in 12 s is one the client should stop waiting for
-   and the server should be told to abort (§5.1 step 4).
+   or the bound. **Bound: 12 s from the tap** (D1). Rationale: the viewer
+   is watching the old quality throughout, so waiting costs nothing visible;
+   12 s covers store reservation (5 s budget) plus a cold encoder admission
+   (`QUEUE_WAIT = 5s`, `admission.rs:46`) with margin, and is far below the
+   45 s prime budget the server allows itself. A prime that has not produced
+   a `Prepare` in 12 s is one the client should stop waiting for and the
+   server should be told to abort (§5.1 step 4). The clock starts at the tap
+   so a slow first exchange cannot stretch it.
 3. While waiting and `preparation == "staging"`, exchange at 1 Hz (§4.2).
 4. On bound expiry: send `aborted` if an `action_id` was seen, else nothing
    (the server's supersession cancel from §4.3 covers the rest), then reopen
-   exactly as today.
+   exactly as today — **at the film position the viewer has reached by
+   then**, not the one captured at the tap. A directed change stays owned
+   until a commit or exactly one reopen; a successor that fails after the
+   offer falls back the same way (build plan §5.3, §6.3, §7.2).
 5. A seek during the wait cancels the wait and reopens at the seek target —
    position is not in the digest (§1.3), so the successor would be built at
    the wrong second. (The server's `incumbent_waiting` cancel does not fire
@@ -307,12 +323,12 @@ The shape is the same on all three and Apple already has most of it:
   when the incumbent is *not* stalled (the server cancels preparations on
   `Waiting|Stalled` anyway, so a stalled reopen stays a reopen); the Auto ask
   needs §4.4.
-- The existing prepared block needs one change: `beginPreparedReplacement`
-  runs the successor muted *and playing* (`:8127`), commits at a 4 s lead
-  (`PREPARED_BUFFER_LEAD_MS`, `:7856`), hides and mutes the incumbent in the
-  same synchronous block as it exposes the successor (`:8254-8266`). That is
-  already the right choreography. Measure the audio seam (§8 M3) before
-  changing the lead.
+- The existing prepared block runs the successor muted *and playing*
+  (`:8127`) and commits at a 4 s lead (`PREPARED_BUFFER_LEAD_MS`, `:7856`) —
+  right — but `commitPreparedReplacement` issues its corrective seek and
+  exposes the successor in the same synchronous block (`:8210-8266`) without
+  awaiting `seeked` or re-checking buffered media. The build plan's §7.3
+  splits it into align-then-expose with the incumbent visible throughout.
 - Do not reopen the reporter across the wait: `p.mediaAttachment` must stay
   set, since that is the guard that dropped the `Prepare` in §2.2.
 
@@ -341,12 +357,10 @@ The shape is the same on all three and Apple already has most of it:
   `onPrepareAction` (`:2996`) is the build path and stays.
 - Remove the incumbent freeze during final alignment (`player.playWhenReady
   = false` at `:3133`, `:3142`). It is a visible pause on every prepared
-  switch and web proves it is unnecessary: run the successor at volume 0
-  with `playWhenReady = true` (already `:3623-3631`) and commit when its
-  buffered-through leads the *moving* playhead by the runway, seeking the
-  successor onto the incumbent's second only if drift exceeds the 250 ms
-  slack (`PREPARED_ALIGNMENT_SLACK_MS`). The `DISCONTINUITY_REASON_SEEK`
-  proof (`:3052-3063`) still gates the commit.
+  switch. The replacement is a rendezvous hold — park the successor at a
+  point ahead of the playhead, keep the incumbent playing, and swap when it
+  arrives — specified in the build plan §6.4; a successor that chases a
+  moving playhead at the same rate never closes the gap.
 - `preparedReplacementEnabled` is read once per player (`:562-576`); fine,
   document it in the Developer row rather than changing it.
 
@@ -409,6 +423,10 @@ exist. Neither is in M1–M3.
 Each is one PR, built in the fast lane, adversarially reviewed once as a
 whole, full suite once after the findings, then merged.
 
+Branch model: one `effort/quality-switch-continuity` branch per
+[AGENTS.md](../../AGENTS.md) — M0 and M1 share server files, so the
+bounded exception does not apply. Order per D5: M0 → M2 → M1 → M3.
+
 ### M0 — the server stops paying for successors nobody will watch
 
 §4.3 supersession cancel, plus `delivery.preparation` (§4.1). Acceptance: a
@@ -452,18 +470,22 @@ consecutive directed changes on each platform with zero dropped frames and
 no audible seam, from a realistic runway, on the fleet build — the number
 [PLAYBACK-CONTROL-STATUS.md](PLAYBACK-CONTROL-STATUS.md) says nobody has.
 
-## 9. Decisions that are Paul's
+## 9. Decisions — taken 2026-09-16
 
-- **D1 — the wait bound.** 12 s proposed (§5.1). Shorter makes the fallback
-  more common on a busy node; longer only delays the new quality on a node
-  that will never answer.
-- **D2 — `delivery.preparation` as a field vs a new advisory action type.**
-  Field proposed; an action type would need per-client vocabulary
-  declaration before any client could see it.
-- **D3 — Auto.** D3-a (client asks, §4.4) now and D3-b (server proposes,
-  §6) later, or straight to D3-b and delete the web controller.
-- **D4 — Apple's switch primitive.** Keep `replaceCurrentItem` (measured
-  24–160 ms first frame) and measure in M3, or build the second-layer
-  cross-fade now.
-- **D5 — order.** M0 → M1 → M2 → M3 as written, or M0 → M2 (Apple is
-  closest) → M1.
+- **D1 — the wait bound: 12 s.** Shorter makes the fallback more common on
+  a busy node; longer only delays the new quality on a node that will never
+  answer. The viewer watches the old quality throughout, so the wait is
+  invisible.
+- **D2 — `delivery.preparation` is a field, not an action type.** Both
+  native decoders ignore unknown keys, so older clients are unaffected; a new
+  action type would stop Apple's reporter for the session unless every client
+  declared it first. It is a state, which is what a field is for.
+- **D3 — Auto: D3-a now, D3-b later.** The client's Auto controller sends the
+  rung it wants (§4.4); server-proposed Auto (§6) is its own plan after M3's
+  measurements exist.
+- **D4 — keep `replaceCurrentItem` on Apple.** It preserves the layer, PiP and
+  every observer; the measured first-frame cost is 24–160 ms; a second layer
+  means two decoders rendering at once on tvOS and an HDR display-mode change
+  on the swap. If M3 shows the swap as a visible hitch, that number opens the
+  cross-fade as a follow-up.
+- **D5 — order: M0 → M2 (Apple, Android) → M1 (web) → M3.**
