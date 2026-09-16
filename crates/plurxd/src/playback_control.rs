@@ -908,7 +908,7 @@ pub(crate) struct DeliveryView {
     pub hold_reason: Option<String>,
     /// Why the producer stopped, when it stopped for a reason this server has
     /// named. `producer_state` says only `failed`; this says which of the
-    /// twenty-one decisions that was, and therefore whether trying again could
+    /// twenty-two decisions that was, and therefore whether trying again could
     /// ever work. Optional: an older peer relaying a response has no such
     /// field, and absence means "not classified here", never "healthy".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1652,7 +1652,7 @@ pub(crate) enum ControlAction {
     },
     /// Production stopped for a reason that may not recur.
     ///
-    /// Seventeen of the twenty-one producer decisions are timing, process,
+    /// Seventeen of the twenty-two producer decisions are timing, process,
     /// plan, executor or recovery facts, and this is what a client is told
     /// about every one of them. The client should try again on the server's own
     /// cadence rather than deciding for itself how hard to retry, which is
@@ -2014,6 +2014,9 @@ fn terminal_message(decision: ProducerDecisionReason) -> String {
         }
         ProducerDecisionReason::SourceDecodeFailed => {
             "this source did not decode, and trying again will not change that"
+        }
+        ProducerDecisionReason::RenditionInitChanged => {
+            "this rendition changed unexpectedly and must be reopened"
         }
         ProducerDecisionReason::EngineChanged => {
             "this server must restart before it can serve this title again"
@@ -4196,15 +4199,23 @@ pub(crate) enum ProducerDecisionReason {
     /// disk. VOD renditions are immutable and fragment-indexed, so a source
     /// that changes underneath one invalidates the plan rather than the media.
     SourceChanged,
+    /// A later generation produced initialization bytes which differ from the
+    /// immutable identity already published for this rendition.
+    ///
+    /// Permanent for this rendition: its playlist cannot safely mix the new
+    /// bytes with already published media, so automatic retries must stop.
+    /// Unlike [`Self::EngineChanged`], this is local evidence and does not say
+    /// the daemon's process-wide engine baseline moved or require a restart.
+    RenditionInitChanged,
     /// The fragment-index engine moved under a rendition planned by the
     /// previous one, so this node cannot serve that plan until it restarts.
     ///
-    /// Permanent, and the one VOD reason that is. The engine baseline is a
-    /// per-process `OnceCell` established at start-up, so every rendition with
-    /// a cluster cache key fails identically for the life of this daemon: a
-    /// reopen replaces the rendition, re-plans, and gets the same verdict.
-    /// Telling a client to keep retrying that is telling it to poll until an
-    /// operator restarts the node.
+    /// Permanent and process-wide. The engine baseline is a per-process
+    /// `OnceCell` established at start-up, so every rendition with a cluster
+    /// cache key fails identically for the life of this daemon: a reopen
+    /// replaces the rendition, re-plans, and gets the same verdict. Telling a
+    /// client to keep retrying that is telling it to poll until an operator
+    /// restarts the node.
     EngineChanged,
     /// The producer could not be started at all — the spawn failed, or the
     /// child came up without the stdout the pipeline reads. Distinct from
@@ -4236,6 +4247,7 @@ impl ProducerDecisionReason {
             Self::SourceDecodeRetry => "source_decode_retry",
             Self::SourceDecodeFailed => "source_decode_failed",
             Self::SourceChanged => "source_changed",
+            Self::RenditionInitChanged => "rendition_init_changed",
             Self::EngineChanged => "engine_changed",
             Self::ProducerLaunchFailed => "producer_launch_failed",
             Self::MediaLandingFailed => "media_landing_failed",
@@ -4245,9 +4257,9 @@ impl ProducerDecisionReason {
 
     /// Whether retrying, unchanged, can ever succeed on this node.
     ///
-    /// Seventeen of these twenty-one reasons are timing, process, executor or
+    /// Seventeen of these twenty-two reasons are timing, process, executor or
     /// plan facts: the same file on the same pipeline may well work on the
-    /// next attempt. Four cannot be retried into working.
+    /// next attempt. Five cannot be retried unchanged into working.
     ///
     /// Two are verdicts about the source itself — this container cannot be
     /// carried by this pipeline, or the recipe that was asked for is not a
@@ -4257,7 +4269,12 @@ impl ProducerDecisionReason {
     /// restarts, and a reopen re-plans straight back into it. Telling that
     /// client to retry is telling it to poll until an operator intervenes.
     ///
-    /// `SourceDecodeFailed` is the fourth, and it is the one to read
+    /// `RenditionInitChanged` is local rather than process-wide, but it is
+    /// still terminal for the immutable rendition which already published a
+    /// different init. A deliberate reopen creates a new owned attempt;
+    /// automatic retrying inside the failed rendition cannot make it safe.
+    ///
+    /// `SourceDecodeFailed` is the fifth, and it is the one to read
     /// carefully, because [`Self::SourceDecodeRetry`] carries the *same
     /// finding* and sits on the impermanent side. What separates them is not
     /// the evidence, which is identical; it is whether this node holds a
@@ -4281,7 +4298,7 @@ impl ProducerDecisionReason {
     /// not yet change what a viewer sees — it is the fact M5 needs in order to.
     ///
     /// The distinction is the whole reason a client cannot decide for itself.
-    /// `producer_state` flattens all twenty-one to the word `failed`, so a
+    /// `producer_state` flattens all twenty-two to the word `failed`, so a
     /// client seeing a failure has no way to tell "try again" from "this will
     /// never work", and every client currently guesses toward retry: it
     /// reopens the session, gets the same verdict, and reopens again.
@@ -4291,6 +4308,7 @@ impl ProducerDecisionReason {
             Self::Unsupported
                 | Self::InvalidConfiguration
                 | Self::SourceDecodeFailed
+                | Self::RenditionInitChanged
                 | Self::EngineChanged
         )
     }
@@ -4308,12 +4326,12 @@ impl ProducerDecisionReason {
     ///   `FlowResumeDeadline`, `InstallDeadline` and `ExecutorLost` are facts
     ///   about this server, not about the file. Relabelling them would make a
     ///   permanent claim about a source over an outage that will pass.
-    /// * The four VOD plan reasons — `SourceChanged`, `EngineChanged`,
+    /// * The VOD plan reasons — `SourceChanged`, `RenditionInitChanged`, `EngineChanged`,
     ///   `ProducerLaunchFailed`, `MediaLandingFailed` and
     ///   `ProducerWriteFailed` — belong to a rendition planned once against an
     ///   exact source and engine. A decode fault latched under one of them is
     ///   evidence about a plan this node is no longer running.
-    /// * The four permanent reasons already know at least as much.
+    /// * The five permanent reasons already know at least as much.
     fn yields_to_decode_evidence(self) -> bool {
         matches!(
             self,
@@ -4325,7 +4343,7 @@ impl ProducerDecisionReason {
     }
 
     /// The bounded vocabulary, in the order the wire and metrics use.
-    pub(crate) const ALL: [Self; 21] = [
+    pub(crate) const ALL: [Self; 22] = [
         Self::StartupDeadline,
         Self::ProgressDeadline,
         Self::ExitClassificationDeadline,
@@ -4343,6 +4361,7 @@ impl ProducerDecisionReason {
         Self::SourceDecodeRetry,
         Self::SourceDecodeFailed,
         Self::SourceChanged,
+        Self::RenditionInitChanged,
         Self::EngineChanged,
         Self::ProducerLaunchFailed,
         Self::MediaLandingFailed,
@@ -15083,10 +15102,11 @@ mod tests {
     #[test]
     fn only_a_verdict_no_retry_can_change_is_permanent() {
         // The split that decides whether a client should ever be told to give
-        // up. Seventeen of the twenty-one are timing, process, executor or
+        // up. Seventeen of the twenty-two are timing, process, executor or
         // plan facts: the same file on the same pipeline may work on the next
-        // attempt. Four cannot be retried into working — two verdicts about
-        // the source, one about this daemon process, and one about the decode.
+        // attempt. Five cannot be retried unchanged into working — two
+        // verdicts about the source, one about a published rendition, one
+        // about this daemon process, and one about the decode.
         //
         // `EngineChanged` is the process one, because the fragment-index
         // engine baseline is a per-process `OnceCell`: once it has moved,
@@ -15111,6 +15131,7 @@ mod tests {
                 ProducerDecisionReason::Unsupported
                     | ProducerDecisionReason::InvalidConfiguration
                     | ProducerDecisionReason::SourceDecodeFailed
+                    | ProducerDecisionReason::RenditionInitChanged
                     | ProducerDecisionReason::EngineChanged
             );
             assert_eq!(
@@ -15125,7 +15146,7 @@ mod tests {
                 .into_iter()
                 .filter(|reason| reason.is_permanent())
                 .count(),
-            4,
+            5,
         );
         // A permanent reason must carry a sentence a viewer could be shown,
         // not the wire name falling through `terminal_message`'s default.
@@ -15143,6 +15164,21 @@ mod tests {
     }
 
     #[test]
+    fn local_init_drift_and_process_engine_change_have_distinct_verdicts() {
+        let local = ProducerDecisionReason::RenditionInitChanged;
+        let process = ProducerDecisionReason::EngineChanged;
+
+        assert!(local.is_permanent(), "the published rendition must stop");
+        assert!(process.is_permanent(), "the changed process must stop");
+        assert_eq!(
+            terminal_message(local),
+            "this rendition changed unexpectedly and must be reopened"
+        );
+        assert!(!terminal_message(local).contains("restart"));
+        assert!(terminal_message(process).contains("restart"));
+    }
+
+    #[test]
     fn every_decision_reason_round_trips_its_wire_name() {
         // `ALL` is what the wire is bounded against and what metrics will be
         // labelled by. A variant added to the enum and forgotten here would
@@ -15153,7 +15189,7 @@ mod tests {
                 Some(reason),
             );
         }
-        assert_eq!(ProducerDecisionReason::ALL.len(), 21);
+        assert_eq!(ProducerDecisionReason::ALL.len(), 22);
         // A variant present in the enum and absent from `ALL` is caught by
         // nothing else. `status` is exhaustive, so the compiler forces a
         // spelling to be written; `ALL` is a hand-maintained array it cannot
@@ -15183,6 +15219,7 @@ mod tests {
                 | ProducerDecisionReason::SourceDecodeRetry
                 | ProducerDecisionReason::SourceDecodeFailed
                 | ProducerDecisionReason::SourceChanged
+                | ProducerDecisionReason::RenditionInitChanged
                 | ProducerDecisionReason::EngineChanged
                 | ProducerDecisionReason::ProducerLaunchFailed
                 | ProducerDecisionReason::MediaLandingFailed

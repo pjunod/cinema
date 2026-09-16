@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e4761dde"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["rust-gate", "web-static"]
+reason = "The Rust gate distinguishes rendition-local init drift from an attested process engine-baseline change in the generic classifier, specialized handler, wire verdict, and actual object-change control. The web gate proves an owned terminal stop retires loaders and retry timers, fences late callbacks, and admits only a fresh user attachment; reverting the repair restores the false restart instruction or lets stale recovery replace the terminal surface."

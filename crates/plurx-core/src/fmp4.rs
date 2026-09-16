@@ -8269,6 +8269,144 @@ mod tests {
     }
 
     #[test]
+    fn encoded_vod_restarts_keep_init_identity_across_chapters() {
+        use crate::domain::{AudioStream, MediaFile};
+        use crate::testfixtures::source_with_chapters;
+        use crate::transcode::{
+            resolve_transcode, vod_pipe_args, AttemptRestrictions, DecodeCapabilities,
+            DecodeCapabilitySnapshotIdentity, DecodeFacts, DecodePlanPolicy, DecodePolicySnapshot,
+            DecodeSourceIdentity, Encoder, Pacing, SoftwareDecoder, TranscodeExecution,
+            TranscodeMediaOptions, TranscodeOptions, TranscodeRequest, VodFrameGrid,
+        };
+
+        let src = source_with_chapters();
+        let chapter_probe = run(Command::new(ffprobe())
+            .args(["-v", "error", "-show_chapters", "-of", "csv=p=0"])
+            .arg(&src));
+        assert!(
+            String::from_utf8_lossy(&chapter_probe).lines().count() >= 3,
+            "the encoded-VOD fixture lost its chapters"
+        );
+
+        let file = MediaFile {
+            id: 1,
+            item_id: 1,
+            path: src,
+            size: 1,
+            mtime: 1,
+            duration_ms: Some(12_000),
+            container: Some("mkv".into()),
+            video_codec: Some("hevc".into()),
+            video_codec_tag: None,
+            video_profile: Some("Main".into()),
+            width: Some(640),
+            height: Some(360),
+            bit_depth: Some(8),
+            hdr: None,
+            hdr_format: None,
+            bitrate: Some(1_000_000),
+            audio_streams: vec![AudioStream {
+                index: 0,
+                codec: "aac".into(),
+                channels: Some(2),
+                default: true,
+                ..Default::default()
+            }],
+            subtitle_streams: vec![],
+            scanned_at: 1,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: crate::domain::DolbyVisionFacts::default(),
+        };
+        let options = TranscodeOptions {
+            target_height: 360,
+            ..TranscodeOptions::default()
+        };
+        let facts = DecodeFacts::from_ffprobe_json(
+            &serde_json::json!({"streams":[{
+                "index":0,"codec_type":"video","codec_name":"hevc",
+                "profile":"Main","width":640,"height":360,
+                "pix_fmt":"yuv420p","avg_frame_rate":"24/1",
+                "r_frame_rate":"24/1","disposition":{"attached_pic":0}
+            }]}),
+            DecodeSourceIdentity::from_sha256("a".repeat(64)).expect("source identity"),
+        )
+        .expect("decode facts");
+        let capabilities = DecodeCapabilities::new(
+            DecodeCapabilitySnapshotIdentity::new(
+                "f".repeat(64),
+                "vod-chapter-test".to_owned(),
+                Some("e".repeat(64)),
+            )
+            .expect("capability identity"),
+            vec![],
+            vec![SoftwareDecoder {
+                codec: "hevc".to_owned(),
+                implementation: Some("hevc".to_owned()),
+            }],
+        )
+        .expect("capabilities");
+        let plan = resolve_transcode(
+            &TranscodeRequest::new(
+                Encoder::Software,
+                TranscodeMediaOptions::from_options(&file, &options),
+            ),
+            &facts,
+            &capabilities,
+            &DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+            &AttemptRestrictions::none(),
+        )
+        .expect("software plan");
+        let grid = VodFrameGrid::new(24, 1).expect("24 fps grid");
+        let generation = |start_seconds| {
+            let mut generation_options = options.clone();
+            generation_options.start_seconds = start_seconds;
+            let execution = TranscodeExecution::from_options(
+                &file,
+                &generation_options,
+                Pacing::unpaced(),
+                ".",
+            )
+            .expect("execution");
+            let bytes =
+                run(Command::new(ffmpeg())
+                    .args(vod_pipe_args(&file, &plan, &execution, grid, 12.0)));
+            read_all(&bytes)
+        };
+
+        // Opposite sides of the 4 s chapter boundary, with different
+        // remaining durations. Chapter mapping used to make these `moov`
+        // bytes differ even though the codec recipe was unchanged.
+        let (before, before_fragments, _) = generation(2.0);
+        let (after, after_fragments, _) = generation(6.0);
+        assert_eq!(
+            before.bytes, after.bytes,
+            "encoded init identity drifted by start offset"
+        );
+        assert!(
+            !before_fragments.is_empty() && !after_fragments.is_empty(),
+            "both generations must continue beyond init publication"
+        );
+        assert_eq!(
+            before
+                .tracks
+                .iter()
+                .map(|track| track.kind)
+                .collect::<Vec<_>>(),
+            vec![TrackKind::Video, TrackKind::Audio]
+        );
+        for forbidden in [b"chpl".as_slice(), b"tref".as_slice()] {
+            assert!(
+                !before
+                    .bytes
+                    .windows(forbidden.len())
+                    .any(|window| window == forbidden),
+                "chapter box/reference survived in encoded init"
+            );
+        }
+    }
+
+    #[test]
     fn merging_nothing_is_an_error_not_an_empty_segment() {
         let feed = pipe("open-gop");
         let (init, _, _) = read_all(&feed);

@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["3cc966d1"]
+points = []
+checks = []
+reason = "This commit records corrective-history evidence, restores one shipped-helper dependency in a JavaScript test harness, and removes two redundant test-only wire-name calls that confused the process-launch ownership sentinel; it changes no runtime behavior."
+ignore = true
