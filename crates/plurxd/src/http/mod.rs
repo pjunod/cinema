@@ -3282,7 +3282,7 @@ mod tests {
                 library_id: lib.id,
                 kind: plurx_core::domain::ItemKind::Movie,
                 parent_id: None,
-                title: "Ember".into(),
+                title: "Heat".into(),
                 year: Some(1995),
                 season_number: None,
                 episode_number: None,
@@ -8680,7 +8680,7 @@ mod tests {
                 library_id: lib.id,
                 kind: ItemKind::Movie,
                 parent_id: None,
-                title: "Ember".into(),
+                title: "Heat".into(),
                 year: Some(1995),
                 season_number: None,
                 episode_number: None,
@@ -13921,7 +13921,7 @@ mod tests {
             .store
             .upsert_file(
                 item,
-                "/media/movies/Blade Runner 2049 (2017) 2160p.mkv",
+                "/media/movies/Neon District 2049 (2017) 2160p.mkv",
                 69_000_000_000,
                 1,
                 &ProbeResult {
@@ -13951,7 +13951,7 @@ mod tests {
             .store
             .upsert_file(
                 item,
-                "/media/movies/Blade Runner 2049 (2017) 720p.mp4",
+                "/media/movies/Neon District 2049 (2017) 720p.mp4",
                 6_800_000_000,
                 1,
                 &ProbeResult {
@@ -13996,7 +13996,7 @@ mod tests {
     /// the absence of `media` — is pre-S1's.
     const PRE_S1_LIST_BODY: &str = concat!(
         r#"{"items":[{"id":1,"library_id":1,"kind":"movie","parent_id":null,"#,
-        r#""title":"Blade Runner 2049","year":2017,"overview":null,"#,
+        r#""title":"Neon District 2049","year":2017,"overview":null,"#,
         r#""season_number":null,"episode_number":null,"air_date":null,"#,
         r#""runtime_ms":null,"added_at":{added},"updated_at":{updated},"#,
         // S3 landed `genres` on ItemDto after this golden was captured. It is
