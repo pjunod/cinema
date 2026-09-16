@@ -1,7 +1,7 @@
 # ATSC 1.0 on VideoToolbox — caption failure, reviewed repair and evidence
 
-**Status:** open; current-main implementation in an independent agent clone,
-final review and validation pending · **Updated:** 2026-09-16 · **Base:**
+**Status:** implemented and locally validated in an independent agent clone;
+[PR #346](http://192.168.4.7:3000/noirr/plurx/pulls/346) records the fast-lane and merge outcome · **Updated:** 2026-09-16 · **Base:**
 `c9e4edf45` · **Branch:** `codex/live-tv-videotoolbox-repair`.
 
 Companion to [PLAYBACK-TESTING.md](../PLAYBACK-TESTING.md) and the
@@ -273,10 +273,27 @@ On an input write failure or publication timeout, close stdin, collect the
 child's status and stderr, and only then fail the assertion. A bare Broken
 pipe must not hide the SEI error. Overall process time remains bounded.
 
-**Evidence status:** final candidate checks are pending. The old base's
-75-test count and 10.75-second hardware run are superseded. Fable observed
-134 live-TV tests on its hand-port and exposed the tail-segment failure.
-Neither count substitutes for results against this branch's final SHA.
+**Final local evidence (2026-09-16):** the implementation and tests committed
+as `7127d468f` passed with Rust 1.97.1 on this Mac:
+
+| Check | Result |
+|---|---|
+| Focused `live_tv::` suite | 136 passed, 0 failed, 1 hardware test ignored; 6.74 seconds |
+| Explicit VideoToolbox hardware regression | All four cases passed; 11.99 seconds |
+| Documentation index | 4 passed |
+| Normal commit hook | Catalog, formatting, workspace/all-target Clippy with denied warnings, and embedded JavaScript syntax passed |
+
+The final adversarial review of `853d6d0a8` found no blocking issues.
+Subsequent execution caught a test-harness hang: dropping a split Tokio
+simplex writer does not deliver EOF. `7127d468f` explicitly shuts down the
+writer and bounds both new capture tests to five seconds. The focused suite
+then passed. This correction changes tests only. Later documentation commits
+do not change the tested Rust tree. The PR records the exact fast-lane head.
+
+The Mac test linker emitted a compact-unwind-size warning for the large
+debug test executable; linking and all selected tests succeeded. The old
+base's 75-test count and 10.75-second hardware run are superseded. Fable's
+134-test hand-port is review history, not final validation evidence.
 
 The repository already pins Rust 1.97.1. The shell trap is selecting
 Homebrew cargo/rustc, which do not honor Rustup's selection. Put Rustup's
@@ -285,7 +302,6 @@ binaries first or invoke `rustup run 1.97.1`; verify `rustc --version`.
 ```bash
 rustup run 1.97.1 rustc --version
 # At final validation, after the adversarial review:
-rustup run 1.97.1 cargo test -p plurxd --bin plurxd live_caption --locked
 rustup run 1.97.1 cargo test -p plurxd --bin plurxd live_tv:: --locked
 rustup run 1.97.1 cargo test -p plurxd --bin plurxd \
   live_tv_videotoolbox_atsc1 --locked -- --ignored --nocapture
