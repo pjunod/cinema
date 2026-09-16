@@ -1,5 +1,10 @@
 # noirr cinema
 
+[![CI: Forgejo](docs/img/badges/ci.svg)](docs/VALIDATION.md)
+[![lint: rustfmt + clippy](docs/img/badges/lint.svg)](docs/VALIDATION.md)
+[![unit coverage: measured](docs/img/badges/coverage.svg)](docs/VALIDATION.md)
+[![dependency audit: scheduled](docs/img/badges/audit.svg)](docs/VALIDATION.md)
+
 A self-hosted media server for movies, TV, anime, ebooks, audiobooks, home
 videos, and photos. Cinema combines a Rust server, a browser player and admin
 UI, and native Apple and Android clients. Your library stays on your hardware;
