@@ -3194,7 +3194,7 @@ mod tests {
             norm("host.docker.internal"),
             "http://host.docker.internal:7676"
         );
-        assert_eq!(norm("  monarr/ "), "http://curator:7676");
+        assert_eq!(norm("  monarr/ "), "http://monarr:7676");
         // A port given without a scheme is a port they chose: keep it.
         assert_eq!(norm("monarr:9000"), "http://monarr:9000");
         // A scheme given is a decision made — respected in full, including
@@ -3221,7 +3221,7 @@ mod tests {
         use super::comingsoon::normalize_monarr_url as norm;
 
         // One slash is unambiguous: nothing else could be meant.
-        assert_eq!(norm("http:/monarr:7676"), "http://curator:7676");
+        assert_eq!(norm("http:/monarr:7676"), "http://monarr:7676");
         assert_eq!(
             norm("https:/monarr.example.com"),
             "https://monarr.example.com"
@@ -3246,7 +3246,7 @@ mod tests {
             "monarr",
             "monarr:7676",
             "http:/monarr:7676",
-            "http://curator:7676",
+            "http://monarr:7676",
             "https://monarr.example.com/",
             "10.0.0.4",
             "[::1]:7676",
@@ -3324,7 +3324,7 @@ mod tests {
             put(
                 "/api/v1/settings",
                 Some(&admin),
-                json!({ "monarr_url": "http://curator:7676", "monarr_api_key": "k",
+                json!({ "monarr_url": "http://monarr:7676", "monarr_api_key": "k",
                         "monarr_watched_sync": true }),
             ),
         )
@@ -3410,7 +3410,7 @@ mod tests {
             put(
                 "/api/v1/settings",
                 Some(&admin),
-                json!({ "monarr_url": "http://curator:7676", "monarr_api_key": "k",
+                json!({ "monarr_url": "http://monarr:7676", "monarr_api_key": "k",
                         "monarr_watched_sync": true }),
             ),
         )
