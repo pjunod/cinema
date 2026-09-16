@@ -114,6 +114,11 @@ function fullOpenHarness() {
     shippedSource("requestPlaybackMediaChange"),shippedSource("executePlaybackMediaChange"),
     shippedSource("streamGeneration"),shippedSource("transcodeOpts"),shippedSource("transcodeHeight"),shippedSource("sessionHeight"),
     shippedSource("startCopyHls"),
+    // The shipped gate: whether an automatic rung move may spend the offer
+    // bound at all. This harness's element reports no decoded data, so it is
+    // a reopen here exactly as it has always been.
+    shippedSource("preparedHandoffEnabled"),shippedSource("preparedHandoffOffered"),
+    shippedSource("directedChangeIncumbentReady"),
     shippedSource("startTranscodeFallback"),shippedSource("switchAutoRung"),
     shippedSource("autoSwitchLabel"),
     shippedSource("claimAutoFallback"),shippedSource("releaseAutoFallback"),
@@ -136,12 +141,25 @@ function fullOpenHarness() {
     shippedSource("observeStreamFailureResponse"),
     shippedSource("createHlsStartupLoader"),shippedSource("scheduleHlsNetworkRetry"),
     shippedSource("attachHls"),
+    // The directed-change owner, shipped. Neither of these harnesses has a
+    // control reporter, so `awaitPreparedOffer` answers "timed_out" at once
+    // and the owner takes its one reopen -- which is what every menu case
+    // here has always been about. The offer itself is driven for real in
+    // the directed-change section further down.
+    shippedConst("PREPARED_OFFER_BOUND_MS"),
+    shippedConst("PREPARED_OFFER_CADENCE_MS"),
+    shippedSource("preparedOfferSuperseded"),
+    shippedSource("awaitPreparedOffer"),
+    shippedSource("requestQualityChange"),
+    shippedSource("fallBackDirectedChange"),
+    shippedSource("settleDirectedChange"),
     shippedSource("resetMediaSource"), shippedSource("play"), shippedSource("setQuality"),
     shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("setSub"),shippedSource("burnSub"),
     shippedSource("offsetLabel"), shippedSource("setSync"), shippedSource("togglePlay"),
     shippedSource("retryPlayback"),
     shippedSource("closePlayer"),
     shippedSource("reportProgress"),
+    "async function qualityMenuPick(q){setQuality(q);for(let turn=0;turn<6;turn+=1)await Promise.resolve();}",
     "const ttff=[];function reportTtff(){ttff.push(PLAYER.fileId);}function esc(x){return x;}function finishPlayback(){throw Error('unattached autoplay');}function clearStall(){}function bufferRunway(){return 0;}const PERSISTENT_STALL_MS=8000;",
     shippedSource("playbackMarkersUsable"),shippedSource("markerNowMs"),
     shippedSource("markerIsEstimated"),shippedSource("markerAutoSkipEligible"),
@@ -151,7 +169,7 @@ function fullOpenHarness() {
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("waiting",\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
     "function incumbentError(){let handler;const v=Object.create(video);v.addEventListener=(_,fn)=>{handler=fn;};"+
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("error",\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
-    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,decisions,sessions,released,media,loading,requestIds,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),spendHlsRetry:()=>scheduleHlsNetworkRetry(video,PLAYER,'network'),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
+    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,decisions,sessions,released,media,loading,requestIds,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality:qualityMenuPick,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),spendHlsRetry:()=>scheduleHlsNetworkRetry(video,PLAYER,'network'),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
   ].join("\n"))(policy);
 }
 
@@ -912,9 +930,24 @@ async function main() {
       shippedSource("rememberPlaybackSelection"),
       shippedSource("offsetLabel"),
       shippedSource("startCopyHls"),
+      // The directed-change owner, shipped. Neither of these harnesses has a
+      // control reporter, so `awaitPreparedOffer` answers "timed_out" at once
+      // and the owner takes its one reopen -- which is what every menu case
+      // here has always been about. The offer itself is driven for real in
+      // the directed-change section further down.
+      shippedConst("PREPARED_OFFER_BOUND_MS"),
+      shippedConst("PREPARED_OFFER_CADENCE_MS"),
+      shippedSource("preparedOfferSuperseded"),
+      shippedSource("awaitPreparedOffer"),
+      shippedSource("requestQualityChange"),
+      shippedSource("fallBackDirectedChange"),
+      shippedSource("settleDirectedChange"),
       shippedSource("setQuality"),shippedSource("setSync"),
       shippedSource("setSub"),shippedSource("burnSub"),shippedSource("switchAudio"),
-      "return {attach(p){PLAYER=p;},hold(){held=true;},rejectWith(error){failure=error;},released,pending,calls,video,setQuality,setSync,setSub,switchAudio,startCopyHls,streamGeneration,beginPlaybackControlSeek};",
+      // A directed change settles a promise chain rather than reopening
+      // inline, so the harness hands back a form the cases can await.
+      "async function qualityMenuPick(q){setQuality(q);for(let turn=0;turn<6;turn+=1)await Promise.resolve();}",
+      "return {attach(p){PLAYER=p;},hold(){held=true;},rejectWith(error){failure=error;},released,pending,calls,video,setQuality:qualityMenuPick,setSync,setSub,switchAudio,startCopyHls,streamGeneration,beginPlaybackControlSeek};",
     ].join("\n"))();
   }
   for(const operation of ["quality","audio-sync","subtitle-burn","audio-track"]){
@@ -924,7 +957,7 @@ async function main() {
       controlSeek:{sequence:1,targetMs:90_000,executed:true},controlSeekSequence:1,
       audio:[{index:0},{index:1}],curAudio:0,curSub:-1,subs:[{index:2}],burnedSub:null};
     h.attach(p);
-    if(operation==='quality') h.setQuality('720');
+    if(operation==='quality') await h.setQuality('720');
     if(operation==='audio-sync') await h.setSync(250);
     if(operation==='subtitle-burn') await h.setSub(2);
     if(operation==='audio-track') await h.switchAudio(1);
@@ -1030,7 +1063,7 @@ async function main() {
   }
   {
     const h=fullOpenHarness(),p=fullPlayer();h.attach(p);
-    h.setQuality('original');
+    await h.setQuality('original');
     await h.startTranscodeFallback('stream-rejected');
     assert.equal(h.sessions.length,0,'a failed incumbent cannot steal a pending manual Original decision');
     assert.equal(p.pendingMediaChange,null);
@@ -1077,7 +1110,11 @@ async function main() {
       shippedSource("rememberPlaybackTransportIntent"),shippedSource("pausePlaybackInternally"),
       shippedSource("resetPlaybackTransportEvents"),shippedSource("playbackTransportEvents"),
       shippedSource("setPlaybackMediaSource"),
-      shippedSource("applyPlaybackTransportIntent"),shippedSource("teardownHls"),
+      shippedSource("applyPlaybackTransportIntent"),
+      // `teardownHls` retires a directed change: the stream it was asked
+      // against is the one ending.
+      shippedSource("settleDirectedChange"),shippedSource("supersedeDirectedChange"),
+      shippedSource("teardownHls"),
       shippedSource("beginPlaybackMediaAttachment"),shippedSource("applyPlaybackAttachmentPosition"),
       shippedSource("playbackAttemptTerminallyStopped"),
       shippedSource("attachHls"),
@@ -1404,7 +1441,7 @@ async function main() {
   }
   for(const laterCommand of ['seek','audio','subtitle']){
     const h=fullOpenHarness(), before=fullPlayer(); h.attach(before);
-    h.setQuality('720');
+    await h.setQuality('720');
     assert.equal(h.decisions.length,1);
     if(laterCommand==='seek') await h.seekTo(90);
     if(laterCommand==='audio') await h.switchAudio(1);
@@ -1428,7 +1465,7 @@ async function main() {
   for(const pauseTiming of ['before-open','during-decision']){
     const h=fullOpenHarness(), p=fullPlayer(); h.attach(p);
     if(pauseTiming==='before-open'){p.wantsPlayback=false;h.video.paused=true;}
-    h.setQuality('720');
+    await h.setQuality('720');
     if(pauseTiming==='during-decision')h.togglePlay();
     resolveDecision(h.decisions[0]);await flush();await flush();
     assert.equal(h.current().wantsPlayback,false,pauseTiming);
@@ -1436,7 +1473,7 @@ async function main() {
     assert.equal(h.media.includes('play'),false,'a stream replacement cannot override Pause');
   }
   {
-    const h=fullOpenHarness();h.attach(fullPlayer());h.setQuality('720');
+    const h=fullOpenHarness();h.attach(fullPlayer());await h.setQuality('720');
     resolveDecision(h.decisions[0]);await flush();await flush();
     h.current().controlSeek={sequence:2,targetMs:90_000,executed:true};
     h.video.onloadedmetadata();
@@ -3509,7 +3546,16 @@ async function main() {
         shippedSource("beginPreparedReplacement"), shippedSource("preparedSelectionText"),
         shippedSource("preparedHlsAttach"), shippedSource("preparedNativeAttach"),
         shippedSource("notePreparedMetadata"), shippedSource("preparedBufferedThroughMs"),
+        shippedConst("PREPARED_ALIGN_SEEK_MS"), shippedConst("PREPARED_ALIGN_ATTEMPTS"),
         shippedSource("notePreparedBuffer"), shippedSource("commitPreparedReplacement"),
+        // §7.3: the commit is two phases now. Alignment finishes before the
+        // successor is exposed, so a corrective seek can no longer put a
+        // blank element in front of the viewer.
+        shippedSource("alignPreparedReplacement"), shippedSource("preparedAlignSeek"),
+        shippedSource("preparedAlignedBuffered"), shippedSource("exposePreparedReplacement"),
+        // The directed change the commit and its failure now settle.
+        shippedSource("settleDirectedChange"), shippedSource("supersedeDirectedChange"),
+        shippedSource("fallBackDirectedChange"),
         shippedSource("retirePreparedPredecessor"), shippedSource("rollbackPreparedReplacement"),
         shippedSource("adoptPlaybackMediaElement"), shippedSource("disposeRetiredMediaElement"),
         shippedSource("preparedFirstFrame"), shippedSource("cancelPreparedFirstFrame"),
@@ -3521,6 +3567,7 @@ async function main() {
         shippedSource("hasPendingPlaybackOpen"), shippedSource("playbackOwnsAttachedMedia"),
         shippedSource("rememberPlaybackTransportIntent"),
         shippedSource("pausePlaybackInternally"),
+        shippedSource("settleDirectedChange"),shippedSource("supersedeDirectedChange"),
         shippedSource("teardownHls"),
         "return {set(p){PLAYER=p;return p;},current:()=>PLAYER,",
         " handle(action){return handlePreparedReplacementAction(PLAYER,action);},",

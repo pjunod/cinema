@@ -7710,7 +7710,17 @@ function playbackControlSelection(p){
     ? {mode:"original"}
     : manualHeight!=null
       ? {mode:"manual",height:Math.max(144,Math.min(2160,manualHeight))}
-      : {mode:"auto"};
+      // D3-a: Auto carries the rung the client's own controller wants.
+      //
+      // `p.autoHeight` is what is being DELIVERED; this is what was asked for,
+      // and they are deliberately different fields. Without the ask on the
+      // wire an Auto controller moving 720 -> 1080 sends the same selection it
+      // sent at 720, the server's digest is unchanged, and the exchange is not
+      // a selection change at all - so no successor is ever staged for it.
+      // Absent means plain Auto, which digests exactly as it always has.
+      : (p&&p.autoRequestedHeight>0)
+        ? {mode:"auto",height:Math.max(144,Math.min(2160,Math.round(p.autoRequestedHeight)))}
+        : {mode:"auto"};
   const selected=(p&&p.curSub>=0)?p.curSub:null;
   const subtitle=selected==null ? {mode:"off",track:null}
     : {mode:p.burnedSub!=null?"burn":"native",track:selected};
@@ -7858,6 +7868,14 @@ const PREPARED_BUFFER_LEAD_MS=4000;
 // incumbent's second. Below this a corrective seek costs more than it fixes:
 // it flushes the buffer that was the whole point of preparing.
 const PREPARED_ALIGN_SLACK_MS=250;
+// How long a corrective alignment seek may take before this client stops
+// believing it will land. The successor is muted and playing, so a seek that
+// completes leaves only its own latency behind; one that does not complete is
+// evidence about the successor, not about the incumbent.
+const PREPARED_ALIGN_SEEK_MS=1500;
+// Corrective seeks per commit. The incumbent keeps moving while each one runs,
+// so a second measurement is worth taking and a third is a loop.
+const PREPARED_ALIGN_ATTEMPTS=2;
 // A switch that never renders is a failed preparation, and the server is owed
 // that answer rather than a 330-second silence.
 const PREPARED_FIRST_FRAME_MS=8000;
@@ -8209,7 +8227,89 @@ function commitPreparedReplacement(p,state){
   const filmMs=playbackFilmPositionMs(v,p);
   const wanted=preparedLocalPositionMs(filmMs,state.mediaOriginMs)/1000;
   const drift=Math.abs((spare.currentTime||0)-wanted)*1000;
-  if(drift>PREPARED_ALIGN_SLACK_MS) try{ spare.currentTime=Math.max(0,wanted); }catch(e){}
+  // Already on the incumbent's second: nothing to wait for, and the exposure
+  // is the same synchronous block it has always been.
+  if(drift<=PREPARED_ALIGN_SLACK_MS) return exposePreparedReplacement(p,state,v,spare,filmMs);
+  // Otherwise finish aligning BEFORE the successor is seen or heard. The
+  // corrective seek used to be the line above, with nothing between it and the
+  // element swap; a seek is asynchronous, so the successor had nothing decoded
+  // at its new position at the moment it took the picture, and the runway
+  // measured before the seek was never evidence about the position after it.
+  alignPreparedReplacement(p,state,v,spare);
+  return true;
+}
+// Phase one of the switch: put the successor on the incumbent's second while
+// the incumbent is still the one being seen and heard.
+//
+// Two attempts, and the drift is re-measured against the incumbent every time
+// rather than assumed to be the number that started this: the incumbent kept
+// playing for the whole duration of each seek. The web runs its successor
+// muted and PLAYING, so what a completed seek leaves behind is only the seek's
+// own latency and a rendezvous hold is not needed -- but the two-attempt bound
+// is the same one it would have had.
+async function alignPreparedReplacement(p,state,v,spare){
+  const live=()=>PLAYER===p&&preparedState(p)===state
+    &&document.getElementById("video")===v&&preparedVideoElement()===spare
+    &&playbackOwnsAttachedMedia(p);
+  for(let attempt=0;attempt<PREPARED_ALIGN_ATTEMPTS;attempt++){
+    if(!live()) return false;
+    const wanted=Math.max(0,
+      preparedLocalPositionMs(playbackFilmPositionMs(v,p),state.mediaOriginMs)/1000);
+    const landed=await preparedAlignSeek(spare,wanted);
+    if(!live()) return false;
+    // `readyState` answers for the element, not for this position, and a seek
+    // that landed in a hole reports HAVE_FUTURE_DATA about a range the
+    // playhead is not in. Both questions have to be asked here.
+    if(landed&&preparedAlignedBuffered(spare)){
+      const filmMs=playbackFilmPositionMs(v,p);
+      const target=preparedLocalPositionMs(filmMs,state.mediaOriginMs)/1000;
+      if(Math.abs((spare.currentTime||0)-target)*1000<=PREPARED_ALIGN_SLACK_MS)
+        return exposePreparedReplacement(p,state,v,spare,filmMs);
+    }
+  }
+  if(!live()) return false;
+  // The incumbent is untouched and still playing. `failPreparedReplacement`
+  // settles the staging with the server and hands the directed change its one
+  // reopen.
+  failPreparedReplacement(p,state,"could not align");
+  return false;
+}
+// Resolve true when the element says the seek completed, false on the bound.
+function preparedAlignSeek(spare,wanted){
+  return new Promise((resolve)=>{
+    let done=false, timer=null;
+    const finish=(ok)=>{
+      if(done) return;
+      done=true;
+      clearTimeout(timer);
+      try{ spare.removeEventListener("seeked",onSeeked); }catch(e){}
+      resolve(ok);
+    };
+    const onSeeked=()=>finish(true);
+    try{ spare.addEventListener("seeked",onSeeked); }catch(e){ resolve(false); return; }
+    timer=setTimeout(()=>finish(false),PREPARED_ALIGN_SEEK_MS);
+    try{ spare.currentTime=wanted; }catch(e){ finish(false); }
+  });
+}
+// Decoded, through the range that contains the playhead it just moved to, with
+// half the ordinary lead in front of it. Half, not the whole lead: this is a
+// re-check after a seek the preparation already earned its runway for, and
+// demanding the full lead again would fail a successor that is fine.
+function preparedAlignedBuffered(spare){
+  try{
+    if(!(Number(spare.readyState)>=3)) return false;
+    const at=spare.currentTime||0, need=at+PREPARED_BUFFER_LEAD_MS/2000;
+    for(let i=0;i<spare.buffered.length;i++){
+      if(spare.buffered.start(i)<=at+0.25&&spare.buffered.end(i)>=need) return true;
+    }
+  }catch(e){}
+  return false;
+}
+// Phase two: the exposure, unchanged. Intent is sampled at the last reversible
+// boundary, mute and rate are applied before display, the elements swap, and
+// the predecessor stays alive and hidden until a real successor frame proves
+// rollback is no longer needed.
+function exposePreparedReplacement(p,state,v,spare,filmMs){
   const predecessor=p.hls, retired=v;
   // Intent is sampled at the last reversible boundary. Preparation can take
   // seconds, during which the viewer may pause, mute, or change rate; copying
@@ -8287,6 +8387,10 @@ function commitPreparedReplacement(p,state){
   preparedFirstFrame(p,state,spare,unixMs=>{
     state.state="committed";
     if(p.preparedCommitting===state) p.preparedCommitting=null;
+    // The switch the viewer asked for happened. Nothing owes them a reopen,
+    // and the rung they asked for is the one being delivered.
+    settleDirectedChange(p,p.directedChange,"committed",
+      Math.round(performance.now()-((p.directedChange&&p.directedChange.tappedAt)||performance.now())));
     retirePreparedPredecessor(p,state);
     queuePlaybackControlAcknowledgement(p,state.actionId,"committed",
       {first_frame_unix_ms:unixMs,committed_media_origin_ms:state.offeredOriginMs});
@@ -8302,6 +8406,10 @@ function commitPreparedReplacement(p,state){
     if(p.preparedCommitting===state) p.preparedCommitting=null;
     rollbackPreparedReplacement(p,state,spare);
     queuePlaybackControlAcknowledgement(p,state.actionId,"failed");
+    // Rolled back to the incumbent, which is the quality the viewer was
+    // already watching -- so the change they asked for still has not happened
+    // and still owes them its one reopen.
+    fallBackDirectedChange(p,p.directedChange,"failed");
     clientLog(Object.assign({level:"error",event:"prepared_replacement",detail:"no_first_frame",
       message:`successor ${state.sessionId} rendered no frame within ${PREPARED_FIRST_FRAME_MS}ms`},
       playbackContext()));
@@ -8462,6 +8570,12 @@ function failPreparedReplacement(p,state,detail){
   // took the picture, so nothing the viewer can see has changed.
   raisePlaybackSurface("log_only",{attached:playbackSurfaceGeneration(p)});
   freePreparedReplacement(p,state);
+  // Until now this only acknowledged, logged and freed -- which was right
+  // while a preparation was something the server started on its own. A
+  // preparation a VIEWER asked for is owed an answer: the successor is gone
+  // and they are still watching the quality they moved away from. A
+  // preparation with no directed change keeps exactly the old behaviour.
+  fallBackDirectedChange(p,p.directedChange,"failed");
 }
 // Settle and free. Every exit path runs through here — a new attach, a seek, a
 // quality change, the player closing, the reporter going away — because a
@@ -8848,6 +8962,244 @@ function askPlaybackControl(renderOverride,observationOverride,deadlineMs=Infini
   if(reporter.stopped) settle(null);
   return {trigger,action};
 }
+// ---- a directed selection change ------------------------------------------
+//
+// The prepared handoff has been built on the server and on all three clients
+// for a milestone and no viewer action has ever reached it, because the one
+// path that could reach it reopened the stream synchronously instead: `play()`
+// nulls `PLAYER.mediaAttachment`, and both the reporter's `capture` and its
+// `onExchange` refuse to speak for any other attachment, so the exchange that
+// carried the ask never left and a `Prepare` could not have been handled if it
+// had. The functions below are that path -- publish the new selection, keep
+// the incumbent playing, wait for the successor the server builds -- with
+// exactly ONE reopen as the answer to every way it can go wrong.
+const PREPARED_OFFER_BOUND_MS=12000;
+const PREPARED_OFFER_CADENCE_MS=1000;
+// `askPlaybackControl` cannot serve this and cannot be made to. Its waiter
+// settles on the FIRST exchange at or after its floor, and a `Prepare` arrives
+// on a later exchange than the one that carried the ask -- the server has to
+// read the new selection, decide, and build a candidate first. This waiter
+// lives in the same list under the same floor discipline, stays armed across
+// exchanges, and is settled by rule rather than by arrival.
+//
+// It deliberately does NOT touch `p.mediaAttachment`. That guard is exactly
+// what dropped every `Prepare` this client was ever offered; the reporter must
+// keep owning the media for the whole wait, and the incumbent keeps playing
+// and keeps being heard while it runs.
+async function awaitPreparedOffer(p,tappedAt){
+  if(!p) return "timed_out";
+  const reporter=p.controlReporter;
+  if(!reporter||reporter.stopped) return "timed_out";
+  // Read BEFORE the notify, exactly as `askPlaybackControl` does: the request
+  // carrying this selection is the next NEW one the reporter starts, and a
+  // replayed retry keeps its old sequence. The identity is pinned with it,
+  // because `resetForOwner` zeroes the counter on a 409.
+  const minSequence=(Number(reporter.sequence)||0)+1;
+  const generation=reporter.bootstrap&&reporter.bootstrap.generation;
+  const controlEpoch=reporter.bootstrap&&reporter.bootstrap.control_epoch;
+  const intentGeneration=p.controlIntentGeneration||0;
+  const trigger=notifyPlaybackControl();
+  // A notify that enqueued nothing will never produce a request carrying this
+  // selection, so waiting the bound out for it spends twelve seconds on an
+  // exchange that is not going to happen.
+  if(!trigger) return "timed_out";
+  if(!p.controlWaiters) p.controlWaiters=[];
+  const waiters=p.controlWaiters;
+  return await new Promise((resolve)=>{
+    const waiter={kind:"offer",minSequence,generation,controlEpoch,
+      intentGeneration,tappedAt,player:p,preparedActionId:null,settled:false,
+      timer:null,cadence:null,confirm:null,
+      settle:(outcome)=>{
+        if(waiter.settled) return;
+        waiter.settled=true;
+        clearTimeout(waiter.timer); waiter.timer=null;
+        clearTimeout(waiter.cadence); waiter.cadence=null;
+        clearTimeout(waiter.confirm); waiter.confirm=null;
+        const at=waiters.indexOf(waiter);
+        if(at!==-1) waiters.splice(at,1);
+        // `clearPlaybackControlWaiters` settles everything with null, and it
+        // is called for an owner change, a reporter that stopped, and every
+        // viewer command. None of those is this ask's answer, and all of them
+        // mean something newer owns the player -- so none of them earns a
+        // reopen on this ask's behalf.
+        resolve(outcome||"superseded");
+      },
+      // An ordinary waiter gets a fresh window on every exchange that is not
+      // its own. This one is bounded from the tap and ignores the extension.
+      extend:()=>{},
+      // The preparation is built after `settlePlaybackControlWaiters` returns,
+      // further down the same `onExchange`. Confirming on the next turn is
+      // what lets the bound below tell "offered and built" from "offered and
+      // dropped" instead of reporting a handoff that does not exist.
+      confirmPrepared:()=>{
+        if(waiter.settled) return;
+        waiter.confirm=null;
+        if(preparedOfferSuperseded(waiter)){ waiter.settle("superseded"); return; }
+        if(preparedOfferBuilt(waiter.player,waiter.preparedActionId))
+          waiter.settle("prepared");
+      }};
+    waiter.timer=setTimeout(()=>{
+      waiter.timer=null;
+      // A staging this client was offered and never built still holds the
+      // session's one preparation slot until the server's deadline, and the
+      // reopen's successor would inherit a session that can never prepare
+      // again. Hand it back before giving up on it.
+      if(waiter.preparedActionId&&!preparedOfferBuilt(p,waiter.preparedActionId))
+        queuePlaybackControlAcknowledgement(p,waiter.preparedActionId,"aborted");
+      waiter.settle("timed_out");
+    },Math.max(0,PREPARED_OFFER_BOUND_MS-(performance.now()-tappedAt)));
+    waiters.push(waiter);
+    // A reporter that stopped between the notify and here will never exchange
+    // again, so nothing but the bound would ever settle this.
+    if(reporter.stopped) waiter.settle("superseded");
+  });
+}
+// A seek, another menu choice, a close: anything that replaces viewer intent
+// retires this ask without earning it a reopen of its own.
+function preparedOfferSuperseded(waiter){
+  const p=waiter&&waiter.player;
+  return !p||(p.controlIntentGeneration||0)!==waiter.intentGeneration;
+}
+// "This client built what it was offered." True while the preparation is live,
+// while its commit is settling, and after a commit that has already settled --
+// a staging whose media is already buffered passes through all three before
+// the confirmation above runs.
+function preparedOfferBuilt(p,actionId){
+  if(!p||!actionId) return false;
+  const live=preparedState(p);
+  if(live&&live.actionId===actionId) return true;
+  if(p.preparedCommitting&&p.preparedCommitting.actionId===actionId) return true;
+  return preparedSettlementDone(p,actionId);
+}
+// The rules, in one place, run for every offer waiter on every exchange.
+function settlePreparedOfferWaiter(p,waiter,mine,response,error){
+  if(preparedOfferSuperseded(waiter)){ waiter.settle("superseded"); return; }
+  // An exchange FAILURE does not settle this one, and that is the difference
+  // from the stall waiter beside it. A stalled viewer cannot wait, so "no
+  // answer" is an answer they can act on; here the incumbent is playing
+  // perfectly and only the ask is unanswered, so the bound decides.
+  if(error||!response||!mine) return;
+  const action=response.action||null;
+  if(action&&window.PlurxPlaybackControl
+     &&action.type===PlurxPlaybackControl.PREPARE_ACTION_TAG){
+    waiter.preparedActionId=action.action_id||null;
+    // The server replays a `Prepare` byte-identically until it processes the
+    // acknowledgement, so a replay of one this client already built settles at
+    // once. A first offer waits for `onExchange` to have its turn -- this must
+    // not build a second pipeline on the element the viewer is watching.
+    if(preparedOfferBuilt(p,waiter.preparedActionId)){ waiter.settle("prepared"); return; }
+    if(waiter.confirm==null) waiter.confirm=setTimeout(waiter.confirmPrepared,0);
+    return;
+  }
+  const preparation=response.delivery&&response.delivery.preparation;
+  // ABSENT IS NOT A DECLINE. A relay peer running an older build does not
+  // evaluate this field at all, and reading its silence as "no" would turn
+  // every switch against one into the immediate reopen this milestone exists
+  // to remove. Only the explicit value declines; absent stays armed and lets
+  // the bound decide.
+  if(preparation==="none"){ waiter.settle("declined"); return; }
+  if(preparation==="staging"&&waiter.cadence==null){
+    // Staging is progress, not an answer. Come back sooner than ordinary
+    // cadence so the offer is collected as soon as it exists rather than up to
+    // a whole exchange interval later.
+    waiter.cadence=setTimeout(()=>{
+      waiter.cadence=null;
+      const live=waiter.player&&waiter.player.controlReporter;
+      if(!waiter.settled&&live&&!live.stopped) try{ live.notify(); }catch(e){}
+    },PREPARED_OFFER_CADENCE_MS);
+  }
+}
+// One owner per directed change, from the tap to a commit or ONE reopen.
+//
+// Every way this can fail converges on the same single answer -- reopen the
+// stream where the viewer actually is -- and `change.settled` is what keeps it
+// single. Without it a decline racing the bound, or a failed commit racing a
+// supersede, reopens twice.
+//
+// `fallback` is optional and is how Auto keeps its own reopen: the automatic
+// controller goes through `requestPlaybackMediaChange` so the create carries
+// the rung, where the menu goes through `play()`.
+async function requestQualityChange(p,reason,fallback){
+  if(!p) return "superseded";
+  const change={intentGeneration:p.controlIntentGeneration||0,
+    tappedAt:performance.now(),settled:false,reason:reason||"manual",
+    fallback:fallback||null,outcome:null,outcomeAt:null};
+  p.directedChange=change;
+  let outcome="timed_out";
+  try{ outcome=await awaitPreparedOffer(p,change.tappedAt); }catch(e){ outcome="timed_out"; }
+  if(p.directedChange===change){ change.outcome=outcome; change.outcomeAt=performance.now(); }
+  // A prepared successor is now this change's business: its commit settles it,
+  // and its failure reopens through the same owner.
+  if(outcome==="prepared") return outcome;
+  if(outcome==="superseded"){ settleDirectedChange(p,change,"superseded"); return outcome; }
+  fallBackDirectedChange(p,change,outcome);
+  return outcome;
+}
+// The one reopen.
+//
+// Position is sampled NOW rather than at the tap. The incumbent kept playing
+// for the whole wait -- up to the full bound -- and reopening at where the
+// viewer was twelve seconds ago is a visible jump backwards on top of a
+// quality change that already cost them a rebuffer.
+function fallBackDirectedChange(p,change,why){
+  if(!p||!change) return false;
+  if(change.settled||p.directedChange!==change
+     ||(p.controlIntentGeneration||0)!==change.intentGeneration) return false;
+  change.settled=true;
+  change.outcome=why;
+  change.outcomeAt=performance.now();
+  const v=document.getElementById("video");
+  const pos=positionForPlaybackIntent(v,p);
+  // The reopen's own create carries the rung explicitly, so the ask on the
+  // wire has done its job and would otherwise keep re-announcing itself.
+  p.autoRequestedHeight=null;
+  clientLog(Object.assign({level:"warn",event:"quality_switch",
+    detail:`via=fallback why=${why}`,reason:change.reason||"manual",
+    message:`prepared handoff did not carry the change (${why}); reopening the stream`},
+    playbackContext()));
+  if(change.fallback){
+    try{ const running=change.fallback(why); if(running&&running.catch) running.catch(()=>{}); }
+    catch(e){}
+    return true;
+  }
+  PENDING_ATTEMPT_REASON="quality";
+  // NOW the destination is published, and not a moment earlier. This is the
+  // call `setQuality` used to make at the tap, where it marked a seek that was
+  // not one and retired the very ask the change was about. Here the stream is
+  // genuinely being reopened at a position, which is exactly what it is for,
+  // and the change is already settled so nothing re-enters.
+  beginPlaybackControlSeek(p,pos);
+  play(p.fileId,p.title||"",Math.round(pos*1000),p.knownDur||0,p.meta);
+  return true;
+}
+// A directed change that ended without a reopen: the successor took the
+// picture, or something newer replaced the whole ask.
+function settleDirectedChange(p,change,why,detail){
+  const owned=change||(p&&p.directedChange);
+  if(!p||!owned||owned.settled||p.directedChange!==owned) return false;
+  owned.settled=true;
+  owned.outcome=why;
+  owned.outcomeAt=performance.now();
+  if(detail!=null) owned.detail=detail;
+  // Requested and delivered are the same rung now, so the selection goes back
+  // to plain Auto -- a stable digest rather than a standing ask.
+  p.autoRequestedHeight=null;
+  return true;
+}
+// A viewer command, a teardown, a stream replacement. The ask is retired and
+// nothing owes it a reopen.
+function supersedeDirectedChange(p){
+  return settleDirectedChange(p,p&&p.directedChange,"superseded");
+}
+// The server cancels a preparation the moment the incumbent reports `waiting`
+// or `stalled`, so an automatic move made from a stalled picture would spend
+// the whole offer bound to be told no. A stalled reopen stays a reopen.
+function directedChangeIncumbentReady(p,v){
+  if(!p||!v||!p.started) return false;
+  if(v.error||v.ended||p.waitAt) return false;
+  if(!playbackOwnsAttachedMedia(p)) return false;
+  return v.paused||Number(v.readyState)>=3;
+}
 // Settle every waiter whose request has now been answered. An exchange that
 // failed settles them too, with null: "no answer" is an answer a stalled
 // viewer can act on immediately, and making them wait out the full bound for
@@ -8869,6 +9221,9 @@ function settlePlaybackControlWaiters(p,request,response,error){
     const mine=sequence>=waiter.minSequence
       && request.generation===waiter.generation
       && request.control_epoch===waiter.controlEpoch;
+    // An offer waiter is settled by rule, never by arrival: the exchange that
+    // answers a directed change is rarely the one that carried it.
+    if(waiter.kind==="offer"){ settlePreparedOfferWaiter(p,waiter,mine,response,error); continue; }
     if(mine) waiter.settle(action); else waiter.extend();
   }
   // A stop that follows its own last exchange leaves a reporter that will never
@@ -8983,6 +9338,10 @@ function startPlaybackControl(v,p,bootstrap){
         }
         if(response){
           const recovered=p.controlLastError;
+          // Advisory only, and read by nothing that decides anything: the
+          // Developer card shows the server's own last word on preparing so an
+          // operator can tell "declined" from "never asked".
+          p.controlLastPreparation=(response.delivery&&response.delivery.preparation)||null;
           p.controlLastResponse=response;
           p.controlLastExchangeAt=Date.now();
           p.controlLastError=null;
@@ -11427,6 +11786,10 @@ function teardownHls(){
   // left to the 330-second deadline: a preparation nobody answered holds this
   // session's only preparation slot for the rest of its life.
   abandonPreparedReplacement(PLAYER,"aborted","the playing stream was replaced");
+  // The stream this change was asked against is ending. Whatever is replacing
+  // it owns the viewer's intent now, and the ask is retired rather than
+  // reopened a second time.
+  supersedeDirectedChange(PLAYER);
   cancelPreparedFirstFrame(PLAYER);
   if(PLAYER&&PLAYER.hls){
     const video=document.getElementById("video");
@@ -11867,7 +12230,10 @@ async function switchAutoRung(currentHeight,decision){
   // The rung switch opens a session like either rescue does, so it takes the
   // same single automatic claim rather than a guard of its own.
   if(!claimAutoFallback(p)) return;
-  try{
+  // Today's move, kept verbatim, and the answer to every way the handoff can
+  // fail. The create carries the rung explicitly, which is why the standing
+  // ask is cleared before this runs.
+  const reopen=async()=>{
     const pos=positionForPlaybackIntent(v,p);
     beginPlaybackControlSeek(p,pos,false);
     const attached=await requestPlaybackMediaChange(p,{method:'transcode',copyHls:false,
@@ -11875,6 +12241,21 @@ async function switchAutoRung(currentHeight,decision){
       from:currentHeight,switchReason:decision.reason});
     if(attached) raisePlaybackSurface("degraded_notice",
       {title:`Quality → ${decision.height}p — ${decision.reason}`});
+    return attached;
+  };
+  try{
+    // A stalled incumbent has nothing to hand off from. The server cancels a
+    // preparation on `waiting` or `stalled` anyway, so asking would spend the
+    // whole offer bound to be told no and leave the viewer stalled for it.
+    if(!preparedHandoffOffered(p)||!directedChangeIncumbentReady(p,v)){
+      await reopen();
+      return;
+    }
+    // Set BEFORE the ask, so the very first exchange after this decision
+    // already carries the rung and the server sees a selection change rather
+    // than the same Auto it has been reading all along.
+    p.autoRequestedHeight=decision.height;
+    await requestQualityChange(p,"auto-quality",reopen);
   } finally { releaseAutoFallback(p); }
 }
 async function rescueAutoSupply(causeEvidence){
@@ -11898,9 +12279,16 @@ async function rescueAutoSupply(causeEvidence){
   p.abr.supplyRescued=true;
   raisePlaybackSurface("owner_recovery_step",{title:"Adjusting quality…",
     detail:"repeated supply stalls — starting transcode Auto"});
+  const reopen=()=>startTranscodeFallback("auto-supply",
+    "switched to transcode Auto after 3 supply stalls in 60 seconds");
   try{
-    await startTranscodeFallback("auto-supply",
-      "switched to transcode Auto after 3 supply stalls in 60 seconds");
+    // The same owner as the rung switch, and the same gate. This path is
+    // reached BY repeated supply stalls, so the incumbent is almost never
+    // ready and this is almost always the reopen it has always been -- which
+    // is the point: a stalled viewer must not wait out an offer bound. It
+    // chooses Auto rather than a rung, so it publishes no requested height.
+    if(!preparedHandoffOffered(p)||!directedChangeIncumbentReady(p,v)) await reopen();
+    else await requestQualityChange(p,"auto-supply",reopen);
   } finally { releaseAutoFallback(p); }
   if(PLAYER!==p) return;
   // The retained recipe owns completion even if a newer command superseded
@@ -13758,14 +14146,26 @@ function setQuality(q){
     clientLog(Object.assign({level:"warn",event:"quality_switch",
       message:`quality ${from} → ${q}`,detail:`from=${from} to=${q}`,reason:"manual"},
       playbackContext()));
-    PENDING_ATTEMPT_REASON="quality";
     // A manual quality choice replaces an automatic/compatibility recipe.
     // In particular Original must not inherit a pending forced transcode.
     PLAYER.pendingMediaChange=null;
-    const v=document.getElementById("video");
-    const pos=positionForPlaybackIntent(v,PLAYER);
-    beginPlaybackControlSeek(PLAYER,pos);
-    play(PLAYER.fileId, PLAYER.title||"", Math.round(pos*1000), PLAYER.knownDur||0, PLAYER.meta);
+    // The viewer picked a rung by hand. Whatever the automatic controller was
+    // asking for is not what they want.
+    PLAYER.autoRequestedHeight=null;
+    // A quality choice is not a seek, and marking one is what used to bump the
+    // control intent generation here -- which retires every outstanding ask,
+    // including the one this change is about to make. Only a destination that
+    // has not landed is republished.
+    if(PLAYER.controlSeek&&!PLAYER.controlSeek.executed){
+      const v=document.getElementById("video");
+      beginPlaybackControlSeek(PLAYER,positionForPlaybackIntent(v,PLAYER));
+    }
+    // Publishes the new selection and keeps the incumbent playing while the
+    // server builds a successor. `PENDING_ATTEMPT_REASON` is set by the reopen
+    // itself now: a switch that commits opens no session, and leaving the
+    // reason armed would label the next unrelated open a quality change.
+    const running=requestQualityChange(PLAYER,"manual");
+    if(running&&running.catch) running.catch(()=>{});
   }
 }
 
@@ -18843,6 +19243,40 @@ function toggleMobileSearch(){
   if(open)document.getElementById('q')?.focus();
 }
 
+// Advisory rows about the last directed quality change, inside the card that
+// already exists. Paul's standing rule: features are not gated in code, so
+// nothing here is read by anything that decides anything -- it is a window
+// onto state the player keeps regardless.
+//
+// Empty when there is no player and no history, which is what the settings
+// page looks like at rest. The rows appear only once there is something true
+// to say about a change that actually happened.
+function directedChangeDeveloperRows(){
+  const p=PLAYER;
+  if(!p) return "";
+  const change=p.directedChange;
+  const outcome=change&&change.outcome;
+  const said={committed:"committed",declined:"declined",timed_out:"timed out",
+    failed:"fell back",superseded:"superseded"}[outcome]||null;
+  const outcomeText=!change ? "no directed change yet"
+    : said==null ? "waiting for an offer"
+    : outcome==="committed"&&Number.isFinite(change.detail)
+      ? `committed ${Math.round(change.detail)} ms` : said;
+  const preparation=p.controlLastPreparation||"not reported";
+  const requested=p.autoRequestedHeight>0?`${Math.round(p.autoRequestedHeight)}p`:"none";
+  const delivered=p.autoHeight>0?`${Math.round(p.autoHeight)}p`:"unknown";
+  if(!change&&!p.controlLastPreparation&&!(p.autoRequestedHeight>0)&&!(p.autoHeight>0))
+    return "";
+  return `<details class="setdetails"><summary>Last quality change</summary><div class="setdetails-body">
+    ${devStaticReq("Outcome",esc(outcomeText),
+      "What became of the most recent directed quality change in this player.")}
+    ${devStaticReq("Server preparation",esc(String(preparation)),
+      "The server's own last word on staging a successor for this session. An absent value means a relay peer that does not evaluate it, which is never a refusal.")}
+    ${devStaticReq("Auto rung",`${esc(requested)} &rarr; ${esc(delivered)}`,
+      "Requested by this browser's automatic controller, then delivered by the server. They are deliberately separate readings.")}
+    <p class="devcheck-note">Advisory only. Nothing on these rows enables, disables or blocks a quality change.</p>
+    </div></details>`;
+}
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
     <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner and guide</span></a>
@@ -18857,7 +19291,8 @@ function developerPanel(settings,readiness){
       <div class="err" id="dverr" role="alert"></div>${setCardFoot("saveDeveloper")}`);
   const browser=setCard(`${cardHead("Second player in this browser","Advertise this browser's ability to prepare a replacement stream.",`<span class="pill acc">this browser</span>`)}
       ${togRow("pdp","Allow a second player","Uses additional device memory and decoder capacity. Saved automatically in this browser; the next reporter exchange sends the change.",preparedHandoffEnabled(),'onchange="setPreparedHandoff(this.checked)"')}
-      <div class="hint">A failed preparation falls back to reopening the stream. <a href="#/settings/playback">Quality switching</a> must also be enabled on the server.</div>`,{local:true});
+      <div class="hint">A failed preparation falls back to reopening the stream. <a href="#/settings/playback">Quality switching</a> must also be enabled on the server.</div>
+      ${directedChangeDeveloperRows()}`,{local:true});
   const libraryChannels=setCard(`${cardHead("Library channels","Build always-on schedules from probed movies and episodes. The feature is compiled into every ordinary server build.",settings.library_channels_enabled?`<span class="pill ok">enabled</span>`:`<span class="pill">disabled</span>`)}
       ${togRow("lcsubjectenabled","Enable subject matching","Starts new local inference calls. Saving, cached matches and existing playback remain available when paused.",settings.library_channel_subject_matching_enabled!==false)}
       ${devReq(readiness,"library_channel_subject_matching","provider","Local Ollama provider and installed model","Configure the local provider and install its model once. Enabling does not download a model.")}
