@@ -1,6 +1,6 @@
 # Library pages — scan your library and inspect one file
 
-**Status:** built in PR #330; web Home restored in PR #331; native restoration in PR #334 · **Updated:** 2026-09-15
+**Status:** built in PR #330; web Home restored in PR #331; native restoration in PR #334; web item page restored · **Updated:** 2026-09-16
 
 Companion to [CLIENTS.md](../CLIENTS.md). This revision implements the approved
 Home and item-page proposals across the web, Apple and Android clients.
@@ -38,7 +38,23 @@ device execution is not claimed. Local iOS, tvOS and Android compilation
 passed. The final lane runs once after the review finding is addressed;
 no broad native unit suite is added.
 
-## The item header describes the selected file
+## The web item page returns to its original layout
+
+On September 16, 2026, the user compared renders of the web item page before
+PR #317, after PR #317 and at current main, and chose the page from before
+PR #317. Movies, series, seasons and episodes render through each layout's own
+item body again: the poster panel, the single row of badge chips, the open
+facts panel with its audio and subtitle chips, the pre-play pickers and the
+Content analysis box. The shared "viewing" body that PR #317 introduced and PR
+#330 recomposed — the version selector, the four coloured header badges, the
+English-availability line, the Download button, the collapsible searchable
+track lists and the series "Next episode" panel — is removed from the web
+client along with its styles. The `/files/{id}/download` route and the
+server-side fields PR #330 added stay; nothing on the web client calls them.
+The native item pages are not part of this restoration and keep the PR #330
+design described below.
+
+## The item header describes the selected file (native clients)
 
 Resolution, dynamic range, video codec and container are the four colored
 header badges. Other facts are text. A version selector changes the displayed
@@ -85,7 +101,7 @@ is 27.0; the final Apple lane uses the pinned Xcode 26.6 runner. Rust 1.97.1
 `cargo check -p plurxd --all-targets --locked`, workspace Clippy with denied
 warnings and formatting passed. Focused regressions:
 
-- `node tests/web/calm-library.test.js`
+- `node tests/web/calm-library.test.js` — its item-page checks now pin the original per-layout item bodies instead of the removed track summaries
 - `cargo test -p plurx-core global_recent_additions_exclude_recordings_before_limiting --locked`
 - `cargo test -p plurxd --bin plurxd original_download_supports_ranges_without_registering_playback --locked`
 
@@ -111,10 +127,13 @@ with sample data; no script errors or horizontal overflow were observed.
 - Both catalogue stores exclude recording libraries before the global Recently
   added limit. An explicitly scoped recordings library still returns its items.
 - Apple and Android recording rows open the named recording details.
-- Web version changes recompute subtitle cost notices and reject responses for
-  detached notices; track choices stay attached to their file.
-- Web home videos and recordings use the shared item composition, including the
-  existing home-video metadata editor in More actions.
+- Web version changes recomputed subtitle cost notices and rejected responses
+  for detached notices; track choices stayed attached to their file. (Removed
+  with the web item-page restoration; the original page has no version
+  selector.)
+- Web home videos and recordings used the shared item composition, including
+  the existing home-video metadata editor in More actions. (Removed with the
+  web item-page restoration; they use their original bodies again.)
 
 The original download action uses a dedicated authenticated, range-capable
 attachment endpoint. Downloading bytes does not create a watching session.

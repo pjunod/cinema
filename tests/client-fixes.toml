@@ -2017,16 +2017,6 @@ test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "def test_repository_build_claims_match_release_inputs"
 
 [[fixes]]
-# Focused web evidence; native layout evidence is compile plus simulator
-# captures, not blanket unit coverage of the visual revision.
-id = "clients.calm-library-track-choices"
-commits = ["a767f5fe"]
-source = "crates/plurxd/src/web/index.html"
-source_anchor = "function itemTrackSummary("
-test = "tests/web/calm-library.test.js"
-test_anchor = "assert.equal(summary(file, 'audio'), 'English');"
-
-[[fixes]]
 id = "clients.calm-library-download-check"
 commits = ["79553e2f"]
 source = "crates/plurxd/src/http/stream.rs"

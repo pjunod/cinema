@@ -166,6 +166,17 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Changed
 
+- **The web item page is the original one again.** Movies, series, seasons and
+  episodes render through each layout's own item body: the poster panel, one
+  row of badge chips, the open facts panel with audio and subtitle chips, the
+  pre-play pickers and the Content analysis box. The shared "viewing" page that
+  the September usability revision introduced and the library-page revision
+  recomposed — version selector, four header badges, the English-availability
+  line, the Download button, collapsible searchable track lists and the series
+  "Next episode" panel — is gone from the web client. Home had already gone
+  back; the grid and rail poster cards never changed. The native item pages
+  keep their current design.
+
 - **`docs/` has a landing page, and 144 of its 161 root files now live in a
   subject folder.** Everything written about one piece of work — the plan, its
   reviews, the handoffs, the status tracker, the diagnoses — sits together in
