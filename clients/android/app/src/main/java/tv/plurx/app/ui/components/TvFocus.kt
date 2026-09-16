@@ -20,6 +20,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Modifier
@@ -61,7 +62,10 @@ fun RequestInitialFocus(
      * during ordinary navigation, rather than once on arrival, pass false.
      */
     reinforce: Boolean = true,
+    /** Called only after an attached target accepts focus. */
+    onFocusRequested: (() -> Unit)? = null,
 ) {
+    val notifyFocused by rememberUpdatedState(onFocusRequested)
     LaunchedEffect(focusRequester, enabled, token) {
         if (!enabled) return@LaunchedEffect
         // Detail content is nested in lazy containers. One frame can attach a
@@ -70,10 +74,12 @@ fun RequestInitialFocus(
         withFrameNanos { }
         // A requester whose node is not composed throws; asking for focus is
         // never worth a crash.
-        runCatching { focusRequester.requestFocus() }
-        if (!reinforce) return@LaunchedEffect
-        delay(80)
-        runCatching { focusRequester.requestFocus() }
+        var acquired = runCatching { focusRequester.requestFocus() }.getOrDefault(false)
+        if (reinforce) {
+            delay(80)
+            acquired = runCatching { focusRequester.requestFocus() }.getOrDefault(false) || acquired
+        }
+        if (acquired) notifyFocused?.invoke()
     }
 }
 

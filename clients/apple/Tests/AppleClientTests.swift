@@ -9683,11 +9683,77 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(DetailView.resumeFraction(positionMs: 200, durationMs: 100), 1)
     }
 
-    func testPhoneHomeKeepsEveryContinuationWithoutAFeaturedHero() {
+    func testPhoneHomeUsesOneCompactContinueFeature() {
         let first = Item(id: 1, kind: "movie", title: "First")
         let second = Item(id: 2, kind: "movie", title: "Second")
-        XCTAssertFalse(HomeLayoutPolicy.usesFeaturedHero)
-        XCTAssertEqual(HomeLayoutPolicy.continueWatchingShelfItems([first, second]).map(\.id), [1, 2])
+
+        XCTAssertTrue(HomeLayoutPolicy.usesFeaturedHero)
+        XCTAssertEqual(
+            HomeLayoutPolicy.continueWatchingShelfItems([first, second]).map(\.id),
+            [2]
+        )
+        XCTAssertLessThanOrEqual(HomeHeroMetrics.compactHeight, 250)
+        XCTAssertGreaterThanOrEqual(HomeHeroMetrics.cornerRadius, 16)
+    }
+
+    @MainActor
+    func testPhoneHomeHeroKeepsEqualInsetsOnBothEdges() {
+        let backdrop = UIGraphicsImageRenderer(
+            size: CGSize(width: 160, height: 90)
+        ).image { context in
+            UIColor.red.setFill()
+            context.fill(CGRect(x: 0, y: 0, width: 160, height: 90))
+        }
+
+        for viewportWidth: CGFloat in [375, 430] {
+            var heroFrame: CGRect = .null
+            let controller = UIHostingController(rootView:
+                NavigationStack {
+                    ScrollView {
+                        LazyVStack(alignment: .leading) {
+                            NavigationLink(value: 1) {
+                                ZStack {
+                                    Image(uiImage: backdrop)
+                                        .resizable()
+                                        .aspectRatio(contentMode: .fill)
+                                        .frame(maxWidth: .infinity)
+                                        .frame(height: HomeHeroMetrics.compactHeight)
+                                        .clipped()
+                                }
+                                .modifier(IOSHomeHeroCardLayout())
+                                .reportLayoutFrame()
+                            }
+                            .featuredButtonStyle()
+                            .modifier(IOSHomeHeroLayout(compact: true))
+                        }
+                    }
+                    .navigationDestination(for: Int.self) { _ in Color.clear }
+                }
+                .onPreferenceChange(LayoutFramePreferenceKey.self) {
+                    heroFrame = $0
+                }
+            )
+
+            controller.view.frame = CGRect(
+                origin: .zero,
+                size: CGSize(width: viewportWidth, height: HomeHeroMetrics.compactHeight)
+            )
+            let window = UIWindow(frame: controller.view.frame)
+            window.rootViewController = controller
+            window.makeKeyAndVisible()
+            controller.view.setNeedsLayout()
+            controller.view.layoutIfNeeded()
+            RunLoop.main.run(until: Date(timeIntervalSinceNow: 0.1))
+
+            XCTAssertFalse(heroFrame.isNull)
+            XCTAssertEqual(heroFrame.minX, HomeHeroMetrics.horizontalInset, accuracy: 0.5)
+            XCTAssertEqual(
+                heroFrame.maxX,
+                viewportWidth - HomeHeroMetrics.horizontalInset,
+                accuracy: 0.5
+            )
+            window.isHidden = true
+        }
     }
 
     private func contrastRatio(_ foreground: UIColor, _ background: UIColor) -> CGFloat {

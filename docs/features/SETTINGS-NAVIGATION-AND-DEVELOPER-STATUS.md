@@ -36,6 +36,15 @@ The branch was compiled and served as an isolated single-node installation on
 loopback-only ports. A disposable local admin account was used; no production
 data or existing plurx installation was touched.
 
+**Screenshot refresh, 2026-09-15:** the linked images now show `main` at
+`39625f9fe`, rebuilt with Rust 1.97.1 and a disposable synthetic library for
+the public documentation. They retain the previous image dimensions and use
+noirr cinema branding. Prepared-quality readiness is now on Developer; the
+existing `settings-playback-readiness-expanded-*` filenames are retained for
+link compatibility. The original branch validation narrative below is a
+historical record; these replacement images do not repeat those interaction
+tests.
+
 | Surface | Evidence |
 |---|---|
 | Developer, desktop | [1280 px dark](../img/settings-developer-1280-dark.png) · [1280 px light](../img/settings-developer-1280-light.png) |

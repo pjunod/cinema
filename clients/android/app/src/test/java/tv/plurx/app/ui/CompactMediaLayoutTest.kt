@@ -6,13 +6,13 @@ import tv.plurx.app.data.Item
 
 class CompactMediaLayoutTest {
     @Test
-    fun allContinuationItemsRemainAvailableWithoutAHero() {
+    fun compactHomeFeaturesFirstContinuationAndTvKeepsAllShelfItems() {
         val items = listOf(
             Item(id = 1, kind = "movie", title = "First"),
             Item(id = 2, kind = "movie", title = "Second"),
         )
 
-        assertEquals(listOf(1L, 2L), continueWatchingShelfItems(items, FormFactor.Compact).map { it.id })
+        assertEquals(listOf(2L), continueWatchingShelfItems(items, FormFactor.Compact).map { it.id })
         assertEquals(listOf(1L, 2L), continueWatchingShelfItems(items, FormFactor.Television).map { it.id })
     }
 

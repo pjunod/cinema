@@ -177,8 +177,6 @@ private fun MainNav(
         composable("home") {
             HomeScreen(
                 vm = vm,
-                dvrController = dvr,
-                onOpenRecording = { id -> nav.navigate("recording/${Uri.encode(id)}") },
                 onOpenItem = { id -> nav.navigate("detail/$id") },
                 onOpenCollection = { title, libraries ->
                     nav.navigate("library/${libraries.joinToString(",") { it.id.toString() }}/${Uri.encode(title)}")

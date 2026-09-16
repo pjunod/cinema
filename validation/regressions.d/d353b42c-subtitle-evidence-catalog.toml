@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["d353b42c"]
+ignore = true
+reason = "This commit only adds the historical evidence mapping for 15f236ce. It changes no runtime code or test behavior; the mapped vendored-loader regression remains the executable proof for the playback correction."

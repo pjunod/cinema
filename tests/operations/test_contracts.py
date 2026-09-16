@@ -1561,20 +1561,16 @@ assert.equal(context.ACT_TIMER, null);
         )
         self.assertIn("git add coverage.json coverage.svg", coverage)
 
-        # The private Forgejo repository serves badges to authenticated local
-        # viewers; no external badge proxy receives repository metadata.
+        # The public-facing README must not depend on authenticated LAN badges
+        # or clone URLs. Workflow/coverage behavior is checked above; removing
+        # a private badge is valid and must not require publishing its metadata
+        # through an external proxy instead.
         readme = read("README.md")
-        self.assertIn(
-            "ci.yml/badge.svg?branch=main&event=push",
+        self.assertNotIn("http://forge.lan:3000", readme)
+        self.assertNotRegex(
             readme,
+            r"(?:https?://|ssh://git@)forge\.lan(?:[:/]|$)",
         )
-        self.assertIn("/raw/branch/badges/coverage.svg", readme)
-        self.assertIn("http://forge.lan:3000/noirr/plurx/actions", readme)
-        self.assertIn(
-            "git clone http://forge.lan:3000/noirr/plurx.git",
-            readme,
-        )
-        self.assertNotIn("git clone https://github.com/pjunod/plurx", readme)
         self.assertNotIn("img.shields.io/endpoint", readme)
         self.assertNotIn("raw.githubusercontent.com/pjunod/plurx/badges", readme)
 
