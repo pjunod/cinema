@@ -1020,3 +1020,58 @@ final class PreparedOfferOwnershipTests: XCTestCase {
         )
     }
 }
+
+/// §5.3 — the two rules that were already here, held still by a test rather
+/// than by reading the source.
+///
+/// Both are about a failure that resolves *after* the viewer has moved on. The
+/// prepared path's failures take a MainActor hop before they reopen, and a
+/// seek can land inside that hop; a fallback that reopened anyway would move
+/// the film out from under the command that superseded it.
+@MainActor
+final class PreparedFallbackOwnershipTests: XCTestCase {
+    private func settle() async {
+        for _ in 0..<10 {
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            await Task.yield()
+        }
+    }
+
+    func testAnInPlaceFallbackRunsWhenItStillOwnsThePlayer() async {
+        Caps.PreparedHandoffTelemetry.shared.reset()
+        let controller = PlayerController()
+        let model = AppModel()
+        controller.start(
+            model: model, itemId: 1, fileId: 1,
+            startMs: 0, durationMs: 600_000, title: "Ownership"
+        )
+        controller.fallBackToInPlaceReplacement(preparedAction())
+        await settle()
+        XCTAssertEqual(
+            Caps.PreparedHandoffTelemetry.shared.lastOutcome, "fell back",
+            "nothing superseded it, so the viewer still gets their change"
+        )
+        controller.stop()
+        Caps.PreparedHandoffTelemetry.shared.reset()
+    }
+
+    func testAnInPlaceFallbackStandsDownWhenANewerViewerActionOwnsThePlayer() async {
+        Caps.PreparedHandoffTelemetry.shared.reset()
+        let controller = PlayerController()
+        let model = AppModel()
+        controller.start(
+            model: model, itemId: 1, fileId: 1,
+            startMs: 0, durationMs: 600_000, title: "Ownership"
+        )
+        // The failure, and the viewer's seek landing inside its hop.
+        controller.fallBackToInPlaceReplacement(preparedAction())
+        controller.seek(toMs: 90_000)
+        await settle()
+        XCTAssertNil(
+            Caps.PreparedHandoffTelemetry.shared.lastOutcome,
+            "the seek owns the player; this fallback is about a destination nobody wants"
+        )
+        controller.stop()
+        Caps.PreparedHandoffTelemetry.shared.reset()
+    }
+}
