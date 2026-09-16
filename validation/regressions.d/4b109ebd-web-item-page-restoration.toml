@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["4b109ebd"]
+points = ["web.experience"]
+checks = ["web-static"]
+reason = "The calm-library web regression now pins the original per-layout item bodies (no viewing-body dispatch, no calm-item styles, the open track rows in specBlock) and fails against the PR #317/#330 item page. tests/ui-structure.golden was never regenerated after PR #317 or #330, so its item-route facts already describe this restored page; a sweep on the branch shows the item route's remaining drift is the shared header chrome (Recordings link, DVR indicator, mobile search) that every route carries, which is left for the golden regeneration on main."

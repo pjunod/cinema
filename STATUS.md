@@ -6,9 +6,10 @@ first.
 
 ## The web item page is back to its pre-#317 layout
 
-**Branch `revert/web-item-page-pre-317`, stacked on `fix/dvr-attention-placeholders`
-([#340](http://forge.lan:3000/noirr/plurx/pulls/340)); both open as drafts,
-adversarial review done and its findings folded, full lane still to run once.**
+**[#342](http://forge.lan:3000/noirr/plurx/pulls/342) from
+`revert/web-item-page-pre-317` into `main`; adversarial review done and its
+findings folded; the Hiqlite fix it uncovered merged first as
+[#340](http://forge.lan:3000/noirr/plurx/pulls/340) (`a6996538`).**
 Paul compared real renders of the web item page before PR #317, after PR #317
 and at current main and chose the pre-#317 page. The branch removes the shared
 "viewing" item body and its styles so every layout renders its own original
@@ -18,8 +19,8 @@ library. Grid and rail poster cards were never changed by either PR. Native
 item pages are out of scope and keep the PR #330 design. Regenerating the
 structural golden for the restoration turned up a real bug on `main`:
 `GET /api/v1/dvr/attention` answers 500 on every replicated store because the
-Hiqlite page statement named its placeholders out of order — fixed in #340
-with the assembled-statement census extended to cover it. The committed
+Hiqlite page statement named its placeholders out of order — fixed and merged
+as #340 with the assembled-statement census extended to cover it. The committed
 `tests/ui-structure.golden` still predates PR #317 and every route's header
 chrome has drifted since (Recordings link, DVR indicator, mobile search); that
 regeneration is a separate chore, not part of these two PRs.
