@@ -918,3 +918,105 @@ final class PreparedReplacementAlignmentTests: XCTestCase {
         )
     }
 }
+
+// MARK: - Ownership after the offer (M2)
+
+/// Once a staging has been offered, **something** must reach the viewer: the
+/// successor commits, or the ordinary in-place change runs. These are the three
+/// ways the offered path can end, and the count of reopens each one owes.
+///
+/// M2 makes them load-bearing for the first time. Until now no viewer action
+/// ever reached the prepared path at all — the ask waited on the exchange that
+/// carried it, which cannot carry a `prepare` — so every one of these branches
+/// was reachable only from the server's own push.
+@MainActor
+final class PreparedOfferOwnershipTests: XCTestCase {
+    func testAnOfferWhoseSuccessorWillNotStartOwesExactlyOneReopen() {
+        let host = RecordingHost()
+        host.startSucceeds = false
+        let coordinator = PreparedReplacementCoordinator(host: host)
+        let action = preparedAction()
+        coordinator.offer(action, filmPositionMs: 30_000)
+        XCTAssertEqual(host.fallbacks, [action], "exactly one, and it names this staging")
+        XCTAssertEqual(coordinator.pendingAcknowledgement?.state, .failed)
+        XCTAssertEqual(host.alive, 0)
+    }
+
+    func testAnOfferThatRunsOutOfReadinessOwesExactlyOneReopen() {
+        let host = RecordingHost()
+        var clock = 1_000
+        let coordinator = PreparedReplacementCoordinator(host: host, now: { clock })
+        let action = preparedAction()
+        coordinator.offer(action, filmPositionMs: 30_000)
+        coordinator.successorIsMetadataReady()
+        clock += PreparedReplacementBounds.readinessMs
+        XCTAssertTrue(coordinator.readinessBoundElapsed())
+        coordinator.abandon(.failed)
+        coordinator.abandon(.failed)
+        XCTAssertEqual(
+            host.fallbacks, [action],
+            "a bound that elapses twice while the monitor polls is still one reopen"
+        )
+    }
+
+    func testAnOfferSupersededByTheViewerOwesNoReopenFromThisPath() {
+        let host = RecordingHost()
+        let coordinator = PreparedReplacementCoordinator(host: host)
+        coordinator.offer(preparedAction(), filmPositionMs: 30_000)
+        // What `beginViewerAction` does at the tap of the next command.
+        coordinator.abandonWithoutFallback(.aborted)
+        XCTAssertTrue(
+            host.fallbacks.isEmpty,
+            "the command that superseded this staging is itself the change being made"
+        )
+        XCTAssertEqual(host.alive, 0)
+    }
+
+    /// The abandoned ask's settlement is the thing that frees the server's one
+    /// preparation slot for the rest of the session, so it is queued behind
+    /// whatever the newer staging owes rather than dropped for it.
+    func testTheAbortedAcknowledgementOfASupersededStagingIsQueuedNotDropped() {
+        let host = RecordingHost()
+        let coordinator = PreparedReplacementCoordinator(host: host)
+        let first = preparedAction()
+        let second = preparedAction(actionId: "2d4f6a80-1b3c-4d5e-8f90-a1b2c3d4e5f6")
+        coordinator.offer(first, filmPositionMs: 30_000)
+        coordinator.offer(second, filmPositionMs: 30_000)
+        XCTAssertEqual(
+            coordinator.pendingAcknowledgement?.actionId, first.actionId,
+            "the settlement that frees the slot rides first"
+        )
+        XCTAssertEqual(coordinator.pendingAcknowledgement?.state, .aborted)
+        // The newer staging makes progress; the older settlement still has not
+        // been delivered, and must not be displaced by it.
+        coordinator.successorIsMetadataReady()
+        XCTAssertEqual(coordinator.pendingAcknowledgement?.actionId, first.actionId)
+        XCTAssertEqual(coordinator.pendingAcknowledgement?.state, .aborted)
+        coordinator.acknowledgementDelivered(
+            ActionAcknowledgement(actionId: first.actionId, state: .aborted)
+        )
+        XCTAssertEqual(
+            coordinator.pendingAcknowledgement?.actionId, second.actionId,
+            "and the newer staging's progress was waiting behind it, not lost"
+        )
+    }
+
+    /// There is no incumbent left to put back: its item is gone and its session
+    /// released. Recording the interruption without reopening would leave the
+    /// viewer looking at a frozen frame with the instrument that measured it.
+    func testASwitchWithoutAFrameReopensRatherThanOnlyRecordingIt() async {
+        let host = RecordingHost()
+        host.outcome = .switchedWithoutAFrame
+        let coordinator = PreparedReplacementCoordinator(host: host)
+        let action = preparedAction()
+        coordinator.offer(action, filmPositionMs: 30_000)
+        coordinator.successorIsMetadataReady()
+        coordinator.successorIsBuffered(throughMs: 40_000)
+        await coordinator.commit()
+        XCTAssertEqual(host.interruptions.count, 1)
+        XCTAssertEqual(
+            host.fallbacks, [action],
+            "measuring the freeze is not a substitute for ending it"
+        )
+    }
+}
