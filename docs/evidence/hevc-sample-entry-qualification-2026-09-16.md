@@ -92,6 +92,13 @@ ownership review now records 512. The complete 198-test validation contract,
 357-test operations contract, player-input contract, and player DOM contract
 then passed locally before the rerun head was pushed.
 
+That rerun passed preflight, web syntax, Apple compile, and mobile-version
+checks. Both native Rust and Windows cross-compile found the same omitted
+`video_codec_tag` initializer in the Plex compatibility crate's `MediaFile`
+test fixture. The fixture now states `None` explicitly; `make
+effort-rust-check` and `make hiqlite-vendor-clippy` passed locally before the
+next exact-head promotion attempt.
+
 ## Review findings F1–F10
 
 | Finding | Disposition |
