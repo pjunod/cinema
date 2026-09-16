@@ -1076,6 +1076,7 @@ async function main() {
       shippedSource("setPlaybackMediaSource"),
       shippedSource("applyPlaybackTransportIntent"),shippedSource("teardownHls"),
       shippedSource("beginPlaybackMediaAttachment"),shippedSource("applyPlaybackAttachmentPosition"),
+      shippedSource("playbackAttemptTerminallyStopped"),
       shippedSource("attachHls"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       "return {p:PLAYER,video,instances,metadata,attach:()=>attachHls(video,'/session/index.m3u8',30),teardownHls};",

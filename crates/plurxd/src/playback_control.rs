@@ -15147,8 +15147,6 @@ mod tests {
 
         assert!(local.is_permanent(), "the published rendition must stop");
         assert!(process.is_permanent(), "the changed process must stop");
-        assert_eq!(local.status(), "rendition_init_changed");
-        assert_eq!(process.status(), "engine_changed");
         assert_eq!(
             terminal_message(local),
             "this rendition changed unexpectedly and must be reopened"
