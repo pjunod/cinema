@@ -2999,7 +2999,9 @@ async function main() {
     ["the viewer paused", () => { stalledVideo.paused = true; }],
     ["the wait already ended", (player) => { player.waitAt = null; }],
   ]) {
-    const h = stallHarness();
+    // This tests leaving during an ask, not exhausting the 20-second wait
+    // budget because earlier cases made the suite's wall clock advance.
+    const h = stallHarness({ clock: { now: () => 9_000 } });
     const player = stalledPlayer();
     h.stub.attach(player, stalledVideo, bootstrap());
     h.attached.push(player);
