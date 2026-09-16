@@ -60,7 +60,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # One shard per `ci-store` slot: `nuc1`, `rogg16` and `nuc2`, one per
+        # One shard per `ci-store` slot: `lab1`, `lab5` and `lab2`, one per
         # physical non-voter host. Keep this list and SHARD_COUNT in step —
         # `make operations-check` fails when they disagree, and when the count
         # exceeds the number of slots the fleet actually carries.

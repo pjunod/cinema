@@ -8,7 +8,7 @@
 # the container, and scans of it will (loudly, now) find nothing.
 #
 # The paths you enter in the plurx web UI are the *container-side* paths:
-# mount /mnt/qnap/media at /media below, then add /media/movies in the UI.
+# mount /mnt/nas/media at /media below, then add /media/movies in the UI.
 # Mounting shares at the same path as the host (second example) keeps UI
 # paths identical to host paths — pick whichever you find saner.
 #
@@ -31,10 +31,10 @@ services:
       # one library into conversion, follow deploy/README.md first, then mount
       # only that exact library at a separate container path with :rw. Do not
       # turn this whole media root writable.
-      - /mnt/qnap/media:/media:ro
-      # - /mnt/qnap/20t:/mnt/qnap/20t:ro
-      # - /mnt/qnap/8tb:/mnt/qnap/8tb:ro
-      # - /mnt/qnap/media/dv-conversion:/media-dv-conversion:rw
+      - /mnt/nas/media:/media:ro
+      # - /mnt/nas/20t:/mnt/nas/20t:ro
+      # - /mnt/nas/8tb:/mnt/nas/8tb:ro
+      # - /mnt/nas/media/dv-conversion:/media-dv-conversion:rw
       # The DVR root. Recording needs somewhere to WRITE, and every media mount
       # above is read-only on purpose, so `dvr.enabled` cannot do anything until
       # this exists — the Developer tab's "The tuner owner can

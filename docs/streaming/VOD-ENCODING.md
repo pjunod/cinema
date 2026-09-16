@@ -171,7 +171,7 @@ Darwin `ps` to inspect their own children; all 11 pass together outside the
 restricted process sandbox. Neither event was hidden by weakening an
 assertion.
 
-Draft Forgejo PR [#173](http://192.168.4.7:3000/noirr/plurx/pulls/173) passed
+Draft Forgejo PR [#173](http://forge.lan:3000/noirr/plurx/pulls/173) passed
 the Effort development gate at reviewed head `44abf337`. The one adversarial
 review found no P0s, three P1 merge blockers, and one P2 status error. Correction
 commit `c7b87df5` closes all four:

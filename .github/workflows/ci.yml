@@ -920,7 +920,7 @@ jobs:
 
   vod_web:
     name: film-addressed VOD browser acceptance
-    # The eligible m6 runners are separate VMs on one physical host. Running
+    # The eligible lab6 runners are separate VMs on one physical host. Running
     # both Chromium-heavy gates together starved one player to 0.5% speed and
     # made a settled layout capture see a transient activity-endpoint failure.
     # A dependency is deliberate: Forgejo 16 accepted the same job-level
@@ -994,8 +994,8 @@ jobs:
         env:
           REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
         run: |
-          tag="192.168.4.7:3000/noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
-          echo "$REGISTRY_TOKEN" | docker login 192.168.4.7:3000 -u fleet --password-stdin || true
+          tag="${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
+          echo "$REGISTRY_TOKEN" | docker login ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }} -u fleet --password-stdin || true
           if docker pull "$tag"; then
             docker tag "$tag" plurx-android-build
             echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
@@ -1138,8 +1138,8 @@ jobs:
         env:
           REGISTRY_TOKEN: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
         run: |
-          tag="192.168.4.7:3000/noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
-          echo "$REGISTRY_TOKEN" | docker login 192.168.4.7:3000 -u fleet --password-stdin || true
+          tag="${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}/noirr/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
+          echo "$REGISTRY_TOKEN" | docker login ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }} -u fleet --password-stdin || true
           if docker pull "$tag"; then
             docker tag "$tag" plurx-android-build
             echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
@@ -1233,9 +1233,9 @@ jobs:
     if: github.ref == 'refs/heads/main'
     # Private-repository coverage badge — no codecov.io account or token.
     # Measure the runner-neutral fast lane and force-push both the endpoint JSON
-    # and a directly renderable SVG to an orphan `badges` branch. The README
-    # loads the SVG through github.com so authorized private-repo viewers work;
-    # shields.io cannot read a private raw.githubusercontent.com branch.
+    # and a directly renderable SVG to an orphan `badges` branch. The README's
+    # branch-relative URL resolves through either Forgejo or GitHub, so each host
+    # authenticates the private image request itself.
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -1260,7 +1260,10 @@ jobs:
         run: >-
           cargo llvm-cov --workspace --locked --exclude plurx-cluster-check
           --summary-only --json --output-path cov.json --failure-mode all
-      - name: Build the unit coverage badges
+      - name: Publish the unit coverage badge
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           pct=$(jq -r '.data[0].totals.lines.percent' cov.json)
           msg=$(printf '%.1f' "$pct"); int=${msg%.*}
@@ -1270,30 +1273,16 @@ jobs:
           elif [ "$int" -ge 40 ]; then color=yellow;      fill='#dfb317'
           elif [ "$int" -ge 20 ]; then color=orange;      fill='#fe7d37'
           else color=red; fill='#e05d44'; fi
-          mkdir -p badge
-          printf '{"schemaVersion":1,"label":"unit coverage","message":"%s%%","color":"%s"}\n' "$msg" "$color" > badge/coverage.json
-          cat > badge/coverage.svg <<SVG
-          <svg xmlns="http://www.w3.org/2000/svg" width="142" height="20" role="img" aria-label="unit coverage: ${msg}%">
-            <title>unit coverage: ${msg}%</title>
-            <linearGradient id="s" x2="0" y2="100%"><stop offset="0" stop-color="#bbb" stop-opacity=".1"/><stop offset="1" stop-opacity=".1"/></linearGradient>
-            <clipPath id="r"><rect width="142" height="20" rx="3" fill="#fff"/></clipPath>
-            <g clip-path="url(#r)"><rect width="91" height="20" fill="#555"/><rect x="91" width="51" height="20" fill="$fill"/><rect width="142" height="20" fill="url(#s)"/></g>
-            <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11"><text x="45.5" y="15" fill="#010101" fill-opacity=".3">unit coverage</text><text x="45.5" y="14">unit coverage</text><text x="116.5" y="15" fill="#010101" fill-opacity=".3">${msg}%</text><text x="116.5" y="14">${msg}%</text></g>
-          </svg>
-          SVG
-          cat badge/coverage.json
-      - name: Publish badge to the `badges` branch
-        if: github.ref == 'refs/heads/main'
-        continue-on-error: true
-        run: |
-          cd badge
-          git init -q
-          git checkout -q -b badges
-          git config user.name  "forgejo-actions[bot]"
-          git config user.email "forgejo-actions@noirr.local"
-          git add coverage.json coverage.svg
-          git commit -q -m "coverage badge"
-          git push -f origin badges
+          scripts/publish-badge \
+            --branch badges \
+            --alias codex/badges \
+            --filename coverage \
+            --label "unit coverage" \
+            --message "${msg}%" \
+            --fill "$fill" \
+            --json-color "$color" \
+            --label-width 91 \
+            --message-width 51
       - name: Enforce persistent Cargo bounds
         if: always() && steps.cargo-cache.outputs.local == 'true'
         uses: ./.github/actions/cargo-cache-finalize
@@ -1527,16 +1516,24 @@ jobs:
           fetch-depth: 0
       - uses: https://github.com/docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
-          buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml
+          buildkitd-config-inline: |
+            # The fleet registry is deliberately plain HTTP on the private LAN. A
+            # BuildKit container does not inherit Docker daemon insecure-registry
+            # settings, so the builder needs the same trust decision explicitly.
+            # Only requests to this exact address are affected.
+            [registry."${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"]
+              http = true
       - uses: https://github.com/docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
-          registry: 192.168.4.7:3000
+          registry: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
           username: fleet
           password: ${{ secrets.LOCAL_REGISTRY_TOKEN }}
       - name: Build once and publish the verified fleet image
         env:
           PLURX_BUILD_REF: ${{ github.sha }}
           PLURX_BUILD_SHA: ${{ github.sha }}
+          PLURX_REGISTRY: ${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}
+          PLURX_SOURCE_URL: ${{ github.server_url }}/${{ github.repository }}
         run: scripts/registry-push
 
   # Configure this as the single required check for main-bound pull requests
@@ -1640,3 +1637,67 @@ jobs:
           path: target/validation/qualification-receipt.json
           if-no-files-found: error
           retention-days: 14
+
+  badge:
+    name: publish CI badge
+    if: always()
+    needs:
+      - scope
+      - mobile_version
+      - preflight
+      - check
+      - windows_compile
+      - cluster_store
+      - cluster_topology
+      - cluster_transport_recovery
+      - cluster_wal
+      - cluster_daemon
+      - web_layout
+      - vod_web
+      - android_jvm
+      - apple
+      - android_device
+      - coverage
+      - package_smoke
+      - publish
+      - publish_main
+      - pr_gate
+    runs-on: [self-hosted, Linux, X64, lab, general]
+    timeout-minutes: 5
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Publish the aggregate CI result
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RESULTS: >-
+            ${{ needs.scope.result }} ${{ needs.mobile_version.result }}
+            ${{ needs.preflight.result }} ${{ needs.check.result }}
+            ${{ needs.windows_compile.result }} ${{ needs.cluster_store.result }}
+            ${{ needs.cluster_topology.result }}
+            ${{ needs.cluster_transport_recovery.result }}
+            ${{ needs.cluster_wal.result }} ${{ needs.cluster_daemon.result }}
+            ${{ needs.web_layout.result }} ${{ needs.vod_web.result }}
+            ${{ needs.android_jvm.result }} ${{ needs.apple.result }}
+            ${{ needs.android_device.result }} ${{ needs.coverage.result }}
+            ${{ needs.package_smoke.result }} ${{ needs.publish.result }}
+            ${{ needs.publish_main.result }} ${{ needs.pr_gate.result }}
+        run: |
+          message=passing; fill='#4c1'; color=brightgreen
+          for result in $RESULTS; do
+            case "$result" in
+              success|skipped) ;;
+              *) message=failing; fill='#e05d44'; color=red ;;
+            esac
+          done
+          scripts/publish-badge \
+            --branch badges-ci \
+            --alias codex/badges-ci \
+            --filename ci \
+            --label ci \
+            --message "$message" \
+            --fill "$fill" \
+            --json-color "$color" \
+            --label-width 20 \
+            --message-width 48

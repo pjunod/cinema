@@ -26,14 +26,14 @@ green.
 Either route works, and on Paul's LAN both of them do. **Where, concretely
 (2026-09-13):**
 
-- **The image.** `m6` (192.168.4.14) runs Docker 29.1.3 on x86_64, and so do
-  `nuc3` (192.168.4.7) and `nuc4` (192.168.4.8); `pjunod` is in the `docker`
+- **The image.** `lab6` (10.42.4.14) runs Docker 29.1.3 on x86_64, and so do
+  `lab3` (10.42.4.7) and `lab4` (10.42.4.8); `operator` is in the `docker`
   group on all three and the deploy key reaches them. `linux/amd64` is native
   there, so nothing is emulated. `make android-image` is about two minutes
   cold, `make android-test` about two and a half, `make android` about one
-  and a half. `nuc1` (192.168.4.5) and `nuc2` (192.168.4.6) answer on 22 but
+  and a half. `lab1` (10.42.4.5) and `lab2` (10.42.4.6) answer on 22 but
   refuse that key.
-- **The local SDK.** `pauls.macbook.air.lan` (192.168.5.115) has no Docker,
+- **The local SDK.** `maca.lan` (10.42.5.115) has no Docker,
   but Homebrew `openjdk@25`, `android-commandlinetools` and
   `android-platform-tools` are installed — none of them on `PATH`, and the
   platform and build-tools have to be fetched once:

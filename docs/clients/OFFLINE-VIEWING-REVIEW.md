@@ -425,7 +425,7 @@ excluded.watched`). Replaying a download from zero, which §8.4 explicitly
 permits, syncs the lower position but leaves the item finished. Separately,
 "the existing server-side watch/Trakt path runs once" overstates Trakt: with no
 session for `(user_id, item_id)` the scrobble path returns early
-(`trakt.rs:206-208`), so only the monarr watched outbox fires. Say both
+(`trakt.rs:206-208`), so only the Curator watched outbox fires. Say both
 plainly.
 
 **S12 · add `recorded_at` and refuse older writes (§10).** Last-writer-wins

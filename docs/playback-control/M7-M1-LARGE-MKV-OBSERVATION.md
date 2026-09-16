@@ -30,7 +30,7 @@ and Android belongs after R-M2 is merged and deployed.
 | Runtime | local loopback-only `plurxd`; no deploy and no fleet traffic |
 | Host | arm64 · macOS 26.6.2 · local storage |
 | ffmpeg / ffprobe | 8.1.2 / 8.1.2 |
-| File | `After Armageddon (2010) HDTV-720p.mkv` |
+| File | `Ash Season (2011) HDTV-720p.mkv` |
 | File size | 2,252,078,306 bytes (2.10 GiB) |
 | Duration | 4,917.160 seconds (81m 57.160s) |
 | Video / audio | H.264 High 1280×720 · AC-3 5.1 English |

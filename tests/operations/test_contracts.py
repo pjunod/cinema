@@ -14,6 +14,12 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# The fleet registry reaches every workflow through one repository variable,
+# and every use carries the same fallback so an unset variable can never
+# resolve to Docker Hub (an empty registry means docker.io to `docker login`
+# and to `docker/login-action`).
+FLEET_REGISTRY_EXPR = "${{ vars.FLEET_REGISTRY || 'fleet-registry.unset.invalid' }}"
+
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
@@ -1279,10 +1285,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("scripts/ship-physical", publishing)
         self.assertIn("When the controller cannot run the play", publishing)
 
-    def test_ship_has_no_obsolete_nuc4_port_exception(self):
+    def test_ship_has_no_obsolete_lab4_port_exception(self):
         ship = read("scripts/ship")
         self.assertNotIn(
-            "nuc4's port is held by Plex; that is accepted, not a failure",
+            "lab4's port is held by Plex; that is accepted, not a failure",
             ship,
         )
 
@@ -1553,20 +1559,43 @@ assert.equal(context.ACT_TIMER, null);
             "cargo llvm-cov --workspace --locked --exclude plurx-cluster-check",
             coverage,
         )
-        self.assertIn("git add coverage.json coverage.svg", coverage)
+        self.assertIn("scripts/publish-badge", coverage)
+        self.assertIn("--branch badges", coverage)
+        self.assertIn('--message "${msg}%"', coverage)
 
-        # The public-facing README must not depend on authenticated LAN badges
-        # or clone URLs. Workflow/coverage behavior is checked above; removing
-        # a private badge is valid and must not require publishing its metadata
-        # through an external proxy instead.
+        # Branch-relative badge paths render through the viewer's authenticated
+        # Forgejo or GitHub session. From main, `../badges/coverage.svg` moves
+        # from the main branch segment to the sibling badges branch segment.
         readme = read("README.md")
-        self.assertNotIn("http://192.168.4.7:3000", readme)
+        for badge in (
+            "../badges-ci/ci.svg",
+            "../badges-lint/lint.svg",
+            "../badges/coverage.svg",
+        ):
+            self.assertIn(badge, readme)
+        self.assertEqual(
+            sum(line.startswith("[![") for line in readme.splitlines()),
+            3,
+        )
+        self.assertNotIn("docs/img/badges/", readme)
+        self.assertNotRegex(
+            readme,
+            r"https?://[^)]+/actions/workflows/[^)]+/badge\.svg",
+        )
+        self.assertNotIn("http://forge.lan:3000", readme)
         self.assertNotRegex(
             readme,
             r"(?:https?://|ssh://git@)forge\.lan(?:[:/]|$)",
         )
         self.assertNotIn("img.shields.io/endpoint", readme)
         self.assertNotIn("raw.githubusercontent.com/pjunod/plurx/badges", readme)
+
+        badge = workflow_job_blocks(".github/workflows/ci.yml")["badge"]
+        self.assertIn("if: always()", badge)
+        self.assertIn("scripts/publish-badge", badge)
+        self.assertIn("--branch badges-ci", badge)
+        self.assertIn("--message \"$message\"", badge)
+        self.assertIn("success|skipped", badge)
 
         package = workflow_job_blocks(".github/workflows/ci.yml")["package_smoke"]
         self.assertNotIn("needs: check", package)
@@ -1603,6 +1632,15 @@ assert.equal(context.ACT_TIMER, null);
         self.assertNotIn("\n  merge_group:\n", lint)
         self.assertIn("workflow_dispatch:", lint)
         self.assertIn("run: make fmt-check lint", lint)
+        lint_job = workflow_job_blocks(".github/workflows/lint.yml")["lint"]
+        lint_steps = workflow_step_blocks(lint_job)
+        self.assertIn("continue-on-error: true", lint_steps["Run rustfmt and Clippy"])
+        self.assertIn("if: always()", lint_steps["Publish the lint result"])
+        self.assertIn("--branch badges-lint", lint_steps["Publish the lint result"])
+        self.assertIn(
+            "if: steps.lint.outcome != 'success'",
+            lint_steps["Preserve the lint verdict"],
+        )
 
         self.assertIn("target: release-binaries", package)
         self.assertIn("scripts/release-package-candidate", package)
@@ -2487,7 +2525,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(
             jobs["publish_main"].count("secrets.LOCAL_REGISTRY_TOKEN"), 1
         )
-        self.assertIn("192.168.4.7:3000/noirr/android-build", workflow)
+        self.assertIn(FLEET_REGISTRY_EXPR + "/noirr/android-build", workflow)
         self.assertEqual(workflow.count("PLURX_ANDROID_IMAGE_READY=1"), 4)
         makefile = read("Makefile")
         self.assertIn('if [ "$${PLURX_ANDROID_IMAGE_READY:-}" = "1" ]', makefile)
@@ -2990,6 +3028,20 @@ assert.equal(context.ACT_TIMER, null);
             gate,
         )
 
+    def test_fleet_registry_variable_always_carries_its_fallback(self):
+        # A bare `${{ vars.FLEET_REGISTRY }}` expands to "" when the variable
+        # is missing, which turns `docker login`, `docker/login-action` and the
+        # image tag into Docker Hub references. Every use must carry the
+        # fallback, and the fallback must not be a real registry.
+        seen = 0
+        for path in sorted((ROOT / ".github").rglob("*.yml")):
+            text = path.read_text(encoding="utf-8")
+            bare = re.findall(r"vars\.FLEET_REGISTRY(?!\s*\|\|)", text)
+            self.assertEqual(bare, [], f"{path.relative_to(ROOT)} uses FLEET_REGISTRY without a fallback")
+            seen += text.count(FLEET_REGISTRY_EXPR)
+        self.assertGreaterEqual(seen, 20)
+        self.assertIn(".invalid", FLEET_REGISTRY_EXPR)
+
     def test_release_registry_and_weekly_readiness_match_ci(self):
         ci = read(".github/workflows/ci.yml")
         publisher = read(".github/workflows/publish-release.yml")
@@ -2997,20 +3049,18 @@ assert.equal(context.ACT_TIMER, null);
         readiness = read(".github/workflows/release-readiness.yml")
 
         self.assertIn("uses: ./.github/workflows/publish-release.yml", ci)
-        self.assertIn("REGISTRY_IMAGE: 192.168.4.7:3000/noirr/plurxd", publisher)
+        self.assertIn("REGISTRY_IMAGE: " + FLEET_REGISTRY_EXPR + "/noirr/plurxd", publisher)
         self.assertEqual(publisher.count("secrets.LOCAL_REGISTRY_TOKEN"), 4)
         self.assertEqual(
-            publisher.count(
-                "buildkitd-config: ${{ github.workspace }}/.github/buildkitd.toml"
-            ),
+            publisher.count("buildkitd-config-inline: |"),
             4,
         )
         self.assertIn(
-            "<Repository>192.168.4.7:3000/noirr/plurxd:main</Repository>",
+            "<Repository>forge.lan:3000/noirr/plurxd:main</Repository>",
             unraid,
         )
         self.assertIn(
-            "<Registry>http://192.168.4.7:3000/noirr/-/packages/container/plurxd/main</Registry>",
+            "<Registry>http://forge.lan:3000/noirr/-/packages/container/plurxd/main</Registry>",
             unraid,
         )
         self.assertNotIn("schedule:", readiness)
@@ -3356,7 +3406,7 @@ assert.equal(context.ACT_TIMER, null);
         # most one slot, so a surplus shard cannot be given a runner of its
         # own: it serialises behind a busy one and buys a more complicated
         # failure and no wall time. This is the check that caught a three-shard
-        # matrix on 2026-09-02 after `gha-nuc2-android-01` lost `ci-store` for
+        # matrix on 2026-09-02 after `gha-lab2-android-01` lost `ci-store` for
         # failing the lane on an unwritable Cargo home.
         self.assertGreaterEqual(
             len([r for r in runners if "ci-store" in r["labels"]]),
@@ -3454,7 +3504,7 @@ assert.equal(context.ACT_TIMER, null);
         script = ROOT / "scripts/ci-flake-report"
         subprocess.run([str(script), "--help"], check=True, stdout=subprocess.PIPE)
         reporter = script.read_text(encoding="utf-8")
-        self.assertIn('default="http://192.168.4.7:3000/api/v1"', reporter)
+        self.assertIn('default="http://forge.lan:3000/api/v1"', reporter)
         self.assertIn('default="noirr/plurx"', reporter)
         self.assertIn('os.environ.get("FORGEJO_TOKEN")', reporter)
         self.assertNotIn("api.github.com", reporter)

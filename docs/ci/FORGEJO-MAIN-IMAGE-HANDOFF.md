@@ -4,7 +4,7 @@ Snapshot: 2026-09-04 21:24 EDT
 
 ## Outcome
 
-Forgejo pull request [#18](http://192.168.4.7:3000/noirr/plurx/pulls/18)
+Forgejo pull request [#18](http://forge.lan:3000/noirr/plurx/pulls/18)
 is merged into `main`. The merge commit is:
 
 ```text
@@ -16,8 +16,8 @@ Forgejo `main` run now builds the Linux/x86_64 image on one runner and publishes
 it to the local Forgejo container registry as:
 
 ```text
-192.168.4.7:3000/noirr/plurxd:main
-192.168.4.7:3000/noirr/plurxd:sha-6f1494e9a8db
+forge.lan:3000/noirr/plurxd:main
+forge.lan:3000/noirr/plurxd:sha-6f1494e9a8db
 ```
 
 The moving `main` tag means the newest qualified merge. The `latest` tag remains
@@ -26,7 +26,7 @@ owned by versioned releases and is not changed by ordinary merges.
 ## State at handoff
 
 The first post-merge workflow is [Forgejo Actions run
-#103](http://192.168.4.7:3000/noirr/plurx/actions/runs/103). It was still
+#103](http://forge.lan:3000/noirr/plurx/actions/runs/103). It was still
 running when work stopped.
 
 At the last observation:
@@ -41,7 +41,7 @@ At the last observation:
 - `Main promotion gate` was also still blocked pending the fan-out.
 
 The separate lint workflow for the same merge is [run
-#104](http://192.168.4.7:3000/noirr/plurx/actions/runs/104).
+#104](http://forge.lan:3000/noirr/plurx/actions/runs/104).
 
 No node was restarted and no node deployment configuration was changed as part
 of this work. The registry image still needs to finish publishing and be
@@ -95,31 +95,31 @@ PLURX_FFPROBE=/private/tmp/plurx-test-bin/ffprobe \
   make check
 ```
 
-Forgejo pull-request run [#97](http://192.168.4.7:3000/noirr/plurx/actions/runs/97)
+Forgejo pull-request run [#97](http://forge.lan:3000/noirr/plurx/actions/runs/97)
 also passed, including the single `Main promotion gate`. Its slowest lane was
 the legacy replicated Store contract job at 27 minutes 51 seconds.
 
 ## Resume checklist
 
-1. Open [run #103](http://192.168.4.7:3000/noirr/plurx/actions/runs/103) and
+1. Open [run #103](http://forge.lan:3000/noirr/plurx/actions/runs/103) and
    wait for `publish merged image (Forgejo registry)` to finish.
 2. If the publisher fails, inspect that job before retrying the workflow. The
    script deliberately refuses an indeterminate registry response and will not
    move `main` after a failed verification.
 3. Confirm the package has both `main` and `sha-6f1494e9a8db` in the [Forgejo
-   package view](http://192.168.4.7:3000/noirr/-/packages/container/plurxd/main).
+   package view](http://forge.lan:3000/noirr/-/packages/container/plurxd/main).
 4. From an authenticated x86_64 node, pull without restarting the service and
    verify the published identity:
 
    ```bash
-   docker pull 192.168.4.7:3000/noirr/plurxd:main
+   docker pull forge.lan:3000/noirr/plurxd:main
    docker image inspect \
      --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}' \
-     192.168.4.7:3000/noirr/plurxd:main
-   docker run --rm 192.168.4.7:3000/noirr/plurxd:main --version
+     forge.lan:3000/noirr/plurxd:main
+   docker run --rm forge.lan:3000/noirr/plurxd:main --version
    docker run --rm \
      --entrypoint /usr/local/bin/plurx-cluster-check \
-     192.168.4.7:3000/noirr/plurxd:main build-identity
+     forge.lan:3000/noirr/plurxd:main build-identity
    ```
 
    Both revision checks should return the full merge SHA shown above. Pulling
@@ -131,7 +131,7 @@ the legacy replicated Store contract job at 27 minutes 51 seconds.
 
 ## Workspace caution
 
-The primary checkout at `/Users/pjunod/code/plurx` was already dirty and was
+The primary checkout at `~/code/plurx` was already dirty and was
 not used to implement or merge this change. At handoff it was on local `main`,
 behind its configured `origin/main`, with unrelated modified and untracked
 files. Do not reset, clean, or pull that checkout without first preserving the

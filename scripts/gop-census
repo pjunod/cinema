@@ -13,7 +13,7 @@ for, while a Blu-ray remux has whatever the studio's encoder did.
 
 So point this at real files:
 
-    scripts/gop-census ~/media/Wicked\\ (2024)\\ Remux-2160p.mkv
+    scripts/gop-census ~/media/Harbor\\ Lights\\ (2023)\\ Remux-2160p.mkv
     scripts/gop-census --sweep --seconds 600 --start 1800 ~/media/big-remux.mkv
 
 It runs the same ffmpeg command the server runs — one continuous fragmented

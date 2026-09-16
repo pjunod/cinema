@@ -166,23 +166,23 @@ async function main() {
 }
 
 test("the Node column names the machine that owns the row", () => {
-  const html = paint(snapshot({ node_hostnames: { [OWNER]: "nuc3" } }));
-  assert.match(html, /<span class="nodename">nuc3<\/span>/);
+  const html = paint(snapshot({ node_hostnames: { [OWNER]: "lab3" } }));
+  assert.match(html, /<span class="nodename">lab3<\/span>/);
   // The defect: the id must not be what the column shows.
   assert.doesNotMatch(html, /<span class="clid">298849e0/);
 });
 
 test("the id keeps a labelled line in Technical details, name beside it", () => {
   const html = paint(
-    snapshot({ node_hostnames: { [OWNER]: "nuc3", [TARGET]: "m6" } }),
+    snapshot({ node_hostnames: { [OWNER]: "lab3", [TARGET]: "lab6" } }),
   );
   assert.match(
     html,
-    /<b>Owner<\/b><span>nuc3 \(298849e0-92fa-4c36-9186-da8b0c1dc01d\)<\/span>/,
+    /<b>Owner<\/b><span>lab3 \(298849e0-92fa-4c36-9186-da8b0c1dc01d\)<\/span>/,
   );
   assert.match(
     html,
-    /<b>Target node<\/b><span>m6 \(75813686-9927-41d0-97e0-18d152f9efa2\)<\/span>/,
+    /<b>Target node<\/b><span>lab6 \(75813686-9927-41d0-97e0-18d152f9efa2\)<\/span>/,
   );
 });
 
@@ -199,11 +199,11 @@ test("a row attributed to nobody is an em dash, not a name and not undefined", (
   const html = paint(
     snapshot({
       rows: [row({ owner_node_id: "", target_node_id: "" })],
-      node_hostnames: { [OWNER]: "nuc3" },
+      node_hostnames: { [OWNER]: "lab3" },
     }),
   );
   assert.match(html, /<span class="clid">—<\/span>/);
-  assert.doesNotMatch(html, /nuc3/);
+  assert.doesNotMatch(html, /lab3/);
   assert.doesNotMatch(html, /undefined/);
   // An unattributed row has no Owner or Target line at all, as before.
   assert.doesNotMatch(html, /<b>Owner<\/b>/);
@@ -214,10 +214,10 @@ test("the column falls back to the target when no owner has claimed the row", ()
   const html = paint(
     snapshot({
       rows: [row({ owner_node_id: "" })],
-      node_hostnames: { [TARGET]: "m6" },
+      node_hostnames: { [TARGET]: "lab6" },
     }),
   );
-  assert.match(html, /<span class="nodename">m6<\/span>/);
+  assert.match(html, /<span class="nodename">lab6<\/span>/);
 });
 
 test("analysis rows render their stored priority and trigger", () => {
@@ -247,10 +247,10 @@ test("analysis rows render their stored priority and trigger", () => {
 });
 
 test("Copy details carries the name and the id an operator will quote", async () => {
-  paint(snapshot({ node_hostnames: { [OWNER]: "nuc3", [TARGET]: "m6" } }));
+  paint(snapshot({ node_hostnames: { [OWNER]: "lab3", [TARGET]: "lab6" } }));
   const text = await copyText("job:job-1");
-  assert.match(text, /Owner: nuc3 \(298849e0-92fa-4c36-9186-da8b0c1dc01d\)/);
-  assert.match(text, /Target: m6 \(75813686-9927-41d0-97e0-18d152f9efa2\)/);
+  assert.match(text, /Owner: lab3 \(298849e0-92fa-4c36-9186-da8b0c1dc01d\)/);
+  assert.match(text, /Target: lab6 \(75813686-9927-41d0-97e0-18d152f9efa2\)/);
 });
 
 test("Copy details still carries a bare id when the roster named nobody", async () => {
@@ -288,15 +288,15 @@ test("a hostile id is escaped in the column too, where no name covers it", () =>
 });
 
 test("a non-string name is refused rather than printed", () => {
-  const html = paint(snapshot({ node_hostnames: { [OWNER]: ["nuc3"] } }));
+  const html = paint(snapshot({ node_hostnames: { [OWNER]: ["lab3"] } }));
   assert.match(html, /<span class="clid">298849e0-92fa-4c36-9186-da8b0c1dc01d<\/span>/);
   assert.doesNotMatch(html, /\[object Object\]/);
 });
 
 test("names never survive into a snapshot that did not carry them", () => {
-  paint(snapshot({ node_hostnames: { [OWNER]: "nuc3" } }));
+  paint(snapshot({ node_hostnames: { [OWNER]: "lab3" } }));
   const html = paint(snapshot());
-  assert.doesNotMatch(html, /nuc3/);
+  assert.doesNotMatch(html, /lab3/);
   assert.match(html, /<span class="clid">298849e0-92fa-4c36-9186-da8b0c1dc01d<\/span>/);
 });
 

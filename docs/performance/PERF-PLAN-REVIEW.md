@@ -81,7 +81,7 @@ the [FFmpeg HLS muxer](https://ffmpeg.org/ffmpeg-formats.html), the
 **Not verified:** no Intel or AMD deployment GPU was available during this
 review. The QSV, VA-API, OpenCL, Vulkan, and jellyfin-ffmpeg graph findings
 are therefore requirements for a hardware spike, not claims that a specific
-graph works on `nynuc`.
+graph works on `media1`.
 
 ## 3. R1 — the hls.js buffer diagnosis is backwards
 

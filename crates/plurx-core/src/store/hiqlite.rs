@@ -93,7 +93,8 @@ const LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION: i64 = 36;
 const DVR_SCHEMA_VERSION: i64 = 37;
 const SUBJECT_SCHEMA_VERSION: i64 = 38;
 const DVR_EVENT_SCHEMA_VERSION: i64 = 39;
-pub const AUTH_SCHEMA_VERSION: i64 = DVR_EVENT_SCHEMA_VERSION;
+const VIDEO_CODEC_TAG_SCHEMA_VERSION: i64 = 40;
+pub const AUTH_SCHEMA_VERSION: i64 = VIDEO_CODEC_TAG_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -133,6 +134,7 @@ const LIBRARY_CHANNELS_SCHEMA_MIGRATION_SOURCE: i64 = OFFLINE_RECOVERY_CLAIM_SCH
 const LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_CHANNELS_SCHEMA_VERSION;
 const DVR_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION;
 const DVR_EVENT_SCHEMA_MIGRATION_SOURCE: i64 = SUBJECT_SCHEMA_VERSION;
+const VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE: i64 = DVR_EVENT_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -2451,6 +2453,26 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(DVR_EVENT_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (super::FILES_VIDEO_CODEC_TAG_COLUMN, params!()),
+                            (
+                                "UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 \
+                                 WHERE singleton=1 AND schema_version=$3",
+                                params!(
+                                    VIDEO_CODEC_TAG_SCHEMA_VERSION,
+                                    now,
+                                    VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -4210,7 +4232,8 @@ fn schema_migration_action(
         | LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE
         | DVR_SCHEMA_MIGRATION_SOURCE
         | DVR_SCHEMA_VERSION
-        | DVR_EVENT_SCHEMA_MIGRATION_SOURCE => {
+        | DVR_EVENT_SCHEMA_MIGRATION_SOURCE
+        | VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -6097,9 +6120,32 @@ mod tests {
             "v36 must advance exactly one step to the DVR schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 32,
+            DVR_SCHEMA_VERSION + 1,
+            SUBJECT_SCHEMA_VERSION,
+            "v37 must advance exactly one step to the subject schema"
+        );
+        assert_eq!(
+            DVR_EVENT_SCHEMA_MIGRATION_SOURCE, SUBJECT_SCHEMA_VERSION,
+            "the DVR-event migration must start from the exact v38 shape"
+        );
+        assert_eq!(
+            DVR_EVENT_SCHEMA_MIGRATION_SOURCE + 1,
+            DVR_EVENT_SCHEMA_VERSION,
+            "v38 must advance exactly one step to the DVR-event schema"
+        );
+        assert_eq!(
+            VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE, DVR_EVENT_SCHEMA_VERSION,
+            "the video-codec-tag migration must start from the exact v39 shape"
+        );
+        assert_eq!(
+            VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE + 1,
+            VIDEO_CODEC_TAG_SCHEMA_VERSION,
+            "v39 must advance exactly one step to the video-codec-tag schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 35,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v37 step"
+            "this implementation contains every additive v5→v40 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
@@ -6111,6 +6157,16 @@ mod tests {
                 .expect("current schema"),
             SchemaMigrationAction::Current
         );
+        for schema_version in AUTH_SCHEMA_MIGRATION_SOURCE..AUTH_SCHEMA_VERSION {
+            assert_eq!(
+                schema_migration_action(&[row(schema_version)], ClusterCompatibility::CURRENT,)
+                    .unwrap_or_else(|error| {
+                        panic!("schema v{schema_version} must reach the current schema: {error}")
+                    }),
+                SchemaMigrationAction::MigrateFrom(schema_version),
+                "schema v{schema_version} must be admitted to the migration chain"
+            );
+        }
         assert_eq!(
             schema_migration_action(
                 &[row(AUTH_SCHEMA_MIGRATION_SOURCE)],

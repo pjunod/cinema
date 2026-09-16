@@ -273,7 +273,7 @@ and happen *before* the PR opens — the lane is not a compiler.
 ### M1 · Apple — tvOS then iOS, one PR
 
 1. `LiveTvType` (§3.6) and the compact button style (§3.2); replace every
-   `.font(` in the file. Compile both platforms on `mba` with
+   `.font(` in the file. Compile both platforms on `maca` with
    `make apple-build` (~15 s warm) before anything else.
 2. Toolbar (§3.2): banner → toast + count; Return to live → focusable
    picture; Earlier/Now/Later → grid header chips.
@@ -294,8 +294,8 @@ and happen *before* the PR opens — the lane is not a compiler.
    `make apple-build-bump` and write the build note.
 
 *Acceptance:* iOS + tvOS focused `LiveTvTests` green on the OS 26.5
-simulators (`make apple-test` on `mba`, ~150 s); a 1920 × 1080 tvOS
-simulator screenshot (`xcrun simctl io <udid> screenshot`) against nynuc's
+simulators (`make apple-test` on `maca`, ~150 s); a 1920 × 1080 tvOS
+simulator screenshot (`xcrun simctl io <udid> screenshot`) against media1's
 lineup showing, in On now, one 48 pt toolbar row and ≥ 10 list rows beside
 the picture, and in Guide, 6 grid rows under a 537 pt picture with 4 time
 ticks; an iPhone portrait screenshot showing ≥ 4 rows while a channel plays.
@@ -352,6 +352,6 @@ the fleet builds.
 - **Source-contract tests break on reformatting** (see #814): pin the new
   assertions to whole tokens (`.font(LiveTvType.`) rather than multi-line
   chains.
-- **Screenshots need a server:** the tvOS simulator on `mba` can reach
-  nynuc:32400; the lineup and guide load without a tuner, so judge the
+- **Screenshots need a server:** the tvOS simulator on `maca` can reach
+  media1:32400; the lineup and guide load without a tuner, so judge the
   list/grid first and tune one channel only if a tuner is free.

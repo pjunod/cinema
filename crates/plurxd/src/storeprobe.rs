@@ -579,7 +579,7 @@ fn sustained_read(path: &Path, size: u64, secs: f64) -> Sustained {
                 //
                 // Drop the whole file from cache on the way round, or the
                 // second pass reads at memory speed and the trace stops being
-                // about storage — nynuc's first run came back with 134 Gb/s
+                // about storage — media1's first run came back with 134 Gb/s
                 // windows for exactly this reason.
                 out.wrapped = true;
                 drop_cache(&f, 0, size);
@@ -603,7 +603,7 @@ fn sustained_read(path: &Path, size: u64, secs: f64) -> Sustained {
     // A short one is not merely noisy, it is *wrong*: every consumer treats a
     // window as `window_secs` of supply, so a 60 ms sample at 2.2 Gb/s enters
     // the simulation as 250 ms at 2.2 Gb/s and hands the client four times the
-    // data that was actually read. nynuc's first trace ended on one.
+    // data that was actually read. media1's first trace ended on one.
     let tail = win_start.elapsed();
     if win_bytes > 0 && tail >= SUSTAINED_WINDOW.mul_f64(0.9) {
         out.windows_bps
@@ -618,7 +618,7 @@ fn sustained_read(path: &Path, size: u64, secs: f64) -> Sustained {
 /// statistics every reader of the report quotes.
 ///
 /// Pure, and separated from the reading, because this is where a trace can
-/// quietly stop being about storage. A handful of 134 Gb/s windows — nynuc's
+/// quietly stop being about storage. A handful of 134 Gb/s windows — media1's
 /// first run had them — drown every real dip in the median and hand the
 /// simulation an effectively infinite buffer, so a report with no stalls would
 /// be produced from evidence that could not have contained one. They are
@@ -1033,7 +1033,7 @@ mod tests {
         assert_eq!(sorted.len(), SEEK_PROBES);
     }
 
-    /// The failure this exists for: nynuc's first trace came back with 134 Gb/s
+    /// The failure this exists for: media1's first trace came back with 134 Gb/s
     /// windows, which is memory rather than storage. Left in, they raise the
     /// median past every real dip and the simulation reports a mount that
     /// cannot hold 25 Mb/s as flawless.

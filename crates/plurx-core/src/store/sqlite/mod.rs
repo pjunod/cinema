@@ -1113,6 +1113,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     crate::channel_subjects::SCHEMA,
     // v59: bounded DVR lifecycle history and per-user attention review.
     crate::dvr::DVR_EVENT_SCHEMA,
+    // v60: the original video's four-character sample-entry label. This is a
+    // source-admission fact, not part of any fragment-index byte identity.
+    super::FILES_VIDEO_CODEC_TAG_COLUMN,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1207,7 +1210,8 @@ const FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container,
      video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, \
      subtitle_streams, scanned_at, hdr_format, audio_offset_ms, \
      (probe_json IS NOT NULL), \
-     dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present";
+     dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, \
+     video_codec_tag";
 
 fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
     let path: String = row.get(2)?;
@@ -1222,6 +1226,7 @@ fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
         duration_ms: row.get(5)?,
         container: row.get(6)?,
         video_codec: row.get(7)?,
+        video_codec_tag: row.get(25)?,
         video_profile: row.get(8)?,
         width: row.get(9)?,
         height: row.get(10)?,
@@ -2346,7 +2351,7 @@ mod tests {
         let store = SqliteStore::open_in_memory().expect("open");
         let first = [
             ("live_tv.enabled", "0"),
-            ("live_tv.device_ipv4", "192.168.4.20"),
+            ("live_tv.device_ipv4", "10.42.4.20"),
             ("live_tv.config_generation", "1"),
         ];
         assert!(store
@@ -2355,7 +2360,7 @@ mod tests {
             .expect("first CAS"));
         let stale = [
             ("live_tv.enabled", "1"),
-            ("live_tv.device_ipv4", "192.168.4.21"),
+            ("live_tv.device_ipv4", "10.42.4.21"),
             ("live_tv.config_generation", "1"),
         ];
         assert!(!store
@@ -2369,7 +2374,7 @@ mod tests {
         );
         assert_eq!(
             snapshot.get("live_tv.device_ipv4").map(String::as_str),
-            Some("192.168.4.20")
+            Some("10.42.4.20")
         );
         assert_eq!(
             snapshot

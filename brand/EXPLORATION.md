@@ -22,8 +22,8 @@ Use one public master brand with descriptive product names:
 
 | Public name | Current project | Job |
 |---|---|---|
-| **Boundlight Catalog** | `monarr` | Knows what you have and want · finds, judges, imports, and organizes it |
-| **Boundlight Fetch** | `nzbd` | Downloads, repairs, extracts, and hands off the finished package |
+| **Boundlight Catalog** | — | Knows what you have and want · finds, judges, imports, and organizes it |
+| **Boundlight Fetch** | — | Downloads, repairs, extracts, and hands off the finished package |
 | **Boundlight Screen** | `plurx` | Serves the library and plays it on web, mobile, and television clients |
 
 `Boundlight` should be the project and suite name. If a legal entity is ever
@@ -77,8 +77,6 @@ release.
 |---|---|---|
 | `noirr` | Keep the existing kit as a complete alternate concept | The double `r` deliberately keeps the family accent; noir also narrows a suite that includes books and general media |
 | `plurx` | Keep as the current server/repository codename until a rename is chosen | It is visually and phonetically close to Plex in the same product category; making it the parent amplifies that dependency |
-| `monarr` | Keep compatibility paths and internal migration references | It explains the origin but makes the replacement sound like another member of the family it is leaving |
-| `nzbd` | Keep protocol names and compatibility documentation where technically accurate | It reads as an implementation abbreviation, not a product someone can recommend aloud |
 
 The current names do not need to disappear in one commit. Compatibility names
 are contracts; public names are presentation. Change the presentation first

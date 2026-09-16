@@ -4,7 +4,7 @@
 > **Updated:** 2026-09-13
 
 Recording and reminders merged to `main` in
-[#294](http://192.168.4.7:3000/noirr/plurx/pulls/294). The server, both Store
+[#294](http://forge.lan:3000/noirr/plurx/pulls/294). The server, both Store
 backends, three clients, the fast lane's Rust, web, Apple and Android compiles,
 and every repository contract are green. **No tuner has ever been opened by
 this code.** No `.ts` exists, no sidecar has been written, no recording has
@@ -23,7 +23,7 @@ something is not a result.
 
 - Paul's Mac, unlocked, with `~/code/plurx-agent/ansible/` and
   `ansible-playbook` installed. A cloud session has neither.
-- The FLEX 4K (device `10AF300E`, `192.168.4.20`) on the LAN, and the four
+- The FLEX 4K (device `1040A1B2`, `10.42.4.20`) on the LAN, and the four
   nodes healthy.
 - An Apple TV and an iPhone awake and unlocked, and one Android device.
   An asleep Apple TV is indistinguishable from one that does not exist.
@@ -57,7 +57,7 @@ and you will believe you deployed.
 **The recorded trap, which has bitten before:** a long `ansible-playbook` run
 driven from a cloud session is killed while it waits on the remote build, and
 it is killed *after* Compose has taken the container down — which once left
-nynuc with both containers exited. Run it from the Mac and let it finish.
+media1 with both containers exited. Run it from the Mac and let it finish.
 
 Then check the property that actually matters. Four nodes agreeing on a build
 with no DVR in it is a perfectly uniform fleet that cannot record, and you
@@ -65,7 +65,7 @@ would not find out until §3 sends you looking for a settings section that does
 not exist:
 
 ```bash
-for n in nynuc m6 nuc4 nuc3; do
+for n in media1 lab6 lab4 lab3; do
   echo -n "$n: "
   curl -fsS -H "Authorization: Bearer $TOKEN" "http://$n:32400/api/v1/dvr/status" \
     | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["owner_node_id"], d["enabled"])' \
@@ -80,8 +80,8 @@ only there.
 
 Worth doing first: it is three curl commands and it changes how you read §4.
 
-> On the FLEX 4K (device `10AF300E`, `192.168.4.20`), read
-> `http://192.168.4.20/discover.json` and take `DeviceAuth`. Fetch with curl and
+> On the FLEX 4K (device `1040A1B2`, `10.42.4.20`), read
+> `http://10.42.4.20/discover.json` and take `DeviceAuth`. Fetch with curl and
 > `--compressed`, twice:
 > `https://api.hdhomerun.com/api/guide?DeviceAuth=<auth>` and the same with
 > `&Channel=7.1&Start=<unix time 48 hours from now>`. For each report HTTP
@@ -92,7 +92,7 @@ Worth doing first: it is three curl commands and it changes how you read §4.
 > say so — that is the free tier, and the plan's M0 still stands. Replace
 > `DeviceAuth` with `<auth>` in the report.
 
-That block is §8's first prompt, with `<tuner-ip>` filled in as `192.168.4.20`
+That block is §8's first prompt, with `<tuner-ip>` filled in as `10.42.4.20`
 and nothing else changed.
 
 **How to read the answer.** The code is correct in every case; what changes is
@@ -195,7 +195,7 @@ fits four tuners.
 ### An existing harness does the device side better
 
 For the tuner-accounting half of step 2, `make live-tv-hardware-check
-DEVICE=192.168.4.20 TUNERS=4` asserts capacity from the **device's own**
+DEVICE=10.42.4.20 TUNERS=4` asserts capacity from the **device's own**
 `/status.json` — that the run holds exactly the tuners it opened and that the
 device reports them free again after release. That is stronger evidence than a
 hand-run fourth viewer, which proves only what one client was told. Run both:

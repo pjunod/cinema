@@ -400,7 +400,7 @@ adding ports 32401/32402 would **not** fail them. What is governed is
 
 There is **no M3 entry at all**. Meanwhile, in the same PR:
 `STATUS.html:92` still says the page "mirrors `docs/ROADMAP.md`";
-`STATUS.html:177` says `✓ done … M2 GPU tone-map: accepted on nynuc at 4.89×
+`STATUS.html:177` says `✓ done … M2 GPU tone-map: accepted on media1 at 4.89×
 the CPU chain`; `:178` says `✓ done … M3 pre-transcode cache`; and `:267`
 **deletes** the operator item "Perf M2 acceptance run on a box with a GPU",
 replacing it with `✓ measured`.
@@ -412,7 +412,7 @@ hardware release gate while its own declared source still lists it as owed is
 exactly the failure this convention exists to prevent.
 
 **Correction:** flip the ROADMAP bullet to `✅ M2 complete 2026-07-29` with the
-nynuc figures and add an `✅ M3 complete` bullet. `PERF-PLAN.md:1259` ("Still
+media1 figures and add an `✅ M3 complete` bullet. `PERF-PLAN.md:1259` ("Still
 owed in M2: the acceptance run below") is stale in the same direction and
 contradicts its own file header.
 

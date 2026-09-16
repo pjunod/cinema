@@ -2438,7 +2438,7 @@ fn merge_carried_guide(
 ///
 /// A *name* over plain http is refused even when it currently resolves
 /// privately, so `http://ha.lan:8123` has to be written
-/// `http://192.168.4.7:8123`. That is a real cost and it is the deliberate
+/// `http://10.42.4.7:8123`. That is a real cost and it is the deliberate
 /// choice: this check runs when a setting is saved, a name that resolves
 /// privately today can resolve publicly tomorrow, and the setting would not be
 /// re-examined. The Developer row says exactly this when it refuses one.
@@ -8156,7 +8156,7 @@ mod tests {
             .store
             .put_settings(&[
                 (keys::LIVE_TV_ENABLED, "1"),
-                (keys::LIVE_TV_DEVICE_IPV4, "192.168.1.20"),
+                (keys::LIVE_TV_DEVICE_IPV4, "10.42.1.20"),
                 (keys::LIVE_TV_OWNER_NODE_ID, "node-a"),
                 (keys::LIVE_TV_MAX_SESSIONS, "2"),
                 (keys::LIVE_TV_OUTPUT_HEIGHT, "720"),
@@ -8984,8 +8984,8 @@ Output #0, hls, to 'index.m3u8':
     #[test]
     fn device_address_is_a_private_canonical_literal() {
         assert_eq!(
-            parse_device_ipv4("192.168.4.20").expect("private"),
-            Some(Ipv4Addr::new(192, 168, 4, 20))
+            parse_device_ipv4("10.42.4.20").expect("private"),
+            Some(Ipv4Addr::new(10, 42, 4, 20))
         );
         for refused in [
             "127.0.0.1",
@@ -8994,7 +8994,7 @@ Output #0, hls, to 'index.m3u8':
             "224.0.0.1",
             "255.255.255.255",
             "hdhomerun.local",
-            "192.168.004.020",
+            "10.42.004.020",
         ] {
             assert!(parse_device_ipv4(refused).is_err(), "{refused}");
         }
@@ -9044,7 +9044,7 @@ Output #0, hls, to 'index.m3u8':
             r#"[
               {"Resource":"tuner0","VctNumber":"7.1","TargetIP":"",
                "SignalStrengthPercent":99,"SignalQualityPercent":99,"SymbolQualityPercent":99},
-              {"Resource":"tuner1","VctNumber":"9.1","TargetIP":"192.168.4.2",
+              {"Resource":"tuner1","VctNumber":"9.1","TargetIP":"10.42.4.2",
                "SignalStrengthPercent":100,"SignalQualityPercent":100,"SymbolQualityPercent":100},
               {"Resource":"tuner2","VctNumber":"7.1","TargetIP":"172.18.0.2",
                "SignalStrengthPercent":96,"SignalQualityPercent":89,"SymbolQualityPercent":100}
@@ -9061,7 +9061,7 @@ Output #0, hls, to 'index.m3u8':
         );
 
         let invalid = serde_json::from_str::<Vec<serde_json::Value>>(
-            r#"[{"Resource":"tuner0","VctNumber":"7.1","TargetIP":"192.168.4.2",
+            r#"[{"Resource":"tuner0","VctNumber":"7.1","TargetIP":"10.42.4.2",
                   "SignalStrengthPercent":101,"SignalQualityPercent":999}]"#,
         )
         .expect("invalid percentages");
@@ -9586,12 +9586,12 @@ Output #0, hls, to 'index.m3u8':
         assert_eq!(allowed.host_str(), Some("hdhomerun.local"));
         assert_eq!(
             lineup_url(
-                Ipv4Addr::new(192, 168, 4, 20),
+                Ipv4Addr::new(10, 42, 4, 20),
                 Some("http://never-resolve.invalid:5004/lineup.json"),
             )
             .expect("pinned lineup")
             .as_str(),
-            "http://192.168.4.20:5004/lineup.json"
+            "http://10.42.4.20:5004/lineup.json"
         );
         for refused in [
             "https://hdhomerun.local:5004/auto/v7.1",
@@ -10449,7 +10449,7 @@ Output #0, hls, to 'index.m3u8':
         assert!(!approved(
             "https://api.hdhomerun.com.evil.invalid/api/guide"
         ));
-        assert!(!approved("https://192.168.1.20/api/guide"));
+        assert!(!approved("https://10.42.1.20/api/guide"));
     }
 
     #[test]
@@ -11154,7 +11154,7 @@ Output #0, hls, to 'index.m3u8':
         // The LAN is the point: the plan's own acceptance puts the XMLTV
         // document on another node.
         for allowed in [
-            "http://192.168.4.7:8080/guide.xml",
+            "http://10.42.4.7:8080/guide.xml",
             "http://10.1.2.3/xmltv.gz",
             "https://guide.example.com/xmltv.xml",
             "http://[2001:db8::5]/g.xml",
@@ -11195,7 +11195,7 @@ Output #0, hls, to 'index.m3u8':
         assert!(matches!(error, LiveTvError::InvalidConfig(_)));
 
         // A literal needs no resolution and pins nothing.
-        let literal = validate_xmltv_url("http://192.168.4.7/guide.xml").expect("a literal parses");
+        let literal = validate_xmltv_url("http://10.42.4.7/guide.xml").expect("a literal parses");
         assert!(resolve_permitted_addrs(&literal)
             .await
             .expect("a permitted literal")
@@ -11209,7 +11209,7 @@ Output #0, hls, to 'index.m3u8':
         seed_test_config(manager.as_ref()).await;
         let mut config = manager.config().await.expect("config");
         config.guide_source = GuideSource::Xmltv;
-        config.xmltv_url = "http://192.168.4.7/guide.xml".to_owned();
+        config.xmltv_url = "http://10.42.4.7/guide.xml".to_owned();
         config.owner_node_id = manager.node_id.clone();
 
         // A good guide is cached and the lineup cache is cold — the state a

@@ -152,7 +152,7 @@ listing copy and privacy disclosures matter too (§3).
 
 | Requirement | Why |
 |---|---|
-| Reachable from the public internet, over **HTTPS with a real certificate** | A reviewer on a corporate network can't reach `192.168.1.10`, and a self-signed cert reads as "broken app" |
+| Reachable from the public internet, over **HTTPS with a real certificate** | A reviewer on a corporate network can't reach `10.42.1.10`, and a self-signed cert reads as "broken app" |
 | A dedicated **demo account**, non-admin, password in the App Review notes | Never hand out an admin login; a reviewer poking Settings → Libraries on your real server is a bad day |
 | Seeded with content you have the **right to distribute** | This is the part people get wrong |
 | Up for the whole review window, and again for every resubmission | Reviews get reassigned; a server that was up on Tuesday and down on Thursday reads as a broken app |

@@ -176,7 +176,7 @@ explicit lease mode.
 
 ### Retained telemetry proves the wedge and old recovery, in legacy mode
 
-A read-only snapshot of nynuc's node-local `telemetry.db` was inspected on
+A read-only snapshot of media1's node-local `telemetry.db` was inspected on
 2026-09-02. It retained 297 Apple `stall` rows through 2026-08-31.
 
 | Evidence class | Rows | Interpretation |

@@ -676,9 +676,9 @@ pub struct AppState {
     pub logs: Arc<LogBuffer>,
     /// Replication/membership detail kept out of the general diagnostics ring.
     pub cluster_logs: Arc<LogBuffer>,
-    /// The coming-soon rail's cached answer from monarr (plan §11.2).
+    /// The coming-soon rail's cached answer from Curator (plan §11.2).
     pub coming_soon: Arc<crate::http::ComingSoonCache>,
-    /// Pushes watch state to monarr when enabled (plan §11.1).
+    /// Pushes watch state to Curator when enabled (plan §11.1).
     pub watched: Arc<crate::watched::WatchedNotifier>,
     /// Leading/trailing progress write coalescer. Every player may report as
     /// often as it likes; durable watch commits stay bounded for Raft.
@@ -1732,7 +1732,7 @@ const INDEX_MAX_EXAMINED_PER_PASS: usize = 200;
 const INDEX_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
 /// Short files retain the original ceiling. Long remuxes need a duration-sized
 /// allowance: indexing is a complete video-bitstream pass, and a measured
-/// 14x Dolby Vision copy on nynuc needs about nine minutes for a two-hour film.
+/// 14x Dolby Vision copy on media1 needs about nine minutes for a two-hour film.
 const INDEX_FILE_BUDGET_FLOOR_SECS: u64 = 90;
 const INDEX_FILE_BUDGET_CEILING_SECS: u64 = 30 * 60;
 const INDEX_EXPECTED_MIN_SPEED: u64 = 8;
@@ -4370,7 +4370,7 @@ impl JobManager {
 
         // The rows exist; without this they would have no artwork until
         // somebody pressed Scan. Bounded to what this request placed (and the
-        // seasons/shows/folders above it) because monarr is holding the HTTP
+        // seasons/shows/folders above it) because Curator is holding the HTTP
         // connection open on this call — enriching the whole library here
         // would turn a per-episode import notification into a per-episode
         // full-library metadata pass.
@@ -5521,6 +5521,10 @@ impl JobManager {
             let state = Arc::clone(self);
             tokio::spawn(async move { state.backfill_dolby_vision_facts().await });
         }
+        {
+            let state = Arc::clone(self);
+            tokio::spawn(async move { state.backfill_video_codec_tags().await });
+        }
         Ok(())
     }
 
@@ -6165,6 +6169,119 @@ impl JobManager {
                 "dv backfill: filled Dolby Vision columns from stored probe data"
             );
         }
+    }
+
+    /// Recover the first playable video's sample-entry label from the probe
+    /// JSON already stored with each catalogue row.
+    ///
+    /// The scanner writes this column for new and changed files. This bounded
+    /// job exists for unchanged libraries: it never opens media or launches
+    /// ffprobe, and it fences every write with the exact path, size, mtime and
+    /// probe snapshot that produced the recovered tag.
+    async fn backfill_video_codec_tags(self: Arc<Self>) {
+        const BACKFILL_PER_TICK: i64 = 256;
+
+        match self
+            .store
+            .get_setting(keys::JOB_VIDEO_CODEC_TAG_BACKFILL_DONE)
+            .await
+        {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "reading the video codec tag backfill stamp");
+                return;
+            }
+        }
+        let lease = match self
+            .acquire_job("catalogue:video-codec-tag".to_owned())
+            .await
+        {
+            Ok(Some(lease)) => lease,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "video codec tag backfill lease failed");
+                return;
+            }
+        };
+        let _lease = lease;
+        let cursor_key = self.local_job_key(keys::JOB_VIDEO_CODEC_TAG_BACKFILL_CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        let pending = match self
+            .store
+            .files_missing_video_codec_tag(cursor, BACKFILL_PER_TICK)
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, "listing files for the video codec tag backfill");
+                return;
+            }
+        };
+        if pending.is_empty() {
+            if let Err(error) = self
+                .store
+                .put_setting(keys::JOB_VIDEO_CODEC_TAG_BACKFILL_DONE, "1")
+                .await
+            {
+                tracing::warn!(%error, "stamping the video codec tag backfill as complete");
+            } else {
+                tracing::info!("video codec tag backfill: complete");
+            }
+            return;
+        }
+
+        let mut updated = 0usize;
+        let mut unknown = 0usize;
+        let mut fenced = 0usize;
+        let mut walked = cursor;
+        for candidate in pending {
+            walked = walked.max(candidate.id);
+            let recovered = serde_json::from_str::<serde_json::Value>(&candidate.probe_json)
+                .ok()
+                .map(|value| plurx_core::scan::probe::parse_probe_json(&value))
+                .and_then(|probe| probe.video_codec_tag);
+            let Some(tag) = recovered else {
+                unknown += 1;
+                continue;
+            };
+            match self.store.set_file_video_codec_tag(&candidate, &tag).await {
+                Ok(true) => updated += 1,
+                Ok(false) => fenced += 1,
+                Err(error) => {
+                    tracing::warn!(
+                        file_id = candidate.id,
+                        %error,
+                        "writing a backfilled video codec tag"
+                    );
+                    walked = walked.min(candidate.id.saturating_sub(1));
+                    break;
+                }
+            }
+        }
+        if walked > cursor {
+            if let Err(error) = self
+                .store
+                .put_setting(&cursor_key, &walked.to_string())
+                .await
+            {
+                tracing::warn!(%error, "advancing the video codec tag backfill cursor");
+            }
+        }
+        tracing::info!(
+            updated,
+            unknown,
+            fenced,
+            cursor = walked,
+            "video codec tag backfill: considered stored probe rows"
+        );
     }
 
     async fn build_fragment_indexes(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
@@ -11340,7 +11457,7 @@ mod tests {
 
     /// The bug this whole change exists for, in one test.
     ///
-    /// monarr POSTs `/api/v1/scan` the moment an import finishes and waits for
+    /// Curator POSTs `/api/v1/scan` the moment an import finishes and waits for
     /// the answer. Before this, the handler placed the row and stopped — no
     /// enrichment, no artwork — and the item sat with a blank card until
     /// somebody pressed Scan on the whole library. A home library is the

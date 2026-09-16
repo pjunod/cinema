@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "apple.hevc-sample-entry-capability"
+commits = ["8daba4af"]
+source = "clients/apple/Sources/Caps.swift"
+source_anchor = "progressiveHevcSampleEntries: hevc ? [\"hvc1\"] : nil"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testAppleCapsDocumentCoversTheProbeMatrixWithoutInventingAHeight"
+
+[[fixes]]
 id = "android.live-tv-playlist-hold-back"
 commits = ["ad524065"]
 source = "clients/android/app/src/main/java/tv/plurx/app/livetv/LiveTvPlayer.kt"
@@ -2007,16 +2015,6 @@ source = "clients/android/README.md"
 source_anchor = "> Status: **v0.3.0**, build"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "def test_repository_build_claims_match_release_inputs"
-
-[[fixes]]
-# Focused web evidence; native layout evidence is compile plus simulator
-# captures, not blanket unit coverage of the visual revision.
-id = "clients.calm-library-track-choices"
-commits = ["a767f5fe"]
-source = "crates/plurxd/src/web/index.html"
-source_anchor = "function itemTrackSummary("
-test = "tests/web/calm-library.test.js"
-test_anchor = "assert.equal(summary(file, 'audio'), 'English');"
 
 [[fixes]]
 id = "clients.calm-library-download-check"

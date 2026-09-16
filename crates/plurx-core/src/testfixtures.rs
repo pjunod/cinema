@@ -353,7 +353,7 @@ pub fn source_with_chapters() -> PathBuf {
 }
 
 /// One real Profile 7 RPU, captured 2026-08-30 from
-/// `Nosferatu (2024) Remux-2160p.mkv` on nuc4 through
+/// `Night Tide (2022) Remux-2160p.mkv` on lab4 through
 /// `-c:v copy -bsf:v hevc_mp4toannexb,filter_units=remove_types=63`.
 ///
 /// A real one rather than a synthetic one because the question the conversion

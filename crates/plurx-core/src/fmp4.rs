@@ -4861,7 +4861,7 @@ mod tests {
     }
 
     /// The two Dolby Vision configuration records ffmpeg itself wrote, captured
-    /// from nuc4 on 2026-08-30 (`docs/streaming/PLAYBACK-CAPS-V2-M0.md` §8).
+    /// from lab4 on 2026-08-30 (`docs/streaming/PLAYBACK-CAPS-V2-M0.md` §8).
     ///
     /// These are the golden. The 24-byte payload is the whole contract between
     /// plurx and every Dolby Vision decoder downstream, and the only way to
@@ -8195,6 +8195,7 @@ mod tests {
             duration_ms: Some(12_000),
             container: Some("mkv".into()),
             video_codec: Some("hevc".into()),
+            video_codec_tag: None,
             video_profile: Some("Main".into()),
             width: Some(640),
             height: Some(360),

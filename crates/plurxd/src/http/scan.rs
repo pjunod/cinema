@@ -1,6 +1,6 @@
 //! `POST /api/v1/scan` — "scan exactly this path", for other applications.
 //!
-//! The fast path in the monarr pipeline: when monarr finishes importing into
+//! The fast path in the Curator pipeline: when Curator finishes importing into
 //! a library folder it says so, instead of plurx discovering it on the next
 //! scheduled sweep. Key-scoped, never user-token: see
 //! [`crate::http::extract::ScopedKey`] for why the wall runs both ways.

@@ -243,7 +243,7 @@ player. A pass proves all of the following:
 
 The last case is a deterministic browser suspension surrogate. It proves the
 player/session contract but does not claim that an operating system slept. The
-nynuc release protocol still closes the laptop or sleeps the browser host
+media1 release protocol still closes the laptop or sleeps the browser host
 mid-film and checks the same session after wake. Transcode-rung VOD remains
 unavailable until the open P2/D6 device measurement establishes that AVPlayer
 and Media3 tolerate the planned EXTINF timing; such a request returns the typed

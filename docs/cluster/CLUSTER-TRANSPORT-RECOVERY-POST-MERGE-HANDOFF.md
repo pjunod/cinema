@@ -40,19 +40,19 @@ Do not use Paul's working checkout. Create a fresh clone, fetch `main`, and
 record both commit and tree before running anything:
 
 ```bash
-git clone ssh://git@192.168.4.7:222/noirr/plurx.git plurx-recovery-qualification
+git clone ssh://git@forge.lan:222/noirr/plurx.git plurx-recovery-qualification
 cd plurx-recovery-qualification
 git switch main
 git pull --ff-only
 git rev-parse HEAD
 git rev-parse 'HEAD^{tree}'
-/Users/pjunod/.cargo/bin/rustc +1.97.1 --version
+~/.cargo/bin/rustc +1.97.1 --version
 ```
 
 Expected compiler: Rust 1.97.1. If qualification runs on another node, send a
 `git archive` of the frozen commit. Transfer neither `.git` nor credentials.
 The approved node key is
-`/Users/pjunod/code/plurx-agent/.ssh-deploy-key`.
+`~/code/plurx-agent/.ssh-deploy-key`.
 
 ## 4. Run the deferred 20+20 campaign — exact SHA, retained bytes
 

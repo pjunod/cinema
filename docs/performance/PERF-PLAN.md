@@ -1,7 +1,7 @@
 # Performance — where the seconds go, and the plan to get them back
 
 **Status:** M1, **M2** and **M3 complete** (2026-07-29). M2's acceptance ran
-on nynuc: the QSV tone-map graph passed at **4.89× the CPU chain**, and
+on media1: the QSV tone-map graph passed at **4.89× the CPU chain**, and
 §4.6's bound held at **9.05 Mb/s peak over a 10 s window against a permitted
 13.6** on the 1080p rung. The same run found the bug in §4.4bis below — 10.4
 second segments from a 2-second request, the original start-up symptom still
@@ -211,7 +211,7 @@ and are the baseline the remaining milestones are judged against.
   a Server block, and TTFF/stall beacons land in Settings → Logs.
 - **Not yet measured on real hardware:** every number above is from software
   x264 on a fixture, in a sandbox with no GPU. The 4K-HDR encode-speed
-  baseline that §5 must beat still has to be captured on nynuc — that is the
+  baseline that §5 must beat still has to be captured on media1 — that is the
   first thing to do before starting M2.
 
 Two deviations from the plan as written, both deliberate:
@@ -291,7 +291,7 @@ cache headers on segment bodies).
 
 `scripts/bench` builds the fixture matrix and plays it against a running
 server. First run, all software x264 in a GPU-less sandbox — which is not
-nynuc, but *is* enough to isolate the one cost this plan is built around:
+media1, but *is* enough to isolate the one cost this plan is built around:
 
 | Fixture | TTFS | speed p10 | p50 | What it isolates |
 |---|---|---|---|---|
@@ -312,7 +312,7 @@ therefore aimed at the right thing.
 
 Two honest limits on the table. It is **software x264** — on hardware the
 absolute numbers all move, and the question M2 must answer is whether the GPU
-graph clears 1.0× on *Paul's* silicon, which only nynuc can say. And TTFS is
+graph clears 1.0× on *Paul's* silicon, which only media1 can say. And TTFS is
 the **server's** half of time-to-first-frame (start → first playable segment);
 the client's buffering threshold sits on top, which is why §4.4's shorter
 segments matter more than these figures alone suggest.
@@ -830,7 +830,7 @@ recent speed reacts to a forced slowdown within its documented window.
 
 ### 4.5bis Asking for a key frame is not getting one (found 2026-07-29)
 
-§4.4 shipped, and on nynuc the segments were **10.4 seconds long**. The
+§4.4 shipped, and on media1 the segments were **10.4 seconds long**. The
 request was two. This is the first measurement the plan has of a hardware
 encoder doing what §4.4 asked, and it was not doing it.
 
@@ -857,7 +857,7 @@ option keeps its hardware and gets a warning instead of vanishing. Losing a
 GPU to an unrecognised option is a worse trade than the latency the option
 removes — the same reasoning that left VA-API's `-rc_mode` alone below.
 
-**Accepted 2026-07-29:** nynuc reads **2.00 s median** (min 1.96, max 2.00)
+**Accepted 2026-07-29:** media1 reads **2.00 s median** (min 1.96, max 2.00)
 across 92 segments, where the same command read 10.4 s before the fix. The
 start floor is where §4.4 said it was.
 
@@ -909,7 +909,7 @@ second. And the failure line the operator reads was ffmpeg's last, which is
 that same generic summary; it is now the first real cause ("Operation not
 permitted" — a missing device — rather than "nothing was written").
 
-**Measured on nynuc, 2026-07-29 — the bound holds.** A 1080p QSV session:
+**Measured on media1, 2026-07-29 — the bound holds.** A 1080p QSV session:
 mean 7.74 Mb/s against an 8 Mb/s nominal, peak **9.05 Mb/s over a 10-second
 window** where the model permits `maxrate + bufsize/W` = **13.6**. The worst
 single segment was also 9.05, so the peak is not a windowing artefact.
@@ -921,7 +921,7 @@ prove that two copies agree, which is the drift review R4 already objected
 to. Re-run it after any rate-control change:
 
 ```bash
-scripts/perf-report --url http://nynuc:32400 \
+scripts/perf-report --url http://media1:32400 \
   --ratecontrol <file_id> --height 1080   # pick the grainiest 4K HDR title
 ```
 
@@ -1017,7 +1017,7 @@ configured pace.
 
 ### 4.9bis An average is the wrong question (shipped 2026-07-29)
 
-nynuc's first numbers made the point immediately. Four mounts — `/8t-2`,
+media1's first numbers made the point immediately. Four mounts — `/8t-2`,
 `/8tb`, `/media`, `/20t`, four separate devices — came back at 242, 265, 242
 and 258 Mb/s, with cold seeks of 3.0–3.3 ms. Four different arrays do not read
 at the same speed by coincidence: that number is **the path they share**, not
@@ -1052,10 +1052,10 @@ a probe shorter than one window produced no windows at all (now flushes a
 partial tail). Both would have answered "no gaps found" from evidence that
 could not have held one.
 
-### 4.9ter nynuc's measured baseline (2026-07-29)
+### 4.9ter media1's measured baseline (2026-07-29)
 
 Recorded so later runs have something to diff against. All four mounts are
-NFSv4.1 exports from one QNAP; nynuc reaches it over a wirelessly-bridged hop
+NFSv4.1 exports from one NAS; media1 reaches it over a wirelessly-bridged hop
 while every other node is wired at 2.5G.
 
 Before, with the original mount options (`rsize=wsize=32768`, `timeo=14`, no
@@ -1125,7 +1125,7 @@ Aggregated in SQL, one scan, on its own route rather than as a field on
 `/system` — the settings page polls `/system` every few seconds, and a table
 scan behind a UI timer is a different kind of mistake.
 
-**Measured on nuc4, 2026-07-29 — and the answer is 24%.** 5427 probed files,
+**Measured on lab4, 2026-07-29 — and the answer is 24%.** 5427 probed files,
 1359 of them 4K:
 
 | | 4K files | share |
@@ -1149,7 +1149,7 @@ instead of every time somebody presses play.
 Two more numbers worth keeping from the same run: 186 files sit at or above the
 former 40 Mb/s segmented-remux floor (§4.3bis), the largest at 98 Mb/s; and the
 codec split is 58% H.264, 37% HEVC, with 96 AV1 files already on disk.
-`vpp_qsv` passed nynuc's boot probe at **4.88–4.89× the CPU chain**,
+`vpp_qsv` passed media1's boot probe at **4.88–4.89× the CPU chain**,
 above the ≥3× objective. Every node reports its own verdicts on Settings →
 System and in `/api/v1/system`.
 
@@ -1175,7 +1175,7 @@ frames on the GPU end-to-end instead of the
 ```
  QSV    : -hwaccel qsv  … -vf scale_qsv=w=-1:h=1080,vpp_qsv=tonemap=1
  VA-API : -hwaccel vaapi … -vf scale_vaapi=w=-1:h=1080:format=nv12,tonemap_vaapi=format=nv12
- (exact graphs to be validated on nynuc — driver/ffmpeg-build dependent;
+ (exact graphs to be validated on media1 — driver/ffmpeg-build dependent;
   jellyfin-ffmpeg also offers tonemap_opencl as the portable GPU alternate)
 ```
 
@@ -1291,11 +1291,11 @@ toward refusal for 4K and heavy-codec HDR, because §2.9 measured both
 sub-realtime in software on exactly this hardware and an optimistic guess there
 costs a viewer their whole session.
 
-**M2 acceptance completed 2026-07-29 on nynuc.** The QSV tone-map path ran at
+**M2 acceptance completed 2026-07-29 on media1.** The QSV tone-map path ran at
 4.89× the CPU chain and stayed inside the measured bitrate bound. The commands
 below remain the reproducible acceptance procedure for a new driver or host.
 
-**Acceptance:** on nynuc, the M0 telemetry shows a 4K HDR10 → 1080p
+**Acceptance:** on media1, the M0 telemetry shows a 4K HDR10 → 1080p
 session at ≥3× (QSV graph) vs the recorded CPU baseline; a 2 h 4K HDR
 play completes with zero stall beacons at the 1080p rung; the corpus adds
 one HDR10 and one HLG asset asserting *which* pipeline was chosen (log
@@ -1509,7 +1509,7 @@ well inside the window.
 
 **Still not measured:** the *cached* TTFF and seek numbers. The mechanism is
 verified end to end — a hit starts with no ffmpeg spawned and seeks by
-`currentTime` — and nynuc's live starts now measure ~684 ms median, so the
+`currentTime` — and media1's live starts now measure ~684 ms median, so the
 ≤1.5 s target is already met before a cache hit is involved. Nobody has
 played a cached title yet, because the producer has not been switched on
 there (`cache_produce_mins: 0`).
@@ -1794,7 +1794,7 @@ chosen-by-probe (§5) · [ROADMAP.md](../ROADMAP.md) — this plan's slice line.
   renders hardcoded dark hexes as black boxes, and the web UI is
   `include_str!` — embedded, so UI edits mean rebuild + restart.
 - The sandbox has no GPU and headless Chromium lacks H.264 — §5
-  acceptance runs on nynuc; CI asserts *pipeline selection* from logs,
+  acceptance runs on media1; CI asserts *pipeline selection* from logs,
   not pixels, exactly like the existing playback corpus.
 
 ## 10. Order of work, and what it buys
@@ -1804,9 +1804,9 @@ chosen-by-probe (§5) · [ROADMAP.md](../ROADMAP.md) — this plan's slice line.
 | Weekend 1 ✅ | M0 + §4.1 + §4.2 + §4.3 + §4.5 | starts ~3–5 s; 4K copy-HLS and AirPlay stop stalling; numbers for everything else |
 | Correction pass ✅ | §2.8: R1 client config · three-frontier accounting + retention + byte budgets · attempt generations + live labels · §8.5 lifecycle · R11 cheap wins | shipped code now matches the reviewed contracts |
 | Weekend 2 | §4.4 + §4.6 (+§4.7 decision) | starts ~2–3 s; Wi-Fi-stable rungs; validation exercises the production flags |
-| Focused week ✅ | §5 (M2) — real-HDR probe on nynuc | `vpp_qsv` at 4.89×; the 30 s stutter class gone; admission by measured speed |
+| Focused week ✅ | §5 (M2) — real-HDR probe on media1 | `vpp_qsv` at 4.89×; the 30 s stutter class gone; admission by measured speed |
 | Weekend 3 ✅ | §6 (M3) — slot arbiter v1 landed with it | predicted plays start with no encoder and seek like direct play; producers yield to viewers |
-| The nynuc run ✅ | §5 + §4.6 accepted; §4.5bis found | 4.89× tone-map, 9.05 of 13.6 Mb/s — and the 10.4 s segments nobody had measured |
+| The media1 run ✅ | §5 + §4.6 accepted; §4.5bis found | 4.89× tone-map, 9.05 of 13.6 Mb/s — and the 10.4 s segments nobody had measured |
 | The second run ✅ | §4.5bis accepted; the DV question found | 2.00 s segments — and a 4K session on the CPU chain, correctly, for a reason nothing logged |
 | The third run ✅ | starts measured; the beacon label fixed | median ~684 ms — and five supply stalls on 4K remux that the mislabelled series had been hiding inside the start times |
 | With Phase 4 | §7 (M4) — fencing + takeover protocol per §7.3 | pool of nodes; failover inside the measured budget; overnight cluster pre-caching |
@@ -1824,14 +1824,14 @@ with no GPU at all. M2's could not be, and the delay cost something — §4.4
 had been "done" for a day while the symptom it exists to kill was still
 there on the only machine that could show it.
 
-**What the nynuc run actually taught.** Two acceptances passed on the first
+**What the media1 run actually taught.** Two acceptances passed on the first
 try, which is the boring half. The valuable half is §4.5bis: a milestone
 about segment length, validated in CI on software, shipped with segments
 five times too long on hardware. **An acceptance run on a machine where the
 bug cannot occur is not an acceptance run** — and §4 is full of criteria
 about what an *encoder* does, all of which were checked exactly that way.
 
-**Measured on nynuc, 2026-07-29.** Start times, once the beacon labels were
+**Measured on media1, 2026-07-29.** Start times, once the beacon labels were
 corrected (a stall's duration had been entering the series as a start):
 **197 ms direct play, 651–1536 ms remux, median ~684 ms** — against the
 ~2–3 s M1 aimed at and the ~10 s this plan opened with.

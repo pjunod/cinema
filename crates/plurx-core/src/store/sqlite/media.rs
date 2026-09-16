@@ -16,8 +16,8 @@ use crate::domain::{
 use crate::error::StoreError;
 use crate::mediafacts::{FactsRow, MediaFacts};
 use crate::store::{
-    ArtworkInventoryItem, ArtworkRepairFence, MediaStore, ReconcileOutcome, RootFingerprintStatus,
-    TOP_LEVEL_ITEM_PREDICATE,
+    ArtworkInventoryItem, ArtworkRepairFence, MediaStore, MissingVideoCodecTag, ReconcileOutcome,
+    RootFingerprintStatus, TOP_LEVEL_ITEM_PREDICATE,
 };
 
 /// Build an FTS5 MATCH expression from free text: quoted tokens, prefix
@@ -1238,9 +1238,10 @@ impl MediaStore for SqliteStore {
                    (item_id, path, size, mtime, duration_ms, container, video_codec,
                     video_profile, width, height, bit_depth, hdr, bitrate,
                     audio_streams, subtitle_streams, probe_json, hdr_format, scanned_at,
-                    dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present)
+                    dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present,
+                    video_codec_tag)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                         ?14, ?15, ?16, ?17, unixepoch(), ?18, ?19, ?20, ?21, ?22)
+                         ?14, ?15, ?16, ?17, unixepoch(), ?18, ?19, ?20, ?21, ?22, ?23)
                  ON CONFLICT(path) DO UPDATE SET
                      item_id = excluded.item_id,
                      size = excluded.size,
@@ -1263,6 +1264,7 @@ impl MediaStore for SqliteStore {
                      dv_bl_compat_id = excluded.dv_bl_compat_id,
                      dv_el_present = excluded.dv_el_present,
                      dv_rpu_present = excluded.dv_rpu_present,
+                     video_codec_tag = excluded.video_codec_tag,
                      scanned_at = unixepoch()
                  RETURNING id",
                 params![
@@ -1288,6 +1290,7 @@ impl MediaStore for SqliteStore {
                     probe.dolby_vision.bl_compat_id,
                     probe.dolby_vision.el_present.map(i64::from),
                     probe.dolby_vision.rpu_present.map(i64::from),
+                    probe.video_codec_tag,
                 ],
                 |row| row.get(0),
             )?;
@@ -1435,6 +1438,59 @@ impl MediaStore for SqliteStore {
                 ))
             })?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+    }
+
+    async fn files_missing_video_codec_tag(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError> {
+        self.with_conn(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT id, path, size, mtime, probe_json FROM files
+                  WHERE video_codec_tag IS NULL
+                    AND probe_json IS NOT NULL
+                    AND id > ?1
+                  ORDER BY id
+                  LIMIT ?2",
+            )?;
+            let rows = statement.query_map(params![after_id, limit.max(0)], |row| {
+                Ok(MissingVideoCodecTag {
+                    id: row.get(0)?,
+                    path: row.get(1)?,
+                    size: row.get(2)?,
+                    mtime: row.get(3)?,
+                    probe_json: row.get(4)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+    }
+
+    async fn set_file_video_codec_tag(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        video_codec_tag: &str,
+    ) -> Result<bool, StoreError> {
+        let candidate = candidate.clone();
+        let video_codec_tag = video_codec_tag.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE files SET video_codec_tag = ?1
+                  WHERE id = ?2 AND path = ?3 AND size = ?4 AND mtime = ?5
+                    AND probe_json = ?6 AND video_codec_tag IS NULL",
+                params![
+                    video_codec_tag,
+                    candidate.id,
+                    candidate.path,
+                    candidate.size,
+                    candidate.mtime,
+                    candidate.probe_json,
+                ],
+            )? == 1)
         })
         .await
     }
@@ -1938,7 +1994,7 @@ mod tests {
                 library_id: lib,
                 kind: ItemKind::Movie,
                 parent_id: None,
-                title: "Blade Runner 2049".into(),
+                title: "Neon District 2049".into(),
                 year: Some(2017),
                 season_number: None,
                 episode_number: None,

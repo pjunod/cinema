@@ -131,6 +131,12 @@ ALTER TABLE files ADD COLUMN dv_bl_compat_id INTEGER;
 ALTER TABLE files ADD COLUMN dv_el_present INTEGER;
 ALTER TABLE files ADD COLUMN dv_rpu_present INTEGER;";
 
+/// The original video's four-character sample-entry label.
+///
+/// Nullable with no default: rows scanned before this column existed remain
+/// explicitly unknown until the bounded stored-probe backfill reaches them.
+const FILES_VIDEO_CODEC_TAG_COLUMN: &str = "ALTER TABLE files ADD COLUMN video_codec_tag TEXT;";
+
 /// The staged-generation ledger, shared verbatim by both backends.
 ///
 /// One statement, because SQLite's append-only migration list keeps one
@@ -788,6 +794,20 @@ pub struct ArtworkInventoryItem {
     pub backdrop_path: Option<String>,
 }
 
+/// One stored-probe row eligible for the sample-entry backfill.
+///
+/// Every source identity field and the exact probe snapshot participate in
+/// the guarded update, so a concurrent scan or replacement cannot be
+/// overwritten by facts parsed from an older file revision.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MissingVideoCodecTag {
+    pub id: i64,
+    pub path: String,
+    pub size: i64,
+    pub mtime: i64,
+    pub probe_json: String,
+}
+
 /// One bounded aggregate read for Store-backed Prometheus gauges.
 ///
 /// Keeping this as one Store primitive lets a replicated backend pay for one
@@ -1415,14 +1435,14 @@ pub mod keys {
     /// trakt.tv/oauth/applications; empty/absent disables the integration).
     pub const TRAKT_CLIENT_ID: &str = "trakt.client_id";
     pub const TRAKT_CLIENT_SECRET: &str = "trakt.client_secret";
-    /// Where monarr lives, and the key to read its calendar with. Both are
+    /// Where Curator lives, and the key to read its calendar with. Both are
     /// server-side only: plurxd proxies the call so the key never reaches a
     /// browser (plan §11.2). Unset = no coming-soon rail, which is the
     /// default and changes nothing.
     pub const MONARR_URL: &str = "monarr.url";
     pub const MONARR_API_KEY: &str = "monarr.api_key";
-    /// Push watch state to monarr ("1" = on). Off by default and separate
-    /// from the URL/key pair, because reading monarr's calendar and sending
+    /// Push watch state to Curator ("1" = on). Off by default and separate
+    /// from the URL/key pair, because reading Curator's calendar and sending
     /// it your household's viewing history are very different consents.
     pub const MONARR_WATCHED_SYNC: &str = "monarr.watched_sync";
     /// Preferred default audio language (ISO 639 code, e.g. "eng").
@@ -1541,7 +1561,7 @@ pub mod keys {
     /// first response; this value cannot change their presentation contract.
     pub const HLS_TYPELESS_SLIDING: &str = "playback.hls_typeless_sliding";
     /// How often, in minutes, to build fragment indexes for files that have
-    /// none. `0` is off, and off is the default until M0-P1's nynuc numbers
+    /// none. `0` is off, and off is the default until M0-P1's media1 numbers
     /// say what a full read of a library costs over NFS — the whole point of
     /// that probe is to size this job, and turning it on before the numbers
     /// return would be guessing with the operator's disks.
@@ -1711,6 +1731,11 @@ pub mod keys {
     /// whose stored probe has no configuration record — would otherwise sit at
     /// the front of every window forever, hiding every fixable row behind it.
     pub const JOB_DV_BACKFILL_CURSOR: &str = "jobs.dv_facts_backfill_cursor";
+    /// Set after every stored probe row has been considered for the additive
+    /// sample-entry column. Unknown or malformed labels remain null by design.
+    pub const JOB_VIDEO_CODEC_TAG_BACKFILL_DONE: &str = "jobs.video_codec_tag_backfilled";
+    /// Node-local strictly-after cursor for the bounded sample-entry walk.
+    pub const JOB_VIDEO_CODEC_TAG_BACKFILL_CURSOR: &str = "jobs.video_codec_tag_backfill_cursor";
     /// Per-library permanent Profile 7 conversion policy, encoded as a JSON
     /// object from decimal library id to `off`, `manual`, or `auto`. Missing
     /// libraries are always off: an upgrade must never rewrite media by
@@ -2498,7 +2523,7 @@ pub trait MediaStore: Send + Sync + 'static {
     ) -> Result<Vec<Item>, StoreError>;
     /// Movies and shows to enrich: normally those no provider has answered
     /// for yet, which is *not* the same as "those with no TMDB id" — an item
-    /// can arrive carrying an id from another application (a monarr scan
+    /// can arrive carrying an id from another application (a Curator scan
     /// request) and still need every other field. `force` includes
     /// already-enriched items too (a metadata refresh, e.g. to backfill
     /// season posters onto shows enriched before that existed).
@@ -2634,6 +2659,20 @@ pub trait MediaStore: Send + Sync + 'static {
         after_id: i64,
         limit: i64,
     ) -> Result<Vec<(i64, String, Option<String>)>, StoreError>;
+    /// Rows whose stored probe can supply the first playable video's sample
+    /// entry, strictly after `after_id` and in ascending id order.
+    async fn files_missing_video_codec_tag(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<MissingVideoCodecTag>, StoreError>;
+    /// Write a recovered tag only if the row is still the exact source and
+    /// probe snapshot returned by `files_missing_video_codec_tag`.
+    async fn set_file_video_codec_tag(
+        &self,
+        candidate: &MissingVideoCodecTag,
+        video_codec_tag: &str,
+    ) -> Result<bool, StoreError>;
     /// Write one file's Dolby Vision columns, and the display label derived
     /// from them.
     ///

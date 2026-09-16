@@ -15,7 +15,7 @@ session and measuring the segments that session wrote — not by reconstructing
 the arguments, which would only prove that two copies of the flag list agree.
 
     scripts/perf-report --sustained
-    scripts/perf-report --url http://nynuc:32400 --ratecontrol 42
+    scripts/perf-report --url http://media1:32400 --ratecontrol 42
 
 Prompts for the admin username and password if you don't pass them.
 
@@ -72,7 +72,7 @@ def clean(s):
 # `/settings` returns API keys in the clear, because an admin editing them has
 # to see what is there. A diagnostic report does not: it gets pasted into a
 # chat, attached to an issue, and kept in a downloads folder. The first version
-# of this dumped them verbatim — TMDB, OMDb, Trakt and monarr, all of them, in
+# of this dumped them verbatim — TMDB, OMDb, Trakt and Curator, all of them, in
 # a file whose entire purpose is to be sent to somebody else.
 SECRET = re.compile(r"(key|secret|token|password)", re.I)
 

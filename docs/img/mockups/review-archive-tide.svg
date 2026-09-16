@@ -36,7 +36,7 @@
   <line x1="0" y1="76" x2="1600" y2="76" stroke="#2a4841"/>
 
   <g class="ui">
-    <text x="32" y="47" class="text" font-size="23" font-weight="760">cinemarr</text>
+    <text x="32" y="47" class="text" font-size="23" font-weight="760">noirr</text>
     <rect x="149" y="25" width="78" height="27" rx="6" fill="#142a25"
           stroke="#2a4841"/>
     <text x="162" y="43" class="mono accent small">ARCHIVE</text>

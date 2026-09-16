@@ -22,7 +22,7 @@ docker_root_raw=$(docker info --format '{{.DockerRootDir}}') \
   || die "cannot read the Docker root directory"
 # The Docker root is root:root 0710 on a stock engine, so a runner that is in
 # the `docker` group can talk to the daemon and still not enter its directory.
-# `gha-mbp-linux-arm-01` proved it: `cannot resolve Docker root directory:
+# `gha-macb-linux-arm-01` proved it: `cannot resolve Docker root directory:
 # /var/lib/docker`, and the package lane failed after its build had succeeded.
 #
 # Failing there would be the wrong trade. The budget is the bound that matters
@@ -111,7 +111,7 @@ fi
 #
 # It used to be a flat 100 GiB, with 20 % taking over on larger disks. The
 # runner fleet is not all large disks: the Incus guests carrying
-# `gha-m6-general-01`, `gha-nuc1-general-01` and their siblings are 78-97 GB
+# `gha-lab6-general-01`, `gha-lab1-general-01` and their siblings are 78-97 GB
 # volumes, so a 100 GiB floor is larger than the entire filesystem and
 # `healthy` can never become true there. The pruner would delete every cache
 # it is permitted to delete and then fail the job regardless -- the worst of

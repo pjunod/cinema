@@ -20,7 +20,7 @@ client build carrying it has ever run on hardware.
 
 | surface | on `main` | running |
 |---|---|---|
-| server (emits the actions) | yes | three nodes on `v0.2.8-106-g55abad8f`, nynuc on a later untagged build |
+| server (emits the actions) | yes | three nodes on `v0.2.8-106-g55abad8f`, media1 on a later untagged build |
 | web (served by the node) | yes | **whatever those nodes serve** — a server deploy ships the web client with it |
 | Apple | whatever `project.yml` says on the commit you deploy | build 99 (installed 2026-08-31; no exchange) |
 | Android | whatever `build.gradle.kts` says on it | 56 (installed 2026-08-31; no exchange) |
@@ -43,7 +43,7 @@ they last restarted.
 Read it on any node:
 
 ```bash
-ssh pjunod@192.168.4.7 'curl -s http://127.0.0.1:32400/metrics | grep plurx_playback_control'
+ssh operator@10.42.4.7 'curl -s http://127.0.0.1:32400/metrics | grep plurx_playback_control'
 ```
 
 Its companion is the one that says whether anything is being *withheld*:

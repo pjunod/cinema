@@ -21,7 +21,7 @@ addressed, so the final candidate consumes the fast lane once.
 
 | Work order | State | Evidence | Exit condition |
 |---|---|---|---|
-| D01 · reproduce and isolate | complete | `m6` recorded 76 `invalid_response` outcomes only while `nynuc` published an active DVR sink; the count stopped when the recording ended | Root cause names the exact rejected field |
+| D01 · reproduce and isolate | complete | `lab6` recorded 76 `invalid_response` outcomes only while `media1` published an active DVR sink; the count stopped when the recording ended | Root cause names the exact rejected field |
 | D02 · correct the peer contract | complete | Removed only the invalid `serving_generation > 0` predicate; the field is an unsigned fence token and zero is its healthy initial epoch | Complete |
 | D03 · retain the failure | complete | `initial_dvr_serving_generation_is_a_valid_peer_snapshot` serializes the real peer shape and requires the decoder to answer it | Complete |
 | D04 · adversarial review | complete | The single review of `decada4790d8` found no concrete correctness, security, coverage, documentation, or workflow defect; it retained the lack of a multi-daemon case as residual risk | Complete |
@@ -36,8 +36,8 @@ admit a DVR transport under generation zero for its entire lifetime.
 The DVR Activity decoder added `serving_generation > 0` as an input bound.
 That predicate rejects the owner's otherwise valid snapshot whenever an active
 recording exposes the initial epoch. The owner does not decode its local
-snapshot through the peer boundary, which is why `nynuc` remained correct
-while another voter displayed `sent an invalid response` for `nynuc`.
+snapshot through the peer boundary, which is why `media1` remained correct
+while another voter displayed `sent an invalid response` for `media1`.
 
 ## Guardrails — repair the assertion, not the feature
 

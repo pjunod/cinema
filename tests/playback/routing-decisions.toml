@@ -71,6 +71,20 @@ test = "crates/plurxd/src/http/stream.rs"
 test_anchor = "every_verdict_has_one_server_owned_execution_plan"
 
 [[decisions]]
+id = "server.hevc-sample-entry-admission"
+source = "crates/plurx-core/src/playback/mod.rs"
+source_anchor = "pub fn progressive_hevc_requires_normalization("
+test = "crates/plurx-core/src/playback/mod.rs"
+test_anchor = "sdr_hev1_requires_copy_remux"
+
+[[decisions]]
+id = "server.hevc-delivery-transport"
+source = "crates/plurxd/src/http/stream.rs"
+source_anchor = "pub(crate) fn hevc_copy_requires_hls("
+test = "crates/plurxd/src/http/stream.rs"
+test_anchor = "minimal_hvcc_hvc1_only_requires_hls"
+
+[[decisions]]
 id = "server.selected-audio-compatibility"
 source = "crates/plurxd/src/http/stream.rs"
 source_anchor = "fn set_selected_audio_default("
@@ -169,6 +183,13 @@ test = "tests/playback/web-policy.test.js"
 test_anchor = "every server verdict reaches exactly one initial web transport"
 
 [[decisions]]
+id = "web.progressive-hevc-admission"
+source = "crates/plurxd/src/web/index.html"
+source_anchor = "async function progressiveHevcSampleEntries("
+test = "tests/playback/web-policy.test.js"
+test_anchor = "mse_support_does_not_claim_progressive_hev1"
+
+[[decisions]]
 id = "web.hls-transport"
 source = "crates/plurxd/src/web/playback-policy.js"
 source_anchor = "function nativeHlsAvailable("
@@ -240,6 +261,20 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "static func playbackMode(_ decision: Decision) -> String"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testLegacyDirectDolbyVisionIsNormalizedToPreservingHls"
+
+[[decisions]]
+id = "apple.hevc-sample-entry-claim"
+source = "clients/apple/Sources/Caps.swift"
+source_anchor = "progressiveHevcSampleEntries: hevc ? [\"hvc1\"] : nil"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testAppleCapsDocumentCoversTheProbeMatrixWithoutInventingAHeight"
+
+[[decisions]]
+id = "apple.hevc-claim-no-downgrade"
+source = "clients/apple/Sources/PlurxAPI.swift"
+source_anchor = "static func shouldFallBackToLegacyDecision(after error: Error, caps: DeviceCaps)"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testDecisionPostFallsBackOnlyForTheMixedFleetStatuses"
 
 [[decisions]]
 id = "apple.compatibility-fallback"

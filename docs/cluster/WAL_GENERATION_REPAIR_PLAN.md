@@ -10,7 +10,7 @@ failed voter) and [CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md)
 (why three voters are the ordinary HA topology) — this plan repairs the WAL
 reader's process-local generation confusion and gives large snapshot transfers
 an explicit deadline. Execute §4 in order. If a step appears to require editing
-Raft metadata, deleting the preserved `nuc4` evidence, weakening WAL integrity
+Raft metadata, deleting the preserved `lab4` evidence, weakening WAL integrity
 checks, or changing live membership as part of the code change, stop and return
 that action for operator approval.
 
@@ -25,7 +25,7 @@ The work is complete only when all four outcomes below are true.
 | Snapshot runway | Production voters default to a 120-second install deadline, with a bounded operator override expressed in seconds. |
 | Regression evidence | A focused test holds the old mmap and memo across repeated full-purge/recreate cycles and reads the first entry from each new generation. |
 
-The physical WAL captured from `nuc4` inspected clean. The running process still
+The physical WAL captured from `lab4` inspected clean. The running process still
 reported a missing first entry at `1,530,001`, then at later snapshot boundaries
 `1,590,001` and `1,600,001`. That combination points at stale process memory,
 not missing bytes on disk.
@@ -297,7 +297,7 @@ fixed or answered with code evidence before merge.
 
 ## 6. Deployment — code merge does not mutate the live cluster
 
-This PR changes source and tests only. It does not start `nuc4`, edit membership,
+This PR changes source and tests only. It does not start `lab4`, edit membership,
 or deploy containers.
 
 The current four-voter membership has only three running voters, which is its

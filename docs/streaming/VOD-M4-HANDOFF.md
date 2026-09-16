@@ -131,10 +131,10 @@ scripts/playback-lab run --suite stall-recovery --browser chrome \
 ```
 
 The self-hosted Linux runners shorten compilation and unit-test time. They do
-not replace the following nynuc acceptance, because that proof names a real
+not replace the following media1 acceptance, because that proof names a real
 library title, NAS path, browser, and host sleep state.
 
-## Nynuc acceptance protocol
+## media1 acceptance protocol
 
 Run all three against the exact deployed commit and retain browser evidence plus
 `/api/v1/system/logs?level=trace` for each case.
@@ -162,10 +162,10 @@ start/end times, and artifact paths in the evidence table below.
 | Automated VOD suite | **PASS** — 3/3 on `50380267`: steady, 20 seeks, suspend/resume; [runner job](https://github.com/pjunod/plurx/actions/runs/32871768220/job/97880727670) |
 | Automated stall-recovery suite | **PASS** — 1/1 on `50380267` with the 60 s evidence window; same runner job |
 | Linux self-hosted CI | **PASS, executable gates** — functionality 12/12, storage contracts, both release compiles, lint, layout, Android, and container smoke passed. Hosted-Apple billing and exhausted artifact storage prevented wrapper checks from turning green; [exact exceptions](https://github.com/pjunod/plurx/pull/563#issuecomment-5413811009). |
-| Fleet server deploy | **PASS** — Ansible deployed merge `3d6f492d`; nynuc and nuc3 rebuilt and health-checked, m6 and nuc4 were already on the exact stamped build; zero failed or unreachable tasks |
-| Nynuc 2 h 4K | Pending |
-| Nynuc 20 seeks | Pending |
-| Nynuc sleep/wake | Pending |
+| Fleet server deploy | **PASS** — Ansible deployed merge `3d6f492d`; media1 and lab3 rebuilt and health-checked, lab6 and lab4 were already on the exact stamped build; zero failed or unreachable tasks |
+| media1 2 h 4K | Pending |
+| media1 20 seeks | Pending |
+| media1 sleep/wake | Pending |
 
 ## Deliberate boundary
 

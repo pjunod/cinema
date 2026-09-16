@@ -41,6 +41,13 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Fixed
 
+- **The Activity page's recording-attention rows load again on a cluster.**
+  `GET /api/v1/dvr/attention` answered 500 on every replicated store because
+  the Hiqlite page statement named its keyset placeholders out of order and
+  Hiqlite binds `$N` by first appearance; SQLite did not care, so only cluster
+  nodes saw it. The statement is assembled in bound order now and the
+  placeholder census test holds it there.
+
 - **CI runners stop filling up, because every cache path is bounded now.** A
   Forgejo runner serves `actions/cache` from a directory of its own, and
   `forgejo-runner` 13.1.0 evicts nothing from it — no size cap, no TTL, no
@@ -50,7 +57,7 @@ bump may break compatibility and a **patch** bump never does.
   `CI_EXECUTION_MODE` being `shadow` or `accelerated`. That variable has never
   been set here, so the condition was false on every job, every job took the
   unbounded branch, and the fleet accumulated ~167 G of cache blobs nothing
-  would ever delete: 118 entries and 41 G on `gha-m6-general-01` alone, all
+  would ever delete: 118 entries and 41 G on `gha-lab6-general-01` alone, all
   three days old, on a 78 G disk. Runners then failed jobs the way a full
   runner does — `ld terminated with signal 7 [Bus error]`, which reads as a
   miscompile. A bound a configuration variable can switch off is not a bound,
@@ -159,6 +166,17 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Changed
 
+- **The web item page is the original one again.** Movies, series, seasons and
+  episodes render through each layout's own item body: the poster panel, one
+  row of badge chips, the open facts panel with audio and subtitle chips, the
+  pre-play pickers and the Content analysis box. The shared "viewing" page that
+  the September usability revision introduced and the library-page revision
+  recomposed — version selector, four header badges, the English-availability
+  line, the Download button, collapsible searchable track lists and the series
+  "Next episode" panel — is gone from the web client. Home had already gone
+  back; the grid and rail poster cards never changed. The native item pages
+  keep their current design.
+
 - **`docs/` has a landing page, and 144 of its 161 root files now live in a
   subject folder.** Everything written about one piece of work — the plan, its
   reviews, the handoffs, the status tracker, the diagnoses — sits together in
@@ -201,7 +219,7 @@ bump may break compatibility and a **patch** bump never does.
   Outside (Integrations) — and collapses to a chip strip on narrow screens.
   A new **Maintenance** section gathers the scheduled jobs, pre-transcoding,
   telemetry retention and Dolby Vision on-disk conversion that used to sit
-  under Libraries; a new **Integrations** section holds Trakt and monarr, so
+  under Libraries; a new **Integrations** section holds Trakt and Curator, so
   Metadata is only the TMDB and OMDb providers. Libraries keeps a table that
   only reports — a library's schedule and Dolby Vision mode open in a drawer
   under its row, and Add library is a drawer from the header. Playback is
@@ -268,7 +286,7 @@ bump may break compatibility and a **patch** bump never does.
   default, and `scripts/registry-push` publishes both `latest` and an immutable
   `sha-<12hex>` rollback tag to the LAN Forgejo registry. The deployment and
   operations guides cover authentication, serial restart discipline, rollback,
-  registry retention, and the local `--build` fallback when nuc3 is down.
+  registry retention, and the local `--build` fallback when lab3 is down.
 
 ### Changed
 
@@ -1254,7 +1272,7 @@ bump may break compatibility and a **patch** bump never does.
   controller-side executable: it never encodes playback, becomes
   `PLURX_FFMPEG`, joins the compose service, or enters the live path. The stable
   JSON distinguishes server/build/encoder identity from scorer
-  path/build/hash/model; binds the local corpus and operator-captured nynuc
+  path/build/hash/model; binds the local corpus and operator-captured media1
   `sha256sum` manifests; rejects duplicate filename/path/hash fixtures in an
   `n1_acceptance` corpus; proves pinned, balanced SDR fixture identity; and
   reports bytes, VMAF, server speed, the 10-second complete-segment observed
@@ -1278,8 +1296,8 @@ bump may break compatibility and a **patch** bump never does.
   rollback body because the requested mode may remain active.
   The smoke path remains visibly non-acceptance. A literal golden
   fixture still pins the current VBR recipe hash. No scorer is installed or
-  needed on nynuc or in compose: nynuc encodes and the accepted laptop scorer
-  runs afterward. The 2026-08-14 nynuc D5 sweep selected QSV quality 22: 21
+  needed on media1 or in compose: media1 encodes and the accepted laptop scorer
+  runs afterward. The 2026-08-14 media1 D5 sweep selected QSV quality 22: 21
   and 22 produced identical QVBR bytes and VMAF on both corpus fixtures, while
   23 was the first failing value under the easy-byte and VMAF gates. Deployed
   build `v0.2.7-167-gb6aaed6` then passed the full no-override comparison with
@@ -2717,7 +2735,7 @@ begin with 0.2.7.
 
 ### Fixed
 
-- **An item imported by another application never got artwork.** monarr POSTs
+- **An item imported by another application never got artwork.** Curator POSTs
   `/api/v1/scan` the moment an import finishes; the handler placed the row and
   stopped. Enrichment lived only in the *full* scan, so a peer-ingested episode
   got a database row and a blank card, and stayed that way — the full scan that
@@ -2753,7 +2771,7 @@ begin with 0.2.7.
   TMDB has answered, and asking three times is three times the load for the same
   word.
 - The crammed `102` form is understood. DVD-era rips write season and episode
-  as three digits — `drawn.together.102-med.avi` is S01E02 — and plurx skipped
+  as three digits — `paper.moons.102-med.avi` is S01E02 — and plurx skipped
   every one of them. It is tried only after `S01E02` and `1x02` fail, on a
   standalone three-digit token, seasons 1–9 only: four digits are a year or a
   resolution far more often than they are season 10, and inventing an episode is
@@ -2767,7 +2785,7 @@ begin with 0.2.7.
 - Samples and other extras say that's what they are, instead of claiming the
   episode couldn't be identified. A skip note prints the whole path, so
   "no season/episode marker … in the file name or on the folder holding it"
-  under `Drawn.Together.S01E02.DVDRip-MEDiEVAL/sample.drawn.together.102-med.avi`
+  under `Paper.Moons.S01E02.DVDRip-GROUP/sample.paper.moons.102-med.avi`
   was the same self-contradiction as before, one layer down: the file was
   excluded on purpose and the message described a different rule. Skip reasons
   are now produced where the decision is made rather than reconstructed after
@@ -2783,15 +2801,15 @@ begin with 0.2.7.
   resolution, could be picked ahead of the real file.
 - Episodes whose filename is a hash are found by their release folder. A common
   torrent shape puts every identifying token on the directory —
-  `Drawn.Together.2004.S01E06.Dirty.Pranking.Number.2.480p.DVD.x265.Panda/` —
+  `Paper.Moons.2004.S01E06.The.Long.Wednesday.Number.2.480p.DVD.x265.GROUP/` —
   and names the file inside `956a4a82d3e71a92e95bc3658e6978d7.mkv`. The parser
   only ever regexed the *filename*, so every one of these was skipped, and the
   skip note printed the full path while claiming there was no `S01E06` in it —
   a message that contradicted itself on screen. The marker is now read from the
   immediate parent directory when the filename hasn't got one, which is where
   the show title has always been read from anyway; the folder above the release
-  still wins the show name, so a file under `Drawn Together/Season 1/` is still
-  *Drawn Together* and not *Drawn.Together.2004*. Two things deliberately do not
+  still wins the show name, so a file under `Paper Moons/Season 1/` is still
+  *Paper Moons* and not *Paper.Moons.2004*. Two things deliberately do not
   inherit a folder's marker: a `Season 02` directory, which carries a season but
   no episode, and a file whose own name says it isn't the episode (`sample`,
   `trailer`, `proof`, `screens`, `rarbg`) — a 30-second sample beside the real
@@ -2833,7 +2851,7 @@ begin with 0.2.7.
   produced two dozen near-identical lines and a real library produced 187 —
   which the ten-line cap then truncated into "…and 177 more", the least useful
   possible summary of a problem with exactly three causes. The report now says
-  `skipped 168 files in /8tb/tv/Drawn Together — no season/episode marker`, one
+  `skipped 168 files in /8tb/tv/Paper Moons — no season/episode marker`, one
   row per folder, worst first, expandable to a few of the filenames. Grouping is
   by the folder directly under the library root, because that is the unit the
   operator acts on: grouping any deeper reproduces the per-file list one level

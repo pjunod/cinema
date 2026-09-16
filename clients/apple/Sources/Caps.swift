@@ -12,6 +12,7 @@ struct DeviceCaps: Codable, Equatable {
     let audio: [String]
     let containers: [String]
     let transports: [String]
+    var progressiveHevcSampleEntries: [String]? = nil
     let dvTransport: String
     let display: DisplayCaps
     var learnedLimits: [LearnedLimit] = []
@@ -143,6 +144,11 @@ enum Caps {
             // first frame-equivalent audio sample on physical devices.
             containers: ["mp4", "mov", "m4v", "m4a", "m4b", "mp3", "aac", "flac", "wav"],
             transports: ["progressive", "hls"],
+            // AVPlayer's progressive HEVC path is conservatively admitted
+            // only for the hvc1 sample entry. HLS remains available for a
+            // server-normalized copy whose progressive output uses another
+            // label.
+            progressiveHevcSampleEntries: hevc ? ["hvc1"] : nil,
             // AVPlayer accepts P5/P8, but a raw progressive MP4 can advance
             // with audio and report DV while rendering black. Preserved DV
             // therefore always rides the normalized copy-video HLS envelope.

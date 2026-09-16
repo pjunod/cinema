@@ -6,7 +6,7 @@ Companion to [ARCHITECTURE.md](../ARCHITECTURE.md) (how it's built) and
 already in place, and a phased plan with effort and risk called out.
 
 The guiding fact: **Netflix and YouTube pre-encode a whole quality ladder
-offline, then let the client hop between renditions per segment. cinemarr
+offline, then let the client hop between renditions per segment. noirr
 encodes just-in-time on one GPU.** Encoding every rung of a ladder
 simultaneously would multiply GPU load per stream — a non-starter on an iGPU
 that can stall with two QSV sessions. So the design puts the *adaptation
@@ -345,6 +345,6 @@ Offline, `tests/playback/web-policy.test.js` drives the pure `decideRung`
 policy through cliff, mild-pressure, supply/decode, dwell, restart-cost, and
 recovery cases. End to end, the `stall-recovery` playback-lab suite applies an
 8 → 1.5 Mb/s cliff and requires one restart to the sustainable 360p rung, then
-no more than one upgrade per 60 s after the throttle lifts. On nynuc: play a
+no more than one upgrade per 60 s after the throttle lifts. On media1: play a
 4K HDR title, clamp the client with browser DevTools network throttling to
 3 Mb/s, and watch the Stats overlay move down to 480p and back.

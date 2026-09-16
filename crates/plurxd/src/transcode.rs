@@ -25234,7 +25234,7 @@ fn bitrate_for_height(height: i64) -> u32 {
 /// Software retains the original 1080p point. QuickSync additionally admits
 /// 2160p after the exact Profile 5 software-decode → tonemapx passthrough →
 /// P010 upload → HEVC Main10 graph measured 1.52× realtime at 1080p and 1.26×
-/// at 2160p on nynuc (2026-08-22). Boot re-proves the device graph before the
+/// at 2160p on media1 (2026-08-22). Boot re-proves the device graph before the
 /// larger rung is advertised; machines that cannot reproduce it stay at the
 /// conservative route.
 pub const HDR10_HEIGHT: i64 = 1080;
@@ -25250,7 +25250,7 @@ fn capability_height_for_encoder(
     }
     match file {
         // Profile 5 software decode → tonemapx SDR reshape → QSV H.264
-        // measured 1.37× realtime at 2160p on nynuc (2026-08-22). The pairing
+        // measured 1.37× realtime at 2160p on media1 (2026-08-22). The pairing
         // probe proves the node's device init/upload graph before its caller
         // may resolve QSV, so SDR-only displays keep the source geometry too.
         Some(file)
@@ -25384,7 +25384,7 @@ pub struct Rung {
     pub total_kbps: u32,
     /// What the rung may PEAK at over the rate-control window: `-maxrate`
     /// (1.5× the target, PERF-PLAN §4.6) + audio. The number that must
-    /// cover the measured burst — nynuc measured 9.05 Mb/s on the 1080
+    /// cover the measured burst — media1 measured 9.05 Mb/s on the 1080
     /// rung's 8 Mb/s target — and the one an HLS `BANDWIDTH` attribute
     /// would be required to state.
     pub peak_kbps: u32,
@@ -27805,6 +27805,7 @@ pub(crate) mod tests {
             duration_ms: Some(1_000),
             container: Some("matroska".into()),
             video_codec: Some("hevc".into()),
+            video_codec_tag: None,
             video_profile: Some("Main 10".into()),
             width: Some(3840),
             height: Some(2160),
@@ -36185,6 +36186,7 @@ pub(crate) mod tests {
             duration_ms: Some(7_200_000),
             container: Some("matroska".into()),
             video_codec: Some("hevc".into()),
+            video_codec_tag: None,
             video_profile: Some("Main 10".into()),
             width: Some(3840),
             height: Some(2160),

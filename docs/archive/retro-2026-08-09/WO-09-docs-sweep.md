@@ -19,7 +19,7 @@ A full docs-coherence audit found the tree in better shape than any prior sweep 
 9. `docs/CHEATSHEET.md` — env table: add `PLURX_SCAN_PRUNE_PERCENT` (default 10; 0 disables; max % of known files one scan may delete). API table: add the two new admin endpoints (root-identity/reset — "accept a verified replaced mount"; search-index/rebuild). Add one pointer line to the offline quota settings in OPERATIONS.md.
 10. `README.md` — `:285` Phase 4 "[ ]" → "[~] … clustering M0–M1c merged behind the Store trait; single-node SQLite still the default"; `:293` Phase 5 "[ ]" → "[~] … Android and Apple clients working; Tizen/webOS/Roku not started"; `:17` soften "not yet wired up" → "replicated store backends merged, not yet activated".
 11. `docs/clients/PGS-OVERLAY-REVIEW-ASSESSMENT.md:477` — "Current `origin/main` is…" → "At this review's 2026-08-04 baseline, `origin/main` was…" (it names build 19 / versionCode 9 as "current").
-12. `crates/plurxd/src/web/index.html:4490, :5955, :6194` — `console.warn("[cinemarr] …")` → `[cinema]` (brand/BRAND.md:29 retires the name). *Code file: this one takes the change out of the docs-only lane — either accept the full CI run or split it into its own commit.*
+12. `crates/plurxd/src/web/index.html:4490, :5955, :6194` — `console.warn("[<retired working name>] …")` → `[cinema]` (brand/BRAND.md:29 retires the old working names). *Code file: this one takes the change out of the docs-only lane — either accept the full CI run or split it into its own commit.*
 
 ## Also in this commit (optional, Paul's call)
 

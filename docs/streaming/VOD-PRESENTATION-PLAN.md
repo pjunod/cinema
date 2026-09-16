@@ -649,7 +649,7 @@ answer is not a feasibility result).
   process generations for same source + args. Any (a)–(d) failure stops
   the plan for redesign — that is the point of running it first.
 - **P1 — index cost.** Time the fragment-index build (the production-shaped
-  video-only pipe, which reads the whole file) on ≥6 real titles on nynuc
+  video-only pipe, which reads the whole file) on ≥6 real titles on media1
   over NFS (biggest DV MKV included, cold cache). Decides how aggressive
   background indexing at import must be; first plays of unindexed files use
   the legacy presentation regardless (§2.2), so no cold play waits on this
@@ -677,7 +677,7 @@ indexer + persistence + the background job, productionizing what P0
 prototyped. No serving changes.
 
 **Acceptance:** the P0 fidelity suite re-runs green as `cargo test`-able
-fixtures plus the nynuc real-file sweep; plan build from a persisted index
+fixtures plus the media1 real-file sweep; plan build from a persisted index
 is <100 ms; index invalidation on file-identity change is tested;
 `cargo test --workspace` green.
 
@@ -725,12 +725,12 @@ resurrect → ENDLIST-complete) goes in docs/PLAYBACK-TESTING.md.
 
 **Implementation status (2026-08-25):** merged at `3d6f492d` and deployed as
 `v0.2.7-1551-g3d6f492d`. Exact-commit automated gates passed; the three
-physical nynuc observations remain tracked in
+physical media1 observations remain tracked in
 [VOD-M4-HANDOFF.md](VOD-M4-HANDOFF.md).
 
 Send the flag; VOD-path handling; timeout configs from P3. No deletions.
 
-**Acceptance:** playback-lab stall-recovery + VOD suites green; on nynuc:
+**Acceptance:** playback-lab stall-recovery + VOD suites green; on media1:
 a 2-hour 4K remux plays end to end with zero keeper fires and zero
 reopens; a 20-seek storm lands every seek natively with no session create
 (server log assertion); sleep/wake mid-film resumes without error.
@@ -1104,7 +1104,7 @@ source per second** (0.067 s for a 2.7 MB fixture, 1.301 s for 714.6 MB). The
 throughput rises with bitrate because the cost is dominated by remuxing
 fragments, not by fragment count.
 
-**That number does not answer P1.** P1 asks what indexing costs on nynuc over
+**That number does not answer P1.** P1 asks what indexing costs on media1 over
 NFS with a cold cache on real titles, which is the number that sizes the
 background job, and no such file is reachable from here. The sweep is an
 operator protocol — see [STATUS.html](../STATUS.html)'s VOD operator checklist.
@@ -1260,5 +1260,5 @@ rather than refusal). B2 becomes stopgap S6 (audit the live path's
 included.
 
 **Still owed before M2 completes**, via STATUS.html's operator protocols: the
-device halves of P2 and P3, P1 on nynuc over NFS, and P0 over at least ten
+device halves of P2 and P3, P1 on media1 over NFS, and P0 over at least ten
 real titles including a Dolby Vision title and one with an A/V offset.

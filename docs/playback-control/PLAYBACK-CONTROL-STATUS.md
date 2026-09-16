@@ -17,11 +17,11 @@ revised main-bound fast lane.
 
 **Updated:** 2026-09-09 · **Current follow-up:** `codex/m6-server-prime` on Forgejo `main` `75744fea` ·
 **Fleet:** level again — all four on `v0.3.0-260-g5b127370`, read off
-`/metrics` 2026-09-02. **nuc3 is a non-voting learner** answering `readyz` 503
+`/metrics` 2026-09-02. **lab3 is a non-voting learner** answering `readyz` 503
 `quorum unavailable`; the other three hold quorum (required 2) with zero
-leader changes, so nothing is degraded, but nuc3 serves only bounded catalogue
+leader changes, so nothing is degraded, but lab3 serves only bounded catalogue
 reads and node-local routes · **Devices:** Apple 99 and Android 56 were **installed** on
-2026-08-31; the web arm of the acceptance passed on nuc3, and M5.5 has since
+2026-08-31; the web arm of the acceptance passed on lab3, and M5.5 has since
 measured all three platforms on hardware — see §"M5.5 ran, and two thirds of
 it settled" · the tree is Android 60 · Apple 104
 
@@ -390,8 +390,8 @@ the Apple TV refused a foreground launch (asleep or locked); the Pixel installed
 and stayed on the keyguard. No title played on either platform, so §4.1, §4.2
 and §4.3 are all still unobserved.
 
-**The old counters are not partial credit.** m6 held 4,657 Apple exchanges and
-nynuc 3 Android, all `complete="false"` — incomplete older clients, which is
+**The old counters are not partial credit.** lab6 held 4,657 Apple exchanges and
+media1 3 Android, all `complete="false"` — incomplete older clients, which is
 what that label means. They cannot settle a ruling about the full vocabulary,
 and they predate the requested builds.
 
@@ -415,7 +415,7 @@ that could receive one.
 
 **That historical gate opened for the then-current vocabulary, but adding
 `prepare_replacement` closes completeness again.** The 2026-09-01 web run
-completed sixteen exchanges on nuc3 with zero `complete="false"`, and nuc4
+completed sixteen exchanges on lab3 with zero `complete="false"`, and lab4
 later carried both web and Apple exchanges under induced conditions. No
 shipped client yet declares the new action name, so the current complete
 vocabulary series must be treated as unproven until the client slice ships and
@@ -469,7 +469,7 @@ a client too old to be told — and a withheld hold is never counted there.
 
 ## M5c is struck, and this is the measurement that struck it
 
-**Written 2026-09-01** from induced control exchanges on nuc4 at
+**Written 2026-09-01** from induced control exchanges on lab4 at
 `v0.3.0-49-g03b4daa3` and from the two client recovery handlers on `main`.
 The full working lives in the agent notes as `M5C-VERDICT.md`, which is
 outside this repository; the short form is here because it closes a milestone
@@ -499,7 +499,7 @@ node (`transcodes=0`, `readyz` 200 on all four):
 | stall report on the same session | `stalled` · `starved` · `network` | **`none`** |
 
 Thirteen exchanges spanned the session kill and every one returned `none`.
-Across the night on nuc4: web `none` **23 → 58**, web `hold` static at **55**,
+Across the night on lab4: web `none` **23 → 58**, web `hold` static at **55**,
 and `terminal` and `retry_resource` **never observed at all**, on any
 platform.
 
@@ -542,7 +542,7 @@ one remaining M5 client change is a comment correction at the truncated-stream
 site, which still calls `endedTries` "a guess standing in for exactly that
 answer" — now only half true.
 
-**An operational note from the same session.** nuc4 could not serve an HLS
+**An operational note from the same session.** lab4 could not serve an HLS
 manifest in under twenty seconds (`20001 ms` / `0 bytes`, `55148 ms` /
 `457 bytes`, `21001 ms` / `0 bytes`) and playback never reached a buffered
 frame in twelve minutes across two titles. `plurx_analysis_queue_depth` shows
@@ -652,7 +652,7 @@ successor keeps `media_origin_ms = 0` and carries the accepted playhead in
 Developer checkbox is default-on and readiness is advisory.
 
 **Merged into `main` as `9c5e1f9b`, 2026-09-08
-([#122](http://192.168.4.7:3000/noirr/plurx/pulls/122)). Not deployed, and not
+([#122](http://forge.lan:3000/noirr/plurx/pulls/122)). Not deployed, and not
 yet on any physical device.** Apple declares `prepare_replacement` and drives
 the whole transaction — a muted, layer-less second `AVPlayer` primed through
 the successor's own `media_origin_ms`, `metadata_ready` and `buffer_ready` as
@@ -897,7 +897,7 @@ discarded as vacuous.
 
 ## The axis rule refuses every real quality change, and M5.5 never ran the case
 
-**Read 2026-09-03 on m6**, on `v0.3.0-487-gd7194b05` — the build carrying the
+**Read 2026-09-03 on lab6**, on `v0.3.0-487-gd7194b05` — the build carrying the
 seam's file and ask gates, so unlike the first reading this one counts only
 transitions a viewer actually made. Apple TV on build 114, which declares
 `dual_player_preparation: true` and reports `observedDownloadBps`.
@@ -1017,7 +1017,7 @@ receipt, and the receipt has to name its run.
 
 ## Shadow mode ran, and the axis rule is what limits M6
 
-**Read 2026-09-03 on m6**, on `v0.3.0-449-gd1a56d01`, from three deliberate
+**Read 2026-09-03 on lab6**, on `v0.3.0-449-gd1a56d01`, from three deliberate
 viewer quality changes: Avatar 2160 → 1080, and a plain SDR title to 720.
 These are in-memory counters and every deploy resets them, so this is what one
 build had decided at one moment, not a running total.

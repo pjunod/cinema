@@ -189,7 +189,7 @@ measured retroactively. Treat "we lost DV on 7/31" as unproven; "we lost the DV
 *label* on 7/31" is proven.
 
 Deployment: `git merge-base --is-ancestor 807e5bbe 97a10ee` → yes, and
-`docs/STATUS.html:311` records nuc4 on `v0.2.7-502-g97a10ee`. The web player
+`docs/STATUS.html:311` records lab4 on `v0.2.7-502-g97a10ee`. The web player
 ships inside `plurxd`, so there is no client-side lag — this is live.
 
 **Stale doc:** `docs/streaming/MEDIA-BADGES-PLAN.md` (~line 340) still says "DV P7

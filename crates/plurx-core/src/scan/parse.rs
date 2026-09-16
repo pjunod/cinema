@@ -77,7 +77,7 @@ const STOP_TOKENS: &[&str] = &[
 static YEAR_PAREN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\((19\d{2}|20\d{2})\)").expect("valid regex"));
 // Word-boundary (not separator-consuming) so consecutive years like
-// "Blade.Runner.2049.2017" both match and the LAST wins as the release year.
+// "Neon.District.2049.2017" both match and the LAST wins as the release year.
 static YEAR_BARE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b(19\d{2}|20\d{2})\b").expect("valid"));
 // S01E02 / s1e2 / S01E02E03 (multi), and the 1x02 style.
@@ -91,7 +91,7 @@ static SEASON_DIR: LazyLock<Regex> =
 // Anime absolute numbering: "Title - 01", "Title - 12v2", "Title - 100".
 static ANIME_EP: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\s-\s(\d{1,4})(?:v\d+)?(?:\s|\.|\[|\(|$)").expect("valid"));
-// The crammed DVD-era form: "Drawn.Together.102" is S01E02. Exactly three
+// The crammed DVD-era form: "Paper.Moons.102" is S01E02. Exactly three
 // digits standing alone — the boundaries keep it out of "1080p", "x264" and
 // "480p", where the digits touch another word character on one side.
 static SEE_CRAMMED: LazyLock<Regex> =
@@ -268,7 +268,7 @@ fn extract_year(s: &str) -> Option<(i32, usize)> {
         return Some((year, whole.start()));
     }
     // Bare year: take the LAST match, so "2001 A Space Odyssey (1968)" style is
-    // handled by the paren branch above, and "Blade.Runner.2049.2017" takes
+    // handled by the paren branch above, and "Neon.District.2049.2017" takes
     // 2017 not 2049.
     let last = YEAR_BARE.captures_iter(s).last()?;
     let year: i32 = last.get(1)?.as_str().parse().ok()?;
@@ -387,7 +387,7 @@ const NOT_A_CRAMMED_MARKER: &[&str] = &[
 /// Find the first `SxxEyy` (or `1x02`) marker in a single name — a filename
 /// stem or a directory name.
 ///
-/// `allow_crammed` enables the last-resort `SEE` form (`Drawn.Together.102` →
+/// `allow_crammed` enables the last-resort `SEE` form (`Paper.Moons.102` →
 /// season 1, episode 2), which DVD-era rips use constantly. It is off for anime
 /// because absolute numbering owns that shape: `One Piece - 102` is episode
 /// 102, not season 1 episode 2, and reading it as `SEE` would silently file
@@ -810,16 +810,16 @@ mod tests {
     #[test]
     fn movies_scene_style() {
         assert_eq!(
-            movie("/m/Blade.Runner.2049.2017.1080p.BluRay.x265-GROUP.mkv"),
+            movie("/m/Neon.District.2049.2017.1080p.BluRay.x265-GROUP.mkv"),
             ParsedMovie {
-                title: "Blade Runner 2049".into(),
+                title: "Neon District 2049".into(),
                 year: Some(2017)
             }
         );
         assert_eq!(
-            movie("/m/Heat.1995.REMUX.1080p.mkv"),
+            movie("/m/Ember.1995.REMUX.1080p.mkv"),
             ParsedMovie {
-                title: "Heat".into(),
+                title: "Ember".into(),
                 year: Some(1995)
             }
         );
@@ -872,8 +872,8 @@ mod tests {
 
     #[test]
     fn episodes_scene_style() {
-        let e = ep("/tv/The.Bear.S02E05.1080p.WEB.h264-GROUP.mkv").expect("parsed");
-        assert_eq!(e.show_title, "The Bear");
+        let e = ep("/tv/The.Kitchen.S02E05.1080p.WEB.h264-GROUP.mkv").expect("parsed");
+        assert_eq!(e.show_title, "The Kitchen");
         assert_eq!((e.season, e.episode), (2, 5));
     }
 
@@ -903,20 +903,24 @@ mod tests {
     #[test]
     fn hash_named_file_inherits_its_release_folder() {
         let e = ep(
-            "/8tb/tv/Drawn Together/Season 1/Drawn.Together.2004.S01E06.Dirty.Pranking.Number.2.\
-             480p.DVD.x265.Panda/956a4a82d3e71a92e95bc3658e6978d7.mkv",
+            "/8tb/tv/Paper Moons/Season 1/Paper.Moons.2004.S01E06.The.Long.Wednesday.Number.2.\
+             480p.DVD.x265.GROUP/956a4a82d3e71a92e95bc3658e6978d7.mkv",
         )
         .expect("parsed from the folder name");
         // "Season 1"'s parent is the clean show folder, so it wins the title.
-        assert_eq!(e.show_title, "Drawn Together");
+        assert_eq!(e.show_title, "Paper Moons");
         assert_eq!((e.season, e.episode), (1, 6));
-        assert_eq!(e.episode_title.as_deref(), Some("Dirty Pranking Number 2"));
+        assert_eq!(
+            e.episode_title.as_deref(),
+            Some("The Long Wednesday Number 2")
+        );
     }
 
     #[test]
     fn release_folder_supplies_title_and_year_with_no_show_dir() {
-        let e = ep("/tv/The.Bear.2022.S02E05.1080p.WEB.h264-GROUP/a1b2c3d4.mkv").expect("parsed");
-        assert_eq!(e.show_title, "The Bear");
+        let e =
+            ep("/tv/The.Kitchen.2022.S02E05.1080p.WEB.h264-GROUP/a1b2c3d4.mkv").expect("parsed");
+        assert_eq!(e.show_title, "The Kitchen");
         assert_eq!(e.show_year, Some(2022));
         assert_eq!((e.season, e.episode), (2, 5));
     }
@@ -937,7 +941,7 @@ mod tests {
         assert!(ep("/tv/Show/Season 1/1x.mkv").is_none());
         assert!(ep("/tv/Show/Season 01/00000000000000000000000000000000.mkv").is_none());
         // And a plain show folder still yields nothing.
-        assert!(ep("/tv/Drawn Together/956a4a82d3e71a92e95bc3658e6978d7.mkv").is_none());
+        assert!(ep("/tv/Paper Moons/956a4a82d3e71a92e95bc3658e6978d7.mkv").is_none());
     }
 
     /// The skip reason is what the scan report prints next to the full path, so
@@ -946,14 +950,14 @@ mod tests {
     fn a_skipped_file_reports_the_reason_that_fired() {
         assert_eq!(
             skip(
-                "/8tb/tv/Drawn Together/Season 1/Drawn.Together.S01E02.DVDRip.XviD-MEDiEVAL/\
-                 sample.drawn.together.102-med.avi"
+                "/8tb/tv/Paper Moons/Season 1/Paper.Moons.S01E02.DVDRip.XviD-GROUP/\
+                 sample.paper.moons.102-med.avi"
             ),
             EpisodeSkip::Extra,
         );
         // No marker on the folder either → the extras rule never came up.
         assert_eq!(
-            skip("/tv/Drawn Together/Season 1/sample.avi"),
+            skip("/tv/Paper Moons/Season 1/sample.avi"),
             EpisodeSkip::NoMarker,
         );
         assert_eq!(skip("/tv/Show/Season 1/poster.jpg"), EpisodeSkip::NoMarker);
@@ -961,8 +965,8 @@ mod tests {
 
     #[test]
     fn crammed_see_numbering() {
-        let e = ep("/tv/Drawn Together/Season 1/drawn.together.102-med.avi").expect("parsed");
-        assert_eq!(e.show_title, "Drawn Together");
+        let e = ep("/tv/Paper Moons/Season 1/paper.moons.102-med.avi").expect("parsed");
+        assert_eq!(e.show_title, "Paper Moons");
         assert_eq!((e.season, e.episode), (1, 2));
         // "-med" is the release group; no episode title is better than that one.
         assert_eq!(e.episode_title, None);

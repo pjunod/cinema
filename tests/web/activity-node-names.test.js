@@ -100,7 +100,7 @@ function snapshot(overrides) {
         {
           method: "hls-copy",
           presentation: "live-recovery",
-          user: "pjunod",
+          user: "operator",
           file_id: 1,
           item_id: 7,
           title: "Tom Segura: Disgraceful",
@@ -139,10 +139,10 @@ async function test(name, run) {
 }
 
 test("the Node cell leads with the machine name and keeps the id under it", () => {
-  const html = paint(snapshot({ node_hostnames: { [NODE_A]: "nuc3" } }));
+  const html = paint(snapshot({ node_hostnames: { [NODE_A]: "lab3" } }));
   assert.match(
     html,
-    /<td><div class="nodename">nuc3<\/div><div class="clid">5deeeebc-8f39-4cb5-8e4a-aa5f912f327f<\/div><\/td>/,
+    /<td><div class="nodename">lab3<\/div><div class="clid">5deeeebc-8f39-4cb5-8e4a-aa5f912f327f<\/div><\/td>/,
   );
   // The defect this file exists for: the id must not be the whole answer.
   assert.doesNotMatch(html, /<td><span class="clid">5deeeebc/);
@@ -158,12 +158,12 @@ test("without a roster map the cell still shows the id it always showed", () => 
 });
 
 test("a node the roster could not name keeps its id while its neighbours are named", () => {
-  const d = snapshot({ node_hostnames: { [NODE_A]: "nuc3" } });
+  const d = snapshot({ node_hostnames: { [NODE_A]: "lab3" } });
   d.deliveries.push(
     Object.assign({}, d.deliveries[0], { node_id: NODE_B, file_id: 2, user: "guest" }),
   );
   const html = paint(d);
-  assert.match(html, /<div class="nodename">nuc3<\/div>/);
+  assert.match(html, /<div class="nodename">lab3<\/div>/);
   assert.match(html, /<td><span class="clid">9a1c77e2-0000-4000-8000-aa5f912f327f<\/span><\/td>/);
 });
 
@@ -176,7 +176,7 @@ test("the Node column still appears on ids alone, and disappears without them", 
 });
 
 test("a row with no node id at all is Unknown, not blank and not undefined", () => {
-  const d = snapshot({ node_hostnames: { [NODE_A]: "nuc3" } });
+  const d = snapshot({ node_hostnames: { [NODE_A]: "lab3" } });
   d.deliveries.push(
     Object.assign({}, d.deliveries[0], { node_id: "", file_id: 3, user: "guest" }),
   );
@@ -188,14 +188,14 @@ test("a row with no node id at all is Unknown, not blank and not undefined", () 
 test("the incomplete-activity banner names the node it is complaining about", () => {
   const html = paint(
     snapshot({
-      node_hostnames: { [NODE_B]: "m6" },
+      node_hostnames: { [NODE_B]: "lab6" },
       activity_nodes: [
         { node_id: NODE_A, status: "answered" },
         { node_id: NODE_B, status: "unreachable" },
       ],
     }),
   );
-  assert.match(html, /Node m6 · unreachable/);
+  assert.match(html, /Node lab6 · unreachable/);
   assert.doesNotMatch(html, /Node 9a1c77e2/);
 });
 
@@ -211,7 +211,7 @@ test("an unnamed peer is still named by its id in the banner", () => {
 test("authentication refusals and HTTP failures stay distinct in the banner", () => {
   const html = paint(
     snapshot({
-      node_hostnames: { [NODE_A]: "nuc3", [NODE_B]: "m6" },
+      node_hostnames: { [NODE_A]: "lab3", [NODE_B]: "lab6" },
       activity_nodes: [
         { node_id: NODE_A, status: "refused" },
         { node_id: NODE_B, status: "http_error" },
@@ -219,10 +219,10 @@ test("authentication refusals and HTTP failures stay distinct in the banner", ()
       ],
     }),
   );
-  assert.match(html, /Node nuc3 · refused the activity request/);
+  assert.match(html, /Node lab3 · refused the activity request/);
   assert.match(html, /Node node-c · does not publish Activity HTTP/);
-  assert.match(html, /Node m6 · returned an HTTP error/);
-  assert.doesNotMatch(html, /Node (nuc3|m6) · unreachable/);
+  assert.match(html, /Node lab6 · returned an HTTP error/);
+  assert.doesNotMatch(html, /Node (lab3|lab6) · unreachable/);
 });
 
 test("the peer directory keeps its own sentence when no node can be named", () => {
@@ -246,7 +246,7 @@ test("a hostile node id is escaped, named or not", () => {
   const hostile = '"><img src=x onerror=alert(1)>';
   const named = paint(snapshot({
     deliveries: [Object.assign({}, snapshot().deliveries[0], { node_id: hostile })],
-    node_hostnames: { [hostile]: "nuc3" },
+    node_hostnames: { [hostile]: "lab3" },
   }));
   assert.doesNotMatch(named, /<img src=x/);
   assert.match(named, /<div class="clid">&quot;&gt;&lt;img src=x/);
@@ -259,15 +259,15 @@ test("a hostile node id is escaped, named or not", () => {
 });
 
 test("a non-string name is refused rather than printed", () => {
-  const html = paint(snapshot({ node_hostnames: { [NODE_A]: { name: "nuc3" } } }));
+  const html = paint(snapshot({ node_hostnames: { [NODE_A]: { name: "lab3" } } }));
   assert.match(html, /<span class="clid">5deeeebc-8f39-4cb5-8e4a-aa5f912f327f<\/span>/);
   assert.doesNotMatch(html, /\[object Object\]/);
 });
 
 test("names never survive into a snapshot that did not carry them", () => {
-  paint(snapshot({ node_hostnames: { [NODE_A]: "nuc3" } }));
+  paint(snapshot({ node_hostnames: { [NODE_A]: "lab3" } }));
   const html = paint(snapshot());
-  assert.doesNotMatch(html, /nuc3/);
+  assert.doesNotMatch(html, /lab3/);
   assert.match(html, /<span class="clid">5deeeebc-8f39-4cb5-8e4a-aa5f912f327f<\/span>/);
 });
 
@@ -287,7 +287,7 @@ function liveSession(overrides) {
       presentation: "live-recovery",
       item_id: 7,
       item_title: "Tom Segura: Disgraceful",
-      user_name: "pjunod",
+      user_name: "operator",
       target_height: 1080,
       encoder: "vaapi",
       lease_mode: "explicit",
@@ -323,7 +323,7 @@ function streaming(sessionOverrides, deliveryOverrides) {
         {
           method: "transcode",
           presentation: session.presentation,
-          user: "pjunod",
+          user: "operator",
           file_id: 1,
           item_id: 7,
           title: "Tom Segura: Disgraceful",
@@ -437,12 +437,12 @@ test("the rung and encoder come from the session row, which is where the server 
 
 test("a direct play has a headline and a delivery meter and nothing invented", () => {
   const html = paint(snapshot({
-    deliveries: [{ method: "direct", user: "pjunod", file_id: 1, item_id: 7, title: "Remux Me", started_unix: Math.floor(Date.now() / 1000) - 60, idle_seconds: 0, delivered_bytes: null, delivered_bps: null }],
+    deliveries: [{ method: "direct", user: "operator", file_id: 1, item_id: 7, title: "Remux Me", started_unix: Math.floor(Date.now() / 1000) - 60, idle_seconds: 0, delivered_bytes: null, delivered_bps: null }],
   }));
   assert.match(html, /<td class="stream-cell"><div class="stream-head"><span class="stream-method">Direct play<\/span><\/div><\/td>/);
   assert.doesNotMatch(html, /stream-state|stream-meters|stream-diag/);
   const remux = paint(snapshot({
-    deliveries: [{ method: "remux", user: "pjunod", file_id: 1, item_id: 7, title: "Remux Me", started_unix: Math.floor(Date.now() / 1000) - 60, idle_seconds: 44, delivered_bytes: 1_048_576, delivered_bps: 38_200_000 }],
+    deliveries: [{ method: "remux", user: "operator", file_id: 1, item_id: 7, title: "Remux Me", started_unix: Math.floor(Date.now() / 1000) - 60, idle_seconds: 44, delivered_bytes: 1_048_576, delivered_bps: 38_200_000 }],
   }));
   assert.match(remux, /<span class="stream-method">Remux<\/span><\/div><div class="stream-meters"><div class="stream-meter "><span class="k">Delivery rate<\/span><span class="v">38 Mb\/s<span class="of">1.0 MB<\/span><\/span><\/div><\/div><\/td>/);
   assert.match(remux, /<div>idle 44s<\/div>/);

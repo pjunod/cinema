@@ -39,11 +39,11 @@ deletions.
 The supplied deployment key was used for read-only SSH. The build command was:
 
 ```bash
-ssh -i /Users/pjunod/code/plurx-agent/.ssh-deploy-key HOST \
+ssh -i ~/code/plurx-agent/.ssh-deploy-key HOST \
   'docker exec plurxd plurxd --version'
 ```
 
-All four nodes (`nynuc`, `m6`, `nuc3`, `nuc4`) returned:
+All four nodes (`media1`, `lab6`, `lab3`, `lab4`) returned:
 
 ```text
 plurxd 0.3.0 (v0.3.0-639-g03379035)
@@ -58,7 +58,7 @@ observations, not playback passes.
 The bounded collection command was:
 
 ```bash
-ssh -i /Users/pjunod/code/plurx-agent/.ssh-deploy-key HOST \
+ssh -i ~/code/plurx-agent/.ssh-deploy-key HOST \
   'docker logs plurxd 2>&1 | head -n 24'
 ```
 
@@ -71,7 +71,7 @@ command above reproduces the bounded view.
 The queue snapshot came from the unauthenticated local metrics surface:
 
 ```bash
-ssh -i /Users/pjunod/code/plurx-agent/.ssh-deploy-key nynuc \
+ssh -i ~/code/plurx-agent/.ssh-deploy-key media1 \
   'curl -sS --max-time 5 http://127.0.0.1:32400/metrics | \
    grep -E "plurx_analysis_queue_depth.*component=\"fragment_index\""'
 ```
@@ -101,22 +101,22 @@ De-identified result:
 
 | Node | Events | Stall records | Stall sessions | Mean reported ms | Maximum reported ms |
 |---|---:|---:|---:|---:|---:|
-| `nynuc` | 10,208 | 102 | 43 | 8,547.8 | 222,802 |
-| `m6` | 21,916 | 642 | 156 | 196,469.7 | 896,194 |
-| `nuc3` | 0 | 0 | 0 | — | — |
-| `nuc4` | not queried | — | — | — | — |
+| `media1` | 10,208 | 102 | 43 | 8,547.8 | 222,802 |
+| `lab6` | 21,916 | 642 | 156 | 196,469.7 | 896,194 |
+| `lab3` | 0 | 0 | 0 | — | — |
+| `lab4` | not queried | — | — | — | — |
 
-`nuc4` lacked the host `sqlite3` executable; “not queried” must not be read as
+`lab4` lacked the host `sqlite3` executable; “not queried” must not be read as
 zero. Event rows span several deployments, so this table establishes field
 failure classes and scale, not regression status for build `03379035`.
 
 A bounded detail query projected only timestamp, event, method, encoder,
 height, duration, runway, reason, and the first 120 characters of diagnostic
-detail. It found one `m6` VAAPI session repeatedly reporting the same frozen
+detail. It found one `lab6` VAAPI session repeatedly reporting the same frozen
 position with `server_hold`, about 61.5 seconds of runway, and increasing stall
 duration over many minutes. No media title or user field was retained.
 
-Post-container-create queries on `nynuc` and `m6` contained only 66 and 65
+Post-container-create queries on `media1` and `lab6` contained only 66 and 65
 `producer_pass` rows respectively at collection time, and no post-restart
 stall. That sample is explicitly too short to prove a fix.
 

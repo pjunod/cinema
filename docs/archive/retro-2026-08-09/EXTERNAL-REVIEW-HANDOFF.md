@@ -132,8 +132,8 @@ and passed health checks.
 
 | Node | Snapshot | Bytes | SHA-256 |
 |---|---|---:|---|
-| nynuc | `plurx.db.predeploy-20260810T004048Z-3603923cce64.bak` | 69,574,656 | `56f80771de22ca17ee8fd7d077ba52b902162cabd496a8cbcbbe755ddf521090` |
-| nuc4 | `plurx.db.predeploy-20260810T004143Z-3603923cce64.bak` | 81,661,952 | `9fef22305d92507a8396e3937405f1a62e128348a470e2332bf13456d8da61ee` |
+| media1 | `plurx.db.predeploy-20260810T004048Z-3603923cce64.bak` | 69,574,656 | `56f80771de22ca17ee8fd7d077ba52b902162cabd496a8cbcbbe755ddf521090` |
+| lab4 | `plurx.db.predeploy-20260810T004143Z-3603923cce64.bak` | 81,661,952 | `9fef22305d92507a8396e3937405f1a62e128348a470e2332bf13456d8da61ee` |
 
 Both snapshots return `PRAGMA quick_check = ok`. The earlier live absence of a
 `backups/` directory was a real operational failure, not a documentation gap;
@@ -149,7 +149,7 @@ completed unchanged. The timestamped run took 66 seconds from
 source timestamp `00:52:11.253`, and produced SHA-256
 `d48091d6960e0fd6831479c12c5190d7c78509b28d726549a12ba65ea651d9cc`.
 
-A same-day QNAP NFS not-responding/recovered event makes transient storage or
+A same-day NAS NFS not-responding/recovered event makes transient storage or
 cache state the leading inference, but the original run's UTC boundary was
 not recorded, so causation is unproved. Raising the timeout would mask I/O
 stalls; direct MKV parsing would violate the audited raw-SUP boundary; chunked
@@ -194,7 +194,7 @@ the acceptance proof because it demonstrates execution despite a red sibling.
 - The first 100 audited CI runs put fast-preflight p95 at 15 seconds against
   its 60-second budget.
 - Direct fleet inspection recorded read-only media binds on both nodes,
-  `/dev/dri` exposure, nuc4's TCP 32402/GDM UDP 32415 override, and the private
+  `/dev/dri` exposure, lab4's TCP 32402/GDM UDP 32415 override, and the private
   deploy play's pinned `make docker-up` call. The later backup repair retained
   those contracts with rebuild disabled.
 

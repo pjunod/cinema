@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REGISTRY="${PLURX_REGISTRY:-192.168.4.7:3000}"
+REGISTRY="${PLURX_REGISTRY:?set PLURX_REGISTRY to the fleet registry host:port (the FLEET_REGISTRY repository variable)}"
 IMAGE="$REGISTRY/noirr/plurxd"
-SOURCE_URL="${PLURX_SOURCE_URL:-http://192.168.4.7:3000/noirr/plurx}"
+SOURCE_URL="${PLURX_SOURCE_URL:?set PLURX_SOURCE_URL to the repository URL, e.g. http://forge.lan:3000/noirr/plurx}"
 FULL_SHA="${PLURX_BUILD_SHA:-$(git rev-parse HEAD)}"
 REF="${PLURX_BUILD_REF:-$(git describe --tags --always --dirty)}"
 EXPECTED_ARCH="${PLURX_IMAGE_ARCH:-amd64}"

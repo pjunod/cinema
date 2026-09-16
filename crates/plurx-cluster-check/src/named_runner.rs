@@ -3035,9 +3035,9 @@ mod tests {
     fn remote_tokens_refuse_options_and_shell_syntax() {
         let sha = "a".repeat(40);
         assert!(safe_image_reference(&format!("plurx-cluster-check:{sha}")));
-        assert!(safe_host_token("192.168.4.8"));
+        assert!(safe_host_token("10.42.4.8"));
         assert!(!safe_host_token("-oProxyCommand=bad"));
-        assert!(!safe_host_token("nuc4;reboot"));
+        assert!(!safe_host_token("lab4;reboot"));
         assert!(!safe_image_reference("--privileged"));
         assert!(!safe_image_reference("$(touch /tmp/no)"));
         assert!(

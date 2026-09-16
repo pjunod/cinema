@@ -15375,7 +15375,7 @@ async fn sqlite_import_refuses_unrecoverable_committed_claims_before_raft_and_re
 /// The fixture is built to defeat a row count on purpose: the oversized band's
 /// rows are large enough that [`SUPERSEDED_ROW_CHUNK_BOUND`] adjacent ones
 /// exceed the production WAL payload capacity, which is exactly the entry that
-/// panicked node `m6` into an HTTP-healthy unreplicated boot (#290). That
+/// panicked node `lab6` into an HTTP-healthy unreplicated boot (#290). That
 /// premise is asserted where the fixture sizes are declared, so passing means
 /// the builder split on bytes rather than that the row count was favourable.
 /// The #279 band is retained alongside it: the byte bound must not regress the
@@ -16577,6 +16577,183 @@ async fn dolby_vision_facts_round_trip_and_the_backfill_finds_what_it_needs() {
             Some("Dolby Vision"),
             "backend {backend}"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn video_codec_tag_round_trips_and_backfill_updates_are_exactly_fenced() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "HEVC tags".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/hevc-tags".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "HEVC package".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+
+        let scanned = store
+            .upsert_file(
+                item,
+                "/hevc-tags/scanned.mp4",
+                10,
+                100,
+                &ProbeResult {
+                    container: Some("mp4".into()),
+                    video_codec: Some("hevc".into()),
+                    video_codec_tag: Some("hvc1".into()),
+                    raw_json: Some(
+                        r#"{"streams":[{"codec_type":"video","codec_tag_string":"hvc1"}]}"#.into(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: scanned file: {error}"));
+        assert_eq!(
+            store
+                .get_file(scanned)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: scanned read: {error}"))
+                .and_then(|file| file.video_codec_tag),
+            Some("hvc1".into()),
+            "{backend}: a current scan owns the stored fact"
+        );
+
+        let legacy_probe = r#"{"streams":[{"codec_type":"video","codec_tag_string":"hev1"}]}"#;
+        let legacy = store
+            .upsert_file(
+                item,
+                "/hevc-tags/legacy.mp4",
+                20,
+                200,
+                &ProbeResult {
+                    container: Some("mp4".into()),
+                    video_codec: Some("hevc".into()),
+                    raw_json: Some(legacy_probe.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: legacy file: {error}"));
+        let pending = store
+            .files_missing_video_codec_tag(0, 256)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list pending: {error}"));
+        assert_eq!(pending.len(), 1, "{backend}");
+        assert_eq!(pending[0].id, legacy, "{backend}");
+        assert_eq!(pending[0].probe_json, legacy_probe, "{backend}");
+
+        assert!(store
+            .set_file_video_codec_tag(&pending[0], "hev1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: guarded write: {error}")));
+        assert_eq!(
+            store
+                .get_file(legacy)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: legacy read: {error}"))
+                .and_then(|file| file.video_codec_tag),
+            Some("hev1".into()),
+            "{backend}"
+        );
+
+        let stale_candidate = store
+            .upsert_file(
+                item,
+                "/hevc-tags/replaced.mp4",
+                30,
+                300,
+                &ProbeResult {
+                    container: Some("mp4".into()),
+                    video_codec: Some("hevc".into()),
+                    raw_json: Some(legacy_probe.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale source: {error}"));
+        let stale = store
+            .files_missing_video_codec_tag(legacy, 1)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale candidate: {error}"))
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("{backend}: replacement candidate"));
+        assert_eq!(stale.id, stale_candidate, "{backend}");
+        store
+            .upsert_file(
+                item,
+                "/hevc-tags/replaced.mp4",
+                31,
+                301,
+                &ProbeResult {
+                    container: Some("mp4".into()),
+                    video_codec: Some("hevc".into()),
+                    video_codec_tag: Some("hvc1".into()),
+                    raw_json: Some(
+                        r#"{"streams":[{"codec_type":"video","codec_tag_string":"hvc1"}]}"#.into(),
+                    ),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replace source: {error}"));
+        assert!(!store
+            .set_file_video_codec_tag(&stale, "hev1")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: stale guarded write: {error}")));
+        assert_eq!(
+            store
+                .get_file(stale_candidate)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replacement read: {error}"))
+                .and_then(|file| file.video_codec_tag),
+            Some("hvc1".into()),
+            "{backend}: a stored-probe snapshot cannot overwrite a newer scan"
+        );
+
+        for index in 0..257 {
+            store
+                .upsert_file(
+                    item,
+                    &format!("/hevc-tags/batch-{index:03}.mp4"),
+                    1000 + index,
+                    2000 + index,
+                    &ProbeResult {
+                        container: Some("mp4".into()),
+                        video_codec: Some("hevc".into()),
+                        raw_json: Some(legacy_probe.into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: batch {index}: {error}"));
+        }
+        let first = store
+            .files_missing_video_codec_tag(stale_candidate, 256)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first bounded page: {error}"));
+        assert_eq!(first.len(), 256, "{backend}");
+        let second = store
+            .files_missing_video_codec_tag(first.last().expect("first page").id, 256)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second bounded page: {error}"));
+        assert_eq!(second.len(), 1, "{backend}: row 257 remains reachable");
     })
     .await;
 }
@@ -27654,7 +27831,7 @@ async fn a_stop_request_survives_the_progress_writes_racing_it_and_is_idempotent
                 reason: None,
                 patch: DvrStatePatch::Started {
                     attempt: 1,
-                    tuner_owner_node_id: "nynuc".to_owned(),
+                    tuner_owner_node_id: "media1".to_owned(),
                     started_at_ms: 4_000,
                     late_start_s: 0,
                     path: "/20t/dvr/Kitchen Table/a.ts".to_owned(),

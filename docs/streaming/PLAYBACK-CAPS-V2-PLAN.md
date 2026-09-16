@@ -4,7 +4,7 @@
 M5a is #688 + #716; M5b is #710, merged under a documented owner-approved
 capacity exception after the final arm64 QEMU image build exceeded its
 60-minute guard and the promotion gate failed as designed. M5a's badge remains
-for the Apple and Android clients, and the §7 timeline check remains for nuc4 ·
+for the Apple and Android clients, and the §7 timeline check remains for lab4 ·
 **Executes:**
 fable's rulings of 2026-08-29 on opus's DV-delivery findings · **Analysed:**
 `main` @ `4ba8bb48` · **Written:** 2026-08-29 · **Updated:** 2026-08-31 ·
@@ -13,7 +13,7 @@ fable's rulings of 2026-08-29 on opus's DV-delivery findings · **Analysed:**
 Two handoffs carry what is left of M5a:
 [M5A-CLIENT-BADGE-HANDOFF.md](M5A-CLIENT-BADGE-HANDOFF.md) (the
 `DV P7 → DV P8` state in the Apple and Android clients; server and web are
-done) and [M5A-VERIFICATION-ON-NUC4.md](M5A-VERIFICATION-ON-NUC4.md) (the
+done) and [M5A-VERIFICATION-ON-LAB4.md](M5A-VERIFICATION-ON-LAB4.md) (the
 container-truth timeline check against a real Profile 7 remux, which needs
 the node and the media).
 
@@ -472,7 +472,7 @@ compatibility id is what a client reads to decide whether the base layer alone
 is watchable; it never reaches the codec string.
 
 **M5a-0 answered it on 2026-08-30** (`docs/streaming/PLAYBACK-CAPS-V2-M0.md` §8, measured
-on nuc4 against a real P7 dual-layer source). **ffmpeg does not derive the
+on lab4 against a real P7 dual-layer source). **ffmpeg does not derive the
 record from the RPU — it copies the one the input container had.** A raw
 Annex B stream has no container and therefore no record, so the pipe below
 produces correct P8.1 RPUs in `mdat` and nothing in the sample entry to say
@@ -637,7 +637,7 @@ conversion mode off" with a reason string, never a crash.
 
 ### M0 — Measure before touching anything (no code)
 
-Run against the live fleet (nuc4 is on `v0.2.7-502-g97a10ee` or later) and
+Run against the live fleet (lab4 is on `v0.2.7-502-g97a10ee` or later) and
 paste the results into a `docs/streaming/PLAYBACK-CAPS-V2-M0.md` so every later
 milestone argues from numbers:
 
@@ -725,7 +725,7 @@ case for the two-entry HEVC ladder replacing the min-of-rungs.
 `reencode_grade`; the non-DV HDR10 encode chain with its `pipeprobe`
 assertion; `hdr10` create-body field honoured through the same function;
 `the_grade_predicate_and_the_renderer_predicate_agree` updated. Measure the
-new chain on nuc4 at 1080p and 2160p (QSV) the way D6 measured the P5
+new chain on lab4 at 1080p and 2160p (QSV) the way D6 measured the P5
 chain (`docs/performance/PERF2-IMPLEMENTATION-HANDOFF.md` §D6) and record the numbers
 in the M0 doc.
 
@@ -786,7 +786,7 @@ for the file); Apple TV and a DV-capable Android phone play it with the DV
 badge lit on the device (§8 checklist). Chrome on the same title still gets
 `hdr10` with the strip reason. An Android device whose caps list 7 gets
 `preserve_dolby_vision:true` with **no** conversion reason and NAL 63
-present in its segments. Throughput on nuc4 for a 4K remux ≥ 1.5× realtime.
+present in its segments. Throughput on lab4 for a 4K remux ≥ 1.5× realtime.
 
 ### M5b — Profile 7 → 8.1 permanently on disk (server + image + UI)
 

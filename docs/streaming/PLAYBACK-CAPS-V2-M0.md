@@ -1,7 +1,7 @@
 # Playback caps v2 — M0 measurements
 
 **Status:** measured 2026-08-30 · **Executes:** [PLAYBACK-CAPS-V2-PLAN.md](PLAYBACK-CAPS-V2-PLAN.md)
-§7 M0 · **Node:** nuc4 (`192.168.4.8:32400`) on `v0.2.7-2417-g4ba8bb48`
+§7 M0 · **Node:** lab4 (`10.42.4.8:32400`) on `v0.2.7-2417-g4ba8bb48`
 
 Companion to [PLAYBACK-CAPS-V2-PLAN.md](PLAYBACK-CAPS-V2-PLAN.md) (what to
 build and in what order) — this is *what was true before any of it was built*,
@@ -111,7 +111,7 @@ never indexes.
 
 ## 4. The node can do everything the plan assumes
 
-`GET /api/v1/system` on nuc4:
+`GET /api/v1/system` on lab4:
 
 | Field | Value | What it means for the plan |
 |---|---|---|
@@ -126,7 +126,7 @@ never indexes.
 ## 5. The live decision probe
 
 The reported title resolves to file **5323**,
-`Resident.Evil.Welcome.to.Raccoon.City.2021.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-FGT.mkv`
+`Glass.Harbor.2021.2160p.BluRay.REMUX.HEVC.DTS-HD.MA.TrueHD.7.1.Atmos-GROUP.mkv`
 — 51.6 GB, HEVC Main 10, 3840×2160, 64 Mb/s, `Dolby Vision · Profile 7
 (HDR10-compatible)`, TrueHD 7.1 Atmos first audio track.
 
@@ -199,8 +199,8 @@ SDR`.
 
 ## 8. M5a-0 — does ffmpeg write the Dolby Vision record on the copy path?
 
-**Measured 2026-08-30 on nuc4**, jellyfin-ffmpeg 7.x in the shipped image,
-against `Nosferatu (2024) Remux-2160p.mkv` — a real Profile 7 dual-layer
+**Measured 2026-08-30 on lab4**, jellyfin-ffmpeg 7.x in the shipped image,
+against `Night Tide (2022) Remux-2160p.mkv` — a real Profile 7 dual-layer
 source (`dv_profile=7 · rpu_present=1 · el_present=1 ·
 dv_bl_signal_compatibility_id=6`).
 
@@ -251,7 +251,7 @@ dovi_rpu=strip=1,filter_units=remove_types=32-34|62-63
 ```
 
 `dovi_rpu=strip=1` removes the RPUs *and* the DOVI side data, so nothing is
-left to write a record from. Re-measured 2026-08-30 on nuc4, same source:
+left to write a record from. Re-measured 2026-08-30 on lab4, same source:
 
 | argv | boxes in the init | ffprobe side data |
 |---|---|---|

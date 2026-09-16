@@ -1,4 +1,4 @@
-# Integration — plurx's seams with monarr, and how to prove they work
+# Integration — plurx's seams with Curator, and how to prove they work
 
 Companion to [INTEGRATION-PLAN.md](features/INTEGRATION-PLAN.md) (the master plan and
 why each seam exists) and [OPERATIONS.md](OPERATIONS.md) (running it day to
@@ -7,15 +7,15 @@ command that proves it*. The trust model behind the scoped-key wall is in
 [SECURITY.md](SECURITY.md).
 
 plurx is the **last stage** of a three-application pipeline. It plays what the
-other two put on disk. Its only integration partner is monarr: plurx and nzbd
-have no seam at all, by design — every path between them runs through monarr,
+other two put on disk. Its only integration partner is Curator: plurx and Runner
+have no seam at all, by design — every path between them runs through Curator,
 after the import, when the files are actually in place.
 
 ## The pipeline
 
 ```
    ┌──────────────┐   grab   ┌──────────────┐
-   │    monarr    │ ───────▶ │     nzbd     │      nzbd and plurx never
+   │    Curator    │ ───────▶ │     Runner     │      Runner and plurx never
    │  (decides)   │ ◀─────── │ (downloads)  │      speak. There is no seam
    └──┬────────▲──┘   SSE    └──────────────┘      between them, on purpose.
       │        │
@@ -23,7 +23,7 @@ after the import, when the files are actually in place.
       │        │  GET  /api/v1/calendar         (the Coming soon rail)
       │        │  GET  /api/v1/system/status    (Test connection)
       │        │
-      │ POST /api/v1/scan   (scoped key, correlation_id = monarr's transfer id)
+      │ POST /api/v1/scan   (scoped key, correlation_id = Curator's transfer id)
       ▼        │
    ┌───────────┴──┐
    │    plurx     │
@@ -31,11 +31,11 @@ after the import, when the files are actually in place.
    └──────────────┘
 ```
 
-Default ports: nzbd 6789 · monarr 7676 · **plurx 32400**.
+Default ports: Runner 6789 · Curator 7676 · **plurx 32400**.
 
 ## Wiring the two together in Docker
 
-Do this first. Most "cannot reach monarr" is a container that cannot resolve a
+Do this first. Most "cannot reach Curator" is a container that cannot resolve a
 name, not a wrong key or a wrong port.
 
 **One shared user-defined network, and address everything by container name.**
@@ -45,7 +45,7 @@ That is the recommended setup, not merely one that works.
 docker network create media          # once, on the host
 ```
 
-Then in **each** compose file — plurx's, monarr's, nzbd's — attach the service
+Then in **each** compose file — plurx's, Curator's, Runner's — attach the service
 and declare the network as external:
 
 ```yaml
@@ -61,8 +61,8 @@ networks:
     external: true                   # created above; compose must not own it
 ```
 
-`docker compose up -d` in each directory, then set the monarr URL to
-`http://monarr:7676`.
+`docker compose up -d` in each directory, then set the Curator URL to
+`http://curator:7676`.
 
 **Get the names from Docker, not from memory.** This is the single command
 that answers "what do I put in the URL", and it answers the network question
@@ -74,8 +74,8 @@ docker ps --format '{{.Names}}\t{{.Networks}}'
 
 ```
 plurxd	media
-nzbd	media
-monarr	media
+Runner	media
+Curator	media
 ```
 
 Column 1 is the hostname to use. Column 2 must contain the shared network for
@@ -84,7 +84,7 @@ or `host` cannot be reached by name from the others.
 
 Read it literally. A container called `plurxd` is **not** reachable as
 `plurx`, and the failure looks like a network problem rather than a spelling
-one: monarr reports
+one: Curator reports
 `lookup plurx on 127.0.0.11:53: server misbehaving` — Docker's embedded
 resolver saying the name does not exist, which is easy to misread as "the
 other side is down". It is not; nothing was ever dialled.
@@ -103,8 +103,8 @@ your own browser, and stop reasoning about them when debugging a seam.
 here.** It only exists in a container whose compose declares
 `extra_hosts: ["host.docker.internal:host-gateway"]`. plurx is the process
 making this call, so that line has to be on *plurx's* service — putting it on
-monarr's does nothing, which is exactly the trap: monarr→nzbd works, plurx→
-monarr does not, and the two look symmetric from the settings screen. It also
+Curator's does nothing, which is exactly the trap: Curator→Runner works, plurx→
+Curator does not, and the two look symmetric from the settings screen. It also
 routes container→host→container for traffic that never needed to leave the
 bridge. A valid fallback when you cannot edit every compose file; not the good
 answer.
@@ -119,24 +119,24 @@ nothing was listening on that port.
 
 | # | Seam | Direction | Transport | Who starts it |
 |---|---|---|---|---|
-| 1 | Targeted scan | **inbound** | `POST /api/v1/scan` | monarr, on import |
+| 1 | Targeted scan | **inbound** | `POST /api/v1/scan` | Curator, on import |
 | 2 | Scoped API keys | the wall around §1 | `/api/v1/keys` | you, once |
-| 3 | Coming soon rail | outbound | `GET {monarr}/api/v1/calendar` | plurx, every 15 min |
-| 4 | Test connection | outbound | `GET {monarr}/api/v1/system/status` | you |
-| 5 | Watched outbox | outbound, durable | `POST {monarr}/api/v1/webhooks/plurx` | plurx, on watch |
+| 3 | Coming soon rail | outbound | `GET {Curator}/api/v1/calendar` | plurx, every 15 min |
+| 4 | Test connection | outbound | `GET {Curator}/api/v1/system/status` | you |
+| 5 | Watched outbox | outbound, durable | `POST {Curator}/api/v1/webhooks/plurx` | plurx, on watch |
 
 ---
 
 ## 1. Targeted scan — "this exact folder changed"
 
-**What it does.** When monarr finishes an import it names the directory,
+**What it does.** When Curator finishes an import it names the directory,
 instead of leaving plurx to find it on the next scheduled sweep. One request
 per directory; a season pack that lands ten episodes in one folder is one
 thing that changed.
 
 The scan **enriches what it placed** before answering: the same provider pass a
 full scan runs, narrowed to the items this request produced and the seasons,
-shows and folders their artwork is fetched through. Narrowed because monarr is
+shows and folders their artwork is fetched through. Narrowed because Curator is
 holding the connection open — a per-episode import notification must not become
 a per-episode full-library metadata pass. Anything whose poster still doesn't
 arrive is picked up later by the artwork retry sweep (Settings →
@@ -169,8 +169,8 @@ whichever header the secret arrived in.
 ```
 
 `path` is absolute and must resolve **under a configured library root** — a
-request for anything else is rejected, which is also how monarr's Test button
-works (§4 of monarr's own integration doc: it deliberately probes an
+request for anything else is rejected, which is also how Curator's Test button
+works (§4 of Curator's own integration doc: it deliberately probes an
 unresolvable path and counts the rejection as a pass).
 
 `hint` is advisory. The library's own kind decides how a file is parsed; the
@@ -183,7 +183,7 @@ a Books root and never invents a relation from title plus author. Older callers
 may omit it; the Books library still derives local file identity from disk and
 standalone EPUBs contribute bounded package metadata.
 
-`correlation_id` is monarr's transfer id (`t-<downloadID>-<hex>`), echoed back
+`correlation_id` is Curator's transfer id (`t-<downloadID>-<hex>`), echoed back
 in the response and written to the log, so one grep across three applications
 reconstructs a single transfer.
 
@@ -231,7 +231,7 @@ it; whether the file was *usable* is the scan's business, not the seam's.
 
 ---
 
-## 2. Scoped API keys — why monarr never holds an admin token
+## 2. Scoped API keys — why Curator never holds an admin token
 
 **What it does.** A key is what another application holds *instead of* a login
 token. The difference is not cosmetic: a token **is** a user, so an admin
@@ -239,7 +239,7 @@ token handed to a neighbouring app also hands over every secret in
 `GET /api/v1/settings`. A key carries a scope list and cannot widen itself.
 
 **Scopes.** Exactly two exist: `scan:trigger` (ask for a scan — the whole
-point of the monarr integration) and `status:read` (read the progress of a
+point of the Curator integration) and `status:read` (read the progress of a
 scan this key asked for). Creating a key with an unknown scope is rejected
 rather than stored, because a typo'd scope produces a key that looks correct
 in a list and authorizes nothing.
@@ -284,8 +284,8 @@ Nothing mapping to `/var/lib/plurx` means the next rebuild will lose the new
 key too. The other tell is the first-run setup screen reappearing.
 
 **How to read it.** `last_used_at` on the listing is the cheapest proof that
-monarr is really using the key you think it is. A key that has never been used
-and a monarr that reports successful deliveries means monarr is holding a
+Curator is really using the key you think it is. A key that has never been used
+and a Curator that reports successful deliveries means Curator is holding a
 *different* key. The timestamp refreshes no more than once per minute, so it
 is an activity signal rather than an exact request counter.
 
@@ -295,23 +295,23 @@ leaving it out means it cannot leak from there.
 
 ---
 
-## 3. Coming soon rail — plurx reading monarr's calendar
+## 3. Coming soon rail — plurx reading Curator's calendar
 
 **What it does.** The home screen shows episodes airing and films due in the
-next four weeks, read from monarr's calendar. plurx proxies the call
-server-side so the monarr key never reaches a browser.
+next four weeks, read from Curator's calendar. plurx proxies the call
+server-side so the Curator key never reaches a browser.
 
 **Wire.** `GET {monarr_url}/api/v1/calendar?start=&end=` with
-`X-Api-Key: <monarr key>` and UA `plurx/<version>`. Cache TTL **15 minutes**,
+`X-Api-Key: <Curator key>` and UA `plurx/<version>`. Cache TTL **15 minutes**,
 horizon **28 days**.
 
-**Where you configure it.** Settings → **Metadata** → the **monarr** card:
-`monarr URL` (placeholder `http://monarr:7676`), `monarr API key` (from
-monarr's Settings → Security → Reveal), and the `Send watch state to monarr`
+**Where you configure it.** Settings → **Metadata** → the **Curator** card:
+`Curator URL` (placeholder `http://curator:7676`), `Curator API key` (from
+Curator's Settings → Security → Reveal), and the `Send watch state to Curator`
 checkbox (§5).
 
-**The URL is completed on save.** A bare host — `monarr`,
-`host.docker.internal` — becomes `http://<host>:7676`, monarr's own default
+**The URL is completed on save.** A bare host — `Curator`,
+`host.docker.internal` — becomes `http://<host>:7676`, Curator's own default
 port, and the field shows the completed form back so the change is visible
 rather than magic. A scheme you supply is respected in full, port and all:
 guessing `:7676` onto an `https://` URL behind a reverse proxy would break a
@@ -325,7 +325,7 @@ below — in a container setup, the URL is only half the problem.
 **Artwork is served by plurx, even before the title arrives.** Each entry
 carries the item's external ids and provider poster path — the SHOW's, for an
 episode. plurx first resolves the ids against its own library and uses that
-cached poster when it exists. Otherwise it downloads monarr's provider path
+cached poster when it exists. Otherwise it downloads Curator's provider path
 from TMDB, TVmaze, or Open Library into the same artwork cache. The browser and
 native apps therefore call only plurx; they never receive the provider URL.
 Unknown hosts, non-HTTPS absolute URLs, redirects outside those three hosts,
@@ -337,7 +337,7 @@ once so a full four-week rail does not serialize its network waits.
 Local resolution and provider-cache checks happen **after** the 15-minute
 calendar cache read. A show that finished scanning two minutes ago therefore
 switches to its library poster immediately, while a future film or a TVmaze
-series outside plurx's TMDB id space still gets the art monarr already knows.
+series outside plurx's TMDB id space still gets the art Curator already knows.
 Only an entry whose provider named no poster falls back to initials.
 
 **How to verify.**
@@ -347,7 +347,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" "$PLURX/api/v1/coming-soon" | python3
 ```
 
 **How to read it.** This is the seam with the sharpest edge in the whole
-integration: **the rail fails silently.** An unreachable monarr, a rejected
+integration: **the rail fails silently.** An unreachable Curator, a rejected
 key, or a genuinely empty calendar all produce the same thing — no rail at
 all. There is no error state on the home screen, on purpose (an error banner
 on the home screen for an optional rail is worse than the missing rail), but
@@ -363,8 +363,8 @@ the message `coming-soon fetch failed`, or run the curl above.
 
 ## 4. Test connection — an active probe, deliberately
 
-**What it does.** The **Test connection** button on the monarr card actively
-calls monarr rather than repeating your config back at you. It distinguishes
+**What it does.** The **Test connection** button on the Curator card actively
+calls Curator rather than repeating your config back at you. It distinguishes
 three failures that look identical from the settings screen: cannot reach it,
 reached it and the key was rejected, reached it and it works.
 
@@ -372,16 +372,16 @@ reached it and the key was rejected, reached it and it works.
 `GET {monarr_url}/api/v1/system/status` with `X-Api-Key`, UA
 `plurx/<version>`, 10 s timeout.
 
-**Where you see it.** Settings → **Metadata → monarr**. Literal results:
+**Where you see it.** Settings → **Metadata → Curator**. Literal results:
 
 | Shown | Means |
 |---|---|
 | `checking…` | in flight |
 | `✗ not configured` | no URL or no key saved |
-| `✓ connected` / `✓ connected · monarr <version>` | reachable and authorized |
-| `✗ monarr rejected the API key` | 401/403 — wrong key |
-| `✗ monarr returned <status>` | reached something, but not monarr |
-| `✗ cannot reach monarr at <url>: <err>` | DNS, port, or firewall |
+| `✓ connected` / `✓ connected · Curator <version>` | reachable and authorized |
+| `✗ Curator rejected the API key` | 401/403 — wrong key |
+| `✗ Curator returned <status>` | reached something, but not Curator |
+| `✗ cannot reach Curator at <url>: <err>` | DNS, port, or firewall |
 
 `<err>` is the **root cause**, not reqwest's outer wrapper — the difference
 between `dns error: failed to lookup address information` and
@@ -404,7 +404,7 @@ the probe.
 curl -sS -H "Authorization: Bearer $TOKEN" "$PLURX/api/v1/monarr/status" | python3 -m json.tool
 ```
 
-**How to read it.** `✓ connected · monarr 0.9.0` proves URL + key + reachable,
+**How to read it.** `✓ connected · Curator 0.9.0` proves URL + key + reachable,
 and nothing about the calendar (§3) or the webhook (§5). It is the floor, not
 the ceiling.
 
@@ -412,15 +412,15 @@ the ceiling.
 
 ## 5. Watched outbox — plurx's only outbound push, off until you say so
 
-**What it does.** When someone finishes something, plurx tells monarr — which
+**What it does.** When someone finishes something, plurx tells Curator — which
 records it, displays it, and prefers upgrades for actively watched shows.
 Nothing is deleted or unmonitored as a result; that path does not exist in
 either application.
 
-**Opt-in.** The `Send watch state to monarr` checkbox is off by default,
+**Opt-in.** The `Send watch state to Curator` checkbox is off by default,
 because the payload names the user who watched it. Per-user with usernames is
 the deliberate choice — an aggregate "someone watched this" is useless for the
-one thing monarr does with it — and that choice is precisely why it is opt-in
+one thing Curator does with it — and that choice is precisely why it is opt-in
 rather than on.
 
 **Wire.** `POST {monarr_url}/api/v1/webhooks/plurx`, header `X-Api-Key`:
@@ -439,10 +439,10 @@ as a column: backoff `5s → 30s → 2m`, batch of 20. Restart plurx mid-retry a
 the retry still happens. A queue that lives in memory loses everything on the
 one event you most want it to survive — a restart.
 
-**Where you see it.** Settings → Integrations → monarr card, the queue line
+**Where you see it.** Settings → Integrations → Curator card, the queue line
 under **Test connection**: `Watch notifications — 41 sent, 2 waiting, 0
-failed`. And on the monarr side, System → **Connections** lists `plurx` as
-`calls Monarr` / `calling`.
+failed`. And on the Curator side, System → **Connections** lists `plurx` as
+`calls Curator` / `calling`.
 
 **How to verify.**
 
@@ -453,11 +453,11 @@ curl -sS -H "Authorization: Bearer $TOKEN" "$PLURX/api/v1/monarr/status" \
 
 Then play something to the end and watch `watched_sent` move.
 
-**How to read it.** `waiting` climbing is monarr being down; it drains itself.
+**How to read it.** `waiting` climbing is Curator being down; it drains itself.
 `failed` is terminal — the delivery was classified as permanently unfixable (a
 rejected key, a 4xx that will never become a 2xx) rather than retried every
-two minutes forever. `sent` moving while monarr shows nothing means the ids
-did not match: monarr matches on TMDB/IMDb id and never on title, and answers
+two minutes forever. `sent` moving while Curator shows nothing means the ids
+did not match: Curator matches on TMDB/IMDb id and never on title, and answers
 `{"matched": false}` with a **200** for anything it does not manage. That is
 not an error, and plurx correctly does not retry it.
 
@@ -475,7 +475,7 @@ not an error, and plurx correctly does not retry it.
 
 `plurx_scan_total{trigger="targeted"}` climbing is the clearest machine-
 readable proof that §1 is live. `plurx_notify_received_total` flat while
-monarr's delivery log shows `ok` means the requests are reaching something
+Curator's delivery log shows `ok` means the requests are reaching something
 that is not this plurx.
 
 ---
@@ -485,25 +485,25 @@ that is not this plurx.
 ```bash
 PLURX=http://127.0.0.1:32400;  MONARR=http://127.0.0.1:7676
 PLXKEY=plx_…                   # §2
-MKEY=<monarr Settings → Security → Reveal>
+MKEY=<Curator Settings → Security → Reveal>
 ```
 
-1. **plurx can reach monarr** — Settings → Integrations → monarr →
-   **Test connection** → `✓ connected · monarr <version>`.
+1. **plurx can reach Curator** — Settings → Integrations → Curator →
+   **Test connection** → `✓ connected · Curator <version>`.
 2. **The calendar half works too** (Test does not cover it) —
    `curl -sS -H "Authorization: Bearer $TOKEN" "$PLURX/api/v1/coming-soon"` returns entries, and the
    home screen shows a **Coming soon** rail.
-3. **monarr can reach plurx** — on monarr: Settings → Notifications → the
+3. **Curator can reach plurx** — on Curator: Settings → Notifications → the
    plurx notifier's Test → a rejection naming *"under any library root"* is a
    pass.
-4. **plurx is visible from monarr** — monarr: System → Connections lists
-   `plurx` as `calls Monarr` / `calling`.
-5. **End to end** — grab something in monarr. When it imports, monarr's
+4. **plurx is visible from Curator** — Curator: System → Connections lists
+   `plurx` as `calls Curator` / `calling`.
+5. **End to end** — grab something in monarr. When it imports, Curator's
    delivery log reads `ok` / `scanned → plurx item …`, `plurx_scan_total`
    increments, and the file appears in plurx without you touching a scan
    button.
 6. **Watch state, if enabled** — play something to the end;
-   `watched_sent` increments on the monarr card and monarr records the watch.
+   `watched_sent` increments on the Curator card and Curator records the watch.
 
 ---
 
@@ -515,8 +515,8 @@ MKEY=<monarr Settings → Security → Reveal>
   admin-only, per-library, off-by-default Dolby Vision on-disk conversion under
   the explicit storage contract in [OPERATIONS.md](OPERATIONS.md); no integration
   can enable or invoke it.
-- **Never talks to nzbd.** There is no seam. plurx learns about new files from
-  monarr, after the import, when they are actually in place — telling it
+- **Never talks to Runner.** There is no seam. plurx learns about new files from
+  Curator, after the import, when they are actually in place — telling it
   earlier would only announce files that are not there yet.
 - **Never accepts a scan from a login token.** `POST /api/v1/scan` is
   key-scoped only. The wall runs both ways: an application cannot use a user's
@@ -524,7 +524,7 @@ MKEY=<monarr Settings → Security → Reveal>
 - **Never returns a key secret twice**, and never returns `key_hash` at all.
 - **Never sends watch state by default.** §5 is opt-in because it names people.
 - **Never blocks playback on an integration.** Every outbound call is queued or
-  cached; monarr being down costs you a rail and a queued notification.
+  cached; Curator being down costs you a rail and a queued notification.
 
 ## Honest gaps, as of 2026-07-27
 
@@ -538,10 +538,10 @@ work around it and a reader who doesn't will misread the UI:
   `GET /api/v1/system` returns `notifications_received`, `scans_by_trigger`,
   `last_notification_at`, `last_notification_source`, `last_correlation_id`
   and `scan_requests` — and nothing renders them. Today the only way to see
-  that monarr is calling is the Logs card or `/metrics`. This is the mirror of
-  the gap monarr's inbound caller registry was written to close.
+  that Curator is calling is the Logs card or `/metrics`. This is the mirror of
+  the gap Curator's inbound caller registry was written to close.
 - **Library scan status does not name its trigger.** A scan shows the same
-  way whether you clicked it or monarr asked for it, even though the request
+  way whether you clicked it or Curator asked for it, even though the request
   record carries `source` and `correlation_id`.
 - **No keys UI** (§2). Minting is a curl.
 

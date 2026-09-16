@@ -640,7 +640,7 @@ theme (`--panel #171922 · --line #2a2f3e · --accent #6ea8fe · radius 12px`)
 ### 4.1 List view (`list-view.png`)
 
 ```
-┌ noirr   Home  [Live TV]  Activity  Settings ─────────── nynuc · 2 tuners ○ ┐
+┌ noirr   Home  [Live TV]  Activity  Settings ─────────── media1 · 2 tuners ○ ┐
 │ Live TV [≡ List|▦ Grid] (12 channels)(1 of 2 tuners)   [All|Favorites|Hide protected] [🔍 Number or name] │
 │ ┌ Channel ──────── On now · 8:12 PM ┐ ┌──────────────────────────────────┐ │
 │ │ CBS  2.1 WCBS              ★     │ │                                  │ │
@@ -807,8 +807,8 @@ metrics, the Developer card section (§3.8), [API.md](../API.md) rows,
 [SECURITY.md](../SECURITY.md) outbound-host row, [OPERATIONS.md](../OPERATIONS.md)
 runbook lines ("guide is off / stale / matched N of M").
 
-**Acceptance:** `make unit` green with the §6 unit rows; on nynuc with the
-FLEX 4K, `curl -H "authorization: Bearer $T" http://nynuc:32400/api/v1/live-tv/guide | jq '.freshness, (.channels|length)'`
+**Acceptance:** `make unit` green with the §6 unit rows; on media1 with the
+FLEX 4K, `curl -H "authorization: Bearer $T" http://media1:32400/api/v1/live-tv/guide | jq '.freshness, (.channels|length)'`
 prints `"fresh"` and the lineup's channel count, the observed response
 shape is recorded in [HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md),
 and `grep -c DeviceAuth` over the daemon's log for the run is `0`.
@@ -819,7 +819,7 @@ The XMLTV fetcher and parser, matching, `matched N of M`, the Developer
 card's URL field, gzip.
 
 **Acceptance:** unit tests over a 300-channel gzipped XMLTV fixture stay
-under the bounds; pointing `live_tv.xmltv_url` at a file served from nuc3
+under the bounds; pointing `live_tv.xmltv_url` at a file served from lab3
 fills the grid for the matched channels and the card shows the count.
 
 ### 7.4 M3 — web
@@ -882,7 +882,7 @@ deploy half; this is the check half):
 
 > Deploy the `effort/live-tv-guide` client builds (Apple 119, Android 74)
 > per docs/clients/CLIENT-DEPLOY-PROMPT.md. Then, with Live TV enabled and
-> the guide source set to HDHomeRun on nynuc, verify and report each line
+> the guide source set to HDHomeRun on media1, verify and report each line
 > as pass/fail with one sentence of what you saw:
 > 1. iPhone: the list shows a programme title and progress for every
 >    unprotected channel; tapping a row tunes; rotating to landscape goes

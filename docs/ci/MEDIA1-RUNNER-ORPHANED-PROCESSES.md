@@ -1,8 +1,8 @@
-# Nynuc runner orphans — kill the owned group, then prove the child is gone
+# media1 runner orphans — kill the owned group, then prove the child is gone
 
 **Status:** fix in review · **Observed:** 2026-09-08 · **Scope:** the four
-Forgejo runner services on `nynuc` · **Issue:**
-[#175](http://192.168.4.7:3000/noirr/plurx/issues/175)
+Forgejo runner services on `media1` · **Issue:**
+[#175](http://forge.lan:3000/noirr/plurx/issues/175)
 
 Companion to [VALIDATION.md](../VALIDATION.md) for timeout semantics,
 [RUNNER-DISK.md](RUNNER-DISK.md) for the idle-runner contract, and
@@ -18,10 +18,10 @@ PID 1, and remained in one of the four runner service cgroups.
 
 | Runner service | Initial stopped orphan count |
 |---|---:|
-| `forgejo-runner-gha-nynuc-general-01.service` | 26 |
-| `forgejo-runner-gha-nynuc-general-02.service` | 14 |
-| `forgejo-runner-gha-nynuc-general-03.service` | 6 |
-| `forgejo-runner-gha-nynuc-general-04.service` | 4 |
+| `forgejo-runner-gha-media1-general-01.service` | 26 |
+| `forgejo-runner-gha-media1-general-02.service` | 14 |
+| `forgejo-runner-gha-media1-general-03.service` | 6 |
+| `forgejo-runner-gha-media1-general-04.service` | 4 |
 | **Total** | **50** |
 
 The six later processes were two each from runs 1031 and 1041 on runner 01 and
@@ -78,7 +78,7 @@ Ran 1 test in 2.048s
 OK
 ```
 
-The same `nynuc` snapshot was then mutated back to the old shell-only fallback.
+The same `media1` snapshot was then mutated back to the old shell-only fallback.
 Both injected census-failure subcases found the bound child still in state `T`,
 the regression failed, and its `finally` cleanup force-killed any surviving
 exact fixture identities. Neither remained executable:
@@ -92,7 +92,7 @@ MUTATION_REJECTED_AND_FIXTURE_NONEXECUTABLE
 
 The companion observability change publishes per-runner stopped/orphan counts,
 `memory.high` events, OOM kills, host swap ratio, and collector freshness from
-`nynuc` every minute. Stopped or orphan counts alert after 15 minutes and have
+`media1` every minute. Stopped or orphan counts alert after 15 minutes and have
 a dedicated Grafana dashboard. This monitoring is in the observability
 infrastructure PR and is not represented as live until deployment verifies its
 series.

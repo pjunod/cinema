@@ -1838,68 +1838,18 @@ impl DvrStore for HiqliteAuthStore {
         upper: Option<(i64, &str)>,
         limit: i64,
     ) -> Result<(Vec<DvrAttentionRow>, i64), StoreError> {
-        let (after_at, after_id) = after.unwrap_or((i64::MAX, ""));
-        let (upper_at, upper_id) = upper.unwrap_or((i64::MAX, ""));
-        let current = "(r.state IN ('conflict','withdrawn','stale') OR
-             (r.state='recording' AND COALESCE(h.latest_attention_sequence,0)>0
-              AND NOT EXISTS(SELECT 1 FROM dvr_events resolved
-                WHERE resolved.recording_id=r.id
-                  AND resolved.sequence>h.latest_attention_sequence
-                  AND resolved.kind IN ('retry_started','first_bytes_written'))))";
-        let legacy = "h.recording_id IS NULL AND
-             (r.state IN ('failed','missed') OR
-              (r.state='partial' AND r.stopped_by_user_id IS NULL))";
-        let condition = match section {
-            DvrAttentionSection::Current => current.to_owned(),
-            DvrAttentionSection::Historical => format!(
-                "NOT ({current}) AND
-                 (COALESCE(h.latest_attention_sequence,0)>COALESCE(a.through_sequence,0)
-                  OR ({legacy}))"
-            ),
-        };
-        let count_sql = format!(
-            "SELECT COUNT(*) AS count FROM dvr_recordings r
-               LEFT JOIN dvr_event_heads h ON h.recording_id=r.id
-               LEFT JOIN dvr_attention_acks a ON a.recording_id=r.id AND a.user_id=$1
-              WHERE {condition}"
-        );
+        let (count_sql, count_values) = attention_count_statement(section, user_id);
         let total = self
             .client()
-            .query_consistent_map::<CountRow, _>(count_sql, params!(user_id))
+            .query_consistent_map::<CountRow, _>(count_sql, count_values)
             .await?
             .into_iter()
             .next()
             .map_or(0, |row| row.count);
-        let sql = format!(
-            "SELECT {RECORDING_COLS},COALESCE(h.latest_attention_sequence,0) AS latest_attention_sequence,
-                    COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms) AS attention_at_ms,
-                    COALESCE(a.through_sequence,0) AS acknowledged_through_sequence
-               FROM dvr_recordings r
-               LEFT JOIN dvr_event_heads h ON h.recording_id=r.id
-               LEFT JOIN dvr_attention_acks a ON a.recording_id=r.id AND a.user_id=$1
-              WHERE {condition}
-                AND (COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms)<$6 OR
-                    (COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms)=$7 AND r.id>=$8))
-                AND (COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms)<$2 OR
-                    (COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms)=$3 AND r.id>$4))
-              ORDER BY COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms) DESC,r.id
-              LIMIT $5"
-        );
+        let (sql, values) = attention_page_statement(section, user_id, after, upper, limit);
         let raw = self
             .client()
-            .query_consistent_map::<AttentionRowRaw, _>(
-                sql,
-                params!(
-                    user_id,
-                    after_at,
-                    after_at,
-                    after_id,
-                    limit.clamp(1, DVR_EVENT_PAGE_MAX),
-                    upper_at,
-                    upper_at,
-                    upper_id
-                ),
-            )
+            .query_consistent_map::<AttentionRowRaw, _>(sql, values)
             .await?;
         let rows = raw
             .into_iter()
@@ -2164,11 +2114,91 @@ impl DvrStore for HiqliteAuthStore {
     }
 }
 
+/// The attention sections, as one SQL condition over the recording, its event
+/// head and the caller's acknowledgement row.
+fn attention_condition(section: DvrAttentionSection) -> String {
+    let current = "(r.state IN ('conflict','withdrawn','stale') OR
+             (r.state='recording' AND COALESCE(h.latest_attention_sequence,0)>0
+              AND NOT EXISTS(SELECT 1 FROM dvr_events resolved
+                WHERE resolved.recording_id=r.id
+                  AND resolved.sequence>h.latest_attention_sequence
+                  AND resolved.kind IN ('retry_started','first_bytes_written'))))";
+    let legacy = "h.recording_id IS NULL AND
+             (r.state IN ('failed','missed') OR
+              (r.state='partial' AND r.stopped_by_user_id IS NULL))";
+    match section {
+        DvrAttentionSection::Current => current.to_owned(),
+        DvrAttentionSection::Historical => format!(
+            "NOT ({current}) AND
+             (COALESCE(h.latest_attention_sequence,0)>COALESCE(a.through_sequence,0)
+              OR ({legacy}))"
+        ),
+    }
+}
+
+fn attention_count_statement(section: DvrAttentionSection, user_id: i64) -> (String, Vec<Param>) {
+    let condition = attention_condition(section);
+    (
+        format!(
+            "SELECT COUNT(*) AS count FROM dvr_recordings r
+               LEFT JOIN dvr_event_heads h ON h.recording_id=r.id
+               LEFT JOIN dvr_attention_acks a ON a.recording_id=r.id AND a.user_id=$1
+              WHERE {condition}"
+        ),
+        params!(user_id),
+    )
+}
+
+/// One attention page. Separate from the trait method so the placeholder order
+/// of the assembled statement is held to `validate_sql` by a unit test: hiqlite
+/// binds `$N` by first appearance, so the `after` bounds ($2-$4) must be named
+/// before the `upper` bounds ($5-$7) and the limit ($8) last, exactly as the
+/// values are bound.
+fn attention_page_statement(
+    section: DvrAttentionSection,
+    user_id: i64,
+    after: Option<(i64, &str)>,
+    upper: Option<(i64, &str)>,
+    limit: i64,
+) -> (String, Vec<Param>) {
+    let (after_at, after_id) = after.unwrap_or((i64::MAX, ""));
+    let (upper_at, upper_id) = upper.unwrap_or((i64::MAX, ""));
+    let condition = attention_condition(section);
+    (
+        format!(
+            "SELECT {RECORDING_COLS},COALESCE(h.latest_attention_sequence,0) AS latest_attention_sequence,
+                    COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms) AS attention_at_ms,
+                    COALESCE(a.through_sequence,0) AS acknowledged_through_sequence
+               FROM dvr_recordings r
+               LEFT JOIN dvr_event_heads h ON h.recording_id=r.id
+               LEFT JOIN dvr_attention_acks a ON a.recording_id=r.id AND a.user_id=$1
+              WHERE {condition}
+                AND (COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms)<$2 OR
+                    (COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms)=$3 AND r.id>$4))
+                AND (COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms)<$5 OR
+                    (COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms)=$6 AND r.id>=$7))
+              ORDER BY COALESCE(h.latest_attention_at_ms,r.finished_at_ms,r.updated_at_ms) DESC,r.id
+              LIMIT $8"
+        ),
+        params!(
+            user_id,
+            after_at,
+            after_at,
+            after_id,
+            upper_at,
+            upper_at,
+            upper_id,
+            limit.clamp(1, DVR_EVENT_PAGE_MAX)
+        ),
+    )
+}
+
 #[cfg(test)]
 mod schema_tests {
     use super::{
-        migration_statements, pending_state_literals, recording_page_statement,
-        transition_statement, validate_sql, DvrRecordingFilter, DvrState, DvrStatePatch,
+        attention_count_statement, attention_page_statement, migration_statements,
+        pending_state_literals, recording_page_statement, transition_statement, validate_sql,
+        DvrAttentionSection, DvrRecordingFilter, DvrState, DvrStatePatch,
     };
 
     #[test]
@@ -2265,6 +2295,26 @@ mod schema_tests {
                         before_capture_start,
                     };
                     let (sql, values) = recording_page_statement(&filter, Some("rec"), 1_000);
+                    validate_sql(&sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+                    assert_eq!(values.len(), sql.matches('$').count(), "{sql}");
+                }
+            }
+        }
+
+        // The attention page binds two keyset bounds and a limit. Before this
+        // test existed the upper bound was named $6-$8 ahead of $2-$4, which
+        // hiqlite refuses at runtime, so every Activity page on a replicated
+        // store answered 500 for /dvr/attention.
+        for section in [
+            DvrAttentionSection::Current,
+            DvrAttentionSection::Historical,
+        ] {
+            let (sql, values) = attention_count_statement(section, 4);
+            validate_sql(&sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+            assert_eq!(values.len(), sql.matches('$').count(), "{sql}");
+            for after in [None, Some((9_000, "rec-a"))] {
+                for upper in [None, Some((12_000, "rec-z"))] {
+                    let (sql, values) = attention_page_statement(section, 4, after, upper, 3);
                     validate_sql(&sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
                     assert_eq!(values.len(), sql.matches('$').count(), "{sql}");
                 }

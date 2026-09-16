@@ -270,6 +270,7 @@ fn execution_file(path: &str) -> MediaFile {
         duration_ms: Some(120_000),
         container: Some("mkv".to_owned()),
         video_codec: Some("h264".to_owned()),
+        video_codec_tag: None,
         video_profile: Some("high".to_owned()),
         width: Some(1920),
         height: Some(1080),

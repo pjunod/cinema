@@ -2295,7 +2295,7 @@ mod tests {
     }
 
     // The reason the whole concept exists. If this ever passes with a 200,
-    // handing monarr a key is handing it the TMDB and Trakt secrets.
+    // handing Curator a key is handing it the TMDB and Trakt secrets.
     #[tokio::test]
     async fn a_key_cannot_read_the_settings_that_hold_every_secret() {
         let app = test_app();
@@ -2826,8 +2826,8 @@ mod tests {
             .contains("Books library"));
     }
 
-    /// The rail is absent, not broken, when no monarr is paired — and a
-    /// paired monarr that is down must not take the home screen with it.
+    /// The rail is absent, not broken, when no Curator is paired — and a
+    /// paired Curator that is down must not take the home screen with it.
     #[tokio::test]
     async fn the_coming_soon_rail_is_absent_unpaired_and_empty_when_monarr_is_down() {
         let app = test_app();
@@ -2854,20 +2854,20 @@ mod tests {
         assert_eq!(
             status,
             StatusCode::OK,
-            "a monarr that is down must not fail the home screen: {body}"
+            "a Curator that is down must not fail the home screen: {body}"
         );
         assert_eq!(body["configured"], true);
         assert_eq!(body["entries"].as_array().expect("entries").len(), 0);
     }
 
-    /// The whole point of proxying: the monarr key stays on the server. A
+    /// The whole point of proxying: the Curator key stays on the server. A
     /// browser holding it would hold a credential that can edit the library.
     #[tokio::test]
     async fn the_rail_forwards_the_calendar_without_handing_out_the_key() {
         use axum::routing::get as axget;
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let sink = seen.clone();
-        let monarr = axum::Router::new().route(
+        let curator = axum::Router::new().route(
             "/api/v1/calendar",
             axget(move |headers: axum::http::HeaderMap| {
                 let sink = sink.clone();
@@ -2887,7 +2887,7 @@ mod tests {
             .expect("bind");
         let base = format!("http://{}", listener.local_addr().expect("addr"));
         tokio::spawn(async move {
-            let _ = axum::serve(listener, monarr).await;
+            let _ = axum::serve(listener, curator).await;
         });
 
         let app = test_app();
@@ -2909,7 +2909,7 @@ mod tests {
         assert_eq!(entries[0]["title"], "Severance");
         assert_eq!(entries[0]["detail"], "S02E01 — Hello");
         assert_eq!(entries[0]["has_file"], false);
-        // monarr's own item id is not forwarded: it means nothing here, and
+        // Curator's own item id is not forwarded: it means nothing here, and
         // publishing it invites somebody to build on it.
         assert!(entries[0].get("mediaItemId").is_none(), "{body}");
 
@@ -2928,14 +2928,14 @@ mod tests {
     /// The rail prefers the show's poster plurx already has.
     ///
     /// A series whose next episode is airing often already has a poster in
-    /// plurx. That copy wins over monarr's provider reference, and it is
+    /// plurx. That copy wins over Curator's provider reference, and it is
     /// resolved by TMDB id, never by title, for the same reason every other
     /// seam in this integration is. Entries without either source still fall
     /// back to initials rather than borrowing an unrelated local poster.
     #[tokio::test]
     async fn the_rail_wears_the_artwork_plurx_already_has() {
         use axum::routing::get as axget;
-        let monarr = axum::Router::new().route(
+        let curator = axum::Router::new().route(
             "/api/v1/calendar",
             axget(|| async {
                 axum::Json(json!([
@@ -2959,7 +2959,7 @@ mod tests {
             .expect("bind");
         let base = format!("http://{}", listener.local_addr().expect("addr"));
         tokio::spawn(async move {
-            let _ = axum::serve(listener, monarr).await;
+            let _ = axum::serve(listener, curator).await;
         });
 
         let (app, state) = test_state();
@@ -3058,7 +3058,7 @@ mod tests {
         assert_eq!(
             e[1]["poster"],
             format!("/api/v1/images/{provider_file}"),
-            "a film not yet in the library uses monarr's cached provider art: {body}"
+            "a film not yet in the library uses Curator's cached provider art: {body}"
         );
         assert!(e[1].get("item_id").is_none());
 
@@ -3068,13 +3068,13 @@ mod tests {
              of its kind would put the wrong picture on the wrong title: {body}"
         );
 
-        // monarr's ids are for resolving, not for publishing.
+        // Curator's ids are for resolving, not for publishing.
         assert!(e[0].get("tmdb_id").is_none(), "{body}");
         assert!(e[0].get("imdb_id").is_none(), "{body}");
     }
 
     /// A settings page that only repeats what you typed cannot answer "did
-    /// it work". This one says whether monarr actually answered.
+    /// it work". This one says whether Curator actually answered.
     #[tokio::test]
     async fn the_monarr_card_says_whether_the_pairing_actually_works() {
         let app = test_app();
@@ -3106,7 +3106,7 @@ mod tests {
             "the reason must be readable, got {body}"
         );
 
-        // A monarr that answers, and one that rejects the key: different
+        // A Curator that answers, and one that rejects the key: different
         // problems, different fixes, so they must not read the same.
         use axum::routing::get as axget;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -3114,7 +3114,7 @@ mod tests {
             .expect("bind");
         let base = format!("http://{}", listener.local_addr().expect("addr"));
         tokio::spawn(async move {
-            let monarr = axum::Router::new().route(
+            let curator = axum::Router::new().route(
                 "/api/v1/system/status",
                 axget(|headers: axum::http::HeaderMap| async move {
                     if headers.get("x-api-key").and_then(|v| v.to_str().ok()) != Some("right") {
@@ -3123,7 +3123,7 @@ mod tests {
                     axum::Json(json!({ "version": "0.9.0" })).into_response()
                 }),
             );
-            let _ = axum::serve(listener, monarr).await;
+            let _ = axum::serve(listener, curator).await;
         });
 
         call(
@@ -3188,7 +3188,7 @@ mod tests {
     #[test]
     fn a_bare_host_is_completed_with_monarrs_own_default_port() {
         use super::comingsoon::normalize_monarr_url as norm;
-        // Nothing but a host: assume http and monarr's default port, because
+        // Nothing but a host: assume http and Curator's default port, because
         // there is nothing else it could mean.
         assert_eq!(
             norm("host.docker.internal"),
@@ -3375,8 +3375,8 @@ mod tests {
         assert!(ev["watched_at"].as_i64().unwrap_or(0) > 0);
     }
 
-    /// An item monarr could not match is not worth sending. Sending a title
-    /// and letting monarr guess is the exact mistake the rest of this
+    /// An item Curator could not match is not worth sending. Sending a title
+    /// and letting Curator guess is the exact mistake the rest of this
     /// integration exists to remove, just pointed the other way.
     #[tokio::test]
     async fn an_item_with_no_ids_is_not_announced() {
@@ -3575,7 +3575,7 @@ mod tests {
         );
     }
 
-    /// Monarr puts a show's id in `series`, not item-level `ids`. The receiver
+    /// Curator puts a show's id in `series`, not item-level `ids`. The receiver
     /// used to build its IdHints Option from `ids` alone, so the authoritative
     /// series id disappeared before the scan job ever saw it.
     #[tokio::test]
@@ -4154,7 +4154,7 @@ mod tests {
                 "/api/v1/settings",
                 Some(&admin),
                 json!({
-                    "live_tv_device_ipv4": "192.168.4.20",
+                    "live_tv_device_ipv4": "10.42.4.20",
                     "live_tv_owner_node_id": owner,
                     "live_tv_max_sessions": 2,
                     "live_tv_output_height": 1080,
@@ -4165,7 +4165,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{saved}");
         assert_eq!(saved["live_tv_enabled"], json!(false));
-        assert_eq!(saved["live_tv_device_ipv4"], json!("192.168.4.20"));
+        assert_eq!(saved["live_tv_device_ipv4"], json!("10.42.4.20"));
         assert_eq!(saved["live_tv_owner_node_id"], json!(owner));
         assert_eq!(saved["live_tv_max_sessions"], json!(2));
         assert_eq!(saved["live_tv_output_height"], json!(1080));
@@ -4247,7 +4247,7 @@ mod tests {
                 "/api/v1/settings",
                 Some(&admin),
                 json!({
-                    "live_tv_device_ipv4": "192.168.4.20",
+                    "live_tv_device_ipv4": "10.42.4.20",
                     "live_tv_owner_node_id": owner,
                     "live_tv_config_generation": 0
                 }),
@@ -4256,7 +4256,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{saved}");
 
-        // Nothing on 192.168.4.20 answers in a test process, so every device
+        // Nothing on 10.42.4.20 answers in a test process, so every device
         // readiness check is red. The enable still lands.
         let (status, enabled) = call(
             &app,
@@ -4315,7 +4315,7 @@ mod tests {
                 "/api/v1/settings",
                 Some(&admin),
                 json!({
-                    "live_tv_device_ipv4": "192.168.4.20",
+                    "live_tv_device_ipv4": "10.42.4.20",
                     "live_tv_owner_node_id": owner,
                     "live_tv_config_generation": 0
                 }),
@@ -4409,7 +4409,7 @@ mod tests {
             .store
             .put_settings(&[
                 (keys::LIVE_TV_ENABLED, "1"),
-                (keys::LIVE_TV_DEVICE_IPV4, "192.168.4.20"),
+                (keys::LIVE_TV_DEVICE_IPV4, "10.42.4.20"),
                 (keys::LIVE_TV_OWNER_NODE_ID, "lost-owner-a"),
                 (keys::LIVE_TV_CONFIG_GENERATION, "7"),
             ])
@@ -4514,7 +4514,7 @@ mod tests {
                 "/api/v1/settings",
                 Some(&admin),
                 json!({
-                    "live_tv_device_ipv4": "192.168.4.20",
+                    "live_tv_device_ipv4": "10.42.4.20",
                     "live_tv_owner_node_id": owner,
                     "live_tv_config_generation": 0
                 }),
@@ -5435,7 +5435,7 @@ mod tests {
     fn the_webhook_policy_admits_the_lan_and_refuses_the_open_internet_in_the_clear() {
         let approved = |raw: &str| crate::live_tv::approved_webhook_url(raw).is_ok();
         assert!(approved("https://hooks.example.com/plurx"));
-        assert!(approved("http://192.168.4.7:8123/api/webhook/plurx"));
+        assert!(approved("http://10.42.4.7:8123/api/webhook/plurx"));
         assert!(approved("http://127.0.0.1:8123/hook"));
         assert!(approved("http://[fd00::1]:8123/hook"));
         assert!(
@@ -13910,7 +13910,7 @@ mod tests {
                 library_id: lib.id,
                 kind: ItemKind::Movie,
                 parent_id: None,
-                title: "Blade Runner 2049".into(),
+                title: "Neon District 2049".into(),
                 year: Some(2017),
                 season_number: None,
                 episode_number: None,
@@ -13921,7 +13921,7 @@ mod tests {
             .store
             .upsert_file(
                 item,
-                "/media/movies/Blade Runner 2049 (2017) 2160p.mkv",
+                "/media/movies/Neon District 2049 (2017) 2160p.mkv",
                 69_000_000_000,
                 1,
                 &ProbeResult {
@@ -13951,7 +13951,7 @@ mod tests {
             .store
             .upsert_file(
                 item,
-                "/media/movies/Blade Runner 2049 (2017) 720p.mp4",
+                "/media/movies/Neon District 2049 (2017) 720p.mp4",
                 6_800_000_000,
                 1,
                 &ProbeResult {
@@ -13996,7 +13996,7 @@ mod tests {
     /// the absence of `media` — is pre-S1's.
     const PRE_S1_LIST_BODY: &str = concat!(
         r#"{"items":[{"id":1,"library_id":1,"kind":"movie","parent_id":null,"#,
-        r#""title":"Blade Runner 2049","year":2017,"overview":null,"#,
+        r#""title":"Neon District 2049","year":2017,"overview":null,"#,
         r#""season_number":null,"episode_number":null,"air_date":null,"#,
         r#""runtime_ms":null,"added_at":{added},"updated_at":{updated},"#,
         // S3 landed `genres` on ItemDto after this golden was captured. It is

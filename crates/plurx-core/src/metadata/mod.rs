@@ -2037,7 +2037,7 @@ mod tests {
     #[tokio::test]
     async fn a_known_tmdb_id_is_used_directly_and_the_search_is_never_called() {
         let (store, lib, movie) = one_movie("Heat (1995) Directors Cut Remux").await;
-        // Exactly what a monarr scan request leaves behind: an id, nothing else.
+        // Exactly what a Curator scan request leaves behind: an id, nothing else.
         store
             .apply_metadata(
                 movie,
@@ -2078,7 +2078,7 @@ mod tests {
         assert_eq!(searches.load(Ordering::SeqCst), 0);
     }
 
-    /// IMDb-only is the other half of the same case — monarr's movie side
+    /// IMDb-only is the other half of the same case — Curator's movie side
     /// tracks IMDb ids, and one lookup beats a title search.
     #[tokio::test]
     async fn an_imdb_id_is_resolved_to_a_tmdb_id_rather_than_searched() {

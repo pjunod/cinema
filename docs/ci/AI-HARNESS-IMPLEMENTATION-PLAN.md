@@ -237,7 +237,7 @@ today — check `scripts/validate list`).
 **Exactly:**
 
 ```bash
-scripts/harness-metrics --forgejo http://192.168.4.7:3000 --repo noirr/plurx \
+scripts/harness-metrics --forgejo http://forge.lan:3000 --repo noirr/plurx \
     --token-file ~/code/plurx-agent/github_token --since 2026-08-27 --weeks 2
 # prints, per ISO week:
 #   fast_lane_failures{bucket=paperwork|compile|real}   from /api/v1/repos/{r}/actions/runs

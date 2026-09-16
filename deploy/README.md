@@ -46,7 +46,7 @@ media server off the networks its peer services use.
 
 When `PLURX_SERVER_NAME` is still the default `plurx`, the companion advertises
 the Docker host name plus its LAN address, so a picker says
-`m6 · 192.168.1.20` instead of showing another anonymous `plurx` row. Set a
+`lab6 · 10.42.1.20` instead of showing another anonymous `plurx` row. Set a
 custom `PLURX_SERVER_NAME` when a room or role name is clearer; the custom name
 replaces the host name while the address remains visible. Cluster nodes are
 named the same way — every node of one logical server reports the same
@@ -90,8 +90,8 @@ permanent conversion.
 services:
   plurxd:
     volumes:
-      - /mnt/qnap/media:/media:ro
-      - /mnt/qnap/media/dv-conversion:/media-dv-conversion:rw
+      - /mnt/nas/media:/media:ro
+      - /mnt/nas/media/dv-conversion:/media-dv-conversion:rw
 ```
 
 Add `/media-dv-conversion` as its own library in Settings. Do not overlap a
@@ -183,7 +183,7 @@ git fetch origin
 git switch --detach origin/main # the checkout must match the published image
 cd deploy
 printf '%s\n' \
-  'PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:main' >> .env
+  'PLURX_IMAGE=forge.lan:3000/noirr/plurxd:main' >> .env
 cd ..
 make docker-image-up         # pulls, proves the budget, then uses --no-build
 curl -fsS http://127.0.0.1:32400/readyz
@@ -208,7 +208,7 @@ tag for rollback:
 git fetch origin
 git switch --detach <old-40-character-sha>
 sed -i.bak \
-  's|^PLURX_IMAGE=.*|PLURX_IMAGE=192.168.4.7:3000/noirr/plurxd:sha-<first-12-characters>|' \
+  's|^PLURX_IMAGE=.*|PLURX_IMAGE=forge.lan:3000/noirr/plurxd:sha-<first-12-characters>|' \
   deploy/.env
 make docker-image-up
 curl -fsS http://127.0.0.1:32400/readyz

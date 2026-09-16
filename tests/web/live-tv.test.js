@@ -1104,12 +1104,12 @@ async function main() {
     const check = new Function("api", "document", "esc", "settingsCurrent", "PAGE_RENDER_GENERATION",
       `${shipped("checkLiveTvReadiness")} return checkLiveTvReadiness;`)(
       async () => ({ ready: false, generation: 8, snapshot: null, checks: [
-        { id: "device_reachable", ready: true, message: "The tuner answered on 192.168.4.100." },
+        { id: "device_reachable", ready: true, message: "The tuner answered on 10.42.4.100." },
         { id: "start_recovery", ready: false, message: "This owner does not retire or resume starts yet." },
       ] }),
       { getElementById: id => nodes[id] }, value => String(value), () => true, 1);
     return check(button).then(() => {
-      assert.match(nodes.ltreadiness.innerHTML, /The tuner answered on 192\.168\.4\.100\./);
+      assert.match(nodes.ltreadiness.innerHTML, /The tuner answered on 10\.42\.4\.100\./);
       assert.match(nodes.ltreadiness.innerHTML, /does not retire or resume starts yet/,
         "a row the server added must appear without a hand-written case for it");
       assert.match(nodes.ltreadiness.innerHTML, /Not ready:/);
@@ -1257,7 +1257,7 @@ async function main() {
   await test("settings separate disabled configuration, enable, and exact physical-fence recovery", async () => {
     const writes = [], settings = { live_tv_enabled: false, live_tv_config_generation: 8,
       live_tv_transition_from_owner_node_id: "owner-a", live_tv_transition_drain_before: 6 };
-    const nodes = { ltip: { value: " 192.168.4.99 " }, ltowner: { value: "owner-b" },
+    const nodes = { ltip: { value: " 10.42.4.99 " }, ltowner: { value: "owner-b" },
       ltlimit: { value: "2" }, ltheight: { value: "720" }, ltfenced: { checked: false },
       "live-tv-settings": { classList: { contains: () => false } } };
     const controls = new Function("SETTINGS", "document", "liveTvSettingsWrite", "toast",
@@ -1266,7 +1266,7 @@ async function main() {
       settings, { getElementById: id => nodes[id] }, async body => writes.push(body), () => {});
     await controls.saveLiveTvSettings();
     assert.deepEqual(writes.pop(), { live_tv_config_generation: 8, live_tv_enabled: false,
-      live_tv_device_ipv4: "192.168.4.99", live_tv_owner_node_id: "owner-b", live_tv_max_sessions: 2,
+      live_tv_device_ipv4: "10.42.4.99", live_tv_owner_node_id: "owner-b", live_tv_max_sessions: 2,
       live_tv_output_height: 720, live_tv_max_output_height: 720 });
     await controls.setLiveTvEnabled(true);
     assert.deepEqual(writes.pop(), { live_tv_config_generation: 8, live_tv_enabled: true });
@@ -1503,10 +1503,10 @@ async function main() {
         programme_title: "City Beat" },
       { channel_number: "4.1", channel_name: "WNBC", user: "guest", owner_node_id: "node-b",
         encoder: "vaapi", output_height: 1080, age_seconds: 30, state: "starting" },
-    ], { "node-b": "nynuc" });
+    ], { "node-b": "media1" });
     assert.match(html, /Live television/);
     assert.match(html, /City Beat/);
-    assert.match(html, /nynuc/, "the roster name, not the raw node id");
+    assert.match(html, /media1/, "the roster name, not the raw node id");
     assert.doesNotMatch(html, /node-b/, "a node with a known name never shows its id");
     assert.match(html, /6 min · active/);
     // A row the guide cannot describe is still a row: the session is real

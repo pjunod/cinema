@@ -518,6 +518,7 @@ const TABLES: &[TablePlan] = &[
             "dv_bl_compat_id",
             "dv_el_present",
             "dv_rpu_present",
+            "video_codec_tag",
         ],
         order_by: "id",
         minimum_schema: 5,
@@ -2498,6 +2499,14 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 // the honest value: the destination's own backfill will fill
                 // it in from the probe JSON that comes across with the row.
                 "NULL".to_owned()
+            } else if table.name == "files"
+                && *column == "video_codec_tag"
+                && schema_version < 60
+            {
+                // The source is opened read-only and cannot be migrated. Its
+                // stored probe JSON crosses with the row and the destination's
+                // bounded backfill recovers a valid tag afterward.
+                "NULL".to_owned()
             } else if table.name == "cluster_fragment_index_jobs"
                 && *column == "attempt_errors"
                 && schema_version < 46
@@ -2851,10 +2860,26 @@ mod tests {
         assert!(
             current.ends_with(
                 "hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, \
-                 dv_el_present, dv_rpu_present"
+                 dv_el_present, dv_rpu_present, video_codec_tag"
             ),
             "{current}"
         );
+    }
+
+    #[test]
+    fn pre_v60_file_projection_supplies_null_video_codec_tag() {
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "files")
+            .copied()
+            .expect("files table plan");
+        let v59 = value_projection(table, 59, false);
+        let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
+        assert!(
+            v59.ends_with("dv_el_present, dv_rpu_present, NULL"),
+            "{v59}"
+        );
+        assert!(current.ends_with("dv_el_present, dv_rpu_present, video_codec_tag"));
     }
 
     /// Every import plan must name the migration that actually creates its

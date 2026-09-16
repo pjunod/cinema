@@ -295,7 +295,7 @@ original sequencing.
    status banner out, Earlier/Now/Later into the grid header, Return to
    live replaced by the focusable picture. *Acceptance:* focused tvOS
    `LiveTvTests` green, plus a 1920 × 1080 screenshot from the tvOS 26.5
-   simulator (`xcrun simctl io <udid> screenshot`) on `mba` showing one
+   simulator (`xcrun simctl io <udid> screenshot`) on `maca` showing one
    toolbar row and no banner.
 2. **tvOS geometry.** Side-by-side On now (620 px column, 72 px rows),
    stage-over-grid Guide with width-derived slots, overlay guide on the
@@ -334,7 +334,7 @@ client PR, per `validation/mobile_versions`.
 
 ## 7. Prompt for the GPT session (physical verification, before and after)
 
-> On the Apple TV (nynuc:32400) and the Google TV Streamer, open Live TV
+> On the Apple TV (media1:32400) and the Google TV Streamer, open Live TV
 > and, for each of Layout = Guide + preview and Channel browser, with On
 > now and then Guide selected: take a screenshot at native 1080p, count the
 > channel rows fully visible, measure the picture's width as a fraction of

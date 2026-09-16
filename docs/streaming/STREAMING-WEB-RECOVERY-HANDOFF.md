@@ -193,7 +193,7 @@ is ready and report; the coordinator dispatches Wave 2 after integration.
   `tests/web/library-channels.test.js` harness because its baseline `document`
   mock lacks `addEventListener`; the failing extracted source is outside this
   task's diff. The settings-section test for the removed HLS switch passes.
-- PR: [Forgejo #324](http://192.168.4.7:3000/noirr/plurx/pulls/324),
+- PR: [Forgejo #324](http://forge.lan:3000/noirr/plurx/pulls/324),
   `codex/streaming-web-recovery` into `effort/streaming-reliability`.
 - Wave 2 native parity: Apple and Android timer-only stalls now publish unknown
   decoder cause and issue one bounded same-recipe replacement without the
@@ -207,7 +207,7 @@ is ready and report; the coordinator dispatches Wave 2 after integration.
   `:app:assembleDebug` passed. Android test compilation also needed the
   coordinator-approved missing `decodeFromJsonElement` import in the existing
   DVR fixture; no DVR behavior changed.
-- Wave 2 PR: [Forgejo #328](http://192.168.4.7:3000/noirr/plurx/pulls/328),
+- Wave 2 PR: [Forgejo #328](http://forge.lan:3000/noirr/plurx/pulls/328),
   `codex/streaming-native-parity` into `effort/streaming-reliability`.
 - Remaining physical observation: Safari playback has not been claimed from
   fake video objects. The coordinator owns the later physical regression run.

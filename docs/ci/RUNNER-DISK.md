@@ -35,10 +35,10 @@ Measured on the fleet on 2026-09-07, when the whole thing was full:
 
 | Consumer | Where | Measured | Bounded by |
 |---|---|---|---|
-| Runner cache server | `<runner>/cache` (`bolt.db` + blobs) | 41 G on `gha-m6-general-01`, ~167 G fleet-wide | the janitor timer, and nothing else |
-| Runner work root | `<runner>/_work` (checkouts) | ~58 M on `gha-nuc4-general-01`, 2026-09-08 | nothing, and it does not need to be |
+| Runner cache server | `<runner>/cache` (`bolt.db` + blobs) | 41 G on `gha-lab6-general-01`, ~167 G fleet-wide | the janitor timer, and nothing else |
+| Runner work root | `<runner>/_work` (checkouts) | ~58 M on `gha-lab4-general-01`, 2026-09-08 | nothing, and it does not need to be |
 | Cargo caches | `$RUNNER_TOOL_CACHE/plurx-ci/cargo/...` | 30 G budget per runner | `scripts/ci-cache-prune`, before and after every job |
-| Docker + BuildKit | `/var/lib/docker` | 101 G images · 58 G build cache on nynuc | `scripts/ci-buildkit-prune` (50 G) and the janitor |
+| Docker + BuildKit | `/var/lib/docker` | 101 G images · 58 G build cache on media1 | `scripts/ci-buildkit-prune` (50 G) and the janitor |
 
 ### The cache server evicts nothing. Ever.
 
@@ -53,7 +53,7 @@ So the rule that follows is not a preference:
 
 > **Nothing that grows per commit may be written to the runner cache server.**
 
-`gha-m6-general-01` is what breaking that rule looks like: 118 entries, 41 G,
+`gha-lab6-general-01` is what breaking that rule looks like: 118 entries, 41 G,
 every one created in the previous three days, on a 78 G disk — about 13 G/day,
 which fills a runner guest in a week. The entries were `Swatinem/rust-cache`
 tarballs of the target directory (~380 M–1.1 G each) and `type=gha` BuildKit
@@ -143,7 +143,7 @@ Check idle before step 3 — `status` on the runners API, not a guess:
 
 ```bash
 curl -s -H "Authorization: token $TOKEN" \
-  http://192.168.4.7:3000/api/v1/repos/noirr/plurx/actions/runners \
+  http://forge.lan:3000/api/v1/repos/noirr/plurx/actions/runners \
   | python3 -c 'import json,sys; [print(r["name"], r["status"]) for r in json.load(sys.stdin)]'
 ```
 
@@ -176,7 +176,7 @@ which is not optional**:
 ```bash
 sudo PLURX_TOKEN=<forgejo token> bash -euc 'f=$(mktemp); curl -fsSL \
   -H "Authorization: token $PLURX_TOKEN" \
-  http://192.168.4.7:3000/noirr/plurx/raw/branch/main/deploy/runner-janitor/bootstrap \
+  http://forge.lan:3000/noirr/plurx/raw/branch/main/deploy/runner-janitor/bootstrap \
   -o "$f"; bash "$f"; rm -f "$f"'
 ```
 
@@ -214,7 +214,7 @@ numbers, same three invariants, launchd instead of systemd.
 sudo deploy/runner-janitor/macos/install
 ```
 
-Verified on `gha-mba-apple-01` on 2026-09-07: it read the runner's label and
+Verified on `gha-maca-apple-01` on 2026-09-07: it read the runner's label and
 config out of the launchd plist, measured 4 G, unloaded the daemon, reset the
 directory and loaded it again, and the runner was back `idle` in Forgejo
 twenty seconds later.
@@ -260,7 +260,7 @@ having**, which is the invariant that was missing; see below.
 record to `/var/lib/plurx-ci-janitor/last-run.json`:
 
 ```json
-{"finished":"2026-09-07T22:00:04Z","host":"nynuc","instances":4,
+{"finished":"2026-09-07T22:00:04Z","host":"media1","instances":4,
  "over_budget":1,"reset":1,"short_after":0,"demand_dropped":0,
  "reclaimed_gb":16,"docker_pruned":false,"budget_gb":20,"required_gb":25}
 ```
@@ -307,10 +307,10 @@ runner healthy.** 20 % of a 78 GB guest is 15.6 G, so at 18 G free both rules
 were satisfied at once — one by turning jobs away, the other by doing nothing
 about it.
 
-`gha-nuc4-general-01` sat in that band on 2026-09-08: two jobs refused with
+`gha-lab4-general-01` sat in that band on 2026-09-08: two jobs refused with
 `18G available … need 25G`, identical to the gigabyte across both, because the
 job kept landing there. **Not because anything pinned it** — eight runners
-carry the `general` label, and `gha-m6-general-02` ran the same lane green with
+carry the `general` label, and `gha-lab6-general-02` ran the same lane green with
 42 G free the same afternoon. A runner that refuses in fifteen seconds returns
 to idle immediately and is therefore first in line for the next job, so a full
 runner takes a disproportionate share of the queue and fails all of it —
@@ -383,7 +383,7 @@ janitor becomes the thing that breaks CI.
 - **No cleanup of `_work`.** It holds other jobs' checkouts on a shared
   runner, several repositories deep, and there is no reliable signal from
   outside a job that a tree is finished. It is also small: the preflight's own
-  diagnostic on `gha-nuc4-general-01` on 2026-09-08 listed the whole checkout
+  diagnostic on `gha-lab4-general-01` on 2026-09-08 listed the whole checkout
   at about 58 MB — `20M docs`, `19M crates`, `4.6M brand`, and down from there.
 
   A reaper for it was written and withdrawn on that measurement, and the

@@ -76,7 +76,7 @@ HTTP_HLS = ROOT / "crates/plurxd/src/http/hls.rs"
 SESSIONS_SQLITE = ROOT / "crates/plurx-core/src/store/sqlite/sessions.rs"
 SESSIONS_HIQLITE = ROOT / "crates/plurx-core/src/store/hiqlite_sessions.rs"
 M0_QUALIFIED_HEAD = "59d0a4d1"
-M0_FORGEJO_PR = "http://192.168.4.7:3000/noirr/plurx/pulls/62"
+M0_FORGEJO_PR = "http://forge.lan:3000/noirr/plurx/pulls/62"
 M1_RECEIPT_HEAD = "81d46577"
 M1_RUNTIME_RECEIPT_HEAD = "bc3c3bee"
 M1_REPAIR_HEAD = "07c8f905"
@@ -158,11 +158,11 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
                 # qualification, however it words it.
                 self.assertRegex(contract["scope"], r"not (a )?deployed")
         by_host = {contract["host"]: contract for contract in contracts}
-        nynuc = by_host["nynuc"]
-        self.assertEqual(nynuc["input_codec"], "rawvideo")
-        self.assertEqual(nynuc["decoder"], "rawvideo")
+        media1 = by_host["media1"]
+        self.assertEqual(media1["input_codec"], "rawvideo")
+        self.assertEqual(media1["decoder"], "rawvideo")
         self.assertEqual(
-            nynuc["scope"],
+            media1["scope"],
             "host diagnostic grammar only; not deployed producer or MPEG-4 qualification",
         )
         self.assertIn(
@@ -178,7 +178,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         self.assertEqual(self.fleet["qualification"], "advertised-only")
         self.assertEqual(
             {node["name"] for node in self.fleet["nodes"]},
-            {"nynuc", "m6", "nuc4", "nuc3"},
+            {"media1", "lab6", "lab4", "lab3"},
         )
         for node in self.fleet["nodes"]:
             self.assertIn(f"| `{node['name']}` |", self.status)

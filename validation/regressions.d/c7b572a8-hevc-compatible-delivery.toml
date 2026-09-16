@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["c7b572a8"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The Rust Store and HTTP regressions retain HEVC tag round trips, bounded backfill, actual progressive-output comparison, and typed refusal before incompatible delivery admission."

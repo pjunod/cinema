@@ -95,15 +95,15 @@ not GitHub artifacts. This also removes two jobs from the graph.
 
 ### B3. The "no build labels on production voters" invariant is probably violated today — audit first
 
-All four plurx nodes (nynuc, m6, nuc4, nuc3) are production voters, and the
-runner inventory includes nynuc with its own standalone play. The heavy
+All four plurx nodes (media1, lab6, lab4, lab3) are production voters, and the
+runner inventory includes media1 with its own standalone play. The heavy
 jobs select on generic labels (`general`, `high-cpu`) across the 19-runner
 fleet. If any voter currently carries those labels, the plan's invariant is
 already broken, and honoring it *removes* capacity every later milestone
 assumes. Milestone 0 must therefore produce a host ↔ runner ↔ label audit
 artifact before any scheduling decision — it changes the answers to Q7 and
 the shard count. Note also a tension to resolve deliberately, not by
-accident: Paul already designated **nuc4 (a voter) as the fleet image build
+accident: Paul already designated **lab4 (a voter) as the fleet image build
 node** in the Forgejo registry plan. Either the invariant carves out
 deploy-time builds explicitly, or that choice gets revisited — the plan
 should say which.
@@ -114,7 +114,7 @@ should say which.
 
 ### R1. Decouple both wins from the laptops — most of the speed needs no new hardware
 
-Sharding needs *distinct* hosts, not *ARM* hosts. nuc1 and nuc2 are runner
+Sharding needs *distinct* hosts, not *ARM* hosts. lab1 and lab2 are runner
 hosts and are not in the plurx voter roster; if the B3 audit confirms them
 (or other fleet members) as non-production x86 builders, Phase A + two-shard
 Phase B ship with zero new hardware and a homogeneous environment — the
@@ -159,12 +159,12 @@ archaeology started — keep replicated shards off laptops entirely.
    compiles in the builder stage), any `build.rs`/build-helper input, and
    `validation/release_dockerfile.py` itself. Fail-open on unknown inputs,
    selector in `points.toml` — both already proposed, both right.
-4. **Registry fallback in M2.** Yes — the Forgejo registry on nuc3 is
+4. **Registry fallback in M2.** Yes — the Forgejo registry on lab3 is
    already decided and its repo half merged (#739); read-mostly with
    protected per-arch writers is the right shape and the scopes are narrow
    enough. Implementation note: the `docker-container` builder does not
    inherit the daemon's `insecure-registries` — the builder needs its own
-   buildkitd config (`[registry."192.168.4.7:3000"] http = true`) or every
+   buildkitd config (`[registry."forge.lan:3000"] http = true`) or every
    cache pull fails quietly to cold.
 5. **Budgets.** The arithmetic doesn't close on the primary host: §5.5
    wants 100 + 60 + 20 GB of budgets *plus* a 100 GB-or-20 % floor

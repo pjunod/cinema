@@ -385,7 +385,7 @@ mod tests {
 
     #[test]
     fn connection_qr_accepts_only_an_http_server_origin() {
-        let svg = connection_qr_svg("http://192.168.4.14:32400/").expect("valid origin");
+        let svg = connection_qr_svg("http://10.42.4.14:32400/").expect("valid origin");
         assert!(svg.starts_with("<?xml"));
         assert!(svg.contains("<svg"));
         assert!(svg.contains("#111217"));

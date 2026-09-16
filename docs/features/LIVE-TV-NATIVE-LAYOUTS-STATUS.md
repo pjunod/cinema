@@ -36,8 +36,8 @@ readiness reasons remain the only runtime control.
 
 | PR | Scope | Evidence | State |
 |---|---|---|---|
-| [#268](http://192.168.4.7:3000/noirr/plurx/pulls/268) | Apple — `LiveTvView.swift`, `LiveTv.swift`, `Theme.swift`, `LiveTvTests.swift`, build 146 | `make apple-test` on the lab Mac: **970 cases, exit 0**, across the iOS and tvOS destinations | merged to `main` at `ebe2b100` |
-| [#269](http://192.168.4.7:3000/noirr/plurx/pulls/269) | Android — `LiveTvScreen.kt`, `LiveTvGuideUi.kt`, `LiveTvApi.kt`, `TvFocus.kt`, `SettingsScreen.kt`, versionCode 89 | pinned build image: `testDebugUnitTest` + `lintDebug`, **553 tests, 0 failures** | open on the fast lane |
+| [#268](http://forge.lan:3000/noirr/plurx/pulls/268) | Apple — `LiveTvView.swift`, `LiveTv.swift`, `Theme.swift`, `LiveTvTests.swift`, build 146 | `make apple-test` on the lab Mac: **970 cases, exit 0**, across the iOS and tvOS destinations | merged to `main` at `ebe2b100` |
+| [#269](http://forge.lan:3000/noirr/plurx/pulls/269) | Android — `LiveTvScreen.kt`, `LiveTvGuideUi.kt`, `LiveTvApi.kt`, `TvFocus.kt`, `SettingsScreen.kt`, versionCode 89 | pinned build image: `testDebugUnitTest` + `lintDebug`, **553 tests, 0 failures** | open on the fast lane |
 
 Each PR took exactly one adversarial review before it was marked ready. Both
 reviews found a focus blocker that no test could have caught, and both are
@@ -86,12 +86,12 @@ different CI lane.
 | Shared input, metadata, and preference contracts | verified | bounded FFmpeg input parser/cache; cross-client DTO and badge cases; generated input tables; pinned Rust compile plus 3 focused server and 39 web checks green | promotion gate |
 | Apple TV and iOS | verified | all three saved layouts, anchored/pinned guide, scoped input, compact schedule/grid, Apple build 130; iOS and tvOS compile green; 28 focused Live TV tests green on each platform | physical Siri Remote walkthrough remains unproved; promotion gate |
 | Google TV and Android | verified | all three saved layouts around one movable player, stable UTC-anchor D-pad navigation, false-on-delegate input, compact schedule/grid, Android build 79; Kotlin compile and 35 JVM checks green; real D-pad case green on Google TV Streamer | broader physical walkthrough remains unproved; promotion gate |
-| Integrated promotion to `main` | candidate finalized | Forgejo PR [#229](http://192.168.4.7:3000/noirr/plurx/pulls/229); exactly one Astra adversarial review of head `f5e67fe9`; all findings addressed; final focused pass green; no feature gates; full suites reserved for the separate sweep | the remote workflow still launched the legacy full qualification on a ready effort PR, so that run was canceled; the candidate adds the required label-triggered compile-only lane before obtaining its current-head verdict |
+| Integrated promotion to `main` | candidate finalized | Forgejo PR [#229](http://forge.lan:3000/noirr/plurx/pulls/229); exactly one Astra adversarial review of head `f5e67fe9`; all findings addressed; final focused pass green; no feature gates; full suites reserved for the separate sweep | the remote workflow still launched the legacy full qualification on a ready effort PR, so that run was canceled; the candidate adds the required label-triggered compile-only lane before obtaining its current-head verdict |
 
 ## Apple TV navigation follow-up — one focus owner per press
 
 Forgejo issue
-[#235](http://192.168.4.7:3000/noirr/plurx/issues/235) tracks a physical
+[#235](http://forge.lan:3000/noirr/plurx/issues/235) tracks a physical
 Apple TV regression reported after build 130 shipped. The correction is Apple
 build 134 after integrating current `main`. Rapid Siri Remote moves
 can be overwritten by the guide's asynchronous restore pass, and moving above
@@ -185,7 +185,7 @@ The review's build-number question originally distinguished Apple build
 
 The required single Astra review ran in task
 `01a088d3-145d-7ea3-af07-4240406efcef` against PR
-[#236](http://192.168.4.7:3000/noirr/plurx/pulls/236) draft head `898bf2b3`.
+[#236](http://forge.lan:3000/noirr/plurx/pulls/236) draft head `898bf2b3`.
 It required changes; no second review or approval pass will be requested.
 
 | Finding | Author resolution |

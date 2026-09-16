@@ -49,7 +49,7 @@ Apple and does not on the others, with no server change.
 ## 2. Three of roadmap §8's open questions are now answered
 
 **Q3 — does a retry bound belong on the client at all? Yes, and it is
-load-bearing.** Measured on nuc4: `resolve_action` never reads the client's
+load-bearing.** Measured on lab4: `resolve_action` never reads the client's
 observation, so a healthy session answers `none` to a client reporting a broken
 stream — thirteen exchanges spanning a session kill, every one `none`. And M5b
 made `endedTries` the bound on the very `retry_resource` meant to replace it
@@ -127,12 +127,12 @@ plurx_playback_control_vocabulary_total{complete="true",platform="…"}
 
 reading non-zero, and records it as zero on 2026-08-31.
 
-**That gate has since been satisfied** — sixteen complete web exchanges on nuc3
-on 2026-09-01, and forty-plus more on nuc4 the same night.
+**That gate has since been satisfied** — sixteen complete web exchanges on lab3
+on 2026-09-01, and forty-plus more on lab4 the same night.
 
 **But it can never be a durable gate, and the doc should stop treating it as
 one.** These are in-memory counters: every deploy resets them. They read zero
-on nuc3 and nuc4 again right now, purely because the fleet redeployed. A gate
+on lab3 and lab4 again right now, purely because the fleet redeployed. A gate
 whose evidence is destroyed by shipping is a gate that will keep re-blocking
 work that is not blocked. Read it as "has this build ever completed an
 exchange", captured at the time, not as a live precondition.

@@ -557,6 +557,7 @@ mod tests {
             duration_ms: Some(1000),
             container: Some("mkv".into()),
             video_codec: Some(codec.into()),
+            video_codec_tag: None,
             video_profile: None,
             width: Some(height * 16 / 9),
             height: Some(height),

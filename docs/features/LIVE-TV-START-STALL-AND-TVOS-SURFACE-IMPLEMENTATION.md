@@ -932,7 +932,7 @@ build):
 ## 10. Mechanics for the builder
 
 - **Clone your own.** Never work in Paul's checkout. Clone from Forgejo
-  (`http://192.168.4.7:3000/noirr/plurx.git`) into your own scratch
+  (`http://forge.lan:3000/noirr/plurx.git`) into your own scratch
   (`/tmp/<name>` on the device VM if its `$HOME` is full — it usually is);
   `--filter=blob:none` is fine. `docs/ci/AGENT-COMPILE-LOOP.md` is how
   Rust gets compiled when the clone and `cargo` are on different machines;

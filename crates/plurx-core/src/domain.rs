@@ -261,7 +261,7 @@ pub struct MetadataPatch {
     /// what takes the item out of the enrichment queue.
     ///
     /// Deliberately explicit rather than inferred from the patch's contents.
-    /// A caller-supplied id (a monarr scan request) is a patch carrying only
+    /// A caller-supplied id (a Curator scan request) is a patch carrying only
     /// `tmdb_id`, and inferring "enriched" from that would mark the item done
     /// *because* it named an id — the exact opposite of what the id is for.
     pub enriched: bool,
@@ -464,6 +464,10 @@ pub struct MediaFile {
     /// Container short name derived from the file extension ("mkv", "mp4").
     pub container: Option<String>,
     pub video_codec: Option<String>,
+    /// Four-character sample-entry label reported by the first playable video
+    /// stream (`hvc1`, `hev1`, `dvh1`, `dvhe`, `avc1`, …). This is packaging
+    /// identity, not a second spelling of the codec family.
+    pub video_codec_tag: Option<String>,
     pub video_profile: Option<String>,
     pub width: Option<i64>,
     pub height: Option<i64>,
@@ -506,6 +510,7 @@ pub struct ProbeResult {
     pub duration_ms: Option<i64>,
     pub container: Option<String>,
     pub video_codec: Option<String>,
+    pub video_codec_tag: Option<String>,
     pub video_profile: Option<String>,
     pub width: Option<i64>,
     pub height: Option<i64>,
@@ -544,8 +549,8 @@ pub struct User {
 /// A machine credential: scopes, no user, no admin flag.
 ///
 /// Deliberately not a `User`. A login token IS a user and carries that
-/// user's privileges wholesale — which is how "let monarr trigger scans"
-/// would otherwise become "let monarr read every secret plurx holds". A key
+/// user's privileges wholesale — which is how "let Curator trigger scans"
+/// would otherwise become "let Curator read every secret plurx holds". A key
 /// can do exactly what its scopes say and cannot widen itself.
 #[derive(Debug, Clone, Serialize)]
 pub struct ApiKey {
@@ -574,7 +579,7 @@ impl ApiKey {
 /// promise about what a stolen key can do, so they are added one considered
 /// grant at a time rather than invented at call sites.
 pub mod scopes {
-    /// Ask for a scan of a path. The whole point of the monarr integration.
+    /// Ask for a scan of a path. The whole point of the Curator integration.
     pub const SCAN_TRIGGER: &str = "scan:trigger";
     /// Read the progress/result of a scan this key asked for.
     pub const STATUS_READ: &str = "status:read";

@@ -4,8 +4,8 @@
 # Apple and Android device — without Ansible.
 #
 # This is the standalone fallback for the media/mobile-physical.yml path in the
-# private Ansible repository. It does the same work for plurx alone: no monarr,
-# no nzbd, no controller inventory, no roster contract. When Ansible is healthy,
+# private Ansible repository. It does the same work for plurx alone: no Curator,
+# no Runner, no controller inventory, no roster contract. When Ansible is healthy,
 # prefer `scripts/ship --android` / the mobile-physical play — they cover all
 # three apps and enforce the deploy-completeness assertions this script does not.
 #

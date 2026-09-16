@@ -71,7 +71,7 @@ def write_corpus(
 
 def write_server_manifest(root, references, overrides=None):
     overrides = overrides or {}
-    path = root / "nynuc.sha256"
+    path = root / "media1.sha256"
     lines = []
     for filename, reference in references.items():
         digest = overrides.get(filename, file_sha(reference))
@@ -201,7 +201,7 @@ class FullApi:
         if path == "/system":
             active = self.active_counts.pop(0) if self.active_counts else self.default_active
             return {
-                "name": "nynuc",
+                "name": "media1",
                 "instance_id": "server-id",
                 "version": "0.9.0",
                 "build": "server-build",
@@ -267,7 +267,7 @@ def harness_args(root, corpus, server_manifest=None, *, modes="vbr,qvbr", only=N
         server_sha256_manifest=str(server_manifest) if server_manifest else None,
         only=only,
         vmaf_ffmpeg="scorer-ffmpeg",
-        base="http://admin:password@nynuc:32400?token=nope",
+        base="http://admin:password@media1:32400?token=nope",
         token="top-secret-token",
         library=None,
         work_dir=str(root / "work"),

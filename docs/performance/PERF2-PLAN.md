@@ -36,7 +36,7 @@ milestones refer back to these as B-facts.
 
 ### 1.1 Starts — the floor is structural now
 
-Measured on nynuc 2026-07-29 (PERF-PLAN §10): **197 ms direct play,
+Measured on media1 2026-07-29 (PERF-PLAN §10): **197 ms direct play,
 651–1536 ms remux, median ~684 ms**. The remaining TTFF costs, in path
 order:
 
@@ -188,7 +188,7 @@ Numbered because milestones cite them.
 4. **Acceptance runs where the bug can occur.** The §4.5bis scar
    (PERF-PLAN §10): a milestone about encoder behavior, validated in
    CI on software, shipped broken on hardware. Encoder- and
-   client-facing milestones here name their acceptance machine (nynuc,
+   client-facing milestones here name their acceptance machine (media1,
    or a physical device); CI asserts *selection* from logs, not
    pixels.
 5. **Cache identity is sacred.** Every parameter that changes output
@@ -313,7 +313,7 @@ beacons ride existing client versions.
 
 **Acceptance:** restart the server; TTFF and stall distributions for the
 prior week still render (`scripts/perf-report` reads the table, not the
-ring). Play the known 4K remux stall title on nynuc; the stored rows
+ring). Play the known 4K remux stall title on media1; the stored rows
 answer B18's question — `delivered_bps` vs `readrate` vs `runway` at
 each stall instant, joined in one record. An Android play produces a
 `ttff` row.
@@ -325,7 +325,7 @@ each stall instant, joined in one record. An Android play produces a
 **Implementation status (2026-08-14):** the harness, runtime settings,
 per-family quality arguments, behavioral validation/fallback, atomically
 published effective mode, single recipe builder, legacy-VBR golden identity,
-and pinned full SDR corpus are implemented and accepted on the reserved nynuc
+and pinned full SDR corpus are implemented and accepted on the reserved media1
 QSV path. A two-second background
 refresh on each server reads the replicated requested pair and validates
 changes against that node's encoder. Those runtime probes share the existing
@@ -350,7 +350,7 @@ Production encoding still uses the deployed
 server's Jellyfin FFmpeg. A separate, explicit `--vmaf-ffmpeg` is
 behavior-probed and scores captured bytes on the controller only after the
 production session ends; it never encodes playback or becomes a live-path
-dependency. No scorer is installed or needed on nynuc or in compose: nynuc
+dependency. No scorer is installed or needed on media1 or in compose: media1
 performs production encoding and the accepted laptop controller scorer runs
 afterward. The named-machine evidence is complete. The deployed
 `v0.2.7-167-gb6aaed6` build passed the full corpus with no quality override;
@@ -366,7 +366,7 @@ Artifact SHA-256 values are:
 The q=21 and q=22 candidate captures were byte-for-byte identical on both
 fixtures; q=23 was the first failure. QSV therefore defaults to 22. Other
 encoder-family values remain candidates until equivalent hardware can run the
-same calibration; that does not weaken the accepted nynuc QSV path.
+same calibration; that does not weaken the accepted media1 QSV path.
 The owner also ratified the 10-second complete-served-segment advertised-peak
 gate on 2026-08-12. A fixed 10-second window spans five nominal HLS segments
 and is stable under the served-segment measurement quantum; the derived
@@ -479,14 +479,14 @@ and the VMAF harness slice below are the real budget. **Risk:**
 low-medium; driver variance is exactly what boot validation catches.
 **Toggle:** `transcode.rate_mode`, default off (= `bitrate`).
 
-**Acceptance (nynuc, per principle 4):** `scripts/bench` grows a
+**Acceptance (media1, per principle 4):** `scripts/bench` grows a
 rate-control mode first, so the harness slice precedes the feature (review R7).
 Production Jellyfin FFmpeg must create the real, uncached plurxd HLS sessions;
 the controller captures the served segments and, after each encode ends, an
 explicit separate scorer decodes them for VMAF offline. Shape:
-`scripts/bench rate-control --base http://nynuc:32400 --token <admin-token>
+`scripts/bench rate-control --base http://media1:32400 --token <admin-token>
 --corpus <fixtures> --modes vbr,qvbr --vmaf-ffmpeg <scoring-only-ffmpeg>
---server-sha256-manifest <nynuc.sha256>
+--server-sha256-manifest <media1.sha256>
 --vmaf-model vmaf_v0.6.1 --vmaf-subsample 1
 --rate-window 10.0 --poll 0.25
 --settings-settle 3.0
@@ -597,7 +597,7 @@ the safety rail, and off means byte-identical behavior. **Toggles:**
 `jobs.media_analysis_mins`, `jobs.deep_analysis_mins`,
 `transcode.per_title` = off (default) | on.
 
-**Acceptance (nynuc):** corpus A/B — per-title mode spends measurably
+**Acceptance (media1):** corpus A/B — per-title mode spends measurably
 fewer bytes on the easy half at equal VMAF and *no fewer* on the hard
 half than N1 alone (the hard half is allowed to cost more: that is the
 feature working); the analysis sweep over the fixture library completes
@@ -780,7 +780,7 @@ N3.0's spike sequences before any N3 schema. **Risk:** medium-high,
 held by the all-or-nothing rule and the packet gates. **Toggles:**
 `cache.prefix_secs` (0 = off), `jobs.prewarm_on_progress`.
 
-**Acceptance (after the §6.4 gates pass; nynuc + one physical Apple
+**Acceptance (after the §6.4 gates pass; media1 + one physical Apple
 device):** press play on a prefix-cached 4K HDR transcode title — TTFF
 lands in the cached-VOD class (measured by the N0 beacon), the served
 playlist carries exactly one discontinuity at the boundary, and 10
@@ -1067,7 +1067,7 @@ JIT AV1 is out (§12). But the *producer* is unpaced background CPU
 v4.2's mid presets reach realtime-class 1080p on 8-core NUC CPUs
 (scaled from
 [published 24-core numbers](https://openbenchmarking.org/result/2502218-NE-SVTAV130739&export=html)
-— treat as an estimate to verify on nynuc, not a fact), and **film
+— treat as an estimate to verify on media1, not a fact), and **film
 grain synthesis is the one technique in this plan that can halve the
 bits on exactly the titles that hurt most** — heavy-grain film (the
 [AV1 FGS reference](https://norkin.org/pdf/DCC_2018_AV1_film_grain.pdf)
@@ -1100,7 +1100,7 @@ gating and by defaults staying off. **Toggles:**
 `transcode.output_codec` (default `h264`), `cache.av1_lane` (default
 off).
 
-**Acceptance (nynuc + physical devices, per principle 4):** a
+**Acceptance (media1 + physical devices, per principle 4):** a
 manifest/media validation command exists first and gates the rollout
 (review R7) — shape: `scripts/perf2-hevc-validate --fixture
 testdata/perf2/hevc-sdr --device-matrix
@@ -1423,7 +1423,7 @@ settings and may be amended without changing the contracts below.
    acceptance has survived a fleet cycle. The efficiency is free;
    the compatibility matrix is the only risk and it is per-client
    gated.
-5. **D5 — quality-mode targets.** Accepted 2026-08-14 for nynuc QSV: quality
+5. **D5 — quality-mode targets.** Accepted 2026-08-14 for media1 QSV: quality
    22 is the highest passing value from the q=21/22/23 corpus sweep. QSV 21
    and 22 were byte-for-byte identical; 23 was the first failure. Other
    family values remain provisional until the same corpus can run on their

@@ -187,7 +187,7 @@ def main() -> int:
     parser.add_argument("--workflow", default="ci.yml")
     parser.add_argument("--runs", type=int, default=30)
     parser.add_argument("--output", type=Path, default=Path("validation/ci-flake-ledger.json"))
-    parser.add_argument("--api-root", default="http://192.168.4.7:3000/api/v1")
+    parser.add_argument("--api-root", default="http://forge.lan:3000/api/v1")
     args = parser.parse_args()
     if not 1 <= args.runs <= 100:
         parser.error("--runs must be between 1 and 100")

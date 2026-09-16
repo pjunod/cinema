@@ -5,7 +5,7 @@
 **Re-pinned:** 2026-09-01 · **Code:** `origin/main` at `918e0464`
 
 This is the standalone implementation plan for the intermittent **Activity is
-incomplete** warning observed on `nynuc`. It treats the corrected
+incomplete** warning observed on `media1`. It treats the corrected
 `make docker-up` deployment as a build-stamping repair, not as proof that the
 runtime defect disappeared. The plan first turns the suspected burst path into
 a deterministic regression, then makes one daemon share its clustered Activity
@@ -52,7 +52,7 @@ inference into a deterministic proof.
 
 | Evidence from 2026-09-01 | What it proves |
 |---|---|
-| The Activity page intermittently named `nuc3`, `nuc4`, and `m6` as unreachable together, then returned to healthy without intervention. | The failure is burst-shaped rather than a stable loss of one named host. |
+| The Activity page intermittently named `lab3`, `lab4`, and `lab6` as unreachable together, then returned to healthy without intervention. | The failure is burst-shaped rather than a stable loss of one named host. |
 | Every node answered `/readyz`; every tested node-to-node TCP path reached `/_internal/v1/activity-snapshot` in 1–3 ms; an unsigned request returned the expected `401`. | The peers and the protected routes were reachable during the investigation. It does not prove what status the failed signed requests received. |
 | Fifteen pre-restart samples and fifteen post-restart samples kept 4/4 heartbeats fresh. | A stale membership heartbeat was not present in those observation windows. |
 | The warning appeared in 4 of 12 browser samples over about 36 seconds before the restart. | The symptom can occur between healthy samples at the page's normal polling cadence. |
@@ -108,7 +108,7 @@ arrive together behind the same sending node.
 One public read sends exactly one signed request to every peer. The receiving
 peer admits two authority checks per sender in its fixed window, so a third
 concurrent public read is refused by every peer at once. That arithmetic
-explains why `nuc3`, `nuc4`, and `m6` appeared together and recovered together:
+explains why `lab3`, `lab4`, and `lab6` appeared together and recovered together:
 it is the signature of one sender-side burst, not three independent link
 failures.
 

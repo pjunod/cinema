@@ -1477,7 +1477,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # +1 Windows service startup-checkpoint thread. It exits when readiness or
 # shutdown is published and owns no media producer.
 # PR #313 ownership review: Subject matching adds a shutdown-owned durable worker, one finite post-save build/enqueue task, and a fake-provider test server that is aborted and awaited. None owns a rolling playback producer.
-expected_occurrences = 511
+# 511 -> 512 with HEVC sample-entry recovery: one startup-owned task runs one
+# leased, 256-row catalogue backfill pass beside the established Dolby Vision
+# facts backfill. It opens no media, starts no process or producer, fences each
+# Store update to the exact source/probe snapshot, and releases its cluster-job
+# lease when the finite pass returns.
+expected_occurrences = 512
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the

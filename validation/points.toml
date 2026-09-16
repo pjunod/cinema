@@ -943,6 +943,7 @@ paths = [
   "docs/features/WEEKLY-REVIEW-REMEDIATION-STATUS.md",
   "scripts/pre-commit",
   "scripts/ci-flake-report",
+  "scripts/publish-badge",
   "scripts/ripwire",
   "scripts/ripwire.lock.json",
   "scripts/ripwire-smoke",

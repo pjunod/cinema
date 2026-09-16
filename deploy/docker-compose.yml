@@ -13,7 +13,7 @@
 # are gitignored. This developer/fleet path deliberately builds from the
 # checked-out Dockerfile (`up -d --build` the first time and after pulling
 # changes). Tagged releases are published separately to the LAN Forgejo
-# registry at `192.168.4.7:3000/noirr/plurxd` for image-only installations.
+# registry at `forge.lan:3000/noirr/plurxd` for image-only installations.
 #
 # Media stays read-only (`:ro`) by default. The only exception is an exact
 # library path an operator deliberately makes writable for the admin-only,
@@ -160,7 +160,7 @@ services:
     restart: unless-stopped
     network_mode: host
     # The advertiser uses the machine hostname when the configured server name
-    # is the generic default `plurx`, so a multi-server picker shows m6/nuc4/etc.
+    # is the generic default `plurx`, so a multi-server picker shows lab6/lab4/etc.
     uts: host
     depends_on:
       plurxd:

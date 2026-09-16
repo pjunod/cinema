@@ -55,7 +55,7 @@ not delete or commit them.
 ## Opus continuation checkpoint
 
 Start from the local clone and head above. Do not use, switch, build, or test
-the user's checkout at `/Users/pjunod/code/plurx`.
+the user's checkout at `~/code/plurx`.
 
 PR #642 moves copy startup, progress, reader classification, process exit,
 retry, and completion lifetime into the rolling actor/executor. It removes the
@@ -233,7 +233,7 @@ commit, exact-head review, test gate, merge, and milestone transition.
 ## 1. Non-negotiable working rules
 
 - Never edit, switch, build, or test the user's checkout at
-  `/Users/pjunod/code/plurx`.
+  `~/code/plurx`.
 - Work only in the disposable clone at
   `/private/tmp/plurx-playback-control-clone`.
 - Preserve the unrelated untracked build artifacts under
