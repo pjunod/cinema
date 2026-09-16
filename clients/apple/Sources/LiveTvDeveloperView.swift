@@ -5,6 +5,7 @@ import SwiftUI
 struct LiveTvDeveloperView: View {
     @EnvironmentObject private var model: AppModel
     @AppStorage("plurx.preparedHandoff") private var preparedHandoffEnabled = true
+    @ObservedObject private var handoff = Caps.PreparedHandoffTelemetry.shared
     @State private var api: LiveTvAPI?
     @State private var saved: LiveTvSettings?
     @State private var readiness: LiveTvReadiness?
@@ -39,6 +40,12 @@ struct LiveTvDeveloperView: View {
                     .font(.caption)
                 Label("Fleet and link evidence: Not met · Checked during playback", systemImage: "exclamationmark.triangle")
                 Text("Throughput, decoder capacity, and physical-device observations improve rollout confidence. Missing or low evidence never disables this switch.")
+                    .font(.caption)
+                Label("Last directed quality change: \(handoff.lastOutcome ?? "none yet")", systemImage: "info.circle")
+                Text("What the most recent viewer-initiated quality change did. Informational only — it never blocks a change and never overrides the switch above.")
+                    .font(.caption)
+                Label("Last server preparation value: \(handoff.lastPreparation ?? "not sent")", systemImage: "info.circle")
+                Text("The newest delivery.preparation this device saw. Older servers and relays do not send it, and its absence is never read as a refusal.")
                     .font(.caption)
             }
             if let saved {
