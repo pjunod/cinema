@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["99bd400e"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["rust-gate", "web-static"]
+reason = "The Rust gate pins chapter-free encoded VOD recipes, identical init bytes across chaptered restart offsets, and rejection of genuine pipeline drift. The web gate pins established-loader resume ownership, typed refusal-body decoding with stale-result fences, and evidence-gated Auto quality changes; reverting the repair breaks those focused regressions and their shared production helpers."

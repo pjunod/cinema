@@ -7274,13 +7274,13 @@ async fn on_init_drift(shared: &Arc<Shared>, rendition: &Arc<Rendition>, cause: 
         );
         return;
     }
-    // Init drift is a *pipeline* change under a rendition a client already
-    // holds a playlist for — vodgen says so in as many words — so it is filed
-    // as the engine moving, not as the file on disk moving.
+    // The mismatch is local to this immutable rendition. It refuses further
+    // publication under the playlist identity the client already holds, but
+    // it is not evidence that the process-wide engine baseline moved.
     record_failure(
         shared,
         rendition,
-        crate::playback_control::ProducerDecisionReason::EngineChanged,
+        crate::playback_control::ProducerDecisionReason::RenditionInitChanged,
         cause,
     );
 }
@@ -7347,8 +7347,8 @@ fn classify_failure(failure: &Failure) -> crate::playback_control::ProducerDecis
     match failure {
         // Handled before this point by `on_init_drift`; classified here so the
         // match stays exhaustive rather than defaulting a new variant, and
-        // with the same class that path records.
-        Failure::InitDrift(_) => Reason::EngineChanged,
+        // with the same local class that path records.
+        Failure::InitDrift(_) => Reason::RenditionInitChanged,
         Failure::EngineChanged(_) => Reason::EngineChanged,
         Failure::Landing(_) => Reason::MediaLandingFailed,
         Failure::Stream(_) => Reason::ReaderFailed,
@@ -11621,7 +11621,10 @@ mod tests {
         use crate::playback_control::ProducerDecisionReason as Reason;
 
         let cases = [
-            (Failure::InitDrift("init".to_owned()), Reason::EngineChanged),
+            (
+                Failure::InitDrift("init".to_owned()),
+                Reason::RenditionInitChanged,
+            ),
             (
                 Failure::EngineChanged("engine".to_owned()),
                 Reason::EngineChanged,
@@ -11650,11 +11653,36 @@ mod tests {
             // every reopen re-plans straight back into the same verdict.
             assert_eq!(
                 classify_failure(&failure).is_permanent(),
-                expected == Reason::EngineChanged,
+                matches!(
+                    expected,
+                    Reason::RenditionInitChanged | Reason::EngineChanged
+                ),
                 "{} is classified with the wrong permanence",
                 describe_failure(&failure)
             );
         }
+    }
+
+    #[tokio::test]
+    async fn specialized_init_drift_records_only_the_rendition_scope() {
+        use crate::playback_control::ProducerDecisionReason as Reason;
+
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+
+        on_init_drift(
+            &serve.shared,
+            &rendition,
+            "generation init bytes differ from the published identity".to_owned(),
+        )
+        .await;
+
+        let failure = rendition.failure().expect("drift is recorded");
+        assert_eq!(failure.decision, Reason::RenditionInitChanged);
+        assert_ne!(failure.decision, Reason::EngineChanged);
+        assert!(failure.decision.is_permanent());
+        assert!(failure.cause.contains("published identity"));
     }
 
     /// The seam the P1-3 correction consists of: the meter a segment answer

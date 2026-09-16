@@ -122,12 +122,15 @@ function fullOpenHarness() {
     shippedSource("retirePlaybackPredecessor"),
     shippedSource("handlePlaybackTransportEvent"),
     shippedSource("beginPlaybackMediaAttachment"), shippedSource("applyPlaybackAttachmentPosition"),
-    shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
+    shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
     shippedSource("hlsStartupManifestRequest"),shippedSource("abortHlsStartupLoaders"),
     shippedSource("cancelHlsStartup"),shippedSource("completeHlsStartup"),
     shippedSource("configureHlsStartupDeadline"),shippedSource("diagnoseHlsStartup"),
     shippedSource("exhaustHlsStartup"),shippedSource("armHlsStartupRetry"),
     shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
+    shippedSource("boundStreamFailureBody"),shippedSource("decodeStreamFailureBytes"),
+    shippedSource("streamFailureResponseBodyNow"),shippedSource("streamFailureResponseBody"),
+    shippedSource("observeStreamFailureResponse"),
     shippedSource("createHlsStartupLoader"),shippedSource("scheduleHlsNetworkRetry"),
     shippedSource("attachHls"),
     shippedSource("resetMediaSource"), shippedSource("play"), shippedSource("setQuality"),
@@ -1073,6 +1076,7 @@ async function main() {
       shippedSource("setPlaybackMediaSource"),
       shippedSource("applyPlaybackTransportIntent"),shippedSource("teardownHls"),
       shippedSource("beginPlaybackMediaAttachment"),shippedSource("applyPlaybackAttachmentPosition"),
+      shippedSource("playbackAttemptTerminallyStopped"),
       shippedSource("attachHls"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       "return {p:PLAYER,video,instances,metadata,attach:()=>attachHls(video,'/session/index.m3u8',30),teardownHls};",
@@ -4888,14 +4892,17 @@ async function main() {
       "const attachment={current:()=>true};const video={currentTime:91};",
       "const hls={loadSource(url){loads.push({url,at:now});},startLoad(at){starts.push({at,now});},stopLoad(){starts.push({stop:true,now});}};",
       `let PLAYER={hls,hlsRetryUsed:0,wantsPlayback:true,mediaAttachment:attachment,controlIntentGeneration:1,stallTimer:null};`,
-      `const episode={player:PLAYER,attachment,playlistUrl:'/captured/index.m3u8',hls,state:'active',manifestState:${JSON.stringify(manifestState)},mediaLoaded:false,startedAt:0,deadlineMs:${deadlineMs},dispatches:0,loaders:new Set(),latestFailure:null,retry:{state:'unused',dueMs:null,detail:null,timer:null,intentGeneration:null}};PLAYER.hlsStartup=episode;`,
+      `const episode={player:PLAYER,attachment,playlistUrl:'/captured/index.m3u8',hls,state:'active',manifestState:${JSON.stringify(manifestState)},mediaLoaded:false,startedAt:0,deadlineMs:${deadlineMs},dispatches:0,loaders:new Set(),latestFailure:null,establishedSuspension:null,retry:{state:'unused',dueMs:null,detail:null,timer:null,intentGeneration:null}};PLAYER.hlsStartup=episode;`,
       "class StockLoader{constructor(){this.aborted=0;this.destroyed=0;this.reads=0;}openAndSendXhr(xhr,context){sends.push({xhr,context,at:now});}readystatechange(){this.reads++;}abort(){this.aborted++;}destroy(){this.destroyed++;}}",
-      shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
+      shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
       shippedSource("hlsStartupManifestRequest"),shippedSource("abortHlsStartupLoaders"),
       shippedSource("cancelHlsStartup"),shippedSource("completeHlsStartup"),
       shippedSource("configureHlsStartupDeadline"),shippedSource("diagnoseHlsStartup"),
       shippedSource("exhaustHlsStartup"),shippedSource("armHlsStartupRetry"),
       shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
+      shippedSource("boundStreamFailureBody"),shippedSource("decodeStreamFailureBytes"),
+      shippedSource("streamFailureResponseBodyNow"),shippedSource("streamFailureResponseBody"),
+      shippedSource("observeStreamFailureResponse"),
       shippedSource("createHlsStartupLoader"),shippedSource("scheduleHlsNetworkRetry"),
       "const Loader=createHlsStartupLoader(StockLoader,episode);",
       "return {episode,player:PLAYER,video,sends,loads,starts,logs,diagnoses,",
@@ -4931,6 +4938,12 @@ async function main() {
       "a pause cancels an established-stream reservation before it can restart loading");
     assert.equal(h.episode.retry.state,"cancelled",
       "the shared established-stream credit remains spent after pause");
+    h.player.controlIntentGeneration+=1;
+    h.video.currentTime=123;
+    assert.equal(h.resume(),true,"the same established attachment resumes its loader");
+    assert.deepEqual(h.starts.filter(entry=>!entry.stop),[{at:123,now:2_000}],
+      "resume starts loading at the current media-local position");
+    assert.equal(h.resume(),false,"duplicate Play cannot restart the established loader twice");
   }
   {
     const h=startupHarness({deadlineMs:2_000});
@@ -4972,11 +4985,164 @@ async function main() {
       "only the presentation owner retires startup");
   }
 
+  await streamFailureBodyTests();
   await vendoredHlsStartupTests();
 
   process.stdout.write("PASS the M5 recovery additions: create retry, hls retry, shared budget\n");
   process.stdout.write("PASS web HLS startup recovery and final-send ownership\n");
   process.stdout.write("PASS passive web playback-control reporter\n");
+}
+
+async function streamFailureBodyTests(){
+  const policy=require("../../crates/plurxd/src/web/playback-policy.js");
+  const h=new Function("PlaybackPolicy",[
+    "let STREAM_FAILURE=null;",
+    shippedSource("boundStreamFailureBody"),shippedSource("decodeStreamFailureBytes"),
+    shippedSource("streamFailureResponseBodyNow"),shippedSource("streamFailureResponseBody"),
+    shippedSource("noteStreamFailure"),shippedSource("observeStreamFailureResponse"),
+    "return {body:streamFailureResponseBody,observe:observeStreamFailureResponse,current:()=>STREAM_FAILURE};",
+  ].join("\n"))(policy);
+  const typed=JSON.stringify({code:"producer_failed",message:"encoder exited"});
+  const bytes=new TextEncoder().encode(typed);
+  const cases=[
+    {name:"text",xhr:{status:502,responseType:"text",responseText:typed}},
+    {name:"json",xhr:{status:502,responseType:"json",response:{code:"producer_failed",message:"encoder exited"}}},
+    {name:"arraybuffer",xhr:{status:502,responseType:"arraybuffer",response:bytes.buffer,
+      get responseText(){throw new Error("InvalidStateError");}}},
+    {name:"blob",xhr:{status:502,responseType:"blob",response:new Blob([bytes])}},
+  ];
+  let ordinal=0;
+  for(const {name,xhr} of cases){
+    const failure=await h.observe(xhr,{attachment:"A",resource:"media",request_ordinal:++ordinal},()=>true);
+    assert.equal(failure.code,"producer_failed",name);
+    assert.equal(failure.message,"encoder exited",name);
+  }
+  assert.equal(await h.observe({status:502,responseType:"arraybuffer",
+    response:new Uint8Array(policy.STREAM_FAILURE_BODY_MAX_CHARS+1).buffer},
+    {attachment:"A",resource:"media",request_ordinal:++ordinal},()=>true),null,
+  "an oversized binary body becomes bounded unknown evidence");
+  assert.equal(await h.observe({status:502,responseType:"arraybuffer",get response(){throw Error("unreadable");}},
+    {attachment:"A",resource:"media",request_ordinal:++ordinal},()=>true),null,
+  "a response getter failure does not escape the hls.js callback");
+  assert.equal(await h.observe({status:0,responseType:"",responseText:""},
+    {attachment:"A",resource:"media",request_ordinal:++ordinal},()=>true),null,
+  "a no-body network failure remains untyped");
+
+  let release;
+  const slow={status:502,responseType:"blob",response:{size:bytes.byteLength,
+    arrayBuffer:()=>new Promise(resolve=>{release=()=>resolve(bytes.buffer);})}};
+  let current=true;
+  const pending=h.observe(slow,{attachment:"A",intent_generation:1,
+    resource:"media",request_ordinal:++ordinal},()=>current);
+  current=false;release();
+  assert.equal(await pending,null,"replacement during Blob decode cannot mutate its successor");
+
+  const newer=await h.observe({status:502,responseType:"text",
+    responseText:JSON.stringify({code:"session_failed",message:"newer"})},
+    {attachment:"A",resource:"media",request_ordinal:100},()=>true);
+  const older=await h.observe({status:502,responseType:"text",responseText:typed},
+    {attachment:"A",resource:"media",request_ordinal:99},()=>true);
+  assert.equal(newer.message,"newer");
+  assert.equal(older.message,"newer","a slow older refusal cannot overwrite newer evidence");
+  assert.equal(h.current().request_ordinal,100);
+}
+
+function establishedHlsResumeTests(){
+  const h=new Function([
+    "let PLAYER=null;const calls=[];const performance={now:()=>1000};",
+    "function clientLog(){}function playbackContext(){return {};}",
+    "const attachment={current:()=>true};const hls={stopLoad(){calls.push(['stop']);},startLoad(at){calls.push(['start',at]);}};",
+    "const player={hls,mediaAttachment:attachment,wantsPlayback:true,controlIntentGeneration:1};PLAYER=player;",
+    "const episode={player,attachment,hls,state:'presenting',establishedSuspension:null,retry:{state:'reserved',timer:null}};player.hlsStartup=episode;",
+    "const video={currentTime:80};function clearTimeout(){}",
+    shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
+    "return {calls,player,episode,video,pause:()=>pauseHlsStartup(player),resume:()=>resumeHlsStartup(video,player),replace(){attachment.current=()=>false;}};",
+  ].join("\n"))();
+  assert.equal(h.pause(),true);
+  assert.deepEqual(h.calls,[["stop"]]);
+  assert.equal(h.episode.state,"presenting","established suspension is not startup suspension");
+  h.player.controlIntentGeneration=2;
+  h.video.currentTime=123;
+  assert.equal(h.resume(),true);
+  assert.deepEqual(h.calls,[["stop"],["start",123]]);
+  assert.equal(h.resume(),false,"duplicate Play is idempotent");
+  assert.equal(h.pause(),true);
+  h.replace();
+  assert.equal(h.resume(),false,"a replaced attachment cannot be restarted");
+
+  const edges=new Function([
+    "let PLAYER=null;const calls=[];function clearTimeout(){}function clientLog(){}function playbackContext(){return {};}",
+    "function clearPlaybackControlWaiters(){}function endWait(){}function playbackSurfaceStep(){}function playerActivity(){}function notifyPlaybackControl(){}",
+    "function supersedePlaybackControlIntent(p){p.controlIntentGeneration=(p.controlIntentGeneration||0)+1;return p.controlIntentGeneration;}",
+    "function play(){}play.pendingIntent=null;",
+    "const attachment={current:()=>true};const hls={stopLoad(){calls.push(['stop']);},startLoad(at){calls.push(['start',at]);}};",
+    "const player={hls,mediaAttachment:attachment,wantsPlayback:true,controlIntentGeneration:1};PLAYER=player;",
+    "const episode={player,attachment,hls,state:'presenting',establishedSuspension:null,retry:{state:'unused',timer:null}};player.hlsStartup=episode;",
+    "const video={paused:false,ended:false,error:null,currentTime:44,pause(){this.paused=true;},play(){this.paused=false;return Promise.resolve();}};",
+    "const document={getElementById:id=>id==='video'?video:null};",
+    shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
+    shippedSource("resetPlaybackTransportEvents"),shippedSource("playbackTransportEvents"),
+    shippedSource("pausePlaybackInternally"),shippedSource("rememberPlaybackTransportIntent"),
+    shippedSource("applyPlaybackTransportIntent"),shippedSource("handlePlaybackTransportEvent"),
+    shippedSource("togglePlay"),
+    "return {calls,player,episode,video,toggle:togglePlay,native:event=>handlePlaybackTransportEvent(video,player,event),reset(){calls.length=0;episode.establishedSuspension=null;player.wantsPlayback=true;player.controlIntentGeneration=1;video.paused=false;resetPlaybackTransportEvents(video);}};",
+  ].join("\n"))();
+  edges.toggle();
+  edges.toggle();
+  assert.deepEqual(edges.calls,[["stop"],["start",44]],
+    "the manual button stops then resumes the established loader once");
+  edges.reset();
+  edges.video.paused=true;
+  edges.native("pause");
+  edges.video.paused=false;
+  edges.native("play");
+  assert.deepEqual(edges.calls,[["stop"],["start",44]],
+    "native media events use the same established-loader resume owner");
+}
+
+function terminalHlsStopTests(){
+  const policy=require("../../crates/plurxd/src/web/playback-policy.js");
+  const h=new Function("PlaybackPolicy",[
+    "let PLAYER=null;const calls=[];let surface='terminal';",
+    "function clearTimeout(timer){calls.push(['clear',timer]);}function setTimeout(fn){calls.push(['timer']);return 9;}",
+    "function playbackSurfaceGeneration(p){return p&&p.attemptId;}function playbackSurfaceStep(event){calls.push(['surface',event.attach]);}",
+    "const token={id:1};const attachment={current:()=>PLAYER===player&&player.mediaAttachment===token};",
+    "const loader={abort(){calls.push(['abort']);},destroy(){calls.push(['destroy']);}};",
+    "const hls={stopLoad(){calls.push(['stop']);},startLoad(at){calls.push(['start',at]);}};",
+    "const player={hls,mediaAttachment:token,attemptId:'a1',controlIntentGeneration:4,hlsRetryUsed:0};PLAYER=player;",
+    "const episode={player,attachment,mediaAttachment:token,hls,state:'presenting',establishedSuspension:{},loaders:new Set([loader]),retry:{state:'reserved',timer:17}};player.hlsStartup=episode;",
+    "const video={currentTime:52};const document={getElementById:()=>video};",
+    "function pausePlaybackInternally(){calls.push(['pause']);}function stopPlayerTimers(){calls.push(['timers']);}",
+    shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),
+    shippedSource("abortHlsStartupLoaders"),shippedSource("retireHlsTerminalAttempt"),
+    shippedSource("stopPlayerForExhaustion"),shippedSource("scheduleHlsNetworkRetry"),
+    shippedSource("beginPlaybackMediaAttachment"),
+    "const owned=()=>attachment.current()&&player.hls===hls&&!playbackAttemptTerminallyStopped(player,token);",
+    "return {calls,player,episode,stop:stopPlayerForExhaustion,current:()=>hlsStartupCurrent(player,episode),retry:()=>scheduleHlsNetworkRetry(video,player,'late fatal'),late(){if(owned())surface='recovering';return surface;},reopen(){player.attemptId='a2';const next=beginPlaybackMediaAttachment(player);return {current:next.current(),terminal:player.terminalStop};}};",
+  ].join("\n"))(policy);
+
+  assert.equal(h.current(),true);
+  h.stop();
+  assert.equal(h.episode.state,"cancelled");
+  assert.equal(h.episode.cancelledReason,"owner_stopped");
+  assert.equal(h.current(),false,"the stopped attempt no longer owns callbacks");
+  assert.equal(h.retry(),false,"a reserved or late network retry cannot restart it");
+  assert.equal(h.late(),"terminal","a late fatal cannot replace the terminal surface");
+  assert.equal(h.calls.some(call=>call[0]==="start"),false);
+  for(const event of ["abort","destroy","stop","pause","timers"])
+    assert.equal(h.calls.some(call=>call[0]===event),true,event);
+
+  const reopened=h.reopen();
+  assert.equal(reopened.current,true,"a deliberate retry owns a fresh attachment");
+  assert.equal(reopened.terminal,null,"the fresh attachment is not fenced by its predecessor");
+}
+
+async function freeFallPlaybackTests(){
+  establishedHlsResumeTests();
+  terminalHlsStopTests();
+  await streamFailureBodyTests();
+  await vendoredHlsStartupTests();
+  process.stdout.write("PASS Free Fall loader resume and binary refusal regressions\n");
 }
 
 async function vendoredHlsStartupTests(){
@@ -5024,13 +5190,16 @@ async function vendoredHlsStartupTests(){
         "const document={getElementById:()=>video,createElement:()=>({dataset:{},track:{}})};",
         "function closeMenu(){}function endWait(){}function subNeedsBurn(s){return !!s?.burn;}function positionForPlaybackIntent(){return 91;}function notifyPlaybackControl(){}function rememberPlaybackSelection(){}function restartPendingPlaybackOpen(){return false;}function pbSyncSubIcon(){}function clearSubs(){}function subLabelFor(){return 'English';}function subUrl(){return '/subtitle';}function nativeHlsSubtitleOrdinal(){return -1;}function clearPlaybackControlWaiters(){}",
         "const hls={loadSource(){},startLoad(){},stopLoad(){}};let PLAYER={hls,hlsRetryUsed:0,wantsPlayback:true,mediaAttachment:attachment,controlIntentGeneration:1};",
-        "const episode={player:PLAYER,attachment,playlistUrl:'/delayed/index.m3u8',hls,state:'active',manifestState:'unknown',mediaLoaded:false,decoderFailed:false,startedAt:0,deadlineMs:40000,dispatches:0,loaders:new Set(),latestFailure:null,retry:{state:'unused',dueMs:null,detail:null,timer:null,intentGeneration:null}};PLAYER.hlsStartup=episode;",
-        shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
+        "const episode={player:PLAYER,attachment,playlistUrl:'/delayed/index.m3u8',hls,state:'active',manifestState:'unknown',mediaLoaded:false,decoderFailed:false,startedAt:0,deadlineMs:40000,dispatches:0,loaders:new Set(),latestFailure:null,establishedSuspension:null,retry:{state:'unused',dueMs:null,detail:null,timer:null,intentGeneration:null}};PLAYER.hlsStartup=episode;",
+        shippedSource("playbackAttemptTerminallyStopped"),shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
         shippedSource("hlsStartupManifestRequest"),shippedSource("abortHlsStartupLoaders"),
         shippedSource("cancelHlsStartup"),shippedSource("completeHlsStartup"),
         shippedSource("configureHlsStartupDeadline"),shippedSource("diagnoseHlsStartup"),
         shippedSource("exhaustHlsStartup"),shippedSource("armHlsStartupRetry"),
         shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
+        shippedSource("boundStreamFailureBody"),shippedSource("decodeStreamFailureBytes"),
+        shippedSource("streamFailureResponseBodyNow"),shippedSource("streamFailureResponseBody"),
+        shippedSource("observeStreamFailureResponse"),
         shippedSource("createHlsStartupLoader"),
         shippedSource("supersedePlaybackControlIntent"),shippedSource("setSub"),
         shippedSource("scheduleHlsNetworkRetry"),
@@ -5124,7 +5293,10 @@ async function vendoredHlsStartupTests(){
   process.stdout.write("PASS vendored HLS startup, local subtitles, retry ownership and stale-request fences\n");
 }
 
-(process.argv.includes('--hls-startup') ? vendoredHlsStartupTests() : main()).catch((error) => {
+const focused=process.argv.includes('--free-fall')
+  ?freeFallPlaybackTests()
+  :process.argv.includes('--hls-startup')?vendoredHlsStartupTests():main();
+focused.catch((error) => {
   process.stderr.write(`${error.stack || error}\n`);
   process.exitCode = 1;
 });

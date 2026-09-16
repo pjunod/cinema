@@ -6807,6 +6807,58 @@ function preferNativeHls(video){
 // confident explanation for a fatal error at minute forty.
 let STREAM_FAILURE=null;
 function clearStreamFailure(){ STREAM_FAILURE=null; }
+function boundStreamFailureBody(body){
+  if(typeof body!=="string") return null;
+  return body.length<=PlaybackPolicy.STREAM_FAILURE_BODY_MAX_CHARS?body:null;
+}
+function decodeStreamFailureBytes(value){
+  try{
+    let bytes=null;
+    if(value instanceof ArrayBuffer) bytes=new Uint8Array(value);
+    else if(ArrayBuffer.isView(value)) bytes=new Uint8Array(value.buffer,value.byteOffset,value.byteLength);
+    if(!bytes||bytes.byteLength>PlaybackPolicy.STREAM_FAILURE_BODY_MAX_CHARS) return null;
+    return boundStreamFailureBody(new TextDecoder("utf-8",{fatal:false}).decode(bytes));
+  }catch(e){ return null; }
+}
+// Media requests use ArrayBuffer responses, while manifest requests normally
+// use text. Read only the property allowed by the declared response type:
+// Safari throws InvalidStateError when responseText is touched on binary XHR.
+// Blob is the one asynchronous case and is bounded before decoding.
+function streamFailureResponseBodyNow(xhr){
+  if(!xhr) return null;
+  const type=String(xhr.responseType||"").toLowerCase();
+  try{
+    if(type===""||type==="text") return boundStreamFailureBody(xhr.responseText);
+    if(type==="json"){
+      if(typeof xhr.response==="string") return boundStreamFailureBody(xhr.response);
+      const source=xhr.response;
+      if(!source||typeof source!=="object") return null;
+      const selected={};
+      for(const key of ["code","message","error","film_position_ms"]){
+        if(Object.prototype.hasOwnProperty.call(source,key)) selected[key]=source[key];
+      }
+      return boundStreamFailureBody(JSON.stringify(selected));
+    }
+    if(type==="arraybuffer") return decodeStreamFailureBytes(xhr.response);
+  }catch(e){}
+  return null;
+}
+async function streamFailureResponseBody(xhr){
+  const immediate=streamFailureResponseBodyNow(xhr);
+  if(immediate!=null) return immediate;
+  if(!xhr||String(xhr.responseType||"").toLowerCase()!=="blob") return null;
+  try{
+    const blob=xhr.response;
+    if(!blob||blob.size>PlaybackPolicy.STREAM_FAILURE_BODY_MAX_CHARS
+      ||typeof blob.arrayBuffer!=="function") return null;
+    return decodeStreamFailureBytes(await blob.arrayBuffer());
+  }catch(e){ return null; }
+}
+async function observeStreamFailureResponse(xhr,evidence,current){
+  const body=await streamFailureResponseBody(xhr);
+  if(typeof current==="function"&&!current()) return null;
+  return noteStreamFailure(Number(xhr&&xhr.status)||0,body,evidence);
+}
 function noteStreamFailure(status, body, evidence){
   const parsed=PlaybackPolicy.parseStreamFailure({status:status, body:body});
   if(!parsed) return null;
@@ -6829,7 +6881,7 @@ function noteStreamFailure(status, body, evidence){
 // reload is not evidence that some terminal segment refusal recovered.
 function clearStreamFailureFor(hls){
   const retryable=STREAM_FAILURE &&
-    (STREAM_FAILURE.code==="startup_timeout" || STREAM_FAILURE.status===503);
+    PlaybackPolicy.hlsStartupResponseAction(STREAM_FAILURE)==="retry";
   if(retryable && PLAYER && PLAYER.hls===hls
     &&(!STREAM_FAILURE.attachment||STREAM_FAILURE.attachment===PLAYER.mediaAttachment))
     clearStreamFailure();
@@ -6906,9 +6958,15 @@ function vodClientContract(){
     }}
   };
 }
+function playbackAttemptTerminallyStopped(player,attachment){
+  const stopped=player&&player.terminalStop;
+  return !!(stopped&&stopped.attachment===(attachment||player.mediaAttachment));
+}
 function hlsStartupCurrent(player,episode){
   return !!(player&&episode&&PLAYER===player&&player.hlsStartup===episode
-    &&player.hls===episode.hls&&episode.attachment.current());
+    &&player.hls===episode.hls&&episode.attachment.current()
+    &&!playbackAttemptTerminallyStopped(player,
+      episode.mediaAttachment||player.mediaAttachment));
 }
 function hlsStartupIncomplete(player){
   const episode=player&&player.hlsStartup;
@@ -6927,7 +6985,11 @@ function abortHlsStartupLoaders(episode){
 }
 function cancelHlsStartup(player,reason){
   const episode=player&&player.hlsStartup;
-  if(!episode||episode.state==='cancelled'||episode.state==='presenting') return;
+  if(!episode||episode.state==='cancelled') return;
+  if(episode.state==='presenting'){
+    episode.establishedSuspension=null;
+    return;
+  }
   episode.state='cancelled'; episode.cancelledReason=reason||'cancelled';
   clearTimeout(episode.retry.timer); episode.retry.timer=null;
   abortHlsStartupLoaders(episode);
@@ -7019,6 +7081,10 @@ function pauseHlsStartup(player){
   if(episode.state==='presenting'){
     if(episode.retry.state==='reserved') episode.retry.state='cancelled';
     clearTimeout(episode.retry.timer); episode.retry.timer=null;
+    if(!episode.establishedSuspension){
+      episode.establishedSuspension={attachment:player.mediaAttachment,
+        intentGeneration:player.controlIntentGeneration||0};
+    }
     try{episode.hls.stopLoad()}catch(e){}
     return true;
   }
@@ -7030,7 +7096,29 @@ function pauseHlsStartup(player){
 }
 function resumeHlsStartup(video,player){
   const episode=player&&player.hlsStartup;
-  if(!episode||!hlsStartupCurrent(player,episode)||episode.state!=='paused') return false;
+  if(!episode||!hlsStartupCurrent(player,episode)) return false;
+  if(episode.state==='presenting'){
+    const suspended=episode.establishedSuspension;
+    if(!suspended||suspended.attachment!==player.mediaAttachment
+      ||player.wantsPlayback===false) return false;
+    // Pause and Play are consecutive viewer intents. A seek, replacement, or
+    // other command between them advances the generation again and retires
+    // this suspension instead of reviving an older loader decision.
+    if((player.controlIntentGeneration||0)!==suspended.intentGeneration+1){
+      episode.establishedSuspension=null;
+      return false;
+    }
+    const at=Math.max(0,Number(video&&video.currentTime)||0);
+    try{
+      episode.hls.startLoad(at);
+      episode.establishedSuspension=null;
+      clientLog(Object.assign({level:'info',event:'hls_loader_resumed',position:at,
+        message:`resuming the established stream loader at ${at.toFixed(1)}s`},
+        playbackContext()));
+      return true;
+    }catch(e){ return false; }
+  }
+  if(episode.state!=='paused') return false;
   episode.intentGeneration=player.controlIntentGeneration||0;
   if(performance.now()>=episode.deadlineMs){
     episode.state='active'; return exhaustHlsStartup(player,'paused_past_deadline');
@@ -7097,9 +7185,13 @@ function createHlsStartupLoader(StockLoader,episode){
         &&hlsStartupCurrent(episode.player,episode)){
         xhr._plurxStartupObserved=true;
         if(xhr.status>=400){
-          const failure=noteStreamFailure(xhr.status,xhr.responseText,{
+          const evidence={
             attachment:episode.player.mediaAttachment,resource:'manifest',
-            request_ordinal:this.plurxRequestOrdinal});
+            request_ordinal:this.plurxRequestOrdinal};
+          const failure=noteStreamFailure(xhr.status,streamFailureResponseBodyNow(xhr),evidence);
+          if(!failure) observeStreamFailureResponse(xhr,evidence,()=>
+            hlsStartupCurrent(episode.player,episode)
+            &&this.plurxIntentGeneration===(episode.player.controlIntentGeneration||0)).catch(()=>{});
           episode.latestFailure=failure||{status:xhr.status,code:null,
             message:(xhr.status===401||xhr.status===403)
               ?'Sign in again before retrying playback.'
@@ -7125,7 +7217,8 @@ function createHlsStartupLoader(StockLoader,episode){
 // established-stream network recovery. An unloaded manifest must be reloaded;
 // startLoad has no levels to start in that state.
 function scheduleHlsNetworkRetry(video,player,detail){
-  if(!player||player.hls==null) return false;
+  if(!player||player.hls==null||playbackAttemptTerminallyStopped(player,player.mediaAttachment))
+    return false;
   const episode=player.hlsStartup;
   if(episode&&hlsStartupCurrent(player,episode)
     &&['active','presenting'].includes(episode.state)){
@@ -7140,9 +7233,10 @@ function scheduleHlsNetworkRetry(video,player,detail){
   }
   if(!PlaybackPolicy.hlsRetryAllowed({used:player.hlsRetryUsed||0})) return false;
   player.hlsRetryUsed=(player.hlsRetryUsed||0)+1;
-  const hls=player.hls,attempt=player.attemptId||null;
+  const hls=player.hls,attempt=player.attemptId||null,attachment=player.mediaAttachment;
   setTimeout(()=>{
-    if(!PLAYER||PLAYER!==player||PLAYER.hls!==hls||PLAYER.attemptId!==attempt) return;
+    if(!PLAYER||PLAYER!==player||PLAYER.hls!==hls||PLAYER.attemptId!==attempt
+      ||playbackAttemptTerminallyStopped(player,attachment)) return;
     const at=Math.max(0,Number(video&&video.currentTime)||0);
     try{hls.startLoad(at)}catch(e){}
   },PlaybackPolicy.HLS_RETRY.delay_ms);
@@ -7200,11 +7294,13 @@ function attachHls(video, playlistUrl, startAt){
       deadlineMs:performance.now()+PlaybackPolicy.HLS_STARTUP.cold_deadline_ms,
       dispatches:0,loaders:new Set(),latestFailure:null,
       intentGeneration:attachedPlayer.controlIntentGeneration||0,
-      evidenceOrdinal:0,
+      evidenceOrdinal:0,establishedSuspension:null,
+      mediaAttachment:attachedPlayer.mediaAttachment,
       retry:{state:'unused',dueMs:null,detail:null,timer:null,intentGeneration:null}};
     attachedPlayer.hlsStartup=startup;
     const observesCurrent=()=>attachment.current()&&attachedPlayer.hls===hls
-      &&playbackOwnsAttachedMedia(attachedPlayer);
+      &&playbackOwnsAttachedMedia(attachedPlayer)
+      &&!playbackAttemptTerminallyStopped(attachedPlayer,startup.mediaAttachment);
     const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
     const hls=new Hls({
       enableWorker:false,
@@ -7229,10 +7325,14 @@ function attachHls(video, playlistUrl, startAt){
       xhrSetup:x=>{
         if(TOKEN) x.setRequestHeader("authorization","Bearer "+TOKEN);
         x.addEventListener("load",()=>{
-          if(observesCurrent()&&x.status>=400&&!x._plurxStartupObserved)
-            noteStreamFailure(x.status,x.responseText,{attachment:attachedPlayer.mediaAttachment,
-              resource:/\.m3u8(?:\?|$)/i.test(String(x.responseURL||''))?'manifest':'media',
-              request_ordinal:++startup.evidenceOrdinal});
+          if(!observesCurrent()||x.status<400||x._plurxStartupObserved) return;
+          const intentGeneration=attachedPlayer.controlIntentGeneration||0;
+          const evidence={attachment:attachedPlayer.mediaAttachment,
+            intent_generation:intentGeneration,
+            resource:/\.m3u8(?:\?|$)/i.test(String(x.responseURL||''))?'manifest':'media',
+            request_ordinal:++startup.evidenceOrdinal};
+          observeStreamFailureResponse(x,evidence,()=>observesCurrent()
+            &&attachedPlayer.controlIntentGeneration===intentGeneration).catch(()=>{});
         });
       }});
     const estimateSeed=PlaybackPolicy.bandwidthSeedBps({
@@ -10096,7 +10196,8 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     controlPresentedFrames:0,controlHasFrameCallbacks:false,
     wantsPlayback:fullIntent.wantsPlayback,
     mediaPredecessor:outgoing,
-    internalMediaReset:true,pendingOpenAttempt:openAttempt,libraryChannel, };
+    internalMediaReset:true,pendingOpenAttempt:openAttempt,libraryChannel,
+    terminalStop:null, };
   const openedPlayer=PLAYER;
   const openIsAttached=()=>openIsCurrent()&&PLAYER===openedPlayer
     &&PLAYER.openToken===openAttempt.token;
@@ -11370,6 +11471,9 @@ function beginPlaybackMediaAttachment(p){
   const token={id:(p._mediaAttachmentOrdinal||0)+1};
   p._mediaAttachmentOrdinal=token.id;
   p.mediaAttachment=token;
+  // A deliberate reopen mints a new attachment. Clear the retired attempt
+  // only after the old attachment can no longer pass its identity closure.
+  p.terminalStop=null;
   // Where this attempt's generation takes the picture: every attach on every
   // route runs through here, and faults about any other generation are dropped.
   // That is what bounds a fault's life — identity, not a clock. (`STREAM_FAILURE`
@@ -11695,6 +11799,64 @@ function recordAutoSwitch(p,from,to,reason,position,targetSessionId){
     message:`Auto quality ${entry.from} → ${entry.to} — ${reason}`},
     playbackContext()));
 }
+function autoCauseEvidence(p,nowMs){
+  const maxAge=PlaybackPolicy.AUTO_DEFAULTS.causeMaxAgeMs;
+  const episode=p&&p.hlsStartup;
+  if(episode&&episode.establishedSuspension
+    &&episode.establishedSuspension.attachment===p.mediaAttachment){
+    return {kind:"loader-suspended",ageMs:0};
+  }
+  const failure=STREAM_FAILURE;
+  if(failure&&(!failure.attachment||failure.attachment===p.mediaAttachment)){
+    const age=Math.max(0,Date.now()-Number(failure.at||Date.now()));
+    if(age<=maxAge){
+      const code=String(failure.code||"");
+      if(failure.status===401||failure.status===403||failure.status===410
+        ||/authority|owner_(?:lost|transition)|node_removal_fenced|learner_route_ineligible/.test(code))
+        return {kind:"authority-refused",ageMs:age,code};
+      if(PlaybackPolicy.HLS_STARTUP_TERMINAL_CODES.includes(code))
+        return {kind:"producer-failed",ageMs:age,code};
+      if(/publication|segment_|response_/.test(code))
+        return {kind:"delivery-refused",ageMs:age,code};
+    }
+  }
+  const healthAge=p&&p.healthObservedAt!=null?Math.max(0,nowMs-p.healthObservedAt):null;
+  const health=p&&p.health;
+  if(health&&healthAge<=maxAge){
+    if(health.producer_state==="failed") return {kind:"producer-failed",ageMs:healthAge};
+    if(Number(health.recent_speed)>0&&Number(health.recent_speed)<1
+      &&["running","held"].includes(String(health.producer_state||"")))
+      return {kind:"capacity-shortfall",ageMs:healthAge};
+  }
+  const abr=p&&p.abr;
+  const sampleAge=abr&&abr.recentEstimateAtMs!=null
+    ?Math.max(0,nowMs-abr.recentEstimateAtMs):null;
+  const sourceKbps=Number(p&&p.source&&p.source.bitrate)/1000;
+  if(sampleAge!=null&&sampleAge<=PlaybackPolicy.AUTO_DEFAULTS.recentSampleMaxAgeMs
+    &&Number(abr.recentEstimateKbps)>0&&sourceKbps>0
+    &&abr.recentEstimateKbps<sourceKbps*PlaybackPolicy.AUTO_DEFAULTS.severeEstimateRatio)
+    return {kind:"bandwidth-limited",ageMs:sampleAge};
+  return {kind:healthAge==null?"unknown":"stale",ageMs:healthAge};
+}
+function recordAutoDecision(p,currentHeight,result,runway,throughputKbps){
+  if(!p||!p.abr) return;
+  if(!result||result.action!=="suppressed"){
+    p.abr.lastDecisionKey=null;
+    return;
+  }
+  const evidence=result.evidence||{};
+  const key=`${result.action}:${result.reason}:${currentHeight}`;
+  if(p.abr.lastDecisionKey===key) return;
+  p.abr.lastDecisionKey=key;
+  clientLog(Object.assign({level:"info",event:"auto_quality_decision",
+    action:result.action,detail:`${result.reason}; ${currentHeight}p retained`,
+    current_height:currentHeight,target_height:currentHeight,
+    evidence_age_ms:evidence.age_ms==null?null:Math.round(evidence.age_ms),
+    runway:runway==null?null:Number(runway),
+    throughput_kbps:throughputKbps==null?null:Math.round(throughputKbps),
+    message:`Auto quality retained ${currentHeight}p — ${result.reason}`},
+    playbackContext()));
+}
 async function switchAutoRung(currentHeight,decision){
   const p=PLAYER, v=document.getElementById("video");
   if(!p||!v||!p.abr||p.abr.switching||!(decision&&decision.height>0)) return;
@@ -11711,9 +11873,17 @@ async function switchAutoRung(currentHeight,decision){
       {title:`Quality → ${decision.height}p — ${decision.reason}`});
   } finally { releaseAutoFallback(p); }
 }
-async function rescueAutoSupply(){
+async function rescueAutoSupply(causeEvidence){
   const p=PLAYER, v=document.getElementById("video");
   if(!p||!v||!p.abr||p.abr.switching||p.abr.supplyRescued) return;
+  const cause=causeEvidence||autoCauseEvidence(p,performance.now());
+  if(!["bandwidth-limited","capacity-shortfall"].includes(cause.kind)){
+    recordAutoDecision(p,Number(p.autoHeight||v.videoHeight)||null,
+      {action:"suppressed",reason:cause.kind==="producer-failed"||cause.kind==="authority-refused"
+        ?cause.kind:"insufficient-evidence",evidence:{age_ms:cause.ageMs}},
+      bufferRunway(v),p.abr.recentEstimateKbps);
+    return;
+  }
   // A decode rescue started earlier in this same interval is already opening a
   // replacement session and has not reached the point where it marks the
   // player. Claim before any state changes or overlay text, so a refused claim
@@ -11763,8 +11933,20 @@ async function autoControllerTick(){
   for(const kind of ['supply','decode']){
     p.abr.stallEvents[kind]=(p.abr.stallEvents[kind]||[]).filter(at=>now-at<windowMs);
   }
+  const causeEvidence=autoCauseEvidence(p,now);
+  if(causeEvidence.kind==="loader-suspended"){
+    const resumed=resumeHlsStartup(v,p);
+    recordAutoDecision(p,Number(p.autoHeight||v.videoHeight)||null,
+      {action:"suppressed",reason:"loader-suspended",
+        evidence:{kind:"loader-suspended",age_ms:causeEvidence.ageMs}},
+      bufferRunway(v),p.abr.recentEstimateKbps);
+    if(resumed) clientLog(Object.assign({level:"info",event:"auto_transport_repair",
+      detail:"loader-suspended",message:"resumed the established HLS loader without changing quality"},
+      playbackContext()));
+    return;
+  }
   if(p.method!=='transcode'){
-    if(p.abr.stallEvents.supply.length>=3) await rescueAutoSupply();
+    if(p.abr.stallEvents.supply.length>=3) await rescueAutoSupply(causeEvidence);
     return;
   }
   const ladder=PlaybackPolicy.normalizedLadder(p.ladder);
@@ -11787,11 +11969,12 @@ async function autoControllerTick(){
     lastStallAtMs:p.abr.lastStallAtMs,nowMs:now,
     lastSwitchAtMs:p.abr.lastSwitchAtMs,mildSamples:p.abr.mildSamples,
     upgradeSinceMs:p.abr.upgradeSinceMs,playerHeight:playerPixelHeight(v),
-    blockedHeights:p.abr.failedHeights
+    blockedHeights:p.abr.failedHeights,causeEvidence
   });
   p.abr.previousRunway=runway;
   p.abr.mildSamples=result.mildSamples;
   p.abr.upgradeSinceMs=result.upgradeSinceMs;
+  recordAutoDecision(p,currentHeight,result,runway,p.abr.recentEstimateKbps);
   if(result.reason && result.height!==currentHeight){
     await switchAutoRung(currentHeight,result);
     return;
@@ -12068,9 +12251,27 @@ function playbackSurfaceSourceIsBlocking(source,context){
 // keeps `wantsPlayback`, so Try again still knows the viewer wanted this
 // playing. Nothing else about the sites that call this changes.
 function stopPlayerForExhaustion(){
+  const p=PLAYER;
+  if(p) retireHlsTerminalAttempt(p);
   const v=document.getElementById("video");
   if(v) pausePlaybackInternally(v);
   stopPlayerTimers();
+}
+function retireHlsTerminalAttempt(p){
+  if(!p) return;
+  const mediaAttachment=p.mediaAttachment||null;
+  const episode=p.hlsStartup;
+  const ownsEpisode=!!(episode&&p.hls===episode.hls&&episode.attachment.current());
+  p.terminalStop={attachment:mediaAttachment,attemptId:p.attemptId||null,
+    intentGeneration:p.controlIntentGeneration||0};
+  if(ownsEpisode){
+    episode.state='cancelled';
+    episode.cancelledReason='owner_stopped';
+    episode.establishedSuspension=null;
+    clearTimeout(episode.retry.timer);episode.retry.timer=null;
+    abortHlsStartupLoaders(episode);
+  }
+  try{if(p.hls)p.hls.stopLoad();}catch(e){}
 }
 // A button the presenter drew. The reducer clears the fault the action belonged
 // to; the EFFECT is the recovery owner’s, which is why it happens here and not
