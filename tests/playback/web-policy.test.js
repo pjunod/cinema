@@ -4903,8 +4903,8 @@ asyncTest("main10_only_success_still_requires_the_emitted_main_profile", async (
 
 asyncTest("mse_only_pq_does_not_authorize_progressive_hevc", async () => {
   const h = hevcHarness();
-  const claimed = h.HEVC_TIERS.map((_, index) => index === 0);
-  const pq = h.HEVC_TIERS.map((_, index) => index === 0);
+  const claimed = h.HEVC_TIERS.map((tier, index) => tier.depth === 10 && index === 3);
+  const pq = h.HEVC_TIERS.map((tier, index) => tier.depth === 10 && index === 3);
   const entries = await h.progressiveHevcSampleEntries(claimed, pq, [], {
     mediaCapabilities: {
       decodingInfo({ video }) {
@@ -5410,6 +5410,7 @@ asyncTest("new_caps_failure_does_not_retry_legacy_decision", async () => {
       "api",
       "currentCapsDocument",
       "decisionUrl",
+      "prePlaySelectionQuery",
       `${shippedSource("askDecision")}\nreturn askDecision;`,
     )(
       async (url, options) => {
@@ -5419,6 +5420,7 @@ asyncTest("new_caps_failure_does_not_retry_legacy_decision", async () => {
       },
       () => caps,
       () => "/legacy-decision",
+      () => "",
     );
     let error = null;
     try { await ask(42, "auto", null); } catch (caught) { error = caught; }

@@ -323,6 +323,7 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
   );
   const panels = new Function(
     "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc", "window", "Hls",
+    "currentCapsDocument",
     // Joined with newlines, never bare interpolation: `shippedSource` here
     // stops at the next `\nfunction `, so a fragment can end inside a trailing
     // `//` comment and swallow whatever follows it.
@@ -340,6 +341,7 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
       // has to be composed too or the panel throws on the name.
       shippedSource("windowsServerCard"),
       shippedSource("webHlsStartupRecoveryCard"),
+      shippedSource("hevcSampleEntryAdmissionCard"),
       "const SETTINGS_DATA=null,ME=null;",
       shippedSource("uiEnableAdvisory"),
       shippedSource("developerPanel"),
@@ -359,6 +361,7 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
     esc,
     { Hls: { DefaultConfig: { loader: function StockLoader() {} } } },
     { DefaultConfig: { loader: function StockLoader() {} } },
+    () => ({ progressive_hevc_sample_entries: ["hvc1"], transports: ["progressive", "hls"] }),
   );
   const readiness = { items: [{
     id: "prepared_quality_handoff",
@@ -401,6 +404,9 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
   assert.match(html, /CARDHEAD:Web HLS startup recovery\|/);
   assert.match(html, /Final-send loader interception/);
   assert.match(html, /Recovery is enabled for every hls\.js attachment/);
+  assert.match(html, /CARDHEAD:HEVC sample-entry admission\|/);
+  assert.match(html, /No feature flag is used/);
+  assert.match(html, /Serving-fleet order/);
   assert.match(html, /These checks[^.]*never enable, disable, or hide it/);
   assert.match(html, /This saved switch is authoritative; readiness is advisory and never overrides your choice/);
   // The switch has to be wired to something. A control that renders and does

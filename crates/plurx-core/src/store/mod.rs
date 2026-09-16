@@ -135,7 +135,7 @@ ALTER TABLE files ADD COLUMN dv_rpu_present INTEGER;";
 ///
 /// Nullable with no default: rows scanned before this column existed remain
 /// explicitly unknown until the bounded stored-probe backfill reaches them.
-const FILES_VIDEO_CODEC_TAG_COLUMN: &str = "ALTER TABLE files ADD COLUMN video_codec_tag TEXT";
+const FILES_VIDEO_CODEC_TAG_COLUMN: &str = "ALTER TABLE files ADD COLUMN video_codec_tag TEXT;";
 
 /// The staged-generation ledger, shared verbatim by both backends.
 ///
