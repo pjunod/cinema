@@ -1302,6 +1302,7 @@ struct LiveTvSession {
     worker: StdMutex<Option<tokio::task::JoinHandle<()>>>,
     process: tokio::sync::Mutex<Option<LiveTvProcess>>,
     decoder_unavailable: Arc<AtomicBool>,
+    encoder_diagnostic: Arc<StdMutex<Option<&'static str>>>,
     source_format: Arc<StdMutex<Option<LiveTvSourceFormat>>>,
     source_format_expires_at: Arc<AtomicI64>,
     /// Bytes the tuner has delivered into the graph. Shared with the pump so
@@ -3119,6 +3120,7 @@ impl LiveTvManager {
             worker: StdMutex::new(None),
             process: tokio::sync::Mutex::new(None),
             decoder_unavailable: Arc::new(AtomicBool::new(false)),
+            encoder_diagnostic: Arc::new(StdMutex::new(None)),
             source_format,
             source_format_expires_at,
             tuner_bytes: Arc::new(AtomicU64::new(0)),
@@ -3654,6 +3656,7 @@ impl LiveTvManager {
         tracing::info!(
             channel = %session.channel.guide_number,
             reason,
+            cause = %sanitize_error(&error.to_string()),
             duration_s = session.started.elapsed().as_secs(),
             tuner_bytes = session.tuner_bytes.load(Ordering::Acquire),
             user = session.request.user_id,
@@ -5033,8 +5036,15 @@ async fn run_live_session(
     // Join the child and its bounded stderr reader before classifying startup
     // failure; otherwise EOF can beat the decoder diagnostic to the waiter.
     let cleanup = cleanup_session(&session).await;
-    let result =
-        classify_live_source_error(result, session.decoder_unavailable.load(Ordering::Acquire));
+    let diagnostic = *session
+        .encoder_diagnostic
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let result = classify_live_source_error(
+        result,
+        session.decoder_unavailable.load(Ordering::Acquire),
+        diagnostic,
+    );
     {
         let error = result.as_ref().err().cloned().unwrap_or_else(|| {
             LiveTvError::CapabilityExpired("the live-TV session stopped".into())
@@ -5073,6 +5083,7 @@ async fn run_live_session(
 fn classify_live_source_error(
     result: Result<(), LiveTvError>,
     decoder_unavailable: bool,
+    encoder_diagnostic: Option<&'static str>,
 ) -> Result<(), LiveTvError> {
     if decoder_unavailable
         && matches!(
@@ -5082,7 +5093,12 @@ fn classify_live_source_error(
     {
         Err(LiveTvError::CodecUnsupported("The tuner owner's FFmpeg could not detect or decode the required video and audio. ATSC 3.0 may require HEVC and AC-4 support; try an ATSC 1.0 channel or a decoder-capable FFmpeg build.".into()))
     } else {
-        result
+        match (result, encoder_diagnostic) {
+            (Err(LiveTvError::StreamFailed(message)), Some(cause)) => {
+                Err(LiveTvError::StreamFailed(format!("{message}; {cause}")))
+            }
+            (result, _) => result,
+        }
     }
 }
 
@@ -5284,6 +5300,7 @@ async fn run_live_session_inner(
         tokio::spawn(capture_live_stderr(
             stderr,
             Arc::clone(&session.decoder_unavailable),
+            Arc::clone(&session.encoder_diagnostic),
             Arc::clone(&session.source_format),
             Arc::clone(&session.source_format_expires_at),
             Arc::clone(&source_format_changed),
@@ -6153,9 +6170,16 @@ fn live_caption_args(encoder: Encoder) -> &'static [&'static str] {
     }
 }
 
+fn live_encoder_diagnostic(bytes: &[u8]) -> Option<&'static str> {
+    let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
+    text.contains("unexpected end of sei nal unit parsing")
+        .then_some("VideoToolbox failed while inserting A/53 captions into H.264 SEI data")
+}
+
 async fn capture_live_stderr(
     mut stderr: impl tokio::io::AsyncRead + Unpin,
     decoder_unavailable: Arc<AtomicBool>,
+    encoder_diagnostic: Arc<StdMutex<Option<&'static str>>>,
     source_format: Arc<StdMutex<Option<LiveTvSourceFormat>>>,
     source_format_expires_at: Arc<AtomicI64>,
     source_format_changed: Arc<AtomicBool>,
@@ -6166,10 +6190,28 @@ async fn capture_live_stderr(
     let mut window = Vec::with_capacity(2048);
     let mut descriptor = Vec::with_capacity(MAX_SOURCE_DESCRIPTOR_BYTES);
     let mut descriptor_done = false;
+    let mut diagnostic_window = Vec::with_capacity(2048);
+    let mut diagnostic_found = false;
     let mut chunk = [0; 1024];
     while let Ok(read) = stderr.read(&mut chunk).await {
         if read == 0 {
             break;
+        }
+        // A fast failure may share a read with the initial descriptor and
+        // stream mapping. Recognize it before the format parser skips that
+        // chunk, retaining only the first static cause, never raw metadata.
+        if !diagnostic_found {
+            diagnostic_window.extend_from_slice(&chunk[..read]);
+            if let Some(cause) = live_encoder_diagnostic(&diagnostic_window) {
+                encoder_diagnostic
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .get_or_insert(cause);
+                diagnostic_found = true;
+                diagnostic_window.clear();
+            } else if diagnostic_window.len() > 2048 {
+                diagnostic_window.drain(..diagnostic_window.len() - 2048);
+            }
         }
         let descriptor_was_done = descriptor_done;
         if !descriptor_done {
@@ -7587,6 +7629,7 @@ mod tests {
             resource_admission: Arc::new(tokio::sync::Semaphore::new(LOCAL_RESOURCE_CONCURRENCY)),
             process: tokio::sync::Mutex::new(None),
             decoder_unavailable: Arc::new(AtomicBool::new(false)),
+            encoder_diagnostic: Arc::new(StdMutex::new(None)),
             source_format: Arc::new(StdMutex::new(None)),
             source_format_expires_at: Arc::new(AtomicI64::new(0)),
             tuner_bytes: Arc::new(AtomicU64::new(0)),
@@ -7676,6 +7719,7 @@ mod tests {
             worker: StdMutex::new(None),
             process: tokio::sync::Mutex::new(None),
             decoder_unavailable: Arc::new(AtomicBool::new(false)),
+            encoder_diagnostic: Arc::new(StdMutex::new(None)),
             source_format: Arc::new(StdMutex::new(None)),
             source_format_expires_at: Arc::new(AtomicI64::new(0)),
             tuner_bytes: Arc::new(AtomicU64::new(0)),
@@ -8719,6 +8763,7 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
             child.stderr.take().expect("stderr"),
             Arc::clone(&detected),
             Arc::new(StdMutex::new(None)),
+            Arc::new(StdMutex::new(None)),
             Arc::new(AtomicI64::new(0)),
             Arc::new(AtomicBool::new(false)),
         ));
@@ -8744,10 +8789,111 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
         assert!(matches!(
             classify_live_source_error(
                 Err(LiveTvError::StreamFailed("child exited".into())),
-                detected.load(Ordering::Acquire)
+                detected.load(Ordering::Acquire),
+                None,
             ),
             Err(LiveTvError::CodecUnsupported(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn live_caption_stderr_fact_enriches_stream_failure_without_claiming_decoder_failure() {
+        for variant in ["type", "size"] {
+            for split in [false, true] {
+                let (mut reader, mut writer) = tokio::io::simplex(4096);
+                let decoder = Arc::new(AtomicBool::new(false));
+                let diagnostic = Arc::new(StdMutex::new(None));
+                let changed = Arc::new(AtomicBool::new(false));
+                let mut bytes =
+                    b"Input #0, http://secret.invalid/token\nStream mapping:\n".to_vec();
+                if split {
+                    bytes.resize(1010, b'x');
+                }
+                bytes.extend_from_slice(
+                    format!("Unexpected end of SEI NAL Unit parsing {variant}.\n").as_bytes(),
+                );
+                // Repetition and later unknown errors must not duplicate or
+                // replace the first recognized static cause.
+                bytes.extend_from_slice(b"Unexpected end of SEI NAL Unit parsing size.\nprivate-path: unknown failure\n");
+                let feed = async {
+                    writer.write_all(&bytes).await.expect("diagnostic input");
+                    drop(writer);
+                };
+                tokio::join!(
+                    feed,
+                    capture_live_stderr(
+                        &mut reader,
+                        Arc::clone(&decoder),
+                        Arc::clone(&diagnostic),
+                        Arc::new(StdMutex::new(None)),
+                        Arc::new(AtomicI64::new(0)),
+                        changed,
+                    )
+                );
+                assert!(
+                    !decoder.load(Ordering::Acquire),
+                    "an encoder failure is not missing decode support"
+                );
+                let fact = *diagnostic.lock().expect("diagnostic lock");
+                assert_eq!(
+                    fact,
+                    Some("VideoToolbox failed while inserting A/53 captions into H.264 SEI data")
+                );
+                let error = classify_live_source_error(
+                    Err(LiveTvError::StreamFailed(
+                        "live-TV FFmpeg exited with 183".into(),
+                    )),
+                    decoder.load(Ordering::Acquire),
+                    fact,
+                )
+                .expect_err("stream failure");
+                assert_eq!(error.code(), "stream_failed");
+                let message = error.to_string();
+                assert_eq!(message.matches("A/53").count(), 1);
+                assert!(!message.contains("secret.invalid"));
+                assert!(!message.contains("private-path"));
+                assert!(classify_live_source_error(Ok(()), false, fact).is_ok());
+                assert!(matches!(
+                    classify_live_source_error(
+                        Err(LiveTvError::CapabilityExpired("idle".into())),
+                        false,
+                        fact
+                    ),
+                    Err(LiveTvError::CapabilityExpired(_))
+                ));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn live_caption_stderr_ignores_unrelated_errors_and_preserves_the_first_fact() {
+        for initial in [None, Some("already recorded encoder cause")] {
+            let (mut reader, mut writer) = tokio::io::simplex(128);
+            let decoder = Arc::new(AtomicBool::new(false));
+            let diagnostic = Arc::new(StdMutex::new(initial));
+            let bytes: &[u8] = if initial.is_some() {
+                b"Unexpected end of SEI NAL Unit parsing type."
+            } else {
+                b"Input #0, mpegts\nStream mapping:\nError opening output: no space left on device"
+            };
+            let feed = async {
+                writer.write_all(bytes).await.expect("stderr");
+                drop(writer);
+            };
+            tokio::join!(
+                feed,
+                capture_live_stderr(
+                    &mut reader,
+                    Arc::clone(&decoder),
+                    Arc::clone(&diagnostic),
+                    Arc::new(StdMutex::new(None)),
+                    Arc::new(AtomicI64::new(0)),
+                    Arc::new(AtomicBool::new(false)),
+                )
+            );
+            assert_eq!(*diagnostic.lock().expect("diagnostic lock"), initial);
+            assert!(!decoder.load(Ordering::Acquire));
+        }
     }
 
     #[tokio::test]
@@ -8765,6 +8911,7 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
             let capture = tokio::spawn(capture_live_stderr(
                 reader,
                 Arc::clone(&detected),
+                Arc::new(StdMutex::new(None)),
                 Arc::new(StdMutex::new(None)),
                 Arc::new(AtomicI64::new(0)),
                 Arc::new(AtomicBool::new(false)),
@@ -8794,6 +8941,7 @@ printf '%s' '{"streams":[{"codec_type":"video","codec_name":"mpeg2video","width"
         let capture = tokio::spawn(capture_live_stderr(
             reader,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(StdMutex::new(None)),
             Arc::new(StdMutex::new(None)),
             Arc::new(AtomicI64::new(0)),
             Arc::clone(&changed),
