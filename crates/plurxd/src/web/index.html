@@ -8744,15 +8744,29 @@ function controlVerdictText(message){
 // A terminal answer belongs to the intent that earned it. Automatic recovery
 // may carry it across a replacement of that same intent; any viewer command
 // retires it and every ask that was waiting on the previous action epoch.
-function supersedePlaybackControlIntent(p){
+function supersedePlaybackControlIntent(p,{preserveHlsStartup=false}={}){
   if(!p) return 0;
-  p.controlIntentGeneration=(p.controlIntentGeneration||0)+1;
+  const previous=p.controlIntentGeneration||0;
+  p.controlIntentGeneration=previous+1;
   // Viewer intent cancels an in-flight automatic episode. Automatic recovery
   // begins its seek with `supersedeIntent=false`, so it retains this exact
   // episode while pause, seek, track change and close fence every old callback.
   p.recoveringStall=null;
   const startup=p.hlsStartup;
-  if(startup&&startup.retry&&startup.retry.state==='reserved'){
+  // A local text-track change fences old control replies, but does not
+  // replace the video. Carry forward only work owned by the immediately
+  // preceding intent: never revive a loader already fenced by pause/seek.
+  const keepStartup=preserveHlsStartup&&startup&&hlsStartupCurrent(p,startup)
+    &&['active','presenting','paused'].includes(startup.state);
+  if(keepStartup){
+    for(const loader of startup.loaders){
+      if(loader.plurxIntentGeneration===previous)
+        loader.plurxIntentGeneration=p.controlIntentGeneration;
+    }
+    if(startup.retry?.intentGeneration===previous)
+      startup.retry.intentGeneration=p.controlIntentGeneration;
+  }
+  if(!keepStartup&&startup&&startup.retry&&startup.retry.state==='reserved'){
     clearTimeout(startup.retry.timer); startup.retry.timer=null;
   }
   p.controlVerdict=null;
@@ -13677,7 +13691,8 @@ async function setSub(index){
   if(burnAction==="burn"||me.burnedSub!=null){
     beginPlaybackControlSeek(me,position);
   }else{
-    supersedePlaybackControlIntent(me);
+    supersedePlaybackControlIntent(me,{preserveHlsStartup:
+      !me.pendingOpenAttempt&&!me.retiringOpenAttempt&&!me.pendingMediaChange});
     notifyPlaybackControl();
   }
   rememberPlaybackSelection("subtitle", index);

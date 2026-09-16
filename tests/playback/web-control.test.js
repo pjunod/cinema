@@ -4972,6 +4972,14 @@ async function main() {
       "only the presentation owner retires startup");
   }
 
+  await vendoredHlsStartupTests();
+
+  process.stdout.write("PASS the M5 recovery additions: create retry, hls retry, shared budget\n");
+  process.stdout.write("PASS web HLS startup recovery and final-send ownership\n");
+  process.stdout.write("PASS passive web playback-control reporter\n");
+}
+
+async function vendoredHlsStartupTests(){
   const VendoredHls=require("../../crates/plurxd/src/web/hls.min.js");
   assert.equal(typeof VendoredHls.DefaultConfig.loader.prototype.openAndSendXhr,"function",
     "the vendored stock loader exposes the final-send seam the adapter wraps");
@@ -5012,7 +5020,9 @@ async function main() {
         "let STREAM_FAILURE=null;const performance=self.performance;const setTimeout=self.setTimeout;const clearTimeout=self.clearTimeout;",
         "function clientLog(){}function playbackContext(){return {};}function stallDiagnose(){return Promise.resolve();}function reportTtff(){}",
         "function noteStreamFailure(status,body,evidence){const parsed=PlaybackPolicy.parseStreamFailure({status,body});if(!parsed)return null;Object.assign(parsed,{at:Date.now()},evidence||{});STREAM_FAILURE=parsed;return parsed;}",
-        "const attachment={current:()=>true};const video={currentTime:91};",
+        "const attachment={current:()=>true};const video={currentTime:91,appendChild(){},querySelectorAll:()=>[],textTracks:[]};",
+        "const document={getElementById:()=>video,createElement:()=>({dataset:{},track:{}})};",
+        "function closeMenu(){}function endWait(){}function subNeedsBurn(s){return !!s?.burn;}function positionForPlaybackIntent(){return 91;}function notifyPlaybackControl(){}function rememberPlaybackSelection(){}function restartPendingPlaybackOpen(){return false;}function pbSyncSubIcon(){}function clearSubs(){}function subLabelFor(){return 'English';}function subUrl(){return '/subtitle';}function nativeHlsSubtitleOrdinal(){return -1;}function clearPlaybackControlWaiters(){}",
         "const hls={loadSource(){},startLoad(){},stopLoad(){}};let PLAYER={hls,hlsRetryUsed:0,wantsPlayback:true,mediaAttachment:attachment,controlIntentGeneration:1};",
         "const episode={player:PLAYER,attachment,playlistUrl:'/delayed/index.m3u8',hls,state:'active',manifestState:'unknown',mediaLoaded:false,decoderFailed:false,startedAt:0,deadlineMs:40000,dispatches:0,loaders:new Set(),latestFailure:null,retry:{state:'unused',dueMs:null,detail:null,timer:null,intentGeneration:null}};PLAYER.hlsStartup=episode;",
         shippedSource("hlsStartupCurrent"),shippedSource("hlsStartupIncomplete"),
@@ -5022,11 +5032,13 @@ async function main() {
         shippedSource("exhaustHlsStartup"),shippedSource("armHlsStartupRetry"),
         shippedSource("pauseHlsStartup"),shippedSource("resumeHlsStartup"),
         shippedSource("createHlsStartupLoader"),
+        shippedSource("supersedePlaybackControlIntent"),shippedSource("setSub"),
+        shippedSource("scheduleHlsNetworkRetry"),
         "const Loader=createHlsStartupLoader(StockLoader,episode);const loader=new Loader({xhrSetup});",
         "loader.load({type:'manifest',url:'/delayed/index.m3u8',responseType:'text'},",
         " {loadPolicy:PlaybackPolicy.HLS_STARTUP.manifest_load_policy.default,timeout:10000},",
         " {onSuccess(){},onProgress(){},onAbort(){},onTimeout(){errors.push('timeout');},onError(error){errors.push(error);}});",
-        "return {episode,loader,pause:()=>pauseHlsStartup(PLAYER)};",
+        "return {episode,loader,player:PLAYER,setSub,retry:()=>scheduleHlsNetworkRetry(video,PLAYER,'test'),pause:()=>pauseHlsStartup(PLAYER),supersede:()=>supersedePlaybackControlIntent(PLAYER)};",
       ].join("\n"))(policy,VendoredHls.DefaultConfig.loader,xhrSetup,errors);
       return {make,sends,errors,advance,restore:()=>{global.self=priorSelf;}};
     }catch(error){global.self=priorSelf;throw error;}
@@ -5053,12 +5065,66 @@ async function main() {
     }finally{h.restore();}
   }
 
-  process.stdout.write("PASS the M5 recovery additions: create retry, hls retry, shared budget\n");
-  process.stdout.write("PASS web HLS startup recovery and final-send ownership\n");
-  process.stdout.write("PASS passive web playback-control reporter\n");
+  for(const subtitle of [0,-1]){
+    let releaseSetup;
+    const setup=new Promise(resolve=>{releaseSetup=resolve;});
+    const h=await actualVendoredLoaderCase({xhrSetup:()=>setup});
+    try{
+      h.make.player.subs=[{index:0,codec:'mov_text'}];
+      h.make.player.offset=0;
+      assert.equal(h.sends.length,0,'manifest dispatch is still pending in the real bundled loader');
+      await h.make.setSub(subtitle);
+      releaseSetup();
+      await Promise.resolve();await Promise.resolve();await Promise.resolve();
+      assert.equal(h.sends.length,1,'a local text-subtitle change must not cancel unchanged video');
+      assert.equal(h.make.episode.state,'active');
+      assert.equal(h.make.player.controlIntentGeneration,2,'old control replies remain fenced');
+    }finally{h.make.loader.destroy();h.restore();}
+  }
+
+  {
+    let releaseSetup;
+    const setup=new Promise(resolve=>{releaseSetup=resolve;});
+    const h=await actualVendoredLoaderCase({xhrSetup:()=>setup});
+    try{
+      h.make.supersede();
+      await h.make.setSub(-1);
+      releaseSetup();
+      await Promise.resolve();await Promise.resolve();await Promise.resolve();
+      assert.equal(h.sends.length,0,'a subtitle change must not revive a request fenced by an earlier command');
+    }finally{h.make.loader.destroy();h.restore();}
+  }
+
+  {
+    const h=await actualVendoredLoaderCase();
+    try{
+      assert.equal(h.make.retry(),true);
+      const retryTimer=h.make.episode.retry.timer;
+      await h.make.setSub(-1);
+      assert.equal(h.make.episode.retry.timer,retryTimer,'text tracks preserve the pending video retry timer');
+      h.advance(require('../../crates/plurxd/src/web/playback-policy.js').HLS_RETRY.delay_ms);
+      assert.equal(h.make.episode.retry.state,'dispatched','the unchanged video still receives its one retry');
+      assert.equal(h.make.retry(),false,'a subtitle change does not replenish the retry budget');
+    }finally{h.make.loader.destroy();h.restore();}
+  }
+
+  for(const pending of ['pendingOpenAttempt','retiringOpenAttempt','pendingMediaChange']){
+    let releaseSetup;
+    const setup=new Promise(resolve=>{releaseSetup=resolve;});
+    const h=await actualVendoredLoaderCase({xhrSetup:()=>setup});
+    try{
+      h.make.player[pending]={};
+      await h.make.setSub(-1);
+      releaseSetup();
+      await Promise.resolve();await Promise.resolve();await Promise.resolve();
+      assert.equal(h.sends.length,0,`${pending}: a subtitle change must not carry forward a replaced video's request`);
+    }finally{h.make.loader.destroy();h.restore();}
+  }
+
+  process.stdout.write("PASS vendored HLS startup, local subtitles, retry ownership and stale-request fences\n");
 }
 
-main().catch((error) => {
+(process.argv.includes('--hls-startup') ? vendoredHlsStartupTests() : main()).catch((error) => {
   process.stderr.write(`${error.stack || error}\n`);
   process.exitCode = 1;
 });
