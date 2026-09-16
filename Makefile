@@ -1413,6 +1413,7 @@ ui-golden: ## Rewrite tests/ui-structure.golden after an intended UI change
 web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/playback/web-policy.test.js
 	@node tests/playback/web-control.test.js
+	@node --test tests/playback/seek-control.test.js
 	@scripts/web-hls-startup-browser-check
 	@node tests/playback/player-input-contract.test.js
 	@node tests/playback/playback-surface-contract.test.js

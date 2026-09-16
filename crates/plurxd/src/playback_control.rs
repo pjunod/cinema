@@ -235,14 +235,22 @@ impl ControlRequestV1 {
                 return Err("buffered_from_ms");
             }
         }
-        let buffer_anchor = self.seek_target_ms.unwrap_or(self.position_ms);
-        if self.buffered_through_ms < buffer_anchor {
-            return Err("buffered_through_ms");
-        }
-        if self.buffered_from_ms.is_some_and(|start| {
-            start > buffer_anchor.saturating_add(target_duration_ms.clamp(2_000, 30_000))
-        }) {
-            return Err("buffered_from_ms");
+        // A seek may retain the old buffer, or install the destination's
+        // buffer before the media clock catches up. Neither interval has to
+        // cover both clocks. Validate its bounds/order above; coverage of
+        // the destination is a runway question, not a protocol error.
+        if self.render_state != RenderState::Seeking {
+            if self.buffered_through_ms < self.position_ms {
+                return Err("buffered_through_ms");
+            }
+            if self.buffered_from_ms.is_some_and(|start| {
+                start
+                    > self
+                        .position_ms
+                        .saturating_add(target_duration_ms.clamp(2_000, 30_000))
+            }) {
+                return Err("buffered_from_ms");
+            }
         }
         if !self.playback_rate.is_finite()
             || match self.demand {
@@ -999,18 +1007,30 @@ pub(crate) fn subtitle_readiness_value(
 /// An absent `buffered_from_ms` means no contiguity evidence, not a hole. That
 /// is the shape a client sends when it could not identify a region containing
 /// the playhead, and it is also the shape every client that predates the field
-/// sends. Both keep the old reading rather than being told they have nothing:
-/// inventing a starvation signal from a missing field would stall production
-/// for clients that are fine.
+/// sends. Preserve its steady-state reading, but do not invent coverage
+/// behind the observed playhead when a backward seek changes the anchor.
 fn contiguous_runway_ms(request: &ControlRequestV1, buffer_anchor_ms: i64) -> i64 {
-    let start = request.buffered_from_ms.unwrap_or(buffer_anchor_ms);
-    if start > buffer_anchor_ms {
+    buffered_runway_ms(
+        request.position_ms,
+        request.buffered_from_ms,
+        request.buffered_through_ms,
+        buffer_anchor_ms,
+    )
+}
+
+// Shared by the wire delivery view and retained producer demand. Keeping two
+// formulas let a seek gap read as zero in control replies but as many seconds
+// of playable media in the producer's pacing loop.
+fn buffered_runway_ms(
+    position_ms: i64,
+    from_ms: Option<i64>,
+    through_ms: i64,
+    anchor_ms: i64,
+) -> i64 {
+    if from_ms.unwrap_or(position_ms) > anchor_ms {
         return 0;
     }
-    request
-        .buffered_through_ms
-        .saturating_sub(buffer_anchor_ms)
-        .max(0)
+    through_ms.saturating_sub(anchor_ms).max(0)
 }
 
 impl DeliveryView {
@@ -2891,9 +2911,12 @@ impl PlaybackDemandSnapshot {
     }
 
     pub(crate) fn runway_ms(&self) -> i64 {
-        self.buffered_through_ms
-            .saturating_sub(self.buffer_anchor_ms())
-            .max(0)
+        buffered_runway_ms(
+            self.position_ms,
+            self.buffered_from_ms,
+            self.buffered_through_ms,
+            self.buffer_anchor_ms(),
+        )
     }
 
     pub(crate) fn platform(&self) -> Option<ClientPlatform> {
@@ -15624,18 +15647,13 @@ mod tests {
              comfort — it is nothing to play",
         );
 
-        // A seek whose buffer is entirely behind the target is *not* tested
-        // here, and the reason is worth writing down: it cannot reach this
-        // function. `validate` refuses a request whose `buffered_through_ms`
-        // is below the anchor, and during a seek the anchor is the target — so
-        // a client holding 9s-20s while seeking to 600s is rejected at the
-        // door rather than arriving with a misleading runway. Asserting it
-        // anyway would be asserting a shape the wire forbids, which proves
-        // nothing about the system and quietly rots when the validator moves.
-        //
-        // What does reach here is the case above: a request that passes
-        // validation because its region ends past the anchor, while starting
-        // after it.
+        let forward = ControlRequestV1 {
+            render_state: RenderState::Seeking,
+            seek_target_ms: Some(600_000),
+            ..contiguous.clone()
+        };
+        assert_eq!(forward.validate(Some(900_000), 2_000), Ok(()));
+        assert_eq!(contiguous_runway_ms(&forward, 600_000), 0);
 
         // No contiguity evidence is not a hole. Every client that predates the
         // field sends this, and so does one that could not identify a region
@@ -15657,6 +15675,100 @@ mod tests {
             ..contiguous
         };
         assert_eq!(contiguous_runway_ms(&exact, 10_000), 30_000);
+    }
+
+    #[test]
+    fn seek_buffers_are_valid_and_wire_and_producer_runway_agree() {
+        // Includes all deployed platforms, omitted-range legacy snapshots,
+        // no buffer after a late landing, and an actually buffered seek.
+        for platform in [
+            ClientPlatform::Web,
+            ClientPlatform::Apple,
+            ClientPlatform::Android,
+        ] {
+            for (position, from, through, target, runway) in [
+                (10_000, Some(8_000), 24_000, 600_000, 0),
+                (600_000, Some(598_000), 620_000, 10_000, 0),
+                (600_000, Some(10_000), 30_000, 10_000, 20_000),
+                (600_000, None, 620_000, 10_000, 0),
+                (797_711, None, 797_711, 729_643, 0),
+                (797_711, Some(797_711), 809_211, 729_643, 0),
+                (20_000, Some(8_000), 30_000, 10_000, 20_000),
+                (10_000, Some(8_000), 30_000, 20_000, 10_000),
+                (10_000, None, 30_000, 20_000, 10_000),
+                (10_000, None, 30_000, 10_000, 20_000),
+            ] {
+                let mut request = request();
+                request
+                    .capabilities
+                    .as_mut()
+                    .expect("fixture capabilities")
+                    .platform = platform;
+                request.position_ms = position;
+                request.buffered_from_ms = from;
+                request.buffered_through_ms = through;
+                request.render_state = RenderState::Seeking;
+                request.seek_target_ms = Some(target);
+                assert_eq!(request.validate(Some(900_000), 6_000), Ok(()));
+                assert_eq!(contiguous_runway_ms(&request, target), runway);
+                assert_eq!(PlaybackDemandSnapshot::from(&request).runway_ms(), runway);
+            }
+        }
+    }
+
+    #[test]
+    fn seeking_still_rejects_malformed_buffers_and_targets() {
+        let seek = ControlRequestV1 {
+            render_state: RenderState::Seeking,
+            seek_target_ms: Some(600_000),
+            ..request()
+        };
+        for (invalid, field) in [
+            (
+                ControlRequestV1 {
+                    position_ms: -1,
+                    ..seek.clone()
+                },
+                "position_ms",
+            ),
+            (
+                ControlRequestV1 {
+                    buffered_through_ms: -1,
+                    ..seek.clone()
+                },
+                "buffered_through_ms",
+            ),
+            (
+                ControlRequestV1 {
+                    buffered_through_ms: 906_001,
+                    ..seek.clone()
+                },
+                "buffered_through_ms",
+            ),
+            (
+                ControlRequestV1 {
+                    buffered_from_ms: Some(26_000),
+                    ..seek.clone()
+                },
+                "buffered_from_ms",
+            ),
+            (
+                ControlRequestV1 {
+                    seek_target_ms: None,
+                    ..seek.clone()
+                },
+                "seek_target_ms",
+            ),
+            (
+                ControlRequestV1 {
+                    seek_target_ms: Some(906_001),
+                    ..seek.clone()
+                },
+                "seek_target_ms",
+            ),
+        ] {
+            assert_eq!(invalid.validate(Some(900_000), 6_000), Err(field));
+        }
     }
 
     /// What survives a restart is the failures, and only the failures.

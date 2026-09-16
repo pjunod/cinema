@@ -1322,6 +1322,16 @@ evidence*, not a hole), `buffered_through_ms`, `playback_rate`,
 `selection`, optional `capabilities` and `observation`, an optional
 `acknowledgement`, and `supported_actions`.
 
+Buffer observations and seek intent are independent. A forward or backward
+seek may report the old buffer alongside a new `seek_target_ms`, or the new
+buffer before `position_ms` catches up; both are accepted, not `invalid_control`.
+Both the delivery view and producer pacing count only buffer covering the
+destination as runway. When `buffered_from_ms` is absent, coverage is inferred
+from the observed position forward, never across a backward seek gap. Numeric
+bounds, ordered buffer endpoints, seek-state pairing, and identity fences
+remain enforced. A malformed request still returns `400 invalid_control`
+with `invalid_field`; the web client retains that field in its error log.
+
 `selection` is `{quality, audio_track?, subtitle, audio_offset_ms, codec,
 dynamic_range}`. `quality` is tagged: `{"mode":"auto"}`,
 `{"mode":"original"}`, or `{"mode":"manual","height":N}`. `subtitle` is

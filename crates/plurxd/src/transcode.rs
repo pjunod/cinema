@@ -31936,6 +31936,61 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn seek_buffer_gap_is_not_counted_as_producer_runway() {
+        let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        // Last accepted snapshot in the September 14 incident. No actual
+        // buffer yet; the 68-second clock jump must not count as runway.
+        demand.position_ms = 797_711;
+        demand.buffered_from_ms = None;
+        demand.buffered_through_ms = 797_711;
+        demand.seek_target_ms = Some(729_643);
+        demand.render_state = crate::playback_control::RenderState::Seeking;
+        let flow = |demand: &crate::playback_control::PlaybackDemandSnapshot| {
+            evaluate_flow(FlowInputs {
+                physical_ahead: Some(Ahead {
+                    seconds: 0,
+                    bytes: 0,
+                }),
+                published_end_ms: Some(86_086),
+                media_origin_ms: 729_643,
+                lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+                demand: Some(demand),
+                global_live_bytes: 64_391_174,
+                global_ahead_bytes: 0,
+                limits: AheadLimits {
+                    max_secs: 180,
+                    max_bytes: 0,
+                    global_max_bytes: 0,
+                },
+                currently_suspended: true,
+                startup_grant_spent: true,
+            })
+        };
+        let stale = flow(&demand);
+        assert_eq!(demand.runway_ms(), 0);
+        assert_eq!(stale.production_ahead_seconds, Some(86));
+        assert_eq!(stale.production_target_seconds, Some(30));
+        assert_eq!(
+            stale.hold.map(|hold| hold.reason),
+            Some(AheadHoldReason::Time)
+        );
+
+        // Counterfactual: if the client were presenting at this position and
+        // could report its real 11.5-second buffer without a stale seek, the
+        // same producer/frontier would be released. No extra bytes are needed.
+        demand.seek_target_ms = None;
+        demand.render_state = crate::playback_control::RenderState::Rendering;
+        demand.buffered_from_ms = Some(797_711);
+        demand.buffered_through_ms = 809_211;
+        let current = flow(&demand);
+        assert_eq!(current.production_ahead_seconds, Some(18));
+        assert_eq!(current.production_target_seconds, Some(42));
+        assert_eq!(current.hold, None);
+    }
+
+    #[test]
     fn lifecycle_refill_empty_and_loaded_waits_are_not_answered_with_their_hold() {
         // The whole loop, joined: the freeze produces the hold, and the
         // resolver must not hand that hold back as the answer to the freeze.

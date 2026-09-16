@@ -1849,7 +1849,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +1 is a test-only timeout around the actual rejected-snapshot request loop.
 # It fails the test if the inner deadline is bypassed; it owns no producer
 # or response in production.
-expected_occurrences = 761
+# +2 are test-only cadence waits in the 24-seek control-endpoint regression:
+# one between seek packets and one before the settled packet. Neither creates
+# a production timer or changes producer ownership.
+expected_occurrences = 763
 
 [[module_structures]]
 id = "bare-time-constructor"
