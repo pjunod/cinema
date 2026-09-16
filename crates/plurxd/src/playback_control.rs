@@ -784,6 +784,18 @@ impl ControlResponseV1 {
                     "demand" | "time" | "bytes" | "global" | "ahead" | "working_set" | "no_room"
                 )
             })
+            // Exact membership, unlike `producer_decision` below. This
+            // vocabulary is three closed states a client *acts* on — one of
+            // them ends the wait and reopens the stream — so a name this node
+            // cannot resolve must not reach a client that would have to guess
+            // which of the three it meant. It is also additive-only by
+            // construction: a fourth state would be a new field, not a new
+            // string, for exactly that reason.
+            && self
+                .delivery
+                .preparation
+                .as_deref()
+                .is_none_or(|value| matches!(value, "staging" | "offered" | "none"))
             // Shape, not membership. A relaying node runs its *own* compiled
             // vocabulary, so during a rolling deploy an ingress on the older
             // build would reject an owner's newer reason outright — the whole
@@ -937,6 +949,24 @@ pub(crate) struct DeliveryView {
     /// answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle_readiness: Option<String>,
+    /// Whether this playback's one preparation slot is doing anything, when
+    /// this server evaluated it.
+    ///
+    /// `staging` — a successor is being planned, reserved or primed for the
+    /// current ask and no `Prepare` has been announced yet; the client should
+    /// keep the incumbent playing and exchange again soon. `offered` — this
+    /// response's `action` is that `Prepare`. `none` — nothing is being built
+    /// for the current ask, so a client waiting for a handoff should stop
+    /// waiting.
+    ///
+    /// Absent means "not evaluated here" (an older relay peer), never `none`:
+    /// a client must not read absence as a decline. That distinction is the
+    /// whole reason this is a tri-state string rather than a bool — a client
+    /// that treated a missing field as a refusal would reopen instantly on
+    /// every exchange served through an older ingress, which is the behaviour
+    /// this field exists to retire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<String>,
     pub owner_node_hash: String,
     pub owner_epoch: u64,
 }
@@ -1072,6 +1102,10 @@ impl DeliveryView {
                     .to_owned()
                 }),
                 subtitle_readiness: subtitle_readiness.clone(),
+                // Resolved at the emit site: the answer depends on the action
+                // this exchange ends up carrying, which is decided after the
+                // delivery view is built.
+                preparation: None,
                 owner_node_hash: node_hash(owner_node_id),
                 owner_epoch,
             },
@@ -1106,6 +1140,7 @@ impl DeliveryView {
                 producer_decision: info.producer_decision.map(str::to_owned),
                 hold_reason: info.producer_hold.map(str::to_owned),
                 subtitle_readiness,
+                preparation: None,
                 owner_node_hash: node_hash(owner_node_id),
                 owner_epoch,
             },
@@ -2677,6 +2712,7 @@ pub(crate) fn terminal_response_for_test(result: &LocalControlResult) -> Control
             producer_decision: None,
             hold_reason: None,
             subtitle_readiness: None,
+            preparation: None,
             owner_node_hash: "n-test".to_owned(),
             owner_epoch: 1,
         },
@@ -13426,6 +13462,63 @@ pub(crate) fn record_preparation_staged(staged: bool) {
     PREPARATIONS_STAGED[usize::from(staged)].fetch_add(1, Ordering::Relaxed);
 }
 
+/// Why a reserved successor was settled without ever being watched.
+///
+/// A speculative successor is a real encoder on real hardware. The standing
+/// rule for this server is that anything using the GPU is attributable from
+/// inside the product — what it is, why it chose that work, and how to stop
+/// it — so a teardown is a measurement, not a log line. `staged_total` already
+/// says how many were built; without this, nothing says how many were paid for
+/// and thrown away, or which policy threw them.
+///
+/// Index order is [`PREPARATION_CANCELLED_REASONS`].
+static PREPARATIONS_CANCELLED: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+
+/// The label vocabulary for [`record_preparation_cancelled`], in index order.
+///
+/// `other` is last and is deliberately not removable: it is what keeps the sum
+/// of this counter equal to the number of settlements, so a reason nobody
+/// mapped shows up as an unexplained teardown instead of vanishing.
+pub(crate) const PREPARATION_CANCELLED_REASONS: [&str; 7] = [
+    "predecessor_superseded",
+    "incumbent_waiting",
+    "foreground_claimed",
+    "disabled",
+    "expired",
+    "ownership_cancelled",
+    "other",
+];
+
+/// The metric label for one of the settlement reasons the server passes to
+/// `settle_cancelled_preparation`.
+///
+/// The reason strings themselves are load-bearing for tracing filters and are
+/// deliberately not changed; this maps them, and an unmapped one is `other`
+/// rather than silently uncounted.
+pub(crate) fn preparation_cancelled_label(reason: &str) -> &'static str {
+    match reason {
+        "predecessor superseded by a new session" => "predecessor_superseded",
+        "incumbent playback needed prepared capacity" => "incumbent_waiting",
+        "foreground playback claimed prepared capacity" => "foreground_claimed",
+        "prepared handoff disabled" => "disabled",
+        "prepared successor expired" | "prepared successor settlement expired" => "expired",
+        "prepared successor ownership was cancelled" | "prepared successor reservation refused" => {
+            "ownership_cancelled"
+        }
+        _ => "other",
+    }
+}
+
+pub(crate) fn record_preparation_cancelled(reason: &str) {
+    let label = preparation_cancelled_label(reason);
+    if let Some(index) = PREPARATION_CANCELLED_REASONS
+        .iter()
+        .position(|name| *name == label)
+    {
+        PREPARATIONS_CANCELLED[index].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Record the same selection change decided as if the client could prepare.
 ///
 /// Separate call rather than a second recording inside the one above, because
@@ -13798,6 +13891,16 @@ pub(crate) fn prometheus() -> String {
         ));
     }
     output.push_str(
+        "# HELP plurx_playback_preparation_cancelled_total Reserved successors torn down before any viewer watched them, by reason.\n\
+         # TYPE plurx_playback_preparation_cancelled_total counter\n",
+    );
+    for (index, reason) in PREPARATION_CANCELLED_REASONS.iter().enumerate() {
+        output.push_str(&format!(
+            "plurx_playback_preparation_cancelled_total{{reason=\"{reason}\"}} {}\n",
+            PREPARATIONS_CANCELLED[index].load(Ordering::Relaxed)
+        ));
+    }
+    output.push_str(
         "# HELP plurx_playback_control_holds_total Holds sent to a client, by the reason production is not advancing.\n\
          # TYPE plurx_playback_control_holds_total counter\n",
     );
@@ -14139,6 +14242,7 @@ mod tests {
                     producer_decision: None,
                     hold_reason: None,
                     subtitle_readiness: None,
+                    preparation: None,
                     owner_node_hash: "n-test".to_owned(),
                     owner_epoch: 1,
                 },
@@ -14456,6 +14560,7 @@ mod tests {
             producer_decision: None,
             hold_reason: reason.map(str::to_owned),
             subtitle_readiness: None,
+            preparation: None,
             owner_node_hash: "n-0123456789abcdef".to_owned(),
             owner_epoch: 1,
         }
@@ -16488,6 +16593,7 @@ mod tests {
             producer_decision: None,
             hold_reason: None,
             subtitle_readiness: None,
+            preparation: None,
             owner_node_hash: "n-test".to_owned(),
             owner_epoch: 1,
         }
@@ -18246,6 +18352,7 @@ mod tests {
                 producer_decision: None,
                 hold_reason: None,
                 subtitle_readiness: None,
+                preparation: None,
                 owner_node_hash: "n-0123456789abcdef".to_owned(),
                 owner_epoch: 1,
             },
@@ -22329,6 +22436,7 @@ mod tests {
                 producer_decision: None,
                 hold_reason: None,
                 subtitle_readiness: None,
+                preparation: None,
                 owner_node_hash: "n-0123456789abcdef".to_owned(),
                 owner_epoch: 1,
             },

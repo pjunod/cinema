@@ -457,6 +457,49 @@ class ControlRequestWireCase(unittest.TestCase):
             "the action and the delivery view disagree about the hold vocabulary",
         )
 
+    def test_the_preparation_state_is_one_vocabulary(self) -> None:
+        """`delivery.preparation` means the same three things on every port.
+
+        It is read as a decision, not as a label: `none` ends a client's wait
+        and reopens the stream. A port that spelled one of these differently
+        would not fail loudly — it would fall through to its own "unknown"
+        branch and wait out the twelve-second bound on every quality change,
+        which looks exactly like a slow server. So the names are pinned here
+        rather than left to each port's own tests.
+
+        Absence is deliberately not in the vocabulary. An older relay peer
+        emits no field at all, and every port must read that as "not evaluated
+        here", never as `none`.
+        """
+        bound = re.search(
+            r"preparation\s*\.as_deref\(\)\s*\.is_none_or\(\|value\| "
+            r"matches!\(value, (.*?)\)\)",
+            self.rust,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(
+            bound, "the delivery view no longer bounds its preparation state"
+        )
+        states = set(re.findall(r'"([a-z]+)"', bound.group(1)))
+        self.assertEqual(states, {"staging", "offered", "none"})
+
+        # Zero, one, two or three ports may declare it: the field is additive
+        # and the clients adopt it on their own milestones. A port that does
+        # declare it has to agree.
+        for label, source in (
+            ("web", self.web),
+            ("apple", self.apple),
+            ("android", self.android),
+        ):
+            if "preparation" not in source:
+                continue
+            declared = set(re.findall(r'"(staging|offered|none)"', source))
+            self.assertTrue(
+                declared <= states,
+                f"{label} names a preparation state the server cannot emit: "
+                f"{sorted(declared - states)}",
+            )
+
     def test_every_port_agrees_on_the_enum_vocabularies(self) -> None:
         """A value the server does not know is refused exactly like a bad name."""
         for label, rust_name, swift_name, kotlin_name in (

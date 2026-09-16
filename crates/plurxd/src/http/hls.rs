@@ -3474,6 +3474,16 @@ async fn settle_activation_predecessor(
     admitted_generation: u64,
     mut guard: Option<StartedSessionGuard>,
 ) -> Result<(), ApiError> {
+    // Before the early return, because a plain create for this playback is a
+    // supersession too: a client that reopened without naming its predecessor
+    // has still gone around the handoff, and the successor it abandoned would
+    // otherwise run to the deadline. One call site rather than the two the plan
+    // named — every activation reaches this function, and `keep` is what makes
+    // the committed successor's own activation safe here.
+    cancel_preparations_for_superseded_predecessor(
+        &successor.playback_id,
+        Some(successor.incarnation_id.as_str()),
+    );
     let Some(predecessor_incarnation) = predecessor_incarnation else {
         if let Some(guard) = guard.as_mut() {
             guard.disarm();
@@ -6958,7 +6968,7 @@ async fn control_local_with_settlement_capacity(
     } else {
         None
     };
-    let response = if let Some(response) = retained_preparation_response {
+    let mut response = if let Some(response) = retained_preparation_response {
         response
     } else if result.lease_state == "ended" {
         if request.demand != crate::playback_control::PlaybackDemand::End {
@@ -7170,6 +7180,10 @@ async fn control_local_with_settlement_capacity(
     } else {
         None
     };
+    // Computed once for both the claim below and the answer at the end of the
+    // exchange: they must be the same string, or a client would be told
+    // `staging` about a candidate for an ask it has already left.
+    let desired_digest = request.selection.desired().digest();
     let preparation_purpose = (!incumbent_waiting)
         .then(|| {
             planned_relocation
@@ -7207,10 +7221,15 @@ async fn control_local_with_settlement_capacity(
                 _ => asked,
             }
         };
+        // Claimed before the spawn, not inside it: a task that has not been
+        // polled yet is still work this playback is doing, and an exchange
+        // that raced in between would otherwise be told `none`.
+        let pending = PendingCandidateGuard::begin(&route.playback_id, &desired_digest);
         // Spawned, never awaited: see the function's own doc. The exchange has
         // spent its deadline by here and the response is already built.
         tokio::spawn(process_preparation_candidate(
             state.clone(),
+            pending,
             PreparationCandidateInputs {
                 session_id: route.session_id.clone(),
                 route: route.clone(),
@@ -7233,6 +7252,39 @@ async fn control_local_with_settlement_capacity(
             },
         ));
     }
+    // Answered last, because it is the only field that depends on the action
+    // this exchange ended up carrying. `offered` is not a guess about the slot:
+    // it is a restatement of what `action` already is, which is what keeps the
+    // two from ever disagreeing.
+    //
+    // `staging` covers three different truths that the client must treat
+    // identically — this exchange just dispatched a candidate, a candidate
+    // spawned by an earlier exchange is still doing its Store reads, or a
+    // successor is registered and priming. A client that could distinguish them
+    // would have nothing different to do with the distinction.
+    //
+    // The digest comparison is what keeps `staging` honest across a change of
+    // mind: a candidate still winding down for the selection the viewer just
+    // left is not work being done for the ask they are waiting on, and saying
+    // `staging` about it would hold them past the point where reopening was the
+    // better answer.
+    response.delivery.preparation = Some(
+        if matches!(
+            response.action,
+            crate::playback_control::ControlAction::Prepare { .. }
+        ) {
+            "offered"
+        } else if preparation_purpose.is_some()
+            || pending_candidate_for_playback(&route.playback_id)
+                .is_some_and(|pending| pending == desired_digest)
+            || has_active_preparation_for_playback(&route.playback_id)
+        {
+            "staging"
+        } else {
+            "none"
+        }
+        .to_owned(),
+    );
     tracing::debug!(
         session = %crate::transcode::session_log_id(&route.session_id),
         owner_epoch,
@@ -7297,11 +7349,186 @@ pub(super) async fn prepared_handoff_write_guard() -> tokio::sync::OwnedRwLockWr
     prepared_handoff_transition().write_owned().await
 }
 
+/// Every playback whose ask is currently being turned into a successor, from
+/// the moment the exchange spawns the candidate until that task exits by any
+/// path — refused, unplannable, disabled, cancelled, or registered as an
+/// `ActivePreparedSuccessor`, at which point the registry above takes over.
+///
+/// This exists because the work between the dispatch exchange and registration
+/// is otherwise invisible. `process_preparation_candidate` reads a setting, a
+/// source row, and runs `plan_preparation_candidate` — several Store awaits —
+/// before anything is registered. An exchange landing inside that window has
+/// neither a new dispatch nor a registry entry, and a server that answered
+/// `none` there would be telling a client that is doing exactly the right
+/// thing to stop waiting and reopen, which is the reopen this whole milestone
+/// exists to retire.
+///
+/// Keyed by playback id, because that is the identity that survives the
+/// session change a directed quality ask produces. The value carries the
+/// desired digest the candidate is for, so a superseding ask is visible as
+/// "pending, but for a different ask"; a `claim` that only this task's guard
+/// matches, so a guard dropping late cannot evict a *newer* candidate's entry;
+/// and a cancelled flag, because removal is the wrong signal — the task must
+/// still run its own teardown, and the entry must keep naming the playback
+/// until it does.
+struct PendingPreparationCandidate {
+    claim: u64,
+    desired_digest: String,
+    cancelled: bool,
+}
+
+fn pending_preparation_candidates(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, PendingPreparationCandidate>> {
+    static PENDING: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, PendingPreparationCandidate>>,
+    > = std::sync::OnceLock::new();
+    PENDING.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+static NEXT_PENDING_CANDIDATE_CLAIM: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+/// RAII: a destructor rather than a call at each `return`, because
+/// `process_preparation_candidate` already has nine early exits and will grow
+/// more. A guard also covers the two returns no `return` statement can —
+/// a panic inside the detached task, and a runtime shutdown that drops it.
+struct PendingCandidateGuard {
+    playback_id: String,
+    claim: u64,
+}
+
+impl PendingCandidateGuard {
+    /// Claim the slot for `playback_id`. A newer ask deliberately overwrites an
+    /// older one: there is one preparation slot per playback, so the older
+    /// candidate is already doomed, and leaving its digest installed would make
+    /// the emit rule answer `staging` about work nobody asked for any more.
+    fn begin(playback_id: &str, desired_digest: &str) -> Self {
+        let claim = NEXT_PENDING_CANDIDATE_CLAIM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        pending_preparation_candidates()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                playback_id.to_owned(),
+                PendingPreparationCandidate {
+                    claim,
+                    desired_digest: desired_digest.to_owned(),
+                    cancelled: false,
+                },
+            );
+        Self {
+            playback_id: playback_id.to_owned(),
+            claim,
+        }
+    }
+
+    /// Whether this candidate has been superseded since it was spawned.
+    ///
+    /// A guard whose entry is no longer its own reads as cancelled too: the
+    /// slot belongs to a newer ask, so continuing to build this one would
+    /// spend an admission slot on a selection the viewer has already left.
+    fn cancelled(&self) -> bool {
+        pending_preparation_candidates()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&self.playback_id)
+            .is_none_or(|pending| pending.claim != self.claim || pending.cancelled)
+    }
+}
+
+impl Drop for PendingCandidateGuard {
+    fn drop(&mut self) {
+        let mut pending = pending_preparation_candidates()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if pending
+            .get(&self.playback_id)
+            .is_some_and(|entry| entry.claim == self.claim)
+        {
+            pending.remove(&self.playback_id);
+        }
+    }
+}
+
+/// The desired digest a pending candidate is being built for, if one is.
+fn pending_candidate_for_playback(playback_id: &str) -> Option<String> {
+    pending_preparation_candidates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(playback_id)
+        .filter(|pending| !pending.cancelled)
+        .map(|pending| pending.desired_digest.clone())
+}
+
+/// Mark a pending candidate superseded. The task observes this at its next
+/// await boundary and exits through its own accounting; the entry stays until
+/// its guard drops, so nothing can observe a gap in which neither this map nor
+/// the active registry names the playback.
+fn cancel_pending_candidate(playback_id: &str) {
+    if let Some(pending) = pending_preparation_candidates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_mut(playback_id)
+    {
+        pending.cancelled = true;
+    }
+}
+
+/// Whether the pending candidate for this playback has been superseded.
+///
+/// Read once more immediately after registration: that is the one window the
+/// guard's own checks cannot cover, because between a task's last await and
+/// its `register_active_preparation` there is no suspension point at which it
+/// could have noticed.
+fn pending_candidate_cancelled(playback_id: &str) -> bool {
+    pending_preparation_candidates()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(playback_id)
+        .is_some_and(|pending| pending.cancelled)
+}
+
+/// Read-only sibling of `take_active_preparations_for_playback`.
+fn has_active_preparation_for_playback(playback_id: &str) -> bool {
+    active_prepared_successors()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .any(|active| active.preparation.playback_id == playback_id)
+}
+
 fn register_active_preparation(active: ActivePreparedSuccessor) {
     active_prepared_successors()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(active.preparation.incarnation_id.clone(), active);
+}
+
+/// Register an `ActivePreparedSuccessor` without standing up a real encoder.
+///
+/// The stage-only path (`stage_prepared_successor`) deliberately does not
+/// register: registration lives inside the prime branch, because cancellation
+/// ownership only means anything once a worker exists to cancel. A test that
+/// used the stage-only path to stand in for registration would be asserting
+/// against an empty registry — the cancel would "succeed" because there was
+/// nothing there, which is exactly the vacuous-guard shape this programme's
+/// reviews keep finding. This builds the entry the real path builds and inserts
+/// it the same way, so the edge under test is the real one.
+#[cfg(test)]
+fn register_test_preparation(
+    state: AppState,
+    executor: crate::playback_control::PreparationExecutor,
+    preparation: plurx_core::domain::MediaSessionPreparation,
+    purpose: PreparationPurpose,
+) -> tokio_util::sync::CancellationToken {
+    let cancelled = tokio_util::sync::CancellationToken::new();
+    register_active_preparation(ActivePreparedSuccessor {
+        state,
+        executor,
+        preparation,
+        purpose,
+        cancelled: cancelled.clone(),
+    });
+    cancelled
 }
 
 fn arm_preparation_foreground_watch(active: ActivePreparedSuccessor) {
@@ -7360,6 +7587,7 @@ fn take_active_preparations_for_playback(playback_id: &str) -> Vec<ActivePrepare
 
 async fn settle_cancelled_preparation(active: ActivePreparedSuccessor, reason: &'static str) {
     let _ = take_active_preparation(&active.preparation.incarnation_id);
+    crate::playback_control::record_preparation_cancelled(reason);
     active.cancelled.cancel();
     let deadline = tokio::time::Instant::now() + PREPARATION_SETTLEMENT_RETRY_BUDGET;
     let mut delay = PREPARATION_SETTLEMENT_RETRY_MIN;
@@ -7404,6 +7632,35 @@ fn spawn_cancelled_preparation(active: ActivePreparedSuccessor, reason: &'static
 fn cancel_preparations_for_incumbent_wait(playback_id: &str) {
     for active in take_active_preparations_for_playback(playback_id) {
         spawn_cancelled_preparation(active, "incumbent playback needed prepared capacity");
+    }
+}
+
+/// The client went around the handoff — it created a new session for this
+/// playback instead of committing the one being prepared — so the successor
+/// has no viewer. Free the worker now rather than at the 330 s deadline, and
+/// mark a pending candidate that has not reached the registry yet.
+///
+/// Two outcomes were being paid for before this existed, both bad: on a node
+/// with encoder headroom the orphan encodes for the full deadline for nobody;
+/// on a node at its hardware session cap the reopen's own live create tears the
+/// successor down as "foreground playback claimed prepared capacity" and counts
+/// it as a refusal, which is what the fleet's `staged_total{refused}` has
+/// actually been measuring.
+///
+/// `keep` is the activating route's incarnation id. The one successor that must
+/// survive its own predecessor's retirement is the committed one. Commit
+/// already removes that registry entry before this can run, so today the guard
+/// is never the only thing standing between a committed successor and
+/// cancellation — but ordering is not a contract, and the guard is what makes
+/// it structural.
+fn cancel_preparations_for_superseded_predecessor(playback_id: &str, keep: Option<&str>) {
+    cancel_pending_candidate(playback_id);
+    for active in take_active_preparations_for_playback(playback_id) {
+        if keep.is_some_and(|keep| keep == active.preparation.incarnation_id) {
+            register_active_preparation(active);
+            continue;
+        }
+        spawn_cancelled_preparation(active, "predecessor superseded by a new session");
     }
 }
 
@@ -8036,7 +8293,11 @@ async fn prepared_relocation_owner(
 /// Decided against **the response this exchange actually sent**: the client
 /// was told a height and a rate, so staging from different values would build
 /// a transition the client never requested.
-async fn process_preparation_candidate(state: AppState, exchange: PreparationCandidateInputs) {
+async fn process_preparation_candidate(
+    state: AppState,
+    pending: PendingCandidateGuard,
+    exchange: PreparationCandidateInputs,
+) {
     let PreparationCandidateInputs {
         session_id,
         route,
@@ -8093,6 +8354,10 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
     if !enabled {
         return;
     }
+    if pending.cancelled() {
+        crate::playback_control::record_preparation_staged(false);
+        return;
+    }
     let Ok(source) = state.store.get_file(recipe.request.file_id).await else {
         // Detached failure is fail-safe: no candidate is staged, and the
         // already-completed exchange remains valid.
@@ -8101,6 +8366,10 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
     let Some(source) = source.as_ref() else {
         return;
     };
+    if pending.cancelled() {
+        crate::playback_control::record_preparation_staged(false);
+        return;
+    }
     let candidate = match plan_preparation_candidate(
         &state,
         &recipe,
@@ -8119,6 +8388,10 @@ async fn process_preparation_candidate(state: AppState, exchange: PreparationCan
             return;
         }
     };
+    if pending.cancelled() {
+        crate::playback_control::record_preparation_staged(false);
+        return;
+    }
     let proposed = crate::playback_control::EffectiveSelection::from_request(
         &candidate,
         match candidate.kind {
@@ -8606,6 +8879,19 @@ async fn stage_prepared_successor_with_prime(
         // A wait or settings disable may then cancel an in-flight reservation;
         // the detached reservation owner reconciles a late commit exactly.
         register_active_preparation(active.clone());
+        // Between this task's last await and the line above there is no
+        // suspension point, so a supersession landing in that window is
+        // invisible to the guard's own checks. Reading the flag once more here,
+        // after the registry names the successor, is what closes it: from this
+        // point on `cancel_preparations_for_superseded_predecessor` can see the
+        // entry itself, and before it the guard could.
+        if pending_candidate_cancelled(&preparation.playback_id) {
+            if let Some(active) = take_active_preparation(&preparation.incarnation_id) {
+                spawn_cancelled_preparation(active, "predecessor superseded by a new session");
+            }
+            crate::playback_control::record_preparation_staged(false);
+            return;
+        }
         arm_preparation_foreground_watch(active.clone());
         let Some(reservation) = reserve_preparation_before(active.clone()).await else {
             crate::playback_control::record_preparation_staged(false);
@@ -15579,6 +15865,7 @@ mod tests {
                     producer_decision: None,
                     hold_reason: None,
                     subtitle_readiness: None,
+                    preparation: None,
                     owner_node_hash: "n-0123456789abcdef".to_owned(),
                     owner_epoch: 1,
                 },
@@ -18466,6 +18753,7 @@ mod tests {
 
         process_preparation_candidate(
             fixture.state.clone(),
+            PendingCandidateGuard::begin(&route.playback_id, "test-digest"),
             PreparationCandidateInputs {
                 session_id: session_id.clone(),
                 route: route.clone(),
