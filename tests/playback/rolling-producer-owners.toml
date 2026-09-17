@@ -1502,7 +1502,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # to that test, holding the staging call it parks so the supersession can be
 # applied while it is parked. Its join handle is awaited inside the test and it
 # owns no shipped producer, process or timer.
-expected_occurrences = 513
+# 513 -> 514 with the review's second registration-window test, which parks the
+# same staging call and then replaces the pending claim with a second ask rather
+# than setting the cancelled flag. Same shape: joined inside the test, owns
+# nothing shipped.
+expected_occurrences = 514
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1887,7 +1891,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 763, main moved the same row to 769 for its VideoToolbox regressions, and the
 # check is exact equality. 777 is a fresh measurement of the merged tree rather
 # than either number plus a remembered delta.
-expected_occurrences = 777
+# 777 -> 780 with the review fixes: the second registration-window test adds a
+# paced sleep and a bounded `tokio::time::timeout` with its polling sleep, the
+# same shape as the test beside it. Re-measured, not extrapolated.
+expected_occurrences = 780
 
 [[module_structures]]
 id = "bare-time-constructor"

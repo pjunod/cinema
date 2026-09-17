@@ -6399,6 +6399,37 @@ fn take_preparation_registration_delay(playback_id: &str) -> Option<Duration> {
         .remove(playback_id)
 }
 
+/// Test-only seam between a dispatch and the answer that same exchange gives.
+///
+/// The first `staging` clause covers a race the emit rule has with the task it
+/// just spawned: the candidate can finish, and its guard drop, before the emit
+/// rule reads the pending map. In production that window is a few instructions
+/// wide and cannot be widened from outside. Arming this makes the exchange wait
+/// for exactly that to have happened, which is the only way the clause is under
+/// test rather than merely present.
+#[cfg(test)]
+fn dispatch_settle_waits() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static WAITS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    WAITS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(test)]
+fn wait_for_the_dispatched_candidate(playback_id: &str) {
+    dispatch_settle_waits()
+        .lock()
+        .expect("dispatch settle waits")
+        .insert(playback_id.to_owned());
+}
+
+#[cfg(test)]
+fn take_dispatch_settle_wait(playback_id: &str) -> bool {
+    dispatch_settle_waits()
+        .lock()
+        .expect("dispatch settle waits")
+        .remove(playback_id)
+}
+
 /// Resolve the staged successor this predecessor may announce now.
 ///
 /// The ledger is the wanted-work authority: a route at the publication
@@ -7329,11 +7360,27 @@ async fn control_local_with_settlement_capacity(
     // successor is registered and priming. A client that could distinguish them
     // would have nothing different to do with the distinction.
     //
-    // The digest comparison is what keeps `staging` honest across a change of
-    // mind: a candidate still winding down for the selection the viewer just
-    // left is not work being done for the ask they are waiting on, and saying
-    // `staging` about it would hold them past the point where reopening was the
-    // better answer.
+    // Every one of the three is measured against *this exchange's*
+    // `desired_digest`, which is what keeps `staging` honest across a change of
+    // mind: work still winding down for the selection the viewer just left is
+    // not work being done for the ask they are waiting on, and saying `staging`
+    // about it would hold them past the point where reopening was the better
+    // answer — and then make them reopen anyway, several seconds later.
+    //
+    // The first clause is not redundant with the second, though it looks it.
+    // The guard is claimed just above with exactly this digest, so the marker
+    // does normally answer for the dispatching exchange — but the task it was
+    // claimed for is already spawned and may run to completion on another
+    // thread before this line reads the map. Whether the exchange that
+    // dispatched says `staging` is a fact about that exchange, not a fact about
+    // a map another thread owns, and a client told `none` on the very exchange
+    // that started its successor reopens immediately and orphans it.
+    #[cfg(test)]
+    if take_dispatch_settle_wait(&route.playback_id) {
+        while pending_candidate_for_playback(&route.playback_id).is_some() {
+            tokio::task::yield_now().await;
+        }
+    }
     response.delivery.preparation = Some(
         if matches!(
             response.action,
@@ -7343,7 +7390,7 @@ async fn control_local_with_settlement_capacity(
         } else if preparation_purpose.is_some()
             || pending_candidate_for_playback(&route.playback_id)
                 .is_some_and(|pending| pending == desired_digest)
-            || has_active_preparation_for_playback(&route.playback_id)
+            || has_active_preparation_for_ask(&route.playback_id, &desired_digest)
         {
             "staging"
         } else {
@@ -7539,27 +7586,67 @@ fn cancel_pending_candidate(playback_id: &str) {
     }
 }
 
-/// Whether the pending candidate for this playback has been superseded.
+/// Whether the pending candidate for this playback has been superseded, from
+/// the point of view of a task building `desired_digest`.
 ///
 /// Read once more immediately after registration: that is the one window the
 /// guard's own checks cannot cover, because between a task's last await and
 /// its `register_active_preparation` there is no suspension point at which it
 /// could have noticed.
-fn pending_candidate_cancelled(playback_id: &str) -> bool {
+///
+/// **Two ways to be superseded, and the flag is only one of them.** The other
+/// is the ordinary one: a second quality tap on the same session activates
+/// nothing, so `cancel_preparations_for_superseded_predecessor` never runs and
+/// no flag is ever set — the next exchange simply dispatches again and
+/// `PendingCandidateGuard::begin` *overwrites* the entry, with `cancelled`
+/// false, for a different ask. A reader that looked only at the flag would let
+/// that task register, arm its watch, reserve and prime a full encoder for a
+/// selection the viewer had already left, and would leave two entries naming
+/// one playback. This is the same "the slot is no longer mine" test
+/// `PendingCandidateGuard::cancelled` makes, expressed against the digest
+/// rather than the claim, because the caller here holds a `preparation` rather
+/// than the guard.
+///
+/// An *absent* entry is not superseded: the test-only staging paths run with no
+/// guard at all, and a task whose guard has already dropped has nothing left to
+/// supersede. `None` for `desired_digest` is the staging path with no observed
+/// selection — no evidence either way, so only the flag counts.
+fn pending_candidate_superseded(playback_id: &str, desired_digest: Option<&str>) -> bool {
     pending_preparation_candidates()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(playback_id)
-        .is_some_and(|pending| pending.cancelled)
+        .is_some_and(|pending| {
+            pending.cancelled || desired_digest.is_some_and(|asked| pending.desired_digest != asked)
+        })
 }
 
-/// Read-only sibling of `take_active_preparations_for_playback`.
-fn has_active_preparation_for_playback(playback_id: &str) -> bool {
+/// Whether a successor is registered and priming **for this ask**.
+///
+/// The digest comparison is the same one the pending-marker clause makes, and
+/// for the same reason. Without it one leftover entry — a stale ask the viewer
+/// left, a planned relocation, a successor whose commit never comes — answers
+/// `staging` on every exchange for the rest of the playback, and a client that
+/// believes it burns its whole wait and *then* reopens. That is strictly worse
+/// than the `none` it would have been told without the entry: the reopen still
+/// happens, just several seconds later.
+///
+/// An executor with no recorded ask matches. Those are the staging paths that
+/// ran without an observed selection, and an absent record is no evidence
+/// either way — reading it as a mismatch would answer `none` while a real
+/// successor primes.
+fn has_active_preparation_for_ask(playback_id: &str, desired_digest: &str) -> bool {
     active_prepared_successors()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .values()
-        .any(|active| active.preparation.playback_id == playback_id)
+        .any(|active| {
+            active.preparation.playback_id == playback_id
+                && active
+                    .executor
+                    .asked()
+                    .is_none_or(|asked| asked == desired_digest)
+        })
 }
 
 fn register_active_preparation(active: ActivePreparedSuccessor) {
@@ -8898,7 +8985,7 @@ async fn stage_prepared_successor_with_prime(
     // The ask this successor is being built for, recorded on the slot so an
     // acknowledgement arriving later is judged against the ask that is current
     // then rather than against the one that started the work.
-    .asking(desired_digest);
+    .asking(desired_digest.clone());
     let preparation = plurx_core::domain::MediaSessionPreparation {
         incarnation_id: staged_incarnation_id,
         session_id: staged_session_id,
@@ -8968,7 +9055,7 @@ async fn stage_prepared_successor_with_prime(
         // after the registry names the successor, is what closes it: from this
         // point on `cancel_preparations_for_superseded_predecessor` can see the
         // entry itself, and before it the guard could.
-        if pending_candidate_cancelled(&preparation.playback_id) {
+        if pending_candidate_superseded(&preparation.playback_id, desired_digest.as_deref()) {
             if let Some(active) = take_active_preparation(&preparation.incarnation_id) {
                 spawn_cancelled_preparation(active, "predecessor superseded by a new session");
             }
@@ -21403,16 +21490,18 @@ mod tests {
             },
         )
         .await;
-        assert!(
-            pending_candidate_for_playback(&playback_id).is_none()
-                && !has_active_preparation_for_playback(&playback_id),
-            "the staging helper registers nothing, so `offered` cannot come from `staging`'s sources",
-        );
-
         let mut request = control_request(route.incarnation_id.clone());
         request.supported_actions = Some(vec![
             crate::playback_control::PREPARE_REPLACEMENT_ACTION.to_owned()
         ]);
+        assert!(
+            pending_candidate_for_playback(&playback_id).is_none()
+                && !has_active_preparation_for_ask(
+                    &playback_id,
+                    &request.selection.desired().digest(),
+                ),
+            "the staging helper registers nothing, so `offered` cannot come from `staging`'s sources",
+        );
         let announced = accepted_exchange(&fixture, &route, &request).await;
         assert_eq!(announced["action"]["type"], "prepare");
         assert_eq!(preparation_state(&announced), "offered");
@@ -21494,6 +21583,287 @@ mod tests {
             "End announces no successor and aborts the slot, so nothing is being built \
              for this ask however durable the ledger row looks",
         );
+    }
+
+    /// Register a successor for this playback with a recorded ask, and no
+    /// durable row: these tests are about what an exchange *says*, not about
+    /// what a settlement does. The caller takes the entry back out.
+    async fn register_successor_for_ask(
+        fixture: &HlsDeliveryFixture,
+        session_id: &str,
+        route: &MediaSessionRoute,
+        asked: Option<&str>,
+    ) -> String {
+        let executor = preparation_executor(fixture, session_id, route)
+            .await
+            .asking(asked.map(str::to_owned));
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        let preparation = preparation_row(fixture, route, &incarnation_id);
+        let _cancelled = register_test_preparation(
+            fixture.state.clone(),
+            executor,
+            preparation,
+            PreparationPurpose::SelectionChange,
+        );
+        assert!(
+            active_preparation(&incarnation_id).is_some(),
+            "the registry must actually name this successor, or the clause under test \
+             is being read against an empty map",
+        );
+        incarnation_id
+    }
+
+    /// The first of the three `staging` sources, on its own.
+    ///
+    /// The guard is claimed with this exchange's digest just before the spawn,
+    /// so in the ordinary case the pending marker answers for the dispatching
+    /// exchange too — which is why this clause looks redundant and why deleting
+    /// it passed every other test. It is not redundant: the task is already
+    /// spawned, and on the multi-threaded runtime production runs it can finish
+    /// and drop its marker before the emit rule reads the map. The seam here
+    /// holds the exchange until exactly that has happened, so what is asserted
+    /// is the clause rather than its shadow.
+    ///
+    /// Deleting `preparation_purpose.is_some()` from the emit rule fails this.
+    #[tokio::test]
+    async fn delivery_preparation_says_staging_on_the_dispatch_after_its_candidate_is_gone() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("preparation-dispatch-race");
+        let (fixture, _session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        fixture.set_delivered_bps_for_test(10_000_000);
+
+        let mut request = preparing_control_request(&route);
+        let opening = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(preparation_state(&opening), "none");
+
+        pace_control_exchanges().await;
+        request.sequence = 2;
+        request.capabilities = None;
+        request.selection.quality =
+            crate::playback_control::QualitySelection::Manual { height: 1080 };
+        wait_for_the_dispatched_candidate(&playback_id);
+        let dispatched = accepted_exchange(&fixture, &route, &request).await;
+
+        assert!(
+            pending_candidate_for_playback(&playback_id).is_none(),
+            "the seam is supposed to have held this exchange until the candidate it \
+             dispatched had finished and dropped its marker",
+        );
+        assert_eq!(
+            preparation_state(&dispatched),
+            "staging",
+            "this exchange started a successor, and that is a fact about this exchange \
+             — not about a map another thread may already have emptied",
+        );
+        await_preparation_candidate(&route).await;
+    }
+
+    /// The third of the three `staging` sources, on its own: a successor that is
+    /// registered and priming for the ask this exchange is making. No dispatch,
+    /// no pending marker — the registry is the only thing that can answer.
+    ///
+    /// Deleting `has_active_preparation_for_ask(..)` from the emit rule fails
+    /// this.
+    #[tokio::test]
+    async fn delivery_preparation_says_staging_for_a_registered_successor_for_this_ask() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("preparation-registered");
+        let (fixture, session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+
+        let mut request = preparing_control_request(&route);
+        let opening = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(
+            preparation_state(&opening),
+            "none",
+            "the session's own ask is recorded as dispatched, so the exchange below \
+             repeats it and dispatches nothing",
+        );
+
+        let asked = request.selection.desired().digest();
+        let registered =
+            register_successor_for_ask(&fixture, &session_id, &route, Some(&asked)).await;
+
+        pace_control_exchanges().await;
+        request.sequence = 2;
+        request.capabilities = None;
+        let polled = accepted_exchange(&fixture, &route, &request).await;
+        assert!(
+            pending_candidate_for_playback(&playback_id).is_none(),
+            "and no pending marker exists to answer in the registry's place",
+        );
+        assert_eq!(preparation_state(&polled), "staging");
+
+        let _ = take_active_preparation(&registered);
+    }
+
+    /// The registry clause is measured against the ask, exactly as the pending
+    /// clause is.
+    ///
+    /// One leftover entry — a stale ask the viewer left, a planned relocation, a
+    /// successor whose commit never comes — otherwise answers `staging` on every
+    /// exchange for the rest of the playback. A client that believes it waits
+    /// out its whole bound and reopens anyway, which is strictly worse than the
+    /// `none` it would have been told if the entry had not been there: the same
+    /// reopen, several seconds later, with a lease it did not renew.
+    ///
+    /// Dropping the digest comparison from `has_active_preparation_for_ask`
+    /// fails this.
+    #[tokio::test]
+    async fn delivery_preparation_says_none_for_a_registered_successor_for_another_ask() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("preparation-left-behind");
+        let (fixture, session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+
+        let mut request = preparing_control_request(&route);
+        let opening = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(preparation_state(&opening), "none");
+
+        let asked = request.selection.desired().digest();
+        let left_behind = register_successor_for_ask(
+            &fixture,
+            &session_id,
+            &route,
+            Some("an-ask-the-viewer-has-already-left"),
+        )
+        .await;
+        assert_ne!(asked, "an-ask-the-viewer-has-already-left");
+
+        pace_control_exchanges().await;
+        request.sequence = 2;
+        request.capabilities = None;
+        let polled = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(
+            preparation_state(&polled),
+            "none",
+            "a successor being built for a selection the viewer has left is not work \
+             being done for the ask they are waiting on",
+        );
+
+        // And the same entry, recorded against *this* ask, does answer — so the
+        // `none` above is the comparison talking, not an empty registry.
+        let _ = take_active_preparation(&left_behind);
+        let matching =
+            register_successor_for_ask(&fixture, &session_id, &route, Some(&asked)).await;
+        pace_control_exchanges().await;
+        request.sequence = 3;
+        let again = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(preparation_state(&again), "staging");
+        let _ = take_active_preparation(&matching);
+    }
+
+    /// A second quality tap supersedes the successor still being built for the
+    /// first — through the claim, not the flag.
+    ///
+    /// This is the ordinary case and the one the flag cannot see. Tapping a
+    /// different quality on a live session activates nothing, so
+    /// `cancel_preparations_for_superseded_predecessor` never runs and nothing
+    /// anywhere is marked cancelled; the next exchange simply dispatches again
+    /// and `PendingCandidateGuard::begin` overwrites the entry, with `cancelled`
+    /// false, for a different ask. A reader that looked only at the flag let the
+    /// first task register, arm its watch, reserve and prime a full encoder for
+    /// a selection the viewer had already left — and left two entries naming one
+    /// playback, the stale one of which then answered `staging` forever.
+    ///
+    /// Reading only the `cancelled` flag after registration fails this.
+    #[tokio::test]
+    async fn a_second_ask_supersedes_a_preparation_in_the_registration_window() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("preparation-second-ask");
+        let (fixture, session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        fixture
+            .state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
+
+        let first = PendingCandidateGuard::begin(&playback_id, "the-first-ask");
+        delay_preparation_registration(&playback_id, std::time::Duration::from_millis(800));
+
+        let superseded_before = cancelled_total("predecessor_superseded");
+        let ownership_before = cancelled_total("ownership_cancelled");
+        let state = fixture.state.clone();
+        let staging_session = session_id.clone();
+        let staging_route = route.clone();
+        let candidate = crate::transcode::SessionRequest {
+            playback_id: playback_id.clone(),
+            ..staged_candidate_request()
+        };
+        let predecessor_recipe = staged_predecessor_recipe(&route);
+        let staging = tokio::spawn(async move {
+            stage_prepared_successor_with_prime(
+                &state,
+                &staging_session,
+                &staging_route,
+                &predecessor_recipe,
+                &candidate,
+                Some(&staged_source_file()),
+                &state.node_id,
+                PreparationPurpose::SelectionChange,
+                AcceptedAsk {
+                    film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                    desired_digest: Some("the-first-ask".to_owned()),
+                },
+                true,
+            )
+            .await;
+        });
+
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        // The viewer taps a different quality. Nothing is cancelled anywhere:
+        // the new exchange's guard simply takes the slot.
+        let second = PendingCandidateGuard::begin(&playback_id, "the-second-ask");
+        assert!(
+            !pending_candidate_superseded(&playback_id, None),
+            "no cancelled flag is set — this is the claim-replacement path, which is \
+             the one a second quality tap on a live session actually takes",
+        );
+        assert!(
+            first.cancelled(),
+            "the first candidate's own guard already knows the slot is not its any more; \
+             the reader after registration has to reach the same answer",
+        );
+
+        staging.await.expect("the staging task finished");
+        drop(first);
+
+        assert!(
+            !has_active_preparation_for_ask(&playback_id, "the-first-ask"),
+            "the superseded successor must not be left registered and priming",
+        );
+        assert!(
+            fixture
+                .state
+                .store
+                .staged_media_session_for_playback(route.user_id, &playback_id)
+                .await
+                .expect("ledger read")
+                .is_none(),
+            "and it must never have been reserved, let alone staged",
+        );
+        let superseded_after = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let now = cancelled_total("predecessor_superseded");
+                if now > superseded_before {
+                    break now;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the read after registration settled the successor as a supersession");
+        assert!(superseded_after > superseded_before);
+        assert_eq!(
+            cancelled_total("ownership_cancelled"),
+            ownership_before,
+            "the second ask must be what tore it down, not a reservation guard dropping \
+             after it had already gone on to reserve and prime",
+        );
+        drop(second);
     }
 
     /// A predecessor that is superseded frees its successor.
@@ -21795,7 +22165,7 @@ mod tests {
         drop(pending);
 
         assert!(
-            !has_active_preparation_for_playback(&playback_id),
+            !has_active_preparation_for_ask(&playback_id, "register-window-digest"),
             "the successor registered in that window must not be left running",
         );
         assert!(
@@ -21872,18 +22242,86 @@ mod tests {
         // match the scan it performs.
         let marker = concat!("_cancelled", "_preparation(");
         let source = include_str!("hls.rs");
+
+        /// The argument list of a call whose opening parenthesis has just been
+        /// consumed: balanced, and blind to parentheses inside string literals,
+        /// so a reason that happens to contain one cannot truncate the parse.
+        fn argument_list(rest: &str) -> Option<&str> {
+            let mut depth = 1_usize;
+            let mut in_string = false;
+            let mut escaped = false;
+            for (index, byte) in rest.bytes().enumerate() {
+                if in_string {
+                    if escaped {
+                        escaped = false;
+                    } else if byte == b'\\' {
+                        escaped = true;
+                    } else if byte == b'"' {
+                        in_string = false;
+                    }
+                    continue;
+                }
+                match byte {
+                    b'"' => in_string = true,
+                    b'(' => depth += 1,
+                    b')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Some(&rest[..index]);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+
+        /// The first string literal in an argument list, terminated by an
+        /// unescaped quote rather than by the first quote of any kind.
+        fn first_literal(arguments: &str) -> Option<&str> {
+            let open = arguments.find('"')?;
+            let rest = &arguments[open + 1..];
+            let mut escaped = false;
+            for (index, byte) in rest.bytes().enumerate() {
+                if escaped {
+                    escaped = false;
+                } else if byte == b'\\' {
+                    escaped = true;
+                } else if byte == b'"' {
+                    return Some(&rest[..index]);
+                }
+            }
+            None
+        }
+
+        /// The two shapes that legitimately carry a `&'static str` binding
+        /// instead of a literal: the two function signatures, and the wrapper
+        /// that forwards its own parameter. Anything else passing a binding is
+        /// a cancellation edge whose reason this scan cannot read, and that is
+        /// a failure rather than a skip — a reason the scan cannot see is a
+        /// reason nobody had to label.
+        const FORWARDING: [&str; 2] = [
+            "active: ActivePreparedSuccessor, reason: &'static str",
+            "active, reason",
+        ];
+
         let mut reasons = std::collections::BTreeSet::new();
         for call in source.split(marker).skip(1) {
-            let arguments = &call[..call.find(')').unwrap_or(call.len())];
-            let Some(open) = arguments.find('"') else {
-                // A definition, or a call forwarding a `reason` binding.
-                continue;
-            };
-            let rest = &arguments[open + 1..];
-            let Some(close) = rest.find('"') else {
-                continue;
-            };
-            reasons.insert(rest[..close].to_owned());
+            let arguments = argument_list(call).expect("a balanced call argument list");
+            match first_literal(arguments) {
+                Some(reason) => {
+                    reasons.insert(reason.to_owned());
+                }
+                None => {
+                    let normalized = arguments.split_whitespace().collect::<Vec<_>>().join(" ");
+                    assert!(
+                        FORWARDING.contains(&normalized.as_str()),
+                        "a settlement is passed a reason this scan cannot read: {normalized:?}. \
+                         Pass the reason as a literal at the call site, or add the new \
+                         forwarding shape here deliberately.",
+                    );
+                }
+            }
         }
         assert!(
             reasons.len() >= 9,

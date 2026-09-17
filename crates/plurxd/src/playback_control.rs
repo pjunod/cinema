@@ -905,8 +905,34 @@ pub(crate) struct PlaybackLeaseView {
     pub expires_at_unix_ms: i64,
 }
 
+/// **Deliberately not `deny_unknown_fields`.** Every other message type here
+/// denies them, and the reason that rule is right for a *request* is exactly
+/// the reason it is wrong here. A request is written by a client against a
+/// schema this server publishes: a field this server does not know is a client
+/// typo or a client sending something it was never told to send, and answering
+/// 400 is how that gets found. A response is written by *this fleet* and read
+/// by an older copy of *this fleet* — a relaying ingress deserializes the
+/// owner's answer before returning it — so a field the reader does not know is
+/// not a mistake, it is a newer node.
+///
+/// Denying them there turns every additive response field into a fleet-wide
+/// outage for the length of a rolling deploy: the ingress's
+/// `serde_json::from_slice::<ControlResponseV1>` fails, that becomes
+/// `PeerTransportError::InvalidResponse`, and the client is answered 503
+/// `control_unavailable` with a `retry_after_ms` it honours — so every affected
+/// viewer re-asks twice a second, renews no lease and receives no action until
+/// the deploy finishes. `preparation` did exactly that. `ControlAction::Switched`'s
+/// own note already names this class of problem and says it cannot be solved
+/// while the response denies unknown fields.
+///
+/// This is what makes `preparation`'s "absent means not evaluated here" true:
+/// an older reader now drops the field instead of rejecting the message.
+///
+/// The same attribute is still on `ControlResponseV1`, `PlaybackLeaseView`,
+/// `EffectiveSelection`, `ControlErrorBody` and `ControlBootstrap`, which carry
+/// the identical hazard for the next field added to any of them. Nothing in
+/// this change adds one, so they are named rather than moved.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct DeliveryView {
     pub presentation: String,
     pub producer_state: String,
@@ -5162,6 +5188,14 @@ impl PreparationExecutor {
     pub(crate) fn asking(mut self, desired_digest: Option<String>) -> Self {
         self.desired_digest = desired_digest;
         self
+    }
+
+    /// The ask this successor is being built for, for a caller deciding whether
+    /// a registered successor is work being done for the exchange in front of
+    /// it. `None` means the staging path had no observed selection to record —
+    /// no evidence either way, which a caller must not read as a mismatch.
+    pub(crate) fn asked(&self) -> Option<&str> {
+        self.desired_digest.as_deref()
     }
 
     /// Stage a successor: durable row first, then the slot.
@@ -15391,10 +15425,11 @@ mod tests {
 
     /// An older peer relays a response it built before this field existed.
     ///
-    /// `DeliveryView` is `deny_unknown_fields`, so the compatibility that
-    /// matters runs the other way: absence must deserialize, and must not be
-    /// read as `ready`. This mirrors the guarantee `producer_decision` already
-    /// carries — absence means "not classified here", never "healthy".
+    /// The compatibility that matters here is absence: it must deserialize,
+    /// and must not be read as `ready`. This mirrors the guarantee
+    /// `producer_decision` already carries — absence means "not classified
+    /// here", never "healthy". The other direction, a reader meeting a field it
+    /// does not know, is `a_delivery_view_tolerates_a_field_from_a_newer_node`.
     #[test]
     fn a_delivery_without_subtitle_readiness_round_trips_as_absent() {
         let json = serde_json::to_string(&delivery_with_hold(None)).expect("serialize");
@@ -15412,6 +15447,82 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&ready).expect("serialize"))
                 .expect("deserialize");
         assert_eq!(round_tripped.subtitle_readiness.as_deref(), Some("ready"));
+    }
+
+    /// A response written by a node one release ahead must still parse here.
+    ///
+    /// This is the direction that was fatal, and it is not the one
+    /// `preparation`'s own rustdoc was written for. A relaying ingress
+    /// deserializes the owner's answer before returning it
+    /// (`validated_control_relay_response`), so during a rolling deploy the
+    /// *older* binary is the one doing the strict parse. With
+    /// `deny_unknown_fields` on `DeliveryView` that parse failed outright:
+    /// `PeerTransportError::InvalidResponse`, then 503 `control_unavailable`
+    /// with a `retry_after_ms` the client honours — every affected viewer
+    /// re-asking twice a second, renewing no lease and receiving no action,
+    /// until the deploy finished. `preparation` was that field.
+    ///
+    /// Reinstating `deny_unknown_fields` on `DeliveryView` fails this test.
+    #[test]
+    fn a_delivery_view_tolerates_a_field_from_a_newer_node() {
+        let current = ControlResponseV1 {
+            protocol: PROTOCOL_V1.to_owned(),
+            generation: "relay-forward-compat".to_owned(),
+            control_epoch: 1,
+            accepted_sequence: 1,
+            server_time_unix_ms: 1,
+            lease: PlaybackLeaseView {
+                state: "active".to_owned(),
+                renew_after_ms: NEXT_EXCHANGE_MS,
+                expires_at_unix_ms: 1,
+            },
+            delivery: delivery_with_hold(Some("demand")),
+            effective_selection: EffectiveSelection {
+                quality_auto: true,
+                height: 720,
+                audio_track: None,
+                subtitle_burn: None,
+                audio_offset_ms: 0,
+                codec: "h264".to_owned(),
+                dynamic_range: Some("sdr".to_owned()),
+            },
+            action: ControlAction::None,
+        };
+        let mut body = serde_json::to_value(&current).expect("serialize a current-shape response");
+        body["delivery"]
+            .as_object_mut()
+            .expect("a delivery serializes as an object")
+            .insert(
+                "a_field_from_next_year".to_owned(),
+                serde_json::Value::String("whatever it comes to mean".to_owned()),
+            );
+        let bytes = serde_json::to_vec(&body).expect("serialize the newer node's body");
+
+        // Exactly what the relay does with the owner's answer.
+        let relayed = serde_json::from_slice::<ControlResponseV1>(&bytes)
+            .expect("a newer node's response must still parse on an older reader");
+        assert_eq!(
+            relayed.delivery.hold_reason.as_deref(),
+            Some("demand"),
+            "and every field this build does know must survive the one it does not",
+        );
+        assert_eq!(relayed.lease.state, "active");
+
+        // And what the relay then hands the client: it re-serializes what it
+        // parsed, so a field it did not understand is dropped rather than
+        // forwarded. That is what makes `preparation`'s "absent means not
+        // evaluated here, never a decline" a promise a client can rely on.
+        let forwarded = serde_json::to_value(&relayed).expect("re-serialize for the client");
+        assert!(
+            forwarded["delivery"]
+                .get("a_field_from_next_year")
+                .is_none(),
+            "a relay normalizes away what it cannot name: {forwarded}",
+        );
+        assert!(
+            forwarded["delivery"].get("hold_reason").is_some(),
+            "without dropping what it can",
+        );
     }
 
     /// Relays preserve extension values they do not understand. The consumer,
