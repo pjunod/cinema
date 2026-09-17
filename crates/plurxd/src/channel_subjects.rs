@@ -1,5 +1,6 @@
-//! Resumable subject matching; inference never runs on the playback path.
-pub(crate) mod ollama;
+//! Resumable subject matching; matching never runs on the playback path.
+pub(crate) mod local;
+
 use crate::{
     http::{error::ApiError, extract::AuthUser},
     state::AppState,
@@ -499,7 +500,7 @@ async fn enabled(state: &AppState) -> Result<bool, ApiError> {
 
 async fn classify_enabled(
     state: &AppState,
-    provider: &ollama::Ollama,
+    provider: &local::LocalSearch,
     subject: &str,
     batch: &[(String, Metadata)],
 ) -> Result<BTreeMap<String, SubjectDecision>, String> {
@@ -521,7 +522,7 @@ pub async fn worker(state: AppState, shutdown: CancellationToken) {
                 .store
                 .subject_write(JobWrite::Prune { now: now() })
                 .await;
-            if let Ok(provider) = ollama::Ollama::configured() {
+            if let Ok(provider) = local::LocalSearch::configured() {
                 match provider.profile().await {
                     Ok(profile) => observe(|o| {
                         o.profile = Some(profile);
@@ -675,7 +676,7 @@ async fn process_inner(
             job.classifier_profile = previous.classifier_profile;
         }
     }
-    let provider = ollama::Ollama::configured().map_err(unavailable)?;
+    let provider = local::LocalSearch::configured().map_err(unavailable)?;
     let profile_result = provider.profile().await;
     match &profile_result {
         Ok(profile) => {
@@ -743,7 +744,7 @@ async fn process_inner(
             .count();
         o.truncated = candidates
             .iter()
-            .filter(|c| Metadata::from_candidate(&c.candidate).truncated)
+            .filter(|c| Metadata::from_candidate_local(&c.candidate).truncated)
             .count();
     });
     // Lexical priority changes time to feedback only; every scoped item is visited.
@@ -775,27 +776,18 @@ async fn process_inner(
         }
         let next = (
             format!("b{}", batch.len()),
-            Metadata::from_candidate(&c.candidate),
+            Metadata::from_candidate_local(&c.candidate),
         );
-        let mut tentative = batch.clone();
-        tentative.push(next.clone());
-        let size=serde_json::json!({"subject":job.recipe.subject,"records":tentative.iter().map(|(id,m)|serde_json::json!({"id":id,"metadata":m})).collect::<Vec<_>>()}).to_string().chars().count();
-        if size > INPUT_CHARS {
-            if batch.is_empty() {
-                return Err(invalid("An eligible metadata record exceeds the serialized input budget; shorten its metadata and refresh."));
-            }
-            break;
-        }
         batch.push(next);
         selected.push(&c.candidate);
-        if batch.len() == BATCH_SIZE {
+        if batch.len() == 128 {
             break;
         }
     }
     if !batch.is_empty() {
         if !enabled(state).await? {
             job.state = "waiting_for_provider".into();
-            job.error = Some("New inference is paused in Settings → Developer.".into());
+            job.error = Some("Local rule matching is paused in Settings → Developer.".into());
             job.counts = counts(&candidates, &decisions);
             return Ok(());
         }
@@ -882,7 +874,7 @@ async fn process_inner(
             other => {
                 new_decisions.clear();
                 job.state = "queued".into();
-                job.error = Some("Model artifact changed or became unavailable during classification; retrying without caching that response.".into());
+                job.error = Some("Local classifier version changed during matching; retrying without caching that response.".into());
                 observe(|o| o.profile = other.ok());
                 return Ok(());
             }

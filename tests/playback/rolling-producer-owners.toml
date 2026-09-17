@@ -1482,7 +1482,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # facts backfill. It opens no media, starts no process or producer, fences each
 # Store update to the exact source/probe snapshot, and releases its cluster-job
 # lease when the finite pass returns.
-expected_occurrences = 512
+# Local search adds two daemon workers sharing background_shutdown and four finite CPU/file tasks; loading, persistence and indexing handles are awaited, while a timed-out query may finish its bounded in-memory operation. Removing the Ollama fixture removes one test task. These own no media process.
+expected_occurrences = 517
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1856,7 +1857,8 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # deadlines, plus the hardware helper deadline, publication deadline, polling
 # sleep and overall encode deadline. All are test-only; feed and child are
 # joined, the ChildJob stays owned until exit, and no timer detaches a producer.
-expected_occurrences = 769
+# Local search adds two cancellation-aware worker sleep intervals, a 15-second keyword request deadline and a two-second best-effort semantic query wait. These do not control playback producers.
+expected_occurrences = 773
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2158,7 +2160,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # unchanged. Both matches are test-only HTTP assertions.
 # +1 VideoToolbox test-only output helper: each finite FFmpeg/FFprobe child
 # is awaited within a 30-second timeout and has kill-on-drop enabled.
-expected_occurrences = 305
+# Removing the Ollama adapter deletes two HTTP response status reads. No child-process owner changes.
+expected_occurrences = 303
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
