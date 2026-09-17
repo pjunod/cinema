@@ -1916,6 +1916,47 @@ mod tests {
             .any(|l| l.dimension == "format" && l.value == "stand-up"));
         assert_eq!(record.overrides.include, vec!["topic:music"]);
         assert_eq!(record.overrides.exclude, vec!["topic:space"]);
+        for overview in ["Temporary edit", "A filmed stand-up special"] {
+            state
+                .store
+                .apply_metadata(
+                    seed.movie,
+                    &plurx_core::domain::MetadataPatch {
+                        overview: Some(overview.into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("edit and revert");
+        }
+        assert!(
+            !state
+                .store
+                .classification_page(0, 1)
+                .await
+                .expect("invalidated")[0]
+                .indexed
+        );
+        crate::library_search::classify_page(&state, &mut 0)
+            .await
+            .expect("repair reverted source index");
+        assert!(
+            state
+                .store
+                .classification_page(0, 1)
+                .await
+                .expect("repaired")[0]
+                .indexed
+        );
+        assert_eq!(
+            state
+                .store
+                .search_items("topic:music", 10)
+                .await
+                .expect("restored manual label")
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]

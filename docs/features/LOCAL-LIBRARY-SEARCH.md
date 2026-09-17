@@ -1,7 +1,7 @@
 # Local library search and reusable classification
 
-**Status:** implementation complete; preparing commits and one draft PR.
-Adversarial review and final fast-lane validation pending. Not deployed.
+**Status:** [Draft PR #350](http://192.168.4.7:3000/noirr/plurx/pulls/350) open.
+Final adversarial review complete; both findings addressed. Fast lane pending. Not deployed.
 **Updated:** 2026-09-17.
 
 ## Delivery status
@@ -13,9 +13,9 @@ Adversarial review and final fast-lane validation pending. Not deployed.
 | Optional embedded CPU model, default off | Implemented; actual embedding smoke check passed |
 | Channel creation layout and search feedback | Implemented; desktop and 390 px browser checks passed |
 | Agent workspace isolation | Standalone clone at `/private/tmp/plurx-search-agent` |
-| Commits and combined PR | Preparing |
-| Final adversarial review | Pending; one review when ready for main |
-| Fast lane and main merge | Pending review fixes |
+| Commits and combined PR | PR #350 open; implementation committed |
+| Final adversarial review | Complete; inherited genre and missing index repairs addressed |
+| Fast lane and main merge | Ready for final validation |
 
 The owner requested one batched PR, no repeated unit-test runs, one final
 adversarial review, then the fast lane and merge. That order applies from
@@ -111,3 +111,12 @@ Decisions made without blocking on the owner:
 - Preserve manual classification corrections separately from original tags.
 - Keep native clients on their existing exact-search API; the semantic API is
   additive, and legacy shipped channel preset text maps to local selectors.
+
+## Final review disposition
+
+The single adversarial review identified two P2 issues. Both are addressed:
+classified episodes retain inherited series genres unless an administrator
+explicitly suppresses that genre; and the classification worker repairs a
+missing FTS row even when source metadata has returned to its prior value.
+Regression coverage accompanies both repairs. Final fast-lane results and
+merge state are authoritative on PR #350.

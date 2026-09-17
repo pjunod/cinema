@@ -284,11 +284,9 @@ pub fn local_decision(subject: &str, metadata: &Metadata) -> SubjectDecision {
                 .is_some_and(|(y, (lo, hi))| y >= lo && y <= hi);
         }
         if let Some(genre) = part.strip_prefix("genre:") {
-            return if tags.split(", ").any(|s| s == "classification:ready") {
-                tags.split(", ").any(|s| s == part)
-            } else {
-                has(&genres, genre)
-            };
+            let suppressed = format!("classification:excluded:{part}");
+            return !tags.split(", ").any(|s| s == suppressed)
+                && (has(&genres, genre) || tags.split(", ").any(|s| s == part));
         }
         if part.starts_with("format:") || part.starts_with("topic:") {
             return tags.split(", ").any(|s| s == part) || automatic.iter().any(|s| s == part);
@@ -406,6 +404,18 @@ mod tests {
             missing_overview: false,
             truncated: false,
         }
+    }
+    #[test]
+    fn classified_episodes_keep_inherited_genres_unless_explicitly_suppressed() {
+        let mut m = metadata("An episode");
+        m.fields
+            .insert("tags".into(), "classification:ready".into());
+        assert_eq!(local_decision("genre:comedy", &m).verdict, Verdict::Match);
+        m.fields.insert(
+            "tags".into(),
+            "classification:ready, classification:excluded:genre:comedy".into(),
+        );
+        assert_eq!(local_decision("genre:comedy", &m).verdict, Verdict::NoMatch);
     }
     #[test]
     fn corrected_labels_are_not_reintroduced_from_the_description() {

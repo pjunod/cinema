@@ -75,6 +75,7 @@ pub struct Record {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
+    pub indexed: bool,
     pub source_json: String,
     pub record: Option<Record>,
 }
@@ -84,7 +85,7 @@ impl Entry {
     }
 }
 pub fn inventory_sql() -> String {
-    format!("SELECT json_object('source_json',({SOURCE} || ''),'record',CASE WHEN c.item_id IS NULL THEN NULL ELSE json_object('source_json',c.source_json,'classification',json(c.payload),'overrides',json(c.overrides),'revision',c.revision) END) AS payload FROM items i LEFT JOIN media_classifications c ON c.item_id=i.id WHERE i.id>$1 AND i.kind IN ('movie','show','episode','video','book','audiobook') ORDER BY i.id LIMIT $2")
+    format!("SELECT json_object('indexed',json(CASE WHEN EXISTS(SELECT 1 FROM classification_fts WHERE rowid=i.id) THEN 'true' ELSE 'false' END),'source_json',({SOURCE} || ''),'record',CASE WHEN c.item_id IS NULL THEN NULL ELSE json_object('source_json',c.source_json,'classification',json(c.payload),'overrides',json(c.overrides),'revision',c.revision) END) AS payload FROM items i LEFT JOIN media_classifications c ON c.item_id=i.id WHERE i.id>$1 AND i.kind IN ('movie','show','episode','video','book','audiobook') ORDER BY i.id LIMIT $2")
 }
 pub fn write_sql() -> String {
     format!("INSERT INTO media_classifications(item_id,source_json,payload,overrides,terms,revision) SELECT $1,$2,$3,$4,$5,$6+1 WHERE EXISTS(SELECT 1 FROM items i WHERE i.id=$1 AND {SOURCE}=$2) AND COALESCE((SELECT revision FROM media_classifications WHERE item_id=$1),0)=$6 ON CONFLICT(item_id) DO UPDATE SET source_json=excluded.source_json,payload=excluded.payload,overrides=excluded.overrides,terms=excluded.terms,revision=excluded.revision")

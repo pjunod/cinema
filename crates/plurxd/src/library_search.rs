@@ -129,11 +129,12 @@ pub(crate) async fn classify_page(state: &AppState, cursor: &mut i64) -> Result<
                 }
             }
         }
-        let unchanged = old.is_some_and(|r| {
-            r.source_json == entry.source_json
-                && r.classification.version == classification::VERSION
-                && r.classification.provider_checked_at == checked
-        });
+        let unchanged = entry.indexed
+            && old.is_some_and(|r| {
+                r.source_json == entry.source_json
+                    && r.classification.version == classification::VERSION
+                    && r.classification.provider_checked_at == checked
+            });
         let mut result = classification::classify(&input.metadata(), keywords);
         let labelled = !result
             .terms(&old.map(|r| r.overrides.clone()).unwrap_or_default())

@@ -843,7 +843,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
                     f.mtime AS file_mtime, f.duration_ms AS duration_ms, \
                     i.library_id, i.kind, i.title, \
                     COALESCE(i.overview, '') AS overview, COALESCE(sh.overview, '') AS show_overview, \
-                    i.genres, COALESCE((SELECT json_group_array(value) FROM (SELECT value FROM json_each(i.tags) UNION ALL SELECT value FROM media_classifications mc,json_each(mc.terms) WHERE mc.item_id=i.id AND mc.source_json=json_object('id',i.id,'kind',i.kind,'title',i.title,'overview',COALESCE(i.overview,''),'year',i.year,'tmdb_id',i.tmdb_id,'genres',json(i.genres),'tags',json(i.tags)))),i.tags) AS tags, \
+                    i.genres, COALESCE((SELECT json_group_array(value) FROM (SELECT value FROM json_each(i.tags) UNION ALL SELECT value FROM media_classifications mc,json_each(mc.terms) WHERE mc.item_id=i.id AND mc.source_json=json_object('id',i.id,'kind',i.kind,'title',i.title,'overview',COALESCE(i.overview,''),'year',i.year,'tmdb_id',i.tmdb_id,'genres',json(i.genres),'tags',json(i.tags)) UNION ALL SELECT 'classification:excluded:' || value FROM media_classifications mc,json_each(mc.overrides,'$.exclude') WHERE mc.item_id=i.id AND mc.source_json=json_object('id',i.id,'kind',i.kind,'title',i.title,'overview',COALESCE(i.overview,''),'year',i.year,'tmdb_id',i.tmdb_id,'genres',json(i.genres),'tags',json(i.tags)))),i.tags) AS tags, \
                     COALESCE(CAST(substr(i.air_date, 1, 4) AS INTEGER), i.year, sh.year) AS year, \
                     sh.id AS show_id, sh.title AS show_title, s.season_number, i.episode_number, \
                     CASE WHEN s.season_number = 0 THEN 1 ELSE 0 END AS special, \
