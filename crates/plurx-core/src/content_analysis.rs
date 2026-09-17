@@ -311,8 +311,8 @@ mod tests {
             first.retry_deadline_ms,
         );
         assert_eq!(later.retry_deadline_ms, first.retry_deadline_ms);
-        assert_eq!(
-            index_retry_decision(
+        assert!(
+            !index_retry_decision(
                 IndexFailureCode::IndexBudgetExceeded,
                 false,
                 5,
@@ -320,8 +320,7 @@ mod tests {
                 30_000,
                 first.retry_deadline_ms,
             )
-            .retryable,
-            false
+            .retryable
         );
     }
 
