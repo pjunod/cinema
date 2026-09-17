@@ -207,7 +207,20 @@ impl Tools for Spawn {
 
     async fn ffprobe(&self, args: Vec<String>) -> Result<std::process::Output, String> {
         let mut command = tokio::process::Command::new(ffprobe_bin());
-        command.args(&args);
+        command
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            // Piped, because `wait_with_output` collects only what was piped.
+            // Without this the answer goes to the daemon's own stdout and
+            // `output.stdout` comes back empty, so every tag this module reads
+            // is "" — which reads as "the output is not BT.709", fails the
+            // reference run, and leaves every node on the CPU tone-map chain
+            // with the hardware encoder it validated sitting idle. The proof
+            // was in the container log: the three correct `color_*=bt709`
+            // lines printed immediately above "the CPU tone-map reference did
+            // not run".
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         crate::process_control::output_job_owned(&mut command)
             .await
             .map_err(|e| format!("could not run ffprobe: {e}"))
