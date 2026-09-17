@@ -191,6 +191,7 @@ pub(crate) async fn readiness(
             live_hls_recovery(live_recovery_on),
             pgs_overlay(overlay_on),
             dolby_vision_convert(convert_on),
+            source_probe_comparison().await,
         ],
     }))
 }
@@ -250,6 +251,82 @@ async fn content_analysis_repair(state: &AppState, enabled: bool) -> DeveloperEn
                 evidence: "The bounded successful-index timing inventory is an operator rollout receipt; the daemon does not receive that artifact. Enabling remains available without it.".to_owned(),
             },
         ],
+    }
+}
+
+/// Advisory, and deliberately switchless: there is nothing here to turn on.
+/// It answers one question an operator otherwise has to read a metrics
+/// endpoint for — is this node checking held sources against the whole stored
+/// scan, or against the narrower set of media facts — and says what would
+/// restore the stricter one.
+async fn source_probe_comparison() -> DeveloperEnableItem {
+    let reporter =
+        plurx_core::scan::probe::known_reporter_identity_of(&crate::ffmpeg::ffprobe_bin()).await;
+    let named = match reporter.flatten() {
+        Some(build) => DeveloperRequirement {
+            id: "probe_reporter_named",
+            title: "This node can name the FFprobe build it probes with",
+            status: RequirementStatus::Met,
+            evidence: format!(
+                "Held sources are probed with {build}, and every scan and held-source probe \
+                 written here is stamped with that name so a later comparison can tell an \
+                 unchanged source from a changed reporter."
+            ),
+        },
+        None if reporter.is_some() => DeveloperRequirement {
+            id: "probe_reporter_named",
+            title: "This node can name the FFprobe build it probes with",
+            status: RequirementStatus::Unmet,
+            evidence: "`ffprobe -version` did not answer, so documents written here carry no \
+                       reporter name. Every held source is then compared against the whole \
+                       stored scan, which refuses whenever that scan came from a different \
+                       FFprobe build."
+                .to_owned(),
+        },
+        // Read, never probed for: an advisory readout does not spawn a
+        // subprocess to report what this node has been doing.
+        None => DeveloperRequirement {
+            id: "probe_reporter_named",
+            title: "This node can name the FFprobe build it probes with",
+            status: RequirementStatus::Unobservable,
+            evidence: "Nothing has been scanned or played on this node since it started, so \
+                       the FFprobe build it would stamp its documents with has not been read \
+                       yet. The first scan or playback start reads it."
+                .to_owned(),
+        },
+    };
+    let admissions = crate::ffmpeg::reporter_drift_admissions();
+    let whole_document = if admissions == 0 {
+        DeveloperRequirement {
+            id: "sources_match_their_scan_whole",
+            title: "Held sources match their stored scan whole",
+            status: RequirementStatus::Met,
+            evidence: "No source has been admitted on its media facts since this process \
+                       started: every held source this node served matched its stored scan \
+                       field for field."
+                .to_owned(),
+        }
+    } else {
+        DeveloperRequirement {
+            id: "sources_match_their_scan_whole",
+            title: "Held sources match their stored scan whole",
+            status: RequirementStatus::Unmet,
+            evidence: format!(
+                "{admissions} held sources were admitted on their media facts rather than on \
+                 the whole stored document, because their scan came from a different FFprobe \
+                 build. Geometry, cadence, codec identity, colour, Dolby Vision side data, the \
+                 audio shape and chapter timing were all compared; the reporter's own schema \
+                 was not. Reanalyzing an item rewrites its scan with this build and restores \
+                 the stricter comparison for it."
+            ),
+        }
+    };
+    DeveloperEnableItem {
+        id: "source_probe_comparison",
+        title: "Held-source probe comparison",
+        enabled: None,
+        setting: None,
+        requirements: vec![named, whole_document],
     }
 }
 

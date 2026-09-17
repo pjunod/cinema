@@ -5027,7 +5027,7 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{live_tv_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}",
+        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{live_tv_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         takeover_metrics = crate::media_sessions::prometheus(),
@@ -5037,6 +5037,10 @@ pub(crate) async fn metrics(
         // whose VOD coverage is complete, which is the number that says the
         // fallback can be turned off.
         live_recovery_metrics = crate::transcode::live_recovery_prometheus(),
+        // A held source admitted on its media facts passed the weaker of the
+        // two comparisons this server can make. Zero is the number that says
+        // every scan in this library was written by the build serving it.
+        probe_reporter_metrics = crate::ffmpeg::reporter_drift_prometheus(),
         // Node-wide statics, so this reads no lock a live segment GET can
         // hold and no `VodServe` handle that a cluster boot may have replaced.
         blocked_get_metrics = state.blocked_gets.prometheus(),

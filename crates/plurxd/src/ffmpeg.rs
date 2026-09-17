@@ -356,26 +356,45 @@ pub async fn ffmpeg_build() -> String {
 /// same-second pathname replacement from pairing fresh bytes with stale
 /// geometry, tracks, cadence, or color facts.
 pub(crate) async fn held_source_probe_json(source: &std::fs::File) -> Result<String, String> {
-    held_source_probe_json_with_limits(
+    let document = held_source_probe_json_with_limits(
         source,
         ENGINE_PROBE_TIMEOUT,
         ENGINE_PROBE_MAX_BYTES,
         "engine probe",
     )
-    .await
+    .await?;
+    Ok(stamped_with_this_reporter(document).await)
+}
+
+/// Name the build that produced a just-taken probe, so a later comparison can
+/// tell an unchanged source from a changed reporter. A document that cannot be
+/// parsed is handed back untouched: the comparison reports the parse failure,
+/// which is the honest answer, rather than a stamp over unreadable output.
+async fn stamped_with_this_reporter(document: String) -> String {
+    let Some(reporter) = plurx_core::scan::probe::reporter_identity_of(&ffprobe_bin()).await else {
+        return document;
+    };
+    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&document) else {
+        return document;
+    };
+    plurx_core::scan::probe::stamp_reporter(&mut parsed, reporter);
+    serde_json::to_string(&parsed).unwrap_or(document)
 }
 
 /// The content-index probe has its own budget. A metadata read on a slow held
 /// source may legitimately take longer than an executable capability probe,
 /// while its JSON is expected to remain far smaller.
 pub(crate) async fn held_source_index_probe_json(source: &std::fs::File) -> Result<String, String> {
-    held_source_probe_json_with_limits(
+    let document = held_source_probe_json_with_limits(
         source,
         Duration::from_secs(30),
         1024 * 1024,
         "index metadata probe",
     )
-    .await
+    .await?;
+    // Stamped for the same reason the engine probe is: the two entry points
+    // must not disagree about a field whose whole purpose is to be compared.
+    Ok(stamped_with_this_reporter(document).await)
 }
 
 async fn held_source_probe_json_with_limits(
@@ -658,6 +677,9 @@ pub(crate) struct ProbeDifference {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct ProbeComparison {
     pub same: bool,
+    /// Admitted on the media facts rather than on the whole document, because
+    /// the two documents were proved to come from different FFprobe builds.
+    pub admitted_on_reporter_drift: bool,
     pub differences: Vec<ProbeDifference>,
     /// Collection stopped at the limit; more differences exist.
     pub truncated: bool,
@@ -786,6 +808,7 @@ const KNOWN_PROBE_FIELDS: &[&str] = &[
     "non_diegetic",
     "original",
     "pix_fmt",
+    "plurx_probe_reporter",
     "probe_score",
     "profile",
     "programs",
@@ -823,7 +846,13 @@ const KNOWN_PROBE_FIELDS: &[&str] = &[
 /// is always collapsed, because container tags carry title text.
 fn rendered_probe_field(key: &str, inside_tags: bool) -> &'static str {
     if inside_tags {
-        return "<field>";
+        // The language a track declares is a catalog fact rather than title
+        // text, and it is the one container tag the comparison reads.
+        return if key == "language" {
+            "language"
+        } else {
+            "<field>"
+        };
     }
     KNOWN_PROBE_FIELDS
         .iter()
@@ -940,25 +969,71 @@ pub(crate) fn compare_probe_documents(stored: &str, held: &str) -> Result<ProbeC
     if stored == held {
         return Ok(ProbeComparison {
             same: true,
+            admitted_on_reporter_drift: false,
             differences: Vec::new(),
             truncated: false,
         });
     }
+    // Two documents from the same FFprobe build describe the same bytes the
+    // same way, so everything that moved between them is a fact about the
+    // source and the whole document is the right comparison. Different builds
+    // do not: they add derived labels, drop container tags, and estimate
+    // durations and bitrates to different precision over a file nothing
+    // touched. A *proved* difference in reporter — and nothing weaker — buys
+    // the narrower comparison, which is the same reasoning each of the
+    // field-by-field exceptions above was making one field at a time.
+    let reporters_differ = match (
+        plurx_core::scan::probe::reporter_of(&stored),
+        plurx_core::scan::probe::reporter_of(&held),
+    ) {
+        (Some(stored), Some(held)) => stored != held,
+        // A scan kept from before this server stamped its documents, read by a
+        // probe that could name itself. That is a different build by
+        // construction: the stamp ships with the build that writes it.
+        (None, Some(_)) => true,
+        // The held probe could not name itself, so there is no proof of
+        // anything. Absence of proof must not be read as proof, or one failed
+        // `ffprobe -version` would narrow the gate for a whole library whose
+        // documents came from the build running right now.
+        _ => false,
+    };
+    if reporters_differ && stream_lists_are_pairable(&stored, &held) {
+        let (stored_facts, held_facts) = source_fact_pair(&stored, &held);
+        if stored_facts == held_facts {
+            return Ok(ProbeComparison {
+                same: true,
+                admitted_on_reporter_drift: true,
+                differences: Vec::new(),
+                truncated: false,
+            });
+        }
+        return Ok(probe_document_differences(&stored_facts, &held_facts));
+    }
+    Ok(probe_document_differences(&stored, &held))
+}
+
+/// Where two documents the comparison refused disagree. The inputs are the
+/// same copies the verdict used, so a diagnosis cannot contradict it.
+fn probe_document_differences(
+    stored: &serde_json::Value,
+    held: &serde_json::Value,
+) -> ProbeComparison {
     let mut differences = Vec::new();
     let mut truncated = false;
     collect_probe_differences(
-        &stored,
-        &held,
+        stored,
+        held,
         &mut Vec::new(),
         false,
         &mut differences,
         &mut truncated,
     );
-    Ok(ProbeComparison {
+    ProbeComparison {
         same: false,
+        admitted_on_reporter_drift: false,
         differences,
         truncated,
-    })
+    }
 }
 
 fn normalized_probe_pair(
@@ -983,6 +1058,265 @@ fn normalized_probe_pair(
     }
     ignore_optional_stream_field_omissions(&mut stored, &mut held);
     Ok((stored, held))
+}
+
+/// Container facts a stored scan asserts about a source.
+const FACT_FORMAT_FIELDS: &[&str] = &["duration", "format_name", "nb_streams", "size"];
+
+/// Per-stream facts the catalog derives from, the recipe reads, or the
+/// delivery decision acts on: geometry, cadence, codec identity, the byte
+/// layout of the parameter sets, color, and the audio shape.
+///
+/// This list is a whitelist on purpose, but it is not a judgement about what
+/// "matters" — it is the set of fields two FFprobe builds were measured
+/// agreeing about over unchanged bytes. Anything left out is left out because
+/// it drifts with the reporter (`start_time`, `start_pts`, `bit_rate`,
+/// `initial_padding`, `ts_id`, `refs`, `film_grain`, `closed_captions`,
+/// `mime_codec_string`, the downmix levels), and every field named here is
+/// compared strictly, including when only one document reports it.
+const FACT_STREAM_FIELDS: &[&str] = &[
+    "avg_frame_rate",
+    "bits_per_raw_sample",
+    "bits_per_sample",
+    "channel_layout",
+    "channels",
+    "chroma_location",
+    "codec_name",
+    "codec_tag_string",
+    "codec_type",
+    "coded_height",
+    "coded_width",
+    "color_primaries",
+    "color_range",
+    "color_space",
+    "color_transfer",
+    "display_aspect_ratio",
+    // The HEVC sample-entry decision and the copy path's parameter-set
+    // promotion are read out of the STORED document (`plurx_core::transcode::
+    // hevc_parameter_set_promotion_required`), so the byte layout of the
+    // extradata is a fact about this source, not about who described it.
+    "extradata_size",
+    "field_order",
+    "has_b_frames",
+    "height",
+    "index",
+    "is_avc",
+    "level",
+    "nal_length_size",
+    "pix_fmt",
+    "profile",
+    "r_frame_rate",
+    "sample_aspect_ratio",
+    "sample_fmt",
+    "sample_rate",
+    "time_base",
+    "width",
+];
+
+/// The dispositions the product reads.
+const FACT_DISPOSITION_FIELDS: &[&str] = &[
+    "attached_pic",
+    "default",
+    "forced",
+    "hearing_impaired",
+    "visual_impaired",
+];
+
+/// Container tags are title text, with one exception: the language a track
+/// declares is a catalog fact and is compared.
+const FACT_TAG_FIELDS: &[&str] = &["language"];
+
+const FACT_CHAPTER_FIELDS: &[&str] = &["end", "end_time", "start", "start_time", "time_base"];
+
+/// FFprobe builds disagree about a container duration by tens of milliseconds
+/// over the same bytes — measured at 2511.520 against 2511.477 seconds on one
+/// production file. The tolerance is relative so it cannot swallow a quarter
+/// of a four-second clip, floored so it survives that drift on a short one and
+/// capped so it never grows into a real edit on a long one.
+const FACT_DURATION_DRIFT_FRACTION: f64 = 1e-4;
+const FACT_DURATION_TOLERANCE_MIN_SECONDS: f64 = 0.05;
+const FACT_DURATION_TOLERANCE_MAX_SECONDS: f64 = 1.0;
+
+fn kept_fields(source: Option<&serde_json::Value>, fields: &[&str]) -> serde_json::Value {
+    let mut kept = serde_json::Map::new();
+    if let Some(present) = source.and_then(serde_json::Value::as_object) {
+        for field in fields {
+            if let Some(value) = present.get(*field) {
+                kept.insert((*field).to_owned(), value.clone());
+            }
+        }
+    }
+    serde_json::Value::Object(kept)
+}
+
+fn probe_duration_seconds(value: Option<&serde_json::Value>) -> Option<f64> {
+    let seconds = match value {
+        Some(serde_json::Value::String(text)) => text.parse::<f64>().ok(),
+        Some(serde_json::Value::Number(number)) => number.as_f64(),
+        _ => None,
+    }?;
+    seconds.is_finite().then_some(seconds)
+}
+
+/// One stream, reduced to the facts above.
+///
+/// `side_data_list` is carried whole and keyed by type rather than filtered to
+/// a known set: a record this projection did not recognize is still a record
+/// that changed, and dropping it would admit an HDR10+ source replaced by an
+/// HDR10 one. Keying by type also means a reporter that emits the records in a
+/// different order does not pair a mastering-display record against a Dolby
+/// Vision one.
+fn stream_facts(stream: &serde_json::Value) -> serde_json::Value {
+    let mut facts = kept_fields(Some(stream), FACT_STREAM_FIELDS);
+    let object = facts.as_object_mut().expect("kept fields build an object");
+    object.insert(
+        "disposition".to_owned(),
+        kept_fields(stream.get("disposition"), FACT_DISPOSITION_FIELDS),
+    );
+    object.insert(
+        "tags".to_owned(),
+        kept_fields(stream.get("tags"), FACT_TAG_FIELDS),
+    );
+    let mut side_data = serde_json::Map::new();
+    for record in stream
+        .get("side_data_list")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+    {
+        let kind = record
+            .get("side_data_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("<unnamed>")
+            .to_owned();
+        side_data
+            .entry(kind)
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+            .as_array_mut()
+            .expect("entry is an array")
+            .push(record.clone());
+    }
+    object.insert(
+        "side_data_list".to_owned(),
+        serde_json::Value::Object(side_data),
+    );
+    serde_json::Value::Object(object.clone())
+}
+
+/// The media facts one probe document asserts, as this product models them.
+fn source_facts(document: &serde_json::Value) -> serde_json::Value {
+    let mut facts = serde_json::Map::new();
+    facts.insert(
+        "format".to_owned(),
+        kept_fields(document.get("format"), FACT_FORMAT_FIELDS),
+    );
+    if let Some(streams) = document
+        .get("streams")
+        .and_then(serde_json::Value::as_array)
+    {
+        facts.insert(
+            "streams".to_owned(),
+            serde_json::Value::Array(streams.iter().map(stream_facts).collect()),
+        );
+    }
+    if let Some(chapters) = document
+        .get("chapters")
+        .and_then(serde_json::Value::as_array)
+    {
+        facts.insert(
+            "chapters".to_owned(),
+            serde_json::Value::Array(
+                chapters
+                    .iter()
+                    .map(|chapter| kept_fields(Some(chapter), FACT_CHAPTER_FIELDS))
+                    .collect(),
+            ),
+        );
+    }
+    serde_json::Value::Object(facts)
+}
+
+/// Held sources this process admitted on their media facts rather than on the
+/// whole stored document. Work this server does on weaker evidence than it
+/// prefers is work an operator must be able to see without a shell.
+static REPORTER_DRIFT_ADMISSIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn note_reporter_drift_admission() {
+    REPORTER_DRIFT_ADMISSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn reporter_drift_admissions() -> u64 {
+    REPORTER_DRIFT_ADMISSIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn reporter_drift_prometheus() -> String {
+    format!(
+        "# HELP plurx_probe_reporter_drift_admissions_total Held sources admitted on their media facts because their stored scan came from a different FFprobe build.\n\
+         # TYPE plurx_probe_reporter_drift_admissions_total counter\n\
+         plurx_probe_reporter_drift_admissions_total {}\n",
+        reporter_drift_admissions()
+    )
+}
+
+/// Whether the two stream lists can be compared position by position at all.
+/// The fact comparison pairs by position, so the pairing itself has to be
+/// proved first: the same count, and the same explicit non-negative integer
+/// index at every position. Without that proof there is no weaker verdict to
+/// fall back to and the whole-document comparison stands.
+fn stream_lists_are_pairable(stored: &serde_json::Value, held: &serde_json::Value) -> bool {
+    let (Some(stored), Some(held)) = (
+        stored.get("streams").and_then(serde_json::Value::as_array),
+        held.get("streams").and_then(serde_json::Value::as_array),
+    ) else {
+        return false;
+    };
+    if stored.len() != held.len() {
+        return false;
+    }
+    stored.iter().zip(held.iter()).all(|(stored, held)| {
+        matches!(
+            (
+                stored.get("index").and_then(serde_json::Value::as_u64),
+                held.get("index").and_then(serde_json::Value::as_u64),
+            ),
+            (Some(stored), Some(held)) if stored == held
+        )
+    })
+}
+
+/// Both documents' facts, with the one measured tolerance applied.
+///
+/// Every field named in the projection is otherwise compared strictly,
+/// including its absence: these are facts about the source, and a reporter
+/// that did not mention one is not evidence that the source lost it. Only
+/// fields the projection never names are ignored, and each of those is there
+/// because two builds were measured disagreeing about it over unchanged bytes.
+fn source_fact_pair(
+    stored: &serde_json::Value,
+    held: &serde_json::Value,
+) -> (serde_json::Value, serde_json::Value) {
+    let mut stored = source_facts(stored);
+    let mut held = source_facts(held);
+    if let (Some(stored_seconds), Some(held_seconds)) = (
+        probe_duration_seconds(stored.pointer("/format/duration")),
+        probe_duration_seconds(held.pointer("/format/duration")),
+    ) {
+        let tolerance = (stored_seconds.abs() * FACT_DURATION_DRIFT_FRACTION).clamp(
+            FACT_DURATION_TOLERANCE_MIN_SECONDS,
+            FACT_DURATION_TOLERANCE_MAX_SECONDS,
+        );
+        if (stored_seconds - held_seconds).abs() <= tolerance {
+            let canonical = serde_json::json!(format!("{stored_seconds:.3}"));
+            if let Some(duration) = stored.pointer_mut("/format/duration") {
+                *duration = canonical.clone();
+            }
+            if let Some(duration) = held.pointer_mut("/format/duration") {
+                *duration = canonical;
+            }
+        }
+    }
+    (stored, held)
 }
 
 /// Which pacing flags this ffmpeg understands. `-readrate` landed in 5.1 and
@@ -2354,6 +2688,538 @@ mod tests {
     /// regressions are about the verdict, which must stay identical.
     fn probes_describe_same_input(stored: &str, held: &str) -> Result<bool, String> {
         Ok(super::compare_probe_documents(stored, held)?.same)
+    }
+
+    /// A production file on `media1`: 4K HEVC Dolby Vision Profile 8 in MP4
+    /// with E-AC-3 Atmos, scanned by the reporter the daemon used then —
+    /// which is not the one it probes the held descriptor with now.
+    fn legacy_reporter_probe() -> serde_json::Value {
+        serde_json::from_str(
+            r#"{
+            "streams": [
+                {"index": 0, "codec_type": "video", "codec_name": "hevc",
+                 "profile": "Main 10", "codec_tag_string": "hvc1",
+                 "width": 3840, "height": 2076, "coded_width": 3840, "coded_height": 2076,
+                 "pix_fmt": "yuv420p10le", "level": 153, "color_range": "tv",
+                 "color_space": "bt2020nc", "color_transfer": "smpte2084",
+                 "color_primaries": "bt2020", "chroma_location": "topleft",
+                 "field_order": "progressive", "has_b_frames": 2,
+                 "extradata_size": 110, "nal_length_size": "4",
+                 "r_frame_rate": "24000/1001", "avg_frame_rate": "24000/1001",
+                 "time_base": "1/24000", "start_pts": 0, "start_time": "0.000000",
+                 "closed_captions": 0, "film_grain": 0, "refs": 1,
+                 "disposition": {"default": 1, "forced": 0, "attached_pic": 0,
+                                 "hearing_impaired": 0, "visual_impaired": 0},
+                 "tags": {"language": "eng", "handler_name": "VideoHandler",
+                          "vendor_id": "[0][0][0][0]"},
+                 "side_data_list": [{"side_data_type": "DOVI configuration record",
+                                     "dv_version_major": 1, "dv_version_minor": 0,
+                                     "dv_profile": 8, "dv_level": 6,
+                                     "rpu_present_flag": 1, "el_present_flag": 0,
+                                     "bl_present_flag": 1,
+                                     "dv_bl_signal_compatibility_id": 1}]},
+                {"index": 1, "codec_type": "audio", "codec_name": "eac3",
+                 "codec_tag_string": "ec-3", "channels": 6, "sample_rate": "48000",
+                 "channel_layout": "5.1(side)", "sample_fmt": "fltp",
+                 "time_base": "1/48000", "start_pts": 0, "start_time": "0.000000",
+                 "disposition": {"default": 1, "forced": 0, "attached_pic": 0,
+                                 "hearing_impaired": 0, "visual_impaired": 0},
+                 "tags": {"language": "eng", "handler_name": "SoundHandler",
+                          "vendor_id": "[0][0][0][0]"}}
+            ],
+            "chapters": [{"id": 0, "time_base": "1/1000", "start": 0,
+                          "start_time": "0.000000", "end": 600000,
+                          "end_time": "600.000000"}],
+            "format": {"filename": "/media/movies/Harbor Lights (2024)/Harbor Lights (2024) WEBDL-2160p.mp4",
+                       "format_name": "mov,mp4,m4a,3gp,3g2,mj2", "nb_streams": 2,
+                       "duration": "11361.520000", "size": "81604378624",
+                       "bit_rate": "2231402"}
+        }"#,
+        )
+        .expect("fixture")
+    }
+
+    /// The same bytes through the reporter the daemon probes with now: every
+    /// one of these differences was measured on `media1` on 2026-09-17 between
+    /// FFprobe 5.1.9 and jellyfin-ffmpeg 8.1.2 over one unchanged file.
+    fn current_reporter_probe() -> serde_json::Value {
+        let mut current = legacy_reporter_probe();
+        current["format"]["filename"] = serde_json::json!("/dev/fd/3");
+        current["format"]["nb_stream_groups"] = serde_json::json!(0);
+        current["format"]["duration"] = serde_json::json!("11361.477000");
+        current["format"]["bit_rate"] = serde_json::json!("2231440");
+        for stream in current["streams"].as_array_mut().expect("streams") {
+            let fields = stream.as_object_mut().expect("stream");
+            for dropped in ["closed_captions", "film_grain", "refs"] {
+                fields.remove(dropped);
+            }
+            fields.insert("view_ids_available".to_owned(), serde_json::json!(""));
+            fields.insert("view_pos_available".to_owned(), serde_json::json!(""));
+            stream["disposition"]["multilayer"] = serde_json::json!(0);
+            stream["disposition"]["non_diegetic"] = serde_json::json!(0);
+            stream["tags"]
+                .as_object_mut()
+                .expect("tags")
+                .remove("vendor_id");
+        }
+        current["streams"][0]["side_data_list"][0]["dv_md_compression"] = serde_json::json!("none");
+        current["streams"][1]["profile"] = serde_json::json!("Dolby Digital Plus + Dolby Atmos");
+        current["streams"][1]["initial_padding"] = serde_json::json!(0);
+        current["streams"][1]["mime_codec_string"] = serde_json::json!("ec-3");
+        current["streams"][1]["dmix_mode"] = serde_json::json!("0");
+        current["streams"][1]["start_pts"] = serde_json::json!(-5);
+        current["streams"][1]["start_time"] = serde_json::json!("-0.005000");
+        current["streams"][1]["tags"]["name"] = serde_json::json!("GROUP DDP5.1 Atmos");
+        plurx_core::scan::probe::stamp_reporter(&mut current, "ffprobe version 8.1.2-Jellyfin");
+        current
+    }
+
+    /// The production failure this exists to stop: three refusals on `media1`
+    /// inside four minutes, on a file nothing had touched, because the scan
+    /// and the held-descriptor probe came from different FFprobe builds. 5,061
+    /// of the 5,955 files in that library carry a scan from the older one, so
+    /// this is not one title.
+    #[test]
+    fn a_different_reporter_admits_its_schema_drift_over_the_same_bytes() {
+        let legacy = legacy_reporter_probe().to_string();
+        let current = current_reporter_probe().to_string();
+        let comparison = super::compare_probe_documents(&legacy, &current).expect("compare");
+        assert!(comparison.same, "{:?}", comparison.differences);
+        assert!(comparison.admitted_on_reporter_drift);
+        assert!(comparison.differences.is_empty());
+        // Symmetric between two named builds, because a replicated catalog can
+        // be newer than the node reading it.
+        let mut legacy_named: serde_json::Value = serde_json::from_str(&legacy).expect("fixture");
+        plurx_core::scan::probe::stamp_reporter(
+            &mut legacy_named,
+            "ffprobe version 5.1.9-0+deb12u1",
+        );
+        let reversed =
+            super::compare_probe_documents(&current, &legacy_named.to_string()).expect("compare");
+        assert!(reversed.same, "{:?}", reversed.differences);
+        assert!(reversed.admitted_on_reporter_drift);
+        let forward =
+            super::compare_probe_documents(&legacy_named.to_string(), &current).expect("compare");
+        assert!(forward.same, "{:?}", forward.differences);
+    }
+
+    /// The reason the comparison exists is unchanged: a same-size, same-second
+    /// replacement must not pair fresh bytes with stale geometry, tracks,
+    /// cadence or color. Every one of these is still a refusal across the same
+    /// reporter drift that the case above admits whole.
+    #[test]
+    fn a_different_reporter_still_refuses_every_measured_media_change() {
+        let legacy = legacy_reporter_probe().to_string();
+        let drifted = current_reporter_probe();
+        let control =
+            super::compare_probe_documents(&legacy, &drifted.to_string()).expect("control");
+        assert!(control.same);
+        // The premise of every case below: this pair reaches the narrower
+        // comparison. Without it the loop would only prove that refusal still
+        // works on the whole-document path.
+        assert!(control.admitted_on_reporter_drift);
+        for (pointer, replacement) in [
+            ("/streams/0/width", serde_json::json!(1920)),
+            ("/streams/0/height", serde_json::json!(1080)),
+            ("/streams/0/pix_fmt", serde_json::json!("yuv420p")),
+            ("/streams/0/codec_name", serde_json::json!("h264")),
+            ("/streams/0/profile", serde_json::json!("Main")),
+            ("/streams/0/level", serde_json::json!(120)),
+            ("/streams/0/color_transfer", serde_json::json!("bt709")),
+            ("/streams/0/color_primaries", serde_json::json!("bt709")),
+            ("/streams/0/r_frame_rate", serde_json::json!("30000/1001")),
+            ("/streams/0/avg_frame_rate", serde_json::json!("30000/1001")),
+            ("/streams/0/time_base", serde_json::json!("1/30000")),
+            ("/streams/0/field_order", serde_json::json!("tt")),
+            ("/streams/0/codec_tag_string", serde_json::json!("dvh1")),
+            ("/streams/0/disposition/default", serde_json::json!(0)),
+            (
+                "/streams/0/side_data_list/0/dv_profile",
+                serde_json::json!(5),
+            ),
+            (
+                "/streams/0/side_data_list/0/bl_present_flag",
+                serde_json::json!(0),
+            ),
+            ("/streams/1/codec_type", serde_json::json!("data")),
+            ("/streams/1/codec_name", serde_json::json!("ac3")),
+            ("/streams/1/channels", serde_json::json!(8)),
+            ("/streams/1/channel_layout", serde_json::json!("7.1")),
+            ("/streams/1/sample_rate", serde_json::json!("44100")),
+            ("/streams/1/sample_fmt", serde_json::json!("s16")),
+            ("/streams/1/tags/language", serde_json::json!("fra")),
+            ("/streams/1/disposition/forced", serde_json::json!(1)),
+            ("/format/size", serde_json::json!("81604378625")),
+            ("/format/nb_streams", serde_json::json!(3)),
+            ("/format/format_name", serde_json::json!("matroska,webm")),
+            ("/format/duration", serde_json::json!("11000.000000")),
+            ("/chapters/0/end", serde_json::json!(660000)),
+        ] {
+            let mut held = drifted.clone();
+            *held.pointer_mut(pointer).expect(pointer) = replacement;
+            let comparison =
+                super::compare_probe_documents(&legacy, &held.to_string()).expect(pointer);
+            assert!(!comparison.same, "{pointer} is a measured media fact");
+            assert!(!comparison.admitted_on_reporter_drift);
+        }
+        let mut fewer = drifted.clone();
+        fewer["streams"].as_array_mut().expect("streams").pop();
+        assert!(
+            !super::compare_probe_documents(&legacy, &fewer.to_string())
+                .expect("track count")
+                .same
+        );
+        let mut chaptered = drifted.clone();
+        chaptered["chapters"]
+            .as_array_mut()
+            .expect("chapters")
+            .push(
+                serde_json::json!({"id": 1, "time_base": "1/1000", "start": 600000,
+                                     "start_time": "600.000000", "end": 1200000,
+                                     "end_time": "1200.000000"}),
+            );
+        assert!(
+            !super::compare_probe_documents(&legacy, &chaptered.to_string())
+                .expect("added chapter")
+                .same
+        );
+    }
+
+    /// Every fact the projection names is compared strictly, including its
+    /// absence. A replacement that simply does not report a property is not
+    /// evidence that the property is unknown — the stored scan measured it.
+    #[test]
+    fn a_fact_only_one_document_reports_is_a_refusal_not_an_unknown() {
+        let legacy = legacy_reporter_probe().to_string();
+        for pointer in [
+            "/streams/0/color_range",
+            "/streams/0/color_transfer",
+            "/streams/0/color_primaries",
+            "/streams/0/pix_fmt",
+            "/streams/0/level",
+            "/streams/0/profile",
+            "/streams/0/extradata_size",
+            "/streams/0/field_order",
+            "/streams/1/channel_layout",
+            "/streams/1/channels",
+            "/streams/1/sample_rate",
+            "/streams/1/tags/language",
+            "/format/duration",
+            "/format/size",
+            "/format/format_name",
+        ] {
+            let mut held = current_reporter_probe();
+            let (parent, field) = pointer.rsplit_once('/').expect("pointer");
+            held.pointer_mut(parent)
+                .expect(parent)
+                .as_object_mut()
+                .expect(parent)
+                .remove(field)
+                .unwrap_or_else(|| panic!("{pointer} is in the fixture"));
+            assert!(
+                !super::compare_probe_documents(&legacy, &held.to_string())
+                    .expect(pointer)
+                    .same,
+                "{pointer} reported only by the scan must refuse"
+            );
+            let mut stored = legacy_reporter_probe();
+            stored
+                .pointer_mut(parent)
+                .expect(parent)
+                .as_object_mut()
+                .expect(parent)
+                .remove(field);
+            assert!(
+                !super::compare_probe_documents(
+                    &stored.to_string(),
+                    &current_reporter_probe().to_string()
+                )
+                .expect(pointer)
+                .same,
+                "{pointer} reported only by the held probe must refuse"
+            );
+        }
+    }
+
+    /// Side data is carried whole and keyed by type, so a record this
+    /// projection never heard of still refuses when it appears or disappears.
+    /// HDR10+ is the case that matters: `detect_hdr_format` classifies a
+    /// source from a dynamic-metadata record alone, and an HDR10+ title
+    /// replaced by a plain HDR10 one differs in nothing else.
+    #[test]
+    fn a_side_data_record_that_appears_or_disappears_refuses() {
+        let legacy_base = legacy_reporter_probe();
+        for record in [
+            serde_json::json!({"side_data_type": "HDR Dynamic Metadata SMPTE2094-40 (HDR10+)",
+                               "application version": 1}),
+            serde_json::json!({"side_data_type": "Mastering display metadata",
+                               "max_luminance": "1000/1", "min_luminance": "1/10000"}),
+            serde_json::json!({"side_data_type": "Content light level metadata",
+                               "max_content": 1000, "max_average": 400}),
+            serde_json::json!({"side_data_type": "Display Matrix", "rotation": -90}),
+            serde_json::json!({"side_data_type": "Stereo 3D", "type": "side by side"}),
+        ] {
+            let mut stored = legacy_base.clone();
+            stored["streams"][0]["side_data_list"]
+                .as_array_mut()
+                .expect("side data")
+                .push(record.clone());
+            assert!(
+                !super::compare_probe_documents(
+                    &stored.to_string(),
+                    &current_reporter_probe().to_string()
+                )
+                .expect("compare")
+                .same,
+                "a dropped {record} must refuse"
+            );
+            let mut held = current_reporter_probe();
+            held["streams"][0]["side_data_list"]
+                .as_array_mut()
+                .expect("side data")
+                .push(record.clone());
+            assert!(
+                !super::compare_probe_documents(&legacy_base.to_string(), &held.to_string())
+                    .expect("compare")
+                    .same,
+                "an added {record} must refuse"
+            );
+        }
+        // A Dolby Vision record whose delivery facts moved is still a refusal
+        // even though the record type is unchanged.
+        let mut held = current_reporter_probe();
+        held["streams"][0]["side_data_list"][0]["dv_bl_signal_compatibility_id"] =
+            serde_json::json!(4);
+        assert!(
+            !super::compare_probe_documents(&legacy_base.to_string(), &held.to_string())
+                .expect("compare")
+                .same
+        );
+    }
+
+    /// A stream list that is not an array cannot be projected, so the
+    /// whole-document verdict has to stand rather than a comparison of
+    /// nothing at all.
+    #[test]
+    fn a_malformed_stream_list_keeps_the_whole_document_verdict() {
+        let legacy = legacy_reporter_probe().to_string();
+        for broken in [
+            serde_json::json!({}),
+            serde_json::Value::Null,
+            serde_json::json!("two"),
+        ] {
+            let mut held = current_reporter_probe();
+            held["streams"] = broken.clone();
+            let comparison =
+                super::compare_probe_documents(&legacy, &held.to_string()).expect("compare");
+            assert!(!comparison.same, "streams {broken} must refuse");
+            assert!(!comparison.admitted_on_reporter_drift);
+        }
+        let mut held = current_reporter_probe();
+        held.as_object_mut().expect("document").remove("streams");
+        assert!(
+            !super::compare_probe_documents(&legacy, &held.to_string())
+                .expect("compare")
+                .same
+        );
+    }
+
+    /// The tolerance is relative, so it cannot swallow a quarter of a short
+    /// clip, and it is exercised at its own boundary.
+    #[test]
+    fn the_duration_tolerance_is_relative_and_exact_at_its_boundary() {
+        let legacy = legacy_reporter_probe();
+        let stored_seconds = 11361.520_f64;
+        let tolerance = (stored_seconds * super::FACT_DURATION_DRIFT_FRACTION).clamp(
+            super::FACT_DURATION_TOLERANCE_MIN_SECONDS,
+            super::FACT_DURATION_TOLERANCE_MAX_SECONDS,
+        );
+        assert!((tolerance - 1.1361520).abs() > f64::EPSILON || tolerance <= 1.0);
+        for (delta, admitted) in [
+            (0.043_f64, true),
+            (tolerance, true),
+            (tolerance + 0.001, false),
+            (300.0, false),
+        ] {
+            let mut held = current_reporter_probe();
+            held["format"]["duration"] =
+                serde_json::json!(format!("{:.6}", stored_seconds - delta));
+            assert_eq!(
+                super::compare_probe_documents(&legacy.to_string(), &held.to_string())
+                    .expect("compare")
+                    .same,
+                admitted,
+                "duration delta {delta}"
+            );
+        }
+        // A four-second clip gets the floor, not a quarter of itself.
+        let mut short_stored = legacy_reporter_probe();
+        short_stored["format"]["duration"] = serde_json::json!("4.000000");
+        let mut short_held = current_reporter_probe();
+        short_held["format"]["duration"] = serde_json::json!("3.100000");
+        assert!(
+            !super::compare_probe_documents(&short_stored.to_string(), &short_held.to_string())
+                .expect("compare")
+                .same,
+            "a 0.9s change in a 4s clip is not reporter drift"
+        );
+        short_held["format"]["duration"] = serde_json::json!("3.980000");
+        assert!(
+            super::compare_probe_documents(&short_stored.to_string(), &short_held.to_string())
+                .expect("compare")
+                .same,
+            "20ms on a 4s clip is inside the floor"
+        );
+        // A duration neither side can state is not silently uncompared.
+        for unparsable in [
+            serde_json::json!("N/A"),
+            serde_json::json!("nan"),
+            serde_json::json!("inf"),
+        ] {
+            let mut held = current_reporter_probe();
+            held["format"]["duration"] = unparsable.clone();
+            assert!(
+                !super::compare_probe_documents(&legacy.to_string(), &held.to_string())
+                    .expect("compare")
+                    .same,
+                "duration {unparsable} must refuse"
+            );
+        }
+    }
+
+    /// The held probe naming itself is what proves a different reporter. A
+    /// probe that could not name itself proves nothing, and must not be read
+    /// as a difference — that direction weakens the gate.
+    #[test]
+    fn an_unnamed_held_probe_is_not_proof_of_a_different_reporter() {
+        let mut stored = legacy_reporter_probe();
+        plurx_core::scan::probe::stamp_reporter(&mut stored, "ffprobe version 8.1.2-Jellyfin");
+        let mut held: serde_json::Value = current_reporter_probe();
+        held.as_object_mut()
+            .expect("document")
+            .remove(plurx_core::scan::probe::REPORTER_FIELD);
+        // Identical bytes, one stamped scan, one probe that could not say who
+        // it was: the whole-document comparison stands, drift and all.
+        let comparison =
+            super::compare_probe_documents(&stored.to_string(), &held.to_string()).expect("same");
+        assert!(!comparison.same);
+        assert!(!comparison.admitted_on_reporter_drift);
+    }
+
+    /// The refusal sentence names the stamp rather than calling it unknown,
+    /// because on a library scanned before this landed it is the most common
+    /// difference an operator will read.
+    #[test]
+    fn the_reporter_stamp_is_nameable_in_a_refusal() {
+        let mut stored = legacy_reporter_probe();
+        stored["streams"][0]["width"] = serde_json::json!(1920);
+        let mut held = legacy_reporter_probe();
+        plurx_core::scan::probe::stamp_reporter(&mut held, "ffprobe version 8.1.2-Jellyfin");
+        held["streams"][1]["index"] = serde_json::json!(7);
+        let rendered = super::compare_probe_documents(&stored.to_string(), &held.to_string())
+            .expect("compare")
+            .rendered_differences();
+        assert!(rendered.contains("/plurx_probe_reporter"), "{rendered}");
+        assert!(!rendered.contains("<unknown-field>"), "{rendered}");
+    }
+
+    /// The relaxation is bought by evidence and nothing else. Two documents
+    /// from the same reporter are still compared whole, so a field that build
+    /// reports on both sides still refuses when it moves.
+    #[test]
+    fn the_same_reporter_still_demands_the_whole_document() {
+        let mut stored = legacy_reporter_probe();
+        plurx_core::scan::probe::stamp_reporter(&mut stored, "ffprobe version 8.1.2-Jellyfin");
+        let mut held = stored.clone();
+        held["streams"][0]["refs"] = serde_json::json!(2);
+        let comparison =
+            super::compare_probe_documents(&stored.to_string(), &held.to_string()).expect("same");
+        assert!(!comparison.same);
+        assert!(!comparison.admitted_on_reporter_drift);
+        assert_eq!(comparison.rendered_differences(), "/streams/0/refs value");
+        let mut unstamped = legacy_reporter_probe();
+        unstamped["streams"][0]["refs"] = serde_json::json!(2);
+        assert!(
+            !super::compare_probe_documents(
+                &legacy_reporter_probe().to_string(),
+                &unstamped.to_string()
+            )
+            .expect("two unknown reporters")
+            .same,
+            "an unproved reporter difference is not a reporter difference"
+        );
+    }
+
+    /// Sub-second duration drift over unchanged bytes was measured; a real
+    /// re-encode is not sub-second.
+    #[test]
+    fn duration_drift_is_bounded_by_a_second() {
+        let legacy = legacy_reporter_probe().to_string();
+        for (duration, admitted) in [
+            ("11361.477000", true),
+            ("11362.400000", true),
+            ("11363.000000", false),
+            ("11360.000000", false),
+        ] {
+            let mut held = current_reporter_probe();
+            held["format"]["duration"] = serde_json::json!(duration);
+            assert_eq!(
+                super::compare_probe_documents(&legacy, &held.to_string())
+                    .expect(duration)
+                    .same,
+                admitted,
+                "duration {duration}"
+            );
+        }
+    }
+
+    /// The fact comparison pairs streams by position, so an unproved pairing
+    /// gets no relaxation at all: the whole-document verdict stands.
+    #[test]
+    fn an_unpairable_stream_list_keeps_the_whole_document_verdict() {
+        let legacy = legacy_reporter_probe().to_string();
+        for broken in [
+            serde_json::json!(5),
+            serde_json::Value::Null,
+            serde_json::json!(-1),
+            serde_json::json!("1"),
+        ] {
+            let mut held = current_reporter_probe();
+            held["streams"][1]["index"] = broken.clone();
+            assert!(
+                !super::compare_probe_documents(&legacy, &held.to_string())
+                    .expect("compare")
+                    .same,
+                "index {broken} is not a pairing"
+            );
+        }
+        let mut held = current_reporter_probe();
+        held["streams"][1]
+            .as_object_mut()
+            .expect("stream")
+            .remove("index");
+        assert!(
+            !super::compare_probe_documents(&legacy, &held.to_string())
+                .expect("compare")
+                .same
+        );
+    }
+
+    /// A reporter that cannot name the codec is not describing the stream the
+    /// other one described, so the spine is never treated as unknown.
+    #[test]
+    fn a_one_sided_codec_identity_is_a_refusal_not_an_unknown() {
+        let legacy = legacy_reporter_probe().to_string();
+        for field in ["codec_name", "codec_type"] {
+            let mut held = current_reporter_probe();
+            held["streams"][1]
+                .as_object_mut()
+                .expect("stream")
+                .remove(field);
+            let comparison =
+                super::compare_probe_documents(&legacy, &held.to_string()).expect(field);
+            assert!(!comparison.same, "{field} omitted on one side");
+        }
     }
 
     /// Wicked's track arrangement: 4K HEVC, a default TrueHD Atmos track, a
