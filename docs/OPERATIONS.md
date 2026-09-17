@@ -4634,11 +4634,11 @@ row in place as history, so without that rule the repaired file would still be
 offered tomorrow and every later press would re-force a library that is already
 indexed. "Nothing left to reopen" is the healthy answer, not an error.
 
-Two things it does not cover, on purpose. **Forced generations** are excluded:
+The generic bulk action excludes **forced generations** on purpose:
 a forced request is somebody's deliberate one-off, not a queue fault to repair.
-**Standalone cluster jobs** with no operator request behind them — playback's
-foreground enqueue makes those — are outside this endpoint entirely and belong
-to discovery's own retry.
+The revisioned selected-video repair described below has a separate candidate
+model and can report standalone cluster jobs without folding them into this
+generic request-history action.
 
 The response says what stopped it. `skipped_unavailable` counts rows whose
 successor could not be created: the file changed underneath the request, so its
@@ -4656,6 +4656,35 @@ work nothing will claim.
 **Settings → Content analysis → Attention** exposes the same thing as *Reopen
 everything failed…*, which previews first and then asks. *Retry this page* beside
 it is the bounded version: it walks only the rows currently painted.
+
+Legacy `truncated` rows need the identity-safe selected-video repair instead
+of the generic bulk reopen:
+
+```
+POST /api/v1/analysis/reopen
+{"dry_run":true,"limit":50,"component":"fragment_index","repair_revision":"video-completion-v1"}
+```
+
+Review `candidates` and their `eligibility`, then send only the eligible exact
+descriptors back as `candidates` with `dry_run:false` and the same revision.
+The server does not choose a replacement batch during apply. It rechecks the
+source, predecessor fence, video and engine identity, current publication,
+active work, receipt, and queue headroom in the Store transaction. One durable
+receipt permits one successor generation; repeated or concurrent apply returns
+that successor. Standalone failed jobs are visible in preview, while candidates
+whose legacy provenance cannot resolve one exact video identity are reported as
+`identity_unresolved` and remain unchanged.
+
+Typed retryable index failures use their own schedule: 30 minutes doubled to a
+24-hour ceiling, at most the configured charged-attempt limit, inside one fixed
+seven-day window. Generic analysis backoff settings still govern other failure
+types. A typed cycle survives the six-hour unstarted-queue cleanup; playback
+priority cannot pull it forward. `index_retry_window_expired` is terminal until
+an explicit administrator generation.
+
+**Settings → Developer → Content analysis** is the authoritative enable switch.
+Its media-tool, durable-store, held-source, and compatibility-inventory rows are
+advisory evidence only. An unmet or unavailable row never disables the switch.
 
 ## Hardware transcode & recent Intel GPUs
 
