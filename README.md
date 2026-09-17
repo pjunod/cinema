@@ -287,4 +287,18 @@ The [roadmap](docs/ROADMAP.md) preserves the project phases and design history.
 
 ## License
 
-Private for now. Licensing will be decided before public distribution.
+plurx is licensed under the Apache License 2.0 — see [LICENSE](LICENSE).
+
+Apache-2.0 grants commercial use, modification, and redistribution, and
+carries an express patent grant from every contributor, with a retaliation
+clause that terminates it for anyone who sues over patents. It withholds
+trademark rights: the plurx and cinemarr names and marks are not licensed
+with the code.
+
+Contributions are accepted under Apache-2.0 §5 — submitting a change licenses
+it under the same terms, with no separate agreement to sign.
+
+Bundled fonts and libraries, the four vendored crates, and the one
+redistribution obligation that comes with the container image are documented
+in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Nothing plurx depends on
+is copyleft; ffmpeg is invoked as a subprocess and never linked.
