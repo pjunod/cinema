@@ -1578,6 +1578,39 @@ release-check: ## Verify the tree is ready to tag the current version
 	@scripts/validate run --profile ci --all --strict
 	@echo "Ready: git tag -a v$(VERSION) -m 'v$(VERSION)' && git push && git push --tags"
 
+# Installing the server is one command per platform, and the platform is
+# detected rather than asked for. deploy/install does the work; these targets
+# exist so `make install` is the answer on every host, and so the answer is
+# the same one deploy/README.md prints. INSTALL_FLAGS passes through, e.g.
+# `make install INSTALL_FLAGS='--binary ~/Downloads/plurxd'` to skip the build
+# or `make install-docker INSTALL_FLAGS=--dry-run` to see the plan first.
+INSTALL_FLAGS ?=
+
+.PHONY: install install-linux install-macos install-windows install-docker install-binary uninstall uninstall-docker
+install: ## Install plurxd as a service on this OS (systemd, launchd, or the Windows service)
+	@deploy/install auto $(INSTALL_FLAGS)
+
+install-linux: ## Install plurxd as a systemd service (dedicated plurx user, sandboxed unit)
+	@deploy/install linux $(INSTALL_FLAGS)
+
+install-macos: ## Install plurxd as a launchd LaunchAgent (keeps VideoToolbox available)
+	@deploy/install macos $(INSTALL_FLAGS)
+
+install-windows: ## Install plurxd as the native Windows service (runs deploy/install.ps1)
+	@deploy/install windows $(INSTALL_FLAGS)
+
+install-docker: ## First-run Compose install: .env, override file, data dir, then docker-up
+	@deploy/install docker $(INSTALL_FLAGS)
+
+install-binary: ## Put plurxd on PATH with no service (run it with `plurxd run`)
+	@deploy/install binary $(INSTALL_FLAGS)
+
+uninstall: ## Stop and remove the service installed by `make install`; data stays
+	@deploy/install auto --uninstall $(INSTALL_FLAGS)
+
+uninstall-docker: ## Bring the Compose stack down; .env, the override file, and data stay
+	@deploy/install docker --uninstall $(INSTALL_FLAGS)
+
 .PHONY: hooks
 hooks: ## Install the lint-and-syntax pre-commit hook
 	@mkdir -p .git/hooks

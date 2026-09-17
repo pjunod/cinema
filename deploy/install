@@ -1,0 +1,443 @@
+#!/usr/bin/env bash
+# Install plurx as one command, on every platform it runs on.
+#
+#   make install            # this OS: systemd on Linux, launchd on macOS,
+#                           # the native service on Windows
+#   make install-docker     # Compose stack, built from this checkout
+#   make install-binary     # just the binary on PATH, no service
+#   make uninstall          # stop and remove the service; data stays
+#
+# The Makefile targets call this script; it can also be run directly:
+#
+#   deploy/install <auto|linux|macos|windows|docker|binary> [options]
+#
+#   --binary PATH   install this prebuilt plurxd instead of building one
+#   --prefix DIR    where the binary goes (default: /usr/local, or the
+#                   Homebrew prefix on macOS); the service unit follows it
+#   --uninstall     remove the service and the binary; keep data and config
+#   --dry-run       print every command instead of running it
+#
+# Every install ends by proving the server answers /readyz and printing the
+# version it reports, rather than by claiming success. Privileged steps run
+# through sudo only when they have to; the build never does.
+#
+# Stays within bash 3.2, which is what macOS ships.
+set -euo pipefail
+
+here=$(cd -P -- "$(dirname -- "$0")" && pwd -P)
+root=$(cd -P -- "$here/.." && pwd -P)
+
+mode=auto
+binary=
+prefix=
+uninstall=0
+dry_run=0
+
+usage() {
+  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+say() { printf '%s\n' "install: $*"; }
+die() { printf '%s\n' "install: $*" >&2; exit 1; }
+
+# `run` executes a command, or prints it under --dry-run. `run_root` does the
+# same through sudo when this shell is not root. Quoting is preserved either
+# way, so a dry-run line can be pasted back into a shell.
+run() {
+  if [ "$dry_run" = 1 ]; then
+    printf '+'; printf ' %q' "$@"; printf '\n'
+  else
+    "$@"
+  fi
+}
+run_root() {
+  if [ "$(id -u)" = 0 ]; then
+    run "$@"
+  else
+    run sudo "$@"
+  fi
+}
+
+# Wrap a writing command in sudo only when the destination is not writable by
+# this user: Homebrew's bin on Apple Silicon is user-owned, /usr/local/bin is not.
+run_for_dir() {
+  local dir=$1; shift
+  # Judge by the nearest ancestor that exists: `install -d /opt/x/bin` needs
+  # root when /opt is root-owned even though /opt/x is not there yet.
+  while [ ! -e "$dir" ] && [ "$dir" != / ]; do dir=$(dirname -- "$dir"); done
+  if [ -w "$dir" ]; then
+    run "$@"
+  else
+    run_root "$@"
+  fi
+}
+
+while [ $# -gt 0 ]; do
+  case $1 in
+    auto|linux|macos|windows|docker|binary) mode=$1 ;;
+    --binary) shift; [ $# -gt 0 ] || die "--binary needs a path"; binary=$1 ;;
+    --binary=*) binary=${1#--binary=} ;;
+    --prefix) shift; [ $# -gt 0 ] || die "--prefix needs a directory"; prefix=$1 ;;
+    --prefix=*) prefix=${1#--prefix=} ;;
+    --uninstall) uninstall=1 ;;
+    --dry-run) dry_run=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die "unknown argument: $1 (try --help)" ;;
+  esac
+  shift
+done
+
+detect_platform() {
+  case $(uname -s) in
+    Linux) echo linux ;;
+    Darwin) echo macos ;;
+    MINGW*|MSYS*|CYGWIN*) echo windows ;;
+    *) die "unsupported platform: $(uname -s)" ;;
+  esac
+}
+[ "$mode" = auto ] && mode=$(detect_platform)
+
+# ---- shared steps ----------------------------------------------------------
+
+# The binary this install ships: --binary as given, or a release build of
+# this checkout. `--locked` matches the Dockerfile and the release workflow,
+# so every install path builds the same stamped server.
+resolve_binary() {
+  if [ -n "$binary" ]; then
+    [ -f "$binary" ] || die "no such file: $binary"
+    [ -x "$binary" ] || die "not executable: $binary"
+    case $binary in /*) ;; *) binary=$PWD/$binary ;; esac
+    return
+  fi
+  command -v cargo >/dev/null 2>&1 \
+    || die "cargo is not on PATH; install the Rust toolchain from rust-toolchain.toml, or pass --binary <prebuilt plurxd>"
+  say "building plurxd (release, --locked) in $root"
+  (cd "$root" && run cargo build --locked --release -p plurxd)
+  binary=${CARGO_TARGET_DIR:-$root/target}/release/plurxd
+  [ "$dry_run" = 1 ] || [ -x "$binary" ] || die "build produced no $binary"
+}
+
+# ffmpeg/ffprobe are the runtime dependency. A missing one is installed with
+# the platform's package manager rather than reported, because a service that
+# starts and then cannot play anything is worse than an install that pauses
+# for a download.
+ensure_ffmpeg() {
+  if command -v ffmpeg >/dev/null 2>&1 && command -v ffprobe >/dev/null 2>&1; then
+    return
+  fi
+  say "ffmpeg/ffprobe not found on PATH; installing"
+  case $mode in
+    macos)
+      command -v brew >/dev/null 2>&1 || die "no ffmpeg and no Homebrew; install ffmpeg first (https://brew.sh)"
+      run brew install ffmpeg ;;
+    *)
+      if command -v apt-get >/dev/null 2>&1; then run_root apt-get install -y --no-install-recommends ffmpeg
+      elif command -v dnf >/dev/null 2>&1; then run_root dnf install -y ffmpeg
+      elif command -v pacman >/dev/null 2>&1; then run_root pacman -S --noconfirm --needed ffmpeg
+      elif command -v zypper >/dev/null 2>&1; then run_root zypper install -y ffmpeg
+      elif command -v apk >/dev/null 2>&1; then run_root apk add ffmpeg
+      else die "no ffmpeg and no known package manager; install ffmpeg and ffprobe, then rerun"
+      fi ;;
+  esac
+  [ "$dry_run" = 1 ] || command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg still not on PATH after install"
+}
+
+# Escape a value for the replacement side of a sed `s|…|…|`.
+sed_escape() { printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'; }
+# Escape a value for XML text, then for sed (a plist is XML: `&` in a path
+# has to arrive as `&amp;` or launchd refuses the whole file).
+plist_escape() { sed_escape "$(printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"; }
+
+# GET a URL with whatever this host has: curl, wget, or python3.
+http_get() {
+  if command -v curl >/dev/null 2>&1; then curl -fsS --max-time 5 "$1"
+  elif command -v wget >/dev/null 2>&1; then wget -q -T 5 -t 1 -O - "$1"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import sys,urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=5).read().decode())' "$1"
+  else
+    die "no curl, wget, or python3 to probe the server with"
+  fi
+}
+
+# Poll /readyz until the server answers, then print what it says it is. The
+# install is not done until this passes; a timeout names the log to read.
+ready_timeout=${PLURX_INSTALL_READY_TIMEOUT:-60}
+wait_ready() {
+  local port=$1 log=$2 tries=0 url
+  url="http://127.0.0.1:$port"
+  [ "$dry_run" = 1 ] && { say "would wait for $url/readyz"; return; }
+  say "waiting for $url/readyz"
+  while ! http_get "$url/readyz" >/dev/null 2>&1; do
+    tries=$((tries + 1))
+    if [ "$tries" -ge "$ready_timeout" ]; then
+      die "server did not become ready within ${ready_timeout}s; read: $log"
+    fi
+    sleep 1
+  done
+  say "ready: $(http_get "$url/api/v1/server" 2>/dev/null || echo "$url answers /readyz")"
+  say "open $url"
+}
+
+bin_dir() {
+  if [ -n "$prefix" ]; then
+    printf '%s/bin\n' "${prefix%/}"
+  elif [ "$mode" = macos ] && command -v brew >/dev/null 2>&1; then
+    printf '%s/bin\n' "$(brew --prefix)"
+  else
+    printf '%s\n' "${DESTDIR:-}/usr/local/bin"
+  fi
+}
+
+install_binary_to() {
+  local dir=$1
+  run_for_dir "$dir" install -d "$dir"
+  run_for_dir "$dir" install -m 0755 "$binary" "$dir/plurxd"
+  say "installed $dir/plurxd"
+}
+
+# ---- linux: systemd ----------------------------------------------------------
+
+linux_install() {
+  [ "$dry_run" = 1 ] || command -v systemctl >/dev/null 2>&1 \
+    || die "no systemctl on this host; use 'make install-binary' and run plurxd under your own supervisor"
+  local dir unit_src unit_dst data was_active=0
+  dir=$(bin_dir)
+  unit_src=$here/plurxd.service
+  unit_dst=${DESTDIR:-}/etc/systemd/system/plurxd.service
+  data=${DESTDIR:-}/var/lib/plurx
+  resolve_binary
+  ensure_ffmpeg
+  case $dir in
+    /home/*|/root/*) die "the unit sets ProtectHome=true, so a prefix under $dir can never start; choose --prefix /opt/plurx or /usr/local" ;;
+  esac
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet plurxd 2>/dev/null; then
+    was_active=1
+    say "plurxd is running; stopping it for the upgrade"
+    run_root systemctl stop plurxd
+  fi
+  if ! getent passwd plurx >/dev/null 2>&1; then
+    run_root useradd --system --home /var/lib/plurx --shell /usr/sbin/nologin plurx
+  fi
+  [ -d "$data" ] || run_root install -d -m 0750 -o plurx -g plurx "$data"
+  install_binary_to "$dir"
+  # The unit is installed once. An existing one is the operator's — the
+  # runbook tells them to uncomment SupplementaryGroups=render and set
+  # ProtectHome there — so an upgrade never overwrites it.
+  if [ -f "$unit_dst" ]; then
+    say "keeping the existing $unit_dst (edit it by hand; the tracked copy is deploy/plurxd.service)"
+  else
+    run_root install -m 0644 "$unit_src" "$unit_dst"
+  fi
+  # The tracked unit names /usr/local/bin/plurxd. A different prefix goes in
+  # a drop-in, so the base unit stays byte-identical to the tracked one.
+  local dropin_dir=$unit_dst.d
+  if [ "$dir" != "${DESTDIR:-}/usr/local/bin" ]; then
+    local rendered
+    rendered=$(mktemp "${TMPDIR:-/tmp}/plurxd-dropin.XXXXXX")
+    printf '[Service]\nExecStart=\nExecStart=%s/plurxd run\n' "$dir" > "$rendered"
+    run_root install -d "$dropin_dir"
+    run_root install -m 0644 "$rendered" "$dropin_dir/10-prefix.conf"
+    rm -f "$rendered"
+  elif [ -f "$dropin_dir/10-prefix.conf" ]; then
+    run_root rm -f "$dropin_dir/10-prefix.conf"
+  fi
+  run_root systemctl daemon-reload
+  if [ "$was_active" = 1 ]; then
+    run_root systemctl start plurxd
+  else
+    run_root systemctl enable --now plurxd
+  fi
+  wait_ready 32400 "journalctl -u plurxd"
+  [ "$dry_run" = 1 ] || systemctl status plurxd --no-pager --lines=0 || true
+  say "logs: journalctl -u plurxd -f"
+}
+
+linux_uninstall() {
+  local dir unit_dst installed
+  unit_dst=${DESTDIR:-}/etc/systemd/system/plurxd.service
+  # The binary is wherever the unit (or its prefix drop-in) says it is, not
+  # wherever this run's defaults would have put it.
+  installed=$({ cat "$unit_dst.d/10-prefix.conf" "$unit_dst" 2>/dev/null || true; } | sed -n 's|^ExecStart=\(.*\)/plurxd run$|\1|p' | head -1)
+  dir=${installed:-$(bin_dir)}
+  run_root systemctl disable --now plurxd || true
+  run_root rm -rf "$unit_dst.d"
+  run_root rm -f "$unit_dst"
+  run_root systemctl daemon-reload
+  run_for_dir "$dir" rm -f "$dir/plurxd"
+  say "removed the service and $dir/plurxd; kept /var/lib/plurx and the plurx user"
+}
+
+# ---- macos: launchd ----------------------------------------------------------
+#
+# A LaunchAgent in the login session, not a boot-time LaunchDaemon, because
+# VideoToolbox hardware transcoding needs a GUI session. deploy/README.md
+# carries the trade-off (permanent on-disk Dolby Vision conversion must stay
+# Off in this mode).
+
+macos_agent_label=com.plurx.plurxd
+
+macos_render_plist() {
+  local dir=$1 out=$2 ffmpeg ffprobe
+  ffmpeg=$(plist_escape "$(command -v ffmpeg || echo /usr/local/bin/ffmpeg)")
+  ffprobe=$(plist_escape "$(command -v ffprobe || echo /usr/local/bin/ffprobe)")
+  local home dir_escaped
+  home=$(plist_escape "$HOME"); dir_escaped=$(plist_escape "$dir")
+  # The template's XML comments explain the choices to a human reading the
+  # repository; the rendered agent is a machine artifact, so they are dropped
+  # and the placeholder check below can be absolute.
+  awk '/<!--/ { skip = 1 } !skip { print } /-->/ { skip = 0 }' "$here/$macos_agent_label.plist" \
+    | sed -e "s|/Users/YOUR_USERNAME|$home|g" \
+          -e "s|<string>/usr/local/bin/plurxd</string>|<string>$dir_escaped/plurxd</string>|" \
+          -e "s|<string>/usr/local/bin/ffmpeg</string>|<string>$ffmpeg</string>|" \
+          -e "s|<string>/usr/local/bin/ffprobe</string>|<string>$ffprobe</string>|" \
+    > "$out"
+  if grep -q 'YOUR_USERNAME' "$out"; then
+    die "plist template still carries a placeholder after rendering: $out"
+  fi
+}
+
+macos_install() {
+  local dir agents plist data uid
+  dir=$(bin_dir)
+  agents=$HOME/Library/LaunchAgents
+  plist=$agents/$macos_agent_label.plist
+  data="$HOME/Library/Application Support/plurx"
+  uid=$(id -u)
+  resolve_binary
+  ensure_ffmpeg
+  # Boot a running agent out before its binary is replaced. A fresh install
+  # has nothing to boot out and that is fine.
+  run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null || true
+  install_binary_to "$dir"
+  run mkdir -p "$agents" "$data" "$HOME/Library/Logs"
+  # The plist is rendered once. An existing one is the operator's (the
+  # runbook has them plutil -replace tool paths in it), so an upgrade keeps it.
+  if [ -f "$plist" ]; then
+    say "keeping the existing $plist (edit it with plutil; the template is deploy/$macos_agent_label.plist)"
+  elif [ "$dry_run" = 1 ]; then
+    say "would render $plist from deploy/$macos_agent_label.plist"
+  else
+    local rendered
+    rendered=$(mktemp "${TMPDIR:-/tmp}/plurxd-agent.XXXXXX")
+    macos_render_plist "$dir" "$rendered"
+    if command -v plutil >/dev/null 2>&1; then plutil -lint "$rendered" >/dev/null || die "rendered plist is not valid: $rendered"; fi
+    mv "$rendered" "$plist"
+    say "rendered $plist"
+  fi
+  run launchctl bootstrap "gui/$uid" "$plist"
+  run launchctl enable "gui/$uid/$macos_agent_label"
+  run launchctl kickstart -k "gui/$uid/$macos_agent_label"
+  wait_ready 32400 "$HOME/Library/Logs/plurxd.log"
+  [ "$dry_run" = 1 ] || launchctl print "gui/$uid/$macos_agent_label" | grep -E 'state|pid' || true
+  say "logs: tail -f ~/Library/Logs/plurxd.log"
+}
+
+macos_uninstall() {
+  local dir plist uid installed
+  plist=$HOME/Library/LaunchAgents/$macos_agent_label.plist
+  installed=$({ sed -n 's|.*<string>\(.*\)/plurxd</string>.*|\1|p' "$plist" 2>/dev/null || true; } | head -1 | sed -e 's/&amp;/\&/g' -e 's/&lt;/</g' -e 's/&gt;/>/g')
+  dir=${installed:-$(bin_dir)}
+  uid=$(id -u)
+  run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null || true
+  run rm -f "$plist"
+  run_for_dir "$dir" rm -f "$dir/plurxd"
+  say "removed the agent and $dir/plurxd; kept ~/Library/Application Support/plurx"
+}
+
+# ---- windows: the native service, via deploy/install.ps1 ---------------------
+
+windows_install() {
+  local ps args
+  if command -v pwsh >/dev/null 2>&1; then ps=pwsh
+  elif command -v powershell.exe >/dev/null 2>&1; then ps=powershell.exe
+  elif command -v powershell >/dev/null 2>&1; then ps=powershell
+  else
+    die "run deploy\\install.ps1 from an elevated PowerShell on the Windows host (no PowerShell found here)"
+  fi
+  set -- -NoProfile -ExecutionPolicy Bypass -File "$here/install.ps1"
+  [ "$uninstall" = 1 ] && set -- "$@" -Uninstall
+  [ "$dry_run" = 1 ] && set -- "$@" -DryRun
+  [ -n "$binary" ] && set -- "$@" -Binary "$binary"
+  [ -n "$prefix" ] && set -- "$@" -InstallDir "$prefix"
+  run "$ps" "$@"
+}
+
+# ---- docker: the Compose stack ------------------------------------------------
+#
+# `make docker-up` is the deploy; this only makes the first run one command by
+# creating the two untracked files it reads and the data directory it mounts.
+
+# One value from a Compose .env: last assignment wins, CRLF, surrounding
+# quotes and a trailing comment are dropped, as Compose itself reads it.
+env_value() {
+  sed -n "s/^$2=//p" "$1" | tail -1 | tr -d '\r' \
+    | sed -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
+}
+
+docker_install() {
+  if [ "$dry_run" = 0 ]; then
+    command -v docker >/dev/null 2>&1 || die "docker is not on PATH"
+    docker compose version >/dev/null 2>&1 || die "'docker compose' is unavailable; install the Compose plugin"
+  fi
+  local deploy=$here env=$here/.env override=$here/docker-compose.override.yml data port
+  if [ ! -f "$env" ]; then
+    say "creating deploy/.env from .env.example (PUID/PGID = $(id -u)/$(id -g))"
+    if [ "$dry_run" = 0 ]; then
+      sed -e "s|^PUID=.*|PUID=$(id -u)|" -e "s|^PGID=.*|PGID=$(id -g)|" "$deploy/.env.example" > "$env"
+    else
+      printf '+ sed -e %q -e %q %q > %q\n' "s|^PUID=.*|PUID=$(id -u)|" "s|^PGID=.*|PGID=$(id -g)|" "$deploy/.env.example" "$env"
+    fi
+  fi
+  if [ ! -f "$override" ]; then
+    say "creating deploy/docker-compose.override.yml from its example — put your media mounts and GPU there"
+    run cp "$deploy/docker-compose.override.example.yml" "$override"
+  fi
+  data=/srv/plurx
+  port=32400
+  if [ -f "$env" ]; then
+    data=$(env_value "$env" PLURX_DATA)
+    port=$(env_value "$env" PLURX_HTTP_PORT)
+    data=${data:-/srv/plurx}
+    port=${port:-32400}
+  fi
+  if [ ! -d "$data" ]; then
+    run_for_dir "$data" install -d -o "$(id -u)" -g "$(id -g)" "$data"
+  fi
+  (cd "$root" && run make docker-up)
+  wait_ready "$port" "cd deploy && docker compose logs plurxd"
+  say "logs: cd deploy && docker compose logs -f plurxd"
+}
+
+docker_uninstall() {
+  (cd "$here" && run docker compose down)
+  say "stack is down; kept deploy/.env, the override file, and the data directory"
+}
+
+# ---- binary: on PATH, no service ----------------------------------------------
+
+binary_install() {
+  local dir
+  dir=$(bin_dir)
+  resolve_binary
+  ensure_ffmpeg
+  install_binary_to "$dir"
+  [ "$dry_run" = 1 ] || "$dir/plurxd" --version || true
+  say "run it with: plurxd run    (serves http://localhost:32400; config via ./plurx.toml or PLURX_* env)"
+}
+
+binary_uninstall() {
+  local dir
+  dir=$(bin_dir)
+  run_for_dir "$dir" rm -f "$dir/plurxd"
+  say "removed $dir/plurxd"
+}
+
+# ---- dispatch --------------------------------------------------------------------
+
+case $mode:$uninstall in
+  linux:0) linux_install ;;     linux:1) linux_uninstall ;;
+  macos:0) macos_install ;;     macos:1) macos_uninstall ;;
+  windows:*) windows_install ;;
+  docker:0) docker_install ;;   docker:1) docker_uninstall ;;
+  binary:0) binary_install ;;   binary:1) binary_uninstall ;;
+esac
