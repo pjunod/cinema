@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["0db6c804", "92b9429f", "45a8b227", "5d997031", "c90cccf7"]
+ignore = true
+reason = "Documentation and regression-evidence metadata only: these main-branch commits update analysis operations, status, review notes, links and the coverage ledger. None changes runtime behavior."

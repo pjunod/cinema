@@ -2064,3 +2064,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackLoadCont
 source_anchor = ".setTargetBufferBytes(playbackBufferTargetBytes(memoryClass))"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlaybackLoadControlTest.kt"
 test_anchor = "fun byteBudgetStopsLoadingBeforeTimeTargetForNetworkAndLocalMedia()"
+
+[[fixes]]
+id = "apple.prepared-fallback-epoch-ownership"
+commits = ["79620fb1"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "func fallBackToInPlaceReplacement(_ action: PreparedReplacementAction)"
+test = "clients/apple/Tests/PreparedReplacementTests.swift"
+test_anchor = "func testAnInPlaceFallbackStandsDownWhenANewerViewerActionOwnsThePlayer()"
