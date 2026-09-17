@@ -7310,7 +7310,16 @@ async fn control_local_with_settlement_capacity(
                 })
         })
         .flatten();
-    if let Some(purpose) = preparation_purpose {
+    // Not on an exchange answering from a durable receipt. That body says
+    // `none` and cannot say anything else — it is the stored answer, and its
+    // replay has to be the same bytes — so dispatching here would tell a client
+    // `none` on the very exchange that started its successor, which is the one
+    // thing this whole seam exists to prevent: the client reopens immediately
+    // and orphans a successor that then holds the slot until it expires. The
+    // planned-relocation purpose consults no slot state, so it would otherwise
+    // fire on a commit acknowledgement or an End during a drain. The next
+    // exchange composes its own body and dispatches there.
+    if let Some(purpose) = preparation_purpose.filter(|_| !durable_receipt_response) {
         crate::playback_control::record_preparation_observation(
             crate::playback_control::PreparationSeam::InSession,
         );

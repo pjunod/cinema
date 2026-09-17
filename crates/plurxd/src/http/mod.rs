@@ -11845,7 +11845,7 @@ mod tests {
 
         // Reanalyze: admin-only, 404 for an item that isn't there, and for a
         // real item it reports per-file rather than pretending to succeed. The
-        // seeded file is 31 placeholder bytes, so ffprobe refuses it — which is
+        // seeded file is 35 placeholder bytes, so ffprobe refuses it — which is
         // exactly the shape this endpoint exists to report honestly.
         assert_eq!(
             call(
@@ -12289,6 +12289,44 @@ mod tests {
             .header("range", format!("bytes={from}-{to}"))
             .body(Body::empty())
             .expect("req")
+    }
+
+    /// Serving refuses bytes whose length disagrees with the catalogue.
+    ///
+    /// This is the rule the content seed spent months violating — it recorded
+    /// 42 bytes for a 35-byte placeholder, and every direct play, range read
+    /// and Plex part read of that fixture answered 404 for it. One test worked
+    /// around it by truncating the file to the recorded size; nothing asserted
+    /// the rule itself, so the fix for the seed could have been "relax the
+    /// guard" and no test would have objected.
+    #[tokio::test]
+    async fn serving_refuses_a_file_whose_length_left_its_recorded_size_behind() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let uri = format!("/api/v1/files/{}/direct?token={admin}", seeded.file);
+        assert!(
+            status_of(&app, get(&uri, None)).await.is_success(),
+            "the seed records the length it wrote",
+        );
+
+        let file = state
+            .store
+            .get_file(seeded.file)
+            .await
+            .expect("query seeded file")
+            .expect("seeded file");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&file.path)
+            .expect("open placeholder")
+            .set_len(file.size as u64 + 7)
+            .expect("grow past the recorded size");
+        assert_eq!(
+            status_of(&app, get(&uri, None)).await,
+            StatusCode::NOT_FOUND,
+            "bytes that outgrew their scan are not this file",
+        );
     }
 
     #[tokio::test]

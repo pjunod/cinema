@@ -954,6 +954,31 @@ mod tests {
     /// preserve), a reference chain that doesn't produce BT.709 (every
     /// candidate is then compared against a wrong answer), or a measurement
     /// that reads no frames (a gray screen scores identically to a good one).
+    /// The plumbing under every measurement in this module.
+    ///
+    /// `wait_with_output` collects only what was piped, so a command built
+    /// without `Stdio::piped()` hands back an empty `stdout` and sends its
+    /// answer to the daemon's own log instead. Every tag then reads as "",
+    /// which this module reports as "the output is tagged color_transfer=, not
+    /// bt709" — a plausible hardware verdict for a plumbing fault, which is
+    /// how it survived to production and left every node on the CPU chain.
+    #[tokio::test]
+    async fn the_probe_reads_what_ffprobe_answers() {
+        plurx_core::testfixtures::require_ffmpeg();
+        let output = Spawn
+            .ffprobe(vec!["-version".to_owned()])
+            .await
+            .expect("ffprobe answers its own version");
+        assert!(
+            !output.stdout.is_empty(),
+            "an empty read is indistinguishable from a build with no capabilities",
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("ffprobe version"),
+            "the answer has to reach the caller, not the log",
+        );
+    }
+
     #[tokio::test]
     async fn the_reference_run_produces_real_bt709_from_real_hdr10() {
         crate::transcode::require_ffmpeg();

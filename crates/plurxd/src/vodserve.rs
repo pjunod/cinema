@@ -11129,8 +11129,12 @@ mod tests {
         // Hand-built, because `driver_pass` rewrites `capacity_hold` on every
         // pass and `create` starts a producer in the background — between them
         // they decide both halves of what this test is asserting, and which one
-        // wins is a race. The mapping from a live producer's hold to the wire
-        // is covered separately, with a real child.
+        // wins is a race.
+        //
+        // So what is proved here is the reporting half: a hold recorded against
+        // a rendition with no producer still reaches the wire, which is the arm
+        // the regression lived in. That a hold with no scheduled end terminates
+        // its producer is a different claim, and no test makes it.
         let base = crate::test_tempdir().expect("base");
         let serve = bare_serve(base.path());
         let rendition = synthetic_rendition(base.path()).await;

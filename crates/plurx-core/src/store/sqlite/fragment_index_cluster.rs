@@ -371,11 +371,18 @@ impl ClusterFragmentIndexStore for SqliteStore {
                                  WHERE id = ?2 AND size = ?3 AND mtime = ?4)
                     AND (SELECT COUNT(*) FROM analysis_requests
                           WHERE state IN ('queued', 'running', 'submitted')) < ?16
-                    AND (?11 = 0 OR ?5 <> 'fragment_index' OR ?7 = '' OR NOT EXISTS (
+                    AND (?11 = 0 OR ?5 <> 'fragment_index' OR NOT EXISTS (
                       SELECT 1 FROM analysis_requests legacy
                        WHERE legacy.file_id = ?2 AND legacy.source_size = ?3
                          AND legacy.source_mtime = ?4 AND legacy.component = ?5
                          AND legacy.video_identity = ''
+                         -- A force that names an identity is still blocked by
+                         -- any active blank row. A force that names none is
+                         -- what the admin button sends, and it displaces an
+                         -- ordinary blank request -- but not another blank
+                         -- force, or two clicks would each buy a whole-file
+                         -- index build and neither would cancel the other.
+                         AND (?7 <> '' OR legacy.force_rebuild = 1)
                          AND legacy.state IN ('queued','running','submitted','ready')))
                     AND (?11 = 1 OR (
                       NOT EXISTS (SELECT 1 FROM analysis_requests
@@ -4454,6 +4461,43 @@ mod tests {
             .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(by_id["legacy"].state, "cancelled");
         assert_eq!(by_id["legacy"].video_identity, "");
+        assert_eq!(by_id["forced-legacy"].state, "queued");
+    }
+
+    /// The other half of the same clause: a force with no identity displaces an
+    /// ordinary blank request, and does not displace another blank force.
+    ///
+    /// Without the second half, two clicks on Force rebuild are two admitted
+    /// requests for the same generation — neither cancels the other, both spend
+    /// a slot of the active budget, and both run a whole-file index build.
+    #[tokio::test]
+    async fn two_unidentified_forces_do_not_both_win() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        store
+            .enqueue_analysis_request(&request("first-force", true, 10))
+            .await
+            .expect("the first force is admitted");
+        let second = store
+            .enqueue_analysis_request(&request("second-force", true, 20))
+            .await
+            .expect("a second click is answered, not refused");
+        assert_eq!(
+            second.request_id, "first-force",
+            "the second click is handed the force already in flight",
+        );
+        let states = store
+            .analysis_requests(10)
+            .await
+            .expect("requests")
+            .into_iter()
+            .map(|request| (request.request_id.clone(), request.state.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(states["first-force"], "queued");
+        assert!(
+            !states.contains_key("second-force"),
+            "a second row would spend the budget twice and cancel nothing: {states:?}",
+        );
     }
 
     #[tokio::test]

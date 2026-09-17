@@ -36,14 +36,32 @@ fn index_refusal_summary(
     let worst = outcomes
         .iter()
         .max_by_key(|outcome| (u8::from(outcome.is_terminal()), outcome.updated_at_ms))?;
-    let detail = match worst.refusal {
-        IndexRefusal::Unsupported => format!("cannot be indexed: {}", worst.reason),
-        IndexRefusal::Truncated { rows } => format!(
-            "incomplete after {rows} fragment{} on attempt {}: {}",
-            if rows == 1 { "" } else { "s" },
-            worst.attempts,
-            worst.reason
+    // From the typed decision when there is one, for the same reason the badge
+    // is: the legacy refusal carries `Truncated` for every terminal code that
+    // is not literally `Unsupported`, so a file that reached its attempt limit
+    // was described as "incomplete after N fragments on attempt 5" — the
+    // sentence for work still in progress, under a badge that now correctly
+    // says it is not.
+    let detail = match (worst.typed_code, worst.is_terminal()) {
+        (Some(code), true) => match worst.terminal_reason.as_deref() {
+            Some(terminal) => format!("{}: {} ({terminal})", code.as_str(), worst.reason),
+            None => format!("{}: {}", code.as_str(), worst.reason),
+        },
+        (Some(code), false) => format!(
+            "{}: {} — attempt {} so far",
+            code.as_str(),
+            worst.reason,
+            worst.attempts
         ),
+        (None, _) => match worst.refusal {
+            IndexRefusal::Unsupported => format!("cannot be indexed: {}", worst.reason),
+            IndexRefusal::Truncated { rows } => format!(
+                "incomplete after {rows} fragment{} on attempt {}: {}",
+                if rows == 1 { "" } else { "s" },
+                worst.attempts,
+                worst.reason
+            ),
+        },
     };
     Some((worst.is_terminal(), detail))
 }
