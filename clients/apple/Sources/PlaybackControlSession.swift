@@ -514,17 +514,28 @@ final class PlaybackControlSession {
                 return step
             case .keepWaiting(let nextExchangeMs):
                 // Only while the server says it is staging, and never faster
-                // than that cadence. `notify` rather than `notifyUrgently`:
-                // `next_exchange_ms` is the server's to set and this wait does
-                // not get to redefine it — it refreshes what the next exchange
-                // will carry so the staging is measured against a position
-                // that is still moving.
+                // than that cadence.
+                //
+                // `notifyUrgently`, and the distinction is the whole milestone.
+                // `notify` leaves the pump asleep in `next_exchange_ms`, which
+                // the server sets once at bootstrap and sets to five seconds —
+                // so a "1 Hz cadence while staging" built on it is not a
+                // cadence at all, and a twelve-second bound buys two or three
+                // exchanges against a forty-five-second priming budget. The
+                // fleet counters would have gone on reading zero, which is the
+                // condition this effort exists to end.
+                //
+                // This does not redefine `next_exchange_ms`. The cadence stays
+                // client-initiated and is floored by the reporter's own
+                // `minimumExchangeMs` of 250 ms, well under the once-a-second
+                // this asks for, and it lasts only as long as the server keeps
+                // saying `staging`.
                 let nowMs = Self.monotonicMs()
                 if wait.lastSaidStaging, nowMs - lastNudgeMs >= nextExchangeMs {
                     lastNudgeMs = nowMs
                     if let live = self.reporter {
                         let capture = self.publish()
-                        await live.notify(capture)
+                        _ = await live.notifyUrgently(capture)
                     }
                 }
             }
