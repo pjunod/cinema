@@ -4,6 +4,44 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The twenty red tests, and the three live defects three of them were reporting
+
+**[#356](http://forge.lan:3000/noirr/plurx/pulls/356) from
+`fix/red-suite-repair` into `main`; adversarial review done (1 blocker, 5
+should-fix, 5 notes) and every finding folded or answered.**
+`main` was carrying twenty failing tests across `plurxd` and `plurx-core`; all
+twenty are green here. Three of them were reporting live production defects
+that the inventories around them had stopped being able to show.
+**`requeue_cluster_fragment_index` bound twelve parameters against `?13`**, so
+rusqlite refused the statement before any I/O and its one caller discards the
+error — a holders-unavailable artifact has never been requeued for rebuild on
+the SQLite backend. **The forced-supersede guard ignored the incoming
+identity**, so the blank-identity force the admin Force rebuild button sends
+was blocked by any pre-upgrade row, answering "analysis source changed or the
+active request queue is full" and doing nothing; the review then found that
+admitting it also admitted a *second* one, so that is fenced too. And
+**`Spawn::ffprobe` never piped stdout** — `wait_with_output` collects only what
+was piped, so every colour tag the pipeline probe read was `""`, which reads as
+"not BT.709", which fails the reference run: **no GPU tone-map graph has ever
+been validated on any node**, and every HDR transcode falls back to software
+x264 with a validated QSV or VAAPI encoder idle. Measured on `media1` as a
+1080p rung presenting at 83% of realtime. The proof was in the container log
+the whole time — the three correct `color_*=bt709` lines printed immediately
+above "the CPU tone-map reference did not run". Two narrower ones: a response
+that came back out of a durable settlement was stamped afterwards, so an answer
+and its own replay were different bytes (and the review caught that the fix let
+an exchange dispatch a successor while answering `none`, which is a hard reopen
+mid-film — dispatch is now gated on composing your own body); and the library
+badge read the legacy refusal, which carries `Truncated` for every terminal
+code that is not literally `Unsupported`, badging permanently unindexable files
+as pending forever. The censuses are restored rather than relaxed: ten SQLite
+transaction boundaries and a module named, the migration ladder at 63, the
+sidecar at v9, the activity payload's base `dvr` key, and a content seed that
+records the 35 bytes it writes instead of 42 — which is what every direct play,
+range read and Plex part read of that fixture was answering 404 against. Four
+new regressions cover the rules that had none: the length check, the ffprobe
+pipe, and both directions of the blank-identity force.
+
 ## A held source is compared on its media facts, not its reporter's schema
 
 **[#354](http://forge.lan:3000/noirr/plurx/pulls/354) from
