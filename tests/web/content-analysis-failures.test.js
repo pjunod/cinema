@@ -10,12 +10,14 @@ const INDEX = path.join(__dirname, "../../crates/plurxd/src/web/index.html");
 const UI = fs.readFileSync(INDEX, "utf8");
 
 function shippedFunction(name) {
-  const marker = `\nfunction ${name}(`;
-  const start = UI.indexOf(marker);
+  const marker = new RegExp(`\\n(?:async )?function ${name}\\(`);
+  const match = marker.exec(UI);
+  const start = match?.index ?? -1;
   assert.notEqual(start, -1, `index.html declares ${name}`);
   const rest = UI.slice(start + 1);
-  const next = rest.indexOf("\nfunction ", 1);
-  return (next === -1 ? rest : rest.slice(0, next)).trimEnd();
+  const next = /\n(?:async )?function /.exec(rest.slice(1));
+  const end = next ? next.index + 1 : rest.length;
+  return rest.slice(0, end).trimEnd();
 }
 
 const esc = (value) => String(value)
@@ -41,6 +43,7 @@ test("content analysis failures retain distinct truthful operator guidance", () 
 test("copied diagnostics expose retry and selected-video evidence without interpreting hostile text", () => {
   const diagnosticText = new Function(
     `${shippedFunction("analysisStateLabel")}
+     ${shippedFunction("analysisPhase")}
      ${shippedFunction("analysisDisposition")}
      ${shippedFunction("analysisErrors")}
      ${shippedFunction("analysisAttemptHistory")}
