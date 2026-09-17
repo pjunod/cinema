@@ -563,7 +563,196 @@
     }
   }
 
+  // ---- M3: measuring the prepared switch -----------------------------------
+  //
+  // Pure arithmetic, deliberately kept out of the player. Nothing below reads
+  // a DOM node, starts a timer, or touches the commit path: the player hands
+  // these functions samples it has already taken and they answer a question.
+  // That is the whole reason they can be unit-tested at all, and the reason
+  // instrumenting the switch cannot change it.
+  //
+  // The window is two seconds EITHER SIDE of the commit, so four seconds wide.
+  // A prepared switch spans two counters — the predecessor's and the
+  // successor's — because each media element keeps its own cumulative
+  // `droppedVideoFrames`. Adding the two halves is the only honest reading;
+  // taking a single element's delta across the swap would measure one half and
+  // call it the whole.
+  const PREPARED_SWITCH_WINDOW_MS = 2_000;
+  // The seam window is centred on the swap and is much narrower: a gap in the
+  // sound at the moment the element changes is what a viewer hears, and a
+  // silence three seconds later is a supply problem, not a seam.
+  const PREPARED_SWITCH_SEAM_WINDOW_MS = 300;
+  const PREPARED_SWITCH_SILENCE_GAP_MS = 20;
+  // Linear amplitude, not dBFS. -50 dBFS: below any dither or room floor a
+  // decoder emits, above the exact zeros a silent-but-present stream carries.
+  const PREPARED_SWITCH_SILENCE_FLOOR = 0.003;
+
+  function finiteNumber(value) {
+    return typeof value === "number" && Number.isFinite(value);
+  }
+
+  /// Samples of ONE cumulative counter, clipped to its side of the commit and
+  /// to the window. Returns null when fewer than two samples survive, because
+  /// a delta needs two readings and inventing one is how an instrument comes
+  /// to report zero for a window it never observed.
+  function preparedSwitchSeries(samples, from, to) {
+    if (!Array.isArray(samples)) return null;
+    const kept = samples.filter((sample) =>
+      sample && finiteNumber(sample.at) && finiteNumber(sample.count)
+      && sample.at >= from && sample.at <= to);
+    if (kept.length < 2) return null;
+    kept.sort((left, right) => left.at - right.at);
+    const first = kept[0];
+    const last = kept[kept.length - 1];
+    // A counter that went backwards was reset — a new element, a new item,
+    // a driver reload. Everything it has counted since is inside the window,
+    // so the reading is the counter itself rather than a negative delta.
+    const delta = last.count >= first.count ? last.count - first.count : last.count;
+    return { delta: Math.max(0, Math.round(delta)), coveredMs: last.at - first.at };
+  }
+
+  /// The two-sided counter delta around a commit.
+  ///
+  /// `before` is the predecessor's series and `after` the successor's. Either
+  /// may be absent — a commit whose successor never reported twice is a real
+  /// outcome — and the result says how much of the four seconds was actually
+  /// covered so a zero can be told apart from a zero nobody watched.
+  function preparedSwitchCounterDelta(options) {
+    const commitAtMs = options && options.commitAtMs;
+    if (!finiteNumber(commitAtMs)) return null;
+    const windowMs = finiteNumber(options.windowMs) && options.windowMs > 0
+      ? options.windowMs : PREPARED_SWITCH_WINDOW_MS;
+    const before = preparedSwitchSeries(options.before, commitAtMs - windowMs, commitAtMs);
+    const after = preparedSwitchSeries(options.after, commitAtMs, commitAtMs + windowMs);
+    if (!before && !after) {
+      return { count: null, coveredMs: 0, windowMs, spanMs: windowMs * 2,
+        beforeMs: 0, afterMs: 0 };
+    }
+    return {
+      count: (before ? before.delta : 0) + (after ? after.delta : 0),
+      beforeMs: before ? before.coveredMs : 0,
+      afterMs: after ? after.coveredMs : 0,
+      coveredMs: (before ? before.coveredMs : 0) + (after ? after.coveredMs : 0),
+      windowMs,
+      spanMs: windowMs * 2,
+    };
+  }
+
+  /// The longest run of consecutive samples at or under the silence floor,
+  /// in milliseconds.
+  ///
+  /// Time-domain samples, not a frequency bin: a 20 ms gap is 960 samples at
+  /// 48 kHz and no animation frame can see it, which is why the scan is over
+  /// the buffer rather than over the callbacks. `n` samples span `n /
+  /// sampleRate` seconds — the run's own length, not the gap between its ends,
+  /// so a single silent sample is one sample period and not zero.
+  function preparedSwitchSilenceRunMs(samples, sampleRate, floor) {
+    if (!samples || typeof samples.length !== "number" || samples.length === 0) return null;
+    if (!finiteNumber(sampleRate) || sampleRate <= 0) return null;
+    const threshold = finiteNumber(floor) ? Math.abs(floor) : PREPARED_SWITCH_SILENCE_FLOOR;
+    let longest = 0;
+    let run = 0;
+    for (let index = 0; index < samples.length; index += 1) {
+      const value = samples[index];
+      if (finiteNumber(value) && Math.abs(value) <= threshold) {
+        run += 1;
+        if (run > longest) longest = run;
+      } else {
+        run = 0;
+      }
+    }
+    return (longest / sampleRate) * 1_000;
+  }
+
+  /// Whether the sound had a seam at the swap.
+  ///
+  /// `scans` are per-buffer results: `at` is the monotonic clock at the END of
+  /// the buffer, `spanMs` the buffer's duration, `runMs` the longest silent run
+  /// inside it. Buffers that are silent end to end chain together, because a
+  /// 60 ms gap arrives as two whole 42 ms buffers and reporting the longest
+  /// single buffer would call it 42 ms and a seam threshold of 20 ms would
+  /// still be met — but a gap spanning three buffers of 15 ms each would not.
+  function preparedSwitchSeam(scans, swapAtMs, options) {
+    if (!Array.isArray(scans) || !finiteNumber(swapAtMs)) return null;
+    const windowMs = options && finiteNumber(options.windowMs) && options.windowMs > 0
+      ? options.windowMs : PREPARED_SWITCH_SEAM_WINDOW_MS;
+    const gapMs = options && finiteNumber(options.gapMs) && options.gapMs > 0
+      ? options.gapMs : PREPARED_SWITCH_SILENCE_GAP_MS;
+    const half = windowMs / 2;
+    const kept = scans.filter((scan) =>
+      scan && finiteNumber(scan.at) && finiteNumber(scan.runMs) && finiteNumber(scan.spanMs)
+      && scan.spanMs > 0 && scan.at >= swapAtMs - half && scan.at <= swapAtMs + half);
+    if (!kept.length) return null;
+    kept.sort((left, right) => left.at - right.at);
+    let longest = 0;
+    let chain = 0;
+    let coveredMs = 0;
+    for (const scan of kept) {
+      coveredMs += scan.spanMs;
+      const whollySilent = scan.runMs >= scan.spanMs;
+      chain = whollySilent ? chain + scan.spanMs : 0;
+      const candidate = Math.max(chain, scan.runMs);
+      if (candidate > longest) longest = candidate;
+    }
+    return {
+      gapMs: longest,
+      seam: longest >= gapMs,
+      thresholdMs: gapMs,
+      coveredMs,
+      windowMs,
+      scans: kept.length,
+    };
+  }
+
+  /// Tap to the successor's first frame. Null rather than a negative number:
+  /// two clocks that disagree are not a measurement.
+  function preparedSwitchVisibleInMs(tappedAtMs, firstFrameAtMs) {
+    if (!finiteNumber(tappedAtMs) || !finiteNumber(firstFrameAtMs)) return null;
+    if (firstFrameAtMs < tappedAtMs) return null;
+    return Math.round(firstFrameAtMs - tappedAtMs);
+  }
+
+  function seconds(ms) {
+    return `${(ms / 1_000).toFixed(1)} s`;
+  }
+
+  /// One wording for the ledger row on every platform. The count comes first
+  /// because it is the measurement; the coverage follows because a zero over
+  /// half the window is a different fact from a zero over all of it.
+  function preparedSwitchFramesRow(delta) {
+    if (!delta || delta.count == null) return "Not measured";
+    return `${delta.count} dropped · ±${seconds(delta.windowMs)} · `
+      + `${seconds(delta.coveredMs)} of ${seconds(delta.spanMs)} sampled`;
+  }
+
+  /// The audio row for a platform that counts events (Apple stalls, Android
+  /// audio-sink underruns) rather than scanning the waveform.
+  function preparedSwitchAudioEventRow(delta, noun) {
+    if (!delta || delta.count == null) return "Not measured";
+    const word = delta.count === 1 ? noun : `${noun}s`;
+    return `${delta.count} ${word} · ±${seconds(delta.windowMs)} · `
+      + `${seconds(delta.coveredMs)} of ${seconds(delta.spanMs)} sampled`;
+  }
+
+  /// The audio row for a platform that scans the waveform.
+  function preparedSwitchAudioSeamRow(seam) {
+    if (!seam) return "Not measured";
+    return seam.seam
+      ? `gap ${Math.round(seam.gapMs)} ms in ${seconds(seam.windowMs)} of the swap`
+      : `no gap ≥ ${Math.round(seam.thresholdMs)} ms in ${seconds(seam.windowMs)} of the swap`;
+  }
+
+  function preparedSwitchVisibleRow(ms) {
+    return ms == null ? "Not measured" : `${ms} ms`;
+  }
+
   return Object.freeze({ PROTOCOL, PREPARE_REPLACEMENT_ACTION, PREPARE_ACTION_TAG,
     SUPPORTED_ACTIONS, Reporter, capture, sameIntent, validBootstrap, validResponse,
-    validPreparation, validAcknowledgement, preparedPlaylistUrl });
+    validPreparation, validAcknowledgement, preparedPlaylistUrl,
+    PREPARED_SWITCH_WINDOW_MS, PREPARED_SWITCH_SEAM_WINDOW_MS,
+    PREPARED_SWITCH_SILENCE_GAP_MS, PREPARED_SWITCH_SILENCE_FLOOR,
+    preparedSwitchCounterDelta, preparedSwitchSilenceRunMs, preparedSwitchSeam,
+    preparedSwitchVisibleInMs, preparedSwitchFramesRow,
+    preparedSwitchAudioEventRow, preparedSwitchAudioSeamRow,
+    preparedSwitchVisibleRow });
 });

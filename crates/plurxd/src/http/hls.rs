@@ -8146,7 +8146,23 @@ async fn plan_preparation_candidate(
         .filter(|caps| caps.v == plurx_core::playback::DeviceCaps::VERSION && !caps.is_empty())
     else {
         let height = match selection.quality {
-            crate::playback_control::QualitySelection::Auto => delivered_height,
+            // A named Auto rung is an explicit ask to `resolve_height`, which
+            // snaps it to the ladder and never binds above the capability
+            // ceiling — the same treatment a manual rung gets. Unnamed Auto
+            // still means "whatever is being delivered".
+            crate::playback_control::QualitySelection::Auto {
+                height: Some(height),
+            } => {
+                resolve_height(
+                    state,
+                    Some(source),
+                    None,
+                    predecessor.request.hdr10,
+                    Some(height),
+                )
+                .await
+            }
+            crate::playback_control::QualitySelection::Auto { height: None } => delivered_height,
             crate::playback_control::QualitySelection::Original => {
                 source.height.unwrap_or(delivered_height)
             }
@@ -8173,7 +8189,9 @@ async fn plan_preparation_candidate(
     use plurx_core::transcode::OutputGrade;
 
     let quality_force = match selection.quality {
-        crate::playback_control::QualitySelection::Auto => Force::Auto,
+        // Auto stays Auto with or without a named rung. The rung is carried on
+        // the create body below, not by switching the server's own policy off.
+        crate::playback_control::QualitySelection::Auto { .. } => Force::Auto,
         crate::playback_control::QualitySelection::Original => Force::Original,
         crate::playback_control::QualitySelection::Manual { .. } => Force::Transcode,
     };
@@ -8281,7 +8299,7 @@ async fn plan_preparation_candidate(
     let decision = plurx_core::playback::decide_forced(source, &profile, force, &node);
     let copy = decision.method != PlaybackMethod::Transcode;
     let requested_height = match selection.quality {
-        crate::playback_control::QualitySelection::Auto => None,
+        crate::playback_control::QualitySelection::Auto { height } => height,
         crate::playback_control::QualitySelection::Original => source.height,
         crate::playback_control::QualitySelection::Manual { height } => Some(height),
     };
@@ -8344,7 +8362,7 @@ async fn plan_preparation_candidate(
         height: requested_height,
         quality_auto: Some(matches!(
             selection.quality,
-            crate::playback_control::QualitySelection::Auto
+            crate::playback_control::QualitySelection::Auto { .. }
         )),
         subtitle_burn: matches!(
             selection.subtitle.mode,
@@ -14652,7 +14670,7 @@ mod tests {
             seek_target_ms: None,
             observed_download_bps: None,
             selection: crate::playback_control::ClientSelection {
-                quality: crate::playback_control::QualitySelection::Auto,
+                quality: crate::playback_control::QualitySelection::Auto { height: None },
                 audio_track: None,
                 subtitle: crate::playback_control::SubtitleSelection {
                     mode: crate::playback_control::SubtitleMode::Off,
@@ -15402,7 +15420,7 @@ mod tests {
             seek_target_ms: None,
             observed_download_bps: None,
             selection: crate::playback_control::ClientSelection {
-                quality: crate::playback_control::QualitySelection::Auto,
+                quality: crate::playback_control::QualitySelection::Auto { height: None },
                 audio_track: None,
                 subtitle: crate::playback_control::SubtitleSelection {
                     mode: crate::playback_control::SubtitleMode::Off,
@@ -15754,7 +15772,7 @@ mod tests {
             seek_target_ms: None,
             observed_download_bps: None,
             selection: crate::playback_control::ClientSelection {
-                quality: crate::playback_control::QualitySelection::Auto,
+                quality: crate::playback_control::QualitySelection::Auto { height: None },
                 audio_track: None,
                 subtitle: crate::playback_control::SubtitleSelection {
                     mode: crate::playback_control::SubtitleMode::Off,
@@ -15989,7 +16007,7 @@ mod tests {
                 seek_target_ms: None,
                 observed_download_bps: None,
                 selection: crate::playback_control::ClientSelection {
-                    quality: crate::playback_control::QualitySelection::Auto,
+                    quality: crate::playback_control::QualitySelection::Auto { height: None },
                     audio_track: None,
                     subtitle: crate::playback_control::SubtitleSelection {
                         mode: crate::playback_control::SubtitleMode::Off,
@@ -18200,7 +18218,7 @@ mod tests {
             seek_target_ms: None,
             observed_download_bps: None,
             selection: crate::playback_control::ClientSelection {
-                quality: crate::playback_control::QualitySelection::Auto,
+                quality: crate::playback_control::QualitySelection::Auto { height: None },
                 audio_track: None,
                 subtitle: crate::playback_control::SubtitleSelection {
                     mode: crate::playback_control::SubtitleMode::Off,
@@ -25967,7 +25985,7 @@ mod tests {
     async fn a_malformed_ask_refuses_the_create_and_records_nothing() {
         use plurx_core::playback::DesiredQuality;
         let state = resolver_state();
-        let mut broken = envelope(1, DesiredQuality::Auto);
+        let mut broken = envelope(1, DesiredQuality::Auto { height: None });
         broken.recipe_revision = 0;
 
         let answer = create_with(

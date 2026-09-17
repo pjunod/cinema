@@ -654,6 +654,14 @@ _Generated from [`tests/playback/playback-info-fields.json`](../../tests/playbac
 | `Attached/intent` | – | – | – | ✓ | text | grid | all | The media generation the fault is about and the viewer request it belongs to, if any. |
 | `History` | – | – | – | ✓ | text | notes | all | Last 16 faults: class · source · raised → cleared (by) · player at raise (rate, position, presenting, stopped_by_owner). |
 
+**PREPARED SWITCH**
+
+| Row | mini | standard | details | debug | Format | Placement | Available on | Note |
+|---|---|---|---|---|---|---|---|---|
+| `Frames at the switch` | – | – | – | ✓ | text | grid | all | Dropped frames counted over the two seconds either side of a prepared commit, with how much of that window the samples cover. An observation, never a verdict: the bar it is measured against lives in docs/playback-control/QUALITY-SWITCH-CONTINUITY-RESULTS.md. |
+| `Audio at the switch` | – | – | – | ✓ | text | grid | all | Audio discontinuity over the same window — Apple access-log stalls, Android audio-sink underruns, and on the web the reason the analyser probe is deliberately not on the audible path. |
+| `Tap to new quality` | – | – | – | ✓ | millis | grid | all | Wall time from the viewer's tap to the successor's first frame. Reported, never judged. |
+
 <!-- contract:info:end -->
 
 ---

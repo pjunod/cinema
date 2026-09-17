@@ -6110,7 +6110,7 @@ mod tests {
                 seek_target_ms: None,
                 observed_download_bps: Some(8_000_000),
                 selection: crate::playback_control::ClientSelection {
-                    quality: crate::playback_control::QualitySelection::Auto,
+                    quality: crate::playback_control::QualitySelection::Auto { height: None },
                     audio_track: Some(0),
                     subtitle: crate::playback_control::SubtitleSelection {
                         mode: crate::playback_control::SubtitleMode::Off,

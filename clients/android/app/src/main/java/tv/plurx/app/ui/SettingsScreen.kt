@@ -44,6 +44,8 @@ import tv.plurx.app.data.SubtitleReadiness
 import tv.plurx.app.data.ThemeId
 import tv.plurx.app.data.SettingsStore
 import tv.plurx.app.livetv.TvLiveLayout
+import tv.plurx.app.player.PreparedReplacementAdvisory
+import tv.plurx.app.player.preparedSwitchAudioRequirements
 import tv.plurx.app.player.isTelevision
 import tv.plurx.app.player.preparedReplacementRequirements
 import tv.plurx.app.ui.components.ChoicePicker
@@ -280,6 +282,46 @@ private fun PreparedReplacementEnable(
             style = MaterialTheme.typography.bodyMedium,
             modifier = Modifier.padding(horizontal = 8.dp),
         )
+        // Two rows of advice about the last rung change, and nothing more.
+        // Paul's standing rule is that features are not gated in code, so
+        // these never block anything and nothing reads them back: they exist
+        // so a change that reopened instead of handing over leaves a trace a
+        // person can find, on a screen that is not inside a playback session.
+        val advice = PreparedReplacementAdvisory.advice
+        LabeledValueRow("Last change", advice.outcome ?: "—")
+        LabeledValueRow("Server preparation", advice.preparation ?: "not reported")
+        Text(
+            "Advisory only. The switch above is read once when a player opens, " +
+                "so turning it on takes effect on the next playback; these rows " +
+                "report what happened and never change it.",
+            color = Muted,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(horizontal = 8.dp),
+        )
+        // M3's measurements of that same change, and the one audio measurement
+        // this platform does not take. Advisory in the strict sense: there is
+        // no switch here, nothing reads these back, and a condition that is not
+        // met never blocks a quality change or the handoff above.
+        advice.switch?.let { measured ->
+            LabeledValueRow("Frames at the switch", measured.frames)
+            LabeledValueRow("Audio at the switch", measured.audio)
+            LabeledValueRow("Tap to new quality", measured.visibleIn)
+        }
+        Text(
+            "Measuring the switch — what it needs, and what it cannot have:",
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(horizontal = 8.dp),
+        )
+        preparedSwitchAudioRequirements(underrunCallbackAvailable = true)
+            .forEach { (title, detail, met) ->
+                LabeledValueRow(title, if (met) "Met" else "Not met")
+                Text(
+                    detail,
+                    color = Muted,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                )
+            }
         preparedReplacementRequirements(
             isTelevision = isTelevision,
             // The successor inherits the incumbent's tunneling, and tunneling

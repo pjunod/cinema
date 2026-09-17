@@ -159,6 +159,14 @@ class PlaybackControlSession(
     private val answerLock = Any()
     private var answerAction: ControlAction? = null
     private var answerRequestSequence = 0L
+    /**
+     * `delivery.preparation` from the same exchange as [answerAction].
+     *
+     * Kept beside the action rather than derived later, so the word and the
+     * action a wait decides on are always from one exchange. Null is a real
+     * value here — an older server sends no such field.
+     */
+    private var answerPreparation: String? = null
     private var answersSeen = 0L
     private var ownerChangesSeen = 0L
     /**
@@ -277,6 +285,88 @@ class PlaybackControlSession(
     }
 
     /**
+     * The viewer changed rung; wait for the server to offer a successor.
+     *
+     * Beside [askForAction] rather than inside it, and on its own numbers.
+     * [askForAction]'s bound is stall policy — how long a *frozen* viewer may
+     * be made to wait before this client recovers on its own — and widening it
+     * to cover a preparation would change what a stall does. This wait is the
+     * other case entirely: playback is healthy and continues throughout, so it
+     * can afford [PreparedOfferWait.BOUND_MS] and the viewer loses nothing by
+     * it.
+     *
+     * [tappedAtMs] is when the viewer tapped, not when this was called. The
+     * bound covers the dispatch exchange and the server's own admission, both
+     * of which happen before this is reached.
+     *
+     * Always returns a terminal step: [PreparedOfferWait.Step.Offered] or
+     * [PreparedOfferWait.Step.Reopen]. The caller owns the outcome either way.
+     */
+    internal suspend fun awaitPreparedOffer(
+        tappedAtMs: Long,
+        now: () -> Long = ::monotonicNowMs,
+    ): PreparedOfferWait.Step {
+        val subject = reporter ?: return PreparedOfferWait.Step.Reopen("no_control")
+        // The same floor discipline as the ask, and for the same reason. The
+        // dispatch that carried the selection is *queued* rather than sent when
+        // `reportIntent` returns — `notifyUrgently` hands back `sequence + 1`
+        // and leaves the pump to build the request — so the counter read here
+        // is still the one before it. One past it is the dispatch's own
+        // sequence, and anything below that answered a request from before the
+        // tap.
+        val floor = subject.status().sequence + 1
+        val wait = PreparedOfferWait(tappedAtMs, floor)
+        var seen = synchronized(answerLock) { answersSeen }
+        var lastNudgeMs = now() - PreparedOfferWait.STAGING_CADENCE_MS
+        while (true) {
+            val answer = synchronized(answerLock) {
+                if (answersSeen > seen) {
+                    seen = answersSeen
+                    ControlAnswer(answerRequestSequence, answerAction, answerPreparation)
+                } else {
+                    null
+                }
+            }
+            val observed = wait.observe(answer, now())
+            // Advisory only, and recorded wherever the word actually arrives.
+            // Nothing reads it back to decide anything.
+            PreparedReplacementAdvisory.recordPreparation(wait.lastPreparation)
+            when (val step = observed) {
+                is PreparedOfferWait.Step.Offered -> return step
+                is PreparedOfferWait.Step.Reopen -> return step
+                is PreparedOfferWait.Step.KeepWaiting -> {
+                    val current = reporter
+                    if (current == null || current.status().stopped) {
+                        return PreparedOfferWait.Step.Reopen("no_control")
+                    }
+                    // Nudge only while the server says it is working on it, and
+                    // no more often than the cadence. The pump otherwise sleeps
+                    // for `next_exchange_ms`, which is long enough that the
+                    // whole bound could pass inside one sleep.
+                    if (wait.lastPreparation == PREPARATION_STAGING &&
+                        now() - lastNudgeMs >= step.nextExchangeMs
+                    ) {
+                        lastNudgeMs = now()
+                        try {
+                            reportEvidence()
+                        } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                            // Re-thrown explicitly. A blanket `Exception` catch
+                            // swallows cancellation, and the M6 review found
+                            // exactly that trap on this file's paths: the wait
+                            // would keep looping after the player was gone.
+                            throw cancellation
+                        } catch (_: Exception) {
+                            // A nudge is best effort. The cadence will try
+                            // again, and the bound still ends the wait.
+                        }
+                    }
+                    kotlinx.coroutines.delay(ASK_POLL_MS)
+                }
+            }
+        }
+    }
+
+    /**
      * A new title. The old verdict described a source that is no longer
      * playing, so keeping it would show a confident sentence about the wrong
      * film. A reopen deliberately does not clear it: the failure a verdict
@@ -324,6 +414,7 @@ class PlaybackControlSession(
             answerGeneration = generation
             answerAction = null
             answerRequestSequence = 0
+            answerPreparation = null
             answersSeen = 0
             ownerChangesSeen = 0
         }
@@ -362,6 +453,7 @@ class PlaybackControlSession(
                         }
                         answerAction = exchange.response?.action
                         answerRequestSequence = exchange.request.sequence
+                        answerPreparation = exchange.response?.delivery?.preparation
                     }
                 }
                 if (exchange.capture.hasSameIntent(latest.get()) && subtitleReadiness.record(
