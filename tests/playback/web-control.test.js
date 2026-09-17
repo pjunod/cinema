@@ -1570,6 +1570,7 @@ async function main() {
       shippedSource("samplePlaybackPresentationClock"),shippedSource("pausePlaybackInternally"),
       shippedSource("playbackTransportEvents"),
       shippedSource("playbackProgressTick"),shippedSource("playbackWaitNeedsProgress"),shippedSource("handlePlaybackPlaying"),
+      shippedSource("samplePreparedSwitchFrames"),shippedConst("SWITCH_FRAME_SAMPLES_MAX"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       "return {p,v,tick(time){now=time;playbackProgressTick(v,p);},playing(){handlePlaybackPlaying(v,p);},attempts:()=>attempts,recovered:()=>recovered};",
     ].join("\n"))();
@@ -2295,6 +2296,7 @@ async function main() {
         shippedSource("streamHasVideo"),
         shippedSource("samplePlaybackPresentationClock"),
         shippedSource("playbackProgressTick"),
+        shippedSource("samplePreparedSwitchFrames"),shippedConst("SWITCH_FRAME_SAMPLES_MAX"),
         shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
         "return {",
         " surface:surfacePainted, stops:()=>surfaceStops.length, events:()=>surfaceEvents,",
@@ -3555,6 +3557,14 @@ async function main() {
         // blank element in front of the viewer.
         shippedSource("alignPreparedReplacement"), shippedSource("preparedAlignSeek"),
         shippedSource("preparedAlignedBuffered"), shippedSource("exposePreparedReplacement"),
+        // M3's instruments. Sliced rather than stubbed, so a commit in this
+        // harness exercises the real recording and the assertions below can
+        // read what it recorded.
+        shippedConst("SWITCH_FRAME_SAMPLES_MAX"),
+        shippedSource("samplePreparedSwitchFrames"),
+        shippedSource("notePreparedSwitchCommit"),
+        shippedSource("notePreparedSwitchFirstFrame"),
+        shippedSource("preparedSwitchLedger"),
         // The directed change the commit and its failure now settle.
         shippedSource("settleDirectedChange"), shippedSource("supersedeDirectedChange"),
         shippedSource("fallBackDirectedChange"),
@@ -4998,17 +5008,23 @@ async function main() {
     // anything that decides anything, and at rest — the settings route with no
     // player — they render nothing at all, so `tests/ui-structure.golden` has
     // no new DOM to record.
-    const rows = new Function("PLAYER", "esc", "devStaticReq",
+    const rows = new Function("PLAYER", "esc", "devStaticReq", "PlurxPlaybackControl",
       [shippedSource("directedChangeDeveloperRows"),
+        // M3's rows hang off the same card and obey the same rule: nothing at
+        // rest, and never a gate.
+        shippedSource("preparedSwitchDeveloperRows"),
+        shippedSource("preparedSwitchLedger"),
+        shippedSource("preparedSwitchAudioEnable"),
+        "const window={PlurxPlaybackControl};",
         "return directedChangeDeveloperRows;"].join("\n"));
     const esc = (value) => String(value);
     const row = (title, status) => `[${title}=${status}]`;
-    assert.equal(rows(null, esc, row)(), "", "no player, no rows");
-    assert.equal(rows({}, esc, row)(), "",
+    assert.equal(rows(null, esc, row, control)(), "", "no player, no rows");
+    assert.equal(rows({}, esc, row, control)(), "",
       "a player with nothing true to say about a change says nothing");
     const painted = rows({ directedChange: { outcome: "committed", detail: 412 },
       controlLastPreparation: "staging", autoRequestedHeight: 1080, autoHeight: 720 },
-      esc, row)();
+      esc, row, control)();
     assert.match(painted, /\[Outcome=committed 412 ms\]/);
     assert.match(painted, /\[Server preparation=staging\]/);
     assert.match(painted, /\[Auto rung=1080p &rarr; 720p\]/,
@@ -5016,12 +5032,28 @@ async function main() {
     assert.match(painted, /Advisory only/);
     for (const [outcome, said] of [["declined", "declined"], ["timed_out", "timed out"],
       ["failed", "fell back"], [null, "waiting for an offer"]]) {
-      assert.match(rows({ directedChange: { outcome } }, esc, row)(),
+      assert.match(rows({ directedChange: { outcome } }, esc, row, control)(),
         new RegExp(`\\[Outcome=${said}\\]`), `${outcome} reads as "${said}"`);
     }
     // An unevaluated `preparation` is reported as unreported, never as a refusal.
-    assert.match(rows({ directedChange: { outcome: "committed" } }, esc, row)(),
+    assert.match(rows({ directedChange: { outcome: "committed" } }, esc, row, control)(),
       /\[Server preparation=not reported\]/);
+    // M3's own rows: absent until a commit has happened, and when present the
+    // enable section states three unmet conditions and enables nothing.
+    assert.doesNotMatch(painted, /Measuring the last switch/,
+      "a player that has not committed shows no switch measurements");
+    const measured = rows({ directedChange: { outcome: "committed", detail: 412 },
+      switchCommit: { at: 1_000, predecessor: "a", successor: "b", tappedAt: 600,
+        firstFrameAt: 1_412 },
+      switchFrames: [{ at: 0, count: 0, element: "a" }, { at: 1_000, count: 0, element: "a" },
+        { at: 1_500, count: 0, element: "b" }, { at: 3_000, count: 0, element: "b" }] },
+      esc, row, control)();
+    assert.match(measured, /\[Frames at the switch=0 dropped/);
+    assert.match(measured, /\[Tap to new quality=812 ms\]/);
+    assert.match(measured, /\[Audio at the switch=Not measured/,
+      "the web audible seam is reported unmeasured rather than as a zero");
+    assert.equal((measured.match(/=Not met\]/g) || []).length, 3,
+      "three stated, unmet conditions and no switch among them");
   }
 
   // ---- §7.3: alignment finishes before the successor is exposed ------------
@@ -5603,10 +5635,197 @@ async function main() {
 
   await streamFailureBodyTests();
   await vendoredHlsStartupTests();
+  preparedSwitchMeasurementTests();
 
   process.stdout.write("PASS the M5 recovery additions: create retry, hls retry, shared budget\n");
   process.stdout.write("PASS web HLS startup recovery and final-send ownership\n");
   process.stdout.write("PASS passive web playback-control reporter\n");
+}
+
+// M3. The arithmetic of measuring the switch, as pure functions.
+//
+// These are the cases the unit lane CAN reach and the device lane cannot: the
+// window boundaries, the counter reset, the two-sided sum, the silent-run
+// length and the chained-buffer gap. Each one is written so that changing the
+// arithmetic it pins makes it fail -- the mutation checks in the PR name which
+// constant each case is holding.
+function preparedSwitchMeasurementTests(){
+  const delta=(options)=>control.preparedSwitchCounterDelta(options);
+
+  // Two sides of one commit are added, not compared. The predecessor dropped
+  // two frames in its last two seconds and the successor one in its first two.
+  {
+    const measured=delta({commitAtMs:10_000,
+      before:[{at:8_000,count:5},{at:10_000,count:7}],
+      after:[{at:10_000,count:0},{at:12_000,count:1}]});
+    assert.equal(measured.count,3,"the two halves of the window are summed");
+    assert.equal(measured.beforeMs,2_000);
+    assert.equal(measured.afterMs,2_000);
+    assert.equal(measured.spanMs,4_000,"the window is two seconds EITHER side");
+    assert.equal(control.preparedSwitchFramesRow(measured),
+      "3 dropped \u00b7 \u00b12.0 s \u00b7 4.0 s of 4.0 s sampled");
+  }
+
+  // A sample outside the window contributes nothing. Without the filter the
+  // predecessor's whole session would be attributed to the switch.
+  {
+    const measured=delta({commitAtMs:10_000,
+      before:[{at:1_000,count:0},{at:7_999,count:40},{at:8_500,count:41},{at:10_000,count:41}],
+      after:[]});
+    assert.equal(measured.count,0,"drops before the window are not the switch's");
+    assert.equal(measured.beforeMs,1_500,"coverage is what was sampled, not the window");
+  }
+
+  // Boundary inclusivity, stated once: a sample exactly on either edge is in.
+  {
+    const measured=delta({commitAtMs:10_000,windowMs:2_000,
+      before:[{at:8_000,count:0},{at:10_000,count:2}],after:[]});
+    assert.equal(measured.count,2,"commit - windowMs and the commit itself are inside");
+  }
+
+  // A successor's counter starts at zero, and a driver reload resets one
+  // mid-window. Neither may read as a negative delta.
+  {
+    const measured=delta({commitAtMs:10_000,before:[],
+      after:[{at:10_100,count:900},{at:11_000,count:4}]});
+    assert.equal(measured.count,4,"a counter that went backwards was reset");
+  }
+
+  // One sample is not a delta. Reporting zero for a window nobody watched is
+  // the exact failure this instrument exists to avoid.
+  {
+    const measured=delta({commitAtMs:10_000,before:[{at:9_000,count:3}],after:[]});
+    assert.equal(measured.count,null,"one reading per side is not a measurement");
+    assert.equal(control.preparedSwitchFramesRow(measured),"Not measured");
+    assert.equal(control.preparedSwitchFramesRow(null),"Not measured");
+  }
+  assert.equal(delta({commitAtMs:null,before:[],after:[]}),null,
+    "no commit instant, no measurement");
+
+  // The silence-gap detector's threshold logic. A run is measured in SAMPLES,
+  // because a 20 ms gap at 48 kHz is 960 of them and no frame callback can
+  // see it.
+  {
+    const run=(values,rate,floor)=>control.preparedSwitchSilenceRunMs(values,rate,floor);
+    assert.equal(run(new Float32Array([1,0,0,0,1,0,0]),1_000,0.003),3,
+      "the longest run, not the last one");
+    assert.equal(run(new Float32Array([0,0]),1_000,0.003),2,"a run at the start counts");
+    assert.equal(run(new Float32Array([1,1]),1_000,0.003),0,"no silence is zero, not null");
+    assert.equal(run(new Float32Array([0.002,-0.002]),1_000,0.003),2,
+      "the floor is an absolute amplitude, so a negative sample is silent too");
+    assert.equal(run(new Float32Array([0.004,-0.004]),1_000,0.003),0,
+      "above the floor is not silence");
+    assert.equal(run(new Float32Array(960).fill(0),48_000,0.003),20,
+      "960 samples at 48 kHz is exactly the 20 ms threshold");
+    assert.equal(run(new Float32Array([0,0]),0,0.003),null,"no sample rate, no answer");
+    assert.equal(run(new Float32Array(0),48_000,0.003),null,"no samples, no answer");
+  }
+
+  // The seam window is 300 ms centred on the swap, and a gap longer than one
+  // analyser buffer arrives as consecutive wholly-silent buffers.
+  {
+    const seam=(scans,at,options)=>control.preparedSwitchSeam(scans,at,options);
+    const whole=(at)=>({at,runMs:42,spanMs:42});
+    const quiet=(at,runMs)=>({at,runMs,spanMs:42});
+    assert.equal(seam([whole(1_000),whole(1_042)],1_020).gapMs,84,
+      "two wholly silent buffers chain into one gap");
+    assert.equal(seam([whole(1_000),quiet(1_042,0),whole(1_084)],1_042).gapMs,42,
+      "a buffer with sound in it breaks the chain");
+    assert.equal(seam([quiet(1_000,19)],1_000).seam,false,
+      "19 ms is under the 20 ms threshold");
+    assert.equal(seam([quiet(1_000,20)],1_000).seam,true,"20 ms meets it");
+    assert.equal(seam([whole(1_000)],1_400),null,
+      "a buffer outside the 300 ms window says nothing about the swap");
+    assert.equal(seam([quiet(1_149,25)],1_000).seam,true,
+      "the window is +/- 150 ms of the swap");
+    assert.equal(seam([quiet(1_151,25)],1_000),null,"and 151 ms is outside it");
+    assert.equal(control.preparedSwitchAudioSeamRow(seam([quiet(1_000,0)],1_000)),
+      "no gap \u2265 20 ms in 0.3 s of the swap");
+    assert.equal(control.preparedSwitchAudioSeamRow(seam([quiet(1_000,34)],1_000)),
+      "gap 34 ms in 0.3 s of the swap");
+    assert.equal(control.preparedSwitchAudioSeamRow(null),"Not measured");
+  }
+
+  // Tap to new quality. Two clocks that disagree are not a measurement.
+  assert.equal(control.preparedSwitchVisibleInMs(1_000,1_412),412);
+  assert.equal(control.preparedSwitchVisibleInMs(1_000,999),null);
+  assert.equal(control.preparedSwitchVisibleInMs(null,999),null);
+  assert.equal(control.preparedSwitchVisibleRow(412),"412 ms");
+  assert.equal(control.preparedSwitchVisibleRow(null),"Not measured");
+
+  // The event-count wording Apple and Android share.
+  assert.equal(control.preparedSwitchAudioEventRow(
+    delta({commitAtMs:10_000,before:[{at:8_000,count:0},{at:10_000,count:1}],
+      after:[{at:10_000,count:0},{at:12_000,count:0}]}),"stall"),
+    "1 stall \u00b7 \u00b12.0 s \u00b7 4.0 s of 4.0 s sampled");
+
+  // ---- the SHIPPED wiring ------------------------------------------------
+  //
+  // The sampler is a getter and a push, and the commit note is two
+  // assignments. Both run against a player object here rather than a browser,
+  // which is exactly how much of the real page they need.
+  const shipped=new Function("assertControl",[
+    "const window={PlurxPlaybackControl:assertControl};",
+    "let now=0; const performance={now:()=>now};",
+    "const setNow=value=>{now=value;};",
+    shippedSource("samplePreparedSwitchFrames"),
+    shippedSource("notePreparedSwitchCommit"),
+    shippedSource("notePreparedSwitchFirstFrame"),
+    shippedSource("preparedSwitchLedger"),
+    shippedSource("preparedSwitchAudioEnable"),
+    shippedConst("SWITCH_FRAME_SAMPLES_MAX"),
+    "return {sample:samplePreparedSwitchFrames,commit:notePreparedSwitchCommit,",
+    "  frame:notePreparedSwitchFirstFrame,ledger:preparedSwitchLedger,",
+    "  enable:preparedSwitchAudioEnable,max:SWITCH_FRAME_SAMPLES_MAX,setNow};",
+  ].join("\n"))(control);
+
+  const element=(dropped)=>({getVideoPlaybackQuality:()=>({droppedVideoFrames:dropped})});
+  {
+    const predecessor=element(0),successor=element(0);
+    const player={directedChange:{tappedAt:0}};
+    shipped.setNow(0); shipped.sample(player,predecessor);
+    predecessor.getVideoPlaybackQuality=()=>({droppedVideoFrames:0});
+    shipped.setNow(2_000); shipped.sample(player,predecessor);
+    shipped.commit(player,predecessor,successor);
+    shipped.setNow(2_400); shipped.sample(player,successor);
+    shipped.setNow(4_000); shipped.sample(player,successor);
+    shipped.frame(player);
+    const rows=shipped.ledger(player);
+    assert.equal(rows.frames,"0 dropped \u00b7 \u00b12.0 s \u00b7 3.6 s of 4.0 s sampled",
+      "the shipped ledger keeps the predecessor and successor series apart");
+    assert.equal(rows.visible,"4000 ms","tap to first frame comes off the directed change");
+    assert.match(rows.audio,/^Not measured/,
+      "the web audible seam is not measured, and says so rather than reporting zero");
+  }
+  {
+    // A player that has not committed says nothing at all, which is what the
+    // settings page looks like at rest.
+    assert.deepEqual(shipped.ledger({}),{frames:null,audio:null,visible:null});
+  }
+  {
+    // The sample ring is bounded. An eight-hour film must not grow it.
+    const player={};const only=element(1);
+    for(let index=0;index<shipped.max*3;index+=1){shipped.setNow(index*500);shipped.sample(player,only);}
+    assert.equal(player.switchFrames.length,shipped.max,"the sample ring is bounded");
+  }
+  {
+    // An element with no quality counter is not an element with zero drops.
+    const player={};
+    shipped.sample(player,{});
+    assert.equal(player.switchFrames,undefined,"no counter means no sample");
+    shipped.sample(player,{getVideoPlaybackQuality(){throw new Error("no");}});
+    assert.equal(player.switchFrames,undefined,"a throwing getter means no sample");
+  }
+  // Every enable condition is a "not met" with a reason, and none of them is a
+  // switch. Paul's rule: instrumentation never gates.
+  const conditions=shipped.enable();
+  assert.equal(conditions.length,3);
+  for(const [title,detail,met] of conditions){
+    assert.equal(met,false,`${title} is advisory and unmet`);
+    assert.ok(detail.length>40,`${title} says why`);
+  }
+
+  process.stdout.write("PASS measuring the prepared switch: windows, silence gaps and the shipped samplers\n");
 }
 
 async function streamFailureBodyTests(){

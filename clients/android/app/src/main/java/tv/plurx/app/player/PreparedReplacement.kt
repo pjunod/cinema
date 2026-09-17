@@ -392,6 +392,8 @@ internal object PreparedReplacementAdvisory {
         val outcome: String? = null,
         /** The last `delivery.preparation` the server sent, verbatim. */
         val preparation: String? = null,
+        /** M3's three readings for the last switch, or null before any. */
+        val switch: PreparedSwitchReading? = null,
     )
 
     @Volatile
@@ -405,6 +407,15 @@ internal object PreparedReplacementAdvisory {
     fun recordPreparation(preparation: String?) {
         if (preparation == null) return
         advice = advice.copy(preparation = preparation)
+    }
+
+    /**
+     * M3's measurements for the switch that just settled. Advisory like
+     * everything else here: nothing reads them back, and an unmeasured window
+     * is reported as unmeasured rather than as a failure.
+     */
+    fun recordSwitch(reading: PreparedSwitchReading) {
+        advice = advice.copy(switch = reading)
     }
 
     /** How a `via=` tag becomes the sentence the row shows. */

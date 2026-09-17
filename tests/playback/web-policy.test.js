@@ -3439,7 +3439,8 @@ test("the shipped progress tick reports the advance it measured, not that it ran
     "samplePlaybackPresentationClock", "streamHasVideo", "endWait", "clearStall",
     "finishStallRecovery", "persistentWait", "bufferRunway", "PERSISTENT_STALL_MS",
     "playbackOwnsAttachedMedia", "completeHlsStartup", "settlePlaybackControlSeek",
-    [shippedSource("playbackProgressTick"), "return playbackProgressTick;"].join("\n"),
+    [shippedSource("playbackProgressTick"), shippedSource("samplePreparedSwitchFrames"),
+     shippedBinding("const", "SWITCH_FRAME_SAMPLES_MAX"), "return playbackProgressTick;"].join("\n"),
   );
   const player = { started: true, wantsPlayback: true, attemptId: "g1" };
   const video = { currentTime: 10, paused: false, ended: false };

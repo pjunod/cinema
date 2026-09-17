@@ -47,6 +47,24 @@ struct LiveTvDeveloperView: View {
                 Label("Last server preparation value: \(handoff.lastPreparation ?? "not sent")", systemImage: "info.circle")
                 Text("The newest delivery.preparation this device saw. Older servers and relays do not send it, and its absence is never read as a refusal.")
                     .font(.caption)
+                // M3's measurements of that same change, and the one audio
+                // measurement this platform does not take. Advisory in the
+                // strict sense: no switch is attached to any of it, nothing
+                // reads it back, and an unmet condition never blocks a change.
+                if let measured = handoff.lastSwitch {
+                    Label("Frames at the switch: \(measured.frames)", systemImage: "info.circle")
+                    Label("Audio at the switch: \(measured.audio)", systemImage: "info.circle")
+                    Label("Tap to new quality: \(measured.visibleIn)", systemImage: "info.circle")
+                }
+                Text("Measuring the switch \u{2014} what it needs, and what it cannot have:")
+                    .font(.caption)
+                ForEach(PreparedSwitchMeasurement.audioRequirements(accessLogAvailable: true)) { requirement in
+                    Label(
+                        "\(requirement.title): \(requirement.met ? "Met" : "Not met")",
+                        systemImage: requirement.met ? "checkmark.circle" : "exclamationmark.triangle"
+                    )
+                    Text(requirement.detail).font(.caption)
+                }
             }
             if let saved {
                 Section("Library channels · advisory enablement") {

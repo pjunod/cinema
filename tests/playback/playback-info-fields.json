@@ -16,7 +16,8 @@
     "BUFFERING / DELIVERY",
     "NETWORK",
     "SERVER",
-    "SURFACE"
+    "SURFACE",
+    "PREPARED SWITCH"
   ],
   "formats": {
     "bitrate": "\"12.3 Mb/s\" — one decimal below 10 Mb/s, none at or above; \"800 kb/s\" below 1 Mb/s. Unit is always Mb/s or kb/s, never Mbps.",
@@ -110,6 +111,9 @@
     {"id": "surface_class", "label": "Fault", "section": "SURFACE", "modes": ["standard", "details", "debug"], "format": "text", "note": "The fault class the surface is projecting: preparing · buffering · recovering · hold · degraded · refused · exhausted · stopped."},
     {"id": "surface_source", "label": "Source", "section": "SURFACE", "modes": ["debug"], "format": "text", "note": "The raw event the fault came from, as named in tests/playback/playback-surface-contract.json."},
     {"id": "surface_ids", "label": "Attached/intent", "section": "SURFACE", "modes": ["debug"], "format": "text", "note": "The media generation the fault is about and the viewer request it belongs to, if any."},
-    {"id": "surface_history", "label": "History", "section": "SURFACE", "modes": ["debug"], "format": "text", "placement": "notes", "note": "Last 16 faults: class · source · raised → cleared (by) · player at raise (rate, position, presenting, stopped_by_owner)."}
+    {"id": "surface_history", "label": "History", "section": "SURFACE", "modes": ["debug"], "format": "text", "placement": "notes", "note": "Last 16 faults: class · source · raised → cleared (by) · player at raise (rate, position, presenting, stopped_by_owner)."},
+    {"id": "switch_frames", "label": "Frames at the switch", "section": "PREPARED SWITCH", "modes": ["debug"], "format": "text", "note": "Dropped frames counted over the two seconds either side of a prepared commit, with how much of that window the samples cover. An observation, never a verdict: the bar it is measured against lives in docs/playback-control/QUALITY-SWITCH-CONTINUITY-RESULTS.md."},
+    {"id": "switch_audio", "label": "Audio at the switch", "section": "PREPARED SWITCH", "modes": ["debug"], "format": "text", "note": "Audio discontinuity over the same window — Apple access-log stalls, Android audio-sink underruns, and on the web the reason the analyser probe is deliberately not on the audible path."},
+    {"id": "switch_visible_in", "label": "Tap to new quality", "section": "PREPARED SWITCH", "modes": ["debug"], "format": "millis", "note": "Wall time from the viewer's tap to the successor's first frame. Reported, never judged."}
   ]
 }
