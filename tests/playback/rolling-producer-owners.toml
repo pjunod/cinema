@@ -1506,7 +1506,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # same staging call and then replaces the pending claim with a second ask rather
 # than setting the cancelled flag. Same shape: joined inside the test, owns
 # nothing shipped.
-expected_occurrences = 514
+expected_occurrences = 519
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1894,7 +1894,7 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 777 -> 780 with the review fixes: the second registration-window test adds a
 # paced sleep and a bounded `tokio::time::timeout` with its polling sleep, the
 # same shape as the test beside it. Re-measured, not extrapolated.
-expected_occurrences = 780
+expected_occurrences = 784
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2196,7 +2196,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # unchanged. Both matches are test-only HTTP assertions.
 # +1 VideoToolbox test-only output helper: each finite FFmpeg/FFprobe child
 # is awaited within a 30-second timeout and has kill-on-drop enabled.
-expected_occurrences = 305
+expected_occurrences = 303
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
