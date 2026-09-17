@@ -941,6 +941,21 @@ async function main() {
     assert.equal(delivered.at(-1),"adopted-element");
     assert.equal(p.controlFrameCancel,null);
 
+    // loadeddata fires only once per resource. A callback delivered as the
+    // buffer drains can leave the next request waiting for readiness again.
+    v.readyState=1;
+    const beforeBuffering=registered.length, beforePresentation=delivered.length;
+    queue(v,p,()=>delivered.push("buffer-recovered"));
+    assert.equal(registered.length,beforeBuffering);
+    v.readyState=3;emit("canplay");
+    assert.equal(registered.length,beforeBuffering+1,
+      "buffer recovery must resume registration without a second loadeddata event");
+    emit("canplay");emit("seeked");
+    assert.equal(registered.length,beforeBuffering+1,"readiness events cannot duplicate a pending request");
+    assert.equal(delivered.length,beforePresentation,"buffer readiness is not presentation evidence");
+    registered.at(-1).fn(400,{mediaTime:63});
+    assert.equal(delivered.at(-1),"buffer-recovered");
+    assert.ok([...events.values()].every(set=>set.size===0),"delivery removes buffering listeners too");
   }
 
   // Run the actual menu operations, including the progressive audio branch
