@@ -104,6 +104,22 @@ fn age_dvr_observations(
     outcome
 }
 
+/// Whether re-aging this entry would move anything.
+///
+/// [`age_dvr_observations`] only ever advances capture observations, so an
+/// outcome without any is byte-identical before and after. Asking first is
+/// what lets the cache hand out the allocation the single-flight gate exists
+/// to share instead of deep-cloning every peer's whole snapshot per reader.
+fn carries_dvr_observations(entry: &(String, PeerActivityOutcome)) -> bool {
+    match &entry.1 {
+        PeerActivityOutcome::Answered(snapshot) => snapshot
+            .dvr
+            .as_ref()
+            .is_some_and(|dvr| !dvr.observations.is_empty()),
+        _ => false,
+    }
+}
+
 #[derive(Default)]
 struct PeerActivityReadGate {
     last_started: Option<tokio::time::Instant>,
@@ -322,6 +338,13 @@ where
         if now.saturating_duration_since(*completed_at) < ACTIVITY_SNAPSHOT_REUSE {
             record_aggregation(1);
             let age = now.saturating_duration_since(*completed_at);
+            // Rebuild only when re-aging would actually move something.
+            // Otherwise every reader on a cache hit allocated a fresh Vec and
+            // cloned every peer's whole snapshot, which is exactly the sharing
+            // this gate exists to provide.
+            if age.is_zero() || !snapshot.iter().any(carries_dvr_observations) {
+                return Ok(Arc::clone(snapshot));
+            }
             return Ok(snapshot
                 .iter()
                 .cloned()
