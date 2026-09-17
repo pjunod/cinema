@@ -6,7 +6,7 @@ proposed, not implemented or deployed · **Written:** 2026-09-17 UTC
 
 Companion to [queue repair verification](QUEUE-REPAIR-VERIFICATION-PROMPT.md)
 (the earlier queue recovery) and
-[Wicked startup](WICKED-NATIVE-HLS-STARTUP-RCA.md) (a separate playback failure
+[Wicked startup](STUTTER-4K.md) (a separate playback failure
 while an index was unavailable). This document explains the retained
 “Index output was incomplete” failures and proposes their correction.
 It is a review proposal, not authorization to deploy or reopen the fleet.
