@@ -5495,11 +5495,23 @@ mod tests {
         // and the DVR's tuner arithmetic leaves a recording somewhere to go —
         // that last one is a sum of two configured numbers, so it is knowable
         // on a node that has never seen a tuner.
+        // `probe_reporter_named` reads a process-wide answer that any earlier
+        // test in this binary may have populated, so it is met on a run that
+        // probed FFprobe and unobservable on one that did not. Both are honest;
+        // neither belongs in an exact set. It is asserted on its own below.
         let green = seen
             .iter()
             .filter(|(_, status)| status.as_str() == "met")
             .map(|(id, _)| id.as_str())
+            .filter(|id| *id != "probe_reporter_named")
             .collect::<Vec<_>>();
+        assert!(
+            matches!(
+                seen.get("probe_reporter_named").map(String::as_str),
+                Some("met" | "unobservable")
+            ),
+            "the reporter row never claims a build it did not read: {seen:?}"
+        );
         assert_eq!(
             green,
             vec![
@@ -6437,8 +6449,10 @@ mod tests {
             [
                 "analysis",
                 "deliveries",
-                // Live TV runs on one unreplicated node, so its key is in the
-                // base payload rather than behind the clustered branch.
+                // Recording and Live TV both run on one unreplicated node, so
+                // their keys are in the base payload rather than behind the
+                // clustered branch.
+                "dvr",
                 "live_tv",
                 "offline",
                 "producing",
@@ -8990,7 +9004,13 @@ mod tests {
         let dir = crate::test_temp_path(format!("plurx-media-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("mediadir");
         let mpath = dir.join("Heat.mp4");
-        std::fs::write(&mpath, b"\x00\x00\x00\x18ftypmp42 tiny placeholder bytes").expect("write");
+        // `serve_file_range` refuses bytes whose on-disk length disagrees with
+        // the size the catalogue recorded, so the seed has to record what it
+        // actually wrote. It recorded 42 for 35 bytes, and every direct-play,
+        // range and Plex-part read of this fixture answered 404.
+        const PLACEHOLDER: &[u8] = b"\x00\x00\x00\x18ftypmp42 tiny placeholder bytes";
+        std::fs::write(&mpath, PLACEHOLDER).expect("write");
+        let placeholder_len = PLACEHOLDER.len() as i64;
         let probe = ProbeResult {
             duration_ms: Some(9_000_000),
             container: Some("mp4".into()),
@@ -9021,7 +9041,7 @@ mod tests {
         };
         let file = state
             .store
-            .upsert_file(movie, &mpath.to_string_lossy(), 42, 1, &probe)
+            .upsert_file(movie, &mpath.to_string_lossy(), placeholder_len, 1, &probe)
             .await
             .expect("file");
         let show = state
@@ -9065,7 +9085,7 @@ mod tests {
             .expect("ep");
         state
             .store
-            .upsert_file(ep, &mpath.to_string_lossy(), 42, 1, &probe)
+            .upsert_file(ep, &mpath.to_string_lossy(), placeholder_len, 1, &probe)
             .await
             .expect("epfile");
         Seed {
@@ -9128,13 +9148,14 @@ mod tests {
             .expect("photo");
 
         let vpath = dir.join("2019/Beach day.mp4");
-        std::fs::write(&vpath, b"\x00\x00\x00\x18ftypmp42 tiny placeholder").expect("write video");
+        const HOME_PLACEHOLDER: &[u8] = b"\x00\x00\x00\x18ftypmp42 tiny placeholder";
+        std::fs::write(&vpath, HOME_PLACEHOLDER).expect("write video");
         state
             .store
             .upsert_file(
                 video,
                 &vpath.to_string_lossy(),
-                42,
+                HOME_PLACEHOLDER.len() as i64,
                 1,
                 &ProbeResult {
                     duration_ms: Some(12_000),
@@ -10601,7 +10622,7 @@ mod tests {
             episode["media"],
             json!({
                 "files": 2,
-                "bytes": 80_000_000_042_i64,
+                "bytes": 80_000_000_035_i64,
                 "video": "HEVC",
                 "height": 2160,
                 "hdr": "dolby_vision",
@@ -12275,20 +12296,6 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let seeded = seed_content(&state).await;
-        // The legacy seed records a 42-byte file but writes a shorter placeholder.
-        // Download serving deliberately rejects bytes that differ from the probe.
-        let file = state
-            .store
-            .get_file(seeded.file)
-            .await
-            .expect("query seeded file")
-            .expect("seeded file");
-        std::fs::OpenOptions::new()
-            .write(true)
-            .open(&file.path)
-            .expect("open placeholder")
-            .set_len(file.size as u64)
-            .expect("match recorded length");
         let uri = format!("/api/v1/files/{}/download?token={admin}", seeded.file);
         let response = app
             .clone()

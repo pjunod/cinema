@@ -255,7 +255,7 @@ mod tests {
             quality: DesiredQuality::Manual { height: 1080 },
             ..baseline()
         };
-        assert_eq!(named.canonical_form().contains("quality=auto:1080"), true);
+        assert!(named.canonical_form().contains("quality=auto:1080"));
         assert_ne!(plain.digest(), named.digest());
         assert_ne!(named.digest(), other.digest());
         assert_ne!(

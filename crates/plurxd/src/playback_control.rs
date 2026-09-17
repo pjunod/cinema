@@ -25953,6 +25953,10 @@ mod tests {
             ),
             ProducerExitAcceptance::Accepted
         );
+        // `observe_producer_exit_at` arms the exit as due; the decision is
+        // minted by the next actor transaction, which in production is the
+        // next command, block report or publication authorization.
+        let _ = unsupported.settle_due_deadlines_at(retry_exit_at);
         assert!(matches!(
             unsupported.pending_decision.as_deref(),
             Some(ProducerDecision::Fail {

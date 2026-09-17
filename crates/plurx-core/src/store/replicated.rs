@@ -785,6 +785,79 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
     },
+    // The recording-event, subject-write and content-analysis-repair boundaries.
+    // Each one pairs a durable write with the event or receipt that explains it,
+    // which is the whole reason they are transactions rather than two writes.
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "insert_dvr_airing_with_event",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "transition_dvr_recording_with_event",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "request_dvr_stop_with_event",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "link_dvr_recording_media_with_event",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "append_dvr_observation_event",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "acknowledge_dvr_attention",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "dvr.rs",
+        method: "prune_dvr_events",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadExpandWrite,
+    },
+    SqliteTransactionSite {
+        module: "library_channels.rs",
+        method: "subject_write",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BatchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "fail_cluster_fragment_index_typed",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "apply_analysis_index_repair",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
 ];
 
 /// hiqlite 0.14.0 `store/state_machine/sqlite/state_machine.rs:401-510`
@@ -907,6 +980,10 @@ mod tests {
     const SQLITE_MODULES: &[(&str, &str)] = &[
         ("apikeys.rs", include_str!("sqlite/apikeys.rs")),
         ("cache.rs", include_str!("sqlite/cache.rs")),
+        (
+            "classification.rs",
+            include_str!("sqlite/classification.rs"),
+        ),
         ("coordination.rs", include_str!("sqlite/coordination.rs")),
         ("dv_conversion.rs", include_str!("sqlite/dv_conversion.rs")),
         ("fragindex.rs", include_str!("sqlite/fragindex.rs")),
@@ -1070,11 +1147,18 @@ mod tests {
         //   none, because the connection mutex already serializes it against
         //   every write in the store.
         //
+        // 97 after the recording-event, subject-write and content-analysis
+        // repair work: seven more `dvr.rs` boundaries that pair a state change
+        // with the event explaining it (a half-applied pair is a recording
+        // whose history disagrees with its state), `subject_write`, and the two
+        // `fragment_index_cluster.rs` boundaries that read a job or a prior
+        // repair and write conditionally on what they read.
+        //
         // The number is written out rather than derived so that adding a
         // transaction boundary has to be a deliberate edit here. That is the
         // point of the assertion: two of the sites above reached main without
-        // one.
-        assert_eq!(methods.len(), 87);
+        // one, and ten more did before this correction.
+        assert_eq!(methods.len(), 97);
     }
 
     #[test]

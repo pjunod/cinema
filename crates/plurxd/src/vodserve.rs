@@ -11126,17 +11126,15 @@ mod tests {
     /// from "nothing is arriving".
     #[tokio::test]
     async fn a_capacity_stall_still_says_no_room_after_its_producer_is_gone() {
+        // Hand-built, because `driver_pass` rewrites `capacity_hold` on every
+        // pass and `create` starts a producer in the background — between them
+        // they decide both halves of what this test is asserting, and which one
+        // wins is a race. The mapping from a live producer's hold to the wire
+        // is covered separately, with a real child.
         let base = crate::test_tempdir().expect("base");
-        let (serve, file) = serve_on(base.path()).await;
-        create(&serve, &file, "sess-a", "play-a", &settings()).await;
-        let rendition = serve
-            .shared
-            .sessions
-            .lock()
-            .await
-            .get("sess-a")
-            .and_then(|session| session.live_rendition().map(Arc::clone))
-            .expect("a live rendition");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        insert_control_session(&serve, "sess-a", Arc::clone(&rendition), Instant::now()).await;
 
         assert_eq!(
             serve.status("sess-a").await.expect("status").producer_hold,
