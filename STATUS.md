@@ -4,6 +4,30 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## `make install` is one command on every platform
+
+**[#349](http://forge.lan:3000/noirr/plurx/pulls/349) from `feat/make-install`
+into `main`; adversarial review done (3 blockers, 14 should-fix) and every
+blocker plus the should-fix set folded; merging once the PR fan-out is green.**
+`make install` detects the host and hands off to `deploy/install`: a sandboxed
+systemd unit with a dedicated `plurx` user on Linux, a LaunchAgent in the
+login session on macOS (VideoToolbox stays available), or the native Windows
+service through `deploy\install.ps1`, which elevates itself. `make
+install-docker` makes the first Compose run one command; `make install-binary`
+puts `plurxd` on `PATH` with no service; `make uninstall` / `uninstall-docker`
+reverse them and keep data. Every path builds the same `--locked` release
+binary or takes a prebuilt one, installs ffmpeg when it is missing (beside
+`plurxd.exe` on Windows, because LocalSystem does not share the user's
+`PATH`), runs only the privileged steps through sudo, upgrades in place
+without ever overwriting a unit or plist the operator edited, and ends by
+waiting for `/readyz` and printing the version the server reports — an
+install whose server never answers exits non-zero and names the log.
+`tests/operations/test_install.py` (21 cases) executes each path against
+stubbed host tools; the Linux path was also run for real as root in a
+container (fresh, upgrade, uninstall, readiness timeout). Not run here: a real
+launchd bootstrap on a Mac and a real Windows service install — both are
+hand-offs in the PR body.
+
 ## The web item page is back to its pre-#317 layout
 
 **[#342](http://forge.lan:3000/noirr/plurx/pulls/342) from

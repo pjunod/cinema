@@ -16,11 +16,24 @@ on-device install/update step.
 
 ## Docker / Compose (recommended for homelabs)
 
-Host-specific bits (media mounts, GPU, and shared Docker networks) live in an
-untracked override file, so pulling updates never conflicts with local edits:
+One command from the repository root brings the stack up for the first time:
+
+```sh
+make install-docker
+```
+
+It writes `deploy/.env` (with your uid/gid) and
+`deploy/docker-compose.override.yml` from their examples when they are
+missing, creates the data directory named in `.env`, runs `make docker-up`,
+and then waits for `/readyz` and prints the version the server reports.
+Host-specific bits (media mounts, GPU, and shared Docker networks) live in
+that untracked override file, so pulling updates never conflicts with local
+edits — put your mounts and GPU there and run `make docker-up` again; that is
+the deploy from then on. By hand, the same first run is:
 
 ```sh
 cd deploy
+cp .env.example .env                   # PUID/PGID, ports, the data directory
 cp docker-compose.override.example.yml docker-compose.override.yml
 $EDITOR docker-compose.override.yml   # your media mounts (host:container:ro), your GPU
 cd .. && make docker-up                  # builds from source; stamps the commit into the build
@@ -336,13 +349,19 @@ Nothing mapping to `/var/lib/plurx` means the next rebuild loses everything.
 
 ```sh
 # Linux amd64/arm64, macOS, Windows — one binary; ffmpeg is the base runtime dependency.
+make install-binary # builds plurxd from this checkout and puts it on PATH (no service)
 plurxd run          # serves :32400; config via ./plurx.toml or PLURX_* env
 ```
 
-Install `ffmpeg`/`ffprobe` (or point `PLURX_FFMPEG`/`PLURX_FFPROBE` at a build
-such as jellyfin-ffmpeg for the best hardware/tone-mapping support). To keep it
-running across reboots, install it as a service — the native Windows service,
-**systemd** on Linux, or **launchd** on macOS, below.
+`make install-binary` also installs `ffmpeg`/`ffprobe` with the platform's
+package manager when they are missing (or point `PLURX_FFMPEG`/`PLURX_FFPROBE`
+at a build such as jellyfin-ffmpeg for the best hardware/tone-mapping
+support). To keep it running across reboots, install it as a service instead —
+`make install` picks the native Windows service, **systemd** on Linux, or
+**launchd** on macOS, each described below. Every target takes
+`INSTALL_FLAGS`: `--binary <path>` installs a prebuilt `plurxd` instead of
+building, `--prefix <dir>` moves the binary, `--dry-run` prints the plan, and
+`make uninstall` removes the service while keeping data and configuration.
 
 Permanent Dolby Vision Profile 7 → 8.1 conversion additionally needs
 `dovi_tool` and `mkvmerge` 68 or newer. The Docker image includes pinned builds;
@@ -375,12 +394,34 @@ probe was rejected.
 
 ## Run as a service — Windows
 
-Download `plurxd-windows-x86_64.zip`, expand it to a stable directory such as
-`C:\Program Files\plurx`, and copy `plurx.example.toml` to
-`C:\ProgramData\plurx\plurx.toml`. Use absolute Windows paths for data, cache,
-transcode scratch, media libraries, and external tools. The managed data and
-cache roots must be on NTFS or ReFS; a read-only library may be on another
-filesystem or an SMB share.
+One command from an elevated PowerShell in the repository root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File deploy\install.ps1                                   # builds plurxd.exe from this checkout
+powershell -ExecutionPolicy Bypass -File deploy\install.ps1 -Binary .\plurxd-windows-x86_64.zip  # or installs the release archive
+```
+
+(From an elevated Git Bash or MSYS2 shell with GNU make, `make install` runs
+the same script; the script elevates itself when it is not already.) It copies
+`plurxd.exe` and `plurx.example.toml` to `C:\Program Files\plurx`, writes
+`C:\ProgramData\plurx\plurx.toml` from the example if there is none, installs
+ffmpeg with winget when none is found and puts `ffmpeg.exe`/`ffprobe.exe`
+beside `plurxd.exe` (the service runs as LocalSystem, which does not share
+your `PATH`; machine-level `PLURX_FFMPEG`/`PLURX_FFPROBE` are honoured
+instead), registers the automatic LocalSystem service through
+`plurxd.exe service install`, opens TCP 32400 and UDP 32414 in Windows
+Firewall, then waits for `/readyz` and prints the version the server reports.
+Run it again to upgrade: the service is stopped, the binary replaced, and the
+service started. `-Uninstall` removes the service and the firewall rules and
+keeps the install directory, the config, and the data. `-DryRun` prints the
+plan. Edit `plurx.toml` afterwards for your libraries: use absolute Windows
+paths for data, cache, transcode scratch, media libraries, and external tools.
+The managed data and cache roots must be on NTFS or ReFS; a read-only library
+may be on another filesystem or an SMB share.
+
+By hand, the same install is: download `plurxd-windows-x86_64.zip`, expand it
+to a stable directory such as `C:\Program Files\plurx`, and copy
+`plurx.example.toml` to `C:\ProgramData\plurx\plurx.toml`.
 
 Install a current jellyfin-ffmpeg Windows build. Put `ffmpeg.exe` and
 `ffprobe.exe` beside `plurxd.exe`, or set the machine-level
@@ -430,7 +471,27 @@ netsh advfirewall firewall delete rule name="plurx GDM discovery"
 Keeps plurxd running across reboots and restarts it if it crashes. The unit
 ([`plurxd.service`](plurxd.service)) runs as a dedicated unprivileged `plurx`
 user and is sandboxed (`ProtectSystem=strict`, `NoNewPrivileges`), writing only
-to its data dir.
+to its data dir. One command from the repository root:
+
+```sh
+make install          # or: make install-linux
+```
+
+It builds `plurxd` from this checkout (`--binary` in `INSTALL_FLAGS` installs a
+prebuilt one instead), installs ffmpeg with apt/dnf/pacman/zypper/apk when it
+is missing, creates the `plurx` user and `/var/lib/plurx`, installs the binary
+and the unit, enables and starts the service, then waits for `/readyz` and
+prints the version the server reports. sudo is used for exactly the steps
+that need root; the build never runs as root. Run it again to upgrade: a
+running service is stopped before its binary is replaced and started after,
+and an existing unit is yours — the installer never overwrites it, so the
+`SupplementaryGroups`, `ProtectHome`, and `PLURX_FFMPEG` edits below survive.
+A `--prefix` other than `/usr/local` lands as a drop-in
+(`plurxd.service.d/10-prefix.conf`) rather than an edited unit; a prefix under
+`/home` is refused because the unit's `ProtectHome=true` would hide it.
+`make uninstall` disables the service and removes the unit, drop-in, and
+binary, and keeps `/var/lib/plurx` and the `plurx` user. By hand, the same
+install is:
 
 ```sh
 # 1. Install the binary + a service user + its data dir
@@ -501,6 +562,23 @@ on crash. A user agent rather than a boot-time system daemon on purpose:
 VideoToolbox hardware transcoding needs a logged-in GUI session, which a daemon
 doesn't have. The template is [`com.plurx.plurxd.plist`](com.plurx.plurxd.plist);
 launchd doesn't expand `~`, so the install fills in absolute paths for you.
+One command from the repository root:
+
+```sh
+make install          # or: make install-macos
+```
+
+It builds `plurxd` from this checkout, installs ffmpeg with Homebrew when it
+is missing, puts the binary in the Homebrew prefix (no sudo on Apple Silicon;
+`--prefix` in `INSTALL_FLAGS` chooses another), renders the agent plist with
+your home directory and the real `plurxd`/`ffmpeg`/`ffprobe` paths, bootstraps
+and starts it, then waits for `/readyz` and prints the version the server
+reports. Run it again to upgrade: the agent is booted out before its binary
+is replaced, and an existing plist is yours — the installer never overwrites
+it, so `plutil -replace` edits survive. `make uninstall` boots the agent out
+and removes the plist and binary, and keeps
+`~/Library/Application Support/plurx`. `make uninstall-docker` is the Compose
+counterpart (`docker compose down`; `.env`, the override, and data stay).
 
 **This shipped LaunchAgent does not support permanent on-disk Dolby Vision
 conversion. Keep that feature Off.** It runs as your interactive login uid, so
@@ -513,6 +591,8 @@ Use the Linux container or Linux systemd recipe above for the supported
 conversion path. A site-specific macOS LaunchDaemon can use a dedicated
 account, but this repository does not ship one because its media ACLs and
 user-session hardware policy cannot be inferred safely.
+
+By hand, the same install is:
 
 ```sh
 # 1. Install the binary + ffmpeg (Homebrew satisfies the runtime dep)

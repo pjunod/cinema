@@ -1872,13 +1872,22 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +2 are test-only cadence waits in the 24-seek control-endpoint regression:
 # one between seek packets and one before the settled packet. Neither creates
 # a production timer or changes producer ownership.
-# 763 -> 771 with M0's preparation tests and their two `#[cfg(test)]` seams:
+# +6 VideoToolbox live-TV regressions: two five-second stderr-capture
+# deadlines, plus the hardware helper deadline, publication deadline, polling
+# sleep and overall encode deadline. All are test-only; feed and child are
+# joined, the ChildJob stays owned until exit, and no timer detaches a producer.
+# 769 -> 777 with M0's preparation tests and their two `#[cfg(test)]` seams:
 # two sleeps in the seams themselves (a planning delay and a registration-window
-# delay, both compiled out of every shipped build), one paced sleep and five
-# bounded waits inside the tests — `tokio::time::timeout` around a settlement
-# that runs on a spawned task, with its polling sleep. None bounds a producer,
-# a process or a lease; every one of them is a test waiting for work it started.
-expected_occurrences = 771
+# delay, both compiled out of every shipped build), paced sleeps and bounded
+# waits inside the tests — `tokio::time::timeout` around settlements that run on
+# spawned tasks, each with its polling sleep. None bounds a producer, a process
+# or a lease; every one of them is a test waiting for work it started.
+# This row is the one that conflicted on this merge, and neither side of the
+# conflict was valid: the effort branch carried 771 against a pre-#346 base of
+# 763, main moved the same row to 769 for its VideoToolbox regressions, and the
+# check is exact equality. 777 is a fresh measurement of the merged tree rather
+# than either number plus a remembered delta.
+expected_occurrences = 777
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1974,7 +1983,11 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # is handed immediately to a bounded output/status owner or `spawn_job_owned`.
 # +2 Windows held-path commands for permanent-DV ffprobe and conversion. Both
 # are bounded and Job-owned before they can execute.
-expected_occurrences = 111
+# +5 VideoToolbox hardware fixtures: video generation, audio muxing, caption
+# probing, segment probing and segment decoding. Each command is passed to
+# the test-only output helper, with a 30-second deadline, kill-on-drop, and
+# awaited completion. The live child uses the existing production owner.
+expected_occurrences = 116
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -2174,7 +2187,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # in-process ranged attachment and unauthenticated denial. Neither creates a
 # child process, task, timer, or producer; the existing file-serving owner is
 # unchanged. Both matches are test-only HTTP assertions.
-expected_occurrences = 304
+# +1 VideoToolbox test-only output helper: each finite FFmpeg/FFprobe child
+# is awaited within a 30-second timeout and has kill-on-drop enabled.
+expected_occurrences = 305
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -2338,7 +2353,9 @@ pattern = "kill_on_drop\\s*\\("
 # fragment-index pipe; normal completion and timeout still explicitly reap.
 # +1 Windows held-path ffprobe. Job ownership is primary; kill-on-drop is the
 # cancellation backstop while its bounded readers and wait are joined.
-expected_occurrences = 71
+# +1 VideoToolbox test-only output helper, shared by five finite media
+# commands. Drop protects cancellation; successful output awaits child exit.
+expected_occurrences = 72
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

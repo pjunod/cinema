@@ -18,11 +18,15 @@ run it, in order of how most people do:
 
 ```bash
 # Docker / Compose (recommended for homelabs) — builds from source the first time
-cd deploy
-cp docker-compose.override.example.yml docker-compose.override.yml   # your mounts + GPU
-cd .. && make docker-up      # builds + starts, and stamps the commit so the server can name it
+make install-docker          # writes deploy/.env + the override file, creates the data dir, runs docker-up
+$EDITOR deploy/docker-compose.override.yml                          # your mounts + GPU
+make docker-up               # builds + starts, and stamps the commit so the server can name it
+
+# As a service — systemd on Linux, launchd on macOS, the native Windows service
+make install                 # builds, installs, starts, and waits for /readyz; `make uninstall` reverses it
 
 # Bare metal — one binary, needs ffmpeg/ffprobe on PATH (and the optional conversion tools below)
+make install-binary   # puts plurxd on PATH, no service
 plurxd run            # serves :32400
 
 # Windows console mode (PowerShell)
