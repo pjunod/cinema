@@ -330,13 +330,19 @@ enum Caps {
         /// `offered`, `none` — or nil on a server or relay that does not send
         /// the field at all, which is not a refusal.
         @Published private(set) var lastPreparation: String?
+        /// M3's three readings for the last committed switch, or nil before
+        /// any. Advisory like everything else here: nothing reads them back,
+        /// and an unmeasured window is never read as a failure.
+        @Published private(set) var lastSwitch: PreparedSwitchMeasurement.Reading?
 
         func note(outcome: String) { lastOutcome = outcome }
         func note(preparation: String?) { lastPreparation = preparation }
+        func note(switch reading: PreparedSwitchMeasurement.Reading) { lastSwitch = reading }
         /// Tests share one process with the app. Nothing in the app calls it.
         func reset() {
             lastOutcome = nil
             lastPreparation = nil
+            lastSwitch = nil
         }
     }
 

@@ -2185,6 +2185,32 @@ final class PlayerController: ObservableObject {
     /// Every explicit viewer command invalidates recovery work that crossed an
     /// await. Session generation alone cannot see pause/resume or native seek.
     private var viewerActionEpoch = 0
+
+    /// M3. What the last prepared switch measured.
+    ///
+    /// Observation only. Every input is a read of an access log AVFoundation
+    /// already writes, taken on the status poll this controller already runs;
+    /// nothing here is awaited on the commit path and nothing in this
+    /// controller reads a value back to decide anything, so instrumenting the
+    /// switch cannot be the thing that changes it. The arithmetic lives in
+    /// `PreparedSwitchMeasurement.swift` as pure functions.
+    private var preparedSwitch = PreparedSwitchMeasurement.Recorder()
+
+    /// The three rows the info panel shows, computed on demand.
+    var preparedSwitchReading: PreparedSwitchMeasurement.Reading { preparedSwitch.reading() }
+
+    /// One reading of the item currently on the layer. A log read and two
+    /// appends; called from the status poll and from either end of the commit,
+    /// never from a render pass.
+    private func sampleThePreparedSwitch() {
+        guard let event = player.currentItem?.accessLog()?.events.last else { return }
+        preparedSwitch.note(
+            atMs: PlaybackControlSession.monotonicMs(),
+            droppedFrames: event.numberOfDroppedVideoFrames >= 0
+                ? event.numberOfDroppedVideoFrames : nil,
+            stalls: event.numberOfStalls >= 0 ? event.numberOfStalls : nil
+        )
+    }
     /// Request sequence already published by a predecessor for the seek that a
     /// replacement is about to attach. It lives above control-session lifetime.
     private var pendingControlSequence: UInt64?
@@ -3352,6 +3378,13 @@ final class PlayerController: ObservableObject {
         // number whenever the ask bails without building a request, and order
         // the reopen's create as more superseded than it is.
         let floor = ((await playbackControl.controlSequence) ?? 0) + 1
+        // M3. The tap, in wall time because the first frame is. `reopened()`
+        // moves the incumbent's readings onto the before side of the switch
+        // that is about to be asked for, so a second change in one session
+        // cannot be measured against the first one's samples.
+        preparedSwitch.reopened()
+        preparedSwitch.note(tappedAtUnixMs: Int(Date().timeIntervalSince1970 * 1_000))
+        sampleThePreparedSwitch()
         let actionEpoch = viewerActionEpoch
         let step = await playbackControl.awaitPreparedOffer(
             tappedAt: PlaybackControlSession.monotonicMs(),
@@ -4492,6 +4525,10 @@ final class PlayerController: ObservableObject {
                     // untouched and the log line is the only trace.
                     self.noteSurfaceLogOnly("session_status_unavailable")
                 }
+                // M3. One access-log read every two seconds, which is the
+                // cadence this poll already has. Off the render path, and the
+                // only sampler there is outside the commit itself.
+                self.sampleThePreparedSwitch()
                 if let status {
                     self.diagnosticSessionStatus = status
                     self.diagnosticSessionStatusObservedAt = Date()
@@ -8768,7 +8805,12 @@ extension PlayerController: PreparedSuccessorHost {
         pgsOverlayWindowTask?.cancel()
         pgsOverlayWindow = nil
         stallObservation.reset()
+        // M3. The predecessor's final reading, and then the instant the item
+        // changed. Two synchronous log reads on either side of the swap, so the
+        // window has an endpoint at the commit rather than at the nearest poll.
+        sampleThePreparedSwitch()
         player.replaceCurrentItem(with: item)
+        preparedSwitch.note(commitAtMs: PlaybackControlSession.monotonicMs())
         // The successor is a full session in every respect but its pointer, so
         // everything keyed on "which session am I playing" moves with it.
         sessionId = action.sessionId
@@ -8797,6 +8839,12 @@ extension PlayerController: PreparedSuccessorHost {
         Caps.PreparedHandoffTelemetry.shared.note(
             outcome: "committed \(max(0, firstFrameUnixMs - exposedAtUnixMs)) ms"
         )
+        // M3. The successor's first reading and the frame the viewer saw. The
+        // developer tab is not inside a playback session and so cannot ask this
+        // controller; these are advisory and nothing reads them back.
+        preparedSwitch.note(firstFrameUnixMs: firstFrameUnixMs)
+        sampleThePreparedSwitch()
+        Caps.PreparedHandoffTelemetry.shared.note(switch: preparedSwitch.reading())
         return .committed(firstFrameUnixMs: firstFrameUnixMs)
     }
 

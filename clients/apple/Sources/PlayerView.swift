@@ -2858,6 +2858,12 @@ let applePlaybackInfoFields: [ApplePlaybackInfoField] = [
     .init("surface_source", "Source", "SURFACE", [.debug]),
     .init("surface_ids", "Attached/intent", "SURFACE", [.debug]),
     .init("surface_history", "History", "SURFACE", [.debug], placement: .notes),
+    // PREPARED SWITCH (M3). Debug only, and always a string: "Not measured"
+    // and "0 dropped" are different facts and the row has to be able to say
+    // which one it is.
+    .init("switch_frames", "Frames at the switch", "PREPARED SWITCH", [.debug], always: true),
+    .init("switch_audio", "Audio at the switch", "PREPARED SWITCH", [.debug], always: true),
+    .init("switch_visible_in", "Tap to new quality", "PREPARED SWITCH", [.debug], always: true),
 ]
 
 /// Adapts the attached finite player into the shared playback-info presentation.
@@ -3176,6 +3182,12 @@ struct PlaybackStatsView: View {
         case "surface_history":
             let summary = controller.surfaceHistory.ledgerSummary
             return summary.isEmpty ? nil : ContractFieldValue(value: summary)
+        case "switch_frames":
+            return ContractFieldValue(value: controller.preparedSwitchReading.frames)
+        case "switch_audio":
+            return ContractFieldValue(value: controller.preparedSwitchReading.audio)
+        case "switch_visible_in":
+            return ContractFieldValue(value: controller.preparedSwitchReading.visibleIn)
         default:
             return nil
         }
