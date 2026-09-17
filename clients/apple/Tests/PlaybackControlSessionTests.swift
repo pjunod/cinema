@@ -270,16 +270,28 @@ private final class PlayerStub {
 /// quarter of a second away rather than five seconds.
 private struct ExchangeTimeout: Error {}
 
-private func sessionBootstrap() -> ControlBootstrap {
+/// `nextExchangeMs` defaults to the protocol floor because most of these tests
+/// want exchanges as fast as they can get them. One does not: the cadence test
+/// has to run against the value a real server sets, which is
+/// `NEXT_EXCHANGE_MS` — five seconds — or it cannot tell a solicited exchange
+/// from one the pump would have made anyway.
+private func sessionBootstrap(
+    nextExchangeMs: Int = PlaybackControl.minimumExchangeMs
+) -> ControlBootstrap {
     ControlBootstrap(
         proto: PlaybackControl.protocolName,
         url: "/api/v1/hls/session-1/control",
         generation: "11111111-1111-4111-8111-111111111111",
         controlEpoch: 7,
-        nextExchangeMs: PlaybackControl.minimumExchangeMs,
+        nextExchangeMs: nextExchangeMs,
         leaseTimeoutMs: 300_000
     )
 }
+
+/// What the server puts in every bootstrap, and the number the whole of A1
+/// turns on. Named here rather than inlined so the arithmetic in the cadence
+/// test's comments can be checked against it.
+private let serverNextExchangeMs = 5_000
 
 // MARK: - Tests
 
@@ -1159,5 +1171,65 @@ final class PlaybackControlSessionTests: XCTestCase {
         }
         XCTAssertEqual(PlayerController.preparedOfferOutcome("timed_out"), "timed out")
         XCTAssertEqual(PlayerController.preparedOfferOutcome("declined"), "declined")
+    }
+
+    /// A1 — the bound has to be winnable, and with `notify` it was not.
+    ///
+    /// `next_exchange_ms` is set once at bootstrap and the server sets it to
+    /// five seconds. `notify` only restarts the pump when it has stopped;
+    /// otherwise the pump sleeps out that five seconds, so a wait built on it
+    /// gets the dispatch exchange plus two more inside the twelve-second bound
+    /// — against a server whose priming budget is forty-five seconds and whose
+    /// admission queue alone can hold for five. The staging would essentially
+    /// never be seen, and the fleet counters would go on reading zero.
+    ///
+    /// `notifyUrgently` wakes the pump, which then paces on the reporter's own
+    /// `minimumExchangeMs` of 250 ms. One nudge a second is well inside that,
+    /// so the count here is roughly one per second of the bound.
+    func testTheWaitSolicitsAnExchangeEachSecondWhileTheServerIsStaging() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        controlAnswer.set(ControlAction(type: "none"))
+        controlAnswer.setPreparation("staging")
+        defer {
+            controlAnswer.set(ControlAction(type: "none"))
+            controlAnswer.setPreparation(nil)
+        }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        let session = PlaybackControlSession()
+        tearDownTransport(session, urlSession)
+
+        session.begin(
+            bootstrap: sessionBootstrap(nextExchangeMs: serverNextExchangeMs),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        let before = controlExchanges.all().count
+        let started = Date()
+        let step = await session.awaitPreparedOffer(
+            tappedAt: PlaybackControlSession.monotonicMs(),
+            isSuperseded: { false },
+            publish: { session.reportEvidence() }
+        )
+        let elapsed = Date().timeIntervalSince(started)
+        let solicited = controlExchanges.all().count - before
+
+        XCTAssertEqual(step, PreparedOfferWait.Step.reopen(reason: "timed_out"))
+        XCTAssertGreaterThan(elapsed, Double(PreparedOfferWait.boundMs) / 1_000 - 1)
+        // The unsolicited floor: the bound divided by the server's cadence,
+        // plus the dispatch exchange. Anything at or below it means the nudge
+        // did nothing, which is what `notify` produced.
+        let unsolicited = PreparedOfferWait.boundMs / serverNextExchangeMs + 1
+        XCTAssertGreaterThan(
+            solicited, unsolicited + 4,
+            "the staging cadence has to solicit exchanges, not wait out next_exchange_ms"
+        )
+        XCTAssertGreaterThanOrEqual(solicited, 9, "about one per second of the bound")
+        XCTAssertLessThanOrEqual(
+            solicited, 16,
+            "and never faster than the cadence it asked for"
+        )
     }
 }

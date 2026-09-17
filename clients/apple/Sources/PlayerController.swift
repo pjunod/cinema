@@ -2045,6 +2045,13 @@ final class PlayerController: ObservableObject {
     /// that replays film the viewer has already watched. Nil once it has been
     /// issued, which is also what lets the readiness monitor move on.
     private var preparedSeekMs: Int?
+    /// What the commit's alignment seek came back with, and which alignment it
+    /// belongs to. Written by the seek's own task and read by the bounded wait
+    /// beside it; both are `@MainActor`, so a pair of stored properties is the
+    /// whole bridge. The generation is what stops an abandoned seek — one this
+    /// commit gave up on — reporting into a later one.
+    private var preparedAlignmentOutcome: Bool?
+    private var preparedAlignmentGeneration = 0
     /// How long the viewer's picture was interrupted the last time a prepared
     /// handoff fell back, in milliseconds. Nil until one does. Published so
     /// the developer surfaces can show the number that is currently missing
@@ -8710,15 +8717,25 @@ extension PlayerController: PreparedSuccessorHost {
         // same reason the wait that produced this staging is affordable at
         // all. The seek is issued while the item is still attached to its own
         // player, which is where AVFoundation will honour one.
-        let alignmentMs = max(preparedFilmPositionMs, realPositionMs())
-        _ = await item.seek(
-            to: CMTime(
-                value: CMTimeValue(max(0, alignmentMs - action.mediaOriginMs)),
-                timescale: 1_000
-            ),
-            toleranceBefore: .zero,
-            toleranceAfter: .zero
+        let rendezvous = PreparedCommitRendezvous.plan(
+            stagedFilmPositionMs: preparedFilmPositionMs,
+            incumbentFilmPositionMs: realPositionMs(),
+            mediaOriginMs: action.mediaOriginMs
         )
+        // Bounded, because an unbounded one does not degrade the way it looks
+        // as though it would. The incumbent does keep playing — but the
+        // readiness monitor has already been dropped two statements above, so
+        // nothing can cancel a suspended commit; `.switching` makes `abandon`,
+        // `abandonWithoutFallback` and `offer` all bail, so the coordinator
+        // never frees and every later quality change in the session skips the
+        // prepared path; the server holds its one preparation slot for the full
+        // deadline because no acknowledgement is queued in `.switching`; and
+        // the viewer's tap produces nothing at all, because the prepared path
+        // already claimed it and suppressed the in-place reopen.
+        guard await awaitPreparedAlignment(of: item, to: rendezvous.itemPositionMs) else {
+            discardPreparedSuccessor()
+            return PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
+        }
         // The staging can be taken away under that await — the player ending,
         // the app backgrounding. `.switching` stops anything else *opening*
         // one, but it does not stop the pipeline being freed, and handing a
@@ -8756,7 +8773,7 @@ extension PlayerController: PreparedSuccessorHost {
         // it is the instrument that could not separate a codec change from no
         // change. Taking it from the alignment is what makes the successor's
         // own first frame able to satisfy it at all.
-        let boundaryMs = alignmentMs
+        let boundaryMs = rendezvous.filmPositionMs
         stopStatusPolling()
         installSeekVideoOutput(on: item)
         #if os(iOS)
@@ -8798,6 +8815,41 @@ extension PlayerController: PreparedSuccessorHost {
             outcome: "committed \(max(0, firstFrameUnixMs - exposedAtUnixMs)) ms"
         )
         return .committed(firstFrameUnixMs: firstFrameUnixMs)
+    }
+
+    /// Put the successor's playhead on the rendezvous, and give up on the seek
+    /// if it does not come back inside `PreparedReplacementBounds.alignmentMs`.
+    ///
+    /// The seek runs in a task of its own rather than being awaited directly,
+    /// so that giving up on it is possible at all: `AVPlayerItem.seek` does not
+    /// observe task cancellation, and the readiness monitor that would
+    /// otherwise own this work was dropped before the commit began. The
+    /// abandoned seek is left to resolve or not; the generation check is what
+    /// stops it reporting into a commit that has moved on.
+    private func awaitPreparedAlignment(of item: AVPlayerItem, to itemMs: Int) async -> Bool {
+        preparedAlignmentGeneration &+= 1
+        let generation = preparedAlignmentGeneration
+        preparedAlignmentOutcome = nil
+        let seek = Task { @MainActor [weak self] in
+            let landed = await item.seek(
+                to: CMTime(value: CMTimeValue(max(0, itemMs)), timescale: 1_000),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            )
+            guard let self, self.preparedAlignmentGeneration == generation else { return }
+            self.preparedAlignmentOutcome = landed
+        }
+        let landed = await awaitBoundedValue(
+            boundMs: PreparedReplacementBounds.alignmentMs,
+            pollMs: PreparedReplacementBounds.pollMs,
+            now: { Int(ProcessInfo.processInfo.systemUptime * 1_000) },
+            sleep: { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000) },
+            read: { [weak self] in self?.preparedAlignmentOutcome }
+        )
+        // Best effort, and expected to do nothing to the seek itself; it stops
+        // the wrapper task rather than the media operation inside it.
+        seek.cancel()
+        return landed ?? false
     }
 
     /// Wall clock at the successor's first frame that is actually at or past

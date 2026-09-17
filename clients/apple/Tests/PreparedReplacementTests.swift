@@ -1075,3 +1075,51 @@ final class PreparedFallbackOwnershipTests: XCTestCase {
         Caps.PreparedHandoffTelemetry.shared.reset()
     }
 }
+
+// MARK: - A refused commit frees everything it was holding (A2)
+
+/// The commit is the one place the coordinator cannot be got out of from
+/// outside: `.switching` makes `abandon`, `abandonWithoutFallback` and `offer`
+/// all bail, and `shouldAskForPreparation` false. A commit that never returns
+/// therefore costs the session every later quality change, not just this one —
+/// which is why the alignment inside it is bounded, and why the bound's answer
+/// is `refused`.
+@MainActor
+final class PreparedRefusedCommitTests: XCTestCase {
+    func testARefusedCommitLeavesTheCoordinatorFreeForTheNextChange() async {
+        let host = RecordingHost()
+        host.outcome = .refused
+        let coordinator = PreparedReplacementCoordinator(host: host)
+        let action = preparedAction()
+        coordinator.offer(action, filmPositionMs: 30_000)
+        coordinator.successorIsMetadataReady()
+        coordinator.successorIsBuffered(throughMs: 40_000)
+        XCTAssertFalse(coordinator.shouldAskForPreparation, "one at a time, while it is live")
+        await coordinator.commit()
+
+        XCTAssertFalse(coordinator.hasActivePreparation)
+        XCTAssertFalse(
+            coordinator.ledger.isSwitching,
+            "a commit that returns is what takes the coordinator out of .switching"
+        )
+        XCTAssertTrue(
+            coordinator.shouldAskForPreparation,
+            "every later quality change in this session would otherwise skip the prepared path"
+        )
+        XCTAssertEqual(
+            host.fallbacks, [action],
+            "the viewer's tap still gets its change, in place"
+        )
+        XCTAssertEqual(
+            coordinator.pendingAcknowledgement?.state, .aborted,
+            "and the server's one preparation slot is freed rather than held to its deadline"
+        )
+        XCTAssertEqual(host.alive, 0)
+
+        let next = preparedAction(actionId: "4e5f6a7b-8c9d-4e0f-8a1b-2c3d4e5f6a7b")
+        XCTAssertEqual(
+            coordinator.offer(next, filmPositionMs: 45_000), .build(next),
+            "and the next change can be prepared"
+        )
+    }
+}
