@@ -2104,6 +2104,7 @@ private fun PlayerInfo(
                 "${fault.attached} / ${fault.intent?.toString() ?: "—"}"
             },
             surfaceHistory = surfaceHistoryLine(surfaceHistory),
+            preparedSwitch = controller.preparedSwitchReading,
         ),
         reasons = plan.reasons,
         mode = mode,
@@ -2127,6 +2128,7 @@ private fun playbackTransportReserve(controlsVisible: Boolean, measuredPx: Int):
 }
 
 internal data class PlaybackInfoDetails(
+    val preparedSwitch: PreparedSwitchReading = PreparedSwitchReading.unmeasured,
     val title: String,
     val fileId: Long,
     val delivery: String,
@@ -2507,6 +2509,30 @@ internal fun playbackInfoRows(
             setOf(PlaybackStatsMode.Debug),
             details.surfaceHistory,
             placement = "notes",
+        ),
+        // PREPARED SWITCH (M3). Debug only, and always a string: "Not measured"
+        // and "0 dropped" are different facts and the row has to be able to say
+        // which. Nothing on these rows is read back by anything.
+        InfoRow(
+            "switch_frames",
+            "Frames at the switch",
+            "PREPARED SWITCH",
+            setOf(PlaybackStatsMode.Debug),
+            details.preparedSwitch.frames,
+        ),
+        InfoRow(
+            "switch_audio",
+            "Audio at the switch",
+            "PREPARED SWITCH",
+            setOf(PlaybackStatsMode.Debug),
+            details.preparedSwitch.audio,
+        ),
+        InfoRow(
+            "switch_visible_in",
+            "Tap to new quality",
+            "PREPARED SWITCH",
+            setOf(PlaybackStatsMode.Debug),
+            details.preparedSwitch.visibleIn,
         ),
     )
 }

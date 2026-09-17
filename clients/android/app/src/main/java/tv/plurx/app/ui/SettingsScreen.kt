@@ -45,6 +45,7 @@ import tv.plurx.app.data.ThemeId
 import tv.plurx.app.data.SettingsStore
 import tv.plurx.app.livetv.TvLiveLayout
 import tv.plurx.app.player.PreparedReplacementAdvisory
+import tv.plurx.app.player.preparedSwitchAudioRequirements
 import tv.plurx.app.player.isTelevision
 import tv.plurx.app.player.preparedReplacementRequirements
 import tv.plurx.app.ui.components.ChoicePicker
@@ -297,6 +298,30 @@ private fun PreparedReplacementEnable(
             style = MaterialTheme.typography.bodySmall,
             modifier = Modifier.padding(horizontal = 8.dp),
         )
+        // M3's measurements of that same change, and the one audio measurement
+        // this platform does not take. Advisory in the strict sense: there is
+        // no switch here, nothing reads these back, and a condition that is not
+        // met never blocks a quality change or the handoff above.
+        advice.switch?.let { measured ->
+            LabeledValueRow("Frames at the switch", measured.frames)
+            LabeledValueRow("Audio at the switch", measured.audio)
+            LabeledValueRow("Tap to new quality", measured.visibleIn)
+        }
+        Text(
+            "Measuring the switch — what it needs, and what it cannot have:",
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier.padding(horizontal = 8.dp),
+        )
+        preparedSwitchAudioRequirements(underrunCallbackAvailable = true)
+            .forEach { (title, detail, met) ->
+                LabeledValueRow(title, if (met) "Met" else "Not met")
+                Text(
+                    detail,
+                    color = Muted,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 8.dp),
+                )
+            }
         preparedReplacementRequirements(
             isTelevision = isTelevision,
             // The successor inherits the incumbent's tunneling, and tunneling

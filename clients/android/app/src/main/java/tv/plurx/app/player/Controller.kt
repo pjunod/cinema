@@ -52,6 +52,7 @@ import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.session.MediaSession
@@ -162,6 +163,55 @@ class Controller(
         externalListeners -= value
         player.removeListener(value)
     }
+
+    /**
+     * M3. What the last prepared switch in this player measured.
+     *
+     * Observation only. Every input is a listener callback Media3 already
+     * dispatches, every method is a bounded list append, and nothing in this
+     * controller reads a single value back to decide anything — so
+     * instrumenting the switch cannot be the thing that changes it. The
+     * arithmetic lives in `PreparedSwitchMeasurement.kt` as pure functions.
+     */
+    private val preparedSwitch = PreparedSwitchRecorder()
+
+    /**
+     * The three rows the info panel shows, computed on demand. A closed panel
+     * costs nothing, and the panel cannot change what it is reading.
+     */
+    internal val preparedSwitchReading: PreparedSwitchReading get() = preparedSwitch.reading()
+
+    /**
+     * The analytics listener each pipeline gets, tagged with that pipeline's
+     * identity so a second directed change cannot file the first switch's
+     * successor on the wrong side of the second one.
+     *
+     * `onDroppedVideoFrames` is an increment and `onAudioUnderrun` an event;
+     * the recorder knows the difference. Attached for the life of the player
+     * rather than removed on a timer: a listener is cheaper than a clock, and
+     * a clock on the commit path is precisely what must not be added.
+     */
+    private fun preparedSwitchAnalytics(pipeline: ExoPlayer): AnalyticsListener =
+        object : AnalyticsListener {
+            private val tag = System.identityHashCode(pipeline)
+
+            override fun onDroppedVideoFrames(
+                eventTime: AnalyticsListener.EventTime,
+                droppedFrames: Int,
+                elapsedMs: Long,
+            ) {
+                preparedSwitch.noteDroppedFrames(monotonicNowMs(), droppedFrames, tag)
+            }
+
+            override fun onAudioUnderrun(
+                eventTime: AnalyticsListener.EventTime,
+                bufferSize: Int,
+                bufferSizeMs: Long,
+                elapsedSinceLastFeedMs: Long,
+            ) {
+                preparedSwitch.noteAudioUnderrun(monotonicNowMs(), tag)
+            }
+        }
 
     /** Immutable quality of this exact decision; pending intent is separate. */
     private val activeQuality = plan.requestedQuality
@@ -959,6 +1009,7 @@ class Controller(
     init {
         player.playWhenReady = playbackIntent.playbackRequested
         player.addListener(listener)
+        player.addAnalyticsListener(preparedSwitchAnalytics(player))
         pgsOverlay.select(selectedSubtitle.takeIf { subtitleDelivery == SubtitleDelivery.BitmapOverlay })
         attachSurfaceGeneration()
         targetPresentationWatchdogJob = scope.launch {
@@ -1340,6 +1391,9 @@ class Controller(
         PreparedReplacementAdvisory.recordOutcome(
             PreparedReplacementAdvisory.outcomeLabel(via, elapsedMs),
         )
+        // M3. The switch's own measurements, for the developer screen, which
+        // is not inside a playback session and so cannot ask this controller.
+        PreparedReplacementAdvisory.recordSwitch(preparedSwitch.reading())
         playbackTelemetry.report(
             event = "quality_switch",
             level = if (via == "prepared") "info" else "warn",
@@ -3240,6 +3294,11 @@ class Controller(
         }
         preparedListener = successorListener
         built.player.addListener(successorListener)
+        // M3. The successor's own dropped-frame and underrun stream, from
+        // before it is exposed to after it is the incumbent. It is never
+        // removed, so the two seconds *after* the commit are on the same
+        // series as the two before it.
+        built.player.addAnalyticsListener(preparedSwitchAnalytics(built.player))
         built.player.setMediaItem(
             MediaItem.fromUri(Session.url(playlist)),
             successorAttachPositionMs(originMs, realPosition()),
@@ -3424,6 +3483,14 @@ class Controller(
         // not is a window where a preparation can be left permanently
         // unsettleable.
         awaitingCommitFrameSinceMs = monotonicNowMs()
+        // M3. Three assignments, on the line the swap is decided at. Nothing
+        // is awaited, nothing is read back, and the picture is untouched.
+        preparedSwitch.noteCommit(
+            atMs = monotonicNowMs(),
+            tappedAtMs = directedChangeTappedAtMs,
+            predecessor = System.identityHashCode(player),
+            successor = System.identityHashCode(successor),
+        )
         val previous = player
         val previousVolume = previous.volume
         val previousPlayWhenReady = playbackIntent.playbackRequested
@@ -3543,6 +3610,7 @@ class Controller(
     private fun settleCommitOnFirstFrame(firstFrameUnixMs: Long) {
         if (awaitingCommitFrameSinceMs == null) return
         awaitingCommitFrameSinceMs = null
+        preparedSwitch.noteFirstFrame(monotonicNowMs())
         publishAcknowledgement(preparedLedger.committed(firstFrameUnixMs))
         // The viewer is looking at the rung they asked for. The directed change
         // is honoured and owes nothing — least of all a reopen.
