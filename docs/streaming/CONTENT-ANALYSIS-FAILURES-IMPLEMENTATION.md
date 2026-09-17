@@ -679,7 +679,7 @@ states; neither may be inferred from a merge or green aggregate queue badge.
 Follow [the compiler loop](../ci/AGENT-COMPILE-LOOP.md) and
 [development pipeline](../DEVELOPMENT_PIPELINE.md). The workflow correction
 at the top of the latter says draft main-bound PR, one adversarial review,
-address findings, mark ready, then `fast-lane`; merging does not deploy.
+address findings, then mark ready to start the fast lane; merging does not deploy.
 Where the supplied AGENTS rules additionally require effort/promotion
 evidence, satisfy those applicable gates too. Do not use CI as the compiler.
 

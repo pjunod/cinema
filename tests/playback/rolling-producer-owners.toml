@@ -1048,7 +1048,8 @@ pattern = "terminal_reason"
 # +4 for content-analysis response reporting: three analysis API field/test
 # references and one browse DTO initializer. These expose or assert the
 # existing terminal cause; none writes a new durable cause.
-expected_occurrences = 31
+# +1 browse reporting reads the terminal reason for a failed analysis badge.
+expected_occurrences = 32
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"

@@ -2072,3 +2072,11 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "func fallBackToInPlaceReplacement(_ action: PreparedReplacementAction)"
 test = "clients/apple/Tests/PreparedReplacementTests.swift"
 test_anchor = "func testAnInPlaceFallbackStandsDownWhenANewerViewerActionOwnsThePlayer()"
+
+[[fixes]]
+id = "android.shared-playback-failure-sources"
+commits = ["1d4e6abab"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurface.kt"
+source_anchor = "SurfaceSources.STARTUP_EXHAUSTED,"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackSurfaceReducerTest.kt"
+test_anchor = "fun sourcesAreTheFixtureVerbatimAndInOrder()"
