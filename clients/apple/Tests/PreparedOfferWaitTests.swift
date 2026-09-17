@@ -152,6 +152,77 @@ final class PreparedOfferWaitTests: XCTestCase {
         )
     }
 
+    /// A3 — the caller polls every 25 ms and is handed the *same* answer back
+    /// until the next exchange lands. A rule keyed on "have I observed an
+    /// accepted answer before" is therefore satisfied 25 milliseconds later by
+    /// the dispatch exchange's own answer, and the client declines a quarter of
+    /// a second into a twelve-second bound.
+    ///
+    /// It is not a theoretical ordering: the server withholds a preparation
+    /// purpose while the incumbent is waiting for capacity, which is transient.
+    /// A viewer who taps quality in that window would never see the `staging`
+    /// the next exchange carries.
+    func testTheDispatchAnswerObservedAgainWithinOnePollIsStillNotADecline() {
+        var subject = makeWait()
+        let dispatch = answer(sequence: 4, preparation: "none")
+        XCTAssertEqual(
+            subject.observe(answer: dispatch, nowMs: 10_050),
+            PreparedOfferWait.Step.keepWaiting(nextExchangeMs: PreparedOfferWait.stagingCadenceMs)
+        )
+        XCTAssertEqual(
+            subject.observe(answer: dispatch, nowMs: 10_075),
+            PreparedOfferWait.Step.keepWaiting(nextExchangeMs: PreparedOfferWait.stagingCadenceMs),
+            "looking twice is not the same as a second exchange having looked"
+        )
+    }
+
+    /// The same, over a whole second of polling — the shape the caller actually
+    /// produces between two exchanges of a five-second cadence.
+    func testTheDeclineNeedsALaterExchangeRatherThanALaterLook() {
+        var subject = makeWait(tappedAtMs: 0)
+        let dispatch = answer(sequence: 4, preparation: "none")
+        for nowMs in stride(from: 25, through: 2_000, by: 25) {
+            XCTAssertEqual(
+                subject.observe(answer: dispatch, nowMs: nowMs),
+                PreparedOfferWait.Step.keepWaiting(
+                    nextExchangeMs: PreparedOfferWait.stagingCadenceMs
+                ),
+                "still the dispatch exchange's own answer at \(nowMs)ms"
+            )
+        }
+        XCTAssertEqual(subject.dispatchSequence, 4)
+        XCTAssertEqual(
+            subject.observe(answer: answer(sequence: 5, preparation: "none"), nowMs: 2_025),
+            PreparedOfferWait.Step.reopen(reason: "declined"),
+            "a later exchange has looked, and says there will be none"
+        )
+    }
+
+    /// And the transient case the guard exists for, end to end: the dispatch
+    /// exchange says `none` because the incumbent was momentarily waiting for
+    /// capacity, and the next one says `staging`.
+    func testADispatchNoneThatBecomesStagingIsNeverDeclined() {
+        var subject = makeWait(tappedAtMs: 0)
+        let dispatch = answer(sequence: 4, preparation: "none")
+        for nowMs in stride(from: 25, through: 1_000, by: 25) {
+            _ = subject.observe(answer: dispatch, nowMs: nowMs)
+        }
+        XCTAssertEqual(
+            subject.observe(answer: answer(sequence: 5, preparation: "staging"), nowMs: 1_025),
+            PreparedOfferWait.Step.keepWaiting(
+                nextExchangeMs: PreparedOfferWait.stagingCadenceMs
+            )
+        )
+        XCTAssertTrue(subject.lastSaidStaging)
+        let step = subject.observe(
+            answer: answer(sequence: 6, action: prepareAction(), preparation: "offered"),
+            nowMs: 2_025
+        )
+        guard case .offered = step else {
+            return XCTFail("the staging it would never have seen, got \(step)")
+        }
+    }
+
     func testTwoConsecutiveNonesDeclineOnTheSecond() {
         var subject = makeWait()
         XCTAssertEqual(
