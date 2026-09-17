@@ -31,6 +31,10 @@ APPLE = ROOT / "clients/apple/Sources/PlaybackControlReporter.swift"
 ANDROID = ROOT / (
     "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt"
 )
+# Apple's reporter carries the wire type; the wait that acts on
+# `delivery.preparation` — and the constants it compares against — lives beside
+# it, so the vocabulary check has to read both.
+APPLE_PREPARED = ROOT / "clients/apple/Sources/PreparedReplacement.swift"
 
 
 def rust_struct_fields(source: str, name: str) -> set[str]:
@@ -173,6 +177,7 @@ class ControlRequestWireCase(unittest.TestCase):
         cls.web = WEB.read_text(encoding="utf-8")
         cls.apple = APPLE.read_text(encoding="utf-8")
         cls.android = ANDROID.read_text(encoding="utf-8")
+        cls.apple_prepared = APPLE_PREPARED.read_text(encoding="utf-8")
 
     def assertSameWire(self, label: str, rust: set[str], swift: set[str], kotlin: set[str]) -> None:
         self.assertEqual(
@@ -456,6 +461,70 @@ class ControlRequestWireCase(unittest.TestCase):
             reasons,
             "the action and the delivery view disagree about the hold vocabulary",
         )
+
+    def test_the_preparation_state_is_one_vocabulary(self) -> None:
+        """`delivery.preparation` means the same three things on every port.
+
+        It is read as a decision, not as a label: `none` ends a client's wait
+        and reopens the stream. A port that spelled one of these differently
+        would not fail loudly — it would fall through to its own "unknown"
+        branch and wait out the twelve-second bound on every quality change,
+        which looks exactly like a slow server. So the names are pinned here
+        rather than left to each port's own tests.
+
+        Absence is deliberately not in the vocabulary. An older relay peer
+        emits no field at all, and every port must read that as "not evaluated
+        here", never as `none`.
+
+        A port is checked by looking its constants up **by name** and comparing
+        their values. The previous form of this test collected the values with
+        `re.findall(r'"(staging|offered|none)"', source)` and asserted the result
+        was a subset of the three — which a regex that can only match those three
+        satisfies unconditionally. Renaming Apple's constant to `"preparing"`
+        left it green.
+
+        Web and Android do not read the field yet, and cannot usefully be
+        checked here: `"none"` is also the action vocabulary's own name for "do
+        nothing", so no regex can tell a preparation state from an action type
+        in those sources. When either port adopts the field it declares a
+        constant and is added below.
+        """
+        bound = re.search(
+            r"preparation\s*\.as_deref\(\)\s*\.is_none_or\(\|value\| "
+            r"matches!\(value, (.*?)\)\)",
+            self.rust,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(
+            bound, "the delivery view no longer bounds its preparation state"
+        )
+        states = set(re.findall(r'"([a-z]+)"', bound.group(1)))
+        self.assertEqual(states, {"staging", "offered", "none"})
+
+        # Every preparation constant Apple declares, whatever it is spelled:
+        # the value is captured as `[^"]*`, so a misspelling is captured and
+        # then fails the membership check rather than failing to match.
+        apple = dict(
+            re.findall(
+                r'static let (\w*[Pp]reparation)\s*=\s*"([^"]*)"',
+                self.apple_prepared,
+            )
+        )
+        self.assertTrue(
+            apple, "Apple no longer names any preparation state the server emits"
+        )
+        for name, value in sorted(apple.items()):
+            self.assertIn(
+                value,
+                states,
+                f"Apple's {name} is {value!r}, which the server cannot emit — the "
+                f"client would fall through to its own unknown branch and wait out "
+                f"the twelve-second bound on every quality change",
+            )
+        # And the two the wait actually branches on, pinned by name, so a change
+        # to the value is caught here rather than absorbed as a new spelling.
+        self.assertEqual(apple.get("stagingPreparation"), "staging")
+        self.assertEqual(apple.get("declinedPreparation"), "none")
 
     def test_every_port_agrees_on_the_enum_vocabularies(self) -> None:
         """A value the server does not know is refused exactly like a bad name."""

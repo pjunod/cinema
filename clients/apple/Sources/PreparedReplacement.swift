@@ -323,8 +323,257 @@ enum PreparedReplacementBounds {
     /// the picture is frozen and the only way out is a reopen, so this is
     /// generous where the readiness bounds are mean.
     static let firstFrameMs = 6_000
+    /// From the commit's alignment seek to the seek coming back.
+    ///
+    /// The successor is already playable and buffered past the point it was
+    /// staged at, so the ordinary alignment is a seek inside loaded media and
+    /// costs tens of milliseconds. What this bound is really for is the case
+    /// where it is not: priming ran long, the incumbent outran the successor's
+    /// buffered runway, and the alignment has to fetch. Four seconds is one
+    /// segment fetch's worth of patience on a link that is already streaming,
+    /// and it is spent while the incumbent is still on the layer — so the cost
+    /// of being wrong is a late in-place change, never a frozen picture.
+    ///
+    /// It is deliberately below `firstFrameMs`: a switch that has already
+    /// happened has no incumbent to go back to, and that is worth waiting
+    /// longer for than one that has not happened yet.
+    static let alignmentMs = 4_000
     /// How often the readiness and first-frame monitors look.
     static let pollMs = 100
+}
+
+// MARK: - The commit's rendezvous
+
+/// Where the successor has to be standing before the viewer is allowed to see
+/// it, and what it means when it cannot get there.
+///
+/// The successor is seeked exactly once, when its item first becomes playable,
+/// to the film position the offer named — and it is never played. The
+/// incumbent meanwhile keeps running, for the whole of the viewer's wait and
+/// the whole of priming. Exposing the item where it was staged rewinds the film
+/// by that difference, and the commit boundary then rejects every frame until
+/// playback catches back up.
+struct PreparedCommitRendezvous: Equatable {
+    /// The film position the switch happens at.
+    let filmPositionMs: Int
+    /// Where that falls in the successor's own timeline, whose zero is the
+    /// staging's `media_origin_ms`.
+    let itemPositionMs: Int
+
+    /// Never behind the staged position: a successor asked to seek backwards
+    /// from where it was primed would fetch media the switch does not need.
+    static func plan(
+        stagedFilmPositionMs: Int,
+        incumbentFilmPositionMs: Int,
+        mediaOriginMs: Int
+    ) -> PreparedCommitRendezvous {
+        let film = max(max(0, stagedFilmPositionMs), max(0, incumbentFilmPositionMs))
+        return PreparedCommitRendezvous(
+            filmPositionMs: film,
+            itemPositionMs: max(0, film - mediaOriginMs)
+        )
+    }
+
+    /// What a commit owes when the alignment does not land inside its bound.
+    ///
+    /// `refused`, not `failed`, because **nothing was switched**: the
+    /// incumbent's item, session and pointer are exactly as they were. That
+    /// makes this an ordinary in-place change — one reopen at the position the
+    /// viewer has actually reached, one `aborted` freeing the server's single
+    /// preparation slot, and a coordinator out of `.switching` and able to take
+    /// the next change. Leaving the commit suspended instead lost all four: the
+    /// tap produced nothing at all, because the prepared path had already
+    /// claimed it.
+    static let outcomeWhenAlignmentCannotLand = PreparedCommitOutcome.refused
+}
+
+/// Wait for a value another task will produce, and give up on it.
+///
+/// Deliberately not `withTaskGroup`. A task group waits for every child at
+/// scope exit, and the thing this bounds — an AVFoundation seek — does not
+/// observe cancellation, so the group would wait out the exact hang the bound
+/// exists to escape. The producer is left to resolve, or not, on its own, and
+/// nothing after the bound reads it.
+///
+/// Takes its clock and its sleep rather than owning them, so a test can drive
+/// it to its deadline instead of spending four seconds of wall clock there.
+@MainActor
+func awaitBoundedValue<Value>(
+    boundMs: Int,
+    pollMs: Int,
+    now: () -> Int,
+    sleep: (Int) async -> Void,
+    read: () -> Value?
+) async -> Value? {
+    let deadline = now() + max(0, boundMs)
+    while true {
+        if let value = read() { return value }
+        // Read before the deadline test and once more after it: a value that
+        // lands in the final poll interval is still the answer.
+        if now() >= deadline { return read() }
+        await sleep(max(1, pollMs))
+    }
+}
+
+// MARK: - Waiting for the offer with the picture up
+
+/// What a directed selection change is waiting for after it has been
+/// published, read off each exchange's answer.
+///
+/// Pure, and in this file for the reason the file gives at the top: the rules
+/// that decide a viewer's picture are the ones that must be provable in a unit
+/// test. The controller feeds it answers and the clock; it says what to do,
+/// and it touches no player.
+///
+/// What it replaces is a 1.5-second `askForAction`, which could only ever see
+/// the answer to the exchange that carried the ask — and the server spawns the
+/// candidate *after* building that response, so a `prepare` is never on it.
+/// This waits across exchanges instead, with the incumbent still playing.
+struct PreparedOfferWait: Equatable {
+    enum Step: Equatable {
+        /// Keep the incumbent playing; exchange again after `nextExchangeMs`.
+        case keepWaiting(nextExchangeMs: Int)
+        /// A `prepare` for this ask arrived — hand it to the coordinator.
+        case offered(PreparedReplacementAction)
+        /// The server said `none` after accepting the ask, or the bound
+        /// expired: reopen in place now, at the CURRENT film position.
+        case reopen(reason: String)
+    }
+
+    /// D1: twelve seconds from the tap. Long enough for a server to stage a
+    /// whole second session; short enough that a viewer whose change is never
+    /// going to be prepared is not left tapping at a picture that will not
+    /// change.
+    static let boundMs = 12_000
+    /// 1 Hz while the server says `staging`.
+    static let stagingCadenceMs = 1_000
+
+    /// What a server that is building a candidate for this ask answers with.
+    static let stagingPreparation = "staging"
+    /// What a server that has decided there will be no candidate answers with.
+    /// **Absence is not this value** — see `observe`.
+    static let declinedPreparation = "none"
+
+    /// Monotonic milliseconds at the viewer's tap.
+    let tappedAtMs: Int
+    /// The first request sequence that could carry this ask's answer.
+    let floorSequence: Int
+    /// Whether any exchange at or past the floor has answered yet.
+    ///
+    /// The exchange that carried the ask is answered by a server that has only
+    /// just accepted it: a new server says `staging` on it, an old one says
+    /// nothing at all. A `none` on *that* exchange is therefore not a decline,
+    /// and reading it as one would reopen immediately on every server whose
+    /// ordering differs by a single hop.
+    private(set) var sawAcceptedAnswer = false
+    /// The sequence of the exchange that carried the ask — the first one at or
+    /// past the floor to come back.
+    ///
+    /// A sequence, not a flag, and that is the whole of the rule. The caller
+    /// polls every 25 ms and is handed the *same* answer back until the next
+    /// exchange lands, so "have I observed an accepted answer before" is true
+    /// again 25 ms later. Keyed that way this rule declined 25 milliseconds
+    /// after the dispatch exchange instead of one exchange later — precisely
+    /// the behaviour it was written to prevent, and invisible to any test whose
+    /// only timing assertion is "inside the bound".
+    ///
+    /// It matters because a dispatch-exchange `none` is not final: the server
+    /// withholds a purpose while the incumbent is waiting for capacity, and
+    /// that is transient. A viewer who taps quality in that window would be
+    /// reopened before the exchange that would have said `staging`.
+    private(set) var dispatchSequence: Int?
+    /// Whether the newest accepted answer said `staging` — the only thing that
+    /// earns an extra exchange at `stagingCadenceMs`. Absent is not staging:
+    /// an old server is waited out by the bound rather than nudged.
+    private(set) var lastSaidStaging = false
+
+    init(tappedAtMs: Int, floorSequence: Int) {
+        self.tappedAtMs = tappedAtMs
+        self.floorSequence = floorSequence
+    }
+
+    mutating func observe(answer: PlaybackControlAnswer?, nowMs: Int) -> Step {
+        // First, and before an exchange has been accepted at all. A server
+        // that never answers this ask is exactly what the bound exists for,
+        // and a bound checked after the answer branches would never fire on
+        // one.
+        if nowMs - tappedAtMs >= Self.boundMs { return .reopen(reason: "timed_out") }
+        guard let answer, answer.requestSequence >= floorSequence else {
+            // Nothing yet, or an answer from before the ask — including a
+            // replayed `prepare` for an older staging, which is why this test
+            // comes before the one below it. Not evidence about this change in
+            // either direction.
+            return .keepWaiting(nextExchangeMs: Self.stagingCadenceMs)
+        }
+        // An offer in hand outranks any hint about one: `preparation` is
+        // progress reporting, and a `prepare` is the thing it was reporting
+        // progress towards.
+        if let action = answer.action, let prepared = PreparedReplacementAction(action) {
+            return .offered(prepared)
+        }
+        let dispatch = dispatchSequence ?? answer.requestSequence
+        dispatchSequence = dispatch
+        sawAcceptedAnswer = true
+        lastSaidStaging = answer.preparation == Self.stagingPreparation
+        // Absence is never a decline. Older servers and relays do not send
+        // this field at all, and reading a missing field as `none` would turn
+        // every one of them into an instant reopen — the exact regression this
+        // milestone exists to remove.
+        //
+        // Nor is the dispatch exchange's own answer one, however many times it
+        // is observed: only a *later* exchange has looked.
+        if answer.preparation == Self.declinedPreparation,
+           answer.requestSequence > dispatch {
+            return .reopen(reason: "declined")
+        }
+        return .keepWaiting(nextExchangeMs: Self.stagingCadenceMs)
+    }
+}
+
+/// Where a quality-only change reopens when the prepared path hands it back.
+///
+/// A quality change changes what is delivered, not where the film is — but it
+/// still creates a presentation destination at the tap, because the progress
+/// bar, the presentation monitor and the stall-recovery suppression are all
+/// built on one. Resuming *at* that destination was harmless while the wait
+/// was 1.5 seconds and could not succeed; at twelve seconds it rewinds the
+/// film by the whole wait. So the destination is kept and the position is read
+/// again when the fallback actually runs.
+enum QualityChangeReopen {
+    /// Where the film is now, for a change whose own pin says where it was.
+    ///
+    /// `livePositionMs` is the incumbent's own clock, or nil when it cannot
+    /// honestly be read — nothing attached, or a replacement already in flight
+    /// — in which case the pin is the best reading anyone has.
+    ///
+    /// `carryingASeek` is the one case where the pin is NOT this change's own:
+    /// a quality change made on top of a seek that had not landed inherits the
+    /// viewer's destination, and the live clock is the position they were
+    /// leaving. The live clock is never taken out from under a seek.
+    static func positionNowMs(
+        pinnedAtTapMs: Int,
+        livePositionMs: Int?,
+        carryingASeek: Bool
+    ) -> Int {
+        guard !carryingASeek, let livePositionMs else { return pinnedAtTapMs }
+        // Never backwards. A clock read during a rebase, or one that has not
+        // caught up, must not send the viewer behind where they tapped.
+        return max(pinnedAtTapMs, livePositionMs)
+    }
+
+    /// `nil` when a viewer seek has taken the position since the tap: the seek
+    /// owns where the film is, and it already carries the new selection
+    /// because `recipeRevision.change()` ran at the tap. Reopening here as
+    /// well would change the stream twice for one tap, and land the second one
+    /// in the wrong place.
+    static func target(
+        seekGenerationAtTap: Int,
+        seekGenerationNow: Int,
+        positionNowMs: Int
+    ) -> Int? {
+        guard seekGenerationAtTap == seekGenerationNow else { return nil }
+        return max(0, positionNowMs)
+    }
 }
 
 // MARK: - The pipeline this client drives

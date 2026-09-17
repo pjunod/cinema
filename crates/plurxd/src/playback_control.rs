@@ -784,6 +784,18 @@ impl ControlResponseV1 {
                     "demand" | "time" | "bytes" | "global" | "ahead" | "working_set" | "no_room"
                 )
             })
+            // Exact membership, unlike `producer_decision` below. This
+            // vocabulary is three closed states a client *acts* on — one of
+            // them ends the wait and reopens the stream — so a name this node
+            // cannot resolve must not reach a client that would have to guess
+            // which of the three it meant. It is also additive-only by
+            // construction: a fourth state would be a new field, not a new
+            // string, for exactly that reason.
+            && self
+                .delivery
+                .preparation
+                .as_deref()
+                .is_none_or(|value| matches!(value, "staging" | "offered" | "none"))
             // Shape, not membership. A relaying node runs its *own* compiled
             // vocabulary, so during a rolling deploy an ingress on the older
             // build would reject an owner's newer reason outright — the whole
@@ -893,8 +905,34 @@ pub(crate) struct PlaybackLeaseView {
     pub expires_at_unix_ms: i64,
 }
 
+/// **Deliberately not `deny_unknown_fields`.** Every other message type here
+/// denies them, and the reason that rule is right for a *request* is exactly
+/// the reason it is wrong here. A request is written by a client against a
+/// schema this server publishes: a field this server does not know is a client
+/// typo or a client sending something it was never told to send, and answering
+/// 400 is how that gets found. A response is written by *this fleet* and read
+/// by an older copy of *this fleet* — a relaying ingress deserializes the
+/// owner's answer before returning it — so a field the reader does not know is
+/// not a mistake, it is a newer node.
+///
+/// Denying them there turns every additive response field into a fleet-wide
+/// outage for the length of a rolling deploy: the ingress's
+/// `serde_json::from_slice::<ControlResponseV1>` fails, that becomes
+/// `PeerTransportError::InvalidResponse`, and the client is answered 503
+/// `control_unavailable` with a `retry_after_ms` it honours — so every affected
+/// viewer re-asks twice a second, renews no lease and receives no action until
+/// the deploy finishes. `preparation` did exactly that. `ControlAction::Switched`'s
+/// own note already names this class of problem and says it cannot be solved
+/// while the response denies unknown fields.
+///
+/// This is what makes `preparation`'s "absent means not evaluated here" true:
+/// an older reader now drops the field instead of rejecting the message.
+///
+/// The same attribute is still on `ControlResponseV1`, `PlaybackLeaseView`,
+/// `EffectiveSelection`, `ControlErrorBody` and `ControlBootstrap`, which carry
+/// the identical hazard for the next field added to any of them. Nothing in
+/// this change adds one, so they are named rather than moved.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct DeliveryView {
     pub presentation: String,
     pub producer_state: String,
@@ -937,6 +975,24 @@ pub(crate) struct DeliveryView {
     /// answer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subtitle_readiness: Option<String>,
+    /// Whether this playback's one preparation slot is doing anything, when
+    /// this server evaluated it.
+    ///
+    /// `staging` — a successor is being planned, reserved or primed for the
+    /// current ask and no `Prepare` has been announced yet; the client should
+    /// keep the incumbent playing and exchange again soon. `offered` — this
+    /// response's `action` is that `Prepare`. `none` — nothing is being built
+    /// for the current ask, so a client waiting for a handoff should stop
+    /// waiting.
+    ///
+    /// Absent means "not evaluated here" (an older relay peer), never `none`:
+    /// a client must not read absence as a decline. That distinction is the
+    /// whole reason this is a tri-state string rather than a bool — a client
+    /// that treated a missing field as a refusal would reopen instantly on
+    /// every exchange served through an older ingress, which is the behaviour
+    /// this field exists to retire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preparation: Option<String>,
     pub owner_node_hash: String,
     pub owner_epoch: u64,
 }
@@ -1072,6 +1128,10 @@ impl DeliveryView {
                     .to_owned()
                 }),
                 subtitle_readiness: subtitle_readiness.clone(),
+                // Resolved at the emit site: the answer depends on the action
+                // this exchange ends up carrying, which is decided after the
+                // delivery view is built.
+                preparation: None,
                 owner_node_hash: node_hash(owner_node_id),
                 owner_epoch,
             },
@@ -1106,6 +1166,7 @@ impl DeliveryView {
                 producer_decision: info.producer_decision.map(str::to_owned),
                 hold_reason: info.producer_hold.map(str::to_owned),
                 subtitle_readiness,
+                preparation: None,
                 owner_node_hash: node_hash(owner_node_id),
                 owner_epoch,
             },
@@ -2677,6 +2738,7 @@ pub(crate) fn terminal_response_for_test(result: &LocalControlResult) -> Control
             producer_decision: None,
             hold_reason: None,
             subtitle_readiness: None,
+            preparation: None,
             owner_node_hash: "n-test".to_owned(),
             owner_epoch: 1,
         },
@@ -5126,6 +5188,14 @@ impl PreparationExecutor {
     pub(crate) fn asking(mut self, desired_digest: Option<String>) -> Self {
         self.desired_digest = desired_digest;
         self
+    }
+
+    /// The ask this successor is being built for, for a caller deciding whether
+    /// a registered successor is work being done for the exchange in front of
+    /// it. `None` means the staging path had no observed selection to record —
+    /// no evidence either way, which a caller must not read as a mismatch.
+    pub(crate) fn asked(&self) -> Option<&str> {
+        self.desired_digest.as_deref()
     }
 
     /// Stage a successor: durable row first, then the slot.
@@ -13426,6 +13496,63 @@ pub(crate) fn record_preparation_staged(staged: bool) {
     PREPARATIONS_STAGED[usize::from(staged)].fetch_add(1, Ordering::Relaxed);
 }
 
+/// Why a reserved successor was settled without ever being watched.
+///
+/// A speculative successor is a real encoder on real hardware. The standing
+/// rule for this server is that anything using the GPU is attributable from
+/// inside the product — what it is, why it chose that work, and how to stop
+/// it — so a teardown is a measurement, not a log line. `staged_total` already
+/// says how many were built; without this, nothing says how many were paid for
+/// and thrown away, or which policy threw them.
+///
+/// Index order is [`PREPARATION_CANCELLED_REASONS`].
+static PREPARATIONS_CANCELLED: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+
+/// The label vocabulary for [`record_preparation_cancelled`], in index order.
+///
+/// `other` is last and is deliberately not removable: it is what keeps the sum
+/// of this counter equal to the number of settlements, so a reason nobody
+/// mapped shows up as an unexplained teardown instead of vanishing.
+pub(crate) const PREPARATION_CANCELLED_REASONS: [&str; 7] = [
+    "predecessor_superseded",
+    "incumbent_waiting",
+    "foreground_claimed",
+    "disabled",
+    "expired",
+    "ownership_cancelled",
+    "other",
+];
+
+/// The metric label for one of the settlement reasons the server passes to
+/// `settle_cancelled_preparation`.
+///
+/// The reason strings themselves are load-bearing for tracing filters and are
+/// deliberately not changed; this maps them, and an unmapped one is `other`
+/// rather than silently uncounted.
+pub(crate) fn preparation_cancelled_label(reason: &str) -> &'static str {
+    match reason {
+        "predecessor superseded by a new session" => "predecessor_superseded",
+        "incumbent playback needed prepared capacity" => "incumbent_waiting",
+        "foreground playback claimed prepared capacity" => "foreground_claimed",
+        "prepared handoff disabled" => "disabled",
+        "prepared successor expired" | "prepared successor settlement expired" => "expired",
+        "prepared successor ownership was cancelled" | "prepared successor reservation refused" => {
+            "ownership_cancelled"
+        }
+        _ => "other",
+    }
+}
+
+pub(crate) fn record_preparation_cancelled(reason: &str) {
+    let label = preparation_cancelled_label(reason);
+    if let Some(index) = PREPARATION_CANCELLED_REASONS
+        .iter()
+        .position(|name| *name == label)
+    {
+        PREPARATIONS_CANCELLED[index].fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Record the same selection change decided as if the client could prepare.
 ///
 /// Separate call rather than a second recording inside the one above, because
@@ -13798,6 +13925,16 @@ pub(crate) fn prometheus() -> String {
         ));
     }
     output.push_str(
+        "# HELP plurx_playback_preparation_cancelled_total Reserved successors torn down before any viewer watched them, by reason.\n\
+         # TYPE plurx_playback_preparation_cancelled_total counter\n",
+    );
+    for (index, reason) in PREPARATION_CANCELLED_REASONS.iter().enumerate() {
+        output.push_str(&format!(
+            "plurx_playback_preparation_cancelled_total{{reason=\"{reason}\"}} {}\n",
+            PREPARATIONS_CANCELLED[index].load(Ordering::Relaxed)
+        ));
+    }
+    output.push_str(
         "# HELP plurx_playback_control_holds_total Holds sent to a client, by the reason production is not advancing.\n\
          # TYPE plurx_playback_control_holds_total counter\n",
     );
@@ -14139,6 +14276,7 @@ mod tests {
                     producer_decision: None,
                     hold_reason: None,
                     subtitle_readiness: None,
+                    preparation: None,
                     owner_node_hash: "n-test".to_owned(),
                     owner_epoch: 1,
                 },
@@ -14456,6 +14594,7 @@ mod tests {
             producer_decision: None,
             hold_reason: reason.map(str::to_owned),
             subtitle_readiness: None,
+            preparation: None,
             owner_node_hash: "n-0123456789abcdef".to_owned(),
             owner_epoch: 1,
         }
@@ -15286,10 +15425,11 @@ mod tests {
 
     /// An older peer relays a response it built before this field existed.
     ///
-    /// `DeliveryView` is `deny_unknown_fields`, so the compatibility that
-    /// matters runs the other way: absence must deserialize, and must not be
-    /// read as `ready`. This mirrors the guarantee `producer_decision` already
-    /// carries — absence means "not classified here", never "healthy".
+    /// The compatibility that matters here is absence: it must deserialize,
+    /// and must not be read as `ready`. This mirrors the guarantee
+    /// `producer_decision` already carries — absence means "not classified
+    /// here", never "healthy". The other direction, a reader meeting a field it
+    /// does not know, is `a_delivery_view_tolerates_a_field_from_a_newer_node`.
     #[test]
     fn a_delivery_without_subtitle_readiness_round_trips_as_absent() {
         let json = serde_json::to_string(&delivery_with_hold(None)).expect("serialize");
@@ -15307,6 +15447,82 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&ready).expect("serialize"))
                 .expect("deserialize");
         assert_eq!(round_tripped.subtitle_readiness.as_deref(), Some("ready"));
+    }
+
+    /// A response written by a node one release ahead must still parse here.
+    ///
+    /// This is the direction that was fatal, and it is not the one
+    /// `preparation`'s own rustdoc was written for. A relaying ingress
+    /// deserializes the owner's answer before returning it
+    /// (`validated_control_relay_response`), so during a rolling deploy the
+    /// *older* binary is the one doing the strict parse. With
+    /// `deny_unknown_fields` on `DeliveryView` that parse failed outright:
+    /// `PeerTransportError::InvalidResponse`, then 503 `control_unavailable`
+    /// with a `retry_after_ms` the client honours — every affected viewer
+    /// re-asking twice a second, renewing no lease and receiving no action,
+    /// until the deploy finished. `preparation` was that field.
+    ///
+    /// Reinstating `deny_unknown_fields` on `DeliveryView` fails this test.
+    #[test]
+    fn a_delivery_view_tolerates_a_field_from_a_newer_node() {
+        let current = ControlResponseV1 {
+            protocol: PROTOCOL_V1.to_owned(),
+            generation: "relay-forward-compat".to_owned(),
+            control_epoch: 1,
+            accepted_sequence: 1,
+            server_time_unix_ms: 1,
+            lease: PlaybackLeaseView {
+                state: "active".to_owned(),
+                renew_after_ms: NEXT_EXCHANGE_MS,
+                expires_at_unix_ms: 1,
+            },
+            delivery: delivery_with_hold(Some("demand")),
+            effective_selection: EffectiveSelection {
+                quality_auto: true,
+                height: 720,
+                audio_track: None,
+                subtitle_burn: None,
+                audio_offset_ms: 0,
+                codec: "h264".to_owned(),
+                dynamic_range: Some("sdr".to_owned()),
+            },
+            action: ControlAction::None,
+        };
+        let mut body = serde_json::to_value(&current).expect("serialize a current-shape response");
+        body["delivery"]
+            .as_object_mut()
+            .expect("a delivery serializes as an object")
+            .insert(
+                "a_field_from_next_year".to_owned(),
+                serde_json::Value::String("whatever it comes to mean".to_owned()),
+            );
+        let bytes = serde_json::to_vec(&body).expect("serialize the newer node's body");
+
+        // Exactly what the relay does with the owner's answer.
+        let relayed = serde_json::from_slice::<ControlResponseV1>(&bytes)
+            .expect("a newer node's response must still parse on an older reader");
+        assert_eq!(
+            relayed.delivery.hold_reason.as_deref(),
+            Some("demand"),
+            "and every field this build does know must survive the one it does not",
+        );
+        assert_eq!(relayed.lease.state, "active");
+
+        // And what the relay then hands the client: it re-serializes what it
+        // parsed, so a field it did not understand is dropped rather than
+        // forwarded. That is what makes `preparation`'s "absent means not
+        // evaluated here, never a decline" a promise a client can rely on.
+        let forwarded = serde_json::to_value(&relayed).expect("re-serialize for the client");
+        assert!(
+            forwarded["delivery"]
+                .get("a_field_from_next_year")
+                .is_none(),
+            "a relay normalizes away what it cannot name: {forwarded}",
+        );
+        assert!(
+            forwarded["delivery"].get("hold_reason").is_some(),
+            "without dropping what it can",
+        );
     }
 
     /// Relays preserve extension values they do not understand. The consumer,
@@ -16488,6 +16704,7 @@ mod tests {
             producer_decision: None,
             hold_reason: None,
             subtitle_readiness: None,
+            preparation: None,
             owner_node_hash: "n-test".to_owned(),
             owner_epoch: 1,
         }
@@ -18246,6 +18463,7 @@ mod tests {
                 producer_decision: None,
                 hold_reason: None,
                 subtitle_readiness: None,
+                preparation: None,
                 owner_node_hash: "n-0123456789abcdef".to_owned(),
                 owner_epoch: 1,
             },
@@ -22329,6 +22547,7 @@ mod tests {
                 producer_decision: None,
                 hold_reason: None,
                 subtitle_readiness: None,
+                preparation: None,
                 owner_node_hash: "n-0123456789abcdef".to_owned(),
                 owner_epoch: 1,
             },

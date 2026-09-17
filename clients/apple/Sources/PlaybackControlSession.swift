@@ -275,7 +275,8 @@ final class PlaybackControlSession {
                     exchange.response?.action,
                     requestSequence: exchange.request.sequence,
                     generation: generation,
-                    ownerChanged: exchange.failure == "transport:409:owner_changed"
+                    ownerChanged: exchange.failure == "transport:409:owner_changed",
+                    preparation: exchange.response?.delivery?.preparation
                 )
                 if let failure = exchange.failure {
                     scheduleSubtitleReady {
@@ -461,6 +462,107 @@ final class PlaybackControlSession {
         return settled()
     }
 
+    /// Publish the viewer's new selection, then wait — across exchanges, with
+    /// the incumbent still playing — for the `prepare` the server spawns
+    /// *after* it has answered the exchange that carried the ask.
+    ///
+    /// Deliberately beside `askForAction` rather than a wider bound on it.
+    /// That one's 1.5 seconds is stall policy: how long a viewer whose picture
+    /// is already frozen waits before this client guesses for itself. This
+    /// one's twelve is a picture that is still playing waiting for a better
+    /// one. One number cannot answer both questions, and the frozen viewer is
+    /// the one who would pay for trying.
+    ///
+    /// Returns the step the caller must take. Every early exit is a `.reopen`,
+    /// because a wait that ends without an offer still owes the viewer the
+    /// change they asked for — except a supersede, where the command that
+    /// ended this wait is itself the change now being made.
+    func awaitPreparedOffer(
+        tappedAt tappedAtMs: Int,
+        isSuperseded: () -> Bool,
+        publish: () -> Void
+    ) async -> PreparedOfferWait.Step {
+        guard let reporter else { return .reopen(reason: "not_reporting") }
+        // A stopped reporter will never exchange again, so the whole bound
+        // would be spent on a picture nobody is going to improve.
+        if await reporter.stopped { return .reopen(reason: "not_reporting") }
+        // Read BEFORE the publish, for the reason `askForAction` sets out at
+        // length: publishing first lets the pump reach `nextRequest()` — and
+        // increment `sequence` — before this hop lands, which puts the floor
+        // one above the very exchange that carried this ask.
+        let floor = await reporter.sequence + 1
+        let ownerChangesAtStart = answers.ownerChangeCount()
+        publish()
+        var wait = PreparedOfferWait(tappedAtMs: tappedAtMs, floorSequence: floor)
+        var lastNudgeMs = tappedAtMs
+        while true {
+            // The adopted owner has a new sequence space and did not answer
+            // this ask: the same bail-out, for the same reason, as the stall
+            // ask makes on a 409.
+            if answers.ownerChangeCount() > ownerChangesAtStart {
+                return .reopen(reason: "owner_changed")
+            }
+            // A seek, a second quality change, a dismiss. The viewer owns the
+            // position now and their command already carries the new
+            // selection, so this ends here rather than at the bound — which is
+            // the difference between a seek that lands at once and one that
+            // lands twelve seconds later.
+            if isSuperseded() { return .reopen(reason: "superseded") }
+            let step = wait.observe(answer: answers.newest(), nowMs: Self.monotonicMs())
+            switch step {
+            case .offered, .reopen:
+                return step
+            case .keepWaiting(let nextExchangeMs):
+                // Only while the server says it is staging, and never faster
+                // than that cadence.
+                //
+                // `notifyUrgently`, and the distinction is the whole milestone.
+                // `notify` leaves the pump asleep in `next_exchange_ms`, which
+                // the server sets once at bootstrap and sets to five seconds —
+                // so a "1 Hz cadence while staging" built on it is not a
+                // cadence at all, and a twelve-second bound buys two or three
+                // exchanges against a forty-five-second priming budget. The
+                // fleet counters would have gone on reading zero, which is the
+                // condition this effort exists to end.
+                //
+                // This does not redefine `next_exchange_ms`. The cadence stays
+                // client-initiated and is floored by the reporter's own
+                // `minimumExchangeMs` of 250 ms, well under the once-a-second
+                // this asks for, and it lasts only as long as the server keeps
+                // saying `staging`.
+                let nowMs = Self.monotonicMs()
+                if wait.lastSaidStaging, nowMs - lastNudgeMs >= nextExchangeMs {
+                    lastNudgeMs = nowMs
+                    if let live = self.reporter {
+                        let capture = self.publish()
+                        _ = await live.notifyUrgently(capture)
+                    }
+                }
+            }
+            try? await Task.sleep(nanoseconds: Self.askPollNanoseconds)
+            guard let current = self.reporter else { return .reopen(reason: "not_reporting") }
+            if await current.stopped {
+                // Read the slot one more time first. A reporter can answer and
+                // then stop in the same instant, and the answer it stopped on
+                // is the one this wait most needed to see.
+                let last = wait.observe(answer: answers.newest(), nowMs: Self.monotonicMs())
+                if case .offered = last { return last }
+                return .reopen(reason: "not_reporting")
+            }
+        }
+    }
+
+    /// The newest `delivery.preparation` this session has been told about.
+    /// Advisory: the developer tab shows it and nothing reads it back.
+    var latestPreparation: String? { answers.newest()?.preparation }
+
+    /// Monotonic milliseconds — the clock every bound in this file is measured
+    /// on, because a wall-clock adjustment mid-wait would lengthen or truncate
+    /// one.
+    static func monotonicMs() -> Int {
+        Int(ProcessInfo.processInfo.systemUptime * 1_000)
+    }
+
     /// How often the ask looks. Short enough that it costs a stalled viewer
     /// nothing measurable, long enough that it is not a spin.
     static let askPollNanoseconds: UInt64 = 25_000_000
@@ -548,12 +650,24 @@ final class PlaybackControlSession {
 /// The generation is checked on write for the same reason the verdict slot
 /// checks it: `end()` stops the old reporter in an unstructured task, so an old
 /// exchange can land after the next session has begun.
+/// One exchange's answer, as both the stall ask and the prepared-offer wait
+/// read it.
+///
+/// Lifted out of `PlaybackControlAnswers` rather than nested in it so that
+/// `PreparedOfferWait` — which is deliberately in the AVFoundation-free file —
+/// can be handed one in a unit test without a reporter, a transport or a
+/// player anywhere in sight.
+struct PlaybackControlAnswer: Equatable {
+    /// The sequence of the REQUEST this answered, not a count of answers.
+    var requestSequence: Int
+    var action: ControlAction?
+    /// `delivery.preparation` off the same response: `staging`, `offered`,
+    /// `none`, or nil on a server or relay that does not send it.
+    var preparation: String?
+}
+
 private final class PlaybackControlAnswers: @unchecked Sendable {
-    struct Answer {
-        /// The sequence of the REQUEST this answered, not a count of answers.
-        var requestSequence: Int
-        var action: ControlAction?
-    }
+    typealias Answer = PlaybackControlAnswer
 
     private let lock = NSLock()
     private var latest: Answer?
@@ -576,14 +690,17 @@ private final class PlaybackControlAnswers: @unchecked Sendable {
         _ action: ControlAction?,
         requestSequence: Int,
         generation: Int,
-        ownerChanged: Bool = false
+        ownerChanged: Bool = false,
+        preparation: String? = nil
     ) {
         lock.lock()
         defer { lock.unlock() }
         guard generation == self.generation else { return }
         answered += 1
         if ownerChanged { ownerChanges += 1 }
-        latest = Answer(requestSequence: requestSequence, action: action)
+        latest = Answer(
+            requestSequence: requestSequence, action: action, preparation: preparation
+        )
     }
 
     /// How many exchanges have come back at all, ours or not.
@@ -597,6 +714,15 @@ private final class PlaybackControlAnswers: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return ownerChanges
+    }
+
+    /// The newest answer, floor or no floor. `PreparedOfferWait` applies its
+    /// own floor and needs to see an answer from below it to know one arrived
+    /// at all.
+    func newest() -> Answer? {
+        lock.lock()
+        defer { lock.unlock() }
+        return latest
     }
 
     func answer(atOrAfter sequence: Int) -> Answer? {

@@ -1,4 +1,5 @@
 import AVFoundation
+import Combine
 import CoreMedia
 import Foundation
 import os
@@ -309,6 +310,34 @@ enum Caps {
             dolbyVision: dolbyVisionIsAvailable,
             dualPlayerPreparation: SettingsStore().preparedHandoffEnabled
         )
+    }
+
+    /// What the last directed quality change actually did, for the developer
+    /// tab to show. **Advisory, and never gating**: nothing in this client
+    /// reads either value back, and neither one can refuse a change, disable
+    /// the handoff switch, or alter a capability. The standing rule is that
+    /// features are not gated in code; these two strings exist so an operator
+    /// looking at a device can tell a decline from a timeout from a fallback
+    /// without a packet capture.
+    @MainActor
+    final class PreparedHandoffTelemetry: ObservableObject {
+        static let shared = PreparedHandoffTelemetry()
+
+        /// `committed 412 ms`, `declined`, `timed out`, `fell back`, and the
+        /// handful of ordinary early exits.
+        @Published private(set) var lastOutcome: String?
+        /// The newest `delivery.preparation` seen on the wire: `staging`,
+        /// `offered`, `none` — or nil on a server or relay that does not send
+        /// the field at all, which is not a refusal.
+        @Published private(set) var lastPreparation: String?
+
+        func note(outcome: String) { lastOutcome = outcome }
+        func note(preparation: String?) { lastPreparation = preparation }
+        /// Tests share one process with the app. Nothing in the app calls it.
+        func reset() {
+            lastOutcome = nil
+            lastPreparation = nil
+        }
     }
 
     private static var dolbyVisionIsAvailable: Bool {
