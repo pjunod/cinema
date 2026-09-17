@@ -17297,6 +17297,21 @@ impl TranscodeManager {
                     format!("the stored source probe cannot be verified: {error}"),
                 )
             })?;
+        if comparison
+            .as_ref()
+            .is_some_and(|result| result.admitted_on_reporter_drift)
+        {
+            // Attributable by design. This source was admitted on its media
+            // facts rather than on the whole document, because the stored scan
+            // and this node's FFprobe are different builds. Reanalyzing the
+            // item restores the stricter comparison.
+            crate::ffmpeg::note_reporter_drift_admission();
+            tracing::info!(
+                file_id = file.id,
+                "admitted a held source on its media facts: its stored scan came from a \
+                 different FFprobe build"
+            );
+        }
         if !comparison.as_ref().is_some_and(|result| result.same) {
             // Why this refused belongs in the product. `ps auxwww` on the box
             // is not an acceptable answer for work this server refuses, and

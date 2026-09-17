@@ -4,6 +4,41 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## A held source is compared on its media facts, not its reporter's schema
+
+**[#354](http://forge.lan:3000/noirr/plurx/pulls/354) from
+`fix/probe-reporter-drift` into `main`; adversarial review done (4 blockers, 5
+should-fix, 5 notes) and every finding folded or answered.**
+Every manual quality change in the web player was refused —
+`vod_source_rescan_required`, "could not load stream" to the viewer — on a file
+nothing had touched. The VOD recipe re-probes the held source and demanded that
+document equal the scan the catalogue stored, and those two documents come from
+whatever FFprobe each side ran: the library was scanned by 5.1.9 and the daemon
+probes the held descriptor with jellyfin-ffmpeg 8.1.2. Measured on the same
+bytes at the same moment, the two builds disagree 32 times and about no media
+fact at all — `tags.vendor_id` gone, `tags.name` new, a derived Atmos profile,
+`start_time`/`duration`/`bit_rate` estimated to different precision. Probing by
+path and by `/dev/fd/3` is byte-identical on both builds, so all of it is the
+reporter. **5,061 of the 5,955 files** in that library carry a scan from the
+older one. Probe documents now record the build that wrote them; two documents
+from the same build are still compared whole, and only a proved difference in
+build narrows the comparison — to a declared projection of geometry, cadence,
+codec identity and parameter-set layout, colour, every side-data record, the
+audio shape, language, disposition, container size and chapter timing, each
+compared strictly including when only one document reports it, with a relative
+tolerance on container duration alone. Proven against the production documents
+themselves: **40 of 40** sampled scan/held pairs are admitted, where `main`
+refuses 4. The Developer tab's "Source verification" card now reads the live
+provenance and says how many sources this node admitted on the narrower
+comparison, advisory only, and `plurx_probe_reporter_drift_admissions_total`
+carries the same number. Two rows on that card were stale the moment this
+landed ("scan provenance: not recorded", "typed source verification: not
+built") and are now live readings. Not done: the scanner still does not
+re-probe a file whose stored reporter differs from the running one, so those
+5,061 documents stay on the fact comparison until an item is reanalysed —
+`POST /api/v1/items/:id/reanalyze` does repair one on demand, which is what the
+refusal already tells an operator to do.
+
 ## `make install` is one command on every platform
 
 **[#349](http://forge.lan:3000/noirr/plurx/pulls/349) from `feat/make-install`
