@@ -323,8 +323,96 @@ enum PreparedReplacementBounds {
     /// the picture is frozen and the only way out is a reopen, so this is
     /// generous where the readiness bounds are mean.
     static let firstFrameMs = 6_000
+    /// From the commit's alignment seek to the seek coming back.
+    ///
+    /// The successor is already playable and buffered past the point it was
+    /// staged at, so the ordinary alignment is a seek inside loaded media and
+    /// costs tens of milliseconds. What this bound is really for is the case
+    /// where it is not: priming ran long, the incumbent outran the successor's
+    /// buffered runway, and the alignment has to fetch. Four seconds is one
+    /// segment fetch's worth of patience on a link that is already streaming,
+    /// and it is spent while the incumbent is still on the layer — so the cost
+    /// of being wrong is a late in-place change, never a frozen picture.
+    ///
+    /// It is deliberately below `firstFrameMs`: a switch that has already
+    /// happened has no incumbent to go back to, and that is worth waiting
+    /// longer for than one that has not happened yet.
+    static let alignmentMs = 4_000
     /// How often the readiness and first-frame monitors look.
     static let pollMs = 100
+}
+
+// MARK: - The commit's rendezvous
+
+/// Where the successor has to be standing before the viewer is allowed to see
+/// it, and what it means when it cannot get there.
+///
+/// The successor is seeked exactly once, when its item first becomes playable,
+/// to the film position the offer named — and it is never played. The
+/// incumbent meanwhile keeps running, for the whole of the viewer's wait and
+/// the whole of priming. Exposing the item where it was staged rewinds the film
+/// by that difference, and the commit boundary then rejects every frame until
+/// playback catches back up.
+struct PreparedCommitRendezvous: Equatable {
+    /// The film position the switch happens at.
+    let filmPositionMs: Int
+    /// Where that falls in the successor's own timeline, whose zero is the
+    /// staging's `media_origin_ms`.
+    let itemPositionMs: Int
+
+    /// Never behind the staged position: a successor asked to seek backwards
+    /// from where it was primed would fetch media the switch does not need.
+    static func plan(
+        stagedFilmPositionMs: Int,
+        incumbentFilmPositionMs: Int,
+        mediaOriginMs: Int
+    ) -> PreparedCommitRendezvous {
+        let film = max(max(0, stagedFilmPositionMs), max(0, incumbentFilmPositionMs))
+        return PreparedCommitRendezvous(
+            filmPositionMs: film,
+            itemPositionMs: max(0, film - mediaOriginMs)
+        )
+    }
+
+    /// What a commit owes when the alignment does not land inside its bound.
+    ///
+    /// `refused`, not `failed`, because **nothing was switched**: the
+    /// incumbent's item, session and pointer are exactly as they were. That
+    /// makes this an ordinary in-place change — one reopen at the position the
+    /// viewer has actually reached, one `aborted` freeing the server's single
+    /// preparation slot, and a coordinator out of `.switching` and able to take
+    /// the next change. Leaving the commit suspended instead lost all four: the
+    /// tap produced nothing at all, because the prepared path had already
+    /// claimed it.
+    static let outcomeWhenAlignmentCannotLand = PreparedCommitOutcome.refused
+}
+
+/// Wait for a value another task will produce, and give up on it.
+///
+/// Deliberately not `withTaskGroup`. A task group waits for every child at
+/// scope exit, and the thing this bounds — an AVFoundation seek — does not
+/// observe cancellation, so the group would wait out the exact hang the bound
+/// exists to escape. The producer is left to resolve, or not, on its own, and
+/// nothing after the bound reads it.
+///
+/// Takes its clock and its sleep rather than owning them, so a test can drive
+/// it to its deadline instead of spending four seconds of wall clock there.
+@MainActor
+func awaitBoundedValue<Value>(
+    boundMs: Int,
+    pollMs: Int,
+    now: () -> Int,
+    sleep: (Int) async -> Void,
+    read: () -> Value?
+) async -> Value? {
+    let deadline = now() + max(0, boundMs)
+    while true {
+        if let value = read() { return value }
+        // Read before the deadline test and once more after it: a value that
+        // lands in the final poll interval is still the answer.
+        if now() >= deadline { return read() }
+        await sleep(max(1, pollMs))
+    }
 }
 
 // MARK: - Waiting for the offer with the picture up
@@ -378,6 +466,22 @@ struct PreparedOfferWait: Equatable {
     /// and reading it as one would reopen immediately on every server whose
     /// ordering differs by a single hop.
     private(set) var sawAcceptedAnswer = false
+    /// The sequence of the exchange that carried the ask — the first one at or
+    /// past the floor to come back.
+    ///
+    /// A sequence, not a flag, and that is the whole of the rule. The caller
+    /// polls every 25 ms and is handed the *same* answer back until the next
+    /// exchange lands, so "have I observed an accepted answer before" is true
+    /// again 25 ms later. Keyed that way this rule declined 25 milliseconds
+    /// after the dispatch exchange instead of one exchange later — precisely
+    /// the behaviour it was written to prevent, and invisible to any test whose
+    /// only timing assertion is "inside the bound".
+    ///
+    /// It matters because a dispatch-exchange `none` is not final: the server
+    /// withholds a purpose while the incumbent is waiting for capacity, and
+    /// that is transient. A viewer who taps quality in that window would be
+    /// reopened before the exchange that would have said `staging`.
+    private(set) var dispatchSequence: Int?
     /// Whether the newest accepted answer said `staging` — the only thing that
     /// earns an extra exchange at `stagingCadenceMs`. Absent is not staging:
     /// an old server is waited out by the bound rather than nudged.
@@ -407,14 +511,19 @@ struct PreparedOfferWait: Equatable {
         if let action = answer.action, let prepared = PreparedReplacementAction(action) {
             return .offered(prepared)
         }
-        let hadAcceptedOne = sawAcceptedAnswer
+        let dispatch = dispatchSequence ?? answer.requestSequence
+        dispatchSequence = dispatch
         sawAcceptedAnswer = true
         lastSaidStaging = answer.preparation == Self.stagingPreparation
         // Absence is never a decline. Older servers and relays do not send
         // this field at all, and reading a missing field as `none` would turn
         // every one of them into an instant reopen — the exact regression this
         // milestone exists to remove.
-        if answer.preparation == Self.declinedPreparation, hadAcceptedOne {
+        //
+        // Nor is the dispatch exchange's own answer one, however many times it
+        // is observed: only a *later* exchange has looked.
+        if answer.preparation == Self.declinedPreparation,
+           answer.requestSequence > dispatch {
             return .reopen(reason: "declined")
         }
         return .keepWaiting(nextExchangeMs: Self.stagingCadenceMs)
