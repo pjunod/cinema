@@ -5070,8 +5070,13 @@ async fn settle_preparation_control(
                 terminal_commit: None,
                 selection: outcome.selection.clone(),
             };
-            let response =
+            let mut response =
                 local_control_response(route, start, recipe, request, &result, response_time, None);
+            // Answered in the receipt, not stamped on top of it afterwards. A
+            // settled answer announces no successor — it carries no `Prepare`
+            // action and its ask is consumed or aborted — and saying so here is
+            // what makes the first answer and its own replay the same bytes.
+            response.delivery.preparation = Some("none".to_owned());
             match (
                 i64::try_from(request.sequence),
                 request.fingerprint(),
@@ -5647,7 +5652,7 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
         result: &crate::playback_control::LocalControlResult,
     ) -> crate::playback_control::TerminalCommitReceipt {
         let server_time_unix_ms = unix_ms();
-        let response = local_control_response(
+        let mut response = local_control_response(
             &self.route,
             &self.start,
             &self.recipe,
@@ -5660,6 +5665,11 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
             // a probe anyway.
             None,
         );
+        // Answered in the receipt, not stamped on top of it afterwards. A
+        // settled answer announces no successor — it carries no `Prepare`
+        // action and its ask is consumed or aborted — and saying so here is
+        // what makes the first answer and its own replay the same bytes.
+        response.delivery.preparation = Some("none".to_owned());
         // Persist the outcome before the commit machinery, because a terminal
         // is the thing most worth explaining after a restart and the atomics
         // that count it do not survive one. `durable_outcome` decides what
@@ -7065,6 +7075,13 @@ async fn control_local_with_settlement_capacity(
     } else {
         None
     };
+    // A response that came back from a durable settlement is the byte-exact
+    // body that was stored, and `preparation_ack_replay` / `terminal_ack_replay`
+    // serve that stored JSON without ever reaching the stamp below. Anything
+    // this exchange adds to it afterwards makes the first answer and its own
+    // replay differ, which is the one property §4 says must always hold.
+    let durable_receipt_response =
+        retained_preparation_response.is_some() || result.lease_state == "ended";
     let mut response = if let Some(response) = retained_preparation_response {
         response
     } else if result.lease_state == "ended" {
@@ -7381,23 +7398,29 @@ async fn control_local_with_settlement_capacity(
             tokio::task::yield_now().await;
         }
     }
-    response.delivery.preparation = Some(
-        if matches!(
-            response.action,
-            crate::playback_control::ControlAction::Prepare { .. }
-        ) {
-            "offered"
-        } else if preparation_purpose.is_some()
-            || pending_candidate_for_playback(&route.playback_id)
-                .is_some_and(|pending| pending == desired_digest)
-            || has_active_preparation_for_ask(&route.playback_id, &desired_digest)
-        {
-            "staging"
-        } else {
-            "none"
-        }
-        .to_owned(),
-    );
+    // Only on a body this exchange composed. On a durable-receipt body the
+    // field stays absent, which is the tri-state's documented "not evaluated
+    // here" — the honest answer for a response written before this exchange
+    // evaluated the slot, and never a decline.
+    if !durable_receipt_response {
+        response.delivery.preparation = Some(
+            if matches!(
+                response.action,
+                crate::playback_control::ControlAction::Prepare { .. }
+            ) {
+                "offered"
+            } else if preparation_purpose.is_some()
+                || pending_candidate_for_playback(&route.playback_id)
+                    .is_some_and(|pending| pending == desired_digest)
+                || has_active_preparation_for_ask(&route.playback_id, &desired_digest)
+            {
+                "staging"
+            } else {
+                "none"
+            }
+            .to_owned(),
+        );
+    }
     tracing::debug!(
         session = %crate::transcode::session_log_id(&route.session_id),
         owner_epoch,
