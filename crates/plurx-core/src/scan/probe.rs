@@ -22,6 +22,77 @@ fn ffprobe_bin() -> String {
         .unwrap_or_else(|| "ffprobe".to_owned())
 }
 
+/// The field a probe document carries to name the FFprobe build that wrote
+/// it. A document without one was written by a build that did not stamp, so
+/// the reporter is unknown — which is a distinct value from any known build,
+/// never a wildcard that matches one.
+pub const REPORTER_FIELD: &str = "plurx_probe_reporter";
+
+/// A reporter name longer than this is truncated. The string comes from an
+/// external executable and is stored on every file row.
+const REPORTER_MAX_CHARS: usize = 160;
+
+type ReporterCache = std::sync::OnceLock<
+    tokio::sync::Mutex<std::collections::HashMap<String, Option<&'static str>>>,
+>;
+static REPORTERS: ReporterCache = std::sync::OnceLock::new();
+
+/// How one FFprobe build names itself, probed once per executable.
+///
+/// Two builds describe the same bytes differently — they add derived labels,
+/// drop container tags, and estimate durations and bitrates to different
+/// precision — so a document is only comparable field-for-field with another
+/// the same build produced. Recording which build spoke is what makes that
+/// answerable instead of guessed.
+///
+/// The executable is a parameter rather than this module's own default
+/// because the daemon resolves its FFprobe differently (a bundled binary
+/// beside the server takes precedence there). A stamp that named a build the
+/// document did not come from would be worse than no stamp at all: the
+/// comparison would call two reporters one.
+pub async fn reporter_identity_of(bin: &str) -> Option<&'static str> {
+    let cache = REPORTERS.get_or_init(Default::default);
+    let mut cache = cache.lock().await;
+    if let Some(known) = cache.get(bin) {
+        return *known;
+    }
+    let identity = probe_reporter_identity(bin).await;
+    // One leak per distinct FFprobe executable, of which a process has one or
+    // two. It buys every caller a plain `&'static str` with no clone.
+    let identity = identity.map(|name| &*Box::leak(name.into_boxed_str()));
+    cache.insert(bin.to_owned(), identity);
+    identity
+}
+
+async fn probe_reporter_identity(bin: &str) -> Option<String> {
+    let output = tokio::process::Command::new(bin)
+        .arg("-version")
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    Some(line.chars().take(REPORTER_MAX_CHARS).collect::<String>())
+}
+
+/// Record which FFprobe build produced this document.
+pub fn stamp_reporter(document: &mut Value, reporter: &str) {
+    if let Some(fields) = document.as_object_mut() {
+        fields.insert(
+            REPORTER_FIELD.to_owned(),
+            Value::String(reporter.chars().take(REPORTER_MAX_CHARS).collect()),
+        );
+    }
+}
+
+/// Which FFprobe build produced this document, if it says.
+pub fn reporter_of(document: &Value) -> Option<&str> {
+    document.get(REPORTER_FIELD).and_then(Value::as_str)
+}
+
 /// Distill ffprobe's stderr into one line for the scan report. ffprobe prefixes
 /// most complaints with the input path, which the report already prints, so the
 /// last non-empty line's text after the final `: ` is the useful part.
@@ -81,8 +152,13 @@ pub async fn probe(path: &Path) -> Result<ProbeResult, ProbeError> {
             reason: probe_failure_reason(&output.stderr),
         });
     }
-    let json: Value = serde_json::from_slice(&output.stdout)
+    let mut json: Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| ProbeError::Parse(format!("ffprobe json: {e}")))?;
+    // Stamped before the document is retained, so a later comparison against a
+    // fresh probe can tell an unchanged source from a changed reporter.
+    if let Some(reporter) = reporter_identity_of(&ffprobe_bin()).await {
+        stamp_reporter(&mut json, reporter);
+    }
     let mut result = parse_probe_json(&json);
     // Container comes from the extension — the decision engine keys on it
     // ("mkv" → remux, "mp4" → direct) and it's more reliable than ffmpeg's
