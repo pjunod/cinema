@@ -20875,16 +20875,105 @@ async fn content_analysis_retry_contract_runs_through_dyn_store() {
         );
 
         let six_hours = 6 * 60 * 60 * 1_000;
+        let retry_deadline = 20 + plurx_core::content_analysis::INDEX_RETRY_WINDOW_MS;
         let retried = store
-            .claim_cluster_fragment_index("node-a", &[], six_hours, six_hours + 1_000)
+            .claim_cluster_fragment_index("node-a", &[], six_hours, retry_deadline + 1_000)
             .await
             .unwrap_or_else(|error| panic!("{backend}: six-hour claim: {error}"))
             .unwrap_or_else(|| panic!("{backend}: retry was incorrectly queue-expired"));
         assert_eq!(retried.attempts, 2, "{backend}");
         assert_eq!(
-            retried.index_retry_deadline_ms,
-            20 + plurx_core::content_analysis::INDEX_RETRY_WINDOW_MS,
+            retried.index_retry_deadline_ms, retry_deadline,
             "{backend}: rediscovery must retain the original retry deadline"
+        );
+        assert_eq!(
+            retried.lease_expires_ms, retry_deadline,
+            "{backend}: an initial claim cannot lease work past its retry deadline"
+        );
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: retried.cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: retried.source_sha256.clone(),
+            pipeline_sha256: retried.pipeline_sha256.clone(),
+            blob_sha256: "c".repeat(64),
+            bytes: 128,
+            built_by_node_id: "node-a".to_owned(),
+            built_at_ms: retry_deadline,
+        };
+        let location = ClusterFragmentIndexLocation {
+            cache_key: retried.cache_key.clone(),
+            node_id: "node-a".to_owned(),
+            bytes: 128,
+            verified_at_ms: retry_deadline,
+            last_seen_at_ms: retry_deadline,
+        };
+        assert!(
+            !store
+                .complete_cluster_fragment_index(&retried, &artifact, &location, retry_deadline,)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: expired completion: {error}")),
+            "{backend}: completion at the retry deadline must be rejected"
+        );
+        assert!(
+            store
+                .cluster_fragment_index_artifact(&retried.cache_key)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: expired artifact lookup: {error}"))
+                .is_none(),
+            "{backend}: an expired completion cannot publish an artifact"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn active_legacy_identity_blocks_exact_forced_successor() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "legacy-identity-block").await;
+        let base = NewAnalysisRequest {
+            request_id: "legacy-blank-active".to_owned(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".to_owned(),
+            pipeline_version: "engine-v1".to_owned(),
+            video_identity: String::new(),
+            requested_generation: "legacy-generation".to_owned(),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            force_rebuild: false,
+            target_node_id: "analysis-node".to_owned(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        };
+        store
+            .enqueue_analysis_request(&base)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue legacy request: {error}"));
+        let exact = NewAnalysisRequest {
+            request_id: "exact-forced-successor".to_owned(),
+            video_identity: "video-a".to_owned(),
+            requested_generation: "exact-force-generation".to_owned(),
+            priority: "forced".to_owned(),
+            trigger: "admin".to_owned(),
+            force_rebuild: true,
+            not_before_ms: 20,
+            created_at_ms: 20,
+            ..base
+        };
+        assert!(
+            store.enqueue_analysis_request(&exact).await.is_err(),
+            "{backend}: a blank active identity must block an exact forced successor"
+        );
+        assert!(
+            store
+                .analysis_request("exact-forced-successor")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read exact successor: {error}"))
+                .is_none(),
+            "{backend}"
         );
     })
     .await;

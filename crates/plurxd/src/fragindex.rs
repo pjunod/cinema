@@ -923,6 +923,26 @@ fn index_pass(
 async fn probe_completion_expectation(
     source: &std::fs::File,
     source_object_version: &str,
+    budget: Duration,
+) -> Result<(VideoCompletionExpectation, Instant), IndexFailure> {
+    let started = Instant::now();
+    match probe_completion_expectation_inner(source, source_object_version, budget, started).await {
+        Ok(expectation) => Ok((expectation, started)),
+        Err(mut failure) => {
+            failure.diagnostic.elapsed_ms =
+                Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+            failure.diagnostic.budget_ms =
+                Some(u64::try_from(budget.as_millis()).unwrap_or(u64::MAX));
+            Err(failure)
+        }
+    }
+}
+
+async fn probe_completion_expectation_inner(
+    source: &std::fs::File,
+    source_object_version: &str,
+    budget: Duration,
+    started: Instant,
 ) -> Result<VideoCompletionExpectation, IndexFailure> {
     let mut view = source;
     view.seek(SeekFrom::Start(0)).map_err(|error| {
@@ -938,7 +958,21 @@ async fn probe_completion_expectation(
                 | std::io::ErrorKind::WouldBlock
         ))
     })?;
-    let result = crate::ffmpeg::held_source_index_probe_json(source).await;
+    let result = tokio::time::timeout(
+        budget.saturating_sub(started.elapsed()),
+        crate::ffmpeg::held_source_index_probe_json(source),
+    )
+    .await
+    .map_err(|_| {
+        IndexFailure::new(
+            IndexFailureCode::IndexBudgetExceeded,
+            format!(
+                "metadata probe exceeded the {}s index budget",
+                budget.as_secs()
+            ),
+            0,
+        )
+    })?;
     let reset = view.seek(SeekFrom::Start(0));
     if let Err(error) = reset {
         return Err(IndexFailure::new(
@@ -966,14 +1000,17 @@ async fn probe_completion_expectation(
         )
         .transient(timeout)
     })?;
-    completion_expectation_from_probe(&raw, source_object_version).map_err(|error| match error {
-        CompletionExpectationError::Unsupported(reason) => {
-            IndexFailure::new(IndexFailureCode::Unsupported, reason, 0)
-        }
-        CompletionExpectationError::Unverified(reason) => {
-            IndexFailure::new(IndexFailureCode::IndexCompletionUnverified, reason, 0)
-        }
-    })
+    let expectation = completion_expectation_from_probe(&raw, source_object_version).map_err(
+        |error| match error {
+            CompletionExpectationError::Unsupported(reason) => {
+                IndexFailure::new(IndexFailureCode::Unsupported, reason, 0)
+            }
+            CompletionExpectationError::Unverified(reason) => {
+                IndexFailure::new(IndexFailureCode::IndexCompletionUnverified, reason, 0)
+            }
+        },
+    )?;
+    Ok(expectation)
 }
 
 /// Build a file's index by running the index pipe.
@@ -1020,10 +1057,11 @@ pub async fn build_from_attested_file(
 ) -> IndexOutcome {
     use std::os::fd::AsRawFd;
 
-    let expectation = match probe_completion_expectation(source, source_object_version).await {
-        Ok(expectation) => expectation,
-        Err(failure) => return IndexOutcome::Failed(Box::new(failure)),
-    };
+    let (expectation, started) =
+        match probe_completion_expectation(source, source_object_version, budget).await {
+            Ok(value) => value,
+            Err(failure) => return IndexOutcome::Failed(Box::new(failure)),
+        };
     let pass = match index_pass(file, video, Some("/dev/fd/3"), expectation) {
         Ok(pass) => pass,
         Err(reason) => return IndexOutcome::Unsupported(reason),
@@ -1035,6 +1073,7 @@ pub async fn build_from_attested_file(
         None,
         runtime_cache,
         budget,
+        started,
         None,
     )
     .await
@@ -1055,10 +1094,11 @@ where
 {
     use std::os::fd::AsRawFd;
 
-    let expectation = match probe_completion_expectation(source, source_object_version).await {
-        Ok(expectation) => expectation,
-        Err(failure) => return IndexOutcome::Failed(Box::new(failure)),
-    };
+    let (expectation, started) =
+        match probe_completion_expectation(source, source_object_version, budget).await {
+            Ok(value) => value,
+            Err(failure) => return IndexOutcome::Failed(Box::new(failure)),
+        };
     let pass = match index_pass(file, video, Some("/dev/fd/3"), expectation) {
         Ok(pass) => pass,
         Err(reason) => return IndexOutcome::Unsupported(reason),
@@ -1070,6 +1110,7 @@ where
         None,
         runtime_cache,
         budget,
+        started,
         Some(Arc::new(progress)),
     )
     .await
@@ -1089,10 +1130,11 @@ pub async fn build_from_attested_file(
         Ok(path) => path,
         Err(reason) => return IndexOutcome::Unsupported(reason),
     };
-    let expectation = match probe_completion_expectation(source, source_object_version).await {
-        Ok(expectation) => expectation,
-        Err(failure) => return IndexOutcome::Failed(Box::new(failure)),
-    };
+    let (expectation, started) =
+        match probe_completion_expectation(source, source_object_version, budget).await {
+            Ok(value) => value,
+            Err(failure) => return IndexOutcome::Failed(Box::new(failure)),
+        };
     let pass = match index_pass(file, video, Some(&path.to_string_lossy()), expectation) {
         Ok(pass) => pass,
         Err(reason) => return IndexOutcome::Unsupported(reason),
@@ -1104,6 +1146,7 @@ pub async fn build_from_attested_file(
         Some((source, &path)),
         runtime_cache,
         budget,
+        started,
         None,
     )
     .await
@@ -1126,10 +1169,11 @@ where
         Ok(path) => path,
         Err(reason) => return IndexOutcome::Unsupported(reason),
     };
-    let expectation = match probe_completion_expectation(source, source_object_version).await {
-        Ok(expectation) => expectation,
-        Err(failure) => return IndexOutcome::Failed(Box::new(failure)),
-    };
+    let (expectation, started) =
+        match probe_completion_expectation(source, source_object_version, budget).await {
+            Ok(value) => value,
+            Err(failure) => return IndexOutcome::Failed(Box::new(failure)),
+        };
     let pass = match index_pass(file, video, Some(&path.to_string_lossy()), expectation) {
         Ok(pass) => pass,
         Err(reason) => return IndexOutcome::Unsupported(reason),
@@ -1141,6 +1185,7 @@ where
         Some((source, &path)),
         runtime_cache,
         budget,
+        started,
         Some(Arc::new(progress)),
     )
     .await
@@ -1154,6 +1199,7 @@ async fn build_with_args(
     source_handoff: Option<(&std::fs::File, &Path)>,
     runtime_cache: &Path,
     budget: Duration,
+    started: Instant,
     progress: Option<SharedIndexProgress>,
 ) -> IndexOutcome {
     let IndexPass {
@@ -1163,7 +1209,6 @@ async fn build_with_args(
         video,
     } = pass;
     let identity = identity_for(file, video);
-    let started = Instant::now();
 
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     crate::transcode::configure_ffmpeg_runtime(&mut command, runtime_cache);
@@ -1255,7 +1300,7 @@ async fn build_with_args(
         }
     };
     let (mut outcome, deadline_fired) = match tokio::time::timeout(
-        budget,
+        budget.saturating_sub(started.elapsed()),
         index_stream_with_progress(
             stdout,
             identity,
@@ -1318,6 +1363,10 @@ async fn build_with_args(
         }
         Err(_) => {
             let _ = child.start_kill();
+            // A second wait is required after escalating to kill; otherwise
+            // the process can remain unreaped while the stderr task is
+            // abandoned below.
+            let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
             if !deadline_fired {
                 let rows = observed.lock().map(|value| value.2).unwrap_or_default();
                 outcome = IndexOutcome::Failed(Box::new(IndexFailure::new(

@@ -174,12 +174,27 @@ impl IndexDiagnostic {
         {
             return Err("index diagnostic exit category is too long".to_owned());
         }
-        let encoded = serde_json::to_string(self)
-            .map_err(|error| format!("encoding index diagnostic: {error}"))?;
-        if encoded.len() > MAX_INDEX_DIAGNOSTIC_BYTES {
-            return Err("index diagnostic exceeds its serialized bound".to_owned());
+        let mut bounded = self.clone();
+        loop {
+            let encoded = serde_json::to_string(&bounded)
+                .map_err(|error| format!("encoding index diagnostic: {error}"))?;
+            if encoded.len() <= MAX_INDEX_DIAGNOSTIC_BYTES {
+                return Ok(encoded);
+            }
+            let Some(first) = bounded.stderr_tail.first_mut() else {
+                return Err("index diagnostic exceeds its serialized bound".to_owned());
+            };
+            if first.is_empty() {
+                bounded.stderr_tail.remove(0);
+                continue;
+            }
+            let remove = first
+                .char_indices()
+                .nth(first.chars().count().min(256))
+                .map(|(index, _)| index)
+                .unwrap_or(first.len());
+            first.drain(..remove);
         }
-        Ok(encoded)
     }
 
     pub fn decode_bounded(value: &str) -> Option<Self> {
@@ -319,5 +334,19 @@ mod tests {
             ..IndexDiagnostic::default()
         };
         assert!(diagnostic.encode_bounded().is_err());
+    }
+
+    #[test]
+    fn content_analysis_diagnostic_trims_escaped_stderr_to_serialized_bound() {
+        let diagnostic = IndexDiagnostic {
+            version: 1,
+            code: IndexFailureCode::IndexProcessFailed.as_str().to_owned(),
+            stderr_tail: vec!["\n".repeat(MAX_INDEX_STDERR_BYTES)],
+            ..IndexDiagnostic::default()
+        };
+        let encoded = diagnostic.encode_bounded().expect("bounded diagnostic");
+        assert!(encoded.len() <= MAX_INDEX_DIAGNOSTIC_BYTES);
+        let decoded = IndexDiagnostic::decode_bounded(&encoded).expect("decoded diagnostic");
+        assert!(!decoded.stderr_tail.is_empty());
     }
 }

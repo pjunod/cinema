@@ -2503,7 +2503,7 @@ async fn fragment_index_video_identities(
 /// whole-file hash to change nothing.
 /// Every copy-video identity this node would build for a file, paired with the
 /// argv fingerprint that names it.
-async fn fragment_index_video_identity_options(
+pub(crate) async fn fragment_index_video_identity_options(
     store: &dyn Store,
     file: &MediaFile,
     have_dovi: bool,
@@ -8138,6 +8138,52 @@ impl JobManager {
             let _retired = retire_heartbeat(stop, heartbeat).await;
             return false;
         };
+        // Every outcome is a statement about the held source, including a
+        // failure. If those bytes changed while ffmpeg was running, record
+        // source movement instead of caching or retrying a diagnosis for the
+        // retired object.
+        if !crate::fragment_index_cluster::source_still_matches(
+            &attested.handle,
+            &attested.observation,
+        )
+        .unwrap_or(false)
+        {
+            let retired = retire_heartbeat(stop, heartbeat).await;
+            let now = clock_ms();
+            self.fail_fragment_index_job(
+                &retired,
+                &job,
+                &node_id,
+                "source_changed",
+                false,
+                now,
+                now.saturating_add(retry_ms),
+            )
+            .await;
+            return false;
+        }
+        let still_current = self
+            .store
+            .get_file(file.id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|current| current.size == file.size && current.mtime == file.mtime);
+        if !still_current {
+            let retired = retire_heartbeat(stop, heartbeat).await;
+            let now = clock_ms();
+            self.fail_fragment_index_job(
+                &retired,
+                &job,
+                &node_id,
+                "source_superseded",
+                false,
+                now,
+                now.saturating_add(retry_ms),
+            )
+            .await;
+            return false;
+        }
         let index = match outcome {
             crate::fragindex::IndexOutcome::Built(index) => index,
             // The node-local row is recorded here too, so a clustered node's
@@ -8207,48 +8253,6 @@ impl JobManager {
             file.duration_ms.unwrap_or_default(),
             index.rows.len(),
         );
-        if !crate::fragment_index_cluster::source_still_matches(
-            &attested.handle,
-            &attested.observation,
-        )
-        .unwrap_or(false)
-        {
-            let retired = retire_heartbeat(stop, heartbeat).await;
-            let now = clock_ms();
-            self.fail_fragment_index_job(
-                &retired,
-                &job,
-                &node_id,
-                "source_changed",
-                false,
-                now,
-                now.saturating_add(retry_ms),
-            )
-            .await;
-            return false;
-        }
-        let still_current = self
-            .store
-            .get_file(file.id)
-            .await
-            .ok()
-            .flatten()
-            .is_some_and(|current| current.size == file.size && current.mtime == file.mtime);
-        if !still_current {
-            let retired = retire_heartbeat(stop, heartbeat).await;
-            let now = clock_ms();
-            self.fail_fragment_index_job(
-                &retired,
-                &job,
-                &node_id,
-                "source_superseded",
-                false,
-                now,
-                now.saturating_add(retry_ms),
-            )
-            .await;
-            return false;
-        }
         let blob = match encode_cluster_fragment_index_blob(
             &index,
             &job.source_sha256,

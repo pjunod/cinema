@@ -1209,6 +1209,12 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
               WHERE EXISTS (SELECT 1 FROM files WHERE id = $2 AND size = $3 AND mtime = $4)
                 AND (SELECT COUNT(*) FROM analysis_requests
                       WHERE state IN ('queued', 'running', 'submitted')) < $16
+                AND ($11 = 0 OR $5 <> 'fragment_index' OR NOT EXISTS (
+                  SELECT 1 FROM analysis_requests legacy
+                   WHERE legacy.file_id = $2 AND legacy.source_size = $3
+                     AND legacy.source_mtime = $4 AND legacy.component = $5
+                     AND legacy.video_identity = ''
+                     AND legacy.state IN ('queued','running','submitted','ready')))
                 AND ($11 = 1 OR (
                   NOT EXISTS (SELECT 1 FROM analysis_requests
                     WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4
@@ -2363,11 +2369,6 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         AND files.size = job.source_size AND files.mtime = job.source_mtime
                         AND (SELECT COUNT(*) FROM analysis_requests
                               WHERE state IN ('queued','running','submitted')) < $14
-                        AND 1 = (SELECT COUNT(*) FROM analysis_requests provenance
-                          WHERE provenance.result_cache_key = job.cache_key
-                            AND provenance.target_node_id = job.target_node_id
-                            AND provenance.pipeline_version = $15
-                            AND provenance.video_identity = $10)
                         AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts artifact
                                          WHERE artifact.cache_key = job.cache_key)
                         AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_heads head
@@ -2376,7 +2377,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                           WHERE active.file_id = job.file_id AND active.source_size = job.source_size
                             AND active.source_mtime = job.source_mtime
                             AND active.component = 'fragment_index'
-                            AND active.pipeline_version = $15 AND active.video_identity = $10
+                            AND ((active.pipeline_version = $15 AND active.video_identity = $10)
+                              OR active.video_identity = '')
                             AND active.state IN ('queued','running','submitted','ready'))
                         AND NOT EXISTS (SELECT 1 FROM analysis_index_repairs repair
                           WHERE repair.repair_revision = $1 AND repair.file_id = job.file_id
@@ -3270,7 +3272,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 .txn(vec![(
                     "UPDATE cluster_fragment_index_jobs
                         SET state = 'running', owner_node_id = $1, fence = fence + 1,
-                            lease_expires_ms = $2, attempts = attempts + 1,
+                            lease_expires_ms = CASE WHEN index_retry_deadline_ms > 0
+                              THEN MIN($2, index_retry_deadline_ms) ELSE $2 END,
+                            attempts = attempts + 1,
                             last_error_code = NULL, updated_at_ms = $3
                       WHERE cache_key = $4 AND fence = $5 AND target_node_id = $6
                         AND state = 'queued' AND not_before_ms <= $3
@@ -3295,7 +3299,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 candidate.state = "running".to_owned();
                 candidate.owner_node_id = node_id.to_owned();
                 candidate.fence += 1;
-                candidate.lease_expires_ms = lease_expires_ms;
+                candidate.lease_expires_ms = if candidate.index_retry_deadline_ms > 0 {
+                    lease_expires_ms.min(candidate.index_retry_deadline_ms)
+                } else {
+                    lease_expires_ms
+                };
                 candidate.attempts += 1;
                 candidate.updated_at_ms = now_ms;
                 return Ok(Some(candidate));
@@ -3519,6 +3527,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         WHERE cache_key = $1 AND target_node_id = $11
                           AND state = 'running' AND owner_node_id = $9
                           AND fence = $12 AND lease_expires_ms > $13
+                          AND (index_retry_deadline_ms = 0 OR index_retry_deadline_ms > $13)
                           AND file_id = $2 AND source_size = $3 AND source_mtime = $4
                           AND source_sha256 = $5 AND pipeline_sha256 = $6
                           AND EXISTS (SELECT 1 FROM files current_file
@@ -3556,7 +3565,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                       WHERE EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
                         WHERE cache_key = $1 AND target_node_id = $6
                           AND state = 'running' AND owner_node_id = $2
-                          AND fence = $7 AND lease_expires_ms > $8)
+                          AND fence = $7 AND lease_expires_ms > $8
+                          AND (index_retry_deadline_ms = 0 OR index_retry_deadline_ms > $8))
                         AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
                           WHERE cache_key = $1 AND source_sha256 = $9
                             AND pipeline_sha256 = $10 AND blob_sha256 = $11 AND bytes = $3)
@@ -3591,6 +3601,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             AND current_job.state = 'running'
                             AND current_job.owner_node_id = $5 AND current_job.fence = $6
                             AND current_job.lease_expires_ms > $3
+                            AND (current_job.index_retry_deadline_ms = 0
+                              OR current_job.index_retry_deadline_ms > $3)
                             AND current_job.file_id = $7
                             AND current_job.source_size = $8
                             AND current_job.source_mtime = $9
@@ -3658,6 +3670,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                            AND current_job.state = 'running'
                            AND current_job.owner_node_id = $5 AND current_job.fence = $6
                            AND current_job.lease_expires_ms > $3
+                           AND (current_job.index_retry_deadline_ms = 0
+                             OR current_job.index_retry_deadline_ms > $3)
                            AND current_job.file_id = $7
                            AND current_job.source_size = $8
                            AND current_job.source_mtime = $9
@@ -3700,6 +3714,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                       WHERE cache_key = $2 AND target_node_id = $3
                         AND state = 'running' AND owner_node_id = $4
                         AND fence = $5 AND lease_expires_ms > $1
+                        AND (index_retry_deadline_ms = 0 OR index_retry_deadline_ms > $1)
                         AND EXISTS (SELECT 1 FROM files current_file
                           WHERE current_file.id = cluster_fragment_index_jobs.file_id
                             AND current_file.size = cluster_fragment_index_jobs.source_size
@@ -3776,7 +3791,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                       WHERE EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
                         WHERE cache_key = $1 AND target_node_id = $6
                           AND state = 'running' AND owner_node_id = $2
-                          AND fence = $7 AND lease_expires_ms > $8)
+                          AND fence = $7 AND lease_expires_ms > $8
+                          AND (index_retry_deadline_ms = 0 OR index_retry_deadline_ms > $8))
                         AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
                           WHERE cache_key = $1 AND source_sha256 = $9
                             AND pipeline_sha256 = $10 AND blob_sha256 = $11 AND bytes = $3)
@@ -3811,6 +3827,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             AND current_job.state = 'running'
                             AND current_job.owner_node_id = $5 AND current_job.fence = $6
                             AND current_job.lease_expires_ms > $3
+                            AND (current_job.index_retry_deadline_ms = 0
+                              OR current_job.index_retry_deadline_ms > $3)
                             AND current_job.file_id = $7
                             AND current_job.source_size = $8
                             AND current_job.source_mtime = $9
@@ -3878,6 +3896,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                            AND current_job.state = 'running'
                            AND current_job.owner_node_id = $5 AND current_job.fence = $6
                            AND current_job.lease_expires_ms > $3
+                           AND (current_job.index_retry_deadline_ms = 0
+                             OR current_job.index_retry_deadline_ms > $3)
                            AND current_job.file_id = $7
                            AND current_job.source_size = $8
                            AND current_job.source_mtime = $9
@@ -3920,6 +3940,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                       WHERE cache_key = $2 AND target_node_id = $3
                         AND state = 'running' AND owner_node_id = $4
                         AND fence = $5 AND lease_expires_ms > $1
+                        AND (index_retry_deadline_ms = 0 OR index_retry_deadline_ms > $1)
                         AND EXISTS (SELECT 1 FROM files current_file
                           WHERE current_file.id = cluster_fragment_index_jobs.file_id
                             AND current_file.size = cluster_fragment_index_jobs.source_size
@@ -4055,7 +4076,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                   WHERE cache_key = $8 AND target_node_id = $9
                     AND state = 'running' AND owner_node_id = $10
                     AND fence = $11 AND lease_expires_ms > $5
-                    AND attempts = $12 AND index_retry_deadline_ms = $13",
+                    AND attempts = $12 AND index_retry_deadline_ms = $13
+                    AND EXISTS (SELECT 1 FROM files current_file
+                      WHERE current_file.id = cluster_fragment_index_jobs.file_id
+                        AND current_file.size = cluster_fragment_index_jobs.source_size
+                        AND current_file.mtime = cluster_fragment_index_jobs.source_mtime)",
                 params!(
                     if decision.retryable {
                         "queued"

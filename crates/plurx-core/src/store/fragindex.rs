@@ -550,11 +550,20 @@ pub(crate) fn record_typed_outcome(
         IndexRefusal::Truncated { rows }
     };
     let mut recorded = record_outcome(&transaction, file_id, source, refusal, reason, now_ms)?;
+    let configured_max_attempts = transaction
+        .query_row(
+            "SELECT value FROM settings WHERE key = ?1",
+            params![crate::store::keys::ANALYSIS_MAX_ATTEMPTS],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let max_attempts =
+        crate::store::bounded_analysis_max_attempts(configured_max_attempts.as_deref()) as u32;
     let decision = crate::content_analysis::index_retry_decision(
         code,
         transient_allowlisted,
         recorded.attempts,
-        crate::store::DEFAULT_ANALYSIS_MAX_ATTEMPTS as u32,
+        max_attempts,
         now_ms,
         existing_deadline,
     );
@@ -565,8 +574,7 @@ pub(crate) fn record_typed_outcome(
     diagnostic.attempt = i64::from(recorded.attempts);
     diagnostic.recorded_at_ms = now_ms;
     let diagnostic_json = diagnostic.encode_bounded().map_err(StoreError::Task)?;
-    let terminal_reason = if recorded.attempts >= crate::store::DEFAULT_ANALYSIS_MAX_ATTEMPTS as u32
-    {
+    let terminal_reason = if recorded.attempts >= max_attempts {
         "attempt_limit".to_owned()
     } else {
         decision

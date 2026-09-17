@@ -779,6 +779,54 @@ const ANALYSIS_REOPEN_SCAN_LIMIT: i64 = ANALYSIS_REOPEN_MAX_FILES * 2;
 /// enqueue and the operator's own single-row Retry down with it.
 const ANALYSIS_REOPEN_HEADROOM: i64 = 512;
 
+async fn resolve_legacy_repair_identities(
+    state: &AppState,
+    candidates: &mut [plurx_core::store::AnalysisIndexRepairCandidate],
+) -> Result<(), ApiError> {
+    if !candidates
+        .iter()
+        .any(|candidate| candidate.eligibility == "identity_unresolved")
+    {
+        return Ok(());
+    }
+    let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+    let have_dovi = state.transcode.dv_strippable();
+    let convert = state.transcode.dv_convert_enabled().await;
+    for candidate in candidates
+        .iter_mut()
+        .filter(|candidate| candidate.eligibility == "identity_unresolved")
+    {
+        let Some(file) = state.store.get_file(candidate.file_id).await? else {
+            continue;
+        };
+        if file.size != candidate.source_size || file.mtime != candidate.source_mtime {
+            continue;
+        }
+        let identities = crate::state::fragment_index_video_identity_options(
+            state.store.as_ref(),
+            &file,
+            have_dovi,
+            convert,
+        )
+        .await?;
+        let mut matching = identities.into_iter().filter(|(video, _)| {
+            crate::fragment_index_cluster::pipeline_digest(&file, &engine, *video)
+                == candidate.pipeline_sha256
+        });
+        let Some((_, identity)) = matching.next() else {
+            continue;
+        };
+        if matching.next().is_some() {
+            continue;
+        }
+        candidate.pipeline_version.clone_from(&engine);
+        candidate.video_identity = identity;
+        candidate.eligibility = "eligible".to_owned();
+        candidate.candidate_id = candidate.recompute_id();
+    }
+    Ok(())
+}
+
 /// POST /api/v1/analysis/reopen — put terminal analysis work back on the
 /// queue in bulk.
 ///
@@ -797,9 +845,9 @@ const ANALYSIS_REOPEN_HEADROOM: i64 = 512;
 /// It skips loudly rather than refusing. A row whose successor cannot be
 /// created — the file changed underneath it, or another actor inserted a
 /// successor between this call's read and its write — is counted in
-/// `skipped_unavailable` and left for discovery. Standalone cluster jobs with
-/// no operator request behind them are outside this endpoint entirely; they
-/// belong to discovery's own retry.
+/// `skipped_unavailable` and left for discovery. The revisioned repair mode
+/// also attributes standalone and pre-identity fragment jobs by matching
+/// their stored pipeline digest against the current copy recipes.
 pub async fn reopen(
     _admin: AdminUser,
     State(state): State<AppState>,
@@ -852,13 +900,14 @@ pub async fn reopen(
                     "repair preview does not accept candidate descriptors".to_owned(),
                 ));
             }
-            let scanned = state
+            let mut scanned = state
                 .store
                 .preview_analysis_index_repairs(
                     params.cursor.as_deref(),
                     plurx_core::store::CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
                 )
                 .await?;
+            resolve_legacy_repair_identities(&state, &mut scanned).await?;
             let scanned_count = scanned.len();
             let mut files = std::collections::BTreeSet::new();
             let mut rows = Vec::new();
@@ -916,13 +965,33 @@ pub async fn reopen(
                 "repair apply candidate count is out of bounds".to_owned(),
             ));
         }
+        if candidates
+            .iter()
+            .any(|candidate| candidate.repair_revision != revision || !candidate.has_valid_id())
+        {
+            return Err(ApiError::BadRequest(
+                "repair candidate descriptor is invalid".to_owned(),
+            ));
+        }
+        let distinct_files = candidates
+            .iter()
+            .map(|candidate| candidate.file_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        if i64::try_from(distinct_files.len()).unwrap_or(i64::MAX) > limit {
+            return Err(ApiError::BadRequest(
+                "repair apply exceeds the requested file limit".to_owned(),
+            ));
+        }
+        let mut candidates = candidates;
+        // Apply never trusts the preview's advisory resolution. Re-derive
+        // each recipe from the current file facts and engine before the Store
+        // checks the predecessor fence and inserts a successor.
+        for candidate in &mut candidates {
+            candidate.eligibility = "identity_unresolved".to_owned();
+        }
+        resolve_legacy_repair_identities(&state, &mut candidates).await?;
         let mut results = Vec::with_capacity(candidates.len());
         for candidate in candidates {
-            if candidate.repair_revision != revision {
-                return Err(ApiError::BadRequest(
-                    "repair candidate revision does not match the request".to_owned(),
-                ));
-            }
             results.push(
                 state
                     .store
