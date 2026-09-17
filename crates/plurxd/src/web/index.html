@@ -6167,6 +6167,20 @@ function unprobedNote(f,itemId){
     permissions, a half-copied download, or an unmounted share at the time it was scanned. It
     still plays, but every playback decision for it is a guess.${act}</div>`;
 }
+// Reanalyze repairs a stale scan, not only a failed one. The scanner
+// deliberately skips a file whose size and mtime are unchanged, so a probe
+// written by an older FFprobe survives every ordinary library refresh — and
+// when playback refuses because the stored probe no longer matches a fresh
+// one, "rescan the library" is not the repair. This is the same admin action
+// unprobedNote offers, behind More actions because a healthy file rarely
+// needs it. px-admin/th-admin keep it off the television surfaces.
+function fileAdminActions(f,itemId){
+  if(!ME||!ME.is_admin||!f.available||f.probed===false) return '';
+  return `<details class="setdetails px-admin th-admin"><summary>More actions</summary><div class="setdetails-body">
+    <p class="hint">Read this file's media details again with the media tools installed now. Use it when playback says the source no longer matches its stored probe.</p>
+    <button class="ghost sm" onclick="reanalyze(${itemId},this)">⟳ Reanalyze</button>
+  </div></details>`;
+}
 async function reanalyze(itemId,btn){
   const label=btn.textContent; btn.disabled=true; btn.textContent="Analyzing…";
   try{
@@ -6650,7 +6664,7 @@ function classicItemBody(p){
       const header=(multi||miss)
         ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&multi)?`<button class="ghost sm" onclick='${playCall(p,v,resume)}'>▶ Play</button>`:''}</div>`
         : '';
-      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}${dvFileActionMount(v)}</div>`;
+      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}${dvFileActionMount(v)}${fileAdminActions(v,it.id)}</div>`;
     }).join("");
   } else if(p.shape==="episodes"){
     // Season: episodes as a list.
@@ -19377,7 +19391,37 @@ function uiEnableAdvisory(){
   const browser=typeof CSS!=='undefined'&&CSS.supports('display','grid')&&typeof fetch==='function';
   const libs=SETTINGS_DATA&&SETTINGS_DATA.libs;
   const row=(title,state,detail)=>`<div><strong>${esc(title)} · ${esc(state)}</strong><small>${esc(detail)}</small></div>`;
-  return `<section class="card" id="ui-enable"><h2>Enable</h2><p>The updated search and activity layouts are enabled in this build. They need no rollout flag.</p><div class="enable-advisory">${row('Browser support',browser?'Met':'Not confirmed','Responsive layout and API support. This observation is advisory.')}${row('Signed-in account',ME?'Met':'Not confirmed','Watch state and recording visibility use the signed-in account.')}${row('Library data',Array.isArray(libs)?libs.length?'Available':'No libraries configured':'Not loaded','Readable files and accurate metadata make continuation and preview useful. Missing data is shown in context.')}${row('Playback and recording','Your saved choices','Use the controls below to enable recording, channel playback or quality handoff. Readiness results never override your choice.')}</div><p class="hint">Advisory only: unmet or unknown checks do not hide features or disable enable switches. Existing authorization, file availability and operational safety rules still apply.</p><nav class="watch-browse" aria-label="Enable controls"><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-recording')?.scrollIntoView({behavior:'smooth',block:'start'})">Recording ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-channels')?.scrollIntoView({behavior:'smooth',block:'start'})">Library channels ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-quality')?.scrollIntoView({behavior:'smooth',block:'start'})">Quality handoff ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-hevc-sample-entry')?.scrollIntoView({behavior:'smooth',block:'start'})">HEVC admission ↓</a></nav></section>`;
+  return `<section class="card" id="ui-enable"><h2>Enable</h2><p>The updated search and activity layouts are enabled in this build. They need no rollout flag.</p><div class="enable-advisory">${row('Browser support',browser?'Met':'Not confirmed','Responsive layout and API support. This observation is advisory.')}${row('Signed-in account',ME?'Met':'Not confirmed','Watch state and recording visibility use the signed-in account.')}${row('Library data',Array.isArray(libs)?libs.length?'Available':'No libraries configured':'Not loaded','Readable files and accurate metadata make continuation and preview useful. Missing data is shown in context.')}${row('Playback and recording','Your saved choices','Use the controls below to enable recording, channel playback or quality handoff. Readiness results never override your choice.')}</div><p class="hint">Advisory only: unmet or unknown checks do not hide features or disable enable switches. Existing authorization, file availability and operational safety rules still apply.</p><nav class="watch-browse" aria-label="Enable controls"><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-recording')?.scrollIntoView({behavior:'smooth',block:'start'})">Recording ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-channels')?.scrollIntoView({behavior:'smooth',block:'start'})">Library channels ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-quality')?.scrollIntoView({behavior:'smooth',block:'start'})">Quality handoff ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-hevc-sample-entry')?.scrollIntoView({behavior:'smooth',block:'start'})">HEVC admission ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-source-probe')?.scrollIntoView({behavior:'smooth',block:'start'})">Source verification ↓</a></nav></section>`;
+}
+// Source verification compatibility.
+//
+// Starting an encoded session re-probes the held source and compares it with
+// the scan in the catalog. Those two reports can come from different FFprobe
+// builds, and a newer build derives properties an older one never reported —
+// an added description is not a replaced movie. The comparator admits the two
+// measured Dolby Atmos profile omissions and nothing else. There is no switch
+// here and there is no flag in the code: the rules are always active, and
+// these rows say what is known about them on this node.
+function sourceProbeCompatibilityCard(){
+  const sys=(SETTINGS_DATA&&SETTINGS_DATA.sys)||{};
+  const tools=sys.ffmpeg_version?`reported`:"not reported";
+  return setCard(`${cardHead("Source probe compatibility",
+      "Let a newer media tool describe an older scan without calling it a replaced file.",
+      `<span class="pill ok">automatic</span>`)}
+      <div class="hint"><b>No feature flag is used.</b> Nothing on this card enables, disables, hides or overrides playback admission. Held-source, storage-object, recipe and generation fences are unchanged.</div>
+      <details class="setdetails" open><summary>Safe enablement and readiness</summary><div class="setdetails-body">
+      ${devStaticReq("Derived Atmos profile omissions","met",
+        "A scan that omits <code>profile</code> on a TrueHD or E-AC-3 track is accepted against a report that carries exactly <code>Dolby TrueHD + Dolby Atmos</code> or <code>Dolby Digital Plus + Dolby Atmos</code>, in either direction, on a stream with the same explicit index. Two reported profiles are always compared, so a real profile change still refuses.","ok")}
+      ${devStaticReq("Media tools on this node",tools,
+        "Compatibility is only needed because the scanning engine and the playing engine can differ. Keeping every node on the same media tools removes most of the need for it; it does not repair metadata an older engine already wrote.",sys.ffmpeg_version?"ok":"warn")}
+      ${devStaticReq("Scan provenance","not recorded",
+        "A stored probe does not record which FFprobe build produced it. An old report therefore cannot prove whether a property was measured and absent or never measurable, so an omission is treated as unknown rather than as a change.","warn")}
+      ${devStaticReq("Refusal diagnostics","met",
+        "A refused comparison writes the normalized field paths that disagreed to the server log, bounded to eight paths, with no values, pathnames or container tag text. The client answer is unchanged.","ok")}
+      ${devStaticReq("Typed source verification","not built",
+        "Comparing whole FFprobe documents makes an external reporting change part of playback admission. The durable repair is a typed fact contract with explicit unknown states, compared against what the recipe actually depends on. Until it exists, a future reporting change can still need a rule of its own.","")}
+      <p class="devcheck-note">Advisory only. An unmet row here means a repair is worth doing, never that playback is blocked. A file whose scan genuinely is stale is repaired with Reanalyze under More actions on the item.</p>
+      </div></details>`);
 }
 function systemAttentionHtml(sys){
   const storage=sys.storage||{}, mounts=(storage.mounts||[]).filter(m=>m.read_bps==null||m.cache_suspect);
@@ -19488,6 +19532,7 @@ function developerPanel(settings,readiness){
       <div class="setsection"><h2>Playback surface contract</h2><p>Advisory verification status for the one fault contract every client renders. Nothing here is a switch.</p></div>${playbackSurfaceReadinessCard()}
       <div class="setsection"><h2>Web HLS startup recovery</h2><p>Always-on manifest recovery with advisory browser and server readiness.</p></div>${webHlsStartupRecoveryCard()}
       <div class="setsection" id="enable-hevc-sample-entry"><h2>HEVC sample-entry admission</h2><p>Always-on packaging admission with advisory deployment and evidence status.</p></div>${hevcSampleEntryAdmissionCard()}
+      <div class="setsection" id="enable-source-probe"><h2>Source verification</h2><p>Always-on probe-compatibility rules with advisory provenance and diagnostics status.</p></div>${sourceProbeCompatibilityCard()}
       <div class="setsection"><h2>Compatibility</h2><p>Native server and protocol controls for compatible playback clients.</p></div>${windowsServerCard(settings,readiness)}${protocol}
       <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}<div class="card"><h2>Search and classification</h2><p>Local text search, channel rules and automatic metadata labels are always available. Add optional search by meaning using an embedded model.</p>${devReq(readiness,"embedded_semantic_search","runtime","Embedded CPU runtime","Included in ordinary builds; no inference service is required.")}${devReq(readiness,"embedded_semantic_search","model","Verified model loaded","Enable to download approximately 91 MB once per node.")}${devReq(readiness,"embedded_semantic_search","index","Local semantic index","Indexing uses additional CPU and memory.")}<p class="hint">These observations are advisory. You can enable or disable semantic search at any time.</p><button class="ghost" onclick="showSearchSettings()">Enable and search settings</button></div>`;
 }
@@ -22177,7 +22222,7 @@ function catalogItemBody(p){
       const header=(multi||miss)
         ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&multi)?`<button class="ghost sm" onclick='play(${v.id},${esc(JSON.stringify(it.title))},${resume},${v.duration_ms||0},${esc(JSON.stringify(pmeta))})'>▶ Play</button>`:''}</div>`
         : '';
-      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}${dvFileActionMount(v)}</div>`;
+      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}${dvFileActionMount(v)}${fileAdminActions(v,it.id)}</div>`;
     }).join("");
   } else if(p.shape==="episodes"){
     const a=watchControls(it);
@@ -22645,7 +22690,7 @@ function theaterItemBody(p){
       const header=(p.multi||miss)
         ? `<div class="vh"><span class="vbadges">${specBadges(v)||`<span class="vt">${esc(v.filename)}</span>`}${miss?'<span class="missbadge">missing</span>':''}</span>${(!miss&&p.multi)?`<button class="ghost sm" onclick='play(${v.id},${esc(JSON.stringify(it.title))},${resume},${v.duration_ms||0},${esc(JSON.stringify(pmeta))})'>▶ Play</button>`:''}</div>`
         : '';
-      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}${dvFileActionMount(v)}</div>`;
+      return `<div class="version">${header}${specBlock(v)}${miss&&ME.is_admin&&v.missing_path?`<div class="problem">${esc(v.missing_path)}</div>`:''}${unprobedNote(v,it.id)}${dvFileActionMount(v)}${fileAdminActions(v,it.id)}</div>`;
     }).join("");
   } else if(p.shape==="episodes"){
     const a=watchControls(it);

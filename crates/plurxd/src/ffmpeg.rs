@@ -488,6 +488,15 @@ fn ignore_optional_stream_field_omissions(
         "ltrt_cmixlev",
         "ltrt_surmixlev",
     ];
+    // Codec name paired with the exact derived profile a newer reporter adds.
+    // FFmpeg a4e5b946 (March 2023) began reading the E-AC-3 extension type A
+    // flag; TrueHD gained its equivalent earlier. An old scan that never
+    // reported the property proves nothing about it either way, so the
+    // omission is treated as unknown rather than as a changed source.
+    const ATMOS_PROFILE_OMISSIONS: [(&str, &str); 2] = [
+        ("truehd", "Dolby TrueHD + Dolby Atmos"),
+        ("eac3", "Dolby Digital Plus + Dolby Atmos"),
+    ];
     let (Some(stored_streams), Some(held_streams)) = (
         stored
             .get_mut("streams")
@@ -513,11 +522,23 @@ fn ignore_optional_stream_field_omissions(
                 held_stream.remove(field);
             }
         }
-        let matching_audio_stream = stored_stream.get("index") == held_stream.get("index")
-            && stored_stream
-                .get("codec_type")
-                .and_then(serde_json::Value::as_str)
-                == Some("audio")
+        // Streams are paired by position, so the pairing itself has to be
+        // proved before anything is removed from it: the same explicit
+        // non-negative integer index on both sides, and audio on both sides.
+        // A missing, null, negative, fractional, string or moved index is not
+        // a pairing, and a report that changed one must refuse.
+        let matching_audio_stream = matches!(
+            (
+                stored_stream
+                    .get("index")
+                    .and_then(serde_json::Value::as_u64),
+                held_stream.get("index").and_then(serde_json::Value::as_u64),
+            ),
+            (Some(stored_index), Some(held_index)) if stored_index == held_index
+        ) && stored_stream
+            .get("codec_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("audio")
             && held_stream
                 .get("codec_type")
                 .and_then(serde_json::Value::as_str)
@@ -529,36 +550,393 @@ fn ignore_optional_stream_field_omissions(
                     held_stream.remove(field);
                 }
             }
-            // Older FFprobe omitted this derived TrueHD profile even for the
-            // same Atmos stream. Keep codec identity and any reported profile
-            // disagreement significant.
-            if stored_stream
-                .get("codec_name")
-                .and_then(serde_json::Value::as_str)
-                == Some("truehd")
-                && held_stream
+            // Newer FFprobe derives an Atmos profile name that older scans
+            // omitted entirely; the bitstream did not change, only what the
+            // reporter is able to say about it. Admit that exact omission and
+            // nothing else: the codec must match a known pairing on both
+            // sides, exactly one document must omit `profile`, and the other
+            // must carry the literal name. Two reported profiles are always
+            // compared, so reported-Atmos versus reported-non-Atmos still
+            // refuses.
+            for (codec_name, atmos_profile) in ATMOS_PROFILE_OMISSIONS {
+                if stored_stream
                     .get("codec_name")
                     .and_then(serde_json::Value::as_str)
-                    == Some("truehd")
-                && ((!stored_stream.contains_key("profile")
+                    != Some(codec_name)
+                    || held_stream
+                        .get("codec_name")
+                        .and_then(serde_json::Value::as_str)
+                        != Some(codec_name)
+                {
+                    continue;
+                }
+                let stored_omits_profile = !stored_stream.contains_key("profile");
+                let held_omits_profile = !held_stream.contains_key("profile");
+                let admits_omission = (stored_omits_profile
                     && held_stream
                         .get("profile")
                         .and_then(serde_json::Value::as_str)
-                        == Some("Dolby TrueHD + Dolby Atmos"))
-                    || (!held_stream.contains_key("profile")
+                        == Some(atmos_profile))
+                    || (held_omits_profile
                         && stored_stream
                             .get("profile")
                             .and_then(serde_json::Value::as_str)
-                            == Some("Dolby TrueHD + Dolby Atmos")))
-            {
-                stored_stream.remove("profile");
-                held_stream.remove("profile");
+                            == Some(atmos_profile));
+                if admits_omission {
+                    stored_stream.remove("profile");
+                    held_stream.remove("profile");
+                }
+                break;
             }
         }
     }
 }
 
-pub(crate) fn probes_describe_same_input(stored: &str, held: &str) -> Result<bool, String> {
+/// How two normalized probe documents disagree at one field path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProbeDifferenceKind {
+    /// One document carries the field and the other does not.
+    Missing,
+    /// Both carry a scalar of the same shape with different contents.
+    Value,
+    /// The two values are different JSON shapes.
+    Type,
+    /// Two arrays at the same path have different lengths.
+    Length,
+}
+
+impl ProbeDifferenceKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Value => "value",
+            Self::Type => "type",
+            Self::Length => "length",
+        }
+    }
+}
+
+/// One normalized field path and how it disagreed. Deliberately carries no
+/// value, no pathname and no free-form tag text: this is a diagnosis aid, not
+/// a probe dump, and it is written to a log an operator reads.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct ProbeDifference {
+    pub path: String,
+    pub kind: ProbeDifferenceKind,
+}
+
+/// The comparison result, with a bounded explanation of a refusal.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct ProbeComparison {
+    pub same: bool,
+    pub differences: Vec<ProbeDifference>,
+    /// Collection stopped at the limit; more differences exist.
+    pub truncated: bool,
+}
+
+impl ProbeComparison {
+    /// A single log-safe line: `"/streams/2/profile missing"`.
+    pub(crate) fn rendered_differences(&self) -> String {
+        let mut rendered = self
+            .differences
+            .iter()
+            .map(|difference| format!("{} {}", difference.path, difference.kind.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if self.truncated {
+            if !rendered.is_empty() {
+                rendered.push_str(", ");
+            }
+            rendered.push_str("…more");
+        }
+        if rendered.is_empty() {
+            // Two documents that are unequal always disagree somewhere, but a
+            // caller rendering this into a refusal must never be handed an
+            // empty clause if that ever stops being true.
+            rendered.push_str("an unnamed field");
+        }
+        rendered
+    }
+}
+
+/// At most this many differing paths are collected before the walk stops.
+const PROBE_DIFFERENCE_LIMIT: usize = 8;
+/// A rendered path longer than this is truncated; no path can grow unbounded
+/// from a document an external tool produced.
+const PROBE_PATH_MAX_CHARS: usize = 128;
+
+/// FFprobe schema names this server is willing to name in a log. Anything
+/// else — a private container tag, a field a future release adds — is
+/// collapsed to a category so a log line can never leak library text.
+const KNOWN_PROBE_FIELDS: &[&str] = &[
+    "attached_pic",
+    "avg_frame_rate",
+    "bit_rate",
+    "bits_per_raw_sample",
+    "bits_per_sample",
+    "bl_present_flag",
+    "blue_x",
+    "blue_y",
+    "captions",
+    "channel_layout",
+    "channels",
+    "chapters",
+    "chroma_location",
+    "clean_effects",
+    "closed_captions",
+    "codec_long_name",
+    "codec_name",
+    "codec_tag",
+    "codec_tag_string",
+    "codec_type",
+    "coded_height",
+    "coded_width",
+    "color_primaries",
+    "color_range",
+    "color_space",
+    "color_transfer",
+    "comment",
+    "default",
+    "dependent",
+    "descriptions",
+    "disposition",
+    "display_aspect_ratio",
+    "displaymatrix",
+    "dmix_mode",
+    "dub",
+    "duration",
+    "duration_ts",
+    "dv_bl_signal_compatibility_id",
+    "dv_level",
+    "dv_md_compression",
+    "dv_profile",
+    "dv_version_major",
+    "dv_version_minor",
+    "el_present_flag",
+    "end",
+    "end_time",
+    "extradata_size",
+    "field_order",
+    "film_grain",
+    "filename",
+    "forced",
+    "format",
+    "format_long_name",
+    "format_name",
+    "green_x",
+    "green_y",
+    "has_b_frames",
+    "hearing_impaired",
+    "height",
+    "id",
+    "index",
+    "initial_padding",
+    "is_avc",
+    "karaoke",
+    "level",
+    "loro_cmixlev",
+    "loro_surmixlev",
+    "ltrt_cmixlev",
+    "ltrt_surmixlev",
+    "lyrics",
+    "max_average",
+    "max_bit_rate",
+    "max_content",
+    "max_luminance",
+    "metadata",
+    "mime_codec_string",
+    "min_luminance",
+    "multilayer",
+    "nal_length_size",
+    "nb_frames",
+    "nb_programs",
+    "nb_read_frames",
+    "nb_read_packets",
+    "nb_stream_groups",
+    "nb_streams",
+    "non_diegetic",
+    "original",
+    "pix_fmt",
+    "probe_score",
+    "profile",
+    "programs",
+    "r_frame_rate",
+    "red_x",
+    "red_y",
+    "refs",
+    "rotation",
+    "rpu_present_flag",
+    "sample_aspect_ratio",
+    "sample_fmt",
+    "sample_rate",
+    "service_type",
+    "side_data_list",
+    "side_data_type",
+    "size",
+    "start",
+    "start_pts",
+    "start_time",
+    "still_image",
+    "stream_groups",
+    "streams",
+    "tags",
+    "time_base",
+    "timed_thumbnails",
+    "view_ids_available",
+    "view_pos_available",
+    "visual_impaired",
+    "white_point_x",
+    "white_point_y",
+    "width",
+];
+
+/// Render one object key for a diagnostic path. A key inside a `tags` object
+/// is always collapsed, because container tags carry title text.
+fn rendered_probe_field(key: &str, inside_tags: bool) -> &'static str {
+    if inside_tags {
+        return "<field>";
+    }
+    KNOWN_PROBE_FIELDS
+        .iter()
+        .copied()
+        .find(|known| *known == key)
+        .unwrap_or("<unknown-field>")
+}
+
+fn rendered_probe_path(segments: &[String]) -> String {
+    let mut path = String::new();
+    for segment in segments {
+        path.push('/');
+        path.push_str(segment);
+    }
+    if path.chars().count() > PROBE_PATH_MAX_CHARS {
+        path = path.chars().take(PROBE_PATH_MAX_CHARS).collect();
+    }
+    if path.is_empty() {
+        path.push('/');
+    }
+    path
+}
+
+/// Walk two normalized documents and record where they disagree, stopping at
+/// `PROBE_DIFFERENCE_LIMIT`. The inputs are the same normalized copies the
+/// admission decision used, so a diagnosis can never contradict the verdict.
+fn collect_probe_differences(
+    stored: &serde_json::Value,
+    held: &serde_json::Value,
+    segments: &mut Vec<String>,
+    inside_tags: bool,
+    differences: &mut Vec<ProbeDifference>,
+    truncated: &mut bool,
+) {
+    if differences.len() >= PROBE_DIFFERENCE_LIMIT {
+        *truncated = true;
+        return;
+    }
+    match (stored, held) {
+        (serde_json::Value::Object(stored_fields), serde_json::Value::Object(held_fields)) => {
+            let mut keys: Vec<&String> = stored_fields.keys().collect();
+            for key in held_fields.keys() {
+                if !stored_fields.contains_key(key) {
+                    keys.push(key);
+                }
+            }
+            for key in keys {
+                if differences.len() >= PROBE_DIFFERENCE_LIMIT {
+                    *truncated = true;
+                    return;
+                }
+                segments.push(rendered_probe_field(key, inside_tags).to_string());
+                match (stored_fields.get(key), held_fields.get(key)) {
+                    (Some(stored_value), Some(held_value)) => collect_probe_differences(
+                        stored_value,
+                        held_value,
+                        segments,
+                        inside_tags || key == "tags",
+                        differences,
+                        truncated,
+                    ),
+                    _ => differences.push(ProbeDifference {
+                        path: rendered_probe_path(segments),
+                        kind: ProbeDifferenceKind::Missing,
+                    }),
+                }
+                segments.pop();
+            }
+        }
+        (serde_json::Value::Array(stored_items), serde_json::Value::Array(held_items)) => {
+            if stored_items.len() != held_items.len() {
+                differences.push(ProbeDifference {
+                    path: rendered_probe_path(segments),
+                    kind: ProbeDifferenceKind::Length,
+                });
+                return;
+            }
+            for (at, (stored_item, held_item)) in
+                stored_items.iter().zip(held_items.iter()).enumerate()
+            {
+                if differences.len() >= PROBE_DIFFERENCE_LIMIT {
+                    *truncated = true;
+                    return;
+                }
+                segments.push(at.to_string());
+                collect_probe_differences(
+                    stored_item,
+                    held_item,
+                    segments,
+                    inside_tags,
+                    differences,
+                    truncated,
+                );
+                segments.pop();
+            }
+        }
+        _ if stored == held => {}
+        _ => differences.push(ProbeDifference {
+            path: rendered_probe_path(segments),
+            kind: if std::mem::discriminant(stored) == std::mem::discriminant(held) {
+                ProbeDifferenceKind::Value
+            } else {
+                ProbeDifferenceKind::Type
+            },
+        }),
+    }
+}
+
+/// Compare a stored scan against a held-source probe and, on a refusal, say
+/// which normalized fields disagreed. Admission is unchanged: `same` is the
+/// same verdict [`probes_describe_same_input`] has always returned.
+pub(crate) fn compare_probe_documents(stored: &str, held: &str) -> Result<ProbeComparison, String> {
+    let (stored, held) = normalized_probe_pair(stored, held)?;
+    if stored == held {
+        return Ok(ProbeComparison {
+            same: true,
+            differences: Vec::new(),
+            truncated: false,
+        });
+    }
+    let mut differences = Vec::new();
+    let mut truncated = false;
+    collect_probe_differences(
+        &stored,
+        &held,
+        &mut Vec::new(),
+        false,
+        &mut differences,
+        &mut truncated,
+    );
+    Ok(ProbeComparison {
+        same: false,
+        differences,
+        truncated,
+    })
+}
+
+fn normalized_probe_pair(
+    stored: &str,
+    held: &str,
+) -> Result<(serde_json::Value, serde_json::Value), String> {
     let mut stored = normalized_probe_document(stored)?;
     let mut held = normalized_probe_document(held)?;
     // Before the scanner requested -show_chapters, omission meant unmeasured,
@@ -576,7 +954,7 @@ pub(crate) fn probes_describe_same_input(stored: &str, held: &str) -> Result<boo
         }
     }
     ignore_optional_stream_field_omissions(&mut stored, &mut held);
-    Ok(stored == held)
+    Ok((stored, held))
 }
 
 /// Which pacing flags this ffmpeg understands. `-readrate` landed in 5.1 and
@@ -1922,6 +2300,345 @@ async fn probe_burst() -> Result<Duration, String> {
 
 #[cfg(test)]
 mod tests {
+    /// Admission as a boolean. Production reads the richer comparison; these
+    /// regressions are about the verdict, which must stay identical.
+    fn probes_describe_same_input(stored: &str, held: &str) -> Result<bool, String> {
+        Ok(super::compare_probe_documents(stored, held)?.same)
+    }
+
+    /// Wicked's track arrangement: 4K HEVC, a default TrueHD Atmos track, a
+    /// second E-AC-3 track, and two AC-3 tracks. Only the two Atmos-capable
+    /// codecs have a derived profile a newer reporter can add.
+    fn atmos_capable_probe(
+        truehd_profile: Option<serde_json::Value>,
+        eac3_profile: Option<serde_json::Value>,
+    ) -> String {
+        let mut document = serde_json::json!({
+            "streams": [
+                {"index": 0, "codec_type": "video", "codec_name": "hevc",
+                 "width": 3840, "height": 2160, "r_frame_rate": "24000/1001"},
+                {"index": 1, "codec_type": "audio", "codec_name": "truehd",
+                 "channels": 8, "sample_rate": "48000", "channel_layout": "7.1"},
+                {"index": 2, "codec_type": "audio", "codec_name": "eac3",
+                 "channels": 6, "sample_rate": "48000", "channel_layout": "5.1(side)"},
+                {"index": 3, "codec_type": "audio", "codec_name": "ac3", "channels": 6},
+                {"index": 4, "codec_type": "audio", "codec_name": "ac3", "channels": 2}
+            ],
+            "chapters": [],
+            "format": {"filename": "/media/library/w.mkv", "nb_streams": 5,
+                       "duration": "9360.000000", "size": "77309411328"}
+        });
+        if let Some(profile) = truehd_profile {
+            document["streams"][1]["profile"] = profile;
+        }
+        if let Some(profile) = eac3_profile {
+            document["streams"][2]["profile"] = profile;
+        }
+        document.to_string()
+    }
+
+    fn eac3_atmos() -> serde_json::Value {
+        serde_json::json!("Dolby Digital Plus + Dolby Atmos")
+    }
+
+    fn truehd_atmos() -> serde_json::Value {
+        serde_json::json!("Dolby TrueHD + Dolby Atmos")
+    }
+
+    /// The reported incident. A July scan omitted `profile` on the E-AC-3
+    /// track; the playback node's newer FFprobe derives the Atmos name from
+    /// the extension type A flag. Nothing about the file changed, so the
+    /// encoded session must be admitted — in either direction, because a
+    /// replicated catalog can be newer than the node that reads it.
+    #[test]
+    fn held_probe_comparison_admits_the_legacy_eac3_atmos_profile_omission() {
+        let legacy = atmos_capable_probe(None, None);
+        let current = atmos_capable_probe(Some(truehd_atmos()), Some(eac3_atmos()));
+        assert!(probes_describe_same_input(&legacy, &current).expect("legacy scan admitted"));
+        assert!(probes_describe_same_input(&current, &legacy).expect("newer catalog admitted"));
+        let eac3_only = atmos_capable_probe(None, Some(eac3_atmos()));
+        assert!(probes_describe_same_input(&legacy, &eac3_only).expect("E-AC-3 alone"));
+        assert!(probes_describe_same_input(&eac3_only, &legacy).expect("E-AC-3 alone reversed"));
+        let truehd_only = atmos_capable_probe(Some(truehd_atmos()), None);
+        assert!(probes_describe_same_input(&legacy, &truehd_only).expect("TrueHD alone"));
+        assert!(probes_describe_same_input(&current, &current).expect("identical reports"));
+    }
+
+    /// The exception admits one measured omission and nothing more. Two
+    /// reported profiles are always compared, and "missing" is not null, an
+    /// empty string, a number, or a name nobody measured.
+    #[test]
+    fn held_probe_comparison_refuses_profile_differences_outside_the_exception() {
+        let legacy = atmos_capable_probe(None, None);
+        let atmos = atmos_capable_probe(None, Some(eac3_atmos()));
+        let plain = atmos_capable_probe(None, Some(serde_json::json!("Dolby Digital Plus")));
+        assert!(!probes_describe_same_input(&atmos, &plain).expect("reported disagreement"));
+        assert!(!probes_describe_same_input(&plain, &atmos).expect("reported disagreement"));
+        for reported in [
+            serde_json::Value::Null,
+            serde_json::json!(""),
+            serde_json::json!(5),
+            serde_json::json!("Dolby Digital Plus + Atmos"),
+            truehd_atmos(),
+        ] {
+            let held = atmos_capable_probe(None, Some(reported.clone()));
+            assert!(
+                !probes_describe_same_input(&legacy, &held).expect("compare probes"),
+                "{reported} must not read as the measured omission"
+            );
+            assert!(
+                !probes_describe_same_input(&held, &legacy).expect("compare probes"),
+                "{reported} must not read as the measured omission, reversed"
+            );
+        }
+    }
+
+    /// The pairing is by codec and by an explicit, equal, non-negative integer
+    /// index. An Atmos name on any other codec, or a stream list that moved,
+    /// buys nothing.
+    #[test]
+    fn held_probe_comparison_confines_the_atmos_exception_to_its_codecs_and_indices() {
+        let base: serde_json::Value =
+            serde_json::from_str(&atmos_capable_probe(None, None)).expect("fixture");
+        for (at, codec_name, profile) in [
+            (3usize, "ac3", "Dolby Digital Plus + Dolby Atmos"),
+            (3, "aac", "Dolby Digital Plus + Dolby Atmos"),
+            (3, "eac3", "Dolby TrueHD + Dolby Atmos"),
+            (0, "hevc", "Dolby TrueHD + Dolby Atmos"),
+        ] {
+            let mut stored = base.clone();
+            stored["streams"][at]["codec_name"] = serde_json::json!(codec_name);
+            let mut held = stored.clone();
+            held["streams"][at]["profile"] = serde_json::json!(profile);
+            assert!(
+                !probes_describe_same_input(&stored.to_string(), &held.to_string())
+                    .expect("compare probes"),
+                "{codec_name} must not earn the Atmos exception"
+            );
+        }
+        for broken in [
+            serde_json::Value::Null,
+            serde_json::json!(-1),
+            serde_json::json!("2"),
+            serde_json::json!(2.0),
+        ] {
+            let mut stored = base.clone();
+            let mut held = base.clone();
+            held["streams"][2]["profile"] = eac3_atmos();
+            stored["streams"][2]["index"] = broken.clone();
+            held["streams"][2]["index"] = broken.clone();
+            assert!(
+                !probes_describe_same_input(&stored.to_string(), &held.to_string())
+                    .expect("compare probes"),
+                "index {broken} is not an explicit pairing"
+            );
+        }
+        let mut unindexed = base.clone();
+        unindexed["streams"][2]
+            .as_object_mut()
+            .expect("stream")
+            .remove("index");
+        let mut unindexed_held = unindexed.clone();
+        unindexed_held["streams"][2]["profile"] = eac3_atmos();
+        assert!(
+            !probes_describe_same_input(&unindexed.to_string(), &unindexed_held.to_string())
+                .expect("compare probes")
+        );
+        let mut renumbered = base.clone();
+        renumbered["streams"][2]["profile"] = eac3_atmos();
+        renumbered["streams"][2]["index"] = serde_json::json!(5);
+        assert!(!probes_describe_same_input(
+            &atmos_capable_probe(None, None),
+            &renumbered.to_string()
+        )
+        .expect("compare probes"));
+        let mut reordered = base.clone();
+        reordered["streams"][2]["profile"] = eac3_atmos();
+        let streams = reordered["streams"].as_array_mut().expect("streams");
+        streams.swap(1, 2);
+        assert!(!probes_describe_same_input(
+            &atmos_capable_probe(None, None),
+            &reordered.to_string()
+        )
+        .expect("compare probes"));
+    }
+
+    /// Everything the encoded recipe actually depends on still refuses, with
+    /// the admitted omission present at the same time.
+    #[test]
+    fn held_probe_comparison_still_refuses_media_changes_beside_the_atmos_omission() {
+        let legacy = atmos_capable_probe(None, None);
+        let current: serde_json::Value = serde_json::from_str(&atmos_capable_probe(
+            Some(truehd_atmos()),
+            Some(eac3_atmos()),
+        ))
+        .expect("fixture");
+        assert!(probes_describe_same_input(&legacy, &current.to_string()).expect("control"));
+        for (pointer, replacement) in [
+            ("/streams/2/channels", serde_json::json!(8)),
+            ("/streams/2/sample_rate", serde_json::json!("44100")),
+            ("/streams/2/channel_layout", serde_json::json!("7.1")),
+            ("/streams/2/codec_name", serde_json::json!("ac3")),
+            ("/streams/2/codec_type", serde_json::json!("data")),
+            ("/streams/0/width", serde_json::json!(1920)),
+            ("/streams/0/height", serde_json::json!(1080)),
+            ("/streams/0/r_frame_rate", serde_json::json!("30000/1001")),
+            ("/streams/0/codec_name", serde_json::json!("h264")),
+            ("/format/duration", serde_json::json!("9000.000000")),
+            ("/format/size", serde_json::json!("77309411329")),
+        ] {
+            let mut held = current.clone();
+            *held.pointer_mut(pointer).expect(pointer) = replacement;
+            assert!(
+                !probes_describe_same_input(&legacy, &held.to_string()).expect("compare probes"),
+                "{pointer} is a measured media fact"
+            );
+        }
+        let mut fewer = current.clone();
+        fewer["streams"].as_array_mut().expect("streams").pop();
+        assert!(!probes_describe_same_input(&legacy, &fewer.to_string()).expect("track count"));
+        let mut chaptered = current.clone();
+        chaptered["chapters"] = serde_json::json!([
+            {"id": 0, "start_time": "0.000000", "end_time": "60.000000"}
+        ]);
+        assert!(
+            !probes_describe_same_input(&legacy, &chaptered.to_string()).expect("added chapter")
+        );
+    }
+
+    /// A refusal has to be diagnosable without dumping a probe into a log.
+    #[test]
+    fn held_probe_comparison_names_the_normalized_field_that_refused() {
+        let legacy = atmos_capable_probe(None, None);
+        let mut held: serde_json::Value = serde_json::from_str(&atmos_capable_probe(
+            Some(truehd_atmos()),
+            Some(eac3_atmos()),
+        ))
+        .expect("fixture");
+        held["streams"][0]["width"] = serde_json::json!(1920);
+        let comparison =
+            super::compare_probe_documents(&legacy, &held.to_string()).expect("compare probes");
+        assert!(!comparison.same);
+        assert!(!comparison.truncated);
+        assert_eq!(
+            comparison.differences,
+            vec![super::ProbeDifference {
+                path: "/streams/0/width".to_string(),
+                kind: super::ProbeDifferenceKind::Value,
+            }]
+        );
+        assert_eq!(comparison.rendered_differences(), "/streams/0/width value");
+        // Removing the deployed exception is what this whole change is about:
+        // with it in place the E-AC-3 profile is not a difference at all.
+        let admitted = super::compare_probe_documents(
+            &legacy,
+            &atmos_capable_probe(Some(truehd_atmos()), Some(eac3_atmos())),
+        )
+        .expect("compare probes");
+        assert!(admitted.same);
+        assert!(admitted.differences.is_empty());
+        // The four kinds are distinguishable.
+        let mut typed = held.clone();
+        typed["streams"][0]["width"] = serde_json::json!("3840");
+        let kinds = super::compare_probe_documents(&legacy, &typed.to_string())
+            .expect("compare probes")
+            .differences;
+        assert_eq!(kinds[0].kind, super::ProbeDifferenceKind::Type);
+        let mut shorter = held.clone();
+        shorter["streams"].as_array_mut().expect("streams").pop();
+        assert_eq!(
+            super::compare_probe_documents(&legacy, &shorter.to_string())
+                .expect("compare probes")
+                .differences[0],
+            super::ProbeDifference {
+                path: "/streams".to_string(),
+                kind: super::ProbeDifferenceKind::Length,
+            }
+        );
+        let mut absent = held.clone();
+        absent["streams"][0]
+            .as_object_mut()
+            .expect("stream")
+            .remove("width");
+        assert_eq!(
+            super::compare_probe_documents(&legacy, &absent.to_string())
+                .expect("compare probes")
+                .differences[0]
+                .kind,
+            super::ProbeDifferenceKind::Missing
+        );
+    }
+
+    /// The diagnostic is written to an operator log, so it may never carry a
+    /// title, a pathname, a private container tag name, or an unbounded list.
+    #[test]
+    fn held_probe_comparison_diagnostics_stay_bounded_and_carry_no_private_text() {
+        let base: serde_json::Value =
+            serde_json::from_str(&atmos_capable_probe(None, None)).expect("fixture");
+        let mut stored = base.clone();
+        stored["format"]["tags"] = serde_json::json!({
+            "title": "Wicked (2024) Private Cut",
+            "COMPANY_NAME": "a private label"
+        });
+        let mut held = base.clone();
+        held["format"]["tags"] = serde_json::json!({
+            "title": "Wicked (2024) Other Cut",
+            "COMPANY_NAME": "a different private label"
+        });
+        let comparison = super::compare_probe_documents(&stored.to_string(), &held.to_string())
+            .expect("compare probes");
+        assert!(!comparison.same);
+        assert!(!comparison.differences.is_empty());
+        for difference in &comparison.differences {
+            assert_eq!(difference.path, "/format/tags/<field>", "{difference:?}");
+        }
+        let rendered = comparison.rendered_differences();
+        for secret in ["Wicked", "title", "COMPANY_NAME", "private", "/media/"] {
+            assert!(!rendered.contains(secret), "{rendered} leaked {secret}");
+        }
+        // An unknown field a future FFprobe adds is named by category only.
+        let mut many_stored = base.clone();
+        let mut many_held = base.clone();
+        for at in 0..12 {
+            let key = format!("some_future_field_{at}");
+            many_stored["streams"][0][key.as_str()] = serde_json::json!(at);
+            many_held["streams"][0][key.as_str()] = serde_json::json!(at + 1);
+        }
+        let many = super::compare_probe_documents(&many_stored.to_string(), &many_held.to_string())
+            .expect("compare probes");
+        assert_eq!(many.differences.len(), super::PROBE_DIFFERENCE_LIMIT);
+        assert!(many.truncated);
+        for difference in &many.differences {
+            assert_eq!(difference.path, "/streams/0/<unknown-field>");
+        }
+        assert!(many.rendered_differences().ends_with("…more"));
+        // A pathological nesting depth cannot grow a log line without bound.
+        let mut deep_leaf = serde_json::json!("leaf");
+        let mut deep_other = serde_json::json!("other leaf");
+        for _ in 0..40 {
+            deep_leaf = serde_json::json!({"a_private_nested_name": deep_leaf});
+            deep_other = serde_json::json!({"a_private_nested_name": deep_other});
+        }
+        let mut deep_stored = base.clone();
+        deep_stored["format"]["tags"] = serde_json::json!({"chain": deep_leaf});
+        let mut deep_held = base.clone();
+        deep_held["format"]["tags"] = serde_json::json!({"chain": deep_other});
+        let deep_comparison =
+            super::compare_probe_documents(&deep_stored.to_string(), &deep_held.to_string())
+                .expect("compare probes");
+        assert!(!deep_comparison.same);
+        assert!(!deep_comparison.differences.is_empty());
+        for difference in &deep_comparison.differences {
+            assert!(
+                difference.path.chars().count() <= super::PROBE_PATH_MAX_CHARS,
+                "{} is unbounded",
+                difference.path
+            );
+            assert!(!difference.path.contains("a_private_nested_name"));
+            assert!(!difference.path.contains("chain"));
+        }
+    }
+
     use super::*;
 
     #[tokio::test]
