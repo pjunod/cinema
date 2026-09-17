@@ -1,7 +1,8 @@
 # Local library search and reusable classification
 
 **Status:** [Draft PR #350](http://192.168.4.7:3000/noirr/plurx/pulls/350) open.
-Final adversarial review complete; both findings addressed. Fast lane pending. Not deployed.
+Final adversarial review complete; both findings addressed.
+Final fast-lane and merge state are tracked on PR #350. Not deployed.
 **Updated:** 2026-09-17.
 
 ## Delivery status
@@ -15,7 +16,7 @@ Final adversarial review complete; both findings addressed. Fast lane pending. N
 | Agent workspace isolation | Standalone clone at `/private/tmp/plurx-search-agent` |
 | Commits and combined PR | PR #350 open; implementation committed |
 | Final adversarial review | Complete; inherited genre and missing index repairs addressed |
-| Fast lane and main merge | Ready for final validation |
+| Fast lane and main merge | [Live PR checks and merge state](http://192.168.4.7:3000/noirr/plurx/pulls/350) |
 
 The owner requested one batched PR, no repeated unit-test runs, one final
 adversarial review, then the fast lane and merge. That order applies from
