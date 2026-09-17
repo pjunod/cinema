@@ -6333,6 +6333,72 @@ fn delay_next_preparation_settlement(incarnation_id: &str, delay: Duration) {
         .insert(incarnation_id.to_owned(), delay);
 }
 
+/// Test-only seam at a preparation candidate's planning step.
+///
+/// `plan_preparation_candidate` is the last thing a candidate does before it
+/// can reach either the ledger or the registry, so the window in which a
+/// client's exchange finds neither is the one this widens far enough to drive
+/// real exchanges through. The refusal half stands in for a candidate that
+/// turns out to be unplannable, without needing a source row contrived to make
+/// the planner fail for some unrelated reason.
+#[cfg(test)]
+fn preparation_planning_faults(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, (Duration, bool)>> {
+    static FAULTS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, (Duration, bool)>>,
+    > = std::sync::OnceLock::new();
+    FAULTS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn fault_preparation_planning(playback_id: &str, delay: Duration, refuse: bool) {
+    preparation_planning_faults()
+        .lock()
+        .expect("preparation planning faults")
+        .insert(playback_id.to_owned(), (delay, refuse));
+}
+
+#[cfg(test)]
+fn take_preparation_planning_fault(playback_id: &str) -> Option<(Duration, bool)> {
+    preparation_planning_faults()
+        .lock()
+        .expect("preparation planning faults")
+        .remove(playback_id)
+}
+
+/// Test-only seam immediately before `register_active_preparation`.
+///
+/// Production has no suspension point between a staging task's last await and
+/// that registration, which is exactly why the supersession flag is read once
+/// more *after* it. A test cannot land a supersession inside a window that does
+/// not exist, so this makes one: the task parks here, the ordinary
+/// `cancel_preparations_for_superseded_predecessor` runs, and the read after
+/// registration is then the only thing in the process that can still see it.
+#[cfg(test)]
+fn preparation_registration_delays(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, Duration>> {
+    static DELAYS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Duration>>,
+    > = std::sync::OnceLock::new();
+    DELAYS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn delay_preparation_registration(playback_id: &str, delay: Duration) {
+    preparation_registration_delays()
+        .lock()
+        .expect("preparation registration delays")
+        .insert(playback_id.to_owned(), delay);
+}
+
+#[cfg(test)]
+fn take_preparation_registration_delay(playback_id: &str) -> Option<Duration> {
+    preparation_registration_delays()
+        .lock()
+        .expect("preparation registration delays")
+        .remove(playback_id)
+}
+
 /// Resolve the staged successor this predecessor may announce now.
 ///
 /// The ledger is the wanted-work authority: a route at the publication
@@ -8370,6 +8436,16 @@ async fn process_preparation_candidate(
         crate::playback_control::record_preparation_staged(false);
         return;
     }
+    // Test-only. The refusal arm takes the same exit as the `Err` arm below,
+    // so a forced refusal is indistinguishable from an unplannable candidate.
+    #[cfg(test)]
+    if let Some((delay, refuse)) = take_preparation_planning_fault(&route.playback_id) {
+        tokio::time::sleep(delay).await;
+        if refuse {
+            crate::playback_control::record_preparation_staged(false);
+            return;
+        }
+    }
     let candidate = match plan_preparation_candidate(
         &state,
         &recipe,
@@ -8875,6 +8951,13 @@ async fn stage_prepared_successor_with_prime(
             purpose,
             cancelled: tokio_util::sync::CancellationToken::new(),
         };
+        // Test-only: see `preparation_registration_delays`. This is the only
+        // way to put a supersession into the window the comment below names,
+        // because in production that window contains no await at all.
+        #[cfg(test)]
+        if let Some(delay) = take_preparation_registration_delay(&preparation.playback_id) {
+            tokio::time::sleep(delay).await;
+        }
         // Publish cancellation ownership before the Store future is polled.
         // A wait or settings disable may then cancel an in-flight reservation;
         // the detached reservation owner reconciles a late commit exactly.
@@ -18059,6 +18142,24 @@ mod tests {
     async fn staging_fixture(
         dir: &std::path::Path,
     ) -> (HlsDeliveryFixture, String, MediaSessionRoute) {
+        staging_fixture_for_playback(dir, "stage-player").await
+    }
+
+    /// A playback id nothing else in the process shares.
+    ///
+    /// The pending-candidate map and the active-successor registry are both
+    /// process-global and keyed by playback id alone, while `staging_fixture`'s
+    /// own `stage-player` is shared by every test that uses it. A test that read
+    /// either map under that name would be reading other tests' work, and would
+    /// pass or fail on whatever else happened to be running.
+    fn unique_playback_id(label: &str) -> String {
+        format!("{label}-{}", uuid::Uuid::new_v4())
+    }
+
+    async fn staging_fixture_for_playback(
+        dir: &std::path::Path,
+        playback_id: &str,
+    ) -> (HlsDeliveryFixture, String, MediaSessionRoute) {
         let session_id = uuid::Uuid::new_v4().to_string();
         let fixture = HlsDeliveryFixture::publish(dir, &session_id).await;
         let user = fixture
@@ -18070,7 +18171,7 @@ mod tests {
         let predecessor_request = crate::transcode::SessionRequest {
             control_sequence: None,
             file_id: fixture.file_id(),
-            playback_id: "stage-player".to_owned(),
+            playback_id: playback_id.to_owned(),
             request_id: Some(incarnation_id.clone()),
             automatic: true,
             previous_session_id: None,
@@ -18127,7 +18228,7 @@ mod tests {
                 incarnation_id,
                 session_id: session_id.clone(),
                 user_id: user.id,
-                playback_id: "stage-player".to_owned(),
+                playback_id: playback_id.to_owned(),
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
                 request_id: None,
@@ -20824,6 +20925,1009 @@ mod tests {
         let expected_seconds = FIXTURE_DURATION_MS as f64 / 1_000.0;
         assert!((start_seconds - expected_seconds).abs() < 0.001);
         assert!((bootstrap_start_seconds - expected_seconds).abs() < 0.001);
+    }
+
+    // -----------------------------------------------------------------
+    // M0 — `delivery.preparation` and supersession cancellation.
+    // -----------------------------------------------------------------
+
+    /// One `plurx_playback_preparation_cancelled_total` bucket.
+    ///
+    /// Read out of the rendered exposition rather than through a private
+    /// accessor, because there is no snapshot for this counter and because
+    /// reading the text also proves the block is emitted under the label a
+    /// dashboard would query. The counter is process-global and these tests run
+    /// in parallel with each other, so every assertion against it is "grew",
+    /// never "grew by one".
+    fn cancelled_total(reason: &str) -> u64 {
+        let needle = format!("plurx_playback_preparation_cancelled_total{{reason=\"{reason}\"}} ");
+        crate::playback_control::prometheus()
+            .lines()
+            .find_map(|line| line.strip_prefix(needle.as_str()))
+            .expect("the cancelled counter names this reason")
+            .trim()
+            .parse()
+            .expect("a counter value")
+    }
+
+    /// The tri-state this milestone added, as a client reads it off the wire.
+    fn preparation_state(body: &serde_json::Value) -> String {
+        body["delivery"]["preparation"]
+            .as_str()
+            .expect("a build that evaluated the slot must answer the field")
+            .to_owned()
+    }
+
+    async fn accepted_exchange(
+        fixture: &HlsDeliveryFixture,
+        route: &MediaSessionRoute,
+        request: &crate::playback_control::ControlRequestV1,
+    ) -> serde_json::Value {
+        let (status, body) = control_body(
+            control_local_inner(
+                &fixture.state,
+                route,
+                request.clone(),
+                unix_ms().saturating_add(4_000),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "exchange refused: {body}");
+        body
+    }
+
+    /// The executor `stage_prepared_successor_with_prime` builds, built the
+    /// same way, so a registered entry settles through the real store calls.
+    async fn preparation_executor(
+        fixture: &HlsDeliveryFixture,
+        session_id: &str,
+        route: &MediaSessionRoute,
+    ) -> crate::playback_control::PreparationExecutor {
+        let gate = fixture
+            .state
+            .transcode
+            .session_preparation_gate(session_id)
+            .await
+            .expect("the live predecessor owns a preparation gate");
+        crate::playback_control::PreparationExecutor::new(
+            Arc::clone(&fixture.state.store),
+            gate,
+            route.user_id,
+            route.playback_id.clone(),
+            route.owner_node_id.clone(),
+            route.owner_epoch,
+        )
+    }
+
+    /// A preparation row of the shape the real staging path writes.
+    fn preparation_row(
+        fixture: &HlsDeliveryFixture,
+        route: &MediaSessionRoute,
+        staged_incarnation_id: &str,
+    ) -> plurx_core::domain::MediaSessionPreparation {
+        let staged_session_id = uuid::Uuid::new_v4().to_string();
+        let staged_request = crate::transcode::SessionRequest {
+            file_id: fixture.file_id(),
+            playback_id: route.playback_id.clone(),
+            request_id: Some(staged_incarnation_id.to_owned()),
+            ..staged_candidate_request()
+        };
+        let response = StartResponse {
+            session_id: staged_session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{staged_session_id}/index.m3u8"),
+            duration_ms: Some(6_000_000),
+            start_seconds: 0.0,
+            media_origin_ms: Some(0),
+            height: 1080,
+            encoder: "staged".to_owned(),
+            vod: true,
+            ladder: Vec::new(),
+            prior_kbps: None,
+            delivered_dynamic_range: Some("sdr".to_owned()),
+            delivered_dolby_vision_profile: None,
+            control: crate::playback_control::ControlBootstrap::new(
+                &staged_session_id,
+                staged_incarnation_id,
+                1,
+                crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+            ),
+            plan_notes: Vec::new(),
+        };
+        let now_ms = unix_ms();
+        plurx_core::domain::MediaSessionPreparation {
+            expected_desired_revision: None,
+            incarnation_id: staged_incarnation_id.to_owned(),
+            session_id: staged_session_id,
+            user_id: route.user_id,
+            playback_id: route.playback_id.clone(),
+            expected_predecessor_incarnation_id: route.incarnation_id.clone(),
+            expected_predecessor_owner_node_id: route.owner_node_id.clone(),
+            expected_predecessor_owner_epoch: route.owner_epoch,
+            request_fingerprint: staged_request.durable_intent_fingerprint(route.user_id),
+            owner_node_id: fixture.state.node_id.clone(),
+            recipe_json: serde_json::to_string(&RemoteStartRequest {
+                protocol_version: crate::media_pool::PROTOCOL_VERSION,
+                incarnation_id: staged_incarnation_id.to_owned(),
+                user_id: route.user_id,
+                source_size: 1,
+                source_mtime: 1,
+                typeless_playlist: false,
+                library_channel: None,
+                request: staged_request,
+            })
+            .expect("recipe"),
+            response_json: serde_json::to_string(&response).expect("response"),
+            media_origin_ms: 0,
+            now_ms,
+            deadline_ms: now_ms.saturating_add(30_000),
+        }
+    }
+
+    /// A reserved-and-registered successor: the durable row exists and the
+    /// registry names it, which is the state a real candidate is in between
+    /// `register_active_preparation` and its commit.
+    ///
+    /// `register_test_preparation` rather than `stage_prepared_successor`
+    /// deliberately: the stage-only helper never registers, so a cancellation
+    /// test built on it would be cancelling an empty registry and would pass
+    /// with the edge under test deleted.
+    async fn registered_preparation(
+        fixture: &HlsDeliveryFixture,
+        session_id: &str,
+        route: &MediaSessionRoute,
+    ) -> (
+        plurx_core::domain::MediaSessionPreparation,
+        crate::playback_control::PreparationExecutor,
+        tokio_util::sync::CancellationToken,
+    ) {
+        let executor = preparation_executor(fixture, session_id, route).await;
+        let preparation = preparation_row(fixture, route, &uuid::Uuid::new_v4().to_string());
+        assert!(
+            executor
+                .reserve(&preparation)
+                .await
+                .expect("reserve the successor's durable row"),
+            "the fixture must be able to reserve, or the settlement below has nothing to abort"
+        );
+        let cancelled = register_test_preparation(
+            fixture.state.clone(),
+            executor.clone(),
+            preparation.clone(),
+            PreparationPurpose::SelectionChange,
+        );
+        assert!(
+            active_preparation(&preparation.incarnation_id).is_some(),
+            "the registry must actually name this successor before anything cancels it"
+        );
+        (preparation, executor, cancelled)
+    }
+
+    /// The route a reopen activates: a second incarnation of the same playback,
+    /// fenced on the one it replaces.
+    async fn activate_superseding_route(
+        fixture: &HlsDeliveryFixture,
+        predecessor: &MediaSessionRoute,
+    ) -> MediaSessionRoute {
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        let request = crate::transcode::SessionRequest {
+            file_id: fixture.file_id(),
+            playback_id: predecessor.playback_id.clone(),
+            request_id: Some(incarnation_id.clone()),
+            previous_session_id: Some(predecessor.session_id.clone()),
+            ..staged_candidate_request()
+        };
+        let recipe = RemoteStartRequest {
+            protocol_version: crate::media_pool::PROTOCOL_VERSION,
+            incarnation_id: incarnation_id.clone(),
+            user_id: predecessor.user_id,
+            source_size: 1,
+            source_mtime: 1,
+            typeless_playlist: false,
+            library_channel: None,
+            request: request.clone(),
+        };
+        let start = StartResponse {
+            session_id: session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            duration_ms: Some(6_000_000),
+            start_seconds: 0.0,
+            media_origin_ms: Some(0),
+            height: 1080,
+            encoder: "test".to_owned(),
+            vod: true,
+            ladder: Vec::new(),
+            prior_kbps: None,
+            delivered_dynamic_range: Some("sdr".to_owned()),
+            delivered_dolby_vision_profile: None,
+            control: crate::playback_control::ControlBootstrap::new(
+                &session_id,
+                &incarnation_id,
+                1,
+                crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+            ),
+            plan_notes: Vec::new(),
+        };
+        let now_ms = unix_ms();
+        activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                recovery_epoch: String::new(),
+                expected_desired_revision: None,
+                incarnation_id,
+                session_id,
+                user_id: predecessor.user_id,
+                playback_id: predecessor.playback_id.clone(),
+                expected_predecessor_incarnation_id: Some(predecessor.incarnation_id.clone()),
+                fence_predecessor: true,
+                request_id: None,
+                request_fingerprint: request.durable_intent_fingerprint(predecessor.user_id),
+                owner_node_id: fixture.state.node_id.clone(),
+                lease_expires_at_ms: now_ms.saturating_add(900_000),
+                recipe_json: serde_json::to_string(&recipe).expect("recipe"),
+                response_json: serde_json::to_string(&start).expect("response"),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms,
+            },
+        )
+        .await
+    }
+
+    /// Run the supersession cancel at its real call site.
+    ///
+    /// `settle_activation_predecessor` is the one place M0 calls it, and it
+    /// calls it above the `predecessor_incarnation` early return, so a plain
+    /// create reaches it too. Passing `None` here is a create that named no
+    /// predecessor; the function then returns as soon as the cancel has run.
+    async fn settle_activation(
+        fixture: &HlsDeliveryFixture,
+        predecessor_incarnation: Option<String>,
+        successor: &MediaSessionRoute,
+    ) -> Result<(), ApiError> {
+        let authority = crate::serving_fence::ServingAuthority::always_ready();
+        let admitted = authority.admit().expect("an admitted serving generation");
+        settle_activation_predecessor(
+            &fixture.state,
+            predecessor_incarnation,
+            successor.clone(),
+            authority,
+            admitted,
+            None,
+        )
+        .await
+    }
+
+    /// Wait for a settlement to have taken the successor's durable row.
+    async fn await_aborted_preparation_row(
+        fixture: &HlsDeliveryFixture,
+        staged_incarnation_id: &str,
+    ) -> MediaSessionRoute {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(row) = fixture
+                    .state
+                    .store
+                    .media_session_route_by_incarnation(staged_incarnation_id)
+                    .await
+                    .expect("staged route read")
+                {
+                    if row.state == "ended" {
+                        break row;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the settlement aborted or discarded the durable row")
+    }
+
+    /// The dispatching exchange answers `staging` and `action: none` together.
+    ///
+    /// Both halves in the same response are the point. `action: none` on its
+    /// own is what the client already saw before this milestone, and a client
+    /// that is told only that has no reason not to reopen — which is the reopen
+    /// the whole effort exists to retire. The first exchange is asserted too,
+    /// so the test cannot pass on a build that answers `staging` always.
+    #[tokio::test]
+    async fn delivery_preparation_says_staging_on_the_exchange_that_dispatched() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("preparation-dispatch");
+        let (fixture, _session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        fixture.set_delivered_bps_for_test(10_000_000);
+
+        let mut request = preparing_control_request(&route);
+        let opening = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(
+            preparation_state(&opening),
+            "none",
+            "the session's own opening ask is not a change and builds nothing",
+        );
+
+        pace_control_exchanges().await;
+        request.sequence = 2;
+        request.capabilities = None;
+        request.selection.quality =
+            crate::playback_control::QualitySelection::Manual { height: 1080 };
+        let dispatched = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(
+            dispatched["action"]["type"], "none",
+            "the exchange that dispatches announces nothing — the stage is detached",
+        );
+        assert_eq!(
+            preparation_state(&dispatched),
+            "staging",
+            "and the same response has to say so, or the client reopens",
+        );
+
+        await_preparation_candidate(&route).await;
+    }
+
+    /// The window `PendingCandidateGuard` exists for.
+    ///
+    /// Between the dispatch and the registry entry a candidate does a settings
+    /// read, a source read and its planning, and an exchange landing in there
+    /// has neither a dispatch of its own nor an entry to read. This parks a
+    /// candidate in that window for longer than two client polls and drives two
+    /// exchanges through it; deleting the pending-candidate clause from the
+    /// emit rule makes both of them answer `none`.
+    ///
+    /// Then two endings for the same window: a plan that fails, after which the
+    /// client must be told to stop waiting, and a supersession, after which the
+    /// task must exit through `record_preparation_staged(false)` having staged
+    /// nothing and left no marker.
+    #[tokio::test]
+    async fn delivery_preparation_stays_staging_while_the_candidate_is_planning() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("preparation-planning");
+        let (fixture, _session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        fixture.set_delivered_bps_for_test(10_000_000);
+
+        // Longer than the two 260 ms polls below, and it refuses at the end:
+        // this half of the test is about the window, not about what a
+        // successful plan produces.
+        fault_preparation_planning(&playback_id, std::time::Duration::from_millis(1_500), true);
+
+        let mut request = preparing_control_request(&route);
+        let _ = accepted_exchange(&fixture, &route, &request).await;
+
+        pace_control_exchanges().await;
+        request.sequence = 2;
+        request.capabilities = None;
+        request.selection.quality =
+            crate::playback_control::QualitySelection::Manual { height: 1080 };
+        let dispatched = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(preparation_state(&dispatched), "staging");
+
+        for sequence in 3..=4_u64 {
+            pace_control_exchanges().await;
+            request.sequence = sequence;
+            let polled = accepted_exchange(&fixture, &route, &request).await;
+            assert_eq!(
+                polled["action"]["type"], "none",
+                "exchange {sequence} has nothing to announce yet",
+            );
+            assert_eq!(
+                preparation_state(&polled),
+                "staging",
+                "exchange {sequence} landed while the candidate was still planning: \
+                 it dispatched nothing itself and no successor is registered, so only \
+                 the pending-candidate marker can answer for it",
+            );
+        }
+
+        await_preparation_candidate(&route).await;
+        assert!(
+            pending_candidate_for_playback(&playback_id).is_none(),
+            "the guard drops with the task, so the marker cannot outlive it",
+        );
+        pace_control_exchanges().await;
+        request.sequence = 5;
+        let after_failure = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(
+            preparation_state(&after_failure),
+            "none",
+            "a plan that failed leaves nothing being built, and a client waiting for a \
+             handoff that will never come must be told to stop",
+        );
+
+        // Same window, superseded instead of failed. A different height, so the
+        // ask is undispatched again and a second candidate is spawned.
+        fault_preparation_planning(&playback_id, std::time::Duration::from_millis(1_500), false);
+        pace_control_exchanges().await;
+        request.sequence = 6;
+        request.selection.quality =
+            crate::playback_control::QualitySelection::Manual { height: 720 };
+        let redispatched = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(preparation_state(&redispatched), "staging");
+
+        let refused_before = crate::playback_control::preparation_staged_snapshot().refused;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        cancel_preparations_for_superseded_predecessor(&playback_id, None);
+        await_preparation_candidate(&route).await;
+
+        assert!(
+            pending_candidate_for_playback(&playback_id).is_none(),
+            "the superseded candidate's marker goes with its guard",
+        );
+        assert!(
+            fixture
+                .state
+                .store
+                .staged_media_session_for_playback(route.user_id, &playback_id)
+                .await
+                .expect("ledger read")
+                .is_none(),
+            "a candidate superseded mid-flight must not reach the ledger",
+        );
+        assert!(
+            crate::playback_control::preparation_staged_snapshot().refused > refused_before,
+            "and it must exit through record_preparation_staged(false), not silently",
+        );
+    }
+
+    /// `offered` is a restatement of the action, not a second opinion about the
+    /// slot: the exchange that carries `Prepare` answers `offered`, and nothing
+    /// else in the emit rule is true at that moment — no dispatch, no pending
+    /// marker, no registered successor — so the answer can only come from the
+    /// action.
+    #[tokio::test]
+    async fn delivery_preparation_says_offered_with_the_prepare_action() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("preparation-offered");
+        let (fixture, session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        fixture
+            .state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &crate::transcode::SessionRequest {
+                playback_id: playback_id.clone(),
+                ..staged_candidate_request()
+            },
+            Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
+        )
+        .await;
+        assert!(
+            pending_candidate_for_playback(&playback_id).is_none()
+                && !has_active_preparation_for_playback(&playback_id),
+            "the staging helper registers nothing, so `offered` cannot come from `staging`'s sources",
+        );
+
+        let mut request = control_request(route.incarnation_id.clone());
+        request.supported_actions = Some(vec![
+            crate::playback_control::PREPARE_REPLACEMENT_ACTION.to_owned()
+        ]);
+        let announced = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(announced["action"]["type"], "prepare");
+        assert_eq!(preparation_state(&announced), "offered");
+    }
+
+    /// `none` on an empty slot, and `none` on an `end` — even with a successor
+    /// sitting in the ledger.
+    ///
+    /// The second half is the one worth having. `End`'s owner-local transaction
+    /// aborts whatever the session held, so the staged row is not work being
+    /// done for this ask however durable it looks; the identical state answers
+    /// `offered` on a non-terminal exchange, which
+    /// `delivery_preparation_says_offered_with_the_prepare_action` pins.
+    #[tokio::test]
+    async fn delivery_preparation_says_none_when_the_slot_is_empty() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let empty_playback = unique_playback_id("preparation-empty");
+        let (empty, _empty_session, empty_route) =
+            staging_fixture_for_playback(dir.path(), &empty_playback).await;
+        let idle = accepted_exchange(
+            &empty,
+            &empty_route,
+            &preparing_control_request(&empty_route),
+        )
+        .await;
+        assert_eq!(
+            preparation_state(&idle),
+            "none",
+            "nothing has been asked for and nothing is being built",
+        );
+
+        // A second fixture rather than a second exchange on the first: the End
+        // below is this session's only exchange, so nothing it is refused for
+        // could be a fence left behind by an earlier one.
+        let ending_playback = unique_playback_id("preparation-ending");
+        let (fixture, session_id, route) =
+            staging_fixture_for_playback(dir.path(), &ending_playback).await;
+        fixture
+            .state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &crate::transcode::SessionRequest {
+                playback_id: ending_playback.clone(),
+                ..staged_candidate_request()
+            },
+            Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
+        )
+        .await;
+        assert!(
+            fixture
+                .state
+                .store
+                .staged_media_session_for_playback(route.user_id, &ending_playback)
+                .await
+                .expect("ledger read")
+                .is_some(),
+            "the ledger has to hold a successor, or the End below proves nothing",
+        );
+
+        let mut ending = preparing_control_request(&route);
+        ending.demand = crate::playback_control::PlaybackDemand::End;
+        ending.render_state = crate::playback_control::RenderState::Ended;
+        ending.playback_rate = 0.0;
+        let ended = accepted_exchange(&fixture, &route, &ending).await;
+        assert_eq!(
+            preparation_state(&ended),
+            "none",
+            "End announces no successor and aborts the slot, so nothing is being built \
+             for this ask however durable the ledger row looks",
+        );
+    }
+
+    /// A predecessor that is superseded frees its successor.
+    ///
+    /// The edge M0 added: before it, a reopen cancelled nothing and the
+    /// speculative encoder ran to the 330 s deadline for nobody, or was torn
+    /// down by the reopen's own admission pressure and counted as a refusal.
+    #[tokio::test]
+    async fn superseding_the_predecessor_cancels_its_registered_preparation() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("preparation-superseded");
+        let (fixture, session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        let (preparation, _executor, cancelled) =
+            registered_preparation(&fixture, &session_id, &route).await;
+
+        let successor = activate_superseding_route(&fixture, &route).await;
+        let cancels_before = cancelled_total("predecessor_superseded");
+
+        // The activation names its predecessor, which is what a client that
+        // reopened through `previous_session_id` produces.
+        let _ = settle_activation(&fixture, Some(route.incarnation_id.clone()), &successor).await;
+
+        assert!(
+            active_preparation(&preparation.incarnation_id).is_none(),
+            "the registry entry must be gone",
+        );
+        assert!(
+            cancelled.is_cancelled(),
+            "the settlement must take ownership of the successor's cancellation token",
+        );
+        let aborted = await_aborted_preparation_row(&fixture, &preparation.incarnation_id).await;
+        assert_eq!(
+            aborted.terminal_reason.as_deref(),
+            Some("replaced"),
+            "the durable row must be aborted or discarded, not merely forgotten",
+        );
+        assert!(
+            cancelled_total("predecessor_superseded") > cancels_before,
+            "and the teardown must be attributable to the policy that ordered it",
+        );
+    }
+
+    /// The `keep` guard, run with an entry actually present.
+    ///
+    /// Every activation runs the supersession cancel, including the committed
+    /// successor's own. `keep` is that route's incarnation id, and without it
+    /// the one successor that must survive its predecessor's retirement is the
+    /// one this edge would tear down. Commit removes the entry first today, so
+    /// the guard is not load-bearing on the current ordering — which is exactly
+    /// why it has to be asserted against a registry that is not empty, or the
+    /// cancel would "succeed" because there was nothing there.
+    #[tokio::test]
+    async fn the_activating_successor_is_kept_by_the_supersession_cancel() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("preparation-kept");
+        let (fixture, session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        let successor = activate_superseding_route(&fixture, &route).await;
+
+        // Registered under the activating route's own incarnation: this is the
+        // committed successor, the single entry `keep` names.
+        let executor = preparation_executor(&fixture, &session_id, &route).await;
+        let preparation = preparation_row(&fixture, &route, &successor.incarnation_id);
+        let cancelled = register_test_preparation(
+            fixture.state.clone(),
+            executor,
+            preparation,
+            PreparationPurpose::SelectionChange,
+        );
+        assert!(
+            active_preparation(&successor.incarnation_id).is_some(),
+            "the guard is being exercised against a registry that names this successor",
+        );
+
+        settle_activation(&fixture, None, &successor)
+            .await
+            .expect("a create that names no predecessor settles immediately");
+
+        assert!(
+            active_preparation(&successor.incarnation_id).is_some(),
+            "the activating route's own successor must survive the cancel its activation ran",
+        );
+        assert!(
+            !cancelled.is_cancelled(),
+            "and no settlement may have been started for it",
+        );
+        let _ = take_active_preparation(&successor.incarnation_id);
+    }
+
+    /// A lifecycle check, not a guard mutation: nothing here is deleted to make
+    /// it fail. It pins that the ordinary commit-then-retire sequence leaves the
+    /// successor current and usable, which is the outcome every cancellation
+    /// edge added by this milestone has to stay out of the way of.
+    #[tokio::test]
+    async fn a_committed_successor_survives_the_predecessors_retirement() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("preparation-committed");
+        let (fixture, session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        fixture
+            .state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
+        stage_prepared_successor(
+            &fixture.state,
+            &session_id,
+            &route,
+            &staged_predecessor_recipe(&route),
+            &crate::transcode::SessionRequest {
+                playback_id: playback_id.clone(),
+                ..staged_candidate_request()
+            },
+            Some(&staged_source_file()),
+            AcceptedAsk {
+                film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                desired_digest: None,
+            },
+        )
+        .await;
+        let staged = fixture
+            .state
+            .store
+            .staged_media_session_for_playback(route.user_id, &playback_id)
+            .await
+            .expect("ledger read")
+            .expect("a successor is staged");
+
+        let mut request = control_request(route.incarnation_id.clone());
+        request.supported_actions = Some(vec![
+            crate::playback_control::PREPARE_REPLACEMENT_ACTION.to_owned()
+        ]);
+        let offered = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(offered["action"]["type"], "prepare");
+        let action_id = offered["action"]["action_id"]
+            .as_str()
+            .expect("Prepare action id")
+            .to_owned();
+
+        pace_control_exchanges().await;
+        request.sequence = 2;
+        request.capabilities = None;
+        request.acknowledgement = Some(crate::playback_control::ActionAcknowledgement {
+            action_id,
+            state: crate::playback_control::AcknowledgementState::Committed,
+            buffered_through_ms: None,
+            committed_media_origin_ms: offered["action"]["media_origin_ms"].as_i64(),
+            first_frame_unix_ms: Some(unix_ms()),
+        });
+        let committed_exchange = accepted_exchange(&fixture, &route, &request).await;
+        assert_eq!(committed_exchange["action"]["type"], "none");
+
+        // The predecessor retires. Before this milestone nothing cancelled a
+        // successor on a supersession; now several things can, and none of them
+        // may reach the one the client is already watching.
+        fixture
+            .state
+            .store
+            .end_media_session(&session_id, "superseded", unix_ms())
+            .await
+            .expect("retire the predecessor");
+
+        let current = fixture
+            .state
+            .store
+            .media_session_route_for_playback(route.user_id, &playback_id)
+            .await
+            .expect("current route")
+            .expect("the playback still has a pointer");
+        assert_eq!(
+            current.incarnation_id, staged.staged_incarnation_id,
+            "the committed successor is still the current generation",
+        );
+        assert_eq!(current.state, "active");
+        assert!(
+            control_start_response(&current).is_some(),
+            "and it is still usable: without a bootstrap its next exchange is a 404",
+        );
+    }
+
+    /// A plain create is a supersession too.
+    ///
+    /// M0 has one call site, at the top of `settle_activation_predecessor` and
+    /// above its `predecessor_incarnation` early return, rather than the two the
+    /// plan named. This is what that placement buys: a client that reopened
+    /// without naming its predecessor still frees the successor it abandoned.
+    /// Both states the cancel has to cover are checked — a registered entry, and
+    /// a candidate that has not reached the registry yet.
+    #[tokio::test]
+    async fn a_plain_create_for_the_playback_cancels_the_preparation() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("preparation-plain-create");
+        let (fixture, session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        let (preparation, _executor, cancelled) =
+            registered_preparation(&fixture, &session_id, &route).await;
+        let successor = activate_superseding_route(&fixture, &route).await;
+        assert_ne!(
+            successor.incarnation_id, preparation.incarnation_id,
+            "`keep` must not be what removes this entry",
+        );
+
+        settle_activation(&fixture, None, &successor)
+            .await
+            .expect("a create that names no predecessor settles immediately");
+
+        assert!(
+            active_preparation(&preparation.incarnation_id).is_none(),
+            "a create that named no predecessor still went around the handoff",
+        );
+        assert!(cancelled.is_cancelled());
+        let aborted = await_aborted_preparation_row(&fixture, &preparation.incarnation_id).await;
+        assert_eq!(aborted.terminal_reason.as_deref(), Some("replaced"));
+
+        // And the same create against a candidate that is still doing its Store
+        // reads, which has no registry entry to take.
+        let pending = PendingCandidateGuard::begin(&playback_id, "a-pending-digest");
+        assert_eq!(
+            pending_candidate_for_playback(&playback_id).as_deref(),
+            Some("a-pending-digest"),
+        );
+        settle_activation(&fixture, None, &successor)
+            .await
+            .expect("a create that names no predecessor settles immediately");
+        assert!(
+            pending.cancelled(),
+            "the pending candidate must observe the supersession at its next await",
+        );
+        assert!(
+            pending_candidate_for_playback(&playback_id).is_none(),
+            "and must stop reading as `staging` at once, before its task has unwound",
+        );
+    }
+
+    /// The window between a staging task's last await and its registration.
+    ///
+    /// The guard's own `cancelled()` checks cannot cover it: in production there
+    /// is no suspension point there, so a supersession landing in it is
+    /// invisible until the registry names the successor. The flag is read once
+    /// more immediately after `register_active_preparation`, and that read is
+    /// the only thing standing between a superseded successor and a full prime.
+    ///
+    /// The task is parked in that window by a `#[cfg(test)]` delay, because a
+    /// window with no await in it cannot otherwise be landed in; the
+    /// supersession itself goes through the ordinary cancel.
+    #[tokio::test]
+    async fn a_supersession_in_the_registration_window_still_frees_the_preparation() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let playback_id = unique_playback_id("preparation-register-window");
+        let (fixture, session_id, route) =
+            staging_fixture_for_playback(dir.path(), &playback_id).await;
+        fixture
+            .state
+            .transcode
+            .vod_for_test()
+            .install_http_test_session(&session_id, staged_source_file(), dir.path())
+            .await;
+
+        // The marker a real candidate would be holding at this point.
+        let pending = PendingCandidateGuard::begin(&playback_id, "register-window-digest");
+        delay_preparation_registration(&playback_id, std::time::Duration::from_millis(800));
+
+        let superseded_before = cancelled_total("predecessor_superseded");
+        let ownership_before = cancelled_total("ownership_cancelled");
+        let state = fixture.state.clone();
+        let staging_session = session_id.clone();
+        let staging_route = route.clone();
+        let candidate = crate::transcode::SessionRequest {
+            playback_id: playback_id.clone(),
+            ..staged_candidate_request()
+        };
+        let predecessor_recipe = staged_predecessor_recipe(&route);
+        let staging = tokio::spawn(async move {
+            stage_prepared_successor_with_prime(
+                &state,
+                &staging_session,
+                &staging_route,
+                &predecessor_recipe,
+                &candidate,
+                Some(&staged_source_file()),
+                &state.node_id,
+                PreparationPurpose::SelectionChange,
+                AcceptedAsk {
+                    film_time_ms: STAGED_ACCEPTED_FILM_TIME_MS,
+                    desired_digest: None,
+                },
+                true,
+            )
+            .await;
+        });
+
+        // Inside the parked window: after the task's last await, before it
+        // registers. The real edge, not a hand-written cancellation.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        cancel_preparations_for_superseded_predecessor(&playback_id, None);
+        staging.await.expect("the staging task finished");
+        drop(pending);
+
+        assert!(
+            !has_active_preparation_for_playback(&playback_id),
+            "the successor registered in that window must not be left running",
+        );
+        assert!(
+            fixture
+                .state
+                .store
+                .staged_media_session_for_playback(route.user_id, &playback_id)
+                .await
+                .expect("ledger read")
+                .is_none(),
+            "and it must never have been reserved, let alone staged",
+        );
+        let superseded_after = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let now = cancelled_total("predecessor_superseded");
+                if now > superseded_before {
+                    break now;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the post-registration read settled the successor as a supersession");
+        assert!(superseded_after > superseded_before);
+        assert_eq!(
+            cancelled_total("ownership_cancelled"),
+            ownership_before,
+            "the supersession must be what tore it down, not a reservation guard \
+             dropping after it had already gone on to reserve and prime",
+        );
+    }
+
+    /// A guard that drops late must not evict a newer claim.
+    ///
+    /// There is one preparation slot per playback and a newer ask deliberately
+    /// overwrites an older one, so the two guards' lifetimes overlap by
+    /// construction. Without the claim comparison the older guard's destructor
+    /// would remove the newer candidate's entry, and every exchange for the ask
+    /// the viewer is actually waiting on would answer `none`.
+    #[test]
+    fn a_late_pending_preparation_guard_drop_leaves_the_newer_claim_alone() {
+        let playback_id = unique_playback_id("preparation-guard-drop");
+        let older = PendingCandidateGuard::begin(&playback_id, "older-digest");
+        let newer = PendingCandidateGuard::begin(&playback_id, "newer-digest");
+
+        assert!(
+            older.cancelled(),
+            "a guard whose entry is no longer its own reads as cancelled",
+        );
+        assert!(!newer.cancelled());
+
+        drop(older);
+        assert_eq!(
+            pending_candidate_for_playback(&playback_id).as_deref(),
+            Some("newer-digest"),
+            "the older guard's destructor must leave the newer claim in place",
+        );
+
+        drop(newer);
+        assert!(pending_candidate_for_playback(&playback_id).is_none());
+    }
+
+    /// Every cancellation reason this file passes must be attributable.
+    ///
+    /// The list is scanned out of the source rather than written here, so a
+    /// cancellation edge added later with a reason nobody labelled is caught by
+    /// this test instead of quietly inflating `other`. `other` itself stays
+    /// reachable on purpose — it is what keeps the counter's sum equal to the
+    /// number of settlements — but a reason that reaches it from inside this
+    /// file is an attribution gap, and the one that does today is named.
+    #[test]
+    fn every_preparation_cancellation_reason_in_this_file_is_attributable() {
+        // Split rather than written out, so this test's own source does not
+        // match the scan it performs.
+        let marker = concat!("_cancelled", "_preparation(");
+        let source = include_str!("hls.rs");
+        let mut reasons = std::collections::BTreeSet::new();
+        for call in source.split(marker).skip(1) {
+            let arguments = &call[..call.find(')').unwrap_or(call.len())];
+            let Some(open) = arguments.find('"') else {
+                // A definition, or a call forwarding a `reason` binding.
+                continue;
+            };
+            let rest = &arguments[open + 1..];
+            let Some(close) = rest.find('"') else {
+                continue;
+            };
+            reasons.insert(rest[..close].to_owned());
+        }
+        assert!(
+            reasons.len() >= 9,
+            "the scan found only {} reasons, which means it stopped matching the call \
+             sites it is supposed to read: {reasons:?}",
+            reasons.len(),
+        );
+
+        /// Reasons this file passes that no label maps, found by this test and
+        /// reported rather than relabelled: choosing a bucket for a settlement
+        /// changes what the metric means, and that is not a test's call.
+        const UNLABELLED: [&str; 1] = ["planned relocation expired before commit"];
+        for reason in &reasons {
+            let label = crate::playback_control::preparation_cancelled_label(reason);
+            assert!(
+                crate::playback_control::PREPARATION_CANCELLED_REASONS.contains(&label),
+                "{reason:?} maps to {label:?}, which is not a bucket the counter has",
+            );
+            if UNLABELLED.contains(&reason.as_str()) {
+                assert_eq!(
+                    label, "other",
+                    "{reason:?} is recorded here as a known attribution gap; if it has \
+                     been given a label, remove it from UNLABELLED",
+                );
+            } else {
+                assert_ne!(
+                    label, "other",
+                    "{reason:?} is a cancellation edge whose teardowns are unattributable: \
+                     give it a label, or add it to UNLABELLED with a reason",
+                );
+            }
+        }
+        for unlabelled in UNLABELLED {
+            assert!(
+                reasons.contains(unlabelled),
+                "{unlabelled:?} is no longer passed anywhere in this file",
+            );
+        }
+
+        assert_eq!(
+            crate::playback_control::preparation_cancelled_label("a reason no build emits"),
+            "other",
+            "an unmapped reason must count as an unexplained teardown, never vanish",
+        );
     }
 
     /// A control envelope that will be admitted for preparation: a client that
