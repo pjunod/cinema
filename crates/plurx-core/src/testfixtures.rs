@@ -213,6 +213,27 @@ pub fn source(kind: &str) -> PathBuf {
     path
 }
 
+/// The `h264` fixture remuxed with a real E-AC-3 audio track.
+///
+/// The derived `Dolby Digital Plus + Dolby Atmos` profile that a newer FFprobe
+/// reports exists only on this codec, and the source-probe comparison
+/// regression is about what two FFprobe builds say about the same bytes. An
+/// edited JSON document cannot stand in for that, so the fixture carries real
+/// E-AC-3 and a real ffprobe describes it.
+pub fn source_with_eac3_audio() -> PathBuf {
+    let src = source("h264");
+    let path = fixture_dir().join("eac3.mkv");
+    publish_fixture_if_absent(&path, "eac3.mkv", |temporary| {
+        run(Command::new(ffmpeg())
+            .args(["-y", "-v", "error", "-i"])
+            .arg(&src)
+            .args(["-c:v", "copy", "-c:a", "eac3"])
+            .args(["-f", "matroska"])
+            .arg(temporary));
+    });
+    path
+}
+
 /// The production pipe command — the same arguments `copy_pipe_args` builds —
 /// run against a fixture, cached beside the source.
 pub fn pipe(kind: &str) -> Vec<u8> {

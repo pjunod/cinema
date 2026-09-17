@@ -116,21 +116,7 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
 async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits() {
     use plurx_core::store::SqliteStore;
     let base = crate::test_tempdir().expect("manager fixture");
-    let source = base.path().join("eac3-source.mkv");
-    let remux = tokio::process::Command::new(crate::ffmpeg::ffmpeg_bin())
-        .args(["-y", "-v", "error", "-i"])
-        .arg(plurx_core::testfixtures::source("h264"))
-        .args(["-c:v", "copy", "-c:a", "eac3", "-f", "matroska"])
-        .arg(&source)
-        .kill_on_drop(true)
-        .output()
-        .await
-        .expect("E-AC-3 fixture");
-    assert!(
-        remux.status.success(),
-        "{}",
-        String::from_utf8_lossy(&remux.stderr)
-    );
+    let source = plurx_core::testfixtures::source_with_eac3_audio();
 
     let held = plurx_core::scan::probe::probe(&source)
         .await
