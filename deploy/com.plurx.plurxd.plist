@@ -6,8 +6,8 @@
   a boot-time LaunchDaemon has no GUI session and falls back to software).
 
   launchd does NOT expand ~ or $HOME, so every path below is absolute. Don't
-  hand-edit YOUR_USERNAME — the install command in deploy/README.md substitutes
-  your real username + the real plurxd/ffmpeg paths with sed.
+  hand-edit YOUR_USERNAME — `make install` (deploy/install macos) renders this
+  template with your real home directory and the real plurxd/ffmpeg paths.
 
   This LaunchAgent runs as the interactive login uid. Permanent on-disk Dolby
   Vision conversion is therefore unsupported and must stay Off: desktop apps,

@@ -170,16 +170,14 @@ Docker/Compose is the recommended homelab setup. Start from a checkout of this
 repository; install Docker with Compose first.
 
 ```bash
-# Run from the repository root. Create persistent server storage.
-sudo install -d -o "$(id -u)" -g "$(id -g)" /srv/plurx
+# Run from the repository root: writes deploy/.env and the override file from
+# their examples, creates /srv/plurx, builds the server, starts it with the
+# source commit stamped into the image, and waits for it to answer.
+make install-docker
 
-# Configure your media mounts and optional GPU access.
-cp deploy/docker-compose.override.example.yml deploy/docker-compose.override.yml
-cp deploy/.env.example deploy/.env
+# Then put your media mounts and optional GPU access in the override file and
+# redeploy — that is the command from now on.
 $EDITOR deploy/docker-compose.override.yml
-$EDITOR deploy/.env                     # set storage paths and the process uid/gid
-
-# Build the server and start it with the source commit stamped into the image.
 make docker-up
 ```
 
@@ -202,8 +200,9 @@ All server variants serve the web app and API on port `32400` by default.
 
 | Deployment | Start here | Requirements |
 |---|---|---|
-| Docker / Compose | `make docker-up` | Docker with Compose; configured media and data mounts |
-| Native server | `plurxd run` | `ffmpeg` and `ffprobe` on `PATH` |
+| Docker / Compose | `make install-docker`, then `make docker-up` | Docker with Compose; configured media and data mounts |
+| Native service (systemd, launchd, or the Windows service) | `make install` | Repository-pinned Rust toolchain, or a prebuilt `plurxd` via `INSTALL_FLAGS=--binary` |
+| Native binary, no service | `make install-binary`, then `plurxd run` | `ffmpeg` and `ffprobe` (installed for you when missing) |
 | Build from source | `cargo run -p plurxd` | Repository-pinned Rust toolchain; `ffmpeg` and `ffprobe` |
 
 Hardware transcoding also needs the appropriate GPU driver and device access.

@@ -65,6 +65,32 @@ environments must explicitly allow those two local actions. It makes no network
 request outside the machine. Each case begins on a freshly loaded player page;
 a failed native-HLS or transcode session therefore cannot poison later results.
 
+## ATSC 1.0 caption regression on macOS
+
+The opt-in [VideoToolbox hardware test](../crates/plurxd/src/live_tv/videotoolbox_tests.rs)
+generates MPEG-2/AC-3 with A/53 captions, verifies caption side data, and uses
+the production source probe and shared live command builder. Its four cases
+cover 480i, 720p with AC-3 5.1, and 1080i at original and 720p output heights.
+It requires two playlist entries before EOF, decodes every listed segment's
+video, and requires/decode-checks AAC on every non-final segment. A finite
+fixture's last segment may have one video frame and no audio packets.
+
+The repository pins Rust 1.97.1; use Rustup's binaries rather than Homebrew
+cargo, which does not honor that pin. At final validation, on a Mac with
+VideoToolbox access:
+
+```bash
+rustup run 1.97.1 cargo test -p plurxd --bin plurxd \
+  live_tv_videotoolbox_atsc1 --locked -- --ignored --nocapture
+```
+
+`PLURX_FFMPEG` and `PLURX_FFPROBE` select another FFmpeg installation.
+Ordinary test runs ignore this hardware test; an ignored test is not hardware
+evidence. Input failures print the child's stderr after reaping it. Read the
+[root-cause record](streaming/LIVE-TV-VIDEOTOOLBOX-ATSC1-ROOT-CAUSE-AND-FIX.md)
+for evidence provenance and the [status page](streaming/LIVE-TV-VIDEOTOOLBOX-STATUS.html)
+for the current candidate's validation and merge state.
+
 ## The matrix is broad on purpose, but not a blind Cartesian product
 
 [`tests/playback/cases.json`](../tests/playback/cases.json) is the reviewable

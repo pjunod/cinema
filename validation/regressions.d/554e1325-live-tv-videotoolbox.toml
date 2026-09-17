@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["554e1325", "76ab0206", "7127d468"]
+points = ["live-tv.integration"]
+checks = ["rust-gate"]
+reason = "The retained live_caption_forwarding tests drive the shared production command for tuner and graph-probe input across every encoder and video-copy route, requiring exactly one disabled A53 option only for VideoToolbox encoding. The live_caption_stderr tests feed the actual capture reader with type/size failures, initial descriptors, split reads and repeated diagnostics, then require one static cause in stream_failed while the actual decoder flag stays false; unrelated failures and ordinary cancellation retain their meaning. Explicit writer shutdown and bounded collection make these diagnostics tests finish or fail instead of hanging. These portable regressions run in the Rust gate and passed in the focused live_tv:: suite. The separate ignored Mac hardware regression additionally passed all four generated caption-bearing MPEG-2/AC-3 cases, including 5.1 input; an ordinary Rust gate does not claim that hardware evidence."

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["40d7c22d"]
+points = ["cluster.membership"]
+checks = ["rust-gate"]
+reason = "The retained `heartbeat_reconciles_addresses_only_for_the_same_live_identity` regression starts with a live committed node whose projected Raft and API addresses are stale, commits a heartbeat for the same node and Raft identity, and requires both addresses and freshness to advance while the admission role stays unchanged. Separate assertions prove that a different Raft identity cannot claim the row and that a tombstoned row cannot be revived. Reverting the heartbeat upsert to refresh only `last_seen_at` leaves the loopback address behind and fails the first case; weakening either identity or tombstone guard fails the corresponding refusal case."
