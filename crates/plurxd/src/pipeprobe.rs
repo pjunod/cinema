@@ -207,7 +207,20 @@ impl Tools for Spawn {
 
     async fn ffprobe(&self, args: Vec<String>) -> Result<std::process::Output, String> {
         let mut command = tokio::process::Command::new(ffprobe_bin());
-        command.args(&args);
+        command
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            // Piped, because `wait_with_output` collects only what was piped.
+            // Without this the answer goes to the daemon's own stdout and
+            // `output.stdout` comes back empty, so every tag this module reads
+            // is "" — which reads as "the output is not BT.709", fails the
+            // reference run, and leaves every node on the CPU tone-map chain
+            // with the hardware encoder it validated sitting idle. The proof
+            // was in the container log: the three correct `color_*=bt709`
+            // lines printed immediately above "the CPU tone-map reference did
+            // not run".
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         crate::process_control::output_job_owned(&mut command)
             .await
             .map_err(|e| format!("could not run ffprobe: {e}"))
@@ -941,6 +954,31 @@ mod tests {
     /// preserve), a reference chain that doesn't produce BT.709 (every
     /// candidate is then compared against a wrong answer), or a measurement
     /// that reads no frames (a gray screen scores identically to a good one).
+    /// The plumbing under every measurement in this module.
+    ///
+    /// `wait_with_output` collects only what was piped, so a command built
+    /// without `Stdio::piped()` hands back an empty `stdout` and sends its
+    /// answer to the daemon's own log instead. Every tag then reads as "",
+    /// which this module reports as "the output is tagged color_transfer=, not
+    /// bt709" — a plausible hardware verdict for a plumbing fault, which is
+    /// how it survived to production and left every node on the CPU chain.
+    #[tokio::test]
+    async fn the_probe_reads_what_ffprobe_answers() {
+        plurx_core::testfixtures::require_ffmpeg();
+        let output = Spawn
+            .ffprobe(vec!["-version".to_owned()])
+            .await
+            .expect("ffprobe answers its own version");
+        assert!(
+            !output.stdout.is_empty(),
+            "an empty read is indistinguishable from a build with no capabilities",
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("ffprobe version"),
+            "the answer has to reach the caller, not the log",
+        );
+    }
+
     #[tokio::test]
     async fn the_reference_run_produces_real_bt709_from_real_hdr10() {
         crate::transcode::require_ffmpeg();

@@ -6182,10 +6182,28 @@ mod tests {
 
     #[test]
     fn complete_multi_entry_hevc_is_a_typed_validated_structural_refusal() {
-        let feed = crate::testfixtures::pipe_with_distinct_hevc_sample_entries("open-gop");
-        let (mut init, fragments, _) = read_all(&feed);
+        // Synthetic, not the piped fixture: that pipe strips NAL types 32-34,
+        // so its first sample carries no parameter sets to promote and the
+        // promotion returns "nothing to do" long before it can refuse a second
+        // sample description. The fixture cache keys on filename alone, so a
+        // tree built before that bsf landed still passed this — which is what
+        // made the failure look like a flake.
+        let mut init = minimal_hvcc_dv_init();
+        let video = init.video().expect("video").clone();
+        let vps = [0x40, 0x01, 0x0c];
+        let sps = [0x42, 0x01, 0x01];
+        let pps = [0x44, 0x01, 0xc0];
+        let vcl = [0x26, 0x01, 0x80];
+        let fragment = fragment_with_first_video_sample(
+            video.id,
+            length_prefixed_hevc_nals(&[&vps, &sps, &pps, &vcl]),
+        );
+        // One complete description first, then a second exactly like it: two
+        // decoder-valid entries, which is the shape the refusal is about.
+        assert!(promote_hevc_parameter_sets(&mut init, &fragment).expect("first promotion"));
+        duplicate_hevc_sample_entry(&mut init);
 
-        let promotion = promote_hevc_parameter_sets(&mut init, &fragments[0])
+        let promotion = promote_hevc_parameter_sets(&mut init, &fragment)
             .expect_err("the writer cannot choose one of two sample descriptions");
         assert_eq!(promotion, Fmp4Error::MultipleHevcSampleEntries { count: 2 });
         assert_eq!(

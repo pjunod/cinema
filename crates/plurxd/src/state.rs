@@ -10939,7 +10939,7 @@ mod tests {
             .expect("the pass records why it could not index this file");
         assert_eq!(first.attempts, 1);
         assert!(
-            !first.refusal.is_retryable(),
+            first.is_terminal(),
             "an unsupported source is terminal, not a wait: {first:?}"
         );
         assert!(!first.reason.is_empty(), "the builder's own words are kept");
