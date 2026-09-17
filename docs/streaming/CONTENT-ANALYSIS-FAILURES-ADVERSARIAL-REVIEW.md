@@ -164,4 +164,3 @@ SQLite eligibility reproduction, and documentation checks.
 Close R1 and R2 with explicit proposal amendments, then obtain Fable's
 decisions on the remaining alternatives. A successful root-cause diagnosis
 does not make the recovery contract safe to execute unchanged.
-

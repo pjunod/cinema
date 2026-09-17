@@ -98,4 +98,3 @@ test("Developer enablement is authoritative and readiness remains advisory", () 
   assert.match(save, /vod_index_cluster_cache:document\.getElementById\("ca-enabled"\)\.checked/);
   assert.doesNotMatch(save, /readiness|requirements|compatibility_inventory/);
 });
-

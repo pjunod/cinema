@@ -398,4 +398,3 @@ blindly downgrade a migrated database.
 Return findings with severity and a concrete correction to the relevant
 section. Implementation readiness requires these contracts to be settled;
 the diagnosis alone is not a completed repair.
-
