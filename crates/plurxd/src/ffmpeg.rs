@@ -907,10 +907,7 @@ fn collect_probe_differences(
 /// Compare a stored scan against a held-source probe and, on a refusal, say
 /// which normalized fields disagreed. Admission is unchanged: `same` is the
 /// same verdict [`probes_describe_same_input`] has always returned.
-pub(crate) fn compare_probe_documents(
-    stored: &str,
-    held: &str,
-) -> Result<ProbeComparison, String> {
+pub(crate) fn compare_probe_documents(stored: &str, held: &str) -> Result<ProbeComparison, String> {
     let (stored, held) = normalized_probe_pair(stored, held)?;
     if stored == held {
         return Ok(ProbeComparison {
@@ -2443,26 +2440,27 @@ mod tests {
             .remove("index");
         let mut unindexed_held = unindexed.clone();
         unindexed_held["streams"][2]["profile"] = eac3_atmos();
-        assert!(!probes_describe_same_input(
-            &unindexed.to_string(),
-            &unindexed_held.to_string()
-        )
-        .expect("compare probes"));
+        assert!(
+            !probes_describe_same_input(&unindexed.to_string(), &unindexed_held.to_string())
+                .expect("compare probes")
+        );
         let mut renumbered = base.clone();
         renumbered["streams"][2]["profile"] = eac3_atmos();
         renumbered["streams"][2]["index"] = serde_json::json!(5);
-        assert!(
-            !probes_describe_same_input(&atmos_capable_probe(None, None), &renumbered.to_string())
-                .expect("compare probes")
-        );
+        assert!(!probes_describe_same_input(
+            &atmos_capable_probe(None, None),
+            &renumbered.to_string()
+        )
+        .expect("compare probes"));
         let mut reordered = base.clone();
         reordered["streams"][2]["profile"] = eac3_atmos();
         let streams = reordered["streams"].as_array_mut().expect("streams");
         streams.swap(1, 2);
-        assert!(
-            !probes_describe_same_input(&atmos_capable_probe(None, None), &reordered.to_string())
-                .expect("compare probes")
-        );
+        assert!(!probes_describe_same_input(
+            &atmos_capable_probe(None, None),
+            &reordered.to_string()
+        )
+        .expect("compare probes"));
     }
 
     /// Everything the encoded recipe actually depends on still refuses, with
@@ -2470,9 +2468,11 @@ mod tests {
     #[test]
     fn held_probe_comparison_still_refuses_media_changes_beside_the_atmos_omission() {
         let legacy = atmos_capable_probe(None, None);
-        let current: serde_json::Value =
-            serde_json::from_str(&atmos_capable_probe(Some(truehd_atmos()), Some(eac3_atmos())))
-                .expect("fixture");
+        let current: serde_json::Value = serde_json::from_str(&atmos_capable_probe(
+            Some(truehd_atmos()),
+            Some(eac3_atmos()),
+        ))
+        .expect("fixture");
         assert!(probes_describe_same_input(&legacy, &current.to_string()).expect("control"));
         for (pointer, replacement) in [
             ("/streams/2/channels", serde_json::json!(8)),
@@ -2510,9 +2510,11 @@ mod tests {
     #[test]
     fn held_probe_comparison_names_the_normalized_field_that_refused() {
         let legacy = atmos_capable_probe(None, None);
-        let mut held: serde_json::Value =
-            serde_json::from_str(&atmos_capable_probe(Some(truehd_atmos()), Some(eac3_atmos())))
-                .expect("fixture");
+        let mut held: serde_json::Value = serde_json::from_str(&atmos_capable_probe(
+            Some(truehd_atmos()),
+            Some(eac3_atmos()),
+        ))
+        .expect("fixture");
         held["streams"][0]["width"] = serde_json::json!(1920);
         let comparison =
             super::compare_probe_documents(&legacy, &held.to_string()).expect("compare probes");
@@ -2602,9 +2604,8 @@ mod tests {
             many_stored["streams"][0][key.as_str()] = serde_json::json!(at);
             many_held["streams"][0][key.as_str()] = serde_json::json!(at + 1);
         }
-        let many =
-            super::compare_probe_documents(&many_stored.to_string(), &many_held.to_string())
-                .expect("compare probes");
+        let many = super::compare_probe_documents(&many_stored.to_string(), &many_held.to_string())
+            .expect("compare probes");
         assert_eq!(many.differences.len(), super::PROBE_DIFFERENCE_LIMIT);
         assert!(many.truncated);
         for difference in &many.differences {
