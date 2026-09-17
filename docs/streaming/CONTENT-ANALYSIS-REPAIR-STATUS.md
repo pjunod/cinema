@@ -1,6 +1,6 @@
 # Content analysis repair — implementation status
 
-**Status:** adversarial review addressed; final fast lane pending · **Updated:** 2026-09-17 UTC ·
+**Status:** local acceptance green; hosted fast lane pending · **Updated:** 2026-09-17 UTC ·
 **Base:** `f237d6180073bd395af7e08de00021d3aa7a2e33` · **Effort:**
 `effort/content-analysis-repair`
 
@@ -16,11 +16,11 @@ tree. Fleet recovery and deployment remain separate actions.
 |---|---|---|---|
 | W0 · reproduce and reconcile | partial | isolated clone merged with current `main`; Rust 1.97.1 confirmed; queue, migration, probe, settings, and recovery seams reconciled | record the bounded live compatibility inventory before enablement |
 | W1 · shared types and persistence | reviewed | typed bounded diagnostics, shared retry policy, SQLite/Hiqlite/local schema updates, and repair receipts compile | final fast lane |
-| W2 · selected-video completion | implemented | held-source probe resolves the exact mapped video stream; rational lower-bound and timeline-span checks compile | add/qualify the integration fixture in the final fast lane |
+| W2 · selected-video completion | qualified locally | held-source probe resolves the exact mapped video stream; rational lower-bound and timeline-span checks plus the longer-audio FFmpeg fixture pass | hosted fast lane |
 | W3 · durable bounded retry | reviewed | fixed backoff, seven-day deadline, attempt preservation, deadline-clamped initial and renewed leases, and deadline-aware completion compile in both Store paths | exercise both backends in the final fast lane |
 | W4 · identity-correct repair | reviewed | exact pipeline/video identity, current-recipe attribution for legacy and standalone rows, revisioned preview/apply candidates, atomic receipts, and stale revalidation compile | backend regressions in the final fast lane |
 | W5 · operator surfaces | implemented | history diagnostics, truthful failure text, repair controls, and advisory Developer enablement compile | browser contract regression in the final fast lane |
-| W6 · review and promotion | active | Forgejo PR [#352](http://192.168.4.7:3000/noirr/plurx/pulls/352) is open; adversarial review findings are addressed in `112b1ae5`; tests remain deliberately deferred | push the reviewed tree, run the single fast lane, fix failures, mark ready, and merge |
+| W6 · review and promotion | active | Forgejo PR [#352](http://192.168.4.7:3000/noirr/plurx/pulls/352) is open; adversarial review findings are addressed; focused local acceptance is green on `0db6c804` | push, mark ready, require the hosted Main promotion gate, and merge |
 
 ## Standing decisions
 
@@ -51,7 +51,8 @@ tree. Fleet recovery and deployment remain separate actions.
 | Pinned compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Baseline compile | green: `cargo check -p plurxd --all-targets --locked` |
 | Reviewed candidate compile | green on `112b1ae5`: `cargo fmt --all`; `git diff --check`; `cargo check -p plurxd --all-targets --locked`; `cargo check -p plurx-core --tests --features hiqlite-contract-tests --locked` |
-| Focused regressions | deferred until the single post-review fast-lane phase |
+| Focused regressions | green on `0db6c804`: core policy/SQLite 8; real three-voter Hiqlite 2; daemon completion/history 6; fragment index 28; audio-tail 1; web 3; docs index 4 |
+| Final lint | green on `0db6c804`: pinned rustfmt and `cargo clippy -p plurxd --all-targets --locked -- -D warnings` |
 | Adversarial implementation review | complete; six findings addressed: legacy recipe attribution, deadline-clamped claim/completion, stale-source precedence, blank-identity exclusion, whole-build budget, and configured local attempt limits |
 | Main fast lane | not run; starts only after review findings are addressed and the draft PR is marked ready |
 | Fleet recovery | not authorized or run |
@@ -65,5 +66,6 @@ tree. Fleet recovery and deployment remain separate actions.
 - [x] W4 exact-identity preview/apply repair implemented and compiled.
 - [x] W5 API, browse, analysis, Developer settings, and operations docs implemented.
 - [x] One adversarial review addressed.
-- [ ] Fast lane green on the reviewed exact tree.
+- [x] Focused local acceptance green after the one adversarial review.
+- [ ] Hosted Main promotion gate green on the current PR head.
 - [ ] Main-bound pull request merged.
