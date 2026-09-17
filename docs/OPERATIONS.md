@@ -4729,7 +4729,7 @@ the loading overlay a few seconds longer, then playback).
 | A GPU tone-map worked and then stopped | The pipeline downgrades once, per session, to the CPU chain and logs it | Look for `pipeline=` on the session's ffmpeg log line: it names what actually ran, not what the box can do |
 | 4K HDR / Dolby Vision won't play | Heavy HEVC is hardware-decoded (Intel too); if the GPU can't decode it and software can't either, the session now fails fast with a clear log line instead of hanging gray | Read `plurxd::transcode` — the last ffmpeg line names the real cause (decode vs tone-map). DV profile 5 is the hardest case |
 | Playback is software when you set `qsv` | The QSV probe was rejected at startup | Read `plurxd::transcode` logs; usually a driver/`/dev/dri` gap |
-| No posters, just filenames | No TMDB key (movies/TV) | Add a key in Settings → Metadata (anime needs none) |
+| No posters, just filenames | No TMDB key (movies/TV) | Add a key in Settings → Developer (anime needs none) |
 | Playing or seeking knocks a Wi-Fi client off the network (loses its IP and can't get another) | An unpaced stream is taking the whole link, starving the client's DHCP renewal of airtime | Lower **Settings → Playback → Delivery speed** to 2×; confirm with a `ping` to the gateway during a seek |
 | 4K starts, then buffers a few seconds in | The session never built a head start — the classic cause was realtime pacing on the copy-video path | Raise **Settings → Playback → Transcode buffering → Head start**; check the stats overlay's Server block for the encode speed |
 | Stutters every 20–40 seconds through a whole film | The encoder cannot keep up: the head start drains at (1 − speed) per second played | Stats overlay (`i`) → Server → encode speed. Below 1× means transcode, not network — pick a lower quality, or check that hardware encoding validated at startup |
@@ -4748,35 +4748,64 @@ the loading overlay a few seconds longer, then playback).
 | An ATSC 3.0 channel returns no picture and no error from the device itself | The device accepted the connection and sent zero bytes — two channels on one test antenna do this | Reception, not software. Check signal on that mux in the HDHomeRun's own UI; plurx cannot make a tuner lock |
 
 
-### Library channel subject matching
+### Library channel search and classification
 
-Subjects use one administrator-configured Ollama origin. Install Ollama on the
-chosen inference host, run `ollama pull qwen3:4b`, and make the service reachable
-from the daemon nodes. The default is `http://127.0.0.1:11434`; set
-`PLURX_CHANNEL_SUBJECT_URL` to an HTTP(S) origin and optionally
-`PLURX_CHANNEL_SUBJECT_MODEL` on participating nodes. Use the same artifact on
-that origin for reproducible cache reuse. The adapter resolves its full digest,
-rejects redirects and credential-bearing URLs, and sends only bounded title,
-overview, genre/tag, year and episode metadata. It sends no paths, files,
-account data or watch history. Keep the origin on the administrator's trusted
-network; HTTPS uses ordinary certificate validation.
+Channel subjects now use local catalogue rules. No Ollama process, model API,
+or inference URL is required. The shipped presets use explicit selectors:
+`format:stand-up`, `format:documentary topic:space`, and
+`genre:comedy year:1990-1999`. Ordinary terms are combined with AND;
+`"quoted phrases"`, comma-separated alternatives within a term, and
+`-exclusions` are supported. The previous shipped preset descriptions map to
+these rules. Custom natural-language descriptions should be reviewed and
+rewritten as words or selectors; existing schedules keep playing until a
+replacement is ready. A broad Comedy genre never establishes stand-up format.
 
-Settings → Developer → Library channel subject matching displays cached
-provider/model and metadata observations. These are advisory. The enabled
-switch defaults on and pauses new inference only; authoring, saving, enabling,
-existing schedules and manual selections keep working. A missing model or
-outage leaves jobs waiting with a visible error. Restore the provider to resume;
-refresh a failed preview to retry malformed output. No cloud fallback exists.
+Title search uses SQLite FTS5, including generated labels and imported
+keywords. It supports phrases, final-word prefixes, exclusions, and the
+`standup` and `scifi` aliases. No match is distinct from a failed request.
 
-SQLite schema 58 and Hiqlite schema 38 add owner-scoped jobs and decisions.
-Ordinary backups/imports carry both tables. One global claim permits one batch
-at a time across nodes, renews every 20 seconds and expires after 120 seconds.
-Calls have a 90-second deadline, eight records and 12,000 input characters at
-most; each malformed/missing row has one bounded retry. Preview expiry is 24
-hours, retained saved jobs seven days, and unused decisions 30 days. Maintenance
-prunes at most 200 rows per table per minute and preserves active work. A stale
-claim or changed channel revision cannot publish. No inference enters playback.
+A background classifier runs by default on the cluster job owner. It derives
+format, topic and genre labels from existing metadata and imports movie/series
+keywords when the existing TMDB key is configured. It does not inspect video
+bytes or send descriptions to an inference service. Provider failure retains
+stored keywords and permits local classification; retries wait one hour,
+and successful keyword fetches refresh after 30 days. Movie/series identity
+changes invalidate their previous keywords immediately.
 
-The implementation observations, model identity, remaining operational limits,
-and delivery evidence live in the
-[subject matching plan](features/LIBRARY-CHANNEL-SUBJECT-MATCHING-IMPLEMENTATION.md).
+Generated labels record their source and matching evidence. In a channel
+preview, **Labels** shows that evidence and lets administrators add or suppress
+labels. Corrections survive refreshes. Concurrent edits return a conflict so
+one administrator cannot silently overwrite another's changes. Editing source
+metadata immediately removes its old classification from search until a fresh
+classification is saved. SQLite schema 61 and Hiqlite schema 41 store these
+records and corrections; backups/imports preserve them and rebuild their index.
+
+**Settings → Developer → Search settings** offers embedded semantic search,
+off by default. Enabling it downloads approximately 91 MB of pinned,
+SHA-256-verified MiniLM model files per node. Candle runs the model on CPU
+inside plurx; there is no inference server. Queries and catalogue text stay
+local. The download requires HTTPS access to Hugging Face and its file hosts.
+Model loading and indexing consume additional CPU and memory.
+
+Semantic results appear separately as **Related by meaning**, after ordinary
+search results. They never admit a title to a channel automatically. A busy,
+unavailable or still-loading model leaves ordinary search available. The
+semantic endpoint has a two-second embedding budget and returns at most 20
+suggestions above its similarity threshold; it can return none. Each returned
+candidate is checked against current metadata and classification revision.
+
+Model files and a disposable vector cache live under
+`<data_dir>/semantic-search/<model-revision>/`. Vectors are not replicated.
+The first pass indexes at most 100,000 items per node and reports a capacity
+limit if reached. A completed pass removes deleted entries and writes the
+cache. Disable the setting to release model memory; downloaded files remain
+for reuse. Removing this directory while disabled reclaims disk space.
+
+The subject worker retains owner-scoped resumable jobs, publication fences,
+and its existing retention policy. **Settings → Developer → Enable subject
+matching** pauses new local rule evaluations; existing schedules, manual
+selection and ordinary title search remain available. It does not control
+the independent optional semantic-search setting.
+
+See [local library search](features/LOCAL-LIBRARY-SEARCH.md) for implementation
+boundaries and validation evidence.

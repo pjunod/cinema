@@ -7,6 +7,7 @@
 
 pub mod anilist;
 pub mod book;
+pub mod classification;
 pub mod genres;
 pub mod local;
 pub mod tmdb;

@@ -692,7 +692,11 @@ pattern = "ServingAuthority"
 # +3 HDHomeRun M2: LiveTvManager's ServingAuthority field and constructor,
 # plus one always-ready test fixture. This projects existing quorum authority;
 # it does not introduce an independent serving lease.
-expected_occurrences = 20
+# 20 -> 21 with M0's supersession tests: one `ServingAuthority::always_ready()`
+# in a test helper that drives `settle_activation_predecessor` at its real call
+# site. It projects the always-ready authority the other fixtures use and owns
+# no producer, lease or serving generation of its own.
+expected_occurrences = 21
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
@@ -772,7 +776,10 @@ pattern = "media_session_route_for_playback"
 # 20 -> 21 with the ordinary-activation ask compare: one more test-only read,
 # asserting a create whose ask moved underneath it left the playback pointing
 # nowhere. The shipped read count is unchanged.
-expected_occurrences = 22
+# 22 -> 23 with M0's commit-lifecycle test: one test-only read of the
+# pointer, asserting a committed successor is still the current generation after
+# its predecessor retires. No shipped reader is added.
+expected_occurrences = 23
 
 [[module_symbols]]
 id = "m4-exact-owner-epoch-end"
@@ -879,7 +886,11 @@ pattern = "publication_ready_at_ms"
 # 86 -> 87: the status HTTP regression's live route fixture starts at the
 # ordinary zero publication fence. It is test-only and neither advances nor
 # relaxes any shipped activation handoff.
-expected_occurrences = 87
+# 87 -> 88 with M0's supersession tests: one test-only activation of a
+# second incarnation of the same playback, which is the route whose activation
+# runs the supersession cancel. It asks for the same sentinel every other
+# activation fixture asks for and moves no shipped fence.
+expected_occurrences = 88
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -1029,7 +1040,12 @@ pattern = "terminal_reason"
 # 22 -> 23 with the drain-release test, which asserts the predecessor ends
 # with cause `superseded` rather than merely ending. Test-only: the cause is
 # written by the release that already existed on this branch.
-expected_occurrences = 25
+# 25 -> 27 with M0's supersession tests. Both additions assert `replaced`
+# — the cause `abort_staged_generation` writes — on the successor a supersession
+# tore down, because an empty registry is satisfied by a successor that was
+# never reserved as much as by one that was settled, and only the durable cause
+# tells the two apart. No new writer of a terminal cause.
+expected_occurrences = 27
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -1482,7 +1498,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # facts backfill. It opens no media, starts no process or producer, fences each
 # Store update to the exact source/probe snapshot, and releases its cluster-job
 # lease when the finite pass returns.
-expected_occurrences = 512
+# 512 -> 513 with M0's registration-window test: one `tokio::spawn` confined
+# to that test, holding the staging call it parks so the supersession can be
+# applied while it is parked. Its join handle is awaited inside the test and it
+# owns no shipped producer, process or timer.
+# 513 -> 514 with the review's second registration-window test, which parks the
+# same staging call and then replaces the pending claim with a second ask rather
+# than setting the cancelled flag. Same shape: joined inside the test, owns
+# nothing shipped.
+expected_occurrences = 519
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1856,7 +1880,21 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # deadlines, plus the hardware helper deadline, publication deadline, polling
 # sleep and overall encode deadline. All are test-only; feed and child are
 # joined, the ChildJob stays owned until exit, and no timer detaches a producer.
-expected_occurrences = 769
+# 769 -> 777 with M0's preparation tests and their two `#[cfg(test)]` seams:
+# two sleeps in the seams themselves (a planning delay and a registration-window
+# delay, both compiled out of every shipped build), paced sleeps and bounded
+# waits inside the tests — `tokio::time::timeout` around settlements that run on
+# spawned tasks, each with its polling sleep. None bounds a producer, a process
+# or a lease; every one of them is a test waiting for work it started.
+# This row is the one that conflicted on this merge, and neither side of the
+# conflict was valid: the effort branch carried 771 against a pre-#346 base of
+# 763, main moved the same row to 769 for its VideoToolbox regressions, and the
+# check is exact equality. 777 is a fresh measurement of the merged tree rather
+# than either number plus a remembered delta.
+# 777 -> 780 with the review fixes: the second registration-window test adds a
+# paced sleep and a bounded `tokio::time::timeout` with its polling sleep, the
+# same shape as the test beside it. Re-measured, not extrapolated.
+expected_occurrences = 784
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2158,7 +2196,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # unchanged. Both matches are test-only HTTP assertions.
 # +1 VideoToolbox test-only output helper: each finite FFmpeg/FFprobe child
 # is awaited within a 30-second timeout and has kill-on-drop enabled.
-expected_occurrences = 305
+expected_occurrences = 303
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

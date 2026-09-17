@@ -104,6 +104,123 @@ async fn encoded_vod_manager_create_resolves_real_recipe_and_served_codecs() {
     manager.stop_session(&start.session_id, "test").await;
 }
 
+/// A catalog row that reports the derived E-AC-3 Atmos profile, read on a node
+/// whose FFprobe does not report it, must still start an encoded session. The
+/// comparator regression proves the verdict; this proves the session path that
+/// turned the verdict into an HTTP 409 on the tablet.
+///
+/// The fixture carries real E-AC-3 audio rather than an edited JSON document,
+/// because the whole class exists where one reporter derives a property from a
+/// bitstream flag and another does not.
+#[tokio::test]
+async fn encoded_vod_manager_admits_a_reported_eac3_atmos_profile_the_node_omits() {
+    use plurx_core::store::SqliteStore;
+    let base = crate::test_tempdir().expect("manager fixture");
+    let source = plurx_core::testfixtures::source_with_eac3_audio();
+
+    let held = plurx_core::scan::probe::probe(&source)
+        .await
+        .expect("held source probe");
+    let mut document: serde_json::Value =
+        serde_json::from_str(held.raw_json.as_deref().expect("raw probe")).expect("probe JSON");
+    {
+        let stream = document["streams"]
+            .as_array_mut()
+            .expect("streams")
+            .iter_mut()
+            .find(|stream| stream["codec_name"] == "eac3")
+            .expect("E-AC-3 stream");
+        assert!(
+            stream.get("profile").is_none(),
+            "this FFprobe already derives the profile, so the fixture cannot pose as a legacy \
+             report: {stream}"
+        );
+        stream["profile"] = serde_json::json!("Dolby Digital Plus + Dolby Atmos");
+    }
+    let reported = plurx_core::domain::ProbeResult {
+        raw_json: Some(document.to_string()),
+        ..held.clone()
+    };
+    let changed_channels = {
+        let mut document: serde_json::Value =
+            serde_json::from_str(held.raw_json.as_deref().expect("raw probe")).expect("probe JSON");
+        let stream = document["streams"]
+            .as_array_mut()
+            .expect("streams")
+            .iter_mut()
+            .find(|stream| stream["codec_name"] == "eac3")
+            .expect("E-AC-3 stream");
+        stream["channels"] = serde_json::json!(8);
+        plurx_core::domain::ProbeResult {
+            raw_json: Some(document.to_string()),
+            ..held.clone()
+        }
+    };
+
+    let metadata = std::fs::metadata(&source).expect("source metadata");
+    let mtime = metadata
+        .modified()
+        .expect("mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("unix mtime")
+        .as_secs() as i64;
+    for (probe, admitted) in [(reported, true), (changed_channels, false)] {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id =
+            seed_file_with_probe_at(&store, source.to_str().expect("path"), probe.clone()).await;
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("file")
+            .expect("seeded");
+        store
+            .upsert_file(
+                file.item_id,
+                source.to_str().expect("path"),
+                metadata.len() as i64,
+                mtime,
+                &probe,
+            )
+            .await
+            .expect("stored catalog probe");
+        let manager = TranscodeManager::new(
+            store,
+            base.path().join(if admitted { "admit" } else { "refuse" }),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let request = SessionRequest {
+            request_id: None,
+            previous_session_id: None,
+            reopen_reason: None,
+            presentation: Presentation::Vod,
+            automatic: false,
+            start_seconds: 0.0,
+            kind: SessionKind::Transcode { height: 240 },
+            ..reopen_request(file_id, "eac3-atmos", "unused", "unused")
+        };
+        match (manager.create_session(&request, "test").await, admitted) {
+            (Ok(start), true) => {
+                assert_eq!(start.kind, SessionKind::Transcode { height: 240 });
+                manager.stop_session(&start.session_id, "test").await;
+            }
+            (Err(error), true) => {
+                panic!("a reporting-only profile difference must not refuse playback: {error}")
+            }
+            (Ok(_), false) => panic!("a changed channel count must still refuse playback"),
+            (Err(error), false) => {
+                assert!(error.contains("vod_source_rescan_required"), "{error}");
+                // The refusal has to say what disagreed and what repairs it.
+                // "rescan" was the old advice and could not work: the scanner
+                // skips a file whose size and mtime are unchanged.
+                assert!(error.contains("/channels"), "{error}");
+                assert!(error.contains("reanalyze this item"), "{error}");
+                assert!(!error.contains(source.to_str().expect("path")), "{error}");
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn encoded_vod_manager_refuses_replaced_source_with_stale_probe() {
     use plurx_core::store::SqliteStore;

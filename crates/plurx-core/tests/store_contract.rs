@@ -321,6 +321,7 @@ const LIBRARY_CHANNEL_METHODS: &[&str] = &[
     "complete_library_channel_build_without_publication",
     "read_library_channel_generation",
 ];
+const CLASSIFICATION_METHODS: &[&str] = &["classification_page", "write_classification"];
 const MEDIA_METHODS: &[&str] = &[
     "item_by_external_id",
     "find_movie",
@@ -16330,6 +16331,7 @@ fn contract_inventory_matches_every_store_method() {
     let declared = store_source
         .lines()
         .chain(include_str!("../src/store/dv_conversion.rs").lines())
+        .chain(include_str!("../src/store/classification.rs").lines())
         .filter_map(|line| line.strip_prefix("    async fn "))
         .filter_map(|line| line.split_once('(').map(|(name, _)| name))
         .collect::<BTreeSet<_>>();
@@ -16341,6 +16343,7 @@ fn contract_inventory_matches_every_store_method() {
         LIBRARY_CHANNEL_METHODS,
         DVR_METHODS,
         MEDIA_METHODS,
+        CLASSIFICATION_METHODS,
         WATCH_METHODS,
         READING_METHODS,
         TRAKT_METHODS,
@@ -16368,7 +16371,7 @@ fn contract_inventory_matches_every_store_method() {
     // Both independently reviewed method sets survive this integration. Read
     // the total from the merged trait rather than carrying either parent's
     // count across the promotion merge.
-    assert_eq!(declared.len(), 349, "review the Store method count");
+    assert_eq!(declared.len(), 351, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -28614,6 +28617,149 @@ async fn subject_saved_activation_and_empty_outcome_are_atomic_in_both_stores() 
             })
             .await
             .expect("old completion fenced"));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn classification_search_fences_and_corrections() {
+    use plurx_core::{metadata::classification, store::classification::Record};
+    for_each_backend(|store, backend| async move {
+        let lib = store
+            .create_library(&NewLibrary {
+                name: "Classification".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let id = store
+            .insert_item(&NewItem {
+                library_id: lib.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "An Evening".into(),
+                year: Some(2020),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("item");
+        store
+            .apply_metadata(
+                id,
+                &MetadataPatch {
+                    overview: Some("A filmed performance".into()),
+                    genres: Some(vec!["Comedy".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("metadata");
+        let entry = store
+            .classification_page(0, 10)
+            .await
+            .expect("page")
+            .remove(0);
+        let mut record = Record {
+            classification: classification::classify(
+                &entry.input().expect("input").metadata(),
+                vec!["stand-up comedy".into()],
+            ),
+            source_json: entry.source_json,
+            overrides: Default::default(),
+            revision: 0,
+        };
+        assert!(
+            store
+                .write_classification(id, &record)
+                .await
+                .expect("classify"),
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .search_items("evening standup", 10)
+                .await
+                .expect("joined search")
+                .len(),
+            1,
+            "{backend}"
+        );
+        assert!(
+            store
+                .search_items("evening -standup", 10)
+                .await
+                .expect("exclusion")
+                .is_empty(),
+            "{backend}"
+        );
+        assert!(
+            !store
+                .write_classification(id, &record)
+                .await
+                .expect("stale revision"),
+            "{backend}"
+        );
+        record.revision = 1;
+        record.overrides.exclude = vec!["format:stand-up".into()];
+        record.overrides.include = vec!["format:concert".into()];
+        assert!(store
+            .write_classification(id, &record)
+            .await
+            .expect("correction"));
+        store
+            .apply_metadata(
+                id,
+                &MetadataPatch {
+                    overview: Some("A concert performance".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("changed source");
+        record.revision = 2;
+        assert!(!store
+            .write_classification(id, &record)
+            .await
+            .expect("stale source"));
+        store.rebuild_search_index().await.expect("rebuild");
+        assert!(
+            store
+                .search_items("standup", 10)
+                .await
+                .expect("no stale labels")
+                .is_empty(),
+            "{backend}"
+        );
+        let entry = store
+            .classification_page(0, 10)
+            .await
+            .expect("current")
+            .remove(0);
+        let old = entry.record.expect("retained correction");
+        assert_eq!(old.overrides.include, vec!["format:concert"]);
+        record.source_json = entry.source_json;
+        record.classification = classification::classify(
+            &serde_json::from_str::<plurx_core::store::classification::Input>(&record.source_json)
+                .expect("source")
+                .metadata(),
+            vec![],
+        );
+        assert!(store
+            .write_classification(id, &record)
+            .await
+            .expect("refresh"));
+        assert_eq!(
+            store
+                .search_items("concert", 10)
+                .await
+                .expect("fresh search")
+                .len(),
+            1,
+            "{backend}"
+        );
     })
     .await;
 }

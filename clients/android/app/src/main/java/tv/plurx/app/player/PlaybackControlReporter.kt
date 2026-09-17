@@ -666,6 +666,17 @@ data class ControlAction(
 @Serializable
 data class ControlDelivery(
     @SerialName("subtitle_readiness") val subtitleReadiness: String? = null,
+    /**
+     * Where this server has got to on the viewer's last selection change:
+     * `staging`, `offered` or `none`.
+     *
+     * Optional, and **absent is not `none`**. Servers older than this field and
+     * every relay in front of one omit it entirely; reading that silence as a
+     * refusal would turn a rung change on such a server into an immediate
+     * reopen while the successor it was quietly priming went to waste. Absence
+     * means "no answer yet", and the wait's own bound is what ends it.
+     */
+    @SerialName("preparation") val preparation: String? = null,
 )
 
 internal object SubtitleReadinessDecision {

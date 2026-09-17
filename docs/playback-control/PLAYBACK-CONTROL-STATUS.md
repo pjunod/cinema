@@ -48,7 +48,7 @@ one is deleted.
 | 5 | delete detached recovery loops | — | merged as #663 |
 | 6 | M5 — one client action owner | [M5](M5-CLIENT-ACTION-OWNERSHIP-HANDOFF.md) · [acceptance](M5-FLEET-ACCEPTANCE.md) | **finished.** M5a and M5b merged; **M5c and M5h are struck, not deferred** — the budgets they delete now bound the server's own answer. See §"M5c is struck" |
 | — | M5.5 — preparation feasibility | [spike](M5.5-PREPARATION-FEASIBILITY-SPIKE.md) · [execution](M5.5-SPIKE-EXECUTION-HANDOFF.md) · [staged generations](M5.5-STAGED-GENERATIONS-HANDOFF.md) | store half **merged as [#726](https://github.com/pjunod/plurx/pull/726)**; the spike **ran 2026-09-01 on all three platforms** and is complete: web and Android `false`, **Apple `true`** after a corrective instrument pass — see §"M5.5 ran, and two thirds of it settled" |
-| 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 · [handoff](M6-IMPLEMENTATION-HANDOFF.md) · [server prime](M6-SERVER-PRIME-HANDOFF.md) | **implementation complete on `codex/m6-server-prime`; validation and merge pending.** The server now durably reserves the successor, attaches the real VOD worker before the actor announces it, authorizes playlist/segment access from the exact live preparation ledger before commit, and keeps control/status fenced. After commit removes the ledger, the durable prepared marker plus exact current playback pointer preserve media continuity during predecessor drain. Commit publication is detached from the four-second exchange and clears the control fence after predecessor projection or the safety boundary; refusal, abort, and expiry release both worker and slot. All three client adapters are already on `main`. Settings → Developer has one direct default-on server checkbox; every readiness row remains advisory and cannot override it. Physical first-frame and fleet receipts remain post-merge evidence, not code gates. |
+| 7 | M6 — prepared recipe handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §3 · [handoff](M6-IMPLEMENTATION-HANDOFF.md) · [server prime](M6-SERVER-PRIME-HANDOFF.md) · [continuity plan](QUALITY-SWITCH-CONTINUITY-PLAN.md) | **built on every side, and as of 2026-09-16 reachable from a viewer action for the first time — see "M6 was unreachable from any viewer action" below; a device run is still owed.** The server now durably reserves the successor, attaches the real VOD worker before the actor announces it, authorizes playlist/segment access from the exact live preparation ledger before commit, and keeps control/status fenced. After commit removes the ledger, the durable prepared marker plus exact current playback pointer preserve media continuity during predecessor drain. Commit publication is detached from the four-second exchange and clears the control fence after predecessor projection or the safety boundary; refusal, abort, and expiry release both worker and slot. All three client adapters are already on `main`. Settings → Developer has one direct default-on server checkbox; every readiness row remains advisory and cannot override it. Physical first-frame and fleet receipts remain post-merge evidence, not code gates. **M3 instrumentation landed 2026-09-16:** all three clients report dropped frames over the two seconds either side of the commit, an audio-discontinuity count over the same window, and the tap-to-new-quality wall time, through a `PREPARED SWITCH` group in the shared ledger and advisory Developer rows. The acceptance record is [QUALITY-SWITCH-CONTINUITY-RESULTS.md](QUALITY-SWITCH-CONTINUITY-RESULTS.md), and its result rows are empty: the twenty-change device run per platform has not been made, and the web audible seam and Apple's audio tap are recorded there as unmeasurable without putting an instrument on the audible path. |
 | 8 | M7 — content-analysis index | [analysis](CONTENT-ANALYSIS-INDEX-HANDOFF.md) · remainder plan in [#740](https://github.com/pjunod/plurx/pull/740) | **four of five** merged as [#700](https://github.com/pjunod/plurx/pull/700); the fifth, **subtitle windows, merged as [#742](https://github.com/pjunod/plurx/pull/742)** with readiness reporting in [#741](https://github.com/pjunod/plurx/pull/741). M7's own **M3 (seek coalescing) is built as [#754](https://github.com/pjunod/plurx/pull/754)** — see §"M3's latch, and the decision that landed it". R-M1 closes the unknown-readiness contract and carries the dated [large-MKV observation](M7-M1-LARGE-MKV-OBSERVATION.md); it merged as [#775](https://github.com/pjunod/plurx/pull/775). R-M2 merged as [#789](https://github.com/pjunod/plurx/pull/789) and R-M3, one live subtitle window per playback, merged as [#830](https://github.com/pjunod/plurx/pull/830); the remainder is complete in source. Physical directed-retry evidence for R-M2 is the only piece left, and it needs a device rather than code. **M4 (burn-join) merged as [#794](https://github.com/pjunod/plurx/pull/794)**, not part of this remediation; detection is separately deferred |
 | 9 | M8 — cluster handoff | [remaining](REMAINING-ROADMAP-HANDOFF.md) §4 | **partly proven at the store, one bullet built end to end.** Four of five acceptance cases are covered by the store contract and `shared_cache.rs` suites — *at the store*, not end to end — and planned drain (§10.2) is not built at all: it sits on top of M6 §3.4 and is blocked behind the same hardware run. §10.3's no-snapshot fallback is built: a lost owner answers with where to reopen instead of an unbounded retry. See §"M8 is not independent of M6" |
 | 10 | M9 — cutover and deletion | [remaining](REMAINING-ROADMAP-HANDOFF.md) §5 | not started |
@@ -638,6 +638,77 @@ cancel work the viewer wants.
 than the accepted sequence: a create can outrun the snapshot that justifies it,
 and a client reporting a *higher* sequence can only look less superseded, which
 is the safe direction. Apple 108, Android 64.
+
+## M6 was unreachable from any viewer action, and now is not
+
+**2026-09-16, effort `effort/quality-switch-continuity`.** The prepared handoff
+described in the section below was complete on the server and on all three
+clients, deployed, default-on — and **no viewer had ever received one.** nynuc's
+counters 28 minutes after the 2026-09-16 deploy read
+`preparation_observations_total{seam="in_session"} 2`,
+`preparation_staged_total{outcome="refused"} 1`, `staged 0`,
+`actions prepare 0`: two selection changes seen, one staging attempted and lost,
+nothing ever offered. Three independent defects, any one of which was sufficient:
+
+1. **`Prepare` cannot arrive on the exchange that asked for it.** The candidate
+   is spawned *after* the response is built (`http/hls.rs`, "Spawned, never
+   awaited"), so the asking exchange always answers `none`. Apple waited 1.5 s
+   on exactly that exchange, got `none`, and reopened.
+2. **Web and Android reopened unconditionally.** Web's `setQuality` called
+   `play()`, which nulls `mediaAttachment` — the guard the reporter needs to
+   handle a `Prepare` at all. Android's `prepareReplacement` published the
+   change and then routed `force = true` regardless, disposing the reporter.
+3. **The client's own reopen killed the successor the server had started for
+   it.** Supersession was not a cancellation edge, so a speculative encoder ran
+   to the 330 s deadline on a node with headroom, or was torn down by the
+   reopen's own admission pressure and counted as a refusal. That refusal is
+   what `staged_total{outcome="refused"}` had actually been measuring.
+
+The plan is [QUALITY-SWITCH-CONTINUITY-PLAN.md](QUALITY-SWITCH-CONTINUITY-PLAN.md);
+the build is [QUALITY-SWITCH-CONTINUITY-BUILD.md](QUALITY-SWITCH-CONTINUITY-BUILD.md).
+
+| Milestone | What it does | State |
+|---|---|---|
+| M0 server | `delivery.preparation` ∈ `staging`·`offered`·`none`, derived across the whole detached candidate task through an RAII pending marker; supersession cancels the preparation; `plurx_playback_preparation_cancelled_total{reason}` | built, proven |
+| M2 Apple | `PreparedOfferWait` — a pure type waiting **across** exchanges to a 12 s bound from the tap; the fallback position is sampled at the reopen, not pinned at the tap | built, proven |
+| M2 Android | the same wait; `DirectedChange` so a change is honoured by a commit or **one** reopen; the incumbent freeze replaced by a rendezvous hold | built, proven |
+| M1 web | a multi-exchange offer waiter that never touches `mediaAttachment`; one owner per directed change; a two-phase commit that finishes alignment before exposing; Auto carries the rung it wants | built, proven |
+| M3 | dropped frames, audio discontinuity and tap-to-first-frame on all three | see below |
+
+**Two defects the milestones found in already-merged M6 code**, both of which
+made a commit look like a success while the viewer saw a rewind:
+
+- **Apple exposed the successor before aligning it.** The successor item was
+  seeked once to the offer's film position and never played, so its playhead sat
+  frozen there while the incumbent moved on. `commitPreparedSuccessor` went
+  straight to `replaceCurrentItem` and relied on `boundaryMs =
+  max(preparedFilmPositionMs, realPositionMs())` — which is `realPositionMs()`
+  by then — so `awaitPreparedFirstFrame` rejected every frame the successor
+  actually had until playback caught back up. Past 6 s that returned
+  `switchedWithoutAFrame`: a frozen picture and a reopen. Now the item is seeked
+  to the alignment position and awaited *while still attached to its own
+  player*, then re-guarded, then exposed.
+- **Web exposed the successor inside the same synchronous block as its
+  corrective seek.** No `seeked` await and no re-check of buffered media, so a
+  corrective seek revealed a visible, audible element with nothing decoded at
+  its position, and the 8 s first-frame watchdog then rolled it back. The
+  `buffer_ready` runway that authorised the commit had been measured at the
+  *pre-seek* position. `readyState` alone was also insufficient: a seek landing
+  in a buffer hole reports `HAVE_FUTURE_DATA` about a range the playhead is not
+  in, so the check now walks `buffered` for the range containing the new
+  playhead.
+
+**Also corrected here:** this page previously described a
+`canOfferPreparation` retirement rule on Apple. It no longer exists —
+`PreparedReplacement.swift` hard-codes `canPrepare: true` and the `.declined`
+arm is dead, which is correct since priming landed.
+
+**What is still owed:** every proof above is a unit-lane proof. Nothing has run
+against a real second pipeline on real hardware, which is precisely the gap that
+let three unreachable-code defects ship green in the first place. M3's bar —
+twenty consecutive directed changes per platform, zero dropped frames in the two
+seconds around the commit, no audible seam — is a device run, and the
+paste-ready prompts are in the pull requests.
 
 ## M6 clients and server reserve-and-prime are implemented
 

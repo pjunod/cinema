@@ -178,6 +178,11 @@ pub(crate) async fn readiness(
                     .map(String::as_str),
                 true,
             )),
+            semantic_search(
+                settings
+                    .get(crate::library_search::SEMANTIC_KEY)
+                    .is_some_and(|v| v == "true"),
+            ),
             dvr(&state, dvr_on, &live_tv, &dvr_config).await,
             cluster_transport_recovery(&state).await,
             playback_control_protocol(control_advertised),
@@ -1215,6 +1220,18 @@ fn webhook_url_approved(dvr: &crate::live_tv::DvrConfig) -> DeveloperRequirement
     }
 }
 
+fn semantic_search(enabled: bool) -> DeveloperEnableItem {
+    let observed = crate::library_search::semantic::status();
+    let phase = observed["state"].as_str().unwrap_or("disabled");
+    let model_loaded = matches!(phase, "indexing" | "ready" | "ready_capacity_limit");
+    let indexed = observed["indexed"].as_u64().unwrap_or(0);
+    DeveloperEnableItem{id:"embedded_semantic_search",title:"Embedded semantic search",enabled:Some(enabled),setting:None,requirements:vec![
+        DeveloperRequirement{id:"runtime",title:"Embedded CPU runtime",status:RequirementStatus::Met,evidence:"Included in this server build. Enabling needs no external inference service.".into()},
+        DeveloperRequirement{id:"model",title:"Verified model loaded on this node",status:if model_loaded{RequirementStatus::Met}else{RequirementStatus::Unmet},evidence:format!("Current state: {phase}. First enable downloads about 91 MB from Hugging Face; model files are pinned and checksum-verified.")},
+        DeveloperRequirement{id:"index",title:"Local semantic index",status:if indexed>0{RequirementStatus::Met}else{RequirementStatus::Unmet},evidence:format!("{indexed} titles indexed on this node. Building the index uses additional CPU and memory; ordinary text search remains available.")},
+    ]}
+}
+
 fn channel_subjects(enabled: bool) -> DeveloperEnableItem {
     let observed = crate::channel_subjects::observation();
     let status = if observed.error.is_some() {
@@ -1225,8 +1242,8 @@ fn channel_subjects(enabled: bool) -> DeveloperEnableItem {
         RequirementStatus::Unobservable
     };
     DeveloperEnableItem {id:"library_channel_subject_matching",title:"Library channel subject matching",enabled:Some(enabled),setting:Some("library_channel_subject_matching_enabled"),requirements:vec![
-        DeveloperRequirement{id:"provider",title:"Local Ollama provider and installed model",status,evidence:observed.error.clone().unwrap_or_else(||observed.profile.clone().unwrap_or_else(||"Not observed yet; configure PLURX_CHANNEL_SUBJECT_URL and PLURX_CHANNEL_SUBJECT_MODEL. No download occurs when enabling.".into()))},
+        DeveloperRequirement{id:"provider",title:"Local catalogue matcher",status,evidence:observed.error.clone().unwrap_or_else(||observed.profile.clone().unwrap_or_else(||"Local metadata rules are available without an inference provider. The worker has not reported a batch yet.".into()))},
         DeveloperRequirement{id:"metadata",title:"Metadata coverage",status:if observed.metadata_total>0{RequirementStatus::Met}else{RequirementStatus::Unobservable},evidence:format!("Last observed scope: {} titles, {} missing item overviews, {} truncated inputs. Sparse metadata can remain uncertain.",observed.metadata_total,observed.missing_overviews,observed.truncated)},
-        DeveloperRequirement{id:"batch",title:"Recent batch outcome and queued work",status:if observed.error.is_some(){RequirementStatus::Unmet}else{RequirementStatus::Unobservable},evidence:format!("{}; queued work observed: {}. Only new inference calls pause when disabled; saves, cached decisions and published playback remain available.",observed.error.unwrap_or_else(||"No recent error recorded".into()),observed.pending>0)},
+        DeveloperRequirement{id:"batch",title:"Recent batch outcome and queued work",status:if observed.error.is_some(){RequirementStatus::Unmet}else{RequirementStatus::Unobservable},evidence:format!("{}; queued work observed: {}. Only new rule evaluations pause when disabled; saves, cached decisions and published playback remain available.",observed.error.unwrap_or_else(||"No recent error recorded".into()),observed.pending>0)},
     ]}
 }

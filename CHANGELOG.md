@@ -8,6 +8,25 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A newer FFprobe describing an old scan no longer reads as a replaced
+  file.** Starting an encoded session compares the catalog's scan with a fresh
+  probe of the held source, and those two reports can come from different
+  FFprobe builds. A scan that omits the derived `Dolby Digital Plus + Dolby
+  Atmos` profile on an E-AC-3 track is now accepted against a report that
+  carries it, in either direction, exactly as TrueHD already was; the two
+  codecs share one table instead of two branches. Two reported profiles are
+  still compared, so a real profile change still refuses, and every paired
+  audio removal now requires the same explicit non-negative stream index on
+  both sides. A refused comparison now names the normalized fields that
+  disagreed — bounded to eight paths, with no values, pathnames or container
+  tag text — in the refusal itself, and tells the operator to *reanalyze* the
+  item rather than to rescan the library, which could never have worked: the
+  scanner skips a file whose size and mtime are unchanged. Reanalyze is
+  reachable on a healthy item under More actions, and Settings → Developer
+  carries an advisory Source verification section that gates nothing.
+
 ### Added
 
 - **`make install` installs the server as a service in one command on every

@@ -1,7 +1,7 @@
 # Content analysis repair — implementation status
 
-**Status:** local acceptance green; hosted fast lane pending · **Updated:** 2026-09-17 UTC ·
-**Base:** `f237d6180073bd395af7e08de00021d3aa7a2e33` · **Effort:**
+**Status:** merge authorized after current-main integration · **Updated:** 2026-09-17 UTC ·
+**Base:** `8232d1b6b7fe0848df009709a27f2a28bdae3f60` · **Effort:**
 `effort/content-analysis-repair`
 
 Companion to the
@@ -20,7 +20,7 @@ tree. Fleet recovery and deployment remain separate actions.
 | W3 · durable bounded retry | reviewed | fixed backoff, seven-day deadline, attempt preservation, deadline-clamped initial and renewed leases, and deadline-aware completion compile in both Store paths | exercise both backends in the final fast lane |
 | W4 · identity-correct repair | reviewed | exact pipeline/video identity, current-recipe attribution for legacy and standalone rows, revisioned preview/apply candidates, atomic receipts, and stale revalidation compile | backend regressions in the final fast lane |
 | W5 · operator surfaces | implemented | history diagnostics, truthful failure text, repair controls, and advisory Developer enablement compile | browser contract regression in the final fast lane |
-| W6 · review and promotion | active | Forgejo PR [#352](http://192.168.4.7:3000/noirr/plurx/pulls/352) is open; adversarial review findings are addressed; focused local acceptance is green on `0db6c804` | push, mark ready, require the hosted Main promotion gate, and merge |
+| W6 · review and promotion | merge authorized | Forgejo PR [#352](http://192.168.4.7:3000/noirr/plurx/pulls/352) is open; adversarial review findings are addressed; focused local acceptance is green on `0db6c804`; current main is integrated and the merged Rust surface compiles | merge immediately per the owner's explicit direction |
 
 ## Standing decisions
 
@@ -46,15 +46,16 @@ tree. Fleet recovery and deployment remain separate actions.
 | Evidence | Result |
 |---|---|
 | Isolated working copy | `/private/tmp/plurx-agent-content-analysis`; the user's checkout was read-only |
-| Current intended base | `f237d6180073bd395af7e08de00021d3aa7a2e33` |
+| Current intended base | `8232d1b6b7fe0848df009709a27f2a28bdae3f60` |
 | Handoff's verified base | `363a22e28aa53094d899a9ad3c812241a6243548`; all seams are being rechecked |
 | Pinned compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Baseline compile | green: `cargo check -p plurxd --all-targets --locked` |
 | Reviewed candidate compile | green on `112b1ae5`: `cargo fmt --all`; `git diff --check`; `cargo check -p plurxd --all-targets --locked`; `cargo check -p plurx-core --tests --features hiqlite-contract-tests --locked` |
 | Focused regressions | green on `0db6c804`: core policy/SQLite 8; real three-voter Hiqlite 2; daemon completion/history 6; fragment index 28; audio-tail 1; web 3; docs index 4 |
 | Final lint | green on `0db6c804`: pinned rustfmt and `cargo clippy -p plurxd --all-targets --locked -- -D warnings` |
+| Current-main integration | migration conflicts resolved by ordering classification before content-analysis repair; Developer Enable keeps both Content analysis and Source verification; `cargo check -p plurxd --all-targets --locked` green |
 | Adversarial implementation review | complete; six findings addressed: legacy recipe attribution, deadline-clamped claim/completion, stale-source precedence, blank-identity exclusion, whole-build budget, and configured local attempt limits |
-| Main fast lane | not run; starts only after review findings are addressed and the draft PR is marked ready |
+| Hosted Main fast lane | not run on the merged-base descendant; owner explicitly directed immediate merge after conflict resolution |
 | Fleet recovery | not authorized or run |
 
 ## Completion
@@ -67,5 +68,5 @@ tree. Fleet recovery and deployment remain separate actions.
 - [x] W5 API, browse, analysis, Developer settings, and operations docs implemented.
 - [x] One adversarial review addressed.
 - [x] Focused local acceptance green after the one adversarial review.
-- [ ] Hosted Main promotion gate green on the current PR head.
+- [x] Current main integrated and merge explicitly authorized by the owner.
 - [ ] Main-bound pull request merged.

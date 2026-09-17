@@ -17287,21 +17287,44 @@ impl TranscodeManager {
                     format!("the held source could not be verified against its scan: {error}"),
                 )
             })?;
-        let probe_matches = probe
+        let comparison = probe
             .as_deref()
-            .map(|stored| crate::ffmpeg::probes_describe_same_input(stored, &held_probe))
+            .map(|stored| crate::ffmpeg::compare_probe_documents(stored, &held_probe))
             .transpose()
             .map_err(|error| {
                 vod_refusal_error(
                     "vod_source_rescan_required",
                     format!("the stored source probe cannot be verified: {error}"),
                 )
-            })?
-            .unwrap_or(false);
-        if !probe_matches {
+            })?;
+        if !comparison.as_ref().is_some_and(|result| result.same) {
+            // Why this refused belongs in the product. `ps auxwww` on the box
+            // is not an acceptable answer for work this server refuses, and
+            // neither is a log line only an operator with a shell can read.
+            // The normalized field paths are built to be safe to show —
+            // bounded to eight, no values, no pathname, no container tag text
+            // — and they come from the same normalized documents the verdict
+            // used, so the explanation cannot contradict the decision. The
+            // typed code is unchanged, so every client keeps its existing
+            // terminal classification; only the sentence gets useful.
+            let detail = match comparison.as_ref() {
+                // A file that was never probed takes this branch too. It is
+                // an unknown source, not a changed one, and saying so is the
+                // difference between a five-minute repair and a snapshot dig.
+                None => "this file has no stored probe".to_string(),
+                Some(result) => format!(
+                    "the stored probe differs from the source at {}",
+                    result.rendered_differences()
+                ),
+            };
+            tracing::warn!(
+                file_id = file.id,
+                detail = %detail,
+                "refusing an encoded session: the held source does not match its stored probe"
+            );
             return Err(vod_refusal_error(
                 "vod_source_rescan_required",
-                "the source no longer matches its stored probe; rescan it before playback",
+                format!("{detail}; reanalyze this item before playback"),
             ));
         }
         let grid = crate::vodencode::frame_grid(probe.as_deref()).ok_or_else(|| {
@@ -32077,6 +32100,7 @@ pub(crate) mod tests {
                 .to_owned()
             }),
             subtitle_readiness: None,
+            preparation: None,
             owner_node_hash: "n-0123456789abcdef".to_owned(),
             owner_epoch: 1,
         };

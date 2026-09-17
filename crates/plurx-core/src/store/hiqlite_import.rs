@@ -1266,6 +1266,22 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "media_classifications",
+        columns: &[
+            "item_id",
+            "source_json",
+            "payload",
+            "overrides",
+            "terms",
+            "revision",
+        ],
+        order_by: "item_id",
+        minimum_schema: 61,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "library_channel_subject_jobs",
         columns: &[
             "id",
@@ -2854,7 +2870,7 @@ mod tests {
         let v37 = value_projection(table, 37, false);
         let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
         assert!(
-            v37.ends_with("hdr_format, audio_offset_ms, NULL, NULL, NULL, NULL, NULL"),
+            v37.ends_with("hdr_format, audio_offset_ms, NULL, NULL, NULL, NULL, NULL, NULL"),
             "{v37}"
         );
         assert!(
@@ -2966,7 +2982,9 @@ mod tests {
         assert!(names.contains(&"dvr_recordings"));
         assert!(names.contains(&"dvr_rules"));
         assert!(names.contains(&"dvr_reminders"));
-        assert_eq!(names.len(), 49, "review every imported durable table");
+        assert!(names.contains(&"media_classifications"));
+        assert!(!names.contains(&"classification_fts"));
+        assert_eq!(names.len(), 52, "review every imported durable table");
     }
 
     /// A source from before the pointer fence has no revision to attribute its
