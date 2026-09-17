@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["3bde5a74"]
+ignore = true
+reason = "Documentation and evidence metadata only: this commit records the completed review and maps the preceding implementation repair to its coverage. It changes no runtime behavior."

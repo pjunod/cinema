@@ -1,6 +1,6 @@
 # Local library search and reusable classification
 
-**Status:** [Draft PR #350](http://192.168.4.7:3000/noirr/plurx/pulls/350) open.
+**Status:** [PR #350](http://192.168.4.7:3000/noirr/plurx/pulls/350) open for merge.
 Final adversarial review complete; both findings addressed.
 Final fast-lane and merge state are tracked on PR #350. Not deployed.
 **Updated:** 2026-09-17.
