@@ -41,6 +41,7 @@ import tv.plurx.app.player.SubtitleMode
 import tv.plurx.app.player.SubtitleSelection
 import tv.plurx.app.player.controlCapabilities
 import java.util.UUID
+import tv.plurx.app.player.playbackLoadControl
 
 data class LibraryChannelPlayerState(
     val channels: List<LibraryChannel> = emptyList(),
@@ -62,6 +63,7 @@ class LibraryChannelPlayer private constructor(context: Context) {
     private val appContext = context.applicationContext
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     val player: ExoPlayer = ExoPlayer.Builder(appContext)
+        .setLoadControl(playbackLoadControl(appContext))
         .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(Net.capabilityClient)))
         .build()
     private val mutableState = MutableStateFlow(LibraryChannelPlayerState())

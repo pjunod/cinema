@@ -3996,6 +3996,7 @@ private fun buildPipeline(context: Context, vm: AppViewModel, tunneling: Boolean
         // into the compatibility rescue and costing the viewer a restart.
         .setEnableDecoderFallback(true)
     val player = ExoPlayer.Builder(context)
+        .setLoadControl(playbackLoadControl(context))
         .setTrackSelector(selector)
         .setRenderersFactory(renderers)
         .setMediaSourceFactory(DefaultMediaSourceFactory(dataSource))

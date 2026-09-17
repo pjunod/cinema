@@ -8,7 +8,6 @@ import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.datasource.okhttp.OkHttpDataSource
-import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import kotlinx.coroutines.CoroutineScope
@@ -19,6 +18,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import tv.plurx.app.player.playbackLoadControl
 
 data class LiveTvPlayerState(
     val channels: List<LiveTvChannel> = emptyList(),
@@ -163,7 +163,7 @@ class LiveTvPlayer private constructor(context: Context) {
     ) {
         val output = ExoPlayer.Builder(context)
             .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(api.mediaClient)))
-            .setLoadControl(DefaultLoadControl.Builder().setBufferDurationsMs(4_000, 12_000, 1_000, 2_000).build())
+            .setLoadControl(playbackLoadControl(context, live = true))
             .build()
         player = output
         // Both of these tear the player down, and they arrive from

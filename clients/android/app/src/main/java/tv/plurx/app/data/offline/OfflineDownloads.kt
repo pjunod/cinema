@@ -56,6 +56,7 @@ import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
+import tv.plurx.app.player.playbackLoadControl
 
 @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
 private typealias DownloadManagerAction<T> = DownloadManager.() -> T
@@ -388,6 +389,7 @@ object OfflineDownloads {
             .setCache(cache)
             .setUpstreamDataSourceFactory(PlaceholderDataSource.FACTORY)
         return ExoPlayer.Builder(context)
+            .setLoadControl(playbackLoadControl(context))
             .setMediaSourceFactory(DefaultMediaSourceFactory(cacheOnly))
             .build()
     }
