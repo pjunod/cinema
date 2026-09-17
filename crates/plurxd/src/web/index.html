@@ -13226,13 +13226,21 @@ function playbackProgressTick(v,p){
   let frames=null, frameSource="none";
   if(streamHasVideo(p,v)){
     if(p.controlHasFrameCallbacks){
-      // Callback support is itself the observation contract. Zero presented
-      // callbacks is real evidence and must not fall through to a decoded-frame
-      // counter that can advance while the compositor remains frozen.
+      // Once callbacks arrive they remain the presentation authority, even if
+      // the decoder continues advancing while the compositor is frozen.
       frames=Number(p.controlPresentedFrames)||0; frameSource="callbacks";
-    }else try{
+    }
+    // Safari can advertise callbacks yet never deliver one for native VOD HLS
+    // resumed into a long timeline. Require both clock and decoded-frame
+    // progress in that case; do not relax MSE or a callback stream that stops.
+    const nativeCallbackSilence=p.controlHasFrameCallbacks&&frames===0
+      &&p.copyHls&&p.vod&&!p.hls;
+    if(!p.controlHasFrameCallbacks||nativeCallbackSilence) try{
       const q=v.getVideoPlaybackQuality?.();
-      if(Number.isFinite(q?.totalVideoFrames)){frames=q.totalVideoFrames; frameSource="quality";}
+      if(Number.isFinite(q?.totalVideoFrames)){
+        frames=q.totalVideoFrames;
+        frameSource=nativeCallbackSilence?"native-decoded":"quality";
+      }
     }catch(e){}
   }
   const key=`${p._seekToken||0}:${p.controlIntentGeneration||0}:${pending?.sequence||0}:${frameSource}`;
