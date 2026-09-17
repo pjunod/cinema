@@ -1209,7 +1209,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
               WHERE EXISTS (SELECT 1 FROM files WHERE id = $2 AND size = $3 AND mtime = $4)
                 AND (SELECT COUNT(*) FROM analysis_requests
                       WHERE state IN ('queued', 'running', 'submitted')) < $16
-                AND ($11 = 0 OR $5 <> 'fragment_index' OR NOT EXISTS (
+                AND ($11 = 0 OR $5 <> 'fragment_index' OR $7 = '' OR NOT EXISTS (
                   SELECT 1 FROM analysis_requests legacy
                    WHERE legacy.file_id = $2 AND legacy.source_size = $3
                      AND legacy.source_mtime = $4 AND legacy.component = $5

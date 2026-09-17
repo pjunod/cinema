@@ -371,7 +371,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                                  WHERE id = ?2 AND size = ?3 AND mtime = ?4)
                     AND (SELECT COUNT(*) FROM analysis_requests
                           WHERE state IN ('queued', 'running', 'submitted')) < ?16
-                    AND (?11 = 0 OR ?5 <> 'fragment_index' OR NOT EXISTS (
+                    AND (?11 = 0 OR ?5 <> 'fragment_index' OR ?7 = '' OR NOT EXISTS (
                       SELECT 1 FROM analysis_requests legacy
                        WHERE legacy.file_id = ?2 AND legacy.source_size = ?3
                          AND legacy.source_mtime = ?4 AND legacy.component = ?5
@@ -2485,7 +2485,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                  SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued',
                         NULL, 0, NULL, 0, ?10, ?11, ?11, 'holders_unavailable'
                   WHERE (SELECT COUNT(*) FROM cluster_fragment_index_jobs
-                          WHERE state IN ('queued', 'running')) < ?13
+                          WHERE state IN ('queued', 'running')) < ?12
                     AND EXISTS (SELECT 1 FROM files
                       WHERE id = ?2 AND size = ?3 AND mtime = ?4)
                     AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
@@ -3369,11 +3369,19 @@ mod tests {
                 .rfind("attempts = CASE")
                 .expect("every reset of this column opens a CASE");
             let budget = &production[open..close + CLOSE.len()];
-            // The history reset is the budget reset with the column and the
-            // reset value swapped. Anything else is a different rule.
+            // The history reset is the budget reset with the reset column and
+            // the reset values swapped. The conditions are left alone: they
+            // test the budget, which is the column `attempt_errors` mirrors,
+            // not the column it is. Rewriting `attempts` everywhere demanded
+            // `attempt_errors = 0` inside a condition — a TEXT history column
+            // compared against an integer, which is not SQL anybody wrote.
             let expected = squeeze(budget)
-                .replace("attempts", "attempt_errors")
-                .replace("THEN 0", "THEN ''");
+                .replacen("attempts = CASE", "attempt_errors = CASE", 1)
+                .replace("THEN 0", "THEN ''")
+                .replace(
+                    "ELSE cluster_fragment_index_jobs.attempts END",
+                    "ELSE cluster_fragment_index_jobs.attempt_errors END",
+                );
             let tail = &production[open..(close + CLOSE.len() + 900).min(production.len())];
             let window = squeeze(tail);
             assert!(
@@ -4965,7 +4973,7 @@ mod tests {
                       (cache_key, file_id, source_size, source_mtime, source_sha256,
                        pipeline_sha256, state, fence, attempts, not_before_ms,
                        created_at_ms, updated_at_ms, last_error_code)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'failed', 1, 1, 1, 1, 1,
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'failed', 1, 0, 1, 1, 1,
                        'queue_expired')",
                     params![
                         seeded_repair.cache_key,
