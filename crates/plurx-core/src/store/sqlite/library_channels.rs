@@ -515,7 +515,7 @@ impl LibraryChannelStore for SqliteStore {
             let mut statement = conn.prepare(
                 "SELECT i.id, f.id, f.size, f.mtime, f.duration_ms, i.library_id, i.kind, \
                         i.title, COALESCE(i.overview, ''), COALESCE(sh.overview, ''), \
-                        i.genres, i.tags, \
+                        i.genres, COALESCE((SELECT json_group_array(value) FROM (SELECT value FROM json_each(i.tags) UNION ALL SELECT value FROM media_classifications mc,json_each(mc.terms) WHERE mc.item_id=i.id AND mc.source_json=json_object('id',i.id,'kind',i.kind,'title',i.title,'overview',COALESCE(i.overview,''),'year',i.year,'tmdb_id',i.tmdb_id,'genres',json(i.genres),'tags',json(i.tags)))),i.tags), \
                         COALESCE(CAST(substr(i.air_date, 1, 4) AS INTEGER), i.year, sh.year), \
                         sh.id, sh.title, s.season_number, i.episode_number, \
                         CASE WHEN s.season_number = 0 THEN 1 ELSE 0 END, \

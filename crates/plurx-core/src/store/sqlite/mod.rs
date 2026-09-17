@@ -10,6 +10,7 @@
 
 mod apikeys;
 mod cache;
+mod classification;
 mod coordination;
 mod dv_conversion;
 mod dvr;
@@ -1116,6 +1117,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v60: the original video's four-character sample-entry label. This is a
     // source-admission fact, not part of any fragment-index byte identity.
     super::FILES_VIDEO_CODEC_TAG_COLUMN,
+    // v61: reusable classification metadata and a derived local text index.
+    super::classification::SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

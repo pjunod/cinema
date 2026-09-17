@@ -49,7 +49,7 @@ pub(super) fn build_state_migration_statements(
 /// Split the shared SQLite migration into the individual writes hiqlite's
 /// transaction API requires. A trigger body contains its own semicolon, so a
 /// plain `split(';')` silently truncates it before replication.
-fn split_schema_statements(schema: &str) -> Vec<String> {
+pub(super) fn split_schema_statements(schema: &str) -> Vec<String> {
     let mut statements = Vec::new();
     let mut current = String::new();
     let mut in_trigger = false;
@@ -843,7 +843,7 @@ impl LibraryChannelStore for HiqliteAuthStore {
                     f.mtime AS file_mtime, f.duration_ms AS duration_ms, \
                     i.library_id, i.kind, i.title, \
                     COALESCE(i.overview, '') AS overview, COALESCE(sh.overview, '') AS show_overview, \
-                    i.genres, i.tags, \
+                    i.genres, COALESCE((SELECT json_group_array(value) FROM (SELECT value FROM json_each(i.tags) UNION ALL SELECT value FROM media_classifications mc,json_each(mc.terms) WHERE mc.item_id=i.id AND mc.source_json=json_object('id',i.id,'kind',i.kind,'title',i.title,'overview',COALESCE(i.overview,''),'year',i.year,'tmdb_id',i.tmdb_id,'genres',json(i.genres),'tags',json(i.tags)))),i.tags) AS tags, \
                     COALESCE(CAST(substr(i.air_date, 1, 4) AS INTEGER), i.year, sh.year) AS year, \
                     sh.id AS show_id, sh.title AS show_title, s.season_number, i.episode_number, \
                     CASE WHEN s.season_number = 0 THEN 1 ELSE 0 END AS special, \
