@@ -342,6 +342,7 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
       shippedSource("windowsServerCard"),
       shippedSource("webHlsStartupRecoveryCard"),
       shippedSource("hevcSampleEntryAdmissionCard"),
+      shippedSource("sourceProbeCompatibilityCard"),
       "const SETTINGS_DATA=null,ME=null;",
       shippedSource("uiEnableAdvisory"),
       shippedSource("developerPanel"),
@@ -405,6 +406,13 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
   assert.match(html, /Final-send loader interception/);
   assert.match(html, /Recovery is enabled for every hls\.js attachment/);
   assert.match(html, /CARDHEAD:HEVC sample-entry admission\|/);
+  // Source verification is always on and has no switch; the card exists to say
+  // what is and is not known about it, which is the only honest thing a
+  // compatibility rule can offer an operator.
+  assert.match(html, /CARDHEAD:Source probe compatibility\|/);
+  assert.match(html, /Derived Atmos profile omissions/);
+  assert.match(html, /Typed source verification/);
+  assert.match(html, /Nothing on this card enables, disables, hides or overrides playback admission/);
   assert.match(html, /No feature flag is used/);
   assert.match(html, /Serving-fleet order/);
   assert.match(html, /These checks[^.]*never enable, disable, or hide it/);
