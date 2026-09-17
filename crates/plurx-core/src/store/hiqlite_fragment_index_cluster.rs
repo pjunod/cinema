@@ -1214,6 +1214,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                    WHERE legacy.file_id = $2 AND legacy.source_size = $3
                      AND legacy.source_mtime = $4 AND legacy.component = $5
                      AND legacy.video_identity = ''
+                     -- See the SQLite twin: a blank force displaces an ordinary
+                     -- blank request and not another blank force.
+                     AND ($7 <> '' OR legacy.force_rebuild = 1)
                      AND legacy.state IN ('queued','running','submitted','ready')))
                 AND ($11 = 1 OR (
                   NOT EXISTS (SELECT 1 FROM analysis_requests

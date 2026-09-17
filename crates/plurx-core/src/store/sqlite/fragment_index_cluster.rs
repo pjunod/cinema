@@ -376,6 +376,13 @@ impl ClusterFragmentIndexStore for SqliteStore {
                        WHERE legacy.file_id = ?2 AND legacy.source_size = ?3
                          AND legacy.source_mtime = ?4 AND legacy.component = ?5
                          AND legacy.video_identity = ''
+                         -- A force that names an identity is still blocked by
+                         -- any active blank row. A force that names none is
+                         -- what the admin button sends, and it displaces an
+                         -- ordinary blank request -- but not another blank
+                         -- force, or two clicks would each buy a whole-file
+                         -- index build and neither would cancel the other.
+                         AND (?7 <> '' OR legacy.force_rebuild = 1)
                          AND legacy.state IN ('queued','running','submitted','ready')))
                     AND (?11 = 1 OR (
                       NOT EXISTS (SELECT 1 FROM analysis_requests
@@ -2485,7 +2492,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                  SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued',
                         NULL, 0, NULL, 0, ?10, ?11, ?11, 'holders_unavailable'
                   WHERE (SELECT COUNT(*) FROM cluster_fragment_index_jobs
-                          WHERE state IN ('queued', 'running')) < ?13
+                          WHERE state IN ('queued', 'running')) < ?12
                     AND EXISTS (SELECT 1 FROM files
                       WHERE id = ?2 AND size = ?3 AND mtime = ?4)
                     AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
@@ -3369,11 +3376,19 @@ mod tests {
                 .rfind("attempts = CASE")
                 .expect("every reset of this column opens a CASE");
             let budget = &production[open..close + CLOSE.len()];
-            // The history reset is the budget reset with the column and the
-            // reset value swapped. Anything else is a different rule.
+            // The history reset is the budget reset with the reset column and
+            // the reset values swapped. The conditions are left alone: they
+            // test the budget, which is the column `attempt_errors` mirrors,
+            // not the column it is. Rewriting `attempts` everywhere demanded
+            // `attempt_errors = 0` inside a condition — a TEXT history column
+            // compared against an integer, which is not SQL anybody wrote.
             let expected = squeeze(budget)
-                .replace("attempts", "attempt_errors")
-                .replace("THEN 0", "THEN ''");
+                .replacen("attempts = CASE", "attempt_errors = CASE", 1)
+                .replace("THEN 0", "THEN ''")
+                .replace(
+                    "ELSE cluster_fragment_index_jobs.attempts END",
+                    "ELSE cluster_fragment_index_jobs.attempt_errors END",
+                );
             let tail = &production[open..(close + CLOSE.len() + 900).min(production.len())];
             let window = squeeze(tail);
             assert!(
@@ -4446,6 +4461,43 @@ mod tests {
             .collect::<std::collections::BTreeMap<_, _>>();
         assert_eq!(by_id["legacy"].state, "cancelled");
         assert_eq!(by_id["legacy"].video_identity, "");
+        assert_eq!(by_id["forced-legacy"].state, "queued");
+    }
+
+    /// The other half of the same clause: a force with no identity displaces an
+    /// ordinary blank request, and does not displace another blank force.
+    ///
+    /// Without the second half, two clicks on Force rebuild are two admitted
+    /// requests for the same generation — neither cancels the other, both spend
+    /// a slot of the active budget, and both run a whole-file index build.
+    #[tokio::test]
+    async fn two_unidentified_forces_do_not_both_win() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        store
+            .enqueue_analysis_request(&request("first-force", true, 10))
+            .await
+            .expect("the first force is admitted");
+        let second = store
+            .enqueue_analysis_request(&request("second-force", true, 20))
+            .await
+            .expect("a second click is answered, not refused");
+        assert_eq!(
+            second.request_id, "first-force",
+            "the second click is handed the force already in flight",
+        );
+        let states = store
+            .analysis_requests(10)
+            .await
+            .expect("requests")
+            .into_iter()
+            .map(|request| (request.request_id.clone(), request.state.clone()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(states["first-force"], "queued");
+        assert!(
+            !states.contains_key("second-force"),
+            "a second row would spend the budget twice and cancel nothing: {states:?}",
+        );
     }
 
     #[tokio::test]
@@ -4965,7 +5017,7 @@ mod tests {
                       (cache_key, file_id, source_size, source_mtime, source_sha256,
                        pipeline_sha256, state, fence, attempts, not_before_ms,
                        created_at_ms, updated_at_ms, last_error_code)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'failed', 1, 1, 1, 1, 1,
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'failed', 1, 0, 1, 1, 1,
                        'queue_expired')",
                     params![
                         seeded_repair.cache_key,

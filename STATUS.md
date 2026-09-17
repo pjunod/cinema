@@ -4,6 +4,79 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## The twenty red tests, and the three live defects three of them were reporting
+
+**[#356](http://forge.lan:3000/noirr/plurx/pulls/356) from
+`fix/red-suite-repair` into `main`; adversarial review done (1 blocker, 5
+should-fix, 5 notes) and every finding folded or answered.**
+`main` was carrying twenty failing tests across `plurxd` and `plurx-core`; all
+twenty are green here. Three of them were reporting live production defects
+that the inventories around them had stopped being able to show.
+**`requeue_cluster_fragment_index` bound twelve parameters against `?13`**, so
+rusqlite refused the statement before any I/O and its one caller discards the
+error — a holders-unavailable artifact has never been requeued for rebuild on
+the SQLite backend. **The forced-supersede guard ignored the incoming
+identity**, so the blank-identity force the admin Force rebuild button sends
+was blocked by any pre-upgrade row, answering "analysis source changed or the
+active request queue is full" and doing nothing; the review then found that
+admitting it also admitted a *second* one, so that is fenced too. And
+**`Spawn::ffprobe` never piped stdout** — `wait_with_output` collects only what
+was piped, so every colour tag the pipeline probe read was `""`, which reads as
+"not BT.709", which fails the reference run: **no GPU tone-map graph has ever
+been validated on any node**, and every HDR transcode falls back to software
+x264 with a validated QSV or VAAPI encoder idle. Measured on `media1` as a
+1080p rung presenting at 83% of realtime. The proof was in the container log
+the whole time — the three correct `color_*=bt709` lines printed immediately
+above "the CPU tone-map reference did not run". Two narrower ones: a response
+that came back out of a durable settlement was stamped afterwards, so an answer
+and its own replay were different bytes (and the review caught that the fix let
+an exchange dispatch a successor while answering `none`, which is a hard reopen
+mid-film — dispatch is now gated on composing your own body); and the library
+badge read the legacy refusal, which carries `Truncated` for every terminal
+code that is not literally `Unsupported`, badging permanently unindexable files
+as pending forever. The censuses are restored rather than relaxed: ten SQLite
+transaction boundaries and a module named, the migration ladder at 63, the
+sidecar at v9, the activity payload's base `dvr` key, and a content seed that
+records the 35 bytes it writes instead of 42 — which is what every direct play,
+range read and Plex part read of that fixture was answering 404 against. Four
+new regressions cover the rules that had none: the length check, the ffprobe
+pipe, and both directions of the blank-identity force.
+
+## A held source is compared on its media facts, not its reporter's schema
+
+**[#354](http://forge.lan:3000/noirr/plurx/pulls/354) from
+`fix/probe-reporter-drift` into `main`; adversarial review done (4 blockers, 5
+should-fix, 5 notes) and every finding folded or answered.**
+Every manual quality change in the web player was refused —
+`vod_source_rescan_required`, "could not load stream" to the viewer — on a file
+nothing had touched. The VOD recipe re-probes the held source and demanded that
+document equal the scan the catalogue stored, and those two documents come from
+whatever FFprobe each side ran: the library was scanned by 5.1.9 and the daemon
+probes the held descriptor with jellyfin-ffmpeg 8.1.2. Measured on the same
+bytes at the same moment, the two builds disagree 32 times and about no media
+fact at all — `tags.vendor_id` gone, `tags.name` new, a derived Atmos profile,
+`start_time`/`duration`/`bit_rate` estimated to different precision. Probing by
+path and by `/dev/fd/3` is byte-identical on both builds, so all of it is the
+reporter. **5,061 of the 5,955 files** in that library carry a scan from the
+older one. Probe documents now record the build that wrote them; two documents
+from the same build are still compared whole, and only a proved difference in
+build narrows the comparison — to a declared projection of geometry, cadence,
+codec identity and parameter-set layout, colour, every side-data record, the
+audio shape, language, disposition, container size and chapter timing, each
+compared strictly including when only one document reports it, with a relative
+tolerance on container duration alone. Proven against the production documents
+themselves: **40 of 40** sampled scan/held pairs are admitted, where `main`
+refuses 4. The Developer tab's "Source verification" card now reads the live
+provenance and says how many sources this node admitted on the narrower
+comparison, advisory only, and `plurx_probe_reporter_drift_admissions_total`
+carries the same number. Two rows on that card were stale the moment this
+landed ("scan provenance: not recorded", "typed source verification: not
+built") and are now live readings. Not done: the scanner still does not
+re-probe a file whose stored reporter differs from the running one, so those
+5,061 documents stay on the fact comparison until an item is reanalysed —
+`POST /api/v1/items/:id/reanalyze` does repair one on demand, which is what the
+refusal already tells an operator to do.
+
 ## `make install` is one command on every platform
 
 **[#349](http://forge.lan:3000/noirr/plurx/pulls/349) from `feat/make-install`

@@ -19439,7 +19439,7 @@ function uiEnableAdvisory(){
 // measured Dolby Atmos profile omissions and nothing else. There is no switch
 // here and there is no flag in the code: the rules are always active, and
 // these rows say what is known about them on this node.
-function sourceProbeCompatibilityCard(){
+function sourceProbeCompatibilityCard(readiness){
   const sys=(SETTINGS_DATA&&SETTINGS_DATA.sys)||{};
   const tools=sys.ffmpeg_version?`reported`:"not reported";
   return setCard(`${cardHead("Source probe compatibility",
@@ -19451,12 +19451,14 @@ function sourceProbeCompatibilityCard(){
         "A scan that omits <code>profile</code> on a TrueHD or E-AC-3 track is accepted against a report that carries exactly <code>Dolby TrueHD + Dolby Atmos</code> or <code>Dolby Digital Plus + Dolby Atmos</code>, in either direction, on a stream with the same explicit index. Two reported profiles are always compared, so a real profile change still refuses.","ok")}
       ${devStaticReq("Media tools on this node",tools,
         "Compatibility is only needed because the scanning engine and the playing engine can differ. Keeping every node on the same media tools removes most of the need for it; it does not repair metadata an older engine already wrote.",sys.ffmpeg_version?"ok":"warn")}
-      ${devStaticReq("Scan provenance","not recorded",
-        "A stored probe does not record which FFprobe build produced it. An old report therefore cannot prove whether a property was measured and absent or never measurable, so an omission is treated as unknown rather than as a change.","warn")}
+      ${devReq(readiness,"source_probe_comparison","probe_reporter_named","Scan provenance",
+        "A probe document records the FFprobe build that wrote it. Two documents from the same build are compared whole; only a proved difference in build narrows the comparison, and a probe that cannot name itself proves nothing and stays on the whole-document comparison.")}
+      ${devReq(readiness,"source_probe_comparison","sources_match_their_scan_whole","Held sources matching their scan whole",
+        "An unmet row means this node has served sources admitted on the narrower comparison because their scan came from an older media tool. Reanalyze under More actions on the item rewrites that scan with this build and restores the stricter comparison for it.")}
       ${devStaticReq("Refusal diagnostics","met",
         "A refused comparison writes the normalized field paths that disagreed to the server log, bounded to eight paths, with no values, pathnames or container tag text. The client answer is unchanged.","ok")}
-      ${devStaticReq("Typed source verification","not built",
-        "Comparing whole FFprobe documents makes an external reporting change part of playback admission. The durable repair is a typed fact contract with explicit unknown states, compared against what the recipe actually depends on. Until it exists, a future reporting change can still need a rule of its own.","")}
+      ${devStaticReq("Compared media facts","built",
+        "When the two documents came from different builds, the comparison is a declared projection of what the catalogue derives and the recipe reads: geometry, cadence, codec identity and tag, parameter-set layout, colour, every side-data record, the audio shape, track language and disposition, container size and format, and chapter timing. Every one of those is compared strictly, including when only one document reports it; a container duration is compared within a relative tolerance because two builds estimate it differently.","ok")}
       <p class="devcheck-note">Advisory only. An unmet row here means a repair is worth doing, never that playback is blocked. A file whose scan genuinely is stale is repaired with Reanalyze under More actions on the item.</p>
       </div></details>`);
 }
@@ -19570,7 +19572,7 @@ function developerPanel(settings,readiness){
       <div class="setsection"><h2>Playback surface contract</h2><p>Advisory verification status for the one fault contract every client renders. Nothing here is a switch.</p></div>${playbackSurfaceReadinessCard()}
       <div class="setsection"><h2>Web HLS startup recovery</h2><p>Always-on manifest recovery with advisory browser and server readiness.</p></div>${webHlsStartupRecoveryCard()}
       <div class="setsection" id="enable-hevc-sample-entry"><h2>HEVC sample-entry admission</h2><p>Always-on packaging admission with advisory deployment and evidence status.</p></div>${hevcSampleEntryAdmissionCard()}
-      <div class="setsection" id="enable-source-probe"><h2>Source verification</h2><p>Always-on probe-compatibility rules with advisory provenance and diagnostics status.</p></div>${sourceProbeCompatibilityCard()}
+      <div class="setsection" id="enable-source-probe"><h2>Source verification</h2><p>Always-on probe-compatibility rules with advisory provenance and diagnostics status.</p></div>${sourceProbeCompatibilityCard(readiness)}
       <div class="setsection"><h2>Compatibility</h2><p>Native server and protocol controls for compatible playback clients.</p></div>${windowsServerCard(settings,readiness)}${protocol}
       <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}<div class="card"><h2>Search and classification</h2><p>Local text search, channel rules and automatic metadata labels are always available. Add optional search by meaning using an embedded model.</p>${devReq(readiness,"embedded_semantic_search","runtime","Embedded CPU runtime","Included in ordinary builds; no inference service is required.")}${devReq(readiness,"embedded_semantic_search","model","Verified model loaded","Enable to download approximately 91 MB once per node.")}${devReq(readiness,"embedded_semantic_search","index","Local semantic index","Indexing uses additional CPU and memory.")}<p class="hint">These observations are advisory. You can enable or disable semantic search at any time.</p><button class="ghost" onclick="showSearchSettings()">Enable and search settings</button></div>`;
 }
