@@ -1,7 +1,7 @@
 # Content analysis repair — implementation status
 
-**Status:** implementation compiled; review and qualification pending · **Updated:** 2026-09-17 UTC ·
-**Base:** `9e1072e6f3c05201b5ff94058c68bbfff7b5894a` · **Effort:**
+**Status:** adversarial review addressed; final fast lane pending · **Updated:** 2026-09-17 UTC ·
+**Base:** `f237d6180073bd395af7e08de00021d3aa7a2e33` · **Effort:**
 `effort/content-analysis-repair`
 
 Companion to the
@@ -14,13 +14,13 @@ tree. Fleet recovery and deployment remain separate actions.
 
 | Package | State | Evidence | Next action |
 |---|---|---|---|
-| W0 · reproduce and reconcile | partial | isolated clone at current `main`; Rust 1.97.1 confirmed; queue, migration, probe, settings, and recovery seams reconciled | record the bounded live compatibility inventory before enablement |
-| W1 · shared types and persistence | implemented | typed bounded diagnostics, shared retry policy, SQLite/Hiqlite/local schema updates, and repair receipts compile | adversarial review and focused regressions |
+| W0 · reproduce and reconcile | partial | isolated clone merged with current `main`; Rust 1.97.1 confirmed; queue, migration, probe, settings, and recovery seams reconciled | record the bounded live compatibility inventory before enablement |
+| W1 · shared types and persistence | reviewed | typed bounded diagnostics, shared retry policy, SQLite/Hiqlite/local schema updates, and repair receipts compile | final fast lane |
 | W2 · selected-video completion | implemented | held-source probe resolves the exact mapped video stream; rational lower-bound and timeline-span checks compile | add/qualify the integration fixture in the final fast lane |
-| W3 · durable bounded retry | implemented | fixed backoff, seven-day deadline, attempt preservation, deadline-aware leases, and both Store paths compile | exercise both backends in the final fast lane |
-| W4 · identity-correct repair | implemented | exact pipeline/video identity, revisioned preview/apply candidates, atomic receipts, and stale revalidation compile | adversarial review and backend regressions |
+| W3 · durable bounded retry | reviewed | fixed backoff, seven-day deadline, attempt preservation, deadline-clamped initial and renewed leases, and deadline-aware completion compile in both Store paths | exercise both backends in the final fast lane |
+| W4 · identity-correct repair | reviewed | exact pipeline/video identity, current-recipe attribution for legacy and standalone rows, revisioned preview/apply candidates, atomic receipts, and stale revalidation compile | backend regressions in the final fast lane |
 | W5 · operator surfaces | implemented | history diagnostics, truthful failure text, repair controls, and advisory Developer enablement compile | browser contract regression in the final fast lane |
-| W6 · review and promotion | pending | tests deliberately deferred; implementation commit `c448d216` compiles | finish test fixtures, open the main-bound PR, review, repair, fast lane, merge |
+| W6 · review and promotion | active | Forgejo PR [#352](http://192.168.4.7:3000/noirr/plurx/pulls/352) is open; adversarial review findings are addressed in `112b1ae5`; tests remain deliberately deferred | push the reviewed tree, run the single fast lane, fix failures, mark ready, and merge |
 
 ## Standing decisions
 
@@ -46,13 +46,13 @@ tree. Fleet recovery and deployment remain separate actions.
 | Evidence | Result |
 |---|---|
 | Isolated working copy | `/private/tmp/plurx-agent-content-analysis`; the user's checkout was read-only |
-| Current intended base | `9e1072e6f3c05201b5ff94058c68bbfff7b5894a` |
+| Current intended base | `f237d6180073bd395af7e08de00021d3aa7a2e33` |
 | Handoff's verified base | `363a22e28aa53094d899a9ad3c812241a6243548`; all seams are being rechecked |
 | Pinned compiler | `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | Baseline compile | green: `cargo check -p plurxd --all-targets --locked` |
-| Implementation compile | green on `c448d216`: `cargo fmt --all`; `git diff --check`; `cargo check -p plurxd --all-targets --locked` |
+| Reviewed candidate compile | green on `112b1ae5`: `cargo fmt --all`; `git diff --check`; `cargo check -p plurxd --all-targets --locked`; `cargo check -p plurx-core --tests --features hiqlite-contract-tests --locked` |
 | Focused regressions | deferred until the single post-review fast-lane phase |
-| Adversarial implementation review | not run; required only after the PR candidate is complete |
+| Adversarial implementation review | complete; six findings addressed: legacy recipe attribution, deadline-clamped claim/completion, stale-source precedence, blank-identity exclusion, whole-build budget, and configured local attempt limits |
 | Main fast lane | not run; starts only after review findings are addressed and the draft PR is marked ready |
 | Fleet recovery | not authorized or run |
 
@@ -64,6 +64,6 @@ tree. Fleet recovery and deployment remain separate actions.
 - [x] W3 retry lifecycle implemented in SQLite and Hiqlite and compiled.
 - [x] W4 exact-identity preview/apply repair implemented and compiled.
 - [x] W5 API, browse, analysis, Developer settings, and operations docs implemented.
-- [ ] One adversarial review addressed.
+- [x] One adversarial review addressed.
 - [ ] Fast lane green on the reviewed exact tree.
 - [ ] Main-bound pull request merged.
