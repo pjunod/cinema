@@ -523,6 +523,7 @@ pub(crate) fn record_outcome(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn record_typed_outcome(
     conn: &Connection,
     file_id: i64,
