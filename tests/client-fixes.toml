@@ -2056,3 +2056,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/TvFocus.k
 source_anchor = "if (acquired) notifyFocused?.invoke()"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/components/TvFocusTest.kt"
 test_anchor = "fun initialFocusCanDisableItselfOnlyAfterTheTargetAcceptsFocus()"
+
+[[fixes]]
+id = "android.playback-heap-budget"
+commits = ["f49a1d7ed"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackLoadControl.kt"
+source_anchor = ".setTargetBufferBytes(playbackBufferTargetBytes(memoryClass))"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/player/PlaybackLoadControlTest.kt"
+test_anchor = "fun byteBudgetStopsLoadingBeforeTimeTargetForNetworkAndLocalMedia()"
