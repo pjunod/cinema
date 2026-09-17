@@ -402,7 +402,7 @@ impl ClientSelection {
         };
         DesiredSelection {
             quality: match self.quality {
-                QualitySelection::Auto => DesiredQuality::Auto,
+                QualitySelection::Auto { height } => DesiredQuality::Auto { height },
                 QualitySelection::Original => DesiredQuality::Original,
                 QualitySelection::Manual { height } => DesiredQuality::Manual { height },
             },
@@ -436,7 +436,14 @@ impl ClientSelection {
     }
 
     fn validate(&self) -> Result<(), &'static str> {
-        if let QualitySelection::Manual { height } = self.quality {
+        // An Auto rung is bounded exactly as a manual one is. Absent is
+        // accepted, because every client shipped before D3-a sends it.
+        let named = match self.quality {
+            QualitySelection::Manual { height } => Some(height),
+            QualitySelection::Auto { height } => height,
+            QualitySelection::Original => None,
+        };
+        if let Some(height) = named {
             if !(crate::transcode::MIN_HEIGHT..=crate::transcode::MAX_HEIGHT).contains(&height) {
                 return Err("selection.quality.height");
             }
@@ -458,7 +465,14 @@ impl ClientSelection {
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum QualitySelection {
-    Auto,
+    /// `height` is the client's automatic controller naming the rung it wants
+    /// while leaving the choice with the server. Absent on every client
+    /// shipped before D3-a, and absent is plain Auto rather than a refusal to
+    /// answer.
+    Auto {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<i64>,
+    },
     /// Preserve the source representation and never grant the server
     /// automatic rung authority. Kept distinct from a manual height because
     /// sources without probed dimensions still have an explicit Original.
@@ -1272,7 +1286,10 @@ pub(crate) fn candidate_request(
     source_height: Option<i64>,
 ) -> crate::transcode::SessionRequest {
     let mut candidate = current.clone();
-    candidate.automatic = matches!(selection.quality, QualitySelection::Auto);
+    // Auto keeps the server's rung authority whether or not the client named a
+    // rung: an Auto ask with a height is "this one for now", not "this one for
+    // ever", and turning `quality_auto` off would make it the latter.
+    candidate.automatic = matches!(selection.quality, QualitySelection::Auto { .. });
     candidate.audio_index = selection.audio_track;
     candidate.audio_offset_ms = selection.audio_offset_ms;
     candidate.subtitle_burn = match selection.subtitle.mode {
@@ -1287,7 +1304,7 @@ pub(crate) fn candidate_request(
         // Auto and Original leave a copy copying, and a source-height ask is a copy's own
         // delivery asked for by name. Both leave `kind` exactly as it was,
         // which is what carries `convert_dolby_vision` through.
-        (SessionKind::Copy { .. }, QualitySelection::Auto) => {}
+        (SessionKind::Copy { .. }, QualitySelection::Auto { .. }) => {}
         (SessionKind::Copy { .. }, QualitySelection::Original) => {}
         (SessionKind::Copy { .. }, QualitySelection::Manual { height: asked })
             if Some(asked) == source_height => {}
@@ -2971,7 +2988,7 @@ impl PlaybackDemandSnapshot {
             seek_target_ms: None,
             observed_download_bps: Some(8_000_000),
             selection: ClientSelection {
-                quality: QualitySelection::Auto,
+                quality: QualitySelection::Auto { height: None },
                 audio_track: Some(0),
                 subtitle: SubtitleSelection {
                     mode: SubtitleMode::Off,
@@ -14523,7 +14540,7 @@ mod tests {
             seek_target_ms: None,
             observed_download_bps: Some(8_000_000),
             selection: ClientSelection {
-                quality: QualitySelection::Auto,
+                quality: QualitySelection::Auto { height: None },
                 audio_track: Some(0),
                 subtitle: SubtitleSelection {
                     mode: SubtitleMode::Off,
@@ -16740,7 +16757,7 @@ mod tests {
     #[test]
     fn an_ask_is_offered_for_persistence_until_the_write_has_landed() {
         let mut state = ControlState::default();
-        let first = selection_at(QualitySelection::Auto);
+        let first = selection_at(QualitySelection::Auto { height: None });
         let second = selection_at(QualitySelection::Manual { height: 720 });
 
         // A session's opening ask has to be written too: without it the store
@@ -16804,7 +16821,7 @@ mod tests {
     #[test]
     fn an_ask_arriving_while_the_slot_is_busy_is_dispatched_once_it_frees() {
         let mut state = ControlState::default();
-        let first = selection_at(QualitySelection::Auto);
+        let first = selection_at(QualitySelection::Auto { height: None });
         let second = selection_at(QualitySelection::Manual { height: 720 });
         let third = selection_at(QualitySelection::Manual { height: 1080 });
 
@@ -17026,7 +17043,7 @@ mod tests {
                 &request.client_instance_id,
                 1,
                 ControlAcceptance::new(Some(ClientPlatform::Web), Some(&successor))
-                    .asking(&selection_at(QualitySelection::Auto)),
+                    .asking(&selection_at(QualitySelection::Auto { height: None })),
             )
             .expect("announced");
         let ControlAction::Prepare {
@@ -23470,7 +23487,7 @@ mod tests {
     #[test]
     fn the_normalized_selection_distinguishes_every_ask_the_wire_does() {
         let qualities = [
-            QualitySelection::Auto,
+            QualitySelection::Auto { height: None },
             QualitySelection::Original,
             QualitySelection::Manual { height: 720 },
         ];
@@ -23743,12 +23760,165 @@ mod tests {
         let current = converting_copy();
         let candidate = candidate_request(
             &current,
-            &selection_at(QualitySelection::Auto),
+            &selection_at(QualitySelection::Auto { height: None }),
             1080,
             Some(2160),
         );
         assert_eq!(candidate.kind, current.kind);
         assert!(candidate.automatic, "and it is Auto now");
+    }
+
+    /// D3-a. An Auto controller that moves rung has to be able to SAY so, and
+    /// a client that says nothing must read exactly as it always has.
+    ///
+    /// The second half is the one with teeth. Every session alive when this
+    /// deploys is sending plain Auto against a digest taken from the old
+    /// canonical string; if `Auto { height: None }` rendered as anything but
+    /// `auto`, every one of them would record a selection change on its first
+    /// exchange after the upgrade and stage a successor nobody asked for.
+    #[test]
+    fn quality_selection_auto_carries_an_optional_rung() {
+        use plurx_core::playback::DesiredQuality;
+
+        let plain = selection_at(QualitySelection::Auto { height: None });
+        let named = selection_at(QualitySelection::Auto { height: Some(1080) });
+
+        assert_eq!(
+            plain.desired().quality,
+            DesiredQuality::Auto { height: None },
+        );
+        assert_eq!(
+            named.desired().quality,
+            DesiredQuality::Auto { height: Some(1080) },
+            "the rung has to reach the desired selection, or it cannot reach the digest",
+        );
+
+        // The literal, not a round trip: a round trip would agree with itself
+        // whatever this renders.
+        assert!(
+            plain
+                .desired()
+                .canonical_form()
+                .starts_with("v1;quality=auto;"),
+            "plain Auto must render the string every stored digest was taken from",
+        );
+        assert_eq!(
+            plain.desired().digest(),
+            selection_at(QualitySelection::Auto { height: None })
+                .desired()
+                .digest(),
+        );
+        assert_ne!(
+            plain.desired().digest(),
+            named.desired().digest(),
+            "an Auto controller moving 720 -> 1080 must read as a selection change",
+        );
+        assert_ne!(
+            named.desired().digest(),
+            selection_at(QualitySelection::Auto { height: Some(720) })
+                .desired()
+                .digest(),
+        );
+        // And a named Auto rung is still not the same ask as naming it by hand.
+        assert_ne!(
+            named.desired().digest(),
+            selection_at(QualitySelection::Manual { height: 1080 })
+                .desired()
+                .digest(),
+            "Auto at 1080 has not withdrawn the server's authority; Manual has",
+        );
+    }
+
+    /// The wire shape. `{"mode":"auto"}` is what every client shipped before
+    /// D3-a sends and what Apple and Android still send, and it must keep
+    /// parsing and keep serializing back to itself.
+    #[test]
+    fn quality_selection_auto_height_round_trips_and_stays_optional() {
+        let plain: QualitySelection =
+            serde_json::from_str(r#"{"mode":"auto"}"#).expect("plain Auto still parses");
+        assert_eq!(plain, QualitySelection::Auto { height: None });
+        assert_eq!(
+            serde_json::to_string(&plain).expect("plain Auto serializes"),
+            r#"{"mode":"auto"}"#,
+            "an absent rung must not grow a null on the way back out",
+        );
+
+        let named: QualitySelection =
+            serde_json::from_str(r#"{"mode":"auto","height":1080}"#).expect("a named rung parses");
+        assert_eq!(named, QualitySelection::Auto { height: Some(1080) });
+        assert_eq!(
+            serde_json::to_string(&named).expect("a named rung serializes"),
+            r#"{"mode":"auto","height":1080}"#,
+        );
+
+        // Bounded exactly as `manual` is, and absent is always accepted.
+        assert!(selection_at(QualitySelection::Auto { height: None })
+            .validate()
+            .is_ok());
+        assert!(selection_at(QualitySelection::Auto { height: Some(1080) })
+            .validate()
+            .is_ok());
+        for out_of_range in [143, 2161, 0, -1] {
+            assert_eq!(
+                selection_at(QualitySelection::Auto {
+                    height: Some(out_of_range)
+                })
+                .validate(),
+                Err("selection.quality.height"),
+                "{out_of_range} is outside the ladder's bounds",
+            );
+        }
+    }
+
+    /// A named Auto rung is an explicit ask on the candidate, and it does NOT
+    /// switch the server's own Auto policy off for the successor.
+    ///
+    /// Both halves matter. Without the first the staged successor is built at
+    /// the rung the client is already on and the switch delivers nothing. With
+    /// `automatic` cleared, the viewer would silently leave Auto by having
+    /// used it.
+    #[test]
+    fn quality_selection_auto_rung_is_an_explicit_ask_that_stays_automatic() {
+        let current = session_request(SessionKind::Transcode { height: 720 });
+        let candidate = candidate_request(
+            &current,
+            &selection_at(QualitySelection::Auto { height: Some(1080) }),
+            1080,
+            Some(2160),
+        );
+        assert_eq!(
+            candidate.kind,
+            SessionKind::Transcode { height: 1080 },
+            "the rung the client named is the rung the successor is built at",
+        );
+        assert!(
+            candidate.automatic,
+            "Auto with a rung is still Auto; the server may move again",
+        );
+
+        // Unnamed Auto is unchanged in every respect.
+        let plain = candidate_request(
+            &current,
+            &selection_at(QualitySelection::Auto { height: None }),
+            720,
+            Some(2160),
+        );
+        assert_eq!(plain.kind, current.kind);
+        assert!(plain.automatic);
+
+        // And Auto never turns a copy into a transcode, named rung or not.
+        let copying = converting_copy();
+        assert_eq!(
+            candidate_request(
+                &copying,
+                &selection_at(QualitySelection::Auto { height: Some(1080) }),
+                1080,
+                Some(2160),
+            )
+            .kind,
+            copying.kind,
+            "Auto is a request to let the server choose, not to stop copying",
+        );
     }
 
     /// Only a burn is a burn. Off, Native and Overlay are not video
@@ -23796,7 +23966,7 @@ mod tests {
     fn a_selection_cannot_rewrite_the_servers_plan_answers() {
         let mut current = converting_copy();
         current.hdr10 = true;
-        let mut selection = selection_at(QualitySelection::Auto);
+        let mut selection = selection_at(QualitySelection::Auto { height: None });
         selection.codec = CodecPolicy::Av1;
         selection.dynamic_range = DynamicRangePolicy::Sdr;
 
