@@ -192,6 +192,23 @@ impl Metadata {
             truncated,
         }
     }
+    pub fn from_candidate_local(c: &ChannelCandidate) -> Self {
+        let mut result = Self::from_candidate(c);
+        for (key, value) in [
+            ("title", c.title.clone()),
+            ("overview", c.overview.clone()),
+            ("tags", c.tags.join(", ")),
+            ("genres", c.genres.join(", ")),
+            ("show_title", c.show_title.clone().unwrap_or_default()),
+            ("show_overview", c.show_overview.clone()),
+            ("show_tags", c.show_tags.join(", ")),
+            ("show_genres", c.show_genres.join(", ")),
+        ] {
+            result.fields.insert(key.into(), value);
+        }
+        result.truncated = false;
+        result
+    }
     pub fn digest(c: &ChannelCandidate) -> String {
         // Hash full source metadata, including beyond the bounded prompt.
         digest(&(

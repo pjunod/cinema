@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 210
+One binary serves everything on one port (`:32400` by default). plurx has 213
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -549,7 +549,10 @@ away.
 | GET | `/api/v1/items/{id}/photo` | bearer | Original photo bytes with range support, or the thumbnail |
 | GET | `/api/v1/hubs` | bearer | Home rows: continue watching, next up, recently added |
 | GET | `/api/v1/home/previews` | bearer | Per-library recent preview in one bounded read |
-| GET | `/api/v1/search` | bearer | Prefix search across item titles |
+| GET | `/api/v1/search` | bearer | Local full-text search across titles, overview, genres, tags and fresh classification labels |
+| GET | `/api/v1/search/related` | bearer | Optional embedded-model suggestions for `q`; returns `results` and node-local `semantic` status |
+| GET, PUT | `/api/v1/search/settings` | bearer for GET; admin for PUT | GET returns `semantic_enabled`, classification progress and semantic status. PUT accepts `{ "semantic_enabled": true }`; readiness remains advisory |
+| GET, PUT | `/api/v1/items/{id}/classification` | bearer for GET; admin for PUT | GET returns the classification record and `pending`. PUT accepts `expected_revision`, `include` and `exclude` label arrays; returns the new revision or 409 on concurrent metadata/correction changes |
 | GET | `/api/v1/images/{filename}` | bearer | Cached artwork, materialized from a peer on miss |
 
 ### 6.1 Listing a library

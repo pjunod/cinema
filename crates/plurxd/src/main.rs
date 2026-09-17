@@ -13,6 +13,7 @@ mod fragindex;
 mod fragment_index_cluster;
 mod http;
 mod job_lease;
+mod library_search;
 mod live_tv;
 mod live_tv_delivery;
 mod logbuf;
@@ -2277,6 +2278,14 @@ fn spawn_background_loops(
     tokio::spawn(crate::media_sessions::lease_loop(state.clone()));
     tokio::spawn(crate::media_sessions::takeover_loop(state.clone()));
     tokio::spawn(crate::media_sessions::maintenance_loop(state.clone()));
+    tokio::spawn(crate::library_search::semantic::worker(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
+    tokio::spawn(crate::library_search::worker(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(crate::channel_subjects::worker(
         state.clone(),
         background_shutdown.clone(),

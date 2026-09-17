@@ -23,29 +23,7 @@ use crate::store::{
 /// Build an FTS5 MATCH expression from free text: quoted tokens, prefix
 /// matching on the last one. Returns `None` for queries with no tokens.
 fn fts_query(input: &str) -> Option<String> {
-    let tokens: Vec<String> = input
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| !t.is_empty())
-        .map(str::to_lowercase)
-        .collect();
-    if tokens.is_empty() {
-        return None;
-    }
-    let last = tokens.len() - 1;
-    Some(
-        tokens
-            .iter()
-            .enumerate()
-            .map(|(i, t)| {
-                if i == last {
-                    format!("\"{t}\"*")
-                } else {
-                    format!("\"{t}\"")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
+    crate::metadata::classification::fts_query(input)
 }
 
 fn find_by(
@@ -603,15 +581,14 @@ impl MediaStore for SqliteStore {
         };
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare(&format!(
-                "SELECT {i}, show.title, season.poster_path
-                 FROM items_fts f
+                "WITH hits AS MATERIALIZED (SELECT rowid,rank AS score FROM items_fts WHERE items_fts MATCH ?1 AND rowid NOT IN (SELECT rowid FROM classification_fts) UNION ALL SELECT rowid,rank AS score FROM classification_fts WHERE classification_fts MATCH ?1) SELECT {i}, show.title, season.poster_path
+                 FROM (SELECT rowid,min(score) AS score FROM hits GROUP BY rowid) f
                  JOIN items i ON i.id = f.rowid
                  LEFT JOIN items season
                         ON season.id = i.parent_id AND i.kind = 'episode'
                  LEFT JOIN items show ON show.id = season.parent_id
-                 WHERE items_fts MATCH ?1
-                   AND i.kind IN ('movie','show','episode','folder','video','photo','book','audiobook')
-                 ORDER BY rank LIMIT ?2",
+                 WHERE i.kind IN ('movie','show','episode','folder','video','photo','book','audiobook')
+                 ORDER BY f.score, i.id LIMIT ?2",
                 i = item_cols("i")
             ))?;
             let items = stmt
@@ -1894,6 +1871,8 @@ impl MediaStore for SqliteStore {
         self.with_conn(move |conn| {
             let count: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |row| row.get(0))?;
             conn.execute("INSERT INTO items_fts(items_fts) VALUES('rebuild')", [])?;
+            conn.execute("DELETE FROM classification_fts", [])?;
+            conn.execute(&crate::store::classification::rebuild_sql(), [])?;
             Ok(count.max(0) as u64)
         })
         .await
