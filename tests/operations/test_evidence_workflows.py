@@ -228,7 +228,7 @@ class EvidenceWorkflowCase(unittest.TestCase):
         android_poll = android.split("private fun pollPreparedReplacement()", 1)[1].split(
             "private fun commitPreparedReplacement", 1
         )[0]
-        self.assertIn("preparedAlignedFilmMs", android_poll)
+        self.assertIn("parkSuccessor(hold.park(monotonicNowMs(), realPosition()), originMs, successor)", android_poll)
         self.assertIn("successor.seekTo(successorAttachPositionMs", android_poll)
         self.assertIn("val restored = rollbackSwitchedReplacement()", android_poll)
         self.assertIn("failSwitchedReplacement()", android_poll)
@@ -352,9 +352,11 @@ class EvidenceWorkflowCase(unittest.TestCase):
         commit = controller.split("private fun commitPreparedReplacement", 1)[1].split(
             "private fun settleCommitOnFirstFrame", 1
         )[0]
-        self.assertIn("preparedCommitAlignmentFilmMs", poll)
+        self.assertIn("successorReady = hold.isReady", poll)
+        self.assertIn("successorFilmMs = successorFilmPositionMs(originMs, successor.currentPosition)", poll)
+        self.assertIn("is RendezvousHold.Step.Commit ->", poll)
         self.assertIn("successor.seekTo", poll)
-        self.assertIn("commitPreparedReplacement(incumbentFilmMs)", poll)
+        self.assertIn("commitPreparedReplacement(step.filmMs)", poll)
         self.assertIn("successorFilmMs - commitFilmMs", commit)
         self.assertIn("successorIsBuffered(bufferedThrough, commitFilmMs)", commit)
         self.assertNotIn("successor.seekTo", commit)

@@ -1107,12 +1107,11 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
             ),
         )
         self.assertEqual(replicated.count("TransactionShape::WriteReadBack"), 2)
-        # 87 after the DVR adds seven explicit transaction boundaries to the
-        # 80 Library channels left: three recording writes, two rule writes and
-        # two reminder writes, each named at its own call site in
-        # `replicated.rs`. The count is read off the merged trait, and the
-        # comment beside it there says why neither parent's total describes it.
-        self.assertIn("assert_eq!(methods.len(), 87);", replicated)
+        # 97 includes seven recording-event boundaries, subject_write, and two
+        # content-analysis repair boundaries added to the previous 87. Each is
+        # explicitly classified in replicated.rs; its census assertion remains
+        # a deliberate count rather than a value derived from the same table.
+        self.assertIn("assert_eq!(methods.len(), 97);", replicated)
 
         # The shape records a real difference between the backends rather than
         # a promise about future work: the replicated twin cannot hold it, and

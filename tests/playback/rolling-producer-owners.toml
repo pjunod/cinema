@@ -1045,7 +1045,11 @@ pattern = "terminal_reason"
 # tore down, because an empty registry is satisfied by a successor that was
 # never reserved as much as by one that was settled, and only the durable cause
 # tells the two apart. No new writer of a terminal cause.
-expected_occurrences = 27
+# +4 for content-analysis response reporting: three analysis API field/test
+# references and one browse DTO initializer. These expose or assert the
+# existing terminal cause; none writes a new durable cause.
+# +1 browse reporting reads the terminal reason for a failed analysis badge.
+expected_occurrences = 32
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -1894,7 +1898,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # 777 -> 780 with the review fixes: the second registration-window test adds a
 # paced sleep and a bounded `tokio::time::timeout` with its polling sleep, the
 # same shape as the test beside it. Re-measured, not extrapolated.
-expected_occurrences = 784
+# +3 for content-analysis completion ownership: the held-source expectation
+# probe has a remaining-budget timeout; fragment-index cleanup bounds the
+# second wait after killing the retained child; the stderr join has a deadline
+# and aborts and joins its retained task on expiry. No new detached producer.
+expected_occurrences = 787
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -1994,7 +2002,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # probing, segment probing and segment decoding. Each command is passed to
 # the test-only output helper, with a 30-second deadline, kill-on-drop, and
 # awaited completion. The live child uses the existing production owner.
-expected_occurrences = 116
+# +1 content-analysis fixture muxer for complete video with a longer audio
+# tail. This finite synthetic input is test-only and handed to testfixtures::run
+# for completion; it is not a production rolling producer.
+expected_occurrences = 117
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -2279,7 +2290,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # and complete before their Job Object guard can leave scope.
 # +1 service install status poll; it waits only for the SCM state transition
 # and cannot own or detach a media child.
-expected_occurrences = 365
+# +1 fragment-index cleanup wait after start_kill when the first wait expires.
+# The second wait is bounded to one second and addresses the retained child;
+# it does not construct a new process or transfer its ownership.
+expected_occurrences = 366
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

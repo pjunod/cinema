@@ -217,6 +217,9 @@ internal data class SurfaceSourceRow(
 internal object SurfaceSources {
     const val OWNER_STOPPED = "owner_stopped"
     const val OWNER_EXHAUSTED = "owner_exhausted"
+    const val STARTUP_EXHAUSTED = "startup_exhausted"
+    const val HLS_INIT_INVALID = "hls_init_invalid"
+    const val HLS_INIT_UNSUPPORTED = "hls_init_unsupported"
     const val AUTH_401_403 = "auth_401_403"
     const val VOD_SOURCE_RESCAN_REQUIRED = "vod_source_rescan_required"
     const val VOD_SOURCE_UNSUPPORTED = "vod_source_unsupported"
@@ -251,6 +254,25 @@ internal val SURFACE_SOURCES: List<SurfaceSourceRow> = listOf(
         SurfaceSources.OWNER_EXHAUSTED,
         "any",
         SurfaceClass.Exhausted,
+        requiresPlayerStopped = true,
+    ),
+    SurfaceSourceRow(
+        SurfaceSources.STARTUP_EXHAUSTED,
+        "any",
+        SurfaceClass.Exhausted,
+        requiresPlayerStopped = true,
+        actions = listOf(SurfaceAction.Close, SurfaceAction.Retry),
+    ),
+    SurfaceSourceRow(
+        SurfaceSources.HLS_INIT_INVALID,
+        "start",
+        SurfaceClass.Stopped,
+        requiresPlayerStopped = true,
+    ),
+    SurfaceSourceRow(
+        SurfaceSources.HLS_INIT_UNSUPPORTED,
+        "start",
+        SurfaceClass.Stopped,
         requiresPlayerStopped = true,
     ),
     SurfaceSourceRow(
