@@ -2,6 +2,14 @@ version = 1
 enforce_after = "e8a910f"
 
 [[fixes]]
+id = "web.native-vod-silent-frame-callbacks"
+commits = ["790ffc9da"]
+source = "crates/plurxd/src/web/index.html"
+source_anchor = "const nativeCallbackSilence=p.controlHasFrameCallbacks&&frames===0"
+test = "tests/playback/web-control.test.js"
+test_anchor = "native VOD clock and decoded-frame progress must not trigger false recovery"
+
+[[fixes]]
 id = "apple.hevc-sample-entry-capability"
 commits = ["8daba4af"]
 source = "clients/apple/Sources/Caps.swift"
