@@ -600,29 +600,7 @@ fn recent_items(rows: Vec<RecentItemRow>) -> Result<Vec<RecentItem>, StoreError>
 }
 
 fn fts_query(input: &str) -> Option<String> {
-    let tokens: Vec<String> = input
-        .split(|character: char| !character.is_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .map(str::to_lowercase)
-        .collect();
-    if tokens.is_empty() {
-        return None;
-    }
-    let last = tokens.len() - 1;
-    Some(
-        tokens
-            .iter()
-            .enumerate()
-            .map(|(index, token)| {
-                if index == last {
-                    format!("\"{token}\"*")
-                } else {
-                    format!("\"{token}\"")
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
+    crate::metadata::classification::fts_query(input)
 }
 
 fn ids_json(ids: &[i64]) -> Result<String, StoreError> {
@@ -1551,14 +1529,13 @@ impl MediaStore for HiqliteAuthStore {
             return Ok(Vec::new());
         };
         let sql = format!(
-            "SELECT {i}, show.title AS rail_show_title, \
+            "WITH hits AS MATERIALIZED (SELECT rowid,rank AS score FROM items_fts WHERE items_fts MATCH $1 AND rowid NOT IN (SELECT rowid FROM classification_fts) UNION ALL SELECT rowid,rank AS score FROM classification_fts WHERE classification_fts MATCH $1) SELECT {i}, show.title AS rail_show_title, \
                     season.poster_path AS rail_season_poster \
-             FROM items_fts f JOIN items i ON i.id = f.rowid \
+             FROM (SELECT rowid,min(score) AS score FROM hits GROUP BY rowid) f JOIN items i ON i.id = f.rowid \
              LEFT JOIN items season ON season.id = i.parent_id AND i.kind = 'episode' \
              LEFT JOIN items show ON show.id = season.parent_id \
-             WHERE items_fts MATCH $1 \
-               AND i.kind IN ('movie','show','episode','folder','video','photo','book','audiobook') \
-             ORDER BY rank LIMIT $2",
+             WHERE i.kind IN ('movie','show','episode','folder','video','photo','book','audiobook') \
+             ORDER BY f.score, i.id LIMIT $2",
             i = item_cols("i")
         );
         // Search is deliberately local derived-state I/O, unlike authoritative
@@ -2820,11 +2797,14 @@ impl MediaStore for HiqliteAuthStore {
     }
 
     async fn rebuild_search_index(&self) -> Result<u64, StoreError> {
-        let statements = [
-            ("DELETE FROM items_fts", params!()),
+        let statements = vec![
+            ("DELETE FROM classification_fts".to_string(), params!()),
+            (crate::store::classification::rebuild_sql(), params!()),
+            ("DELETE FROM items_fts".to_string(), params!()),
             (
                 "INSERT INTO items_fts(rowid, title, overview, tags) \
-                 SELECT id, title, overview, tags FROM items",
+                 SELECT id, title, overview, tags FROM items"
+                    .to_string(),
                 params!(),
             ),
         ];
@@ -2839,7 +2819,7 @@ impl MediaStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        Ok(results.get(1).copied().unwrap_or(0) as u64)
+        Ok(results.get(3).copied().unwrap_or(0) as u64)
     }
 
     async fn delete_files(&self, ids: &[i64]) -> Result<u64, StoreError> {

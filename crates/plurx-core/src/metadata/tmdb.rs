@@ -115,6 +115,25 @@ pub struct TmdbClient {
 type GenreIndex = std::collections::HashMap<i64, String>;
 
 impl TmdbClient {
+    /// Keywords are a separate metadata feed, retained locally by the classifier.
+    pub async fn keywords(&self, id: i64, kind: &str) -> Result<Vec<String>, MetadataError> {
+        let (route, field) = if kind == "show" {
+            ("tv", "results")
+        } else {
+            ("movie", "keywords")
+        };
+        let body = self.get(&format!("/{route}/{id}/keywords"), &[]).await?;
+        Ok(body
+            .get(field)
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| MetadataError::Parse("Missing keyword list".into()))?
+            .iter()
+            .filter_map(|v| v.get("name").and_then(|v| v.as_str()))
+            .take(100)
+            .map(|s| s.chars().take(100).collect())
+            .collect())
+    }
+
     pub fn new(api_key: impl Into<String>) -> Self {
         TmdbClient {
             api_key: api_key.into(),
@@ -669,6 +688,44 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn keyword_endpoints_distinguish_empty_metadata_from_invalid_responses() {
+        use axum::{routing::get, Json};
+        let app = axum::Router::new()
+            .route(
+                "/movie/1/keywords",
+                get(|| async { Json(json!({"keywords":[{"name":"stand-up comedy"}]})) }),
+            )
+            .route(
+                "/tv/2/keywords",
+                get(|| async { Json(json!({"results":[{"name":"space exploration"}]})) }),
+            )
+            .route(
+                "/movie/3/keywords",
+                get(|| async { Json(json!({"keywords":[]})) }),
+            )
+            .route(
+                "/movie/4/keywords",
+                get(|| async { Json(json!({"wrong":[]})) }),
+            );
+        let base = serve(app).await;
+        let client = TmdbClient::new("test").with_base(&base, &base);
+        assert_eq!(
+            client.keywords(1, "movie").await.expect("movie"),
+            vec!["stand-up comedy"]
+        );
+        assert_eq!(
+            client.keywords(2, "show").await.expect("series"),
+            vec!["space exploration"]
+        );
+        assert!(client
+            .keywords(3, "movie")
+            .await
+            .expect("empty keywords")
+            .is_empty());
+        assert!(client.keywords(4, "movie").await.is_err());
+    }
 
     #[test]
     fn image_url_composes() {

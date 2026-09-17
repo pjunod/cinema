@@ -13,12 +13,13 @@ const source = shell.slice(shell.indexOf("function libraryChannelDraftKey("),
 function editor() {
   const storage = new Map(), nodes = new Map(), calls = [];
   const context = vm.createContext({
+    exactWireId: item => String(item.id_string || item.item_id || item.id),
     LibraryChannelCore, SERVER: {instance_id: "test-server"}, ME: {id: 1, is_admin: true},
     location: {origin: "https://test", hash: "#/library-channels"},
     sessionStorage: {get length() {return storage.size;}, key: index => [...storage.keys()][index],
       getItem: key => storage.get(key) || null,
       setItem: (key, value) => storage.set(key, value), removeItem: key => storage.delete(key)},
-    document: {getElementById: id => nodes.get(id), querySelectorAll: () => []},
+    document: {addEventListener: () => {}, getElementById: id => nodes.get(id), querySelectorAll: () => []},
     LIBRARY_CHANNELS: {draft: LibraryChannelCore.emptyDraft({server: "test-server", user: 1}),
       libs: [], channels: [], editor: true},
     api: async (url, options) => {
@@ -100,7 +101,7 @@ test("subject preset replaces old all-library controls before preview reads them
   assert.equal(recipe.match_all_in_scope, false);
   assert.deepEqual(Array.from(recipe.genres_any), []);
   assert.deepEqual(Array.from(recipe.keywords_any), []);
-  assert.match(recipe.subject, /space exploration/);
+  assert.match(recipe.subject, /format:documentary topic:space/);
 });
 
 test("stand-up preset uses performance phrases rather than broad comedy", async () => {
@@ -108,8 +109,8 @@ test("stand-up preset uses performance phrases rather than broad comedy", async 
   await c.lcPreset("standup");
   const recipe = calls.find(call => call.options?.body?.recipe)?.options.body.recipe;
   assert.equal(recipe.match_all_in_scope, false);
-  assert.match(recipe.subject, /Stand-up comedy performances/);
-  assert.match(recipe.subject, /Exclude sitcoms, comedy movies, talk shows/);
+  assert.match(recipe.subject, /format:stand-up/);
+  assert.match(recipe.subject, /-format:sitcom -format:talk-show/);
   assert.deepEqual(Array.from(recipe.keywords_any), []);
   assert.deepEqual(Array.from(recipe.genres_any), []);
 });
@@ -232,4 +233,82 @@ test("channel naming waits for the complete subject and preserves a chosen name"
   nodes.set("lc-subject", {value: "Coastal railways"});
   c.lcStep("playback");
   assert.equal(draft.name, "My coastal favourites", "revising content must preserve an explicit name");
+});
+
+test("provider outage explains that subject matching did not find zero results", () => {
+  const {context: c} = editor();
+  const d = c.LIBRARY_CHANNELS.draft;
+  d.recipe.subject = "Stand-up comedy";
+  d.subjectRecipe = JSON.stringify(d.recipe);
+  d.subjectPreview = {state: "waiting_for_provider", error: "provider_unreachable",
+    processed: 0, total: 5856, matched: 0, rows: []};
+  const html = c.libraryChannelEditorHtml();
+  assert.match(html, /Subject matching is unavailable/);
+  assert.match(html, /0 of 5856 titles checked/);
+  assert.match(html, /resume automatically/);
+  assert.match(html, /#\/settings\/developer/);
+  assert.doesNotMatch(html, /Selection is partial; matching continues|provider_unreachable/);
+  assert.equal(d.recipe.subject, "Stand-up comedy");
+  assert.equal(d.recipe.match_all_in_scope, false);
+});
+
+test("subject status distinguishes missing model, cancellation and completion", () => {
+  const {context: c} = editor();
+  const subject = {state: "waiting_for_provider", error: "provider_model_missing",
+    processed: 0, total: 10, matched: 0};
+  c.ME.is_admin = false;
+  assert.match(c.lcSubjectStatus(subject), /model is not installed/);
+  assert.match(c.lcSubjectStatus(subject), /Ask your server administrator/);
+  assert.doesNotMatch(c.lcSubjectStatus(subject), /href=/);
+  assert.match(c.lcSubjectStatus({...subject, state: "cancelled", error: null}), /Preview cancelled/);
+  assert.match(c.lcSubjectStatus({...subject, state: "complete", complete: true, error: null}), /Scan complete/);
+});
+
+test("title search finds supported catalogue results and preserves the query", async () => {
+  const {context: c, nodes} = editor();
+  nodes.set("lc-search", {value: "Bill Maher"});
+  c.api = async url => {
+    assert.equal(url, "/search?q=Bill%20Maher");
+    return {results: [{id_string: "9007199254740993", kind: "movie", title: "Bill Maher: Live"},
+      {id: 2, kind: "show", title: "Bill Maher"}, {id: 3, kind: "book", title: "Book"}]};
+  };
+  await c.lcSearchTitles();
+  assert.equal(c.LIBRARY_CHANNELS.search.length, 2);
+  assert.equal(c.LIBRARY_CHANNELS.draft.searchQuery, "Bill Maher");
+  const html = c.libraryChannelEditorHtml();
+  assert.match(html, /Bill Maher: Live/);
+  assert.match(html, /9007199254740993/);
+  assert.match(html, /value="Bill Maher"/);
+});
+
+test("empty and failed title searches show distinct feedback", async () => {
+  const {context: c, nodes} = editor();
+  nodes.set("lc-search", {value: "not here"});
+  await c.lcSearchTitles();
+  assert.match(c.libraryChannelEditorHtml(), /No movies, series or episodes found/);
+  nodes.set("lc-search", {value: "not here"});
+  c.api = async () => {throw new Error("Server unavailable");};
+  await c.lcSearchTitles();
+  assert.match(c.libraryChannelEditorHtml(), /Title search failed: Server unavailable/);
+});
+
+test("late title search responses cannot replace a newer query or another draft", async () => {
+  const {context: c, nodes} = editor();
+  const pending = [];
+  c.api = () => new Promise(resolve => pending.push(resolve));
+  nodes.set("lc-search", {value: "first"});
+  const first = c.lcSearchTitles();
+  nodes.set("lc-search", {value: "second"});
+  const second = c.lcSearchTitles();
+  pending[1]({results: [{id: 2, kind: "movie", title: "Second"}]});
+  await second;
+  pending[0]({results: [{id: 1, kind: "movie", title: "First"}]});
+  await first;
+  assert.equal(c.LIBRARY_CHANNELS.search[0].title, "Second");
+  nodes.set("lc-search", {value: "third"});
+  const third = c.lcSearchTitles();
+  c.LIBRARY_CHANNELS.draft = LibraryChannelCore.emptyDraft({server: "test-server", user: 1});
+  pending[2]({results: [{id: 3, kind: "movie", title: "Third"}]});
+  await third;
+  assert.equal(c.LIBRARY_CHANNELS.search[0].title, "Second");
 });
