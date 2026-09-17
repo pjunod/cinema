@@ -182,6 +182,21 @@ impl FragmentIndexOutcome {
         }
         self.refusal.is_retryable() && now_ms >= self.next_attempt_at_ms
     }
+
+    /// Whether waiting will change the answer.
+    ///
+    /// Same precedence as [`Self::is_due`], and for the same reason: the typed
+    /// disposition is what the indexer decided, and the legacy `refusal`
+    /// answers only for rows recorded before there was one. Reading `refusal`
+    /// directly says "waiting will help" for every terminal code that is not
+    /// literally `Unsupported`, because the legacy field carries `Truncated`
+    /// for all of them.
+    pub fn is_terminal(&self) -> bool {
+        match self.typed_retryable {
+            Some(retryable) => !retryable,
+            None => !self.refusal.is_retryable(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -33,12 +33,9 @@ fn index_refusal_summary(
     outcomes: &[plurx_core::segplan::FragmentIndexOutcome],
 ) -> Option<(bool, String)> {
     use plurx_core::segplan::IndexRefusal;
-    let worst = outcomes.iter().max_by_key(|outcome| {
-        (
-            u8::from(!outcome.refusal.is_retryable()),
-            outcome.updated_at_ms,
-        )
-    })?;
+    let worst = outcomes
+        .iter()
+        .max_by_key(|outcome| (u8::from(outcome.is_terminal()), outcome.updated_at_ms))?;
     let detail = match worst.refusal {
         IndexRefusal::Unsupported => format!("cannot be indexed: {}", worst.reason),
         IndexRefusal::Truncated { rows } => format!(
@@ -48,7 +45,7 @@ fn index_refusal_summary(
             worst.reason
         ),
     };
-    Some((!worst.refusal.is_retryable(), detail))
+    Some((worst.is_terminal(), detail))
 }
 
 /// Compare paths the way a listener reads numbered parts: Part 2 precedes
