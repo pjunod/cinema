@@ -1477,6 +1477,99 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn content_analysis_ffmpeg_accepts_complete_video_with_a_longer_audio_tail() {
+        testfixtures::require_ffmpeg();
+        let temp = crate::test_tempdir().expect("tempdir");
+        let source_path = temp.path().join("video-shorter-than-audio.mkv");
+        let mut mux = std::process::Command::new(testfixtures::ffmpeg());
+        mux.args(["-y", "-v", "error"])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=160x90:rate=24:duration=3",
+            ])
+            .args([
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:sample_rate=48000:duration=6",
+            ])
+            .args([
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "24",
+                "-c:a",
+                "aac",
+                "-f",
+                "matroska",
+            ])
+            .arg(&source_path);
+        testfixtures::run(&mut mux);
+
+        let source = std::fs::File::open(&source_path).expect("fixture source");
+        let size = i64::try_from(source.metadata().expect("fixture metadata").len())
+            .expect("fixture size");
+        let file = MediaFile {
+            id: 42,
+            item_id: 1,
+            path: source_path,
+            size,
+            mtime: 1,
+            duration_ms: Some(6_000),
+            container: Some("matroska".to_owned()),
+            video_codec: Some("h264".to_owned()),
+            video_codec_tag: None,
+            video_profile: Some("High".to_owned()),
+            width: Some(160),
+            height: Some(90),
+            bit_depth: Some(8),
+            hdr: None,
+            hdr_format: None,
+            bitrate: None,
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            scanned_at: 0,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: Default::default(),
+        };
+        let outcome = build_from_attested_file(
+            &file,
+            &source,
+            "fixture-object-v1",
+            transcode::CopyVideoOptions::new(false, false),
+            temp.path(),
+            Duration::from_secs(30),
+        )
+        .await;
+        let IndexOutcome::Built(index) = outcome else {
+            panic!("complete selected video with a longer audio tail must build: {outcome:?}");
+        };
+        let covered = index
+            .rows
+            .iter()
+            .try_fold(0_u64, |sum, row| sum.checked_add(row.duration))
+            .expect("coverage sum");
+        let old_container_expectation = VideoCompletionExpectation {
+            stream_index: 0,
+            duration_num: 6,
+            duration_den: 1,
+            provenance: CompletionProvenance::StreamSeconds,
+            source_object_version: "fixture-object-v1".to_owned(),
+        };
+        assert_eq!(
+            old_container_expectation.covers(covered, index.timescale),
+            Ok(false),
+            "the former container-duration predicate rejects this valid video-only output"
+        );
+    }
+
     fn hevc_file(hdr: Option<&str>, hdr_format: Option<&str>) -> MediaFile {
         MediaFile {
             id: 77,

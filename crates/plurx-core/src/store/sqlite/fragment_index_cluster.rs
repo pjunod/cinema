@@ -1504,6 +1504,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                    AND job.file_id = ?5 AND job.source_size = ?6 AND job.source_mtime = ?7
                    AND job.source_sha256 = ?8 AND job.pipeline_sha256 = ?9
                    AND files.size = job.source_size AND files.mtime = job.source_mtime
+                   AND 1 = (SELECT COUNT(*) FROM analysis_requests provenance
+                     WHERE provenance.result_cache_key = job.cache_key
+                       AND provenance.target_node_id = job.target_node_id
+                       AND provenance.pipeline_version = ?10
+                       AND provenance.video_identity = ?11)
                    AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts artifact
                                     WHERE artifact.cache_key = job.cache_key)
                    AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_heads head
@@ -2217,12 +2222,17 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = CASE
                         WHEN cluster_fragment_index_jobs.state = 'queued'
-                         AND cluster_fragment_index_jobs.index_retry_deadline_ms = 0
+                         AND cluster_fragment_index_jobs.index_retry_deadline_ms > 0
+                        THEN cluster_fragment_index_jobs.not_before_ms
+                        WHEN cluster_fragment_index_jobs.state = 'queued'
                         THEN MIN(cluster_fragment_index_jobs.not_before_ms, excluded.not_before_ms)
                         ELSE excluded.not_before_ms END,
                     created_at_ms = cluster_fragment_index_jobs.created_at_ms,
                     updated_at_ms = excluded.updated_at_ms,
-                    last_error_code = NULL
+                    last_error_code = CASE
+                        WHEN cluster_fragment_index_jobs.index_retry_deadline_ms > 0
+                        THEN cluster_fragment_index_jobs.last_error_code
+                        ELSE NULL END
                   WHERE cluster_fragment_index_jobs.state = 'cancelled'
                      OR (cluster_fragment_index_jobs.state = 'failed'
                        AND cluster_fragment_index_jobs.last_error_code = 'queue_expired'
@@ -5097,5 +5107,184 @@ mod tests {
             .await
             .expect("current lookup")
             .is_some());
+    }
+
+    #[tokio::test]
+    async fn content_analysis_retry_survives_foreground_rediscovery_and_six_hours() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        let original = job(1, 10, 1);
+        assert!(store
+            .enqueue_cluster_fragment_index(&original)
+            .await
+            .expect("enqueue"));
+        let claimed = store
+            .claim_cluster_fragment_index("node-a", &[], 10, 1_000)
+            .await
+            .expect("claim")
+            .expect("claimed job");
+        assert_eq!(claimed.attempts, 1);
+        assert!(store
+            .fail_cluster_fragment_index_typed(
+                &crate::store::fragment_index_cluster::ClusterFragmentIndexFailure {
+                    cache_key: claimed.cache_key.clone(),
+                    target_node_id: claimed.target_node_id.clone(),
+                    node_id: "node-a".to_owned(),
+                    fence: claimed.fence,
+                    code: crate::content_analysis::IndexFailureCode::IndexProbeTimeout,
+                    transient_allowlisted: false,
+                    diagnostic: crate::content_analysis::IndexDiagnostic::default(),
+                    now_ms: 20,
+                },
+            )
+            .await
+            .expect("typed failure"));
+
+        let mut rediscovered = original.clone();
+        rediscovered.priority = "foreground".to_owned();
+        rediscovered.trigger = "foreground".to_owned();
+        rediscovered.not_before_ms = 30;
+        rediscovered.created_at_ms = 30;
+        assert!(store
+            .enqueue_cluster_fragment_index(&rediscovered)
+            .await
+            .expect("foreground rediscovery"));
+
+        let (attempts, not_before_ms, deadline_ms, code, history) = store
+            .with_read(move |conn| {
+                conn.query_row(
+                    "SELECT attempts, not_before_ms, index_retry_deadline_ms,
+                            COALESCE(last_error_code, ''), attempt_errors
+                       FROM cluster_fragment_index_jobs
+                      WHERE cache_key = ?1 AND target_node_id = ?2",
+                    params![claimed.cache_key, claimed.target_node_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, String>(3)?,
+                            row.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .map_err(Into::into)
+            })
+            .await
+            .expect("retry state");
+        assert_eq!(attempts, 1);
+        assert_eq!(
+            not_before_ms,
+            20 + crate::content_analysis::INDEX_RETRY_BASE_MS
+        );
+        assert_eq!(
+            deadline_ms,
+            20 + crate::content_analysis::INDEX_RETRY_WINDOW_MS
+        );
+        assert_eq!(code, "index_probe_timeout");
+        assert_eq!(history, "index_probe_timeout");
+
+        let six_hours = 6 * 60 * 60 * 1_000;
+        let retried = store
+            .claim_cluster_fragment_index("node-a", &[], six_hours, six_hours + 1_000)
+            .await
+            .expect("claim after six hours")
+            .expect("retry cycle was not queue-expired");
+        assert_eq!(retried.attempts, 2);
+        assert_eq!(retried.index_retry_deadline_ms, deadline_ms);
+    }
+
+    #[tokio::test]
+    async fn content_analysis_repair_is_exact_and_idempotent() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        let predecessor = job(1, 10, 1);
+        let seeded = predecessor.clone();
+        store
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO cluster_fragment_index_jobs
+                      (cache_key, file_id, source_size, source_mtime, source_sha256,
+                       pipeline_sha256, target_node_id, state, fence, attempts,
+                       not_before_ms, last_error_code, created_at_ms, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'failed', 4, 1,
+                             50, 'truncated', 1, 50)",
+                    params![
+                        seeded.cache_key,
+                        seeded.file_id,
+                        seeded.source_size,
+                        seeded.source_mtime,
+                        seeded.source_sha256,
+                        seeded.pipeline_sha256,
+                        seeded.target_node_id,
+                    ],
+                )?;
+                conn.execute(
+                    "INSERT INTO analysis_requests
+                      (request_id, file_id, source_size, source_mtime, component,
+                       pipeline_version, video_identity, requested_generation,
+                       priority, trigger, force_rebuild, target_node_id, state,
+                       fence, attempts, not_before_ms, result_cache_key,
+                       last_error_code, created_at_ms, updated_at_ms)
+                     VALUES ('legacy-request', ?1, ?2, ?3, 'fragment_index',
+                             'engine-v1', 'video-a', 'legacy-generation',
+                             'normal', 'background', 0, ?4, 'failed', 1, 1, 50,
+                             ?5, 'truncated', 1, 50)",
+                    params![
+                        seeded.file_id,
+                        seeded.source_size,
+                        seeded.source_mtime,
+                        seeded.target_node_id,
+                        seeded.cache_key,
+                    ],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed legacy failure");
+
+        let candidates = store
+            .preview_analysis_index_repairs(None, 10)
+            .await
+            .expect("preview");
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].eligibility, "eligible");
+        assert_eq!(candidates[0].video_identity, "video-a");
+        let first = store
+            .apply_analysis_index_repair(&candidates[0], "repair-one", 100)
+            .await
+            .expect("first apply");
+        assert_eq!(first.status, "created");
+        let repeated = store
+            .apply_analysis_index_repair(&candidates[0], "repair-two", 101)
+            .await
+            .expect("repeated apply");
+        assert_eq!(repeated.status, "already_created");
+        assert_eq!(repeated.successor_request_id, "repair-one");
+
+        let (receipts, successors, predecessor_state) = store
+            .with_read(move |conn| {
+                Ok((
+                    conn.query_row("SELECT COUNT(*) FROM analysis_index_repairs", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM analysis_requests
+                          WHERE request_id IN ('repair-one','repair-two')",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )?,
+                    conn.query_row(
+                        "SELECT state FROM cluster_fragment_index_jobs WHERE cache_key = ?1",
+                        params![predecessor.cache_key],
+                        |row| row.get::<_, String>(0),
+                    )?,
+                ))
+            })
+            .await
+            .expect("repair counts");
+        assert_eq!(receipts, 1);
+        assert_eq!(successors, 1);
+        assert_eq!(predecessor_state, "failed");
     }
 }

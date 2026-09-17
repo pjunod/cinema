@@ -2342,14 +2342,17 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         self.client()
             .txn(vec![
                 (
-                    "INSERT INTO analysis_index_repairs
-                        (repair_revision, file_id, source_size, source_mtime, source_sha256,
-                         pipeline_sha256, target_node_id, video_identity,
-                         predecessor_cache_key, predecessor_fence,
-                         successor_request_id, created_at_ms)
-                     SELECT $1, job.file_id, job.source_size, job.source_mtime,
-                            job.source_sha256, job.pipeline_sha256, job.target_node_id,
-                            $10, job.cache_key, job.fence, $11, $12
+                    "INSERT INTO analysis_requests
+                        (request_id, file_id, source_size, source_mtime, component,
+                         pipeline_version, video_identity, requested_generation,
+                         expected_predecessor_generation, priority, trigger, force_rebuild,
+                         target_node_id, state, owner_node_id, fence, lease_expires_ms,
+                         attempts, not_before_ms, result_cache_key, last_error_code,
+                         cancel_requested, created_at_ms, updated_at_ms)
+                     SELECT $11, job.file_id, job.source_size, job.source_mtime,
+                            'fragment_index', $15, $10, $11, '', 'forced', 'admin', 1,
+                            job.target_node_id, 'queued', NULL, 0, NULL, 0, $12,
+                            NULL, NULL, 0, $12, $12
                        FROM cluster_fragment_index_jobs job
                        JOIN files ON files.id = job.file_id
                       WHERE job.cache_key = $2 AND job.target_node_id = $3
@@ -2360,6 +2363,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         AND files.size = job.source_size AND files.mtime = job.source_mtime
                         AND (SELECT COUNT(*) FROM analysis_requests
                               WHERE state IN ('queued','running','submitted')) < $14
+                        AND 1 = (SELECT COUNT(*) FROM analysis_requests provenance
+                          WHERE provenance.result_cache_key = job.cache_key
+                            AND provenance.target_node_id = job.target_node_id
+                            AND provenance.pipeline_version = $15
+                            AND provenance.video_identity = $10)
                         AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts artifact
                                          WHERE artifact.cache_key = job.cache_key)
                         AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_heads head
@@ -2370,6 +2378,13 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             AND active.component = 'fragment_index'
                             AND active.pipeline_version = $15 AND active.video_identity = $10
                             AND active.state IN ('queued','running','submitted','ready'))
+                        AND NOT EXISTS (SELECT 1 FROM analysis_index_repairs repair
+                          WHERE repair.repair_revision = $1 AND repair.file_id = job.file_id
+                            AND repair.source_size = job.source_size
+                            AND repair.source_mtime = job.source_mtime
+                            AND repair.source_sha256 = job.source_sha256
+                            AND repair.pipeline_sha256 = job.pipeline_sha256
+                            AND repair.target_node_id = job.target_node_id)
                      ON CONFLICT DO NOTHING"
                         .to_owned(),
                     params!(
@@ -2391,21 +2406,21 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     ),
                 ),
                 (
-                    "INSERT INTO analysis_requests
-                        (request_id, file_id, source_size, source_mtime, component,
-                         pipeline_version, video_identity, requested_generation,
-                         expected_predecessor_generation, priority, trigger, force_rebuild,
-                         target_node_id, state, owner_node_id, fence, lease_expires_ms,
-                         attempts, not_before_ms, result_cache_key, last_error_code,
-                         cancel_requested, created_at_ms, updated_at_ms)
-                     SELECT $1, $2, $3, $4, 'fragment_index', $5, $6, $1, '',
-                            'forced', 'admin', 1, $7, 'queued', NULL, 0, NULL, 0,
-                            $8, NULL, NULL, 0, $8, $8
-                      WHERE EXISTS (SELECT 1 FROM analysis_index_repairs repair
-                         WHERE repair.repair_revision = $9 AND repair.file_id = $2
-                           AND repair.source_size = $3 AND repair.source_mtime = $4
-                           AND repair.source_sha256 = $10 AND repair.pipeline_sha256 = $11
-                           AND repair.target_node_id = $7 AND repair.successor_request_id = $1)
+                    "INSERT INTO analysis_index_repairs
+                        (repair_revision, file_id, source_size, source_mtime, source_sha256,
+                         pipeline_sha256, target_node_id, video_identity,
+                         predecessor_cache_key, predecessor_fence,
+                         successor_request_id, created_at_ms)
+                     SELECT $9, $2, $3, $4, $10, $11, $7, $6, $12, $13, $1, $8
+                      WHERE EXISTS (SELECT 1 FROM analysis_requests successor
+                         WHERE successor.request_id = $1 AND successor.file_id = $2
+                           AND successor.source_size = $3 AND successor.source_mtime = $4
+                           AND successor.pipeline_version = $5
+                           AND successor.video_identity = $6
+                           AND successor.target_node_id = $7
+                           AND successor.requested_generation = $1
+                           AND successor.force_rebuild = 1
+                           AND successor.state = 'queued')
                      ON CONFLICT DO NOTHING"
                         .to_owned(),
                     params!(
@@ -2419,7 +2434,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         now_ms,
                         &candidate.repair_revision,
                         &candidate.source_sha256,
-                        &candidate.pipeline_sha256
+                        &candidate.pipeline_sha256,
+                        &candidate.predecessor_cache_key,
+                        candidate.predecessor_fence
                     ),
                 ),
             ])
@@ -3071,12 +3088,17 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = CASE
                         WHEN cluster_fragment_index_jobs.state = 'queued'
-                         AND cluster_fragment_index_jobs.index_retry_deadline_ms = 0
+                         AND cluster_fragment_index_jobs.index_retry_deadline_ms > 0
+                        THEN cluster_fragment_index_jobs.not_before_ms
+                        WHEN cluster_fragment_index_jobs.state = 'queued'
                         THEN MIN(cluster_fragment_index_jobs.not_before_ms, excluded.not_before_ms)
                         ELSE excluded.not_before_ms END,
                     created_at_ms = cluster_fragment_index_jobs.created_at_ms,
                     updated_at_ms = excluded.updated_at_ms,
-                    last_error_code = NULL
+                    last_error_code = CASE
+                        WHEN cluster_fragment_index_jobs.index_retry_deadline_ms > 0
+                        THEN cluster_fragment_index_jobs.last_error_code
+                        ELSE NULL END
                   WHERE cluster_fragment_index_jobs.state = 'cancelled'
                      OR (cluster_fragment_index_jobs.state = 'failed'
                        AND cluster_fragment_index_jobs.last_error_code = 'queue_expired'

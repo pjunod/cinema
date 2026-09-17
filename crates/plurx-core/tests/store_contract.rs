@@ -20810,6 +20810,211 @@ async fn published_forced_fragment_generation_can_be_repaired_through_dyn_store(
 }
 
 #[tokio::test]
+async fn content_analysis_retry_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "content-analysis-retry").await;
+        let source_sha256 = "a".repeat(64);
+        let pipeline_sha256 = "b".repeat(64);
+        let cache_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("cache key");
+        let job = NewClusterFragmentIndexJob {
+            cache_key,
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256,
+            pipeline_sha256,
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            target_node_id: String::new(),
+            not_before_ms: 1,
+            created_at_ms: 1,
+        };
+        assert!(store
+            .enqueue_cluster_fragment_index(&job)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue: {error}")));
+        let claimed = store
+            .claim_cluster_fragment_index("node-a", &[], 10, 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: initial claim"));
+        assert!(store
+            .fail_cluster_fragment_index_typed(&plurx_core::store::ClusterFragmentIndexFailure {
+                cache_key: claimed.cache_key.clone(),
+                target_node_id: claimed.target_node_id.clone(),
+                node_id: "node-a".to_owned(),
+                fence: claimed.fence,
+                code: plurx_core::content_analysis::IndexFailureCode::IndexProbeTimeout,
+                transient_allowlisted: false,
+                diagnostic: plurx_core::content_analysis::IndexDiagnostic::default(),
+                now_ms: 20,
+            },)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: typed failure: {error}")));
+
+        let foreground = NewClusterFragmentIndexJob {
+            priority: "foreground".to_owned(),
+            trigger: "foreground".to_owned(),
+            not_before_ms: 30,
+            created_at_ms: 30,
+            ..job
+        };
+        assert!(store
+            .enqueue_cluster_fragment_index(&foreground)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: foreground rediscovery: {error}")));
+        assert!(
+            store
+                .claim_cluster_fragment_index("node-a", &[], 31, 1_031)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: early claim: {error}"))
+                .is_none(),
+            "{backend}: a foreground rediscovery must not bypass fixed backoff"
+        );
+
+        let six_hours = 6 * 60 * 60 * 1_000;
+        let retried = store
+            .claim_cluster_fragment_index("node-a", &[], six_hours, six_hours + 1_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: six-hour claim: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: retry was incorrectly queue-expired"));
+        assert_eq!(retried.attempts, 2, "{backend}");
+        assert_eq!(
+            retried.index_retry_deadline_ms,
+            20 + plurx_core::content_analysis::INDEX_RETRY_WINDOW_MS,
+            "{backend}: rediscovery must retain the original retry deadline"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn content_analysis_repair_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "content-analysis-repair").await;
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let request = store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: request_id.clone(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".to_owned(),
+                pipeline_version: "engine-v1".to_owned(),
+                video_identity: "video-a".to_owned(),
+                requested_generation: "legacy-generation".to_owned(),
+                priority: "normal".to_owned(),
+                trigger: "background".to_owned(),
+                force_rebuild: false,
+                target_node_id: "analysis-node".to_owned(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue request: {error}"));
+        assert_eq!(request.request_id, request_id, "{backend}");
+        let claimed_request = store
+            .claim_analysis_request("analysis-node", 10, 1_010)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim request: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: claimed request"));
+        let source_sha256 = "c".repeat(64);
+        let pipeline_sha256 = "d".repeat(64);
+        let predecessor_key =
+            cluster_fragment_index_key(file_id, 10_000, 1, &source_sha256, &pipeline_sha256)
+                .expect("predecessor key");
+        let job = NewClusterFragmentIndexJob {
+            cache_key: predecessor_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256,
+            pipeline_sha256,
+            priority: claimed_request.priority.clone(),
+            trigger: claimed_request.trigger.clone(),
+            target_node_id: claimed_request.target_node_id.clone(),
+            not_before_ms: 11,
+            created_at_ms: 11,
+        };
+        assert!(store
+            .submit_fragment_index_analysis(&claimed_request, &job, 11)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: submit predecessor: {error}")));
+        let worker = store
+            .claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim predecessor: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: predecessor worker"));
+        assert!(store
+            .fail_cluster_fragment_index(
+                &worker.cache_key,
+                &worker.target_node_id,
+                &worker.owner_node_id,
+                worker.fence,
+                "truncated",
+                false,
+                12,
+                12,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fail legacy predecessor: {error}")));
+        assert_eq!(
+            store
+                .settle_analysis_requests(13)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: settle predecessor: {error}")),
+            1,
+            "{backend}"
+        );
+
+        let candidates = store
+            .preview_analysis_index_repairs(None, 10)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: preview repair: {error}"));
+        let candidate = candidates
+            .iter()
+            .find(|candidate| candidate.predecessor_cache_key == predecessor_key)
+            .unwrap_or_else(|| panic!("{backend}: exact predecessor candidate"));
+        assert_eq!(candidate.eligibility, "eligible", "{backend}");
+        assert_eq!(candidate.video_identity, "video-a", "{backend}");
+
+        let first_id = uuid::Uuid::new_v4().to_string();
+        let first = store
+            .apply_analysis_index_repair(candidate, &first_id, 20)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: apply repair: {error}"));
+        assert_eq!(first.status, "created", "{backend}");
+        let repeated = store
+            .apply_analysis_index_repair(candidate, &uuid::Uuid::new_v4().to_string(), 21)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: repeat repair: {error}"));
+        assert_eq!(repeated.status, "already_created", "{backend}");
+        assert_eq!(repeated.successor_request_id, first_id, "{backend}");
+        let successor = store
+            .analysis_request(&first_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read successor: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: successor exists"));
+        assert_eq!(successor.video_identity, "video-a", "{backend}");
+        assert_eq!(successor.pipeline_version, "engine-v1", "{backend}");
+        assert_eq!(successor.state, "queued", "{backend}");
+        assert_eq!(
+            store
+                .cluster_fragment_index_job(&predecessor_key, "analysis-node")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read predecessor: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: predecessor retained"))
+                .state,
+            "failed",
+            "{backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn fragment_index_contract_runs_through_dyn_store() {
     for_each_backend(|store, backend| async move {
         let identity = SourceIdentity::new(4_096, 1_700_000_000_000, "fingerprint");

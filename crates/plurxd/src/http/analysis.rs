@@ -1080,6 +1080,114 @@ mod tests {
     use super::history_row_value;
 
     #[test]
+    fn content_analysis_history_projects_typed_diagnostic_and_retry_state() {
+        let diagnostic = plurx_core::content_analysis::IndexDiagnostic {
+            version: 1,
+            code: "index_probe_timeout".to_owned(),
+            retryable: true,
+            claim_fence: 7,
+            attempt: 2,
+            selected_stream: Some(3),
+            expected_ms: Some(120_000),
+            elapsed_ms: Some(30_000),
+            budget_ms: Some(30_000),
+            recorded_at_ms: 10,
+            ..Default::default()
+        }
+        .encode_bounded()
+        .expect("bounded diagnostic");
+        let value = history_row_value(plurx_core::store::AnalysisHistoryRow {
+            row_key: "job:retry".to_owned(),
+            request_id: String::new(),
+            job_id: "retry".to_owned(),
+            file_id: 42,
+            item_id: 0,
+            title: "fixture".to_owned(),
+            component: "fragment_index".to_owned(),
+            force_rebuild: false,
+            target_node_id: String::new(),
+            request_state: String::new(),
+            job_state: "queued".to_owned(),
+            state: "queued".to_owned(),
+            disposition: "automatic".to_owned(),
+            action: "none".to_owned(),
+            owner_node_id: String::new(),
+            claim_epoch: 7,
+            lease_expires_ms: 0,
+            attempts: 2,
+            not_before_ms: i64::MAX - 1,
+            request_error_code: String::new(),
+            job_error_code: "index_probe_timeout".to_owned(),
+            job_attempt_errors: "index_budget_exceeded,index_probe_timeout".to_owned(),
+            index_retry_deadline_ms: i64::MAX,
+            index_diagnostic_json: diagnostic,
+            created_at_ms: 1,
+            updated_at_ms: 10,
+            pipeline_version: "engine-v1".to_owned(),
+            requested_generation: String::new(),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            cancel_requested: false,
+            phase: "fragment_index".to_owned(),
+            source_size: 100,
+        });
+        assert_eq!(value["durable_state"], "retry_wait");
+        assert_eq!(value["effective_retry_at_ms"], i64::MAX - 1);
+        assert_eq!(value["index_retry_deadline_ms"], i64::MAX);
+        assert_eq!(value["index_diagnostic"]["selected_stream"], 3);
+        assert_eq!(value["index_diagnostic"]["attempt"], 2);
+        assert_eq!(
+            value["job_attempt_errors"],
+            serde_json::json!(["index_budget_exceeded", "index_probe_timeout"])
+        );
+        assert!(value["terminal_reason"].is_null());
+    }
+
+    #[test]
+    fn content_analysis_history_tolerates_absent_legacy_diagnostic() {
+        let mut row = plurx_core::store::AnalysisHistoryRow {
+            row_key: "job:legacy".to_owned(),
+            request_id: String::new(),
+            job_id: "legacy".to_owned(),
+            file_id: 42,
+            item_id: 0,
+            title: "legacy".to_owned(),
+            component: "fragment_index".to_owned(),
+            force_rebuild: false,
+            target_node_id: String::new(),
+            request_state: String::new(),
+            job_state: "failed".to_owned(),
+            state: "failed".to_owned(),
+            disposition: "attention".to_owned(),
+            action: "retry".to_owned(),
+            owner_node_id: String::new(),
+            claim_epoch: 1,
+            lease_expires_ms: 0,
+            attempts: 1,
+            not_before_ms: 0,
+            request_error_code: String::new(),
+            job_error_code: "truncated".to_owned(),
+            job_attempt_errors: String::new(),
+            index_retry_deadline_ms: 0,
+            index_diagnostic_json: String::new(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            pipeline_version: "legacy".to_owned(),
+            requested_generation: String::new(),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            cancel_requested: false,
+            phase: String::new(),
+            source_size: 100,
+        };
+        let value = history_row_value(row.clone());
+        assert!(value["index_diagnostic"].is_null());
+        assert_eq!(value["terminal_reason"], "truncated");
+        row.index_diagnostic_json = "{not json".to_owned();
+        assert!(history_row_value(row)["index_diagnostic"].is_null());
+    }
+
+    #[test]
     fn standalone_structural_source_invalidation_is_projected_as_stale() {
         let value = history_row_value(plurx_core::store::AnalysisHistoryRow {
             row_key: "job:stale".to_owned(),
