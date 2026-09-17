@@ -1599,41 +1599,64 @@ async function main() {
       'decoded-ahead frames cannot settle recovery while presentation callbacks stay at zero');
     h.p.controlPresentedFrames=1;h.v.currentTime=42;h.tick(24000);
     assert.equal(h.recovered(),4,'the supported presentation callback settles recovery');
-    // Native Safari VOD may advertise rVFC yet emit no callbacks after a
-    // nonzero resume, even while the picture and decoded counter advance.
+    // Native VOD may advertise rVFC yet emit no callbacks while the picture
+    // and displayed-frame counter advance.
     // Keep the generic callback contract above; only this observed transport
-    // can use its decoded counter until a presentation callback arrives.
+    // can use its displayed counter until a presentation callback arrives.
     h.p.progressWatch=null;h.p.waitAt=null;h.p.recoveringStall=null;
     Object.assign(h.p,{copyHls:true,vod:true,hls:null,controlPresentedFrames:0});
-    let decoded=600;
-    h.v.getVideoPlaybackQuality=()=>({totalVideoFrames:decoded,droppedVideoFrames:0});
+    let observedFrames=600;
+    h.v.getVideoPlaybackQuality=()=>({totalVideoFrames:observedFrames,droppedVideoFrames:0});
     h.v.currentTime=50;h.tick(25000);
     for(let i=1;i<=20;i++){
-      decoded+=12;h.v.currentTime=50+i/2;h.tick(25000+i*500);
+      observedFrames+=12;h.v.currentTime=50+i/2;h.tick(25000+i*500);
     }
     assert.equal(h.attempts(),1,
-      'native VOD clock and decoded-frame progress must not trigger false recovery');
+      'native VOD clock and displayed-frame progress must not trigger false recovery');
     assert.equal(h.p.progressWatch.fired,false);
     // An advancing clock alone still does not excuse a stopped decoder.
     for(let i=1;i<=16;i++){h.v.currentTime=60+i/2;h.tick(35000+i*500);}
     assert.equal(h.attempts(),2,'native VOD with stationary frames still recovers');
     h.p.waitAt=null;h.p.progressWatch=null;
-    h.tick(44000);decoded+=12;h.tick(52000);
+    h.tick(44000);observedFrames+=12;h.tick(52000);
     assert.equal(h.attempts(),3,'decode-ahead without clock movement still recovers');
     // Once Safari actually supplies callbacks they remain authoritative.
     h.p.waitAt=null;h.p.progressWatch=null;h.p.controlPresentedFrames=1;
-    h.tick(53000);decoded+=200;h.v.currentTime+=8;h.tick(61000);
+    h.tick(53000);observedFrames+=200;h.v.currentTime+=8;h.tick(61000);
     assert.equal(h.attempts(),4,'observed presentation callbacks cannot fall back on silence');
     h.p.waitAt=null;h.p.progressWatch=null;h.p.controlPresentedFrames=0;h.p.hls={};
-    h.tick(62000);decoded+=200;h.v.currentTime+=8;h.tick(70000);
+    h.tick(62000);observedFrames+=200;h.v.currentTime+=8;h.tick(70000);
     assert.equal(h.attempts(),5,'MSE keeps presentation callbacks authoritative');
     h.p.waitAt=null;h.p.progressWatch=null;h.p.hls=null;h.p.vod=false;
-    h.tick(71000);decoded+=200;h.v.currentTime+=8;h.tick(79000);
+    h.tick(71000);observedFrames+=200;h.v.currentTime+=8;h.tick(79000);
     assert.equal(h.attempts(),6,'live HLS keeps presentation callbacks authoritative');
     h.p.waitAt=null;h.p.progressWatch=null;h.p.vod=true;
     delete h.v.getVideoPlaybackQuality;
     h.tick(80000);h.v.currentTime+=8;h.tick(88000);
     assert.equal(h.attempts(),7,'native VOD needs a frame counter, not clock progress alone');
+    // Dropped frames are included in totalVideoFrames. A running audio clock
+    // and an entirely dropped video stream must not count as presentation.
+    h.p.waitAt=null;h.p.progressWatch=null;
+    let totalFrames=600,droppedFrames=0;
+    h.v.getVideoPlaybackQuality=()=>({totalVideoFrames:totalFrames,droppedVideoFrames:droppedFrames});
+    h.tick(90000);
+    for(let i=1;i<=60;i++){
+      totalFrames+=12;droppedFrames+=12;h.v.currentTime+=0.5;h.tick(90000+i*500);
+    }
+    assert.equal(h.attempts(),8,'native VOD must recover when every new frame is dropped');
+    // A valid counter showing some displayed frames still proves progress.
+    h.p.waitAt=null;h.p.progressWatch=null;h.tick(121000);
+    for(let i=1;i<=20;i++){
+      totalFrames+=12;droppedFrames+=2;h.v.currentTime+=0.5;h.tick(121000+i*500);
+    }
+    assert.equal(h.attempts(),8,'native VOD with displayed frames tolerates partial drops');
+    for(const bad of [undefined,NaN,Infinity,-1,"exceeds-total"]){
+      h.p.waitAt=null;h.p.progressWatch=null;
+      h.v.getVideoPlaybackQuality=()=>({totalVideoFrames:totalFrames,
+        droppedVideoFrames:bad==="exceeds-total"?totalFrames+1:bad});
+      const before=h.attempts();h.tick(140000);totalFrames+=12;h.v.currentTime+=8;h.tick(148000);
+      assert.equal(h.attempts(),before+1,'invalid dropped counters cannot prove native VOD progress');
+    }
   }
   player.waitAt=performance.now()-9_000;
   const inferredSupply=adapter.playbackControlSnapshot(video,player);

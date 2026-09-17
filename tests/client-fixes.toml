@@ -7,7 +7,7 @@ commits = ["790ffc9da"]
 source = "crates/plurxd/src/web/index.html"
 source_anchor = "const nativeCallbackSilence=p.controlHasFrameCallbacks&&frames===0"
 test = "tests/playback/web-control.test.js"
-test_anchor = "native VOD clock and decoded-frame progress must not trigger false recovery"
+test_anchor = "native VOD clock and displayed-frame progress must not trigger false recovery"
 
 [[fixes]]
 id = "apple.hevc-sample-entry-capability"

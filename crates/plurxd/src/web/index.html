@@ -13230,16 +13230,25 @@ function playbackProgressTick(v,p){
       // the decoder continues advancing while the compositor is frozen.
       frames=Number(p.controlPresentedFrames)||0; frameSource="callbacks";
     }
-    // Safari can advertise callbacks yet never deliver one for native VOD HLS
-    // resumed into a long timeline. Require both clock and decoded-frame
-    // progress in that case; do not relax MSE or a callback stream that stops.
+    // Native VOD can play without delivering advertised frame callbacks.
+    // Until a callback arrives, require both clock and displayed-frame
+    // progress; do not relax MSE or a callback stream that stops.
     const nativeCallbackSilence=p.controlHasFrameCallbacks&&frames===0
       &&p.copyHls&&p.vod&&!p.hls;
     if(!p.controlHasFrameCallbacks||nativeCallbackSilence) try{
       const q=v.getVideoPlaybackQuality?.();
-      if(Number.isFinite(q?.totalVideoFrames)){
+      if(nativeCallbackSilence){
+        // totalVideoFrames includes drops, even before decoding. Drops alone
+        // cannot prove that a picture was displayed or complete a recovery.
+        if(Number.isFinite(q?.totalVideoFrames)&&q.totalVideoFrames>=0
+          &&Number.isFinite(q?.droppedVideoFrames)&&q.droppedVideoFrames>=0
+          &&q.droppedVideoFrames<=q.totalVideoFrames){
+          frames=q.totalVideoFrames-q.droppedVideoFrames;
+          frameSource="native-displayed";
+        }
+      }else if(Number.isFinite(q?.totalVideoFrames)){
         frames=q.totalVideoFrames;
-        frameSource=nativeCallbackSilence?"native-decoded":"quality";
+        frameSource="quality";
       }
     }catch(e){}
   }
