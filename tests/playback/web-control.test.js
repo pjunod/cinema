@@ -4993,6 +4993,37 @@ async function main() {
     await outcomeOf(pending);
   }
 
+  {
+    // The Developer rows. Advisory, and NEVER a gate: nothing here is read by
+    // anything that decides anything, and at rest — the settings route with no
+    // player — they render nothing at all, so `tests/ui-structure.golden` has
+    // no new DOM to record.
+    const rows = new Function("PLAYER", "esc", "devStaticReq",
+      [shippedSource("directedChangeDeveloperRows"),
+        "return directedChangeDeveloperRows;"].join("\n"));
+    const esc = (value) => String(value);
+    const row = (title, status) => `[${title}=${status}]`;
+    assert.equal(rows(null, esc, row)(), "", "no player, no rows");
+    assert.equal(rows({}, esc, row)(), "",
+      "a player with nothing true to say about a change says nothing");
+    const painted = rows({ directedChange: { outcome: "committed", detail: 412 },
+      controlLastPreparation: "staging", autoRequestedHeight: 1080, autoHeight: 720 },
+      esc, row)();
+    assert.match(painted, /\[Outcome=committed 412 ms\]/);
+    assert.match(painted, /\[Server preparation=staging\]/);
+    assert.match(painted, /\[Auto rung=1080p &rarr; 720p\]/,
+      "requested and delivered are two readings and both are shown");
+    assert.match(painted, /Advisory only/);
+    for (const [outcome, said] of [["declined", "declined"], ["timed_out", "timed out"],
+      ["failed", "fell back"], [null, "waiting for an offer"]]) {
+      assert.match(rows({ directedChange: { outcome } }, esc, row)(),
+        new RegExp(`\\[Outcome=${said}\\]`), `${outcome} reads as "${said}"`);
+    }
+    // An unevaluated `preparation` is reported as unreported, never as a refusal.
+    assert.match(rows({ directedChange: { outcome: "committed" } }, esc, row)(),
+      /\[Server preparation=not reported\]/);
+  }
+
   // ---- §7.3: alignment finishes before the successor is exposed ------------
   {
     // A corrective seek whose `seeked` is delayed. The incumbent keeps the
