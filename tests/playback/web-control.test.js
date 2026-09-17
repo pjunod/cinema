@@ -114,6 +114,11 @@ function fullOpenHarness() {
     shippedSource("requestPlaybackMediaChange"),shippedSource("executePlaybackMediaChange"),
     shippedSource("streamGeneration"),shippedSource("transcodeOpts"),shippedSource("transcodeHeight"),shippedSource("sessionHeight"),
     shippedSource("startCopyHls"),
+    // The shipped gate: whether an automatic rung move may spend the offer
+    // bound at all. This harness's element reports no decoded data, so it is
+    // a reopen here exactly as it has always been.
+    shippedSource("preparedHandoffEnabled"),shippedSource("preparedHandoffOffered"),
+    shippedSource("directedChangeIncumbentReady"),
     shippedSource("startTranscodeFallback"),shippedSource("switchAutoRung"),
     shippedSource("autoSwitchLabel"),
     shippedSource("claimAutoFallback"),shippedSource("releaseAutoFallback"),
@@ -136,12 +141,25 @@ function fullOpenHarness() {
     shippedSource("observeStreamFailureResponse"),
     shippedSource("createHlsStartupLoader"),shippedSource("scheduleHlsNetworkRetry"),
     shippedSource("attachHls"),
+    // The directed-change owner, shipped. Neither of these harnesses has a
+    // control reporter, so `awaitPreparedOffer` answers "timed_out" at once
+    // and the owner takes its one reopen -- which is what every menu case
+    // here has always been about. The offer itself is driven for real in
+    // the directed-change section further down.
+    shippedConst("PREPARED_OFFER_BOUND_MS"),
+    shippedConst("PREPARED_OFFER_CADENCE_MS"),
+    shippedSource("preparedOfferSuperseded"),
+    shippedSource("awaitPreparedOffer"),
+    shippedSource("requestQualityChange"),
+    shippedSource("fallBackDirectedChange"),
+    shippedSource("settleDirectedChange"),
     shippedSource("resetMediaSource"), shippedSource("play"), shippedSource("setQuality"),
     shippedSource("seekTo"), shippedSource("switchAudio"), shippedSource("setSub"),shippedSource("burnSub"),
     shippedSource("offsetLabel"), shippedSource("setSync"), shippedSource("togglePlay"),
     shippedSource("retryPlayback"),
     shippedSource("closePlayer"),
     shippedSource("reportProgress"),
+    "async function qualityMenuPick(q){setQuality(q);for(let turn=0;turn<6;turn+=1)await Promise.resolve();}",
     "const ttff=[];function reportTtff(){ttff.push(PLAYER.fileId);}function esc(x){return x;}function finishPlayback(){throw Error('unattached autoplay');}function clearStall(){}function bufferRunway(){return 0;}const PERSISTENT_STALL_MS=8000;",
     shippedSource("playbackMarkersUsable"),shippedSource("markerNowMs"),
     shippedSource("markerIsEstimated"),shippedSource("markerAutoSkipEligible"),
@@ -151,7 +169,7 @@ function fullOpenHarness() {
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("waiting",\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
     "function incumbentError(){let handler;const v=Object.create(video);v.addEventListener=(_,fn)=>{handler=fn;};"+
       shippedSource('wirePlayerMedia').match(/v\.addEventListener\("error",\(\)=>\{[\s\S]*?\n  \}\);/)[0]+"handler();}",
-    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,decisions,sessions,released,media,loading,requestIds,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),spendHlsRetry:()=>scheduleHlsNetworkRetry(video,PLAYER,'network'),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
+    "return {attach(p){PLAYER=p;},setOpen(value){modalOpen=value;},isOpen:()=>modalOpen,node,current:()=>PLAYER,decisions,sessions,released,media,loading,requestIds,surface:surfacePainted,stops:()=>surfaceStops.length,posted,video,play,setQuality:qualityMenuPick,seekTo,switchAudio,setSub,setSync,togglePlay,retryPlayback,closePlayer,incumbentError,incumbentWaiting,checkMarkers,skipCurrent,skipMarker,ttff,pbTick,reportProgress,attachHls:()=>attachHls(video,'/A/index.m3u8',10),spendHlsRetry:()=>scheduleHlsNetworkRetry(video,PLAYER,'network'),hlsInstances,settle:()=>settlePlaybackControlSeek(video,PLAYER,video.currentTime,100),playing:()=>handlePlaybackPlaying(video,PLAYER),startTranscodeFallback,switchAutoRung,resetMediaSource,applyPlaybackTransportIntent,handlePlaybackTransportEvent,advance(ms){now+=ms;for(const [id,timer] of [...timers])if(timer.at<=now){timers.delete(id);timer.fn();}}};",
   ].join("\n"))(policy);
 }
 
@@ -912,9 +930,24 @@ async function main() {
       shippedSource("rememberPlaybackSelection"),
       shippedSource("offsetLabel"),
       shippedSource("startCopyHls"),
+      // The directed-change owner, shipped. Neither of these harnesses has a
+      // control reporter, so `awaitPreparedOffer` answers "timed_out" at once
+      // and the owner takes its one reopen -- which is what every menu case
+      // here has always been about. The offer itself is driven for real in
+      // the directed-change section further down.
+      shippedConst("PREPARED_OFFER_BOUND_MS"),
+      shippedConst("PREPARED_OFFER_CADENCE_MS"),
+      shippedSource("preparedOfferSuperseded"),
+      shippedSource("awaitPreparedOffer"),
+      shippedSource("requestQualityChange"),
+      shippedSource("fallBackDirectedChange"),
+      shippedSource("settleDirectedChange"),
       shippedSource("setQuality"),shippedSource("setSync"),
       shippedSource("setSub"),shippedSource("burnSub"),shippedSource("switchAudio"),
-      "return {attach(p){PLAYER=p;},hold(){held=true;},rejectWith(error){failure=error;},released,pending,calls,video,setQuality,setSync,setSub,switchAudio,startCopyHls,streamGeneration,beginPlaybackControlSeek};",
+      // A directed change settles a promise chain rather than reopening
+      // inline, so the harness hands back a form the cases can await.
+      "async function qualityMenuPick(q){setQuality(q);for(let turn=0;turn<6;turn+=1)await Promise.resolve();}",
+      "return {attach(p){PLAYER=p;},hold(){held=true;},rejectWith(error){failure=error;},released,pending,calls,video,setQuality:qualityMenuPick,setSync,setSub,switchAudio,startCopyHls,streamGeneration,beginPlaybackControlSeek};",
     ].join("\n"))();
   }
   for(const operation of ["quality","audio-sync","subtitle-burn","audio-track"]){
@@ -924,7 +957,7 @@ async function main() {
       controlSeek:{sequence:1,targetMs:90_000,executed:true},controlSeekSequence:1,
       audio:[{index:0},{index:1}],curAudio:0,curSub:-1,subs:[{index:2}],burnedSub:null};
     h.attach(p);
-    if(operation==='quality') h.setQuality('720');
+    if(operation==='quality') await h.setQuality('720');
     if(operation==='audio-sync') await h.setSync(250);
     if(operation==='subtitle-burn') await h.setSub(2);
     if(operation==='audio-track') await h.switchAudio(1);
@@ -1030,7 +1063,7 @@ async function main() {
   }
   {
     const h=fullOpenHarness(),p=fullPlayer();h.attach(p);
-    h.setQuality('original');
+    await h.setQuality('original');
     await h.startTranscodeFallback('stream-rejected');
     assert.equal(h.sessions.length,0,'a failed incumbent cannot steal a pending manual Original decision');
     assert.equal(p.pendingMediaChange,null);
@@ -1077,7 +1110,11 @@ async function main() {
       shippedSource("rememberPlaybackTransportIntent"),shippedSource("pausePlaybackInternally"),
       shippedSource("resetPlaybackTransportEvents"),shippedSource("playbackTransportEvents"),
       shippedSource("setPlaybackMediaSource"),
-      shippedSource("applyPlaybackTransportIntent"),shippedSource("teardownHls"),
+      shippedSource("applyPlaybackTransportIntent"),
+      // `teardownHls` retires a directed change: the stream it was asked
+      // against is the one ending.
+      shippedSource("settleDirectedChange"),shippedSource("supersedeDirectedChange"),
+      shippedSource("teardownHls"),
       shippedSource("beginPlaybackMediaAttachment"),shippedSource("applyPlaybackAttachmentPosition"),
       shippedSource("playbackAttemptTerminallyStopped"),
       shippedSource("attachHls"),
@@ -1404,7 +1441,7 @@ async function main() {
   }
   for(const laterCommand of ['seek','audio','subtitle']){
     const h=fullOpenHarness(), before=fullPlayer(); h.attach(before);
-    h.setQuality('720');
+    await h.setQuality('720');
     assert.equal(h.decisions.length,1);
     if(laterCommand==='seek') await h.seekTo(90);
     if(laterCommand==='audio') await h.switchAudio(1);
@@ -1428,7 +1465,7 @@ async function main() {
   for(const pauseTiming of ['before-open','during-decision']){
     const h=fullOpenHarness(), p=fullPlayer(); h.attach(p);
     if(pauseTiming==='before-open'){p.wantsPlayback=false;h.video.paused=true;}
-    h.setQuality('720');
+    await h.setQuality('720');
     if(pauseTiming==='during-decision')h.togglePlay();
     resolveDecision(h.decisions[0]);await flush();await flush();
     assert.equal(h.current().wantsPlayback,false,pauseTiming);
@@ -1436,7 +1473,7 @@ async function main() {
     assert.equal(h.media.includes('play'),false,'a stream replacement cannot override Pause');
   }
   {
-    const h=fullOpenHarness();h.attach(fullPlayer());h.setQuality('720');
+    const h=fullOpenHarness();h.attach(fullPlayer());await h.setQuality('720');
     resolveDecision(h.decisions[0]);await flush();await flush();
     h.current().controlSeek={sequence:2,targetMs:90_000,executed:true};
     h.video.onloadedmetadata();
@@ -3392,6 +3429,7 @@ async function main() {
   // the preparation state machine would prove the fixture, not the page.
   function preparedHarness(options = {}) {
     const notifies = [];
+    const notifySelections = [];
     const logs = [];
     const wired = [];
     const adopted = [];
@@ -3476,7 +3514,7 @@ async function main() {
       "armHitchDetector", "setupAirplay", "playbackProgressTick", "probeDecode",
       "handleEnded", "renderPlayerInfo", "pbTick", "pbSyncPlayIcon",
       [
-        "let PLAYER=null;",
+        "let PLAYER=null; let quality='auto';",
         "function playbackContext(){return {};}",
         "function cancelHlsStartup(){}",
         // §3.3 row 18: a staging nobody took up raises a log-only fault, and
@@ -3496,6 +3534,7 @@ async function main() {
         shippedConst("PREPARED_ACK_QUEUE_MAX"),
         shippedConst("PREPARED_SETTLED_MEMORY"),
         shippedSource("preparedHandoffEnabled"), shippedSource("setPreparedHandoffEnabled"),
+        shippedSource("preparedHandoffOffered"),
         shippedSource("sessionMediaOriginMs"), shippedSource("realMediaPositionMs"),
         shippedSource("preparedLocalPositionMs"), shippedSource("playbackFilmPositionMs"),
         shippedSource("streamHasVideo"),
@@ -3509,7 +3548,16 @@ async function main() {
         shippedSource("beginPreparedReplacement"), shippedSource("preparedSelectionText"),
         shippedSource("preparedHlsAttach"), shippedSource("preparedNativeAttach"),
         shippedSource("notePreparedMetadata"), shippedSource("preparedBufferedThroughMs"),
+        shippedConst("PREPARED_ALIGN_SEEK_MS"), shippedConst("PREPARED_ALIGN_ATTEMPTS"),
         shippedSource("notePreparedBuffer"), shippedSource("commitPreparedReplacement"),
+        // §7.3: the commit is two phases now. Alignment finishes before the
+        // successor is exposed, so a corrective seek can no longer put a
+        // blank element in front of the viewer.
+        shippedSource("alignPreparedReplacement"), shippedSource("preparedAlignSeek"),
+        shippedSource("preparedAlignedBuffered"), shippedSource("exposePreparedReplacement"),
+        // The directed change the commit and its failure now settle.
+        shippedSource("settleDirectedChange"), shippedSource("supersedeDirectedChange"),
+        shippedSource("fallBackDirectedChange"),
         shippedSource("retirePreparedPredecessor"), shippedSource("rollbackPreparedReplacement"),
         shippedSource("adoptPlaybackMediaElement"), shippedSource("disposeRetiredMediaElement"),
         shippedSource("preparedFirstFrame"), shippedSource("cancelPreparedFirstFrame"),
@@ -3521,7 +3569,37 @@ async function main() {
         shippedSource("hasPendingPlaybackOpen"), shippedSource("playbackOwnsAttachedMedia"),
         shippedSource("rememberPlaybackTransportIntent"),
         shippedSource("pausePlaybackInternally"),
+        shippedSource("settleDirectedChange"),shippedSource("supersedeDirectedChange"),
         shippedSource("teardownHls"),
+        // ---- the directed change, end to end -----------------------------
+        "let PENDING_ATTEMPT_REASON=null; const plays=[],mediaChanges=[];",
+        "function playbackSurfaceStep(){return null;}",
+        "function closeMenu(){} function toast(){} function qualityLabel(){return 'x';}",
+        "function play(id,title,position,dur,meta){plays.push({id,position,reason:PENDING_ATTEMPT_REASON});PENDING_ATTEMPT_REASON=null;}",
+        "async function requestPlaybackMediaChange(p,change){mediaChanges.push(change);return true;}",
+        "function selectedAudioIndex(){return 0;} function playQuality(){return quality;}",
+        "function hlsStartupCurrent(){return false;}",
+        shippedConst("PREPARED_OFFER_BOUND_MS"),
+        shippedConst("PREPARED_OFFER_CADENCE_MS"),
+        shippedSource("playbackControlSelection"),
+        shippedSource("positionForPlaybackIntent"),
+        shippedSource("supersedePlaybackControlIntent"),
+        shippedSource("beginPlaybackControlSeek"),
+        shippedSource("clearPlaybackControlWaiters"),
+        shippedSource("settlePlaybackControlWaiters"),
+        shippedSource("settlePreparedOfferWaiter"),
+        shippedSource("preparedOfferSuperseded"),
+        shippedSource("preparedOfferBuilt"),
+        shippedSource("awaitPreparedOffer"),
+        shippedSource("requestQualityChange"),
+        shippedSource("fallBackDirectedChange"),
+        shippedSource("settleDirectedChange"),
+        shippedSource("supersedeDirectedChange"),
+        shippedSource("directedChangeIncumbentReady"),
+        shippedSource("claimAutoFallback"),
+        shippedSource("releaseAutoFallback"),
+        shippedSource("setQuality"),
+        shippedSource("switchAutoRung"),
         "return {set(p){PLAYER=p;return p;},current:()=>PLAYER,",
         " handle(action){return handlePreparedReplacementAction(PLAYER,action);},",
         " abandon(state,reason){return abandonPreparedReplacement(PLAYER,state,reason);},",
@@ -3531,6 +3609,28 @@ async function main() {
         " pending(demand){return pendingPlaybackControlAcknowledgement(PLAYER,demand);},",
         " settle(request){return settlePlaybackControlAcknowledgement(PLAYER,request);},",
         " origin:sessionMediaOriginMs, film:realMediaPositionMs, local:preparedLocalPositionMs,",
+        // The onExchange ORDER, which is the whole point: the waiters are
+        // settled first and the preparation is built after, further down the
+        // same callback. `build:false` is the offer this client was handed and
+        // never built -- the case the bound has to notice.
+        " exchange(request,response,error,build){",
+        "   settlePlaybackControlWaiters(PLAYER,request,response,error);",
+        "   if(build!==false&&response&&response.action",
+        "      &&response.action.type===PlurxPlaybackControl.PREPARE_ACTION_TAG)",
+        "     handlePreparedReplacementAction(PLAYER,response.action);",
+        " },",
+        " ask(reason,fallback){return requestQualityChange(PLAYER,reason,fallback);},",
+        " fallback(why){return fallBackDirectedChange(PLAYER,PLAYER.directedChange,why||'failed');},",
+        // `setQuality` fires the owner and returns; the owner settles a promise
+        // chain of its own. The harness hands back a form the cases can await.
+        " async menu(q){quality=q;setQuality(q);for(let turn=0;turn<6;turn+=1)await Promise.resolve();},",
+        " autoRung(from,decision){return switchAutoRung(from,decision);},",
+        " supersede(){return supersedePlaybackControlIntent(PLAYER);},",
+        " waiters(){return (PLAYER&&PLAYER.controlWaiters)||[];},",
+        " selection(){return playbackControlSelection(PLAYER);},",
+        " requestedRung(){return PLAYER&&PLAYER.autoRequestedHeight;},",
+        " commit(){return commitPreparedReplacement(PLAYER,preparedState(PLAYER));},",
+        " plays, mediaChanges,",
         " surfaceRaised};",
       ].join("\n"),
     );
@@ -3541,7 +3641,9 @@ async function main() {
       (id) => { timers.delete(id); },
       (fn, ms) => { intervals.push({ fn, ms }); return intervals.length; },
       () => {},
-      () => { notifies.push(current()); },
+      () => { notifies.push(current());
+        notifySelections.push({ selection: selection(), requested: requestedRung() });
+        return { trigger: true }; },
       (entry) => { logs.push(entry); },
       !!options.native,
       (v) => wired.push(v),
@@ -3568,8 +3670,10 @@ async function main() {
         || attached.find((node) => node.id === "video-prepared")
         || created[created.length - 1] || null,
     });
+    const selection = () => api.selection();
+    const requestedRung = () => api.requestedRung();
     return Object.assign(api, {
-      live, instances, notifies, logs, attached, created, removed, wired, adopted,
+      live, instances, notifies, notifySelections, logs, attached, created, removed, wired, adopted,
       intervals,
       queue: () => (api.current() && api.current().controlAcknowledgements) || [],
       head: () => api.pending("active"),
@@ -4495,6 +4599,512 @@ async function main() {
     assert.equal(p.prepared, null);
   }
 
+
+
+  // ---- §7: the directed quality change, from the tap to the switch ----------
+  //
+  // The prepared handoff had been fully built for a milestone and no viewer
+  // action had ever reached it: `setQuality` reopened the stream synchronously,
+  // `play()` nulled `p.mediaAttachment`, and both the reporter's `capture` and
+  // its `onExchange` refuse to speak past that. Everything below runs the
+  // SHIPPED owner and the SHIPPED waiter sliced out of index.html.
+  const CONTROL_GENERATION = "11111111-1111-4111-8111-111111111111";
+  const CONTROL_EPOCH = 7;
+  // A reporter that answers the three questions `awaitPreparedOffer` asks it:
+  // where the sequence is now, who it is, and whether it has stopped.
+  const offerReporter = (h, sequence = 4) => {
+    const reporter = {
+      sequence, stopped: false, notifies: 0,
+      bootstrap: { generation: CONTROL_GENERATION, control_epoch: CONTROL_EPOCH },
+      notify() { this.notifies += 1; },
+    };
+    h.current().controlReporter = reporter;
+    return reporter;
+  };
+  const offerRequest = (sequence) => ({ sequence,
+    generation: CONTROL_GENERATION, control_epoch: CONTROL_EPOCH });
+  const offerResponse = (overrides = {}) => Object.assign(
+    { action: { type: "none" } }, overrides);
+  // The player a directed change is made against: decoding, attached, and
+  // watching something.
+  const directedPlayer = (h, overrides = {}) => {
+    const p = h.set(preparedPlayer(Object.assign({
+      fileId: "film", title: "Film", knownDur: 3_600_000, meta: null,
+      started: true, controlIntentGeneration: 3,
+      hls: { bandwidthEstimate: 1, destroy() {} },
+    }, overrides)));
+    h.live.readyState = 4;
+    h.live.paused = false;
+    return p;
+  };
+
+  // An offer waiter that never settles has to read as a FAILURE rather than as
+  // a case that quietly stopped. The harness's timers are fake, so an
+  // unresolved promise keeps nothing alive: the event loop drains, the process
+  // exits mid-case, and the run is green for a switch that never happened.
+  const outcomeOf = (pending) => Promise.race([
+    pending,
+    new Promise((resolve) => setTimeout(() => resolve("never settled"), 20)),
+  ]);
+  // The confirmation the offer waiter schedules for the next turn, and ONLY
+  // it: the preparation is built after `settlePlaybackControlWaiters` returns,
+  // further down the same `onExchange`, and `fireAll` would also expire the
+  // twelve-second bound sitting in front of it.
+  const fireOfferConfirm = (h) => {
+    const at = [...h.timers.entries()].find(([, timer]) => timer.ms === 0);
+    assert.ok(at, "an offer waiter confirms the build on the next turn");
+    h.fire(at[0]);
+  };
+  // ---- §7.1 rule 1: the floor is read BEFORE the notify ---------------------
+  {
+    const h = preparedHarness();
+    const p = directedPlayer(h);
+    const reporter = offerReporter(h, 4);
+    // A notify that starts a request must not push our floor past it.
+    const pending = h.ask("manual");
+    await flush();
+    const [waiter] = h.waiters();
+    assert.equal(waiter.minSequence, 5,
+      "the floor is the next NEW request, read before the notify that starts it");
+    assert.equal(waiter.kind, "offer");
+    assert.equal(waiter.generation, CONTROL_GENERATION,
+      "the identity is pinned with the floor: resetForOwner zeroes the counter");
+    assert.equal(waiter.controlEpoch, CONTROL_EPOCH);
+    assert.equal(h.notifies.length, 1, "the ask publishes the new selection once");
+    // A replayed retry keeps its old sequence and is skipped by the floor.
+    h.exchange(offerRequest(4), offerResponse({ delivery: { preparation: "none" } }));
+    assert.equal(h.waiters().length, 1, "a replay below the floor is not this ask's answer");
+    h.exchange(offerRequest(5), offerResponse({ delivery: { preparation: "none" } }));
+    assert.equal(await outcomeOf(pending), "declined");
+    assert.equal(reporter.notifies, 0);
+  }
+
+  // ---- §7.1 rule 2: the media attachment is never touched -------------------
+  {
+    const h = preparedHarness();
+    const attachment = {};
+    const p = directedPlayer(h, { mediaAttachment: attachment });
+    offerReporter(h);
+    const pending = h.ask("manual");
+    await flush();
+    assert.equal(p.mediaAttachment, attachment,
+      "the reporter must keep owning the media for the whole wait — this guard is "
+      + "what dropped every Prepare this client was ever offered");
+    h.exchange(offerRequest(5), offerResponse({ delivery: { preparation: "none" } }));
+    await outcomeOf(pending);
+    assert.equal(p.mediaAttachment, attachment, "…and still owns it afterwards");
+  }
+
+  // ---- §7.1 rule 3: settled by rule, not by arrival -------------------------
+  {
+    // `prepare` on a LATER exchange than the one that carried the ask. This is
+    // the case `askPlaybackControl` structurally cannot serve.
+    const h = preparedHarness();
+    const p = directedPlayer(h);
+    offerReporter(h);
+    const pending = h.ask("manual");
+    await flush();
+    h.exchange(offerRequest(5), offerResponse({ delivery: { preparation: "staging" } }));
+    assert.equal(h.waiters().length, 1, "staging is progress, not an answer");
+    h.exchange(offerRequest(7), offerResponse({ action: prepareAction() }));
+    fireOfferConfirm(h);
+    assert.equal(await outcomeOf(pending), "prepared");
+    assert.equal(p.prepared.actionId, PREPARE_ACTION_ID);
+    assert.equal(h.instances.length, 1, "the offer is built exactly once, by onExchange");
+  }
+  {
+    // An explicit `none` declines, on an exchange at or after the ask.
+    const h = preparedHarness();
+    directedPlayer(h);
+    offerReporter(h);
+    const pending = h.ask("manual");
+    await flush();
+    h.exchange(offerRequest(6), offerResponse({ delivery: { preparation: "none" } }));
+    assert.equal(await outcomeOf(pending), "declined");
+  }
+  {
+    // ABSENT IS NOT A DECLINE. An older relay peer does not evaluate the field,
+    // and reading its silence as "no" would turn every switch against one into
+    // the immediate reopen this milestone exists to take out.
+    const h = preparedHarness();
+    directedPlayer(h);
+    offerReporter(h);
+    const pending = h.ask("manual");
+    await flush();
+    for (const delivery of [{}, { subtitle_readiness: "ready" }, undefined]) {
+      h.exchange(offerRequest(6), offerResponse(delivery ? { delivery } : {}));
+      assert.equal(h.waiters().length, 1,
+        "an unevaluated `preparation` leaves the bound to decide, never the client");
+    }
+    h.fireAll();
+    assert.equal(await outcomeOf(pending), "timed_out");
+  }
+  {
+    // `staging` stays armed AND asks again sooner than ordinary cadence.
+    const h = preparedHarness();
+    directedPlayer(h);
+    const reporter = offerReporter(h);
+    const pending = h.ask("manual");
+    await flush();
+    h.exchange(offerRequest(5), offerResponse({ delivery: { preparation: "staging" } }));
+    assert.equal(reporter.notifies, 0, "the cadence is a timer, not an immediate storm");
+    const cadence = [...h.timers.entries()].find(([, t]) => t.ms === 1000);
+    assert.ok(cadence, "a staging exchange schedules one cadence wake");
+    h.fire(cadence[0]);
+    assert.equal(reporter.notifies, 1, "…which comes back for the offer");
+    h.exchange(offerRequest(6), offerResponse({ action: prepareAction() }));
+    fireOfferConfirm(h);
+    assert.equal(await outcomeOf(pending), "prepared");
+  }
+  {
+    // An exchange FAILURE does not settle an offer waiter. That is the whole
+    // difference from the stall waiter beside it: a stalled viewer cannot wait,
+    // but here the incumbent is playing and only the ask is unanswered.
+    const h = preparedHarness();
+    directedPlayer(h);
+    offerReporter(h);
+    const pending = h.ask("manual");
+    await flush();
+    const failed = Object.assign(new Error("gone"), { status: 503, code: "unavailable" });
+    h.exchange(offerRequest(6), null, failed);
+    assert.equal(h.waiters().length, 1, "no answer is not an answer here");
+    h.exchange(offerRequest(7), offerResponse({ action: prepareAction() }));
+    fireOfferConfirm(h);
+    assert.equal(await outcomeOf(pending), "prepared");
+  }
+  {
+    // …but an owner change clears every waiter, and that DOES settle it — as
+    // superseded, because the new owner did not answer this observation.
+    const h = preparedHarness();
+    directedPlayer(h);
+    offerReporter(h);
+    const pending = h.ask("manual");
+    await flush();
+    h.exchange(offerRequest(6), null,
+      Object.assign(new Error("409"), { status: 409, code: "owner_changed" }));
+    assert.equal(await outcomeOf(pending), "superseded");
+    assert.equal(h.waiters().length, 0);
+  }
+
+  // ---- §7.1 rule 4: a newer viewer intent supersedes ------------------------
+  {
+    const h = preparedHarness();
+    const p = directedPlayer(h);
+    offerReporter(h);
+    const pending = h.ask("manual");
+    await flush();
+    h.supersede();                      // a seek, or another menu choice
+    assert.equal(await outcomeOf(pending), "superseded");
+    assert.equal(h.plays.length, 0, "a superseded ask never earns a reopen of its own");
+  }
+
+  // ---- §7.1 rule 5: the bound, and the staging it hands back ----------------
+  {
+    const h = preparedHarness();
+    directedPlayer(h);
+    offerReporter(h);
+    const pending = h.ask("manual");
+    await flush();
+    const bound = [...h.timers.entries()].find(([, t]) => t.ms > 11_000 && t.ms <= 12_000);
+    assert.ok(bound, "the bound is measured from the tap, not from the exchange");
+    h.fire(bound[0]);
+    assert.equal(await outcomeOf(pending), "timed_out");
+  }
+  {
+    // Offered, and never built — the guard in `onExchange` refused it, or the
+    // validator did. The staging holds this session's ONE preparation slot
+    // until the server's deadline, so it is handed back before giving up.
+    const h = preparedHarness();
+    const p = directedPlayer(h);
+    offerReporter(h);
+    const pending = h.ask("manual");
+    await flush();
+    h.exchange(offerRequest(6), offerResponse({ action: prepareAction() }), null, false);
+    assert.equal(p.prepared, null, "nothing was built");
+    h.fireAll();
+    assert.equal(await outcomeOf(pending), "timed_out");
+    assert.equal(latest(h).action_id, PREPARE_ACTION_ID);
+    assert.equal(latest(h).state, "aborted",
+      "an offer nobody built is handed back, or the session can never prepare again");
+  }
+
+  // ---- §7.2: one owner, one reopen -----------------------------------------
+  {
+    // Menu → offer → commit → NO reopen.
+    const h = preparedHarness();
+    const incumbent = { bandwidthEstimate: 1, destroyed: false, destroy() { this.destroyed = true; } };
+    const p = directedPlayer(h, { hls: incumbent });
+    offerReporter(h);
+    const pending = h.menu("720");
+    await flush();
+    assert.equal(h.plays.length, 0, "the tap itself reopens nothing any more");
+    assert.equal(p.controlIntentGeneration, 3,
+      "a quality choice is not a seek, and must not retire its own ask");
+    h.exchange(offerRequest(6), offerResponse({ action: prepareAction() }));
+    fireOfferConfirm(h);
+    await outcomeOf(pending);
+    h.instances[0].events.manifest();
+    h.spare.ranges = [[0, 30]];
+    h.instances[0].events.append();
+    assert.equal(h.spare.id, "video", "the successor took the picture");
+    h.spare.frameCallback(0, { presentationTime: 1, presentedFrames: 1 });
+    assert.equal(p.directedChange.settled, true);
+    assert.equal(p.directedChange.outcome, "committed");
+    assert.equal(h.plays.length, 0, "a switch that committed owes the viewer nothing");
+  }
+  {
+    // Menu → offer → the preparation fails → exactly ONE reopen, at the
+    // position the viewer is at NOW rather than where they were at the tap.
+    const h = preparedHarness();
+    const p = directedPlayer(h, { offset: 0 });
+    offerReporter(h);
+    h.live.currentTime = 300;
+    const pending = h.menu("720");
+    await flush();
+    h.exchange(offerRequest(6), offerResponse({ action: prepareAction() }));
+    fireOfferConfirm(h);
+    await outcomeOf(pending);
+    h.live.currentTime = 312;          // twelve seconds of wait, still playing
+    h.failPrepared("the successor never primed");
+    assert.equal(h.plays.length, 1, "one reopen, and exactly one");
+    assert.equal(h.plays[0].position, 312_000,
+      "the reopen lands where the viewer is, not where they were at the tap");
+    assert.equal(h.plays[0].reason, "quality");
+    assert.equal(p.directedChange.outcome, "failed");
+    // A second settlement cannot reopen again. `change.settled` is the whole
+    // reason a decline racing the bound, or a failed commit racing a
+    // supersede, does not reopen the stream twice for one tap.
+    assert.equal(h.fallback("failed"), false);
+    assert.equal(h.plays.length, 1, "one tap, one reopen");
+  }
+  {
+    // Menu → `none` → one reopen.
+    const h = preparedHarness();
+    directedPlayer(h, { offset: 0 });
+    offerReporter(h);
+    h.live.currentTime = 90;
+    const pending = h.menu("720");
+    await flush();
+    h.exchange(offerRequest(6), offerResponse({ delivery: { preparation: "none" } }));
+    await outcomeOf(pending);
+    assert.equal(h.plays.length, 1);
+    assert.equal(h.plays[0].position, 90_000);
+  }
+  {
+    // Menu → the bound → one reopen.
+    const h = preparedHarness();
+    directedPlayer(h, { offset: 0 });
+    offerReporter(h);
+    h.live.currentTime = 90;
+    const pending = h.menu("720");
+    await flush();
+    h.fireAll();
+    await outcomeOf(pending);
+    assert.equal(h.plays.length, 1);
+  }
+  {
+    // Menu → a seek during the wait → NO reopen from this path. The seek owns
+    // the viewer's intent and reopens on its own terms.
+    const h = preparedHarness();
+    const p = directedPlayer(h);
+    offerReporter(h);
+    const pending = h.menu("720");
+    await flush();
+    h.supersede();
+    await outcomeOf(pending);
+    assert.equal(h.plays.length, 0, "two reopens for one tap is the thing to be single about");
+    assert.equal(p.directedChange.settled, true);
+    assert.equal(p.directedChange.outcome, "superseded");
+  }
+  {
+    // Auto while the incumbent is stalled stays a plain reopen. The server
+    // cancels a preparation on `waiting`/`stalled` anyway, so asking would
+    // spend twelve seconds to be told no — with the viewer already stalled.
+    const h = preparedHarness();
+    const p = directedPlayer(h, { abr: { switching: false } });
+    offerReporter(h);
+    p.waitAt = 1;                      // the incumbent is not decoding
+    await h.autoRung(720, { height: 1080, reason: "runway" });
+    assert.equal(h.mediaChanges.length, 1, "a stalled reopen stays a reopen");
+    assert.equal(h.mediaChanges[0].height, 1080);
+    assert.equal(h.waiters().length, 0, "and it never armed an offer at all");
+    assert.equal(p.autoRequestedHeight, undefined,
+      "a reopen carries the rung on its own create; it publishes no standing ask");
+  }
+  {
+    // A healthy Auto move goes through the handoff, and its reopen is the
+    // media-change owner rather than `play()`.
+    const h = preparedHarness();
+    const p = directedPlayer(h, { abr: { switching: false } });
+    offerReporter(h);
+    const moving = h.autoRung(720, { height: 1080, reason: "runway" });
+    await flush();
+    assert.equal(h.waiters().length, 1, "a decoding incumbent can hand off");
+    assert.equal(h.mediaChanges.length, 0, "…and does not reopen while it waits");
+    h.exchange(offerRequest(6), offerResponse({ delivery: { preparation: "none" } }));
+    await outcomeOf(moving);
+    assert.equal(h.plays.length, 0, "Auto reopens through its own owner, not the menu's");
+    assert.deepEqual(h.mediaChanges.map((c) => c.height), [1080]);
+    assert.equal(p.autoRequestedHeight, null, "the reopen's create carries the rung instead");
+  }
+
+  // ---- §7.4 D3-a, the web half: Auto carries the rung it wants -------------
+  {
+    const h = preparedHarness();
+    const p = directedPlayer(h, { abr: { switching: false } });
+    offerReporter(h);
+    p.autoHeight = 720;
+    assert.deepEqual(h.selection().quality, { mode: "auto" },
+      "an Auto controller that has asked for nothing sends plain Auto");
+    const moving = h.autoRung(720, { height: 1080, reason: "runway" });
+    await flush();
+    // The ORDER is the point: the rung has to be on the very first exchange
+    // after the decision, or the server reads the same Auto it has been
+    // reading all along and stages nothing.
+    assert.deepEqual(h.notifySelections.map((entry) => entry.requested), [1080],
+      "`autoRequestedHeight` is set BEFORE the notify, not after it");
+    assert.deepEqual(h.notifySelections[0].selection.quality,
+      { mode: "auto", height: 1080 },
+      "the outgoing selection carries the rung the controller wants");
+    assert.equal(p.autoHeight, 720,
+      "requested is never copied into delivered; the Developer card shows both");
+    h.exchange(offerRequest(6), offerResponse({ action: prepareAction() }));
+    fireOfferConfirm(h);
+    await outcomeOf(moving);
+    h.instances[0].events.manifest();
+    h.spare.ranges = [[0, 30]];
+    h.instances[0].events.append();
+    h.spare.frameCallback(0, { presentationTime: 1, presentedFrames: 1 });
+    assert.equal(p.autoRequestedHeight, null,
+      "a committed rung is the delivered one now; the selection returns to plain Auto");
+    assert.deepEqual(h.selection().quality, { mode: "auto" },
+      "…which is a stable digest rather than a standing ask");
+  }
+  {
+    // A viewer who picks by hand overrides whatever the controller wanted.
+    const h = preparedHarness();
+    const p = directedPlayer(h);
+    offerReporter(h);
+    p.autoRequestedHeight = 1080;
+    const pending = h.menu("720");
+    await flush();
+    assert.equal(p.autoRequestedHeight, null);
+    h.fireAll();
+    await outcomeOf(pending);
+  }
+
+  {
+    // The Developer rows. Advisory, and NEVER a gate: nothing here is read by
+    // anything that decides anything, and at rest — the settings route with no
+    // player — they render nothing at all, so `tests/ui-structure.golden` has
+    // no new DOM to record.
+    const rows = new Function("PLAYER", "esc", "devStaticReq",
+      [shippedSource("directedChangeDeveloperRows"),
+        "return directedChangeDeveloperRows;"].join("\n"));
+    const esc = (value) => String(value);
+    const row = (title, status) => `[${title}=${status}]`;
+    assert.equal(rows(null, esc, row)(), "", "no player, no rows");
+    assert.equal(rows({}, esc, row)(), "",
+      "a player with nothing true to say about a change says nothing");
+    const painted = rows({ directedChange: { outcome: "committed", detail: 412 },
+      controlLastPreparation: "staging", autoRequestedHeight: 1080, autoHeight: 720 },
+      esc, row)();
+    assert.match(painted, /\[Outcome=committed 412 ms\]/);
+    assert.match(painted, /\[Server preparation=staging\]/);
+    assert.match(painted, /\[Auto rung=1080p &rarr; 720p\]/,
+      "requested and delivered are two readings and both are shown");
+    assert.match(painted, /Advisory only/);
+    for (const [outcome, said] of [["declined", "declined"], ["timed_out", "timed out"],
+      ["failed", "fell back"], [null, "waiting for an offer"]]) {
+      assert.match(rows({ directedChange: { outcome } }, esc, row)(),
+        new RegExp(`\\[Outcome=${said}\\]`), `${outcome} reads as "${said}"`);
+    }
+    // An unevaluated `preparation` is reported as unreported, never as a refusal.
+    assert.match(rows({ directedChange: { outcome: "committed" } }, esc, row)(),
+      /\[Server preparation=not reported\]/);
+  }
+
+  // ---- §7.3: alignment finishes before the successor is exposed ------------
+  {
+    // A corrective seek whose `seeked` is delayed. The incumbent keeps the
+    // picture AND the sound for the whole of it — this is the defect: the old
+    // commit assigned `currentTime` and swapped the elements in the same
+    // synchronous block, putting an element with nothing decoded at its new
+    // position in front of the viewer.
+    const h = preparedHarness();
+    const p = h.set(preparedPlayer({ vod: false, offset: 600,
+      hls: { bandwidthEstimate: 1, destroy() {} } }));
+    h.live.currentTime = 300;                     // film 900 s
+    h.live.muted = false;
+    h.handle(prepareAction({ media_origin_ms: PREPARE_ORIGIN_MS }));
+    h.instances[0].events.manifest();
+    h.spare.currentTime = 306;                    // six seconds of drift
+    h.spare.ranges = [[300, 330]];
+    h.spare.readyState = 4;
+    h.instances[0].events.append();
+    assert.equal(h.spare.currentTime, 300, "the seek is issued onto the incumbent's second");
+    assert.equal(h.live.id, "video", "…and the incumbent still owns the picture");
+    assert.equal(h.live.style.display, "", "…is still displayed");
+    assert.equal(h.live.muted, false, "…and is still audible while the seek runs");
+    assert.equal(h.spare.style.display, "none", "the successor is not exposed yet");
+    assert.equal(p.prepared.state, "committing", "the staging is mid-commit, not exposed");
+    // Now it lands, on a range that covers where it landed.
+    h.spare.ranges = [[300, 330]];
+    h.spare.emit("seeked");
+    await flush(); await flush();
+    assert.equal(h.spare.id, "video", "a completed, decoded seek exposes the successor");
+    assert.equal(h.live.id, "video-prepared");
+    assert.equal(h.live.muted, true, "and only then is the predecessor silenced");
+  }
+  {
+    // A seek that never completes. Two attempts, then the staging is failed
+    // with the incumbent exactly where it was — and the change takes its one
+    // reopen.
+    const h = preparedHarness();
+    const p = directedPlayer(h, { vod: false, offset: 600 });
+    offerReporter(h);
+    h.live.currentTime = 300;
+    h.live.muted = false;
+    const pending = h.menu("720");
+    await flush();
+    h.exchange(offerRequest(6),
+      offerResponse({ action: prepareAction({ media_origin_ms: PREPARE_ORIGIN_MS }) }));
+    fireOfferConfirm(h);
+    await outcomeOf(pending);
+    h.instances[0].events.manifest();
+    h.spare.currentTime = 306;
+    h.spare.ranges = [[300, 330]];
+    h.spare.readyState = 4;
+    h.instances[0].events.append();
+    assert.equal(h.live.id, "video", "the incumbent holds the picture while the seek runs");
+    // Both bounds expire with no `seeked`.
+    h.fireAll(); await flush(); await flush();
+    h.fireAll(); await flush(); await flush();
+    assert.equal(h.live.id, "video", "a seek that never lands never exposes anything");
+    assert.equal(h.live.muted, false, "…and the incumbent is untouched, picture and sound");
+    assert.equal(h.spare.style.display, "none");
+    assert.equal(p.prepared, null, "the staging is settled rather than left to the deadline");
+    assert.equal(h.plays.length, 1, "…and the change the viewer asked for takes its one reopen");
+  }
+  {
+    // A seek that completes into a HOLE. `readyState` answers for the element,
+    // not for the position it just moved to.
+    const h = preparedHarness();
+    const p = h.set(preparedPlayer({ vod: false, offset: 600,
+      hls: { bandwidthEstimate: 1, destroy() {} } }));
+    h.live.currentTime = 300;
+    h.handle(prepareAction({ media_origin_ms: PREPARE_ORIGIN_MS }));
+    h.instances[0].events.manifest();
+    h.spare.currentTime = 306;
+    h.spare.ranges = [[300, 330]];
+    h.spare.readyState = 4;
+    h.instances[0].events.append();
+    h.spare.ranges = [[320, 400]];              // decoded, but not here
+    h.spare.emit("seeked");
+    await flush(); await flush();
+    assert.equal(h.live.id, "video",
+      "a range the new playhead is not inside is not evidence about the new playhead");
+  }
 
   // ---- M5: the three bounded recovery additions -----------------------------
   //
