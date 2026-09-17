@@ -1586,7 +1586,7 @@ release-check: ## Verify the tree is ready to tag the current version
 # or `make install-docker INSTALL_FLAGS=--dry-run` to see the plan first.
 INSTALL_FLAGS ?=
 
-.PHONY: install install-linux install-macos install-windows install-docker install-binary uninstall
+.PHONY: install install-linux install-macos install-windows install-docker install-binary uninstall uninstall-docker
 install: ## Install plurxd as a service on this OS (systemd, launchd, or the Windows service)
 	@deploy/install auto $(INSTALL_FLAGS)
 
@@ -1607,6 +1607,9 @@ install-binary: ## Put plurxd on PATH with no service (run it with `plurxd run`)
 
 uninstall: ## Stop and remove the service installed by `make install`; data stays
 	@deploy/install auto --uninstall $(INSTALL_FLAGS)
+
+uninstall-docker: ## Bring the Compose stack down; .env, the override file, and data stay
+	@deploy/install docker --uninstall $(INSTALL_FLAGS)
 
 .PHONY: hooks
 hooks: ## Install the lint-and-syntax pre-commit hook

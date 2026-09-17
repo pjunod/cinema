@@ -42,6 +42,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# PowerShell 7.4+ turns a native command's non-zero exit into a terminating
+# error under 'Stop'. Invoke-Step checks $LASTEXITCODE itself, so keep that
+# single authority: netsh deleting an absent rule is an answer, not a failure.
+if ($PSVersionTable.PSVersion.Major -ge 7) { $PSNativeCommandUseErrorActionPreference = $false }
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $serviceName = 'plurxd'
 $httpRule = 'plurx HTTP'
@@ -58,7 +62,8 @@ function Fail([string]$Message) { Write-Error "install: $Message"; exit 1 }
 # that is not there).
 function Invoke-Step([string]$Command, [string[]]$Arguments, [switch]$IgnoreExit) {
   $shown = ($Arguments | ForEach-Object { if ($_ -match '\s') { "'$_'" } else { $_ } }) -join ' '
-  if ($DryRun) { Write-Host "+ $Command $shown"; return }
+  $shownCommand = if ($Command -match '\s') { "& '$Command'" } else { $Command }
+  if ($DryRun) { Write-Host "+ $shownCommand $shown"; return }
   & $Command @Arguments
   if (-not $IgnoreExit -and $LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) {
     Fail "$Command $shown exited $LASTEXITCODE"
@@ -79,7 +84,17 @@ function Test-Admin {
 }
 
 if (-not $DryRun -and -not (Test-Admin)) {
-  Fail 'run this from an elevated PowerShell (the service and firewall steps need it)'
+  # The service and firewall steps need elevation: re-run this exact
+  # invocation elevated rather than telling the user to.
+  Say 'elevating (the service and firewall steps need it)'
+  $forward = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $PSCommandPath) + $MyInvocation.UnboundArguments
+  foreach ($bound in $PSBoundParameters.GetEnumerator()) {
+    if ($bound.Value -is [switch]) { if ($bound.Value) { $forward += "-$($bound.Key)" } }
+    else { $forward += "-$($bound.Key)"; $forward += "$($bound.Value)" }
+  }
+  $shell = (Get-Process -Id $PID).Path
+  $elevated = Start-Process -FilePath $shell -ArgumentList $forward -Verb RunAs -Wait -PassThru
+  exit $elevated.ExitCode
 }
 
 function Resolve-Binary {
@@ -113,15 +128,33 @@ function Resolve-Binary {
 
 # ffmpeg.exe beside plurxd.exe wins over PATH, and PLURX_FFMPEG wins over both.
 # A missing ffmpeg is installed with winget rather than reported.
+# The service runs as LocalSystem, whose PATH and environment are not the
+# installing user's. So only two placements count: machine-level
+# PLURX_FFMPEG/PLURX_FFPROBE, or ffmpeg.exe/ffprobe.exe beside plurxd.exe.
+# Anything found on this user's PATH (or installed by winget) is copied
+# beside the binary, and the install fails if that leaves nothing there.
 function Ensure-FFmpeg {
-  if ($env:PLURX_FFMPEG -and $env:PLURX_FFPROBE) { return }
-  if ((Test-Path (Join-Path $InstallDir 'ffmpeg.exe')) -and (Test-Path (Join-Path $InstallDir 'ffprobe.exe'))) { return }
-  if ((Get-Command ffmpeg -ErrorAction SilentlyContinue) -and (Get-Command ffprobe -ErrorAction SilentlyContinue)) { return }
-  Say 'ffmpeg/ffprobe not found; installing with winget (Gyan.FFmpeg)'
-  if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
-    Fail 'no ffmpeg and no winget; put ffmpeg.exe and ffprobe.exe beside plurxd.exe (a jellyfin-ffmpeg build is best) or set PLURX_FFMPEG/PLURX_FFPROBE, then rerun'
+  $machineFfmpeg = [Environment]::GetEnvironmentVariable('PLURX_FFMPEG', 'Machine')
+  $machineFfprobe = [Environment]::GetEnvironmentVariable('PLURX_FFPROBE', 'Machine')
+  if ($machineFfmpeg -and $machineFfprobe -and (Test-Path $machineFfmpeg) -and (Test-Path $machineFfprobe)) { return }
+  $sibling = @((Join-Path $InstallDir 'ffmpeg.exe'), (Join-Path $InstallDir 'ffprobe.exe'))
+  if ((Test-Path $sibling[0]) -and (Test-Path $sibling[1])) { return }
+  $found = @((Get-Command ffmpeg -ErrorAction SilentlyContinue), (Get-Command ffprobe -ErrorAction SilentlyContinue))
+  if (-not ($found[0] -and $found[1])) {
+    Say 'ffmpeg/ffprobe not found; installing with winget (Gyan.FFmpeg)'
+    if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+      Fail 'no ffmpeg and no winget; put ffmpeg.exe and ffprobe.exe beside plurxd.exe (a jellyfin-ffmpeg build is best) or set machine-level PLURX_FFMPEG/PLURX_FFPROBE, then rerun'
+    }
+    Invoke-Step 'winget' @('install', '--id', 'Gyan.FFmpeg', '-e', '--scope', 'machine', '--accept-source-agreements', '--accept-package-agreements') -IgnoreExit
+    if ($DryRun) { return }
+    $found = @((Get-Command ffmpeg -ErrorAction SilentlyContinue), (Get-Command ffprobe -ErrorAction SilentlyContinue))
+    if (-not ($found[0] -and $found[1])) { Fail 'ffmpeg still not on PATH after winget; open a new elevated PowerShell and rerun, or place ffmpeg.exe and ffprobe.exe beside plurxd.exe' }
   }
-  Invoke-Step 'winget' @('install', '--id', 'Gyan.FFmpeg', '-e', '--accept-source-agreements', '--accept-package-agreements')
+  Step "Copy-Item '$($found[0].Source)' '$($sibling[0])'" { Copy-Item -Force -Path $found[0].Source -Destination $sibling[0] }
+  Step "Copy-Item '$($found[1].Source)' '$($sibling[1])'" { Copy-Item -Force -Path $found[1].Source -Destination $sibling[1] }
+  if (-not $DryRun -and -not ((Test-Path $sibling[0]) -and (Test-Path $sibling[1]))) {
+    Fail "ffmpeg.exe and ffprobe.exe are not beside $exe; the service could start but play nothing"
+  }
 }
 
 function Wait-Ready([int]$Port) {
@@ -153,15 +186,26 @@ function Install-Plurx {
   $example = Join-Path $root 'plurx.example.toml'
   Step "Copy-Item '$example' '$InstallDir'" { Copy-Item -Force -Path $example -Destination (Join-Path $InstallDir 'plurx.example.toml') }
   if (-not (Test-Path $config)) {
-    Say "writing $config from plurx.example.toml (service mode keeps data under $ConfigDir\data)"
+    Say "writing $config from plurx.example.toml (service mode keeps data under $env:ProgramData\plurx\data unless the config says otherwise)"
     Step "Copy-Item '$example' '$config'" { Copy-Item -Path $example -Destination $config }
   }
   Ensure-FFmpeg
-  if ($existing) {
-    # `service install` refuses an existing registration, so an upgrade is
-    # stop, replace, start, exactly as deploy/README.md describes it.
+  # `service install` refuses an existing registration, so an upgrade is
+  # stop, replace, start, exactly as deploy/README.md describes it — unless
+  # the registration names another binary or config than this run's, in
+  # which case starting it would run the old install and call it upgraded.
+  $reregister = $false
+  if ($existing -and -not $DryRun) {
+    $registered = (Get-CimInstance Win32_Service -Filter "Name='$serviceName'").PathName
+    if ($registered -notlike "*$exe*" -or $registered -notlike "*$config*") {
+      Say "the registered service runs $registered; re-registering for $exe --config $config"
+      $reregister = $true
+    }
+  }
+  if ($existing -and -not $reregister) {
     Step "Start-Service $serviceName" { Start-Service -Name $serviceName }
   } else {
+    if ($existing) { Invoke-Step $exe @('service', 'uninstall') }
     Invoke-Step $exe @('service', 'install', '--config', $config)
   }
   foreach ($rule in @(@($httpRule, 'TCP', '32400'), @($gdmRule, 'UDP', '32414'))) {

@@ -142,10 +142,16 @@ ensure_ffmpeg() {
   [ "$dry_run" = 1 ] || command -v ffmpeg >/dev/null 2>&1 || die "ffmpeg still not on PATH after install"
 }
 
+# Escape a value for the replacement side of a sed `s|…|…|`.
+sed_escape() { printf '%s' "$1" | sed -e 's/[&|\\]/\\&/g'; }
+# Escape a value for XML text, then for sed (a plist is XML: `&` in a path
+# has to arrive as `&amp;` or launchd refuses the whole file).
+plist_escape() { sed_escape "$(printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"; }
+
 # GET a URL with whatever this host has: curl, wget, or python3.
 http_get() {
   if command -v curl >/dev/null 2>&1; then curl -fsS --max-time 5 "$1"
-  elif command -v wget >/dev/null 2>&1; then wget -q -T 5 -O - "$1"
+  elif command -v wget >/dev/null 2>&1; then wget -q -T 5 -t 1 -O - "$1"
   elif command -v python3 >/dev/null 2>&1; then
     python3 -c 'import sys,urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=5).read().decode())' "$1"
   else
@@ -201,7 +207,10 @@ linux_install() {
   data=${DESTDIR:-}/var/lib/plurx
   resolve_binary
   ensure_ffmpeg
-  if [ "$dry_run" = 0 ] && systemctl is-active --quiet plurxd 2>/dev/null; then
+  case $dir in
+    /home/*|/root/*) die "the unit sets ProtectHome=true, so a prefix under $dir can never start; choose --prefix /opt/plurx or /usr/local" ;;
+  esac
+  if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet plurxd 2>/dev/null; then
     was_active=1
     say "plurxd is running; stopping it for the upgrade"
     run_root systemctl stop plurxd
@@ -209,18 +218,28 @@ linux_install() {
   if ! getent passwd plurx >/dev/null 2>&1; then
     run_root useradd --system --home /var/lib/plurx --shell /usr/sbin/nologin plurx
   fi
-  run_root install -d -o plurx -g plurx "$data"
+  [ -d "$data" ] || run_root install -d -m 0750 -o plurx -g plurx "$data"
   install_binary_to "$dir"
-  # The tracked unit names /usr/local/bin/plurxd. A different prefix is
-  # rewritten into the installed copy so the unit and the binary agree.
-  if [ "$dir" = "${DESTDIR:-}/usr/local/bin" ]; then
-    run_root install -m 0644 "$unit_src" "$unit_dst"
+  # The unit is installed once. An existing one is the operator's — the
+  # runbook tells them to uncomment SupplementaryGroups=render and set
+  # ProtectHome there — so an upgrade never overwrites it.
+  if [ -f "$unit_dst" ]; then
+    say "keeping the existing $unit_dst (edit it by hand; the tracked copy is deploy/plurxd.service)"
   else
+    run_root install -m 0644 "$unit_src" "$unit_dst"
+  fi
+  # The tracked unit names /usr/local/bin/plurxd. A different prefix goes in
+  # a drop-in, so the base unit stays byte-identical to the tracked one.
+  local dropin_dir=$unit_dst.d
+  if [ "$dir" != "${DESTDIR:-}/usr/local/bin" ]; then
     local rendered
-    rendered=$(mktemp "${TMPDIR:-/tmp}/plurxd.service.XXXXXX")
-    sed "s|^ExecStart=/usr/local/bin/plurxd run|ExecStart=$dir/plurxd run|" "$unit_src" > "$rendered"
-    run_root install -m 0644 "$rendered" "$unit_dst"
+    rendered=$(mktemp "${TMPDIR:-/tmp}/plurxd-dropin.XXXXXX")
+    printf '[Service]\nExecStart=\nExecStart=%s/plurxd run\n' "$dir" > "$rendered"
+    run_root install -d "$dropin_dir"
+    run_root install -m 0644 "$rendered" "$dropin_dir/10-prefix.conf"
     rm -f "$rendered"
+  elif [ -f "$dropin_dir/10-prefix.conf" ]; then
+    run_root rm -f "$dropin_dir/10-prefix.conf"
   fi
   run_root systemctl daemon-reload
   if [ "$was_active" = 1 ]; then
@@ -234,10 +253,14 @@ linux_install() {
 }
 
 linux_uninstall() {
-  local dir unit_dst
-  dir=$(bin_dir)
+  local dir unit_dst installed
   unit_dst=${DESTDIR:-}/etc/systemd/system/plurxd.service
+  # The binary is wherever the unit (or its prefix drop-in) says it is, not
+  # wherever this run's defaults would have put it.
+  installed=$({ cat "$unit_dst.d/10-prefix.conf" "$unit_dst" 2>/dev/null || true; } | sed -n 's|^ExecStart=\(.*\)/plurxd run$|\1|p' | head -1)
+  dir=${installed:-$(bin_dir)}
   run_root systemctl disable --now plurxd || true
+  run_root rm -rf "$unit_dst.d"
   run_root rm -f "$unit_dst"
   run_root systemctl daemon-reload
   run_for_dir "$dir" rm -f "$dir/plurxd"
@@ -255,14 +278,16 @@ macos_agent_label=com.plurx.plurxd
 
 macos_render_plist() {
   local dir=$1 out=$2 ffmpeg ffprobe
-  ffmpeg=$(command -v ffmpeg || echo /usr/local/bin/ffmpeg)
-  ffprobe=$(command -v ffprobe || echo /usr/local/bin/ffprobe)
+  ffmpeg=$(plist_escape "$(command -v ffmpeg || echo /usr/local/bin/ffmpeg)")
+  ffprobe=$(plist_escape "$(command -v ffprobe || echo /usr/local/bin/ffprobe)")
+  local home dir_escaped
+  home=$(plist_escape "$HOME"); dir_escaped=$(plist_escape "$dir")
   # The template's XML comments explain the choices to a human reading the
   # repository; the rendered agent is a machine artifact, so they are dropped
   # and the placeholder check below can be absolute.
   awk '/<!--/ { skip = 1 } !skip { print } /-->/ { skip = 0 }' "$here/$macos_agent_label.plist" \
-    | sed -e "s|/Users/YOUR_USERNAME|$HOME|g" \
-          -e "s|<string>/usr/local/bin/plurxd</string>|<string>$dir/plurxd</string>|" \
+    | sed -e "s|/Users/YOUR_USERNAME|$home|g" \
+          -e "s|<string>/usr/local/bin/plurxd</string>|<string>$dir_escaped/plurxd</string>|" \
           -e "s|<string>/usr/local/bin/ffmpeg</string>|<string>$ffmpeg</string>|" \
           -e "s|<string>/usr/local/bin/ffprobe</string>|<string>$ffprobe</string>|" \
     > "$out"
@@ -280,17 +305,25 @@ macos_install() {
   uid=$(id -u)
   resolve_binary
   ensure_ffmpeg
+  # Boot a running agent out before its binary is replaced. A fresh install
+  # has nothing to boot out and that is fine.
+  run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null || true
   install_binary_to "$dir"
   run mkdir -p "$agents" "$data" "$HOME/Library/Logs"
-  if [ "$dry_run" = 1 ]; then
+  # The plist is rendered once. An existing one is the operator's (the
+  # runbook has them plutil -replace tool paths in it), so an upgrade keeps it.
+  if [ -f "$plist" ]; then
+    say "keeping the existing $plist (edit it with plutil; the template is deploy/$macos_agent_label.plist)"
+  elif [ "$dry_run" = 1 ]; then
     say "would render $plist from deploy/$macos_agent_label.plist"
   else
-    macos_render_plist "$dir" "$plist"
+    local rendered
+    rendered=$(mktemp "${TMPDIR:-/tmp}/plurxd-agent.XXXXXX")
+    macos_render_plist "$dir" "$rendered"
+    if command -v plutil >/dev/null 2>&1; then plutil -lint "$rendered" >/dev/null || die "rendered plist is not valid: $rendered"; fi
+    mv "$rendered" "$plist"
     say "rendered $plist"
   fi
-  # An already-loaded agent has to be booted out before bootstrap will take
-  # the new plist; a fresh install has nothing to boot out and that is fine.
-  run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null || true
   run launchctl bootstrap "gui/$uid" "$plist"
   run launchctl enable "gui/$uid/$macos_agent_label"
   run launchctl kickstart -k "gui/$uid/$macos_agent_label"
@@ -300,9 +333,10 @@ macos_install() {
 }
 
 macos_uninstall() {
-  local dir plist uid
-  dir=$(bin_dir)
+  local dir plist uid installed
   plist=$HOME/Library/LaunchAgents/$macos_agent_label.plist
+  installed=$({ sed -n 's|.*<string>\(.*\)/plurxd</string>.*|\1|p' "$plist" 2>/dev/null || true; } | head -1 | sed -e 's/&amp;/\&/g' -e 's/&lt;/</g' -e 's/&gt;/>/g')
+  dir=${installed:-$(bin_dir)}
   uid=$(id -u)
   run launchctl bootout "gui/$uid/$macos_agent_label" 2>/dev/null || true
   run rm -f "$plist"
@@ -333,6 +367,13 @@ windows_install() {
 # `make docker-up` is the deploy; this only makes the first run one command by
 # creating the two untracked files it reads and the data directory it mounts.
 
+# One value from a Compose .env: last assignment wins, CRLF, surrounding
+# quotes and a trailing comment are dropped, as Compose itself reads it.
+env_value() {
+  sed -n "s/^$2=//p" "$1" | tail -1 | tr -d '\r' \
+    | sed -e 's/[[:space:]]#.*$//' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/' -e "s/^'\(.*\)'\$/\1/"
+}
+
 docker_install() {
   if [ "$dry_run" = 0 ]; then
     command -v docker >/dev/null 2>&1 || die "docker is not on PATH"
@@ -343,6 +384,8 @@ docker_install() {
     say "creating deploy/.env from .env.example (PUID/PGID = $(id -u)/$(id -g))"
     if [ "$dry_run" = 0 ]; then
       sed -e "s|^PUID=.*|PUID=$(id -u)|" -e "s|^PGID=.*|PGID=$(id -g)|" "$deploy/.env.example" > "$env"
+    else
+      printf '+ sed -e %q -e %q %q > %q\n' "s|^PUID=.*|PUID=$(id -u)|" "s|^PGID=.*|PGID=$(id -g)|" "$deploy/.env.example" "$env"
     fi
   fi
   if [ ! -f "$override" ]; then
@@ -352,8 +395,8 @@ docker_install() {
   data=/srv/plurx
   port=32400
   if [ -f "$env" ]; then
-    data=$(sed -n 's/^PLURX_DATA=//p' "$env" | tail -1)
-    port=$(sed -n 's/^PLURX_HTTP_PORT=//p' "$env" | tail -1)
+    data=$(env_value "$env" PLURX_DATA)
+    port=$(env_value "$env" PLURX_HTTP_PORT)
     data=${data:-/srv/plurx}
     port=${port:-32400}
   fi

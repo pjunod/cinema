@@ -24,10 +24,13 @@ bump may break compatibility and a **patch** bump never does.
   privileged steps and only those through sudo, and ends by waiting for
   `/readyz` and printing the version the server reports rather than claiming
   success. Running it again upgrades in place, stopping a running service
-  before its binary is replaced; `make uninstall` removes the service and
-  keeps data and configuration. `tests/operations/test_install.py` executes
-  each path against stubbed host tools and asserts on the calls and the files
-  written, including that the rendered launchd plist carries no placeholder.
+  before its binary is replaced and never overwriting a unit or plist the
+  operator has edited; `make uninstall` removes the service and keeps data
+  and configuration. `tests/operations/test_install.py` executes each path
+  against stubbed host tools and asserts on the calls and the files written,
+  including that an install whose server never answers `/readyz` fails and
+  names the log, and that the rendered launchd plist parses with the real
+  home and tool paths in it.
 - **plurx records from the tuner, and tells you before a programme starts.**
   Every guide cell on web, Apple and Android now offers Record, Record series
   and Remind me beside Watch. The owner node writes the tuner's bytes straight

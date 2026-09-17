@@ -56,7 +56,7 @@ class Host:
         self.sysbin = tmp / "sysbin"
         self.sysbin.mkdir()
         for tool in (
-            "awk", "bash", "cat", "chmod", "cp", "dirname", "env", "grep", "id", "mkdir", "mktemp",
+            "awk", "bash", "cat", "chmod", "cp", "dirname", "env", "grep", "head", "mkdir", "mktemp", "mv",
             "printf", "rm", "sed", "sh", "sleep", "tail", "tr", "uname",
         ):
             found = shutil.which(tool)
@@ -73,6 +73,9 @@ class Host:
         # Every stub appends `name args...` to the log; specific stubs add
         # behaviour on top.
         self.stub("sudo", 'exec "$@"\n')
+        # A fixed non-root identity, so "sudo only where needed" is provable
+        # even when the suite itself runs as root (CI containers do).
+        self.stub("id", 'case "$1" in -u) echo 1000 ;; -g) echo 1000 ;; *) echo "uid=1000(test) gid=1000(test)" ;; esac\n')
         self.stub("ffmpeg", "")
         self.stub("ffprobe", "")
         self.stub(
@@ -147,7 +150,7 @@ class InstallerCase(unittest.TestCase):
             calls,
             "getent passwd plurx",
             "sudo useradd --system --home /var/lib/plurx --shell /usr/sbin/nologin plurx",
-            f"sudo install -d -o plurx -g plurx {dest}/var/lib/plurx",
+            f"sudo install -d -m 0750 -o plurx -g plurx {dest}/var/lib/plurx",
             # DESTDIR is writable here, so no sudo; on a real host /usr/local/bin
             # is root-owned and the same call goes through sudo.
             f"install -m 0755 {self.host.fake_binary} {dest}/usr/local/bin/plurxd",
@@ -178,6 +181,22 @@ class InstallerCase(unittest.TestCase):
         self.assertNotIn("useradd", "\n".join(calls))
         self.assertNotIn("enable --now", "\n".join(calls), "an upgrade restarts; it does not re-enable")
 
+    def test_linux_upgrade_keeps_the_operators_unit_and_data_directory(self):
+        self.host.stub("systemctl", 'case "$1" in is-active) exit 0 ;; esac\n')
+        self.host.stub("getent", "")
+        unit = self.host.destdir / "etc/systemd/system/plurxd.service"
+        unit.parent.mkdir(parents=True)
+        unit.write_text("[Service]\nSupplementaryGroups=render\nProtectHome=read-only\n")
+        data = self.host.destdir / "var/lib/plurx"
+        data.mkdir(parents=True)
+        result = self.host.run("linux", "--binary", str(self.host.fake_binary))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(unit.read_text(), "[Service]\nSupplementaryGroups=render\nProtectHome=read-only\n", "the operator's unit was overwritten")
+        self.assertIn("keeping the existing", result.stdout)
+        calls = "\n".join(self.host.calls())
+        self.assertNotIn("install -m 0644", calls)
+        self.assertNotIn("install -d -m 0750", calls, "an existing data directory keeps its mode")
+
     def test_linux_prefix_moves_the_binary_and_the_unit_agrees(self):
         self.host.stub("systemctl", 'case "$1" in is-active) exit 3 ;; esac\n')
         self.host.stub("useradd", "")
@@ -186,9 +205,56 @@ class InstallerCase(unittest.TestCase):
         result = self.host.run("linux", "--binary", str(self.host.fake_binary), "--prefix", str(prefix))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         unit = (self.host.destdir / "etc/systemd/system/plurxd.service").read_text(encoding="utf-8")
-        self.assertIn(f"ExecStart={prefix}/bin/plurxd run", unit)
-        self.assertNotIn("ExecStart=/usr/local/bin/plurxd", unit)
+        self.assertEqual(unit, read("deploy/plurxd.service"), "the base unit stays the tracked one; the prefix is a drop-in")
+        dropin = self.host.destdir / "etc/systemd/system/plurxd.service.d/10-prefix.conf"
+        self.assertEqual(dropin.read_text(encoding="utf-8"), f"[Service]\nExecStart=\nExecStart={prefix}/bin/plurxd run\n")
         self.assertTrue((prefix / "bin" / "plurxd").exists())
+        # And the uninstall finds the binary where the drop-in says it is.
+        self.host.stub("systemctl", "")
+        result = self.host.run("linux", "--uninstall")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse((prefix / "bin" / "plurxd").exists(), "uninstall removed the wrong path")
+        self.assertFalse(dropin.exists())
+
+    def test_a_prefix_under_home_is_refused_because_the_unit_hides_home(self):
+        self.host.stub("systemctl", "")
+        result = self.host.run("linux", "--binary", str(self.host.fake_binary), "--prefix", "/home/bob/.local")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ProtectHome", result.stderr)
+        self.assertEqual(self.host.calls(), [], "refused before anything was installed")
+
+    def test_special_characters_in_a_prefix_survive_rendering(self):
+        self.host.stub("systemctl", 'case "$1" in is-active) exit 3 ;; esac\n')
+        self.host.stub("useradd", "")
+        self.host.stub("getent", "exit 2\n")
+        prefix = self.tmp / "a&b|c"
+        result = self.host.run("linux", "--binary", str(self.host.fake_binary), "--prefix", str(prefix))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        dropin = self.host.destdir / "etc/systemd/system/plurxd.service.d/10-prefix.conf"
+        self.assertIn(f"ExecStart={prefix}/bin/plurxd run", dropin.read_text(encoding="utf-8"))
+        self.host.stub("launchctl", 'case "$1" in bootout) exit 3 ;; esac\n')
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(prefix))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with (self.host.home / "Library/LaunchAgents/com.plurx.plurxd.plist").open("rb") as handle:
+            self.assertEqual(plistlib.load(handle)["ProgramArguments"][0], f"{prefix}/bin/plurxd")
+
+    def test_an_install_that_never_becomes_ready_fails_and_names_the_log(self):
+        self.host.stub("curl", "exit 7\n")
+        self.host.stub("systemctl", 'case "$1" in is-active) exit 3 ;; esac\n')
+        self.host.stub("useradd", "")
+        self.host.stub("getent", "exit 2\n")
+        self.host.stub("launchctl", "")
+        expected = {
+            "linux": "journalctl -u plurxd",
+            "macos": "Library/Logs/plurxd.log",
+        }
+        for mode, log in expected.items():
+            self.host.log.write_text("")
+            result = self.host.run(mode, "--binary", str(self.host.fake_binary), "--prefix", str(self.tmp / mode), env={"PLURX_INSTALL_READY_TIMEOUT": "2"})
+            self.assertNotEqual(result.returncode, 0, f"{mode} claimed success with no server answering")
+            self.assertIn("did not become ready within 2s", result.stderr, mode)
+            self.assertIn(log, result.stderr, mode)
+            self.assertNotIn("ready:", result.stdout, mode)
 
     def test_linux_uninstall_removes_the_service_and_keeps_the_data(self):
         self.host.stub("systemctl", "")
@@ -243,16 +309,28 @@ class InstallerCase(unittest.TestCase):
         self.assertEqual(plist["StandardOutPath"], f"{self.host.home}/Library/Logs/plurxd.log")
         self.assertTrue((self.host.home / "Library/Application Support/plurx").is_dir())
         self.assertTrue((prefix / "bin" / "plurxd").exists())
-        uid = os.getuid()
+        uid = 1000
         self.assertOrdered(
             self.host.calls(),
             f"launchctl bootout gui/{uid}/com.plurx.plurxd",
+            "install -m 0755",
             f"launchctl bootstrap gui/{uid} {plist_path}",
             f"launchctl enable gui/{uid}/com.plurx.plurxd",
             f"launchctl kickstart -k gui/{uid}/com.plurx.plurxd",
             "curl",
         )
         self.assertNotIn("sudo", "\n".join(self.host.calls()), "a user-owned prefix needs no sudo")
+
+    def test_macos_upgrade_keeps_the_operators_plist(self):
+        self.host.stub("launchctl", "")
+        agents = self.host.home / "Library/LaunchAgents"
+        agents.mkdir(parents=True)
+        edited = "<plist version=\"1.0\"><dict><key>ProgramArguments</key><array><string>/opt/x/bin/plurxd</string></array></dict></plist>\n"
+        (agents / "com.plurx.plurxd.plist").write_text(edited)
+        result = self.host.run("macos", "--binary", str(self.host.fake_binary), "--prefix", str(self.tmp / "hb"))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((agents / "com.plurx.plurxd.plist").read_text(), edited)
+        self.assertIn("keeping the existing", result.stdout)
 
     def test_macos_uninstall_boots_the_agent_out_and_keeps_application_support(self):
         self.host.stub("launchctl", "")
@@ -261,13 +339,16 @@ class InstallerCase(unittest.TestCase):
         (prefix / "bin" / "plurxd").write_text("bin")
         agents = self.host.home / "Library/LaunchAgents"
         agents.mkdir(parents=True)
-        (agents / "com.plurx.plurxd.plist").write_text("<plist/>")
+        (agents / "com.plurx.plurxd.plist").write_text(
+            f"<plist><dict><key>ProgramArguments</key><array><string>{prefix}/bin/plurxd</string><string>run</string></array></dict></plist>\n"
+        )
         support = self.host.home / "Library/Application Support/plurx"
         support.mkdir(parents=True)
         (support / "plurx.db").write_text("precious")
-        result = self.host.run("macos", "--uninstall", "--prefix", str(prefix))
+        # No --prefix: the uninstall reads the binary's path from the plist.
+        result = self.host.run("macos", "--uninstall")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn(f"launchctl bootout gui/{os.getuid()}/com.plurx.plurxd", self.host.calls())
+        self.assertIn(f"launchctl bootout gui/{1000}/com.plurx.plurxd", self.host.calls())
         self.assertFalse((agents / "com.plurx.plurxd.plist").exists())
         self.assertFalse((prefix / "bin" / "plurxd").exists())
         self.assertEqual((support / "plurx.db").read_text(), "precious")
@@ -284,6 +365,11 @@ class InstallerCase(unittest.TestCase):
             if path.exists():
                 path.unlink()
         (fake_root / "Makefile").write_text("docker-up:\n\t@echo stub\n")
+        # The example's data directory is /srv/plurx; point it into tmp so the
+        # test never depends on (or touches) the host's own deployment.
+        data = self.tmp / "srv-plurx"
+        example = fake_root / "deploy" / ".env.example"
+        example.write_text(example.read_text(encoding="utf-8").replace("PLURX_DATA=/srv/plurx", f"PLURX_DATA={data}"), encoding="utf-8")
         self.host.stub("docker", "")
         self.host.stub("make", "")
         installer = fake_root / "deploy" / "install"
@@ -297,17 +383,18 @@ class InstallerCase(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         env_file = (fake_root / "deploy" / ".env").read_text(encoding="utf-8")
-        self.assertIn(f"PUID={os.getuid()}\n", env_file)
-        self.assertIn(f"PGID={os.getgid()}\n", env_file)
-        self.assertIn("PLURX_DATA=/srv/plurx", env_file)
+        self.assertIn(f"PUID={1000}\n", env_file)
+        self.assertIn(f"PGID={1000}\n", env_file)
+        self.assertIn(f"PLURX_DATA={data}", env_file)
         self.assertTrue((fake_root / "deploy" / "docker-compose.override.yml").exists())
         self.assertOrdered(
             self.host.calls(),
             "docker compose version",
-            f"sudo install -d -o {os.getuid()} -g {os.getgid()} /srv/plurx",
+            f"install -d -o {1000} -g {1000} {data}",
             "make docker-up",
             "curl",
         )
+        self.assertTrue(data.is_dir())
         self.assertNotIn("-f ", " ".join(c for c in self.host.calls() if c.startswith("make")))
 
     def test_docker_install_respects_an_existing_env_file(self):
@@ -315,7 +402,8 @@ class InstallerCase(unittest.TestCase):
         shutil.copytree(ROOT / "deploy", fake_root / "deploy")
         data = self.tmp / "data"
         data.mkdir()
-        (fake_root / "deploy" / ".env").write_text(f"PLURX_HTTP_PORT=32410\nPLURX_DATA={data}\nPUID=4242\nPGID=4242\n")
+        # Quoted, commented, CRLF: the shapes Compose accepts and a hand edit produces.
+        (fake_root / "deploy" / ".env").write_text(f"PLURX_HTTP_PORT=32410\r\nPLURX_DATA=\"{data}\" # host path\nPUID=4242\nPGID=4242\n")
         (fake_root / "deploy" / "docker-compose.override.yml").write_text("services: {}\n")
         (fake_root / "Makefile").write_text("docker-up:\n\t@echo stub\n")
         self.host.stub("docker", "")
@@ -365,12 +453,27 @@ class InstallerCase(unittest.TestCase):
             "@($httpRule, 'TCP', '32400')",
             "@($gdmRule, 'UDP', '32414')",
             "Gyan.FFmpeg",
+            "'--scope', 'machine'",
+            "GetEnvironmentVariable('PLURX_FFMPEG', 'Machine')",
+            "$PSNativeCommandUseErrorActionPreference = $false",
+            "-Verb RunAs",
+            "Win32_Service",
             "[switch]$Uninstall",
             "[switch]$DryRun",
             "/readyz",
         ):
             self.assertIn(needle, script)
-        self.assertIn("Test-Admin", script, "the service and firewall steps need elevation, and the script says so")
+        self.assertIn("Test-Admin", script, "the service and firewall steps need elevation, and the script elevates")
+        pwsh = shutil.which("pwsh")
+        if pwsh:
+            parse = subprocess.run(
+                [pwsh, "-NoProfile", "-Command",
+                 "$t=$null;$e=$null;[System.Management.Automation.Language.Parser]::ParseFile($args[0],[ref]$t,[ref]$e)|Out-Null;"
+                 "if($e.Count){$e|%{\"$($_.Extent.StartLineNumber): $($_.Message)\"};exit 1}",
+                 str(INSTALL_PS1)],
+                capture_output=True, text=True, timeout=60,
+            )
+            self.assertEqual(parse.returncode, 0, parse.stdout + parse.stderr)
         # The runbook and the installer agree on where things live.
         readme = read("deploy/README.md")
         self.assertIn("deploy\\install.ps1", readme)
@@ -382,8 +485,15 @@ class InstallerCase(unittest.TestCase):
         for stale in ("sudo", "curl", "install"):
             os.remove(self.host.bin / stale)
         before = sorted(str(p) for p in self.host.destdir.rglob("*"))
+        fake_root = self.tmp / "checkout"
+        shutil.copytree(ROOT / "deploy", fake_root / "deploy")
         for mode in ("linux", "macos", "docker", "binary"):
-            result = self.host.run(mode, "--dry-run", "--binary", str(self.host.fake_binary), "--prefix", str(self.tmp / "p"))
+            installer = str(fake_root / "deploy" / "install") if mode == "docker" else str(INSTALL)
+            result = subprocess.run(
+                [installer, mode, "--dry-run", "--binary", str(self.host.fake_binary), "--prefix", str(self.tmp / "p")],
+                cwd=self.tmp, env={"PATH": f"{self.host.bin}:{self.host.sysbin}", "HOME": str(self.host.home), "DESTDIR": str(self.host.destdir), "TMPDIR": str(self.tmp)},
+                capture_output=True, text=True, timeout=60,
+            )
             self.assertEqual(result.returncode, 0, f"{mode}: " + result.stdout + result.stderr)
             self.assertTrue(any(line.startswith("+ ") for line in result.stdout.splitlines()), mode)
             if mode == "binary":
@@ -392,7 +502,7 @@ class InstallerCase(unittest.TestCase):
                 self.assertIn("would wait for http://127.0.0.1:32400/readyz", result.stdout, mode)
         after = sorted(str(p) for p in self.host.destdir.rglob("*"))
         self.assertEqual(before, after)
-        self.assertEqual(self.host.calls(), [], "a dry run invokes no host tool")
+        self.assertEqual([c for c in self.host.calls() if not c.startswith("id ")], [], "a dry run invokes no host tool")
 
     # ---- the make targets and the docs --------------------------------------
 
@@ -413,6 +523,7 @@ class InstallerCase(unittest.TestCase):
                 f"`make {target}` must run `deploy/install {mode}`",
             )
         self.assertRegex(makefile, re.compile(r"^uninstall: ## .*\n\t@deploy/install auto --uninstall \$\(INSTALL_FLAGS\)\n", re.M))
+        self.assertRegex(makefile, re.compile(r"^uninstall-docker: ## .*\n\t@deploy/install docker --uninstall \$\(INSTALL_FLAGS\)\n", re.M))
         self.assertTrue(os.access(INSTALL, os.X_OK), "deploy/install must be executable")
         subprocess.run(["bash", "-n", str(INSTALL)], check=True)
 

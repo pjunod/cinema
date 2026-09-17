@@ -401,11 +401,14 @@ powershell -ExecutionPolicy Bypass -File deploy\install.ps1                     
 powershell -ExecutionPolicy Bypass -File deploy\install.ps1 -Binary .\plurxd-windows-x86_64.zip  # or installs the release archive
 ```
 
-(`make install` runs the same script when GNU make is on PATH.) It copies
+(From an elevated Git Bash or MSYS2 shell with GNU make, `make install` runs
+the same script; the script elevates itself when it is not already.) It copies
 `plurxd.exe` and `plurx.example.toml` to `C:\Program Files\plurx`, writes
 `C:\ProgramData\plurx\plurx.toml` from the example if there is none, installs
-ffmpeg with winget when neither a sibling `ffmpeg.exe` nor one on `PATH`
-exists, registers the automatic LocalSystem service through
+ffmpeg with winget when none is found and puts `ffmpeg.exe`/`ffprobe.exe`
+beside `plurxd.exe` (the service runs as LocalSystem, which does not share
+your `PATH`; machine-level `PLURX_FFMPEG`/`PLURX_FFPROBE` are honoured
+instead), registers the automatic LocalSystem service through
 `plurxd.exe service install`, opens TCP 32400 and UDP 32414 in Windows
 Firewall, then waits for `/readyz` and prints the version the server reports.
 Run it again to upgrade: the service is stopped, the binary replaced, and the
@@ -480,9 +483,15 @@ is missing, creates the `plurx` user and `/var/lib/plurx`, installs the binary
 and the unit, enables and starts the service, then waits for `/readyz` and
 prints the version the server reports. sudo is used for exactly the steps
 that need root; the build never runs as root. Run it again to upgrade: a
-running service is stopped before its binary is replaced and started after.
-`make uninstall` disables the service and removes the unit and binary, and
-keeps `/var/lib/plurx` and the `plurx` user. By hand, the same install is:
+running service is stopped before its binary is replaced and started after,
+and an existing unit is yours — the installer never overwrites it, so the
+`SupplementaryGroups`, `ProtectHome`, and `PLURX_FFMPEG` edits below survive.
+A `--prefix` other than `/usr/local` lands as a drop-in
+(`plurxd.service.d/10-prefix.conf`) rather than an edited unit; a prefix under
+`/home` is refused because the unit's `ProtectHome=true` would hide it.
+`make uninstall` disables the service and removes the unit, drop-in, and
+binary, and keeps `/var/lib/plurx` and the `plurx` user. By hand, the same
+install is:
 
 ```sh
 # 1. Install the binary + a service user + its data dir
@@ -564,8 +573,12 @@ is missing, puts the binary in the Homebrew prefix (no sudo on Apple Silicon;
 `--prefix` in `INSTALL_FLAGS` chooses another), renders the agent plist with
 your home directory and the real `plurxd`/`ffmpeg`/`ffprobe` paths, bootstraps
 and starts it, then waits for `/readyz` and prints the version the server
-reports. Run it again to upgrade; `make uninstall` boots the agent out and
-removes the plist and binary, and keeps `~/Library/Application Support/plurx`.
+reports. Run it again to upgrade: the agent is booted out before its binary
+is replaced, and an existing plist is yours — the installer never overwrites
+it, so `plutil -replace` edits survive. `make uninstall` boots the agent out
+and removes the plist and binary, and keeps
+`~/Library/Application Support/plurx`. `make uninstall-docker` is the Compose
+counterpart (`docker compose down`; `.env`, the override, and data stay).
 
 **This shipped LaunchAgent does not support permanent on-disk Dolby Vision
 conversion. Keep that feature Off.** It runs as your interactive login uid, so
