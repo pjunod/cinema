@@ -12281,6 +12281,7 @@ async function rescueAutoSupply(causeEvidence){
     detail:"repeated supply stalls — starting transcode Auto"});
   const reopen=()=>startTranscodeFallback("auto-supply",
     "switched to transcode Auto after 3 supply stalls in 60 seconds");
+  let handedOff=false;
   try{
     // The same owner as the rung switch, and the same gate. This path is
     // reached BY repeated supply stalls, so the incumbent is almost never
@@ -12288,12 +12289,17 @@ async function rescueAutoSupply(causeEvidence){
     // is the point: a stalled viewer must not wait out an offer bound. It
     // chooses Auto rather than a rung, so it publishes no requested height.
     if(!preparedHandoffOffered(p)||!directedChangeIncumbentReady(p,v)) await reopen();
-    else await requestQualityChange(p,"auto-supply",reopen);
+    else handedOff=await requestQualityChange(p,"auto-supply",reopen)==="prepared";
   } finally { releaseAutoFallback(p); }
   if(PLAYER!==p) return;
   // The retained recipe owns completion even if a newer command superseded
   // this invocation. It records the switch exactly once, at actual attachment.
   if(p.pendingMediaChange) return;
+  // A prepared successor owns completion for the same reason, and the checks
+  // below cannot speak for it: a handoff replaces the session without touching
+  // `p.method`, so reading the method here would find the predecessor's and
+  // report that the switch did not land.
+  if(handedOff) return;
   p.abr.switching=false;
   if(p.method!=='transcode'){
     p.abr.supplyRescued=false;
