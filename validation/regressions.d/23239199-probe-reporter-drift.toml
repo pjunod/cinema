@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["23239199", "670fbc97", "5409b567"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "A held-source probe and the scan it is compared against come from whatever FFprobe each side ran, and two builds disagree 32 times over unchanged bytes without disagreeing about a media fact, which refused every manual quality change on 5,061 of 5,955 files. Probe documents now name the build that wrote them; two documents from the same build are still compared whole, and only a proved difference in build narrows the comparison to a declared projection of geometry, cadence, codec identity and parameter-set layout, colour, every side-data record, the audio shape, language, disposition, container size and chapter timing. The Rust gate carries the measured drift of the production file that prompted this and re-refuses 30 media changes across it, proves a projected fact reported by only one document refuses, proves a side-data record that appears or disappears refuses, proves an unpairable or malformed stream list keeps the whole-document verdict, exercises the relative duration tolerance at its own boundary and on a four-second clip, and proves an unnamed held probe is not read as proof of a different reporter. No stored media or probe records were modified."
