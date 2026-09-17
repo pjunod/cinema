@@ -1259,11 +1259,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                          WHERE older.file_id = $3 AND older.source_size = $4
                            AND older.source_mtime = $5 AND older.component = $6
                            AND older.pipeline_version = $7 AND older.force_rebuild = 0
+                           AND EXISTS (SELECT 1 FROM analysis_requests successor
+                             WHERE successor.request_id = $8 AND successor.force_rebuild = 1)
                            AND (older.video_identity = $9 OR older.video_identity = ''
                                 OR $9 = '')
-                           AND older.state IN ('queued','running','submitted')
-                           AND EXISTS (SELECT 1 FROM analysis_requests successor
-                             WHERE successor.request_id = $8 AND successor.force_rebuild = 1))"
+                           AND older.state IN ('queued','running','submitted'))"
                         .to_owned(),
                     params!(
                         request.created_at_ms,
@@ -1284,10 +1284,10 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             last_error_code = 'publication_superseded', updated_at_ms = $1
                       WHERE $2 = 1 AND file_id = $3 AND source_size = $4
                         AND source_mtime = $5 AND component = $6 AND pipeline_version = $7
-                        AND force_rebuild = 0 AND state IN ('queued','running','submitted')
-                        AND (video_identity = $9 OR video_identity = '' OR $9 = '')
                         AND EXISTS (SELECT 1 FROM analysis_requests successor
-                          WHERE successor.request_id = $8 AND successor.force_rebuild = 1)"
+                          WHERE successor.request_id = $8 AND successor.force_rebuild = 1)
+                        AND force_rebuild = 0 AND state IN ('queued','running','submitted')
+                        AND (video_identity = $9 OR video_identity = '' OR $9 = '')"
                         .to_owned(),
                     params!(
                         request.created_at_ms,
@@ -1341,12 +1341,12 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     "SELECT {REQUEST_COLS} FROM analysis_requests
                       WHERE file_id = $1 AND source_size = $2 AND source_mtime = $3
                         AND component = $4
-                        AND video_identity = $8
                         AND ((pipeline_version = $5 AND requested_generation = $6
                               AND target_node_id = $7)
                           OR (force_rebuild = 1 AND pipeline_version = $5
                             AND target_node_id = $7
                             AND state IN ('queued', 'running', 'submitted', 'ready')))
+                        AND video_identity = $8
                         AND (request_id = $9
                           OR state IN ('queued', 'running', 'submitted')
                           OR ($10 = 0 AND requested_generation = $6)
@@ -2355,17 +2355,17 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                          target_node_id, state, owner_node_id, fence, lease_expires_ms,
                          attempts, not_before_ms, result_cache_key, last_error_code,
                          cancel_requested, created_at_ms, updated_at_ms)
-                     SELECT $11, job.file_id, job.source_size, job.source_mtime,
-                            'fragment_index', $15, $10, $11, '', 'forced', 'admin', 1,
-                            job.target_node_id, 'queued', NULL, 0, NULL, 0, $12,
-                            NULL, NULL, 0, $12, $12
+                     SELECT $1, job.file_id, job.source_size, job.source_mtime,
+                            'fragment_index', $2, $3, $1, '', 'forced', 'admin', 1,
+                            job.target_node_id, 'queued', NULL, 0, NULL, 0, $4,
+                            NULL, NULL, 0, $4, $4
                        FROM cluster_fragment_index_jobs job
                        JOIN files ON files.id = job.file_id
-                      WHERE job.cache_key = $2 AND job.target_node_id = $3
+                      WHERE job.cache_key = $5 AND job.target_node_id = $6
                         AND job.state = 'failed' AND job.last_error_code = 'truncated'
-                        AND job.fence = $4 AND job.updated_at_ms = $5
-                        AND job.file_id = $6 AND job.source_size = $7 AND job.source_mtime = $8
-                        AND job.source_sha256 = $9 AND job.pipeline_sha256 = $13
+                        AND job.fence = $7 AND job.updated_at_ms = $8
+                        AND job.file_id = $9 AND job.source_size = $10 AND job.source_mtime = $11
+                        AND job.source_sha256 = $12 AND job.pipeline_sha256 = $13
                         AND files.size = job.source_size AND files.mtime = job.source_mtime
                         AND (SELECT COUNT(*) FROM analysis_requests
                               WHERE state IN ('queued','running','submitted')) < $14
@@ -2377,11 +2377,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                           WHERE active.file_id = job.file_id AND active.source_size = job.source_size
                             AND active.source_mtime = job.source_mtime
                             AND active.component = 'fragment_index'
-                            AND ((active.pipeline_version = $15 AND active.video_identity = $10)
+                            AND ((active.pipeline_version = $2 AND active.video_identity = $3)
                               OR active.video_identity = '')
                             AND active.state IN ('queued','running','submitted','ready'))
                         AND NOT EXISTS (SELECT 1 FROM analysis_index_repairs repair
-                          WHERE repair.repair_revision = $1 AND repair.file_id = job.file_id
+                          WHERE repair.repair_revision = $15 AND repair.file_id = job.file_id
                             AND repair.source_size = job.source_size
                             AND repair.source_mtime = job.source_mtime
                             AND repair.source_sha256 = job.source_sha256
@@ -2390,7 +2390,10 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                      ON CONFLICT DO NOTHING"
                         .to_owned(),
                     params!(
-                        &candidate.repair_revision,
+                        successor_request_id,
+                        &candidate.pipeline_version,
+                        &candidate.video_identity,
+                        now_ms,
                         &candidate.predecessor_cache_key,
                         &candidate.target_node_id,
                         candidate.predecessor_fence,
@@ -2399,12 +2402,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         candidate.source_size,
                         candidate.source_mtime,
                         &candidate.source_sha256,
-                        &candidate.video_identity,
-                        successor_request_id,
-                        now_ms,
                         &candidate.pipeline_sha256,
                         active_limit,
-                        &candidate.pipeline_version
+                        &candidate.repair_revision
                     ),
                 ),
                 (
@@ -2413,32 +2413,32 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                          pipeline_sha256, target_node_id, video_identity,
                          predecessor_cache_key, predecessor_fence,
                          successor_request_id, created_at_ms)
-                     SELECT $9, $2, $3, $4, $10, $11, $7, $6, $12, $13, $1, $8
+                     SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
                       WHERE EXISTS (SELECT 1 FROM analysis_requests successor
-                         WHERE successor.request_id = $1 AND successor.file_id = $2
+                         WHERE successor.request_id = $11 AND successor.file_id = $2
                            AND successor.source_size = $3 AND successor.source_mtime = $4
-                           AND successor.pipeline_version = $5
-                           AND successor.video_identity = $6
+                           AND successor.pipeline_version = $13
+                           AND successor.video_identity = $8
                            AND successor.target_node_id = $7
-                           AND successor.requested_generation = $1
+                           AND successor.requested_generation = $11
                            AND successor.force_rebuild = 1
                            AND successor.state = 'queued')
                      ON CONFLICT DO NOTHING"
                         .to_owned(),
                     params!(
-                        successor_request_id,
+                        &candidate.repair_revision,
                         candidate.file_id,
                         candidate.source_size,
                         candidate.source_mtime,
-                        &candidate.pipeline_version,
-                        &candidate.video_identity,
-                        &candidate.target_node_id,
-                        now_ms,
-                        &candidate.repair_revision,
                         &candidate.source_sha256,
                         &candidate.pipeline_sha256,
+                        &candidate.target_node_id,
+                        &candidate.video_identity,
                         &candidate.predecessor_cache_key,
-                        candidate.predecessor_fence
+                        candidate.predecessor_fence,
+                        successor_request_id,
+                        now_ms,
+                        &candidate.pipeline_version
                     ),
                 ),
             ])
