@@ -244,6 +244,20 @@
     </details>
   </section>
 
+  <!-- ══════════ Source verification ══════════ -->
+  <section>
+    <h2>Source verification — a probe report is not an identity <span class="chip prog">🚧 incident closed, architecture scoped</span> <span class="ev">WICKED-TCL-PROBE-MISMATCH-RCA-AND-FIX.md · updated 2026-09-17</span></h2>
+    <div class="meter"><div class="track"><div class="fill" style="width:35%"></div></div><div class="n">The E-AC-3 repair is merged · the typed fact contract that would retire this class of exception is scoped and not started</div></div>
+    <details open><summary>Items</summary>
+      <ul class="items">
+        <li class="done-item"><span class="m done">✓ merged</span><span class="t"><b>The E-AC-3 Atmos reporting difference no longer refuses playback (2026-09-17).</b> One movie would not start on an Android tablet: the July scan omits <code>profile</code> on an E-AC-3 track and the playback node&rsquo;s FFprobe derives <code>Dolby Digital Plus + Dolby Atmos</code> from the extension type A flag, so <code>/streams/2/profile</code> was the only remaining difference and the encoded session was refused with <code>vod_source_rescan_required</code> before Media3 decoded anything. The derived Atmos profiles are now a two-row table shared by TrueHD and E-AC-3, symmetric because a replicated catalog can be newer than the node reading it, and every paired audio removal now needs the same explicit non-negative stream index on both sides. Two reported profiles are still compared. <b>Proved on the movie, not on a fixture:</b> the real remux probed by FFprobe 5.1.9 and by Jellyfin 8.1.2, run through the deployed comparator and the shipped one &mdash; refused, then admitted.</span></li>
+        <li class="done-item"><span class="m done">✓ merged</span><span class="t"><b>A refusal now says what disagreed and what repairs it.</b> One <code>compare_probe_documents</code> normalizes once and returns the verdict with a bounded list of normalized field paths and a difference kind, so a diagnosis cannot contradict the decision. The 409 carries it &mdash; at most eight paths, no values, no pathname, container tags collapsed to <code>tags/&lt;field&gt;</code> &mdash; and says <i>reanalyze this item</i>, because the old advice to rescan the library could never work: the scanner skips a file whose size and mtime are unchanged. Reanalyze is now reachable on a healthy item under More actions, and Settings &rarr; Developer carries an advisory Source verification section that gates nothing.</span></li>
+        <li><span class="m todo">○ scoped</span><span class="t"><b>The durable repair: stop using FFprobe report equality as source verification.</b> Comparing whole documents owned by another project makes an external reporting change part of playback admission, and one exception per failed title can never be a complete contract. The design &mdash; typed observations with explicit known/unknown/invalid states, compared against what the recipe and the <i>session</i> actually depend on, with producer provenance and a staged observation-only comparator &mdash; is written up in &sect;7 of the RCA, including the two cautions a review raised: a &ldquo;refresh on unknown&rdquo; must not become a Play-time reprobe of a cold NAS source, and the dependency inventory must cover the mid-session track switch, the fragment index&rsquo;s source attestation and the subtitle window. Not started.</span></li>
+        <li><span class="m todo">○ operator</span><span class="t"><b>Unproved, and deliberately not claimed.</b> Which FFprobe executable and node wrote the July 22 scan; and playback of the title on the TCL tablet after the repair. File-stat equality and matching FFprobe reports are not a whole-file integrity check.</span></li>
+      </ul>
+    </details>
+  </section>
+
   <!-- ══════════ Playback capabilities v2 ══════════ -->
   <section>
     <h2>Playback capabilities v2 — the grade is negotiated, not guessed <span class="chip prog">🚧 lab4 acceptance</span> <span class="ev">PLAYBACK-CAPS-V2-PLAN.md · PLAYBACK-CAPS-V2-M0.md · updated 2026-09-01</span></h2>

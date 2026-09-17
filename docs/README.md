@@ -176,6 +176,8 @@ conversion, decoder selection, and the stall/stutter investigations.
 |---|---|---|
 | [HEVC-SAMPLE-ENTRY-STATUS.md](streaming/HEVC-SAMPLE-ENTRY-STATUS.md) | Live execution ledger for the HEVC sample-entry admission repair: implementation, evidence, review, and promotion state. | open |
 | [HEVC sample-entry qualification receipt](evidence/hevc-sample-entry-qualification-2026-09-16.md) | Exact reviewed head, focused commands and counts, F1–F10 disposition, rollout order, and physical-evidence limits for PR #337. | built |
+| [WICKED-TCL-PROBE-MISMATCH-RCA-AND-FIX.md](streaming/WICKED-TCL-PROBE-MISMATCH-RCA-AND-FIX.md) | Why one added E-AC-3 Atmos profile refused a whole movie, what shipped to admit it, and why report equality is the wrong source-verification contract. | built |
+| [Probe compatibility replay](evidence/wicked-probe-compatibility-replay.py) | Runs the deployed and shipped source-probe comparators side by side, on a synthetic pair or on two real FFprobe documents. | built |
 | [STREAMING-RELIABILITY-IMPLEMENTATION.md](streaming/STREAMING-RELIABILITY-IMPLEMENTATION.md) | Two-wave reliability effort: quality preservation, truthful recovery, first-play preparation, task ownership and finite qualification. | open |
 | [STREAMING-SHARED-INDEX-HANDOFF.md](streaming/STREAMING-SHARED-INDEX-HANDOFF.md) | Sol work package for exact shared Dolby Vision indexes and bounded first-play measurements. | open |
 | [STREAMING-WEB-RECOVERY-HANDOFF.md](streaming/STREAMING-WEB-RECOVERY-HANDOFF.md) | Sol work package for truthful web stall evidence, recipe-preserving recovery and native parity. | open |
