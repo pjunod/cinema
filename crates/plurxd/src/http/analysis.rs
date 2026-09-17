@@ -429,6 +429,8 @@ fn history_filter(
 }
 
 fn history_row_value(row: plurx_core::store::AnalysisHistoryRow) -> serde_json::Value {
+    let index_diagnostic =
+        plurx_core::content_analysis::IndexDiagnostic::decode_bounded(&row.index_diagnostic_json);
     let effective_error = if row.job_error_code.is_empty() {
         row.request_error_code.as_str()
     } else {
@@ -469,6 +471,11 @@ fn history_row_value(row: plurx_core::store::AnalysisHistoryRow) -> serde_json::
             .split(',')
             .filter(|code| !code.is_empty())
             .collect::<Vec<_>>(),
+        "index_retry_deadline_ms": row.index_retry_deadline_ms,
+        "effective_retry_at_ms": (row.state == "queued").then_some(row.not_before_ms),
+        "terminal_reason": matches!(row.state.as_str(), "failed" | "cancelled")
+            .then(|| effective_error.to_owned()),
+        "index_diagnostic": index_diagnostic,
         "created_at_ms": row.created_at_ms,
         "updated_at_ms": row.updated_at_ms,
         "pipeline_version": row.pipeline_version,
@@ -749,6 +756,9 @@ pub struct AnalysisReopenParams {
     limit: Option<i64>,
     /// Restrict to one component (`fragment_index`, `skip_markers`, …).
     component: Option<String>,
+    repair_revision: Option<String>,
+    cursor: Option<String>,
+    candidates: Option<Vec<plurx_core::store::AnalysisIndexRepairCandidate>>,
 }
 
 /// The largest bulk reopen one call will perform.
@@ -769,6 +779,54 @@ const ANALYSIS_REOPEN_SCAN_LIMIT: i64 = ANALYSIS_REOPEN_MAX_FILES * 2;
 /// enqueue and the operator's own single-row Retry down with it.
 const ANALYSIS_REOPEN_HEADROOM: i64 = 512;
 
+async fn resolve_legacy_repair_identities(
+    state: &AppState,
+    candidates: &mut [plurx_core::store::AnalysisIndexRepairCandidate],
+) -> Result<(), ApiError> {
+    if !candidates
+        .iter()
+        .any(|candidate| candidate.eligibility == "identity_unresolved")
+    {
+        return Ok(());
+    }
+    let engine = crate::ffmpeg::fragment_index_engine_digest().await;
+    let have_dovi = state.transcode.dv_strippable();
+    let convert = state.transcode.dv_convert_enabled().await;
+    for candidate in candidates
+        .iter_mut()
+        .filter(|candidate| candidate.eligibility == "identity_unresolved")
+    {
+        let Some(file) = state.store.get_file(candidate.file_id).await? else {
+            continue;
+        };
+        if file.size != candidate.source_size || file.mtime != candidate.source_mtime {
+            continue;
+        }
+        let identities = crate::state::fragment_index_video_identity_options(
+            state.store.as_ref(),
+            &file,
+            have_dovi,
+            convert,
+        )
+        .await?;
+        let mut matching = identities.into_iter().filter(|(video, _)| {
+            crate::fragment_index_cluster::pipeline_digest(&file, &engine, *video)
+                == candidate.pipeline_sha256
+        });
+        let Some((_, identity)) = matching.next() else {
+            continue;
+        };
+        if matching.next().is_some() {
+            continue;
+        }
+        candidate.pipeline_version.clone_from(&engine);
+        candidate.video_identity = identity;
+        candidate.eligibility = "eligible".to_owned();
+        candidate.candidate_id = candidate.recompute_id();
+    }
+    Ok(())
+}
+
 /// POST /api/v1/analysis/reopen — put terminal analysis work back on the
 /// queue in bulk.
 ///
@@ -787,9 +845,9 @@ const ANALYSIS_REOPEN_HEADROOM: i64 = 512;
 /// It skips loudly rather than refusing. A row whose successor cannot be
 /// created — the file changed underneath it, or another actor inserted a
 /// successor between this call's read and its write — is counted in
-/// `skipped_unavailable` and left for discovery. Standalone cluster jobs with
-/// no operator request behind them are outside this endpoint entirely; they
-/// belong to discovery's own retry.
+/// `skipped_unavailable` and left for discovery. The revisioned repair mode
+/// also attributes standalone and pre-identity fragment jobs by matching
+/// their stored pipeline digest against the current copy recipes.
 pub async fn reopen(
     _admin: AdminUser,
     State(state): State<AppState>,
@@ -808,6 +866,151 @@ pub async fn reopen(
                 "invalid analysis component".to_owned(),
             ));
         }
+    }
+    if let Some(revision) = params.repair_revision.as_deref() {
+        if revision != plurx_core::store::CONTENT_ANALYSIS_REPAIR_REVISION {
+            return Err(ApiError::BadRequest(
+                "unknown content-analysis repair revision".to_owned(),
+            ));
+        }
+        if params
+            .component
+            .as_deref()
+            .is_some_and(|value| value != "fragment_index")
+        {
+            return Err(ApiError::BadRequest(
+                "video-completion repair requires fragment_index".to_owned(),
+            ));
+        }
+        if params
+            .cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.len() > 256)
+        {
+            return Err(ApiError::BadRequest("invalid repair cursor".to_owned()));
+        }
+        let dry_run = params.dry_run.unwrap_or(true);
+        if dry_run {
+            if params
+                .candidates
+                .as_ref()
+                .is_some_and(|rows| !rows.is_empty())
+            {
+                return Err(ApiError::BadRequest(
+                    "repair preview does not accept candidate descriptors".to_owned(),
+                ));
+            }
+            let mut scanned = state
+                .store
+                .preview_analysis_index_repairs(
+                    params.cursor.as_deref(),
+                    plurx_core::store::CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
+                )
+                .await?;
+            resolve_legacy_repair_identities(&state, &mut scanned).await?;
+            let scanned_count = scanned.len();
+            let mut files = std::collections::BTreeSet::new();
+            let mut rows = Vec::new();
+            for candidate in scanned {
+                if !files.contains(&candidate.file_id)
+                    && i64::try_from(files.len()).unwrap_or(i64::MAX) >= limit
+                {
+                    break;
+                }
+                files.insert(candidate.file_id);
+                rows.push(candidate);
+            }
+            let next_cursor = rows.last().map(|candidate| {
+                format!(
+                    "{}|{}",
+                    candidate.predecessor_cache_key, candidate.target_node_id
+                )
+            });
+            let existing_receipts = rows
+                .iter()
+                .filter(|candidate| candidate.eligibility == "already_created")
+                .count();
+            let skipped = rows.iter().fold(
+                std::collections::BTreeMap::<String, usize>::new(),
+                |mut counts, candidate| {
+                    if candidate.eligibility != "eligible" {
+                        *counts.entry(candidate.eligibility.clone()).or_default() += 1;
+                    }
+                    counts
+                },
+            );
+            return Ok(Json(serde_json::json!({
+                "dry_run": true,
+                "repair_revision": revision,
+                "files": files.len(),
+                "identities": rows.len(),
+                "existing_receipts": existing_receipts,
+                "skipped": skipped,
+                "scan_truncated": scanned_count >= usize::try_from(plurx_core::store::CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES).unwrap_or(usize::MAX),
+                "next_cursor": next_cursor,
+                "candidates": rows,
+            })));
+        }
+        let candidates = params.candidates.ok_or_else(|| {
+            ApiError::BadRequest(
+                "repair apply requires the exact candidate descriptors from preview".to_owned(),
+            )
+        })?;
+        if candidates.is_empty()
+            || candidates.len()
+                > usize::try_from(plurx_core::store::CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES)
+                    .unwrap_or(usize::MAX)
+        {
+            return Err(ApiError::BadRequest(
+                "repair apply candidate count is out of bounds".to_owned(),
+            ));
+        }
+        if candidates
+            .iter()
+            .any(|candidate| candidate.repair_revision != revision || !candidate.has_valid_id())
+        {
+            return Err(ApiError::BadRequest(
+                "repair candidate descriptor is invalid".to_owned(),
+            ));
+        }
+        let distinct_files = candidates
+            .iter()
+            .map(|candidate| candidate.file_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        if i64::try_from(distinct_files.len()).unwrap_or(i64::MAX) > limit {
+            return Err(ApiError::BadRequest(
+                "repair apply exceeds the requested file limit".to_owned(),
+            ));
+        }
+        let mut candidates = candidates;
+        // Apply never trusts the preview's advisory resolution. Re-derive
+        // each recipe from the current file facts and engine before the Store
+        // checks the predecessor fence and inserts a successor.
+        for candidate in &mut candidates {
+            candidate.eligibility = "identity_unresolved".to_owned();
+        }
+        resolve_legacy_repair_identities(&state, &mut candidates).await?;
+        let mut results = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            results.push(
+                state
+                    .store
+                    .apply_analysis_index_repair(
+                        &candidate,
+                        &uuid::Uuid::new_v4().to_string(),
+                        crate::state::clock_ms(),
+                    )
+                    .await?,
+            );
+        }
+        if results.iter().any(|result| result.status == "created") {
+            kick_analysis_queue(&state);
+        }
+        return Ok(Json(serde_json::json!({
+            "dry_run": false,
+            "repair_revision": revision,
+            "results": results,
+        })));
     }
     if !dry_run && !state.jobs.analysis_queue_enabled().await {
         return Err(ApiError::Conflict(
@@ -946,6 +1149,114 @@ mod tests {
     use super::history_row_value;
 
     #[test]
+    fn content_analysis_history_projects_typed_diagnostic_and_retry_state() {
+        let diagnostic = plurx_core::content_analysis::IndexDiagnostic {
+            version: 1,
+            code: "index_probe_timeout".to_owned(),
+            retryable: true,
+            claim_fence: 7,
+            attempt: 2,
+            selected_stream: Some(3),
+            expected_ms: Some(120_000),
+            elapsed_ms: Some(30_000),
+            budget_ms: Some(30_000),
+            recorded_at_ms: 10,
+            ..Default::default()
+        }
+        .encode_bounded()
+        .expect("bounded diagnostic");
+        let value = history_row_value(plurx_core::store::AnalysisHistoryRow {
+            row_key: "job:retry".to_owned(),
+            request_id: String::new(),
+            job_id: "retry".to_owned(),
+            file_id: 42,
+            item_id: 0,
+            title: "fixture".to_owned(),
+            component: "fragment_index".to_owned(),
+            force_rebuild: false,
+            target_node_id: String::new(),
+            request_state: String::new(),
+            job_state: "queued".to_owned(),
+            state: "queued".to_owned(),
+            disposition: "automatic".to_owned(),
+            action: "none".to_owned(),
+            owner_node_id: String::new(),
+            claim_epoch: 7,
+            lease_expires_ms: 0,
+            attempts: 2,
+            not_before_ms: i64::MAX - 1,
+            request_error_code: String::new(),
+            job_error_code: "index_probe_timeout".to_owned(),
+            job_attempt_errors: "index_budget_exceeded,index_probe_timeout".to_owned(),
+            index_retry_deadline_ms: i64::MAX,
+            index_diagnostic_json: diagnostic,
+            created_at_ms: 1,
+            updated_at_ms: 10,
+            pipeline_version: "engine-v1".to_owned(),
+            requested_generation: String::new(),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            cancel_requested: false,
+            phase: "fragment_index".to_owned(),
+            source_size: 100,
+        });
+        assert_eq!(value["durable_state"], "retry_wait");
+        assert_eq!(value["effective_retry_at_ms"], i64::MAX - 1);
+        assert_eq!(value["index_retry_deadline_ms"], i64::MAX);
+        assert_eq!(value["index_diagnostic"]["selected_stream"], 3);
+        assert_eq!(value["index_diagnostic"]["attempt"], 2);
+        assert_eq!(
+            value["job_attempt_errors"],
+            serde_json::json!(["index_budget_exceeded", "index_probe_timeout"])
+        );
+        assert!(value["terminal_reason"].is_null());
+    }
+
+    #[test]
+    fn content_analysis_history_tolerates_absent_legacy_diagnostic() {
+        let mut row = plurx_core::store::AnalysisHistoryRow {
+            row_key: "job:legacy".to_owned(),
+            request_id: String::new(),
+            job_id: "legacy".to_owned(),
+            file_id: 42,
+            item_id: 0,
+            title: "legacy".to_owned(),
+            component: "fragment_index".to_owned(),
+            force_rebuild: false,
+            target_node_id: String::new(),
+            request_state: String::new(),
+            job_state: "failed".to_owned(),
+            state: "failed".to_owned(),
+            disposition: "attention".to_owned(),
+            action: "retry".to_owned(),
+            owner_node_id: String::new(),
+            claim_epoch: 1,
+            lease_expires_ms: 0,
+            attempts: 1,
+            not_before_ms: 0,
+            request_error_code: String::new(),
+            job_error_code: "truncated".to_owned(),
+            job_attempt_errors: String::new(),
+            index_retry_deadline_ms: 0,
+            index_diagnostic_json: String::new(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            pipeline_version: "legacy".to_owned(),
+            requested_generation: String::new(),
+            priority: "normal".to_owned(),
+            trigger: "background".to_owned(),
+            cancel_requested: false,
+            phase: String::new(),
+            source_size: 100,
+        };
+        let value = history_row_value(row.clone());
+        assert!(value["index_diagnostic"].is_null());
+        assert_eq!(value["terminal_reason"], "truncated");
+        row.index_diagnostic_json = "{not json".to_owned();
+        assert!(history_row_value(row)["index_diagnostic"].is_null());
+    }
+
+    #[test]
     fn standalone_structural_source_invalidation_is_projected_as_stale() {
         let value = history_row_value(plurx_core::store::AnalysisHistoryRow {
             row_key: "job:stale".to_owned(),
@@ -970,6 +1281,8 @@ mod tests {
             request_error_code: String::new(),
             job_error_code: "source_superseded".to_owned(),
             job_attempt_errors: String::new(),
+            index_retry_deadline_ms: 0,
+            index_diagnostic_json: String::new(),
             created_at_ms: 1,
             updated_at_ms: 1,
             pipeline_version: "v1".to_owned(),

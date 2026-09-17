@@ -1759,7 +1759,10 @@ in.
 Each row carries, among others, `job_attempt_errors` — the code each charged
 attempt ended with, oldest first. That field exists because the terminal
 `job_error_code` for an exhausted budget is always `attempt_limit`, which
-names no cause.
+names no cause. Fragment-index rows may also include `index_diagnostic`,
+`index_retry_deadline_ms`, `effective_retry_at_ms`, and `terminal_reason`.
+The diagnostic is a bounded versioned object: unknown versions and invalid or
+oversized records appear as absent instead of leaking untrusted store text.
 
 ### 16.2 The health verdict
 
@@ -1798,10 +1801,23 @@ in four ways:
   created is counted in `skipped_unavailable` and left to discovery.
 
 Candidates are counted only while no request for the same source, component
-and target is already live, which is what makes it safe to press twice — a
+pipeline version, video identity, and target is already live, which is what
+makes it safe to press twice — a
 file repaired on Monday is not re-forced on Friday. Watch
 `stopped_at_headroom` and `scan_truncated` on the response: either means more
 work is waiting and the call must be repeated.
+
+The selected-video completion repair uses the same route with
+`"repair_revision":"video-completion-v1"` and component `fragment_index`.
+Its preview returns exact candidate descriptors, eligibility, stable candidate
+IDs, a continuation cursor, receipt counts, and skipped reasons. It reads at
+most 1,500 pipeline candidates and the ordinary 50/500 distinct-file limit
+still applies. Apply must send those exact descriptors back with
+`"dry_run":false`; the Store treats them as untrusted and atomically rechecks
+the source, predecessor fence/update time, pipeline identity, current head,
+active successors, receipt, and 512-slot headroom. A stale descriptor is
+reported, never replaced by a newly selected file. Repeating or racing apply
+returns the durable successor from the once-per-source/pipeline receipt.
 
 ### 16.4 Timeline annotations
 

@@ -1119,6 +1119,12 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     super::FILES_VIDEO_CODEC_TAG_COLUMN,
     // v61: reusable classification metadata and a derived local text index.
     super::classification::SCHEMA,
+    // v62: typed index diagnostics, fixed retry-cycle deadlines, identity-
+    // aware active request indexes, and durable one-time repair receipts.
+    crate::store::fragment_index_cluster::CONTENT_ANALYSIS_REPAIR_SCHEMA,
+    // v63: mirror typed retry disposition and diagnostics in the standalone
+    // node-local refusal store.
+    crate::store::fragindex::FRAGMENT_INDEX_TYPED_OUTCOMES_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

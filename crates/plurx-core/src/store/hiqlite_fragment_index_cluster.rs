@@ -15,10 +15,11 @@ use super::hiqlite::{database_error, validate_sql, HiqliteAuthStore};
 use super::{
     cluster_fragment_index_generation_key, cluster_fragment_index_key, AnalysisAttempt,
     AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryPage,
-    AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisRequest, AnalysisStatusSummary,
-    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
-    ClusterFragmentIndexStore, FragmentIndexSourceObservation, NewAnalysisRequest,
-    NewClusterFragmentIndexJob,
+    AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisIndexRepairCandidate,
+    AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
+    ClusterFragmentIndexArtifact, ClusterFragmentIndexFailure, ClusterFragmentIndexJob,
+    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
+    NewAnalysisRequest, NewClusterFragmentIndexJob,
 };
 use crate::error::StoreError;
 
@@ -636,9 +637,58 @@ pub(super) fn analysis_attempt_errors_migration_statements(
 const ANALYSIS_REQUEST_IDENTITY_STATEMENTS: &[&str] =
     &["ALTER TABLE analysis_requests ADD COLUMN video_identity TEXT NOT NULL DEFAULT ''"];
 
+const CONTENT_ANALYSIS_REPAIR_STATEMENTS: &[&str] = &[
+    "ALTER TABLE cluster_fragment_index_jobs ADD COLUMN index_retry_deadline_ms INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE cluster_fragment_index_jobs ADD COLUMN index_diagnostic_json TEXT NOT NULL DEFAULT ''",
+    r#"CREATE TABLE analysis_index_repairs (
+        repair_revision       TEXT NOT NULL,
+        file_id               INTEGER NOT NULL,
+        source_size           INTEGER NOT NULL,
+        source_mtime          INTEGER NOT NULL,
+        source_sha256         TEXT NOT NULL,
+        pipeline_sha256       TEXT NOT NULL,
+        target_node_id        TEXT NOT NULL,
+        video_identity        TEXT NOT NULL,
+        predecessor_cache_key TEXT NOT NULL,
+        predecessor_fence     INTEGER NOT NULL,
+        successor_request_id  TEXT NOT NULL,
+        created_at_ms         INTEGER NOT NULL,
+        PRIMARY KEY (
+          repair_revision, file_id, source_size, source_mtime, source_sha256,
+          pipeline_sha256, target_node_id
+        )
+    ) STRICT"#,
+    "CREATE INDEX analysis_index_repairs_successor ON analysis_index_repairs(successor_request_id)",
+    r#"CREATE TRIGGER analysis_index_repairs_delete_source AFTER DELETE ON files
+       BEGIN
+         DELETE FROM analysis_index_repairs WHERE file_id = OLD.id;
+       END"#,
+    "DROP INDEX IF EXISTS analysis_requests_one_active_forced_successor",
+    "DROP INDEX IF EXISTS analysis_requests_one_active_source",
+    r#"CREATE UNIQUE INDEX analysis_requests_one_active_source
+        ON analysis_requests(file_id, source_size, source_mtime, component,
+                             pipeline_version, video_identity,
+                             requested_generation, target_node_id)
+        WHERE state IN ('queued', 'running', 'submitted')"#,
+    r#"CREATE UNIQUE INDEX analysis_requests_one_active_forced_skip_successor
+        ON analysis_requests(file_id, source_size, source_mtime, component)
+        WHERE component = 'skip_markers' AND force_rebuild = 1
+          AND state IN ('queued', 'running', 'submitted')"#,
+    r#"CREATE UNIQUE INDEX analysis_requests_one_active_forced_fragment_successor
+        ON analysis_requests(file_id, source_size, source_mtime, component,
+                             pipeline_version, video_identity)
+        WHERE component = 'fragment_index' AND force_rebuild = 1
+          AND state IN ('queued', 'running', 'submitted')"#,
+];
+
 pub(super) fn analysis_request_identity_migration_statements(
 ) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
     migration_statements(ANALYSIS_REQUEST_IDENTITY_STATEMENTS)
+}
+
+pub(super) fn content_analysis_repair_migration_statements(
+) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    migration_statements(CONTENT_ANALYSIS_REPAIR_STATEMENTS)
 }
 
 /// Whether the complete v22 analysis shape is already installed.
@@ -708,6 +758,7 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
     statements.extend(analysis_attempt_errors_migration_statements()?);
     statements.extend(analysis_request_identity_migration_statements()?);
     statements.extend(analysis_terminal_identity_index_migration_statements()?);
+    statements.extend(content_analysis_repair_migration_statements()?);
     client
         .txn(statements)
         .await
@@ -723,7 +774,7 @@ const JOB_COLS: &str = "cache_key, file_id, source_size, source_mtime, source_sh
     state, COALESCE(owner_node_id, '') AS owner_node_id, fence,
     COALESCE(lease_expires_ms, 0) AS lease_expires_ms, attempts, not_before_ms,
     created_at_ms, updated_at_ms, COALESCE(last_error_code, '') AS last_error_code,
-    attempt_errors";
+    attempt_errors, index_retry_deadline_ms, index_diagnostic_json";
 
 struct JobRow(ClusterFragmentIndexJob);
 
@@ -749,7 +800,51 @@ impl From<&mut Row<'_>> for JobRow {
             updated_at_ms: row.get("updated_at_ms"),
             last_error_code: row.get("last_error_code"),
             attempt_errors: row.get("attempt_errors"),
+            index_retry_deadline_ms: row.get("index_retry_deadline_ms"),
+            index_diagnostic_json: row.get("index_diagnostic_json"),
         })
+    }
+}
+
+struct RepairCandidateRow(AnalysisIndexRepairCandidate);
+
+impl From<&mut Row<'_>> for RepairCandidateRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        let mut candidate = AnalysisIndexRepairCandidate {
+            candidate_id: String::new(),
+            repair_revision: super::CONTENT_ANALYSIS_REPAIR_REVISION.to_owned(),
+            predecessor_cache_key: row.get("cache_key"),
+            target_node_id: row.get("target_node_id"),
+            predecessor_fence: row.get("fence"),
+            predecessor_updated_at_ms: row.get("updated_at_ms"),
+            file_id: row.get("file_id"),
+            source_size: row.get("source_size"),
+            source_mtime: row.get("source_mtime"),
+            source_sha256: row.get("source_sha256"),
+            pipeline_sha256: row.get("pipeline_sha256"),
+            pipeline_version: row.get("pipeline_version"),
+            video_identity: row.get("video_identity"),
+            cause: row.get("cause"),
+            eligibility: String::new(),
+            successor_request_id: row.get("successor_request_id"),
+        };
+        let already_ready = row.get::<i64>("already_ready") != 0;
+        let identities = row.get::<i64>("identity_count");
+        candidate.eligibility = if !candidate.successor_request_id.is_empty() {
+            "already_created"
+        } else if already_ready {
+            "already_ready"
+        } else if candidate.pipeline_version.is_empty()
+            || candidate.video_identity.is_empty()
+            || identities != 1
+        {
+            "identity_unresolved"
+        } else {
+            "eligible"
+        }
+        .to_owned();
+        candidate.candidate_id = candidate.recompute_id();
+        Self(candidate)
     }
 }
 
@@ -845,7 +940,8 @@ const HISTORY_COLS: &str = "row_key, request_id, job_id, file_id, item_id, title
     component, force_rebuild, target_node_id, request_state, job_state, state, disposition,
     action, owner_node_id, claim_epoch, lease_expires_ms, attempts, not_before_ms, request_error_code,
     job_error_code, created_at_ms, updated_at_ms, pipeline_version, requested_generation,
-    priority, trigger, cancel_requested, phase, source_size, job_attempt_errors";
+    priority, trigger, cancel_requested, phase, source_size, job_attempt_errors,
+    index_retry_deadline_ms, index_diagnostic_json";
 
 const HISTORY_PAGE_COLS: &str = "COALESCE(page.row_key, '') AS row_key,
     COALESCE(page.request_id, '') AS request_id, COALESCE(page.job_id, '') AS job_id,
@@ -870,7 +966,9 @@ const HISTORY_PAGE_COLS: &str = "COALESCE(page.row_key, '') AS row_key,
     COALESCE(page.cancel_requested, 0) AS cancel_requested,
     COALESCE(page.phase, '') AS phase,
     COALESCE(page.source_size, 0) AS source_size,
-    COALESCE(page.job_attempt_errors, '') AS job_attempt_errors";
+    COALESCE(page.job_attempt_errors, '') AS job_attempt_errors,
+    COALESCE(page.index_retry_deadline_ms, 0) AS index_retry_deadline_ms,
+    COALESCE(page.index_diagnostic_json, '') AS index_diagnostic_json";
 
 struct HistoryRow(AnalysisHistoryRow, AnalysisHistoryCursor, i64);
 
@@ -908,6 +1006,8 @@ impl From<&mut Row<'_>> for HistoryRow {
             phase: row.get("phase"),
             source_size: row.get("source_size"),
             job_attempt_errors: row.get("job_attempt_errors"),
+            index_retry_deadline_ms: row.get("index_retry_deadline_ms"),
+            index_diagnostic_json: row.get("index_diagnostic_json"),
         };
         let cursor = AnalysisHistoryCursor {
             sort_rank: row.get("sort_rank"),
@@ -1082,42 +1182,52 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 (
                     "INSERT INTO analysis_requests
                 (request_id, file_id, source_size, source_mtime, component,
-                 pipeline_version, requested_generation, expected_predecessor_generation,
+                 pipeline_version, video_identity, requested_generation,
+                 expected_predecessor_generation,
                  priority, trigger,
                  force_rebuild, target_node_id, state, owner_node_id, fence,
                  lease_expires_ms, attempts, not_before_ms, result_cache_key,
                  last_error_code, cancel_requested, created_at_ms, updated_at_ms)
-             SELECT $1, $2, $3, $4, $5, $6, $7,
+             SELECT $1, $2, $3, $4, $5, $6, $7, $8,
                     CASE WHEN $5 = 'skip_markers' THEN COALESCE((
                       SELECT generation_id FROM timeline_annotation_sets
                        WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4
                     ), '') ELSE '' END,
-                    $8, $9, $10, $11,
-                    CASE WHEN $10 = 0 AND $5 = 'skip_markers' AND EXISTS (
+                    $9, $10, $11, $12,
+                    CASE WHEN $11 = 0 AND $5 = 'skip_markers' AND EXISTS (
                       SELECT 1 FROM timeline_annotation_sets
                        WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4
-                         AND argv_fingerprint = $12 AND publication_priority = 'forced'
+                         AND argv_fingerprint = $13 AND publication_priority = 'forced'
                     ) THEN 'ready' ELSE 'queued' END,
-                    NULL, 0, NULL, 0, $13,
-                    CASE WHEN $10 = 0 AND $5 = 'skip_markers' THEN (
+                    NULL, 0, NULL, 0, $14,
+                    CASE WHEN $11 = 0 AND $5 = 'skip_markers' THEN (
                       SELECT generation_id FROM timeline_annotation_sets
                        WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4
-                         AND argv_fingerprint = $12 AND publication_priority = 'forced'
+                         AND argv_fingerprint = $13 AND publication_priority = 'forced'
                     ) ELSE NULL END,
-                    NULL, 0, $14, $14
+                    NULL, 0, $15, $15
               WHERE EXISTS (SELECT 1 FROM files WHERE id = $2 AND size = $3 AND mtime = $4)
                 AND (SELECT COUNT(*) FROM analysis_requests
-                      WHERE state IN ('queued', 'running', 'submitted')) < $15
-                AND ($10 = 1 OR (
+                      WHERE state IN ('queued', 'running', 'submitted')) < $16
+                AND ($11 = 0 OR $5 <> 'fragment_index' OR NOT EXISTS (
+                  SELECT 1 FROM analysis_requests legacy
+                   WHERE legacy.file_id = $2 AND legacy.source_size = $3
+                     AND legacy.source_mtime = $4 AND legacy.component = $5
+                     AND legacy.video_identity = ''
+                     AND legacy.state IN ('queued','running','submitted','ready')))
+                AND ($11 = 1 OR (
                   NOT EXISTS (SELECT 1 FROM analysis_requests
                     WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4
                       AND component = $5 AND force_rebuild = 1
-                      AND target_node_id = $11
+                      AND (($5 = 'skip_markers' AND target_node_id = $12)
+                        OR ($5 = 'fragment_index' AND pipeline_version = $6
+                          AND video_identity = $7))
                       AND state IN ('queued', 'running', 'submitted', 'ready'))
                   AND NOT EXISTS (SELECT 1 FROM analysis_requests
                     WHERE file_id = $2 AND source_size = $3 AND source_mtime = $4
                       AND component = $5 AND pipeline_version = $6
-                      AND requested_generation = $7 AND target_node_id = $11)
+                      AND video_identity = $7
+                      AND requested_generation = $8 AND target_node_id = $12)
                 ))
              ON CONFLICT DO NOTHING"
                         .to_owned(),
@@ -1128,6 +1238,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         request.source_mtime,
                         &request.component,
                         &request.pipeline_version,
+                        &request.video_identity,
                         &request.requested_generation,
                         &request.priority,
                         &request.trigger,
@@ -1148,9 +1259,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                          WHERE older.file_id = $3 AND older.source_size = $4
                            AND older.source_mtime = $5 AND older.component = $6
                            AND older.pipeline_version = $7 AND older.force_rebuild = 0
-                           AND older.state IN ('queued','running','submitted')
                            AND EXISTS (SELECT 1 FROM analysis_requests successor
-                             WHERE successor.request_id = $8 AND successor.force_rebuild = 1))"
+                             WHERE successor.request_id = $8 AND successor.force_rebuild = 1)
+                           AND (older.video_identity = $9 OR older.video_identity = ''
+                                OR $9 = '')
+                           AND older.state IN ('queued','running','submitted'))"
                         .to_owned(),
                     params!(
                         request.created_at_ms,
@@ -1160,7 +1273,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         request.source_mtime,
                         &request.component,
                         &request.pipeline_version,
-                        &request.request_id
+                        &request.request_id,
+                        &request.video_identity
                     ),
                 ),
                 (
@@ -1170,9 +1284,10 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             last_error_code = 'publication_superseded', updated_at_ms = $1
                       WHERE $2 = 1 AND file_id = $3 AND source_size = $4
                         AND source_mtime = $5 AND component = $6 AND pipeline_version = $7
-                        AND force_rebuild = 0 AND state IN ('queued','running','submitted')
                         AND EXISTS (SELECT 1 FROM analysis_requests successor
-                          WHERE successor.request_id = $8 AND successor.force_rebuild = 1)"
+                          WHERE successor.request_id = $8 AND successor.force_rebuild = 1)
+                        AND force_rebuild = 0 AND state IN ('queued','running','submitted')
+                        AND (video_identity = $9 OR video_identity = '' OR $9 = '')"
                         .to_owned(),
                     params!(
                         request.created_at_ms,
@@ -1182,7 +1297,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         request.source_mtime,
                         &request.component,
                         &request.pipeline_version,
-                        &request.request_id
+                        &request.request_id,
+                        &request.video_identity
                     ),
                 ),
                 (
@@ -1230,12 +1346,13 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                           OR (force_rebuild = 1 AND pipeline_version = $5
                             AND target_node_id = $7
                             AND state IN ('queued', 'running', 'submitted', 'ready')))
-                        AND (request_id = $8
+                        AND video_identity = $8
+                        AND (request_id = $9
                           OR state IN ('queued', 'running', 'submitted')
-                          OR ($9 = 0 AND requested_generation = $6)
-                          OR ($9 = 0 AND force_rebuild = 1 AND state = 'ready'
+                          OR ($10 = 0 AND requested_generation = $6)
+                          OR ($10 = 0 AND force_rebuild = 1 AND state = 'ready'
                             AND pipeline_version = $5 AND target_node_id = $7))
-                      ORDER BY CASE WHEN request_id = $8 THEN 0
+                      ORDER BY CASE WHEN request_id = $9 THEN 0
                           WHEN force_rebuild = 1
                             AND state IN ('queued', 'running', 'submitted') THEN 1
                           WHEN state IN ('queued', 'running', 'submitted') THEN 2
@@ -1250,6 +1367,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     &request.pipeline_version,
                     &request.requested_generation,
                     &request.target_node_id,
+                    &request.video_identity,
                     &request.request_id,
                     if request.force_rebuild { 1_i64 } else { 0_i64 }
                 ),
@@ -1602,7 +1720,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                                               state = 'cancelled'
                                               OR (state = 'failed'
                                                 AND last_error_code = 'queue_expired'
-                                                AND attempts <= $13))))))))"
+                                                AND attempts = 0
+                                                AND index_retry_deadline_ms = 0
+                                                AND $13 >= 1))))))))"
                         .to_owned(),
                     params!(
                         &job.cache_key,
@@ -1643,16 +1763,23 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         owner_node_id = NULL, lease_expires_ms = NULL,
                         attempts = CASE WHEN $15 = 1 THEN 0
                           WHEN cluster_fragment_index_jobs.state = 'cancelled'
-                            OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                            OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                                AND cluster_fragment_index_jobs.attempts = 0)
                             OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                           ELSE cluster_fragment_index_jobs.attempts END,
                         attempt_errors = CASE WHEN $15 = 1 THEN ''
                           WHEN cluster_fragment_index_jobs.state = 'cancelled'
-                            OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                            OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                                AND cluster_fragment_index_jobs.attempts = 0)
                             OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
                           ELSE cluster_fragment_index_jobs.attempt_errors END,
                         not_before_ms = excluded.not_before_ms,
-                        created_at_ms = excluded.created_at_ms,
+                        created_at_ms = CASE WHEN $15 = 1 THEN excluded.created_at_ms
+                          ELSE cluster_fragment_index_jobs.created_at_ms END,
+                        index_retry_deadline_ms = CASE WHEN $15 = 1 THEN 0
+                          ELSE cluster_fragment_index_jobs.index_retry_deadline_ms END,
+                        index_diagnostic_json = CASE WHEN $15 = 1 THEN ''
+                          ELSE cluster_fragment_index_jobs.index_diagnostic_json END,
                         updated_at_ms = excluded.updated_at_ms, last_error_code = NULL
                       WHERE ($15 = 1 AND cluster_fragment_index_jobs.state
                                           IN ('ready', 'failed', 'cancelled'))
@@ -1660,7 +1787,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                            cluster_fragment_index_jobs.state = 'cancelled'
                            OR (cluster_fragment_index_jobs.state = 'failed'
                              AND cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                             AND cluster_fragment_index_jobs.attempts <= $16)))"
+                             AND cluster_fragment_index_jobs.attempts = 0
+                             AND cluster_fragment_index_jobs.index_retry_deadline_ms = 0
+                             AND $16 >= 1)))"
                         .to_owned(),
                     params!(
                         &job.cache_key,
@@ -2062,6 +2191,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                              AND successor.source_size = terminal.source_size
                              AND successor.source_mtime = terminal.source_mtime
                              AND successor.component = terminal.component
+                             AND successor.pipeline_version = terminal.pipeline_version
+                             AND successor.video_identity = terminal.video_identity
                              AND successor.target_node_id = terminal.target_node_id
                              AND successor.state IN ('queued','running','submitted','ready'))
                       ORDER BY terminal.updated_at_ms, terminal.request_id LIMIT $2"
@@ -2105,13 +2236,14 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .txn(vec![(
                 "INSERT INTO analysis_requests
                         (request_id, file_id, source_size, source_mtime, component,
-                         pipeline_version, requested_generation,
+                         pipeline_version, video_identity, requested_generation,
                          expected_predecessor_generation, priority, trigger,
                          force_rebuild, target_node_id, state, owner_node_id, fence,
                          lease_expires_ms, attempts, not_before_ms, result_cache_key,
                          last_error_code, cancel_requested, created_at_ms, updated_at_ms)
                      SELECT $1, original.file_id, original.source_size, original.source_mtime,
-                            original.component, original.pipeline_version, $1,
+                            original.component, original.pipeline_version,
+                            original.video_identity, $1,
                             CASE WHEN original.component = 'skip_markers' THEN COALESCE((
                               SELECT generation_id FROM timeline_annotation_sets
                                WHERE file_id = original.file_id
@@ -2137,6 +2269,219 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
         self.analysis_request(requested_generation).await
+    }
+
+    async fn preview_analysis_index_repairs(
+        &self,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<AnalysisIndexRepairCandidate>, StoreError> {
+        let limit = limit.clamp(1, super::CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES);
+        Ok(self
+            .client()
+            .query_consistent_map::<RepairCandidateRow, _>(
+                "SELECT job.cache_key AS cache_key, job.target_node_id AS target_node_id,
+                        job.fence AS fence, job.updated_at_ms AS updated_at_ms,
+                        job.file_id AS file_id, job.source_size AS source_size,
+                        job.source_mtime AS source_mtime, job.source_sha256 AS source_sha256,
+                        job.pipeline_sha256 AS pipeline_sha256,
+                        COALESCE((SELECT request.pipeline_version
+                          FROM analysis_requests request
+                         WHERE request.result_cache_key = job.cache_key
+                           AND request.target_node_id = job.target_node_id
+                         ORDER BY request.updated_at_ms DESC, request.request_id DESC LIMIT 1), '') AS pipeline_version,
+                        COALESCE((SELECT request.video_identity
+                          FROM analysis_requests request
+                         WHERE request.result_cache_key = job.cache_key
+                           AND request.target_node_id = job.target_node_id
+                           AND request.video_identity <> ''
+                         ORDER BY request.updated_at_ms DESC, request.request_id DESC LIMIT 1), '') AS video_identity,
+                        COALESCE(job.last_error_code, '') AS cause,
+                        COALESCE((SELECT repair.successor_request_id
+                          FROM analysis_index_repairs repair
+                         WHERE repair.repair_revision = 'video-completion-v1'
+                           AND repair.file_id = job.file_id
+                           AND repair.source_size = job.source_size
+                           AND repair.source_mtime = job.source_mtime
+                           AND repair.source_sha256 = job.source_sha256
+                           AND repair.pipeline_sha256 = job.pipeline_sha256
+                           AND repair.target_node_id = job.target_node_id), '') AS successor_request_id,
+                        (EXISTS(SELECT 1 FROM cluster_fragment_index_artifacts artifact
+                                WHERE artifact.cache_key = job.cache_key)
+                          OR EXISTS(SELECT 1 FROM cluster_fragment_index_heads head
+                                WHERE head.logical_cache_key = job.cache_key)) AS already_ready,
+                        (SELECT COUNT(DISTINCT request.video_identity)
+                           FROM analysis_requests request
+                          WHERE request.result_cache_key = job.cache_key
+                            AND request.target_node_id = job.target_node_id
+                            AND request.video_identity <> '') AS identity_count
+                   FROM cluster_fragment_index_jobs job
+                  WHERE job.state = 'failed' AND job.last_error_code = 'truncated'
+                    AND (job.cache_key || '|' || job.target_node_id) > $1
+                  ORDER BY job.cache_key, job.target_node_id LIMIT $2",
+                params!(after.unwrap_or_default(), limit),
+            )
+            .await?
+            .into_iter()
+            .map(|row| row.0)
+            .collect())
+    }
+
+    async fn apply_analysis_index_repair(
+        &self,
+        candidate: &AnalysisIndexRepairCandidate,
+        successor_request_id: &str,
+        now_ms: i64,
+    ) -> Result<AnalysisIndexRepairResult, StoreError> {
+        if candidate.repair_revision != super::CONTENT_ANALYSIS_REPAIR_REVISION
+            || !candidate.has_valid_id()
+            || candidate.eligibility != "eligible"
+            || successor_request_id.is_empty()
+            || successor_request_id.len() > 128
+        {
+            return Err(StoreError::Task(
+                "invalid content-analysis repair candidate".to_owned(),
+            ));
+        }
+        let active_limit = super::MAX_ACTIVE_ANALYSIS_REQUESTS
+            .saturating_sub(super::CONTENT_ANALYSIS_REPAIR_HEADROOM);
+        self.client()
+            .txn(vec![
+                (
+                    "INSERT INTO analysis_requests
+                        (request_id, file_id, source_size, source_mtime, component,
+                         pipeline_version, video_identity, requested_generation,
+                         expected_predecessor_generation, priority, trigger, force_rebuild,
+                         target_node_id, state, owner_node_id, fence, lease_expires_ms,
+                         attempts, not_before_ms, result_cache_key, last_error_code,
+                         cancel_requested, created_at_ms, updated_at_ms)
+                     SELECT $1, job.file_id, job.source_size, job.source_mtime,
+                            'fragment_index', $2, $3, $1, '', 'forced', 'admin', 1,
+                            job.target_node_id, 'queued', NULL, 0, NULL, 0, $4,
+                            NULL, NULL, 0, $4, $4
+                       FROM cluster_fragment_index_jobs job
+                       JOIN files ON files.id = job.file_id
+                      WHERE job.cache_key = $5 AND job.target_node_id = $6
+                        AND job.state = 'failed' AND job.last_error_code = 'truncated'
+                        AND job.fence = $7 AND job.updated_at_ms = $8
+                        AND job.file_id = $9 AND job.source_size = $10 AND job.source_mtime = $11
+                        AND job.source_sha256 = $12 AND job.pipeline_sha256 = $13
+                        AND files.size = job.source_size AND files.mtime = job.source_mtime
+                        AND (SELECT COUNT(*) FROM analysis_requests
+                              WHERE state IN ('queued','running','submitted')) < $14
+                        AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts artifact
+                                         WHERE artifact.cache_key = job.cache_key)
+                        AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_heads head
+                                         WHERE head.logical_cache_key = job.cache_key)
+                        AND NOT EXISTS (SELECT 1 FROM analysis_requests active
+                          WHERE active.file_id = job.file_id AND active.source_size = job.source_size
+                            AND active.source_mtime = job.source_mtime
+                            AND active.component = 'fragment_index'
+                            AND ((active.pipeline_version = $2 AND active.video_identity = $3)
+                              OR active.video_identity = '')
+                            AND active.state IN ('queued','running','submitted','ready'))
+                        AND NOT EXISTS (SELECT 1 FROM analysis_index_repairs repair
+                          WHERE repair.repair_revision = $15 AND repair.file_id = job.file_id
+                            AND repair.source_size = job.source_size
+                            AND repair.source_mtime = job.source_mtime
+                            AND repair.source_sha256 = job.source_sha256
+                            AND repair.pipeline_sha256 = job.pipeline_sha256
+                            AND repair.target_node_id = job.target_node_id)
+                     ON CONFLICT DO NOTHING"
+                        .to_owned(),
+                    params!(
+                        successor_request_id,
+                        &candidate.pipeline_version,
+                        &candidate.video_identity,
+                        now_ms,
+                        &candidate.predecessor_cache_key,
+                        &candidate.target_node_id,
+                        candidate.predecessor_fence,
+                        candidate.predecessor_updated_at_ms,
+                        candidate.file_id,
+                        candidate.source_size,
+                        candidate.source_mtime,
+                        &candidate.source_sha256,
+                        &candidate.pipeline_sha256,
+                        active_limit,
+                        &candidate.repair_revision
+                    ),
+                ),
+                (
+                    "INSERT INTO analysis_index_repairs
+                        (repair_revision, file_id, source_size, source_mtime, source_sha256,
+                         pipeline_sha256, target_node_id, video_identity,
+                         predecessor_cache_key, predecessor_fence,
+                         successor_request_id, created_at_ms)
+                     SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
+                      WHERE EXISTS (SELECT 1 FROM analysis_requests successor
+                         WHERE successor.request_id = $11 AND successor.file_id = $2
+                           AND successor.source_size = $3 AND successor.source_mtime = $4
+                           AND successor.pipeline_version = $13
+                           AND successor.video_identity = $8
+                           AND successor.target_node_id = $7
+                           AND successor.requested_generation = $11
+                           AND successor.force_rebuild = 1
+                           AND successor.state = 'queued')
+                     ON CONFLICT DO NOTHING"
+                        .to_owned(),
+                    params!(
+                        &candidate.repair_revision,
+                        candidate.file_id,
+                        candidate.source_size,
+                        candidate.source_mtime,
+                        &candidate.source_sha256,
+                        &candidate.pipeline_sha256,
+                        &candidate.target_node_id,
+                        &candidate.video_identity,
+                        &candidate.predecessor_cache_key,
+                        candidate.predecessor_fence,
+                        successor_request_id,
+                        now_ms,
+                        &candidate.pipeline_version
+                    ),
+                ),
+            ])
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        let existing = self
+            .client()
+            .query_consistent_map::<AnalysisSettingRow, _>(
+                "SELECT successor_request_id AS value FROM analysis_index_repairs
+                  WHERE repair_revision = $1 AND file_id = $2 AND source_size = $3
+                    AND source_mtime = $4 AND source_sha256 = $5
+                    AND pipeline_sha256 = $6 AND target_node_id = $7",
+                params!(
+                    &candidate.repair_revision,
+                    candidate.file_id,
+                    candidate.source_size,
+                    candidate.source_mtime,
+                    &candidate.source_sha256,
+                    &candidate.pipeline_sha256,
+                    &candidate.target_node_id
+                ),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.0);
+        let successor_exists = if existing.as_deref() == Some(successor_request_id) {
+            self.analysis_request(successor_request_id).await?.is_some()
+        } else {
+            false
+        };
+        Ok(AnalysisIndexRepairResult {
+            candidate_id: candidate.candidate_id.clone(),
+            status: match existing.as_deref() {
+                Some(value) if value == successor_request_id && successor_exists => "created",
+                Some(_) => "already_created",
+                None => "stale",
+            }
+            .to_owned(),
+            successor_request_id: existing.unwrap_or_default(),
+        })
     }
 
     async fn cancel_analysis_request_admin(
@@ -2674,6 +3019,21 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         self.execute(
             "UPDATE cluster_fragment_index_jobs
                 SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
+                    fence = fence + CASE WHEN state = 'running' THEN 1 ELSE 0 END,
+                    not_before_ms = $1, updated_at_ms = $1,
+                    last_error_code = 'index_retry_window_expired',
+                    attempt_errors = CASE WHEN attempt_errors = ''
+                      THEN 'index_retry_window_expired'
+                      ELSE attempt_errors || ',index_retry_window_expired' END
+              WHERE state IN ('queued','running')
+                AND index_retry_deadline_ms > 0
+                AND index_retry_deadline_ms <= $1",
+            params!(job.created_at_ms),
+        )
+        .await?;
+        self.execute(
+            "UPDATE cluster_fragment_index_jobs
+                SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                     not_before_ms = $1, updated_at_ms = $1,
                     last_error_code = CASE WHEN state = 'running'
                       THEN 'attempt_limit' ELSE 'queue_expired' END,
@@ -2681,7 +3041,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                               THEN (CASE WHEN attempt_errors = '' THEN 'lease_expired'
                                     ELSE attempt_errors || ',lease_expired' END)
                               ELSE attempt_errors END
-              WHERE (state = 'queued' AND created_at_ms < $2)
+              WHERE (state = 'queued' AND created_at_ms < $2
+                     AND index_retry_deadline_ms = 0)
                  OR (state = 'running' AND attempts >= $3
                    AND COALESCE(lease_expires_ms, 0) <= $1)",
             params!(job.created_at_ms, eligibility_cutoff, max_attempts),
@@ -2717,28 +3078,34 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
                     attempts = CASE
                         WHEN cluster_fragment_index_jobs.state = 'cancelled'
-                          OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                          OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                              AND cluster_fragment_index_jobs.attempts = 0)
                           OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                         ELSE cluster_fragment_index_jobs.attempts END,
                     attempt_errors = CASE
                         WHEN cluster_fragment_index_jobs.state = 'cancelled'
-                          OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                          OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                              AND cluster_fragment_index_jobs.attempts = 0)
                           OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
                         ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = CASE
                         WHEN cluster_fragment_index_jobs.state = 'queued'
+                         AND cluster_fragment_index_jobs.index_retry_deadline_ms > 0
+                        THEN cluster_fragment_index_jobs.not_before_ms
+                        WHEN cluster_fragment_index_jobs.state = 'queued'
                         THEN MIN(cluster_fragment_index_jobs.not_before_ms, excluded.not_before_ms)
                         ELSE excluded.not_before_ms END,
-                    created_at_ms = CASE
-                        WHEN cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                        THEN excluded.created_at_ms
-                        ELSE cluster_fragment_index_jobs.created_at_ms END,
+                    created_at_ms = cluster_fragment_index_jobs.created_at_ms,
                     updated_at_ms = excluded.updated_at_ms,
-                    last_error_code = NULL
+                    last_error_code = CASE
+                        WHEN cluster_fragment_index_jobs.index_retry_deadline_ms > 0
+                        THEN cluster_fragment_index_jobs.last_error_code
+                        ELSE NULL END
                   WHERE cluster_fragment_index_jobs.state = 'cancelled'
                      OR (cluster_fragment_index_jobs.state = 'failed'
                        AND cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                       AND cluster_fragment_index_jobs.attempts <= $13)
+                       AND cluster_fragment_index_jobs.attempts = 0
+                       AND cluster_fragment_index_jobs.index_retry_deadline_ms = 0)
                      OR (cluster_fragment_index_jobs.state = 'queued'
                        AND cluster_fragment_index_jobs.priority = 'normal'
                        AND excluded.priority = 'foreground')",
@@ -2754,8 +3121,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     &job.target_node_id,
                     job.not_before_ms,
                     job.created_at_ms,
-                    MAX_ACTIVE_JOBS,
-                    max_attempts
+                    MAX_ACTIVE_JOBS
                 ),
             )
             .await?
@@ -2791,6 +3157,21 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 (
                     "UPDATE cluster_fragment_index_jobs
                         SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
+                            fence = fence + CASE WHEN state = 'running' THEN 1 ELSE 0 END,
+                            not_before_ms = $1, updated_at_ms = $1,
+                            last_error_code = 'index_retry_window_expired',
+                            attempt_errors = CASE WHEN attempt_errors = ''
+                              THEN 'index_retry_window_expired'
+                              ELSE attempt_errors || ',index_retry_window_expired' END
+                      WHERE state IN ('queued','running')
+                        AND index_retry_deadline_ms > 0
+                        AND index_retry_deadline_ms <= $1"
+                        .to_owned(),
+                    params!(now_ms),
+                ),
+                (
+                    "UPDATE cluster_fragment_index_jobs
+                        SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                             not_before_ms = $1, updated_at_ms = $1,
                             last_error_code = CASE WHEN state = 'running'
                               THEN 'attempt_limit' ELSE 'queue_expired' END,
@@ -2798,7 +3179,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                               THEN (CASE WHEN attempt_errors = '' THEN 'lease_expired'
                                     ELSE attempt_errors || ',lease_expired' END)
                               ELSE attempt_errors END
-                      WHERE (state = 'queued' AND created_at_ms < $2)
+                      WHERE (state = 'queued' AND created_at_ms < $2
+                             AND index_retry_deadline_ms = 0)
                          OR (state = 'running' AND attempts >= $3
                            AND COALESCE(lease_expires_ms, 0) <= $1)"
                         .to_owned(),
@@ -2810,20 +3192,40 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 ),
                 (
                     "UPDATE cluster_fragment_index_jobs
+                        SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
+                            fence = fence + 1, not_before_ms = $1, updated_at_ms = $1,
+                            last_error_code = 'index_retry_window_expired',
+                            attempt_errors = CASE WHEN attempt_errors = ''
+                              THEN 'lease_expired,index_retry_window_expired'
+                              ELSE attempt_errors || ',lease_expired,index_retry_window_expired' END
+                      WHERE state = 'running' AND COALESCE(lease_expires_ms, 0) <= $1
+                        AND attempts < $2 AND index_retry_deadline_ms > 0
+                        AND $1 + MIN(1800000 * (1 << MIN(MAX(attempts - 1, 0), 30)), 86400000)
+                              >= index_retry_deadline_ms"
+                        .to_owned(),
+                    params!(now_ms, max_attempts),
+                ),
+                (
+                    "UPDATE cluster_fragment_index_jobs
                         SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
-                            not_before_ms = $1 + MIN(MAX(1000,
+                            not_before_ms = CASE WHEN index_retry_deadline_ms > 0
+                              THEN $1 + MIN(1800000 * (1 << MIN(MAX(attempts - 1, 0), 30)), 86400000)
+                              ELSE $1 + MIN(MAX(1000,
                               ($2 * (1 << MIN(MAX(attempts - 1, 0), 30)) *
                                (75 + (ABS(length(cache_key || ':' || target_node_id) * 17
                                  + unicode(substr(cache_key || ':' || target_node_id, 1, 1)) * 31
                                  + unicode(substr(cache_key || ':' || target_node_id, -1, 1)) * 13
-                                 + attempts * 7) % 51))) / 100), $3),
+                                 + attempts * 7) % 51))) / 100), $3) END,
                             last_error_code = 'lease_expired',
                             attempt_errors = CASE WHEN attempt_errors = ''
                               THEN 'lease_expired'
                               ELSE attempt_errors || ',lease_expired' END,
                             updated_at_ms = $1
                       WHERE state = 'running' AND COALESCE(lease_expires_ms, 0) <= $1
-                        AND attempts < $4"
+                        AND attempts < $4
+                        AND (index_retry_deadline_ms = 0 OR
+                             $1 + MIN(1800000 * (1 << MIN(MAX(attempts - 1, 0), 30)), 86400000)
+                               < index_retry_deadline_ms)"
                         .to_owned(),
                     params!(now_ms, backoff_base_ms, backoff_max_ms, max_attempts),
                 ),
@@ -2837,6 +3239,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 "SELECT {JOB_COLS} FROM cluster_fragment_index_jobs job
                   WHERE state = 'queued' AND not_before_ms <= $1
                     AND attempts < $2 AND fence < 9223372036854775807
+                    AND (index_retry_deadline_ms = 0 OR index_retry_deadline_ms > $1)
                     AND (target_node_id = '' OR target_node_id = $3)
                   ORDER BY job.created_at_ms - CASE
                       WHEN job.priority IN ('forced','foreground') THEN $4 ELSE 0 END,
@@ -2869,10 +3272,13 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 .txn(vec![(
                     "UPDATE cluster_fragment_index_jobs
                         SET state = 'running', owner_node_id = $1, fence = fence + 1,
-                            lease_expires_ms = $2, attempts = attempts + 1,
+                            lease_expires_ms = CASE WHEN index_retry_deadline_ms > 0
+                              THEN MIN($2, index_retry_deadline_ms) ELSE $2 END,
+                            attempts = attempts + 1,
                             last_error_code = NULL, updated_at_ms = $3
                       WHERE cache_key = $4 AND fence = $5 AND target_node_id = $6
                         AND state = 'queued' AND not_before_ms <= $3
+                        AND (index_retry_deadline_ms = 0 OR index_retry_deadline_ms > $3)
                         AND (target_node_id = '' OR target_node_id = $1)"
                         .to_owned(),
                     params!(
@@ -2893,7 +3299,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 candidate.state = "running".to_owned();
                 candidate.owner_node_id = node_id.to_owned();
                 candidate.fence += 1;
-                candidate.lease_expires_ms = lease_expires_ms;
+                candidate.lease_expires_ms = if candidate.index_retry_deadline_ms > 0 {
+                    lease_expires_ms.min(candidate.index_retry_deadline_ms)
+                } else {
+                    lease_expires_ms
+                };
                 candidate.attempts += 1;
                 candidate.updated_at_ms = now_ms;
                 return Ok(Some(candidate));
@@ -2918,6 +3328,21 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         self.execute(
             "UPDATE cluster_fragment_index_jobs
                 SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
+                    fence = fence + CASE WHEN state = 'running' THEN 1 ELSE 0 END,
+                    not_before_ms = $1, updated_at_ms = $1,
+                    last_error_code = 'index_retry_window_expired',
+                    attempt_errors = CASE WHEN attempt_errors = ''
+                      THEN 'index_retry_window_expired'
+                      ELSE attempt_errors || ',index_retry_window_expired' END
+              WHERE state IN ('queued','running')
+                AND index_retry_deadline_ms > 0
+                AND index_retry_deadline_ms <= $1",
+            params!(replacement.created_at_ms),
+        )
+        .await?;
+        self.execute(
+            "UPDATE cluster_fragment_index_jobs
+                SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                     not_before_ms = $1, updated_at_ms = $1,
                     last_error_code = CASE WHEN state = 'running'
                       THEN 'attempt_limit' ELSE 'queue_expired' END,
@@ -2925,7 +3350,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                               THEN (CASE WHEN attempt_errors = '' THEN 'lease_expired'
                                     ELSE attempt_errors || ',lease_expired' END)
                               ELSE attempt_errors END
-              WHERE (state = 'queued' AND created_at_ms < $2)
+              WHERE (state = 'queued' AND created_at_ms < $2
+                     AND index_retry_deadline_ms = 0)
                  OR (state = 'running' AND attempts >= $3
                    AND COALESCE(lease_expires_ms, 0) <= $1)",
             params!(replacement.created_at_ms, eligibility_cutoff, max_attempts),
@@ -2956,12 +3382,14 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
                     attempts = CASE
                       WHEN cluster_fragment_index_jobs.state = 'ready'
-                        OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                        OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                            AND cluster_fragment_index_jobs.attempts = 0)
                         OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                       ELSE cluster_fragment_index_jobs.attempts END,
                     attempt_errors = CASE
                       WHEN cluster_fragment_index_jobs.state = 'ready'
-                        OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                        OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                            AND cluster_fragment_index_jobs.attempts = 0)
                         OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
                       ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = excluded.not_before_ms,
@@ -2971,7 +3399,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                   WHERE cluster_fragment_index_jobs.state = 'ready'
                      OR (cluster_fragment_index_jobs.state = 'failed'
                        AND cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                       AND cluster_fragment_index_jobs.attempts <= $13)",
+                       AND cluster_fragment_index_jobs.attempts = 0
+                       AND cluster_fragment_index_jobs.index_retry_deadline_ms = 0)",
                 params!(
                     &replacement.cache_key,
                     replacement.file_id,
@@ -2984,8 +3413,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     &replacement.target_node_id,
                     replacement.not_before_ms,
                     replacement.created_at_ms,
-                    MAX_ACTIVE_JOBS,
-                    max_attempts
+                    MAX_ACTIVE_JOBS
                 ),
             )
             .await?
@@ -3004,10 +3432,13 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         Ok(self
             .execute(
                 "UPDATE cluster_fragment_index_jobs
-                    SET lease_expires_ms = $1, updated_at_ms = $2
+                    SET lease_expires_ms = CASE WHEN index_retry_deadline_ms > 0
+                          THEN MIN($1, index_retry_deadline_ms) ELSE $1 END,
+                        updated_at_ms = $2
                   WHERE cache_key = $3 AND owner_node_id = $4 AND fence = $5
                     AND target_node_id = $6
-                    AND state = 'running' AND lease_expires_ms > $2 AND $1 > $2",
+                    AND state = 'running' AND lease_expires_ms > $2 AND $1 > $2
+                    AND (index_retry_deadline_ms = 0 OR index_retry_deadline_ms > $2)",
                 params!(
                     lease_expires_ms,
                     now_ms,
@@ -3096,6 +3527,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         WHERE cache_key = $1 AND target_node_id = $11
                           AND state = 'running' AND owner_node_id = $9
                           AND fence = $12 AND lease_expires_ms > $13
+                          AND (index_retry_deadline_ms = 0 OR index_retry_deadline_ms > $13)
                           AND file_id = $2 AND source_size = $3 AND source_mtime = $4
                           AND source_sha256 = $5 AND pipeline_sha256 = $6
                           AND EXISTS (SELECT 1 FROM files current_file
@@ -3133,7 +3565,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                       WHERE EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
                         WHERE cache_key = $1 AND target_node_id = $6
                           AND state = 'running' AND owner_node_id = $2
-                          AND fence = $7 AND lease_expires_ms > $8)
+                          AND fence = $7 AND lease_expires_ms > $8
+                          AND (index_retry_deadline_ms = 0 OR index_retry_deadline_ms > $8))
                         AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
                           WHERE cache_key = $1 AND source_sha256 = $9
                             AND pipeline_sha256 = $10 AND blob_sha256 = $11 AND bytes = $3)
@@ -3168,6 +3601,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             AND current_job.state = 'running'
                             AND current_job.owner_node_id = $5 AND current_job.fence = $6
                             AND current_job.lease_expires_ms > $3
+                            AND (current_job.index_retry_deadline_ms = 0
+                              OR current_job.index_retry_deadline_ms > $3)
                             AND current_job.file_id = $7
                             AND current_job.source_size = $8
                             AND current_job.source_mtime = $9
@@ -3235,6 +3670,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                            AND current_job.state = 'running'
                            AND current_job.owner_node_id = $5 AND current_job.fence = $6
                            AND current_job.lease_expires_ms > $3
+                           AND (current_job.index_retry_deadline_ms = 0
+                             OR current_job.index_retry_deadline_ms > $3)
                            AND current_job.file_id = $7
                            AND current_job.source_size = $8
                            AND current_job.source_mtime = $9
@@ -3277,6 +3714,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                       WHERE cache_key = $2 AND target_node_id = $3
                         AND state = 'running' AND owner_node_id = $4
                         AND fence = $5 AND lease_expires_ms > $1
+                        AND (index_retry_deadline_ms = 0 OR index_retry_deadline_ms > $1)
                         AND EXISTS (SELECT 1 FROM files current_file
                           WHERE current_file.id = cluster_fragment_index_jobs.file_id
                             AND current_file.size = cluster_fragment_index_jobs.source_size
@@ -3353,7 +3791,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                       WHERE EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
                         WHERE cache_key = $1 AND target_node_id = $6
                           AND state = 'running' AND owner_node_id = $2
-                          AND fence = $7 AND lease_expires_ms > $8)
+                          AND fence = $7 AND lease_expires_ms > $8
+                          AND (index_retry_deadline_ms = 0 OR index_retry_deadline_ms > $8))
                         AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
                           WHERE cache_key = $1 AND source_sha256 = $9
                             AND pipeline_sha256 = $10 AND blob_sha256 = $11 AND bytes = $3)
@@ -3388,6 +3827,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             AND current_job.state = 'running'
                             AND current_job.owner_node_id = $5 AND current_job.fence = $6
                             AND current_job.lease_expires_ms > $3
+                            AND (current_job.index_retry_deadline_ms = 0
+                              OR current_job.index_retry_deadline_ms > $3)
                             AND current_job.file_id = $7
                             AND current_job.source_size = $8
                             AND current_job.source_mtime = $9
@@ -3455,6 +3896,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                            AND current_job.state = 'running'
                            AND current_job.owner_node_id = $5 AND current_job.fence = $6
                            AND current_job.lease_expires_ms > $3
+                           AND (current_job.index_retry_deadline_ms = 0
+                             OR current_job.index_retry_deadline_ms > $3)
                            AND current_job.file_id = $7
                            AND current_job.source_size = $8
                            AND current_job.source_mtime = $9
@@ -3497,6 +3940,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                       WHERE cache_key = $2 AND target_node_id = $3
                         AND state = 'running' AND owner_node_id = $4
                         AND fence = $5 AND lease_expires_ms > $1
+                        AND (index_retry_deadline_ms = 0 OR index_retry_deadline_ms > $1)
                         AND EXISTS (SELECT 1 FROM files current_file
                           WHERE current_file.id = cluster_fragment_index_jobs.file_id
                             AND current_file.size = cluster_fragment_index_jobs.source_size
@@ -3572,6 +4016,89 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     target_node_id,
                     node_id,
                     fence
+                ),
+            )
+            .await?
+            == 1)
+    }
+
+    async fn fail_cluster_fragment_index_typed(
+        &self,
+        failure: &ClusterFragmentIndexFailure,
+    ) -> Result<bool, StoreError> {
+        let Some(current) = self
+            .cluster_fragment_index_job(&failure.cache_key, &failure.target_node_id)
+            .await?
+        else {
+            return Ok(false);
+        };
+        if current.state != "running"
+            || current.owner_node_id != failure.node_id
+            || current.fence != failure.fence
+            || current.lease_expires_ms <= failure.now_ms
+        {
+            return Ok(false);
+        }
+        let max_attempts = configured_max_attempts(self).await?;
+        let decision = crate::content_analysis::index_retry_decision(
+            failure.code,
+            failure.transient_allowlisted,
+            u32::try_from(current.attempts.max(0)).unwrap_or(u32::MAX),
+            u32::try_from(max_attempts.max(1)).unwrap_or(u32::MAX),
+            failure.now_ms,
+            current.index_retry_deadline_ms,
+        );
+        let mut diagnostic = failure.diagnostic.clone();
+        diagnostic.version = 1;
+        diagnostic.code = failure.code.as_str().to_owned();
+        diagnostic.retryable = decision.retryable;
+        diagnostic.claim_fence = failure.fence;
+        diagnostic.attempt = current.attempts;
+        diagnostic.recorded_at_ms = failure.now_ms;
+        let diagnostic = diagnostic.encode_bounded().map_err(StoreError::Task)?;
+        let terminal = if current.attempts >= max_attempts {
+            "attempt_limit"
+        } else {
+            decision
+                .terminal_code
+                .map(|code| code.as_str())
+                .unwrap_or_else(|| failure.code.as_str())
+        };
+        Ok(self
+            .execute(
+                "UPDATE cluster_fragment_index_jobs
+                    SET state = $1, owner_node_id = NULL, lease_expires_ms = NULL,
+                        last_error_code = $2,
+                        attempt_errors = CASE WHEN attempt_errors = ''
+                              THEN $3 ELSE attempt_errors || ',' || $3 END,
+                        not_before_ms = $4, updated_at_ms = $5,
+                        index_retry_deadline_ms = $6, index_diagnostic_json = $7
+                  WHERE cache_key = $8 AND target_node_id = $9
+                    AND state = 'running' AND owner_node_id = $10
+                    AND fence = $11 AND lease_expires_ms > $5
+                    AND attempts = $12 AND index_retry_deadline_ms = $13
+                    AND EXISTS (SELECT 1 FROM files current_file
+                      WHERE current_file.id = cluster_fragment_index_jobs.file_id
+                        AND current_file.size = cluster_fragment_index_jobs.source_size
+                        AND current_file.mtime = cluster_fragment_index_jobs.source_mtime)",
+                params!(
+                    if decision.retryable {
+                        "queued"
+                    } else {
+                        "failed"
+                    },
+                    terminal,
+                    failure.code.as_str(),
+                    decision.next_attempt_at_ms,
+                    failure.now_ms,
+                    decision.retry_deadline_ms,
+                    diagnostic,
+                    &failure.cache_key,
+                    &failure.target_node_id,
+                    &failure.node_id,
+                    failure.fence,
+                    current.attempts,
+                    current.index_retry_deadline_ms
                 ),
             )
             .await?

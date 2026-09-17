@@ -164,11 +164,22 @@ pub struct FragmentIndexOutcome {
     /// on this identity. [`i64::MAX`] for a terminal refusal.
     pub next_attempt_at_ms: i64,
     pub updated_at_ms: i64,
+    pub typed_code: Option<crate::content_analysis::IndexFailureCode>,
+    pub typed_retryable: Option<bool>,
+    pub retry_deadline_ms: i64,
+    pub policy_revision: u32,
+    pub terminal_reason: Option<String>,
+    pub diagnostic: Option<crate::content_analysis::IndexDiagnostic>,
 }
 
 impl FragmentIndexOutcome {
     /// Whether the indexer may spend another pass on this identity.
     pub fn is_due(&self, now_ms: i64) -> bool {
+        if let Some(retryable) = self.typed_retryable {
+            return retryable
+                && now_ms >= self.next_attempt_at_ms
+                && (self.retry_deadline_ms == 0 || now_ms < self.retry_deadline_ms);
+        }
         self.refusal.is_retryable() && now_ms >= self.next_attempt_at_ms
     }
 }

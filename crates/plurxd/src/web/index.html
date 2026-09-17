@@ -15447,8 +15447,16 @@ function analysisErrorInfo(code){
     queue_expired:["Waited too long for a slot","The job sat queued past its eligibility window without any node claiming it.","Check that the target node is up and indexing is enabled there, then retry.","warn"],
     node_local_refusal:["Returned by the node that held it","This node could not reach the source, so it handed the claim back without spending a retry.","No action: another node with the mount will take it. Persisting means no node can read the file.","warn"],
     attempt_limit:["Retry limit reached","Repeated source or store failures exhausted the automatic retry budget.","Every attempt is listed below; resolve what those codes name, then retry manually.","bad"],
+    index_budget_exceeded:["Index build timed out","The selected-video index pass exceeded its per-file budget.","The bounded retry cycle will try again at the time shown below.","warn"],
+    index_probe_timeout:["Video timing probe timed out","The bounded metadata probe could not establish the selected video duration in time.","The bounded retry cycle will try again at the time shown below.","warn"],
+    index_source_io:["Source read failed","The held source could not be read while building the video index.","Transient I/O failures retry automatically; terminal failures need storage inspection.","bad"],
+    index_process_failed:["Index process failed","The index process did not exit successfully; its bounded exit detail is shown in Technical details.","Transient resource failures retry automatically; other exits need server-log inspection.","bad"],
+    index_video_shortfall:["Selected video ended early","The process exited successfully, but indexed video coverage did not reach the selected video duration.","Inspect the expected and covered durations before starting a new generation.","bad"],
+    index_completion_unverified:["Video completion could not be verified","Selected-stream metadata or timeline semantics could not prove that the output covered the complete video.","Review the timing provenance; this is unavailable evidence, not proof of damaged media.","bad"],
+    index_output_malformed:["Index output was malformed","The process exited successfully, but its fragment stream was incomplete or invalid.","Inspect the bounded process diagnostics before retrying.","bad"],
+    index_retry_window_expired:["Index retry window ended","The fixed seven-day retry cycle ended before another safe attempt could complete.","Start an explicit administrator generation after resolving the underlying attempt history.","bad"],
     unsupported:["VOD analysis is not supported","The file’s codec or fragment structure cannot produce a safe VOD HLS index.","Live HLS can be used only when live recovery is enabled in Playback settings; rebuilding will not help unless the source changes.","bad"],
-    truncated:["Index output was incomplete","Analysis ended before it could describe the complete file timeline.","Check the source for damage or truncation, then retry after replacing it.","bad"],
+    truncated:["Legacy index output was incomplete","The original record did not preserve enough detail to identify why analysis stopped early.","Preview the video-completion repair to resolve the exact pipeline without replacing successful siblings.","bad"],
     encode_failed:["Index encoding failed","The index was built but could not be serialized into the cache artifact.","Inspect server logs and retry; repeated failures need a server fix.","bad"],
     local_publish_failed:["Index could not be published","The completed artifact could not be written to this node’s index cache.","Check free space and permissions on the cache directory, then retry.","bad"],
   };
@@ -15623,6 +15631,7 @@ function openAnalysisSettings(){
   else location.hash="#/settings/analysis";
 }
 function analysisDiagnosticText(row,names){
+  const diagnostic=row.index_diagnostic||{};
   const trigger=row.request_id?(row.force_rebuild?"Operator rebuild":"Operator"):"Background";
   return [
     `Title: ${row.title||`File ${row.file_id}`}`,
@@ -15639,6 +15648,15 @@ function analysisDiagnosticText(row,names){
     `Attempts: ${row.attempts||0}`,
     ...analysisErrors(row).map(error=>`${error.stage} error: ${error.code}`),
     analysisAttemptHistory(row).length?`Attempt history: ${analysisAttemptHistory(row).join(", ")}`:null,
+    row.index_retry_deadline_ms?`Retry deadline: ${new Date(row.index_retry_deadline_ms).toISOString()}`:null,
+    diagnostic.selected_stream!=null?`Selected stream: ${diagnostic.selected_stream}`:null,
+    diagnostic.expectation_provenance?`Timing provenance: ${diagnostic.expectation_provenance}`:null,
+    diagnostic.expected_ms!=null?`Expected video: ${diagnostic.expected_ms} ms`:null,
+    diagnostic.covered_ms!=null?`Covered video: ${diagnostic.covered_ms} ms`:null,
+    diagnostic.elapsed_ms!=null?`Elapsed / budget: ${diagnostic.elapsed_ms} / ${diagnostic.budget_ms??"?"} ms`:null,
+    diagnostic.output_bytes!=null?`Index output: ${diagnostic.output_bytes} bytes`:null,
+    diagnostic.exit_category?`Process exit: ${diagnostic.exit_category}`:null,
+    Array.isArray(diagnostic.stderr_tail)&&diagnostic.stderr_tail.length?`stderr tail:\n${diagnostic.stderr_tail.join("\n")}`:null,
   ].filter(Boolean).join("\n");
 }
 async function copyAnalysisDetails(key,btn){
@@ -15676,19 +15694,20 @@ async function reopenFailedAnalysis(btn){
   const label=btn&&btn.textContent;
   if(btn){btn.disabled=true;btn.textContent="Checking…";}
   try{
-    const preview=await api("/analysis/reopen",{method:"POST",body:{dry_run:true,limit:500}});
-    const files=preview.files||0, rows=preview.reopened||0;
+    const preview=await api("/analysis/reopen",{method:"POST",body:{dry_run:true,limit:500,component:"fragment_index",repair_revision:"video-completion-v1"}});
+    const eligible=(preview.candidates||[]).filter(row=>row.eligibility==="eligible");
+    const files=new Set(eligible.map(row=>row.file_id)).size, rows=eligible.length;
     // Nothing reopenable is the normal answer once the queue has recovered:
     // a file whose successor is queued or already built is not offered again,
     // which is what makes this safe to press twice.
-    if(!files){ toast("Nothing left to reopen"); return; }
+    if(!files){ toast("No eligible legacy incomplete indexes found"); return; }
     const more=preview.scan_truncated?" There is more waiting than one run can take; run it again afterwards.":"";
     if(!confirm(`Reopen ${rows} analysis ${rows===1?'item':'items'} across ${files} ${files===1?'file':'files'}?${more}`)) return;
     if(btn) btn.textContent="Reopening…";
-    const done=await api("/analysis/reopen",{method:"POST",body:{dry_run:false,limit:500}});
-    const unavailable=done.skipped_unavailable||0;
-    const held=done.stopped_at_headroom?", stopped early to leave queue room":"";
-    toast(`${done.reopened||0} reopened${unavailable?`, ${unavailable} no longer requestable`:""}${held}`);
+    const done=await api("/analysis/reopen",{method:"POST",body:{dry_run:false,limit:500,component:"fragment_index",repair_revision:"video-completion-v1",candidates:eligible}});
+    const created=(done.results||[]).filter(row=>row.status==="created").length;
+    const skipped=(done.results||[]).length-created;
+    toast(`${created} repair ${created===1?'generation':'generations'} queued${skipped?`, ${skipped} changed or already existed`:""}`);
     await renderAnalysis(PAGE_RENDER_GENERATION,true);
   }catch(error){ toast(error.message||"Couldn’t reopen analysis"); }
   finally{ if(btn&&document.body.contains(btn)){btn.disabled=false;btn.textContent=label;} }
@@ -15748,6 +15767,13 @@ function paintAnalysis(snapshot){
       ["Priority",priorityLabel],["Trigger",triggerLabel],
       ["Source size",row.source_size!=null?fmtBytes(row.source_size):null],
       ["Pipeline",row.pipeline_version],
+      ["Retry deadline",row.index_retry_deadline_ms?new Date(row.index_retry_deadline_ms).toLocaleString():null],
+      ["Selected video stream",row.index_diagnostic&&row.index_diagnostic.selected_stream],
+      ["Timing provenance",row.index_diagnostic&&row.index_diagnostic.expectation_provenance],
+      ["Video coverage",row.index_diagnostic&&row.index_diagnostic.covered_ms!=null?`${row.index_diagnostic.covered_ms} / ${row.index_diagnostic.expected_ms??"?"} ms`:null],
+      ["Index output",row.index_diagnostic&&row.index_diagnostic.output_bytes!=null?fmtBytes(row.index_diagnostic.output_bytes):null],
+      ["Elapsed / budget",row.index_diagnostic&&row.index_diagnostic.elapsed_ms!=null?`${row.index_diagnostic.elapsed_ms} / ${row.index_diagnostic.budget_ms??"?"} ms`:null],
+      ["Process exit",row.index_diagnostic&&row.index_diagnostic.exit_category],
     ].filter(([,value])=>value!=null&&value!=="");
     const errorHtml=analysisErrors(row).map(error=>analysisErrorHtml(error.code,error.stage)).join("");
     return `<tr>
@@ -15773,7 +15799,7 @@ function paintAnalysis(snapshot){
     <div class="analysis-sub">Summary metrics include all active work and up to ${counts.terminal_window||8192} recent terminal worker results. The selected filter count below is exact across retained history.</div>
     <div class="analysis-controls"><div class="analysis-search"><input id="analysis-search" data-analysis-focus="search" aria-label="Search analysis work" placeholder="Search title, file, node id, or error…" value="${esc(ANALYSIS_VIEW.query)}" oninput="setAnalysisQuery(this.value)"></div>
       <div class="analysis-filters">${filterButton("all","All")}${filterButton("working","Unfinished")}${filterButton("attention","Attention")}${filterButton("expected","Expected")}${filterButton("ready","Ready")}</div>
-      ${ANALYSIS_VIEW.filter==="attention"&&pageRows.some(analysisCanRetry)?`<button class="ghost sm" data-analysis-focus="retry-page" onclick="retryFailedAnalysis()">Retry this page</button><button class="ghost sm" data-analysis-focus="reopen-all" onclick="reopenFailedAnalysis(this)">Reopen everything failed…</button>`:`<span></span>`}</div>
+      ${ANALYSIS_VIEW.filter==="attention"&&pageRows.some(analysisCanRetry)?`<button class="ghost sm" data-analysis-focus="retry-page" onclick="retryFailedAnalysis()">Retry this page</button><button class="ghost sm" data-analysis-focus="reopen-all" onclick="reopenFailedAnalysis(this)">Repair legacy incomplete indexes…</button>`:`<span></span>`}</div>
     ${analysisAttentionGroups(pageRows)}
     ${rows?`<div class="analysis-table-wrap"><table class="analysis-table"><thead><tr><th scope="col">File</th><th scope="col">Analysis</th><th scope="col">Node / updated</th><th scope="col">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`
       :`<div class="empty">${ANALYSIS_VIEW.query||ANALYSIS_VIEW.filter!=="all"?"No analysis work matches these filters.":"Nothing has been queued yet. Use Analyze now on a video’s detail page."}</div>`}
@@ -19387,11 +19413,22 @@ function hevcSampleEntryAdmissionCard(){
       <p class="devcheck-note">Advisory only. Unmet or unknown rows do not gate the feature, rewrite capability claims, or override the server's typed refusal.</p>
       </div></details>`);
 }
+function contentAnalysisEnableCard(settings,readiness){
+  return setCard(`${cardHead("Selected-video content analysis","Build durable VOD indexes against the exact video stream FFmpeg maps.",settings.vod_index_cluster_cache?`<span class="pill ok">enabled</span>`:`<span class="pill">disabled</span>`)}
+      ${togRow("ca-enabled","Enable durable content analysis","This saved choice is authoritative. The checks below explain safe rollout conditions and never disable or override it.",settings.vod_index_cluster_cache)}
+      <details class="setdetails" open><summary>Safe enablement and current readiness</summary><div class="setdetails-body">
+      ${devReq(readiness,"content_analysis_repair","media_tools","Measured media tools","FFmpeg builds the video-only index and FFprobe resolves timing for exactly the mapped stream.")}
+      ${devReq(readiness,"content_analysis_repair","durable_queue","Durable analysis authority","The queue must persist typed failures, retry deadlines and bounded diagnostics across restarts and nodes.")}
+      ${devReq(readiness,"content_analysis_repair","source_fencing","Held-source fencing","The metadata expectation and long index pass must describe the same attested source object.")}
+      ${devReq(readiness,"content_analysis_repair","compatibility_inventory","Successful-file timing sample","Review a bounded compatibility sample before fleet rollout so valid files without selected-stream timing are visible.")}
+      <p class="devcheck-note">Advisory only. Unmet, unavailable or unobservable rows do not gate this switch. Existing successful indexes remain usable while the queue is paused.</p>
+      </div></details><div class="err" id="caerr" role="alert"></div>${setCardFoot("saveContentAnalysisDeveloper")}`);
+}
 function uiEnableAdvisory(){
   const browser=typeof CSS!=='undefined'&&CSS.supports('display','grid')&&typeof fetch==='function';
   const libs=SETTINGS_DATA&&SETTINGS_DATA.libs;
   const row=(title,state,detail)=>`<div><strong>${esc(title)} · ${esc(state)}</strong><small>${esc(detail)}</small></div>`;
-  return `<section class="card" id="ui-enable"><h2>Enable</h2><p>The updated search and activity layouts are enabled in this build. They need no rollout flag.</p><div class="enable-advisory">${row('Browser support',browser?'Met':'Not confirmed','Responsive layout and API support. This observation is advisory.')}${row('Signed-in account',ME?'Met':'Not confirmed','Watch state and recording visibility use the signed-in account.')}${row('Library data',Array.isArray(libs)?libs.length?'Available':'No libraries configured':'Not loaded','Readable files and accurate metadata make continuation and preview useful. Missing data is shown in context.')}${row('Playback and recording','Your saved choices','Use the controls below to enable recording, channel playback or quality handoff. Readiness results never override your choice.')}</div><p class="hint">Advisory only: unmet or unknown checks do not hide features or disable enable switches. Existing authorization, file availability and operational safety rules still apply.</p><nav class="watch-browse" aria-label="Enable controls"><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-recording')?.scrollIntoView({behavior:'smooth',block:'start'})">Recording ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-channels')?.scrollIntoView({behavior:'smooth',block:'start'})">Library channels ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-quality')?.scrollIntoView({behavior:'smooth',block:'start'})">Quality handoff ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-hevc-sample-entry')?.scrollIntoView({behavior:'smooth',block:'start'})">HEVC admission ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-source-probe')?.scrollIntoView({behavior:'smooth',block:'start'})">Source verification ↓</a></nav></section>`;
+  return `<section class="card" id="ui-enable"><h2>Enable</h2><p>The updated search and activity layouts are enabled in this build. They need no rollout flag.</p><div class="enable-advisory">${row('Browser support',browser?'Met':'Not confirmed','Responsive layout and API support. This observation is advisory.')}${row('Signed-in account',ME?'Met':'Not confirmed','Watch state and recording visibility use the signed-in account.')}${row('Library data',Array.isArray(libs)?libs.length?'Available':'No libraries configured':'Not loaded','Readable files and accurate metadata make continuation and preview useful. Missing data is shown in context.')}${row('Playback and recording','Your saved choices','Use the controls below to enable recording, channel playback or quality handoff. Readiness results never override your choice.')}</div><p class="hint">Advisory only: unmet or unknown checks do not hide features or disable enable switches. Existing authorization, file availability and operational safety rules still apply.</p><nav class="watch-browse" aria-label="Enable controls"><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-analysis')?.scrollIntoView({behavior:'smooth',block:'start'})">Content analysis ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-recording')?.scrollIntoView({behavior:'smooth',block:'start'})">Recording ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-channels')?.scrollIntoView({behavior:'smooth',block:'start'})">Library channels ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-quality')?.scrollIntoView({behavior:'smooth',block:'start'})">Quality handoff ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-hevc-sample-entry')?.scrollIntoView({behavior:'smooth',block:'start'})">HEVC admission ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-source-probe')?.scrollIntoView({behavior:'smooth',block:'start'})">Source verification ↓</a></nav></section>`;
 }
 // Source verification compatibility.
 //
@@ -19526,6 +19563,7 @@ function developerPanel(settings,readiness){
       </div></details><div class="err" id="lcdeverr" role="alert"></div>${setCardFoot("saveLibraryChannelsDeveloper")}`);
   return `${setHead("Developer","Compatibility controls and device diagnostics.")}
       ${destinations}${uiEnableAdvisory()}
+      <div class="setsection" id="enable-analysis"><h2>Content analysis</h2><p>Explicit enablement for durable selected-video indexing with advisory rollout evidence.</p></div>${contentAnalysisEnableCard(settings,readiness)}
       <div class="setsection" id="enable-recording"><h2>Recording</h2><p>Explicit enablement for capturing the tuner to a disk, with advisory deployment facts.</p></div>${dvrCard(settings,readiness)}
       <div class="setsection" id="enable-channels"><h2>Library channels</h2><p>Explicit playback enablement with advisory deployment facts.</p></div>${libraryChannels}
       <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Explicit server and browser enablement with advisory safety evidence.</p></div>${preparedQualityCard(settings,readiness)}${browser}
@@ -21355,6 +21393,15 @@ async function saveDeveloper(btn){
       playback_control_protocol_v1:document.getElementById("pcpv1").checked}}));
     toast("Developer settings saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
+async function saveContentAnalysisDeveloper(btn){
+  const err=document.getElementById("caerr"); if(err) err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
+      vod_index_cluster_cache:document.getElementById("ca-enabled").checked}}));
+    toast("Content analysis setting saved"); if(btn) setCardSaved(btn);
+  }catch(error){ if(err) err.textContent=error.message; if(btn) btn.disabled=false; }
 }
 async function saveWindowsCompatibility(btn){
   const err=document.getElementById("winerr"); err.textContent="";

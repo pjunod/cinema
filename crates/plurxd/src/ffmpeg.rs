@@ -356,6 +356,34 @@ pub async fn ffmpeg_build() -> String {
 /// same-second pathname replacement from pairing fresh bytes with stale
 /// geometry, tracks, cadence, or color facts.
 pub(crate) async fn held_source_probe_json(source: &std::fs::File) -> Result<String, String> {
+    held_source_probe_json_with_limits(
+        source,
+        ENGINE_PROBE_TIMEOUT,
+        ENGINE_PROBE_MAX_BYTES,
+        "engine probe",
+    )
+    .await
+}
+
+/// The content-index probe has its own budget. A metadata read on a slow held
+/// source may legitimately take longer than an executable capability probe,
+/// while its JSON is expected to remain far smaller.
+pub(crate) async fn held_source_index_probe_json(source: &std::fs::File) -> Result<String, String> {
+    held_source_probe_json_with_limits(
+        source,
+        Duration::from_secs(30),
+        1024 * 1024,
+        "index metadata probe",
+    )
+    .await
+}
+
+async fn held_source_probe_json_with_limits(
+    source: &std::fs::File,
+    timeout: Duration,
+    max_bytes: u64,
+    label: &'static str,
+) -> Result<String, String> {
     #[cfg(windows)]
     {
         let held_identity = plurx_core::fs_secure::std_file_identity(source)
@@ -381,7 +409,7 @@ pub(crate) async fn held_source_probe_json(source: &std::fs::File) -> Result<Str
             "-show_chapters",
         ]);
         command.arg(&source_path);
-        let output = bounded_command_output(command).await?;
+        let output = bounded_command_output_with_limits(command, timeout, max_bytes, label).await?;
         if plurx_core::fs_secure::std_file_identity(source)
             .map_err(|error| format!("re-reading held source identity: {error}"))?
             != held_identity
@@ -413,7 +441,7 @@ pub(crate) async fn held_source_probe_json(source: &std::fs::File) -> Result<Str
             "-show_chapters",
             "/dev/fd/3",
         ]);
-        let output = bounded_command_output(command).await?;
+        let output = bounded_command_output_with_limits(command, timeout, max_bytes, label).await?;
         String::from_utf8(output.stdout)
             .map_err(|error| format!("ffprobe returned non-UTF-8 JSON: {error}"))
     }
@@ -1351,8 +1379,18 @@ async fn bounded_command_output(command: tokio::process::Command) -> Result<Boun
 }
 
 async fn bounded_command_output_with_timeout(
+    command: tokio::process::Command,
+    timeout: Duration,
+) -> Result<BoundedOutput, String> {
+    bounded_command_output_with_limits(command, timeout, ENGINE_PROBE_MAX_BYTES, "engine probe")
+        .await
+}
+
+async fn bounded_command_output_with_limits(
     mut command: tokio::process::Command,
     timeout: Duration,
+    max_bytes: u64,
+    label: &'static str,
 ) -> Result<BoundedOutput, String> {
     command
         .stdin(std::process::Stdio::null())
@@ -1371,8 +1409,11 @@ async fn bounded_command_output_with_timeout(
         .ok_or_else(|| "engine probe has no stderr".to_owned())?;
     let collect = async move {
         let _child_job = child_job;
-        let (stdout, stderr, status) =
-            tokio::join!(read_bounded(stdout), read_bounded(stderr), child.wait());
+        let (stdout, stderr, status) = tokio::join!(
+            read_bounded_with_limit(stdout, max_bytes, label),
+            read_bounded_with_limit(stderr, max_bytes, label),
+            child.wait()
+        );
         let status = status.map_err(|error| error.to_string())?;
         if !status.success() {
             return Err(format!("engine probe exited {status}"));
@@ -1384,21 +1425,30 @@ async fn bounded_command_output_with_timeout(
     };
     tokio::time::timeout(timeout, collect)
         .await
-        .map_err(|_| format!("engine probe timed out after {} seconds", timeout.as_secs()))?
+        .map_err(|_| format!("{label} timed out after {} seconds", timeout.as_secs()))?
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 async fn read_bounded(input: impl AsyncRead + Unpin) -> Result<Vec<u8>, String> {
+    read_bounded_with_limit(input, ENGINE_PROBE_MAX_BYTES, "engine probe").await
+}
+
+async fn read_bounded_with_limit(
+    input: impl AsyncRead + Unpin,
+    max_bytes: u64,
+    label: &'static str,
+) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     input
-        .take(ENGINE_PROBE_MAX_BYTES + 1)
+        .take(max_bytes + 1)
         .read_to_end(&mut bytes)
         .await
         .map_err(|error| error.to_string())?;
-    if bytes.len() as u64 > ENGINE_PROBE_MAX_BYTES {
+    if bytes.len() as u64 > max_bytes {
         // Name the bound. The last time this fired it read as "could not probe
         // ffmpeg", which sent three people looking for a missing binary.
         return Err(format!(
-            "engine probe exceeded its output bound of {ENGINE_PROBE_MAX_BYTES} bytes"
+            "{label} exceeded its output bound of {max_bytes} bytes"
         ));
     }
     Ok(bytes)

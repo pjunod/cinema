@@ -755,14 +755,17 @@ pub use fragment_index_cluster::{
     cluster_fragment_index_key, cluster_fragment_index_pipeline_digest,
     decode_cluster_fragment_index_blob, encode_cluster_fragment_index_blob, stored_switch,
     AnalysisAttempt, AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter,
-    AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisRequest,
-    AnalysisStatusSummary, ClusterFragmentIndexArtifact, ClusterFragmentIndexJob,
+    AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisIndexRepairCandidate,
+    AnalysisIndexRepairResult, AnalysisRequest, AnalysisStatusSummary,
+    ClusterFragmentIndexArtifact, ClusterFragmentIndexFailure, ClusterFragmentIndexJob,
     ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
-    NewAnalysisRequest, NewClusterFragmentIndexJob, DEFAULT_ANALYSIS_BACKOFF_BASE_SECS,
-    DEFAULT_ANALYSIS_BACKOFF_MAX_SECS, DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS,
-    DEFAULT_SUBTITLE_WINDOW_SECS, MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS,
-    MAX_ANALYSIS_BACKOFF_MAX_SECS, MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS,
-    MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES, MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS,
+    NewAnalysisRequest, NewClusterFragmentIndexJob, CONTENT_ANALYSIS_REPAIR_HEADROOM,
+    CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES, CONTENT_ANALYSIS_REPAIR_REVISION,
+    DEFAULT_ANALYSIS_BACKOFF_BASE_SECS, DEFAULT_ANALYSIS_BACKOFF_MAX_SECS,
+    DEFAULT_ANALYSIS_LEASE_SECS, DEFAULT_ANALYSIS_MAX_ATTEMPTS, DEFAULT_SUBTITLE_WINDOW_SECS,
+    MAX_ACTIVE_ANALYSIS_REQUESTS, MAX_ANALYSIS_BACKOFF_BASE_SECS, MAX_ANALYSIS_BACKOFF_MAX_SECS,
+    MAX_ANALYSIS_LEASE_SECS, MAX_ANALYSIS_MAX_ATTEMPTS, MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES,
+    MAX_SUBTITLE_WINDOW_SECS, MIN_SUBTITLE_WINDOW_SECS,
 };
 pub use publication::{PublicationFence, PublicationStore};
 pub use sqlite::{SqliteStore, SQLITE_SCHEMA_VERSION};
@@ -4580,6 +4583,18 @@ pub trait FragmentIndexStore: Send + Sync + 'static {
         source: &crate::segplan::SourceIdentity,
         refusal: crate::segplan::IndexRefusal,
         reason: &str,
+    ) -> Result<crate::segplan::FragmentIndexOutcome, StoreError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn record_fragment_index_typed_outcome(
+        &self,
+        file_id: i64,
+        source: &crate::segplan::SourceIdentity,
+        code: crate::content_analysis::IndexFailureCode,
+        transient_allowlisted: bool,
+        reason: &str,
+        rows: u32,
+        diagnostic: &crate::content_analysis::IndexDiagnostic,
     ) -> Result<crate::segplan::FragmentIndexOutcome, StoreError>;
 
     /// The recorded refusal for this identity, if it still describes this

@@ -168,6 +168,55 @@ CREATE INDEX IF NOT EXISTS analysis_requests_terminal_identity
     WHERE state IN ('ready', 'failed', 'cancelled') AND force_rebuild = 0;
 "#;
 
+/// Durable content-analysis diagnostics, retry-cycle fencing, exact request
+/// identity, and once-per-source repair receipts.
+pub const CONTENT_ANALYSIS_REPAIR_SCHEMA: &str = r#"
+ALTER TABLE cluster_fragment_index_jobs
+    ADD COLUMN index_retry_deadline_ms INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE cluster_fragment_index_jobs
+    ADD COLUMN index_diagnostic_json TEXT NOT NULL DEFAULT '';
+CREATE TABLE analysis_index_repairs (
+    repair_revision       TEXT NOT NULL,
+    file_id               INTEGER NOT NULL,
+    source_size           INTEGER NOT NULL,
+    source_mtime          INTEGER NOT NULL,
+    source_sha256         TEXT NOT NULL,
+    pipeline_sha256       TEXT NOT NULL,
+    target_node_id        TEXT NOT NULL,
+    video_identity        TEXT NOT NULL,
+    predecessor_cache_key TEXT NOT NULL,
+    predecessor_fence     INTEGER NOT NULL,
+    successor_request_id  TEXT NOT NULL,
+    created_at_ms         INTEGER NOT NULL,
+    PRIMARY KEY (
+      repair_revision, file_id, source_size, source_mtime, source_sha256,
+      pipeline_sha256, target_node_id
+    )
+) STRICT;
+CREATE INDEX analysis_index_repairs_successor
+    ON analysis_index_repairs(successor_request_id);
+CREATE TRIGGER analysis_index_repairs_delete_source AFTER DELETE ON files
+BEGIN
+    DELETE FROM analysis_index_repairs WHERE file_id = OLD.id;
+END;
+DROP INDEX IF EXISTS analysis_requests_one_active_forced_successor;
+DROP INDEX IF EXISTS analysis_requests_one_active_source;
+CREATE UNIQUE INDEX analysis_requests_one_active_source
+    ON analysis_requests(file_id, source_size, source_mtime, component,
+                         pipeline_version, video_identity,
+                         requested_generation, target_node_id)
+    WHERE state IN ('queued', 'running', 'submitted');
+CREATE UNIQUE INDEX analysis_requests_one_active_forced_skip_successor
+    ON analysis_requests(file_id, source_size, source_mtime, component)
+    WHERE component = 'skip_markers' AND force_rebuild = 1
+      AND state IN ('queued', 'running', 'submitted');
+CREATE UNIQUE INDEX analysis_requests_one_active_forced_fragment_successor
+    ON analysis_requests(file_id, source_size, source_mtime, component,
+                         pipeline_version, video_identity)
+    WHERE component = 'fragment_index' AND force_rebuild = 1
+      AND state IN ('queued', 'running', 'submitted');
+"#;
+
 /// v41/v22 widens the already-durable request identity to the replicated
 /// semantic component. A table rebuild is required because SQLite cannot
 /// alter a CHECK constraint in place.
@@ -577,6 +626,9 @@ ALTER TABLE analysis_requests
 "#;
 
 pub const MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES: usize = 32 * 1024 * 1024;
+pub const CONTENT_ANALYSIS_REPAIR_REVISION: &str = "video-completion-v1";
+pub const CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES: i64 = 1_500;
+pub const CONTENT_ANALYSIS_REPAIR_HEADROOM: i64 = 512;
 pub const DEFAULT_ANALYSIS_MAX_ATTEMPTS: i64 = 5;
 pub const MAX_ANALYSIS_MAX_ATTEMPTS: i64 = 20;
 pub const DEFAULT_ANALYSIS_LEASE_SECS: i64 = 60;
@@ -744,6 +796,8 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
          COALESCE(request.last_error_code, '') AS request_error_code,
          CASE WHEN request.cache_rank = 1 THEN COALESCE(job.last_error_code, '') ELSE '' END AS job_error_code,
          CASE WHEN request.cache_rank = 1 THEN COALESCE(job.attempt_errors, '') ELSE '' END AS job_attempt_errors,
+         CASE WHEN request.cache_rank = 1 THEN COALESCE(job.index_retry_deadline_ms, 0) ELSE 0 END AS index_retry_deadline_ms,
+         CASE WHEN request.cache_rank = 1 THEN COALESCE(job.index_diagnostic_json, '') ELSE '' END AS index_diagnostic_json,
          request.created_at_ms AS created_at_ms,
          CASE WHEN request.cache_rank = 1 AND COALESCE(job.updated_at_ms, 0) > request.updated_at_ms
               THEN job.updated_at_ms ELSE request.updated_at_ms END AS updated_at_ms,
@@ -781,6 +835,8 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
          job.attempts AS attempts, job.not_before_ms AS not_before_ms,
          '' AS request_error_code, COALESCE(job.last_error_code, '') AS job_error_code,
          COALESCE(job.attempt_errors, '') AS job_attempt_errors,
+         job.index_retry_deadline_ms AS index_retry_deadline_ms,
+         job.index_diagnostic_json AS index_diagnostic_json,
          job.created_at_ms AS created_at_ms, job.updated_at_ms AS updated_at_ms,
          SUBSTR(job.pipeline_sha256, 1, 12) AS pipeline_version,
          job.cache_key AS requested_generation,
@@ -963,6 +1019,23 @@ pub struct ClusterFragmentIndexJob {
     /// itself resets. `last_error_code` is the terminal code the UI and the
     /// lifecycle triggers key on — this is the history behind it.
     pub attempt_errors: String,
+    /// Fixed seven-day boundary for a typed retry cycle. Zero means no
+    /// new-policy cycle has started.
+    pub index_retry_deadline_ms: i64,
+    /// Bounded versioned diagnostic stored by the same fenced transition.
+    pub index_diagnostic_json: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClusterFragmentIndexFailure {
+    pub cache_key: String,
+    pub target_node_id: String,
+    pub node_id: String,
+    pub fence: i64,
+    pub code: crate::content_analysis::IndexFailureCode,
+    pub transient_allowlisted: bool,
+    pub diagnostic: crate::content_analysis::IndexDiagnostic,
+    pub now_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1017,6 +1090,60 @@ pub struct AnalysisRequest {
     pub cancel_requested: bool,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalysisIndexRepairCandidate {
+    pub candidate_id: String,
+    pub repair_revision: String,
+    pub predecessor_cache_key: String,
+    pub predecessor_fence: i64,
+    pub predecessor_updated_at_ms: i64,
+    pub file_id: i64,
+    pub source_size: i64,
+    pub source_mtime: i64,
+    pub source_sha256: String,
+    pub pipeline_sha256: String,
+    pub pipeline_version: String,
+    pub video_identity: String,
+    pub target_node_id: String,
+    pub cause: String,
+    pub eligibility: String,
+    pub successor_request_id: String,
+}
+
+impl AnalysisIndexRepairCandidate {
+    pub fn recompute_id(&self) -> String {
+        let mut digest = Sha256::new();
+        digest.update(b"plurx/content-analysis-repair-candidate\0");
+        update_field(&mut digest, self.repair_revision.as_bytes());
+        update_field(&mut digest, self.predecessor_cache_key.as_bytes());
+        update_field(&mut digest, self.file_id.to_string().as_bytes());
+        update_field(&mut digest, self.source_size.to_string().as_bytes());
+        update_field(&mut digest, self.source_mtime.to_string().as_bytes());
+        update_field(&mut digest, self.source_sha256.as_bytes());
+        update_field(&mut digest, self.pipeline_sha256.as_bytes());
+        update_field(&mut digest, self.pipeline_version.as_bytes());
+        update_field(&mut digest, self.video_identity.as_bytes());
+        update_field(&mut digest, self.target_node_id.as_bytes());
+        update_field(&mut digest, self.predecessor_fence.to_string().as_bytes());
+        update_field(
+            &mut digest,
+            self.predecessor_updated_at_ms.to_string().as_bytes(),
+        );
+        hex::encode(digest.finalize())
+    }
+
+    pub fn has_valid_id(&self) -> bool {
+        self.candidate_id == self.recompute_id()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalysisIndexRepairResult {
+    pub candidate_id: String,
+    pub status: String,
+    pub successor_request_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1105,6 +1232,8 @@ pub struct AnalysisHistoryRow {
     /// first. Empty for a request with no job, and for the non-current
     /// generations of one.
     pub job_attempt_errors: String,
+    pub index_retry_deadline_ms: i64,
+    pub index_diagnostic_json: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1274,6 +1403,19 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         now_ms: i64,
     ) -> Result<Option<AnalysisRequest>, StoreError>;
 
+    async fn preview_analysis_index_repairs(
+        &self,
+        after: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<AnalysisIndexRepairCandidate>, StoreError>;
+
+    async fn apply_analysis_index_repair(
+        &self,
+        candidate: &AnalysisIndexRepairCandidate,
+        successor_request_id: &str,
+        now_ms: i64,
+    ) -> Result<AnalysisIndexRepairResult, StoreError>;
+
     /// Cancel an operator request and revoke any live request fence. A shared
     /// fragment artifact already published by another identity is untouched.
     async fn cancel_analysis_request_admin(
@@ -1441,6 +1583,14 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
         retryable: bool,
         now_ms: i64,
         retry_at_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Apply one typed index failure under the live job fence. The Store owns
+    /// attempt limits, the fixed retry deadline, next-attempt time, terminal
+    /// code, and the diagnostic write so state and evidence cannot diverge.
+    async fn fail_cluster_fragment_index_typed(
+        &self,
+        failure: &ClusterFragmentIndexFailure,
     ) -> Result<bool, StoreError>;
 
     async fn put_cluster_fragment_index_location(
