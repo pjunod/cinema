@@ -174,6 +174,10 @@ conversion, decoder selection, and the stall/stutter investigations.
 
 | File | Answers | |
 |---|---|---|
+| [CONTENT-ANALYSIS-REPAIR-STATUS.md](streaming/CONTENT-ANALYSIS-REPAIR-STATUS.md) | Live implementation ledger for selected-video completion, bounded retry, exact-identity repair, review, and promotion. | open |
+| [CONTENT-ANALYSIS-FAILURES-RCA-AND-FIX.md](streaming/CONTENT-ANALYSIS-FAILURES-RCA-AND-FIX.md) | Why complete video indexes were labelled incomplete: fleet evidence, selected-stream duration, timeout policy, and recovery constraints. | open |
+| [CONTENT-ANALYSIS-FAILURES-ADVERSARIAL-REVIEW.md](streaming/CONTENT-ANALYSIS-FAILURES-ADVERSARIAL-REVIEW.md) | Independent design review that found retry expiry and lost video identity before implementation. | done |
+| [CONTENT-ANALYSIS-FAILURES-IMPLEMENTATION.md](streaming/CONTENT-ANALYSIS-FAILURES-IMPLEMENTATION.md) | Build contract for selected-video completion, typed diagnostics, bounded retry cycles, exact-identity recovery, migrations, tests, and rollout. | open |
 | [HEVC-SAMPLE-ENTRY-STATUS.md](streaming/HEVC-SAMPLE-ENTRY-STATUS.md) | Live execution ledger for the HEVC sample-entry admission repair: implementation, evidence, review, and promotion state. | open |
 | [HEVC sample-entry qualification receipt](evidence/hevc-sample-entry-qualification-2026-09-16.md) | Exact reviewed head, focused commands and counts, F1–F10 disposition, rollout order, and physical-evidence limits for PR #337. | built |
 | [STREAMING-RELIABILITY-IMPLEMENTATION.md](streaming/STREAMING-RELIABILITY-IMPLEMENTATION.md) | Two-wave reliability effort: quality preservation, truthful recovery, first-play preparation, task ownership and finite qualification. | open |
