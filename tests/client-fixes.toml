@@ -1,21 +1,15 @@
 version = 1
 enforce_after = "e8a910f"
 
+# The unmerged counter-fallback proposals were superseded by callback
+# lifecycle repair; retain their history mappings against the current proof.
 [[fixes]]
-id = "web.native-vod-dropped-frame-progress"
-commits = ["4c8830b2c"]
+id = "web.frame-callback-registration-lifecycle"
+commits = ["790ffc9da", "4c8830b2c"]
 source = "crates/plurxd/src/web/index.html"
-source_anchor = "frames=q.totalVideoFrames-q.droppedVideoFrames;"
+source_anchor = "if(id!=null||v.readyState<2||v.seeking) return;"
 test = "tests/playback/web-control.test.js"
-test_anchor = "native VOD must recover when every new frame is dropped"
-
-[[fixes]]
-id = "web.native-vod-silent-frame-callbacks"
-commits = ["790ffc9da"]
-source = "crates/plurxd/src/web/index.html"
-source_anchor = "const nativeCallbackSilence=p.controlHasFrameCallbacks&&frames===0"
-test = "tests/playback/web-control.test.js"
-test_anchor = "native VOD clock and displayed-frame progress must not trigger false recovery"
+test_anchor = "loadeddata during the initial seek must not strand a frame request"
 
 [[fixes]]
 id = "apple.hevc-sample-entry-capability"

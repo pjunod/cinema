@@ -862,15 +862,17 @@ async function main() {
   }
   {
     const callbacks=[];
-    const queue=new Function(shippedSource("queuePlaybackFrame")+"; return queuePlaybackFrame;")();
+    const queue=new Function("getPlayer",shippedSource("queuePlaybackFrame").replaceAll("PLAYER","getPlayer()")+"; return queuePlaybackFrame;")(()=>p);
     const p={started:true,offset:0,source:{video_codec:"h264"},controlHasFrameCallbacks:true};
-    const v={currentTime:80,paused:false,seeking:false,
+    const v={currentTime:80,paused:false,seeking:false,readyState:2,
+      addEventListener(){},removeEventListener(){},cancelVideoFrameCallback(){},
       requestVideoFrameCallback:callback=>callbacks.push(callback)};
     const epochs=[];
     queue(v,p,(_now,_meta,epoch)=>epochs.push(epoch));
     seekIntentAdapter.begin(p,80); seekIntentAdapter.mark(p,80,v);
+    callbacks[0](presentationNow,{mediaTime:80});
     queue(v,p,(_now,_meta,epoch)=>epochs.push(epoch));
-    callbacks.forEach(callback=>callback(presentationNow,{mediaTime:80}));
+    callbacks[1](presentationNow,{mediaTime:80});
     assert.notEqual(epochs[0],p.controlPresentationEpoch,
       "a callback queued by the predecessor cannot settle the new execution");
     assert.equal(epochs[1],p.controlPresentationEpoch);
@@ -879,6 +881,66 @@ async function main() {
       "delayed video presentation is checked against the active media timeline");
     assert.match(SHIPPED_UI,/if\(epoch===\(p\.controlPresentationEpoch\|\|0\)\)\s*settlePlaybackControlSeek/,
       "the shipped detector enforces callback ownership before settlement");
+  }
+
+  {
+    // Model the observed browser boundary: a native request made before the
+    // initial seek completes stays pending forever. Only a request made after
+    // current data and seek completion can deliver a real presentation sample.
+    const p={controlPresentationEpoch:0};
+    let current=p;
+    const queue=new Function("getPlayer",shippedSource("queuePlaybackFrame").replaceAll("PLAYER","getPlayer()")+"; return queuePlaybackFrame;")(()=>current);
+    const events=new Map(),registered=[],delivered=[],cancelled=[];
+    const v={readyState:0,seeking:false,
+      addEventListener(type,fn){if(!events.has(type))events.set(type,new Set());events.get(type).add(fn);},
+      removeEventListener(type,fn){events.get(type)?.delete(fn);},
+      cancelVideoFrameCallback(id){cancelled.push(id);},
+      requestVideoFrameCallback(fn){registered.push({fn,deliverable:this.readyState>=2&&!this.seeking});return registered.length;}
+    };
+    const emit=type=>[...(events.get(type)||[])].forEach(fn=>fn());
+    queue(v,p,(_now,meta,epoch)=>delivered.push({time:meta.mediaTime,epoch}));
+    assert.equal(registered.length,0,"initial frame registration waits for current media data");
+    v.readyState=2;v.seeking=true;emit("loadeddata");
+    assert.equal(registered.length,0,"loadeddata during the initial seek must not strand a frame request");
+    p.controlPresentationEpoch=1;v.seeking=false;emit("seeked");
+    assert.equal(registered.length,1,"seek completion registers exactly one frame request");
+    assert.equal(registered[0].deliverable,true);
+    assert.equal(delivered.length,0,"media readiness is not presentation evidence");
+    registered[0].fn(100,{mediaTime:566.055});
+    assert.deepEqual(delivered,[{time:566.055,epoch:0}],"waiting must preserve the request's presentation epoch");
+    emit("loadeddata");emit("seeked");assert.equal(registered.length,1,"readiness listeners retire after registration");
+    queue(v,p,()=>{});assert.equal(registered.length,2,"established playback immediately queues its next frame");
+    v.readyState=0;queue(v,p,()=>{});current={};v.readyState=2;emit("loadeddata");
+    assert.equal(registered.length,2,"a replaced player cannot register a delayed callback");
+    current=p;v.readyState=0;queue(v,p,()=>{throw new Error("superseded listener");});
+    queue(v,p,()=>delivered.push("replacement"));v.readyState=2;emit("loadeddata");
+    assert.equal(registered.length,3,"a new observer replaces the element's pending readiness listener");
+    assert.equal(typeof v._plurxFrameCancel,"function");
+    const beforeReset=registered[2];
+    v.readyState=0;emit("emptied");
+    assert.ok(cancelled.includes(3),"source replacement cancels the outstanding native request");
+    v.readyState=2;v.seeking=true;emit("loadeddata");
+    assert.equal(registered.length,3,"replacement data cannot rearm before the seek finishes");
+    v.seeking=false;emit("seeked");assert.equal(registered.length,4);
+    beforeReset.fn(200,{mediaTime:9});
+    assert.equal(delivered.length,1,"a cancelled browser delivery cannot become presentation evidence");
+    registered[3].fn(250,{mediaTime:60});
+    assert.equal(delivered[1],"replacement","the renewed request can deliver a real frame");
+    queue(v,p,()=>{});
+    p.controlFrameCancel();assert.equal(v._plurxFrameCancel,null);
+    assert.equal(p.controlFrameCancel,null);
+    assert.ok([...events.values()].every(set=>set.size===0),"retirement removes every media lifecycle listener");
+    queue(v,p,()=>delivered.push("retired-element"));
+    const retiredRequest=registered.at(-1);
+    const adopted={...v,_plurxFrameCancel:null};
+    queue(adopted,p,()=>delivered.push("adopted-element"));
+    assert.equal(v._plurxFrameCancel,null,"adopting an element retires the player's former subscription");
+    retiredRequest.fn(300,{mediaTime:61});
+    assert.equal(delivered.length,2,"a retired element cannot contribute presentation evidence");
+    registered.at(-1).fn(350,{mediaTime:62});
+    assert.equal(delivered.at(-1),"adopted-element");
+    assert.equal(p.controlFrameCancel,null);
+
   }
 
   // Run the actual menu operations, including the progressive audio branch
@@ -1599,64 +1661,6 @@ async function main() {
       'decoded-ahead frames cannot settle recovery while presentation callbacks stay at zero');
     h.p.controlPresentedFrames=1;h.v.currentTime=42;h.tick(24000);
     assert.equal(h.recovered(),4,'the supported presentation callback settles recovery');
-    // Native VOD may advertise rVFC yet emit no callbacks while the picture
-    // and displayed-frame counter advance.
-    // Keep the generic callback contract above; only this observed transport
-    // can use its displayed counter until a presentation callback arrives.
-    h.p.progressWatch=null;h.p.waitAt=null;h.p.recoveringStall=null;
-    Object.assign(h.p,{copyHls:true,vod:true,hls:null,controlPresentedFrames:0});
-    let observedFrames=600;
-    h.v.getVideoPlaybackQuality=()=>({totalVideoFrames:observedFrames,droppedVideoFrames:0});
-    h.v.currentTime=50;h.tick(25000);
-    for(let i=1;i<=20;i++){
-      observedFrames+=12;h.v.currentTime=50+i/2;h.tick(25000+i*500);
-    }
-    assert.equal(h.attempts(),1,
-      'native VOD clock and displayed-frame progress must not trigger false recovery');
-    assert.equal(h.p.progressWatch.fired,false);
-    // An advancing clock alone still does not excuse a stopped decoder.
-    for(let i=1;i<=16;i++){h.v.currentTime=60+i/2;h.tick(35000+i*500);}
-    assert.equal(h.attempts(),2,'native VOD with stationary frames still recovers');
-    h.p.waitAt=null;h.p.progressWatch=null;
-    h.tick(44000);observedFrames+=12;h.tick(52000);
-    assert.equal(h.attempts(),3,'decode-ahead without clock movement still recovers');
-    // Once Safari actually supplies callbacks they remain authoritative.
-    h.p.waitAt=null;h.p.progressWatch=null;h.p.controlPresentedFrames=1;
-    h.tick(53000);observedFrames+=200;h.v.currentTime+=8;h.tick(61000);
-    assert.equal(h.attempts(),4,'observed presentation callbacks cannot fall back on silence');
-    h.p.waitAt=null;h.p.progressWatch=null;h.p.controlPresentedFrames=0;h.p.hls={};
-    h.tick(62000);observedFrames+=200;h.v.currentTime+=8;h.tick(70000);
-    assert.equal(h.attempts(),5,'MSE keeps presentation callbacks authoritative');
-    h.p.waitAt=null;h.p.progressWatch=null;h.p.hls=null;h.p.vod=false;
-    h.tick(71000);observedFrames+=200;h.v.currentTime+=8;h.tick(79000);
-    assert.equal(h.attempts(),6,'live HLS keeps presentation callbacks authoritative');
-    h.p.waitAt=null;h.p.progressWatch=null;h.p.vod=true;
-    delete h.v.getVideoPlaybackQuality;
-    h.tick(80000);h.v.currentTime+=8;h.tick(88000);
-    assert.equal(h.attempts(),7,'native VOD needs a frame counter, not clock progress alone');
-    // Dropped frames are included in totalVideoFrames. A running audio clock
-    // and an entirely dropped video stream must not count as presentation.
-    h.p.waitAt=null;h.p.progressWatch=null;
-    let totalFrames=600,droppedFrames=0;
-    h.v.getVideoPlaybackQuality=()=>({totalVideoFrames:totalFrames,droppedVideoFrames:droppedFrames});
-    h.tick(90000);
-    for(let i=1;i<=60;i++){
-      totalFrames+=12;droppedFrames+=12;h.v.currentTime+=0.5;h.tick(90000+i*500);
-    }
-    assert.equal(h.attempts(),8,'native VOD must recover when every new frame is dropped');
-    // A valid counter showing some displayed frames still proves progress.
-    h.p.waitAt=null;h.p.progressWatch=null;h.tick(121000);
-    for(let i=1;i<=20;i++){
-      totalFrames+=12;droppedFrames+=2;h.v.currentTime+=0.5;h.tick(121000+i*500);
-    }
-    assert.equal(h.attempts(),8,'native VOD with displayed frames tolerates partial drops');
-    for(const bad of [undefined,NaN,Infinity,-1,"exceeds-total"]){
-      h.p.waitAt=null;h.p.progressWatch=null;
-      h.v.getVideoPlaybackQuality=()=>({totalVideoFrames:totalFrames,
-        droppedVideoFrames:bad==="exceeds-total"?totalFrames+1:bad});
-      const before=h.attempts();h.tick(140000);totalFrames+=12;h.v.currentTime+=8;h.tick(148000);
-      assert.equal(h.attempts(),before+1,'invalid dropped counters cannot prove native VOD progress');
-    }
   }
   player.waitAt=performance.now()-9_000;
   const inferredSupply=adapter.playbackControlSnapshot(video,player);
@@ -2527,7 +2531,7 @@ async function main() {
     const player=Object.assign(stalledPlayer(),{waitAt:null,wantsPlayback:true});
     const video={paused:false,seeking:false,ended:false,currentTime:10};
     h.stub.monitor(player,video);now=9000;h.stub.monitor(player,video);
-    const listener=SHIPPED_UI.match(/v\.addEventListener\("seeking",[^\n]+/)[0];
+    const listener=shippedSource("wirePlayerMedia").match(/v\.addEventListener\("seeking",[^\n]+/)[0];
     const seeking=new Function('PLAYER','performance',[
       'let callback;const v={addEventListener(_,fn){callback=fn;}};const STALL_MIN_MS=350;function clearTimeout(){}function notifyPlaybackControl(){}',
       shippedSource('endWait'),listener,'return callback;',

@@ -11310,7 +11310,49 @@ async function refreshSegTimes(){
 // predecessor, even if the browser delivers it after the source was replaced.
 function queuePlaybackFrame(v,p,callback){
   const epoch=p.controlPresentationEpoch||0;
-  v.requestVideoFrameCallback((now,meta)=>callback(now,meta,epoch));
+  // One subscription belongs to this player and element. Retire it when an
+  // element is adopted or reused, including callbacks already queued by the
+  // browser before cancellation.
+  if(p.controlFrameCancel) p.controlFrameCancel();
+  if(v._plurxFrameCancel) v._plurxFrameCancel();
+  let id=null, generation=0, retired=false;
+  const cancel=()=>{
+    generation++;
+    if(id!=null&&typeof v.cancelVideoFrameCallback==="function") v.cancelVideoFrameCallback(id);
+    id=null;
+  };
+  const clear=()=>{
+    retired=true;cancel();
+    v.removeEventListener("emptied",suspend);
+    v.removeEventListener("seeking",suspend);
+    v.removeEventListener("loadeddata",ready);
+    v.removeEventListener("seeked",ready);
+    if(p.controlFrameCancel===clear) p.controlFrameCancel=null;
+    if(v._plurxFrameCancel===clear) v._plurxFrameCancel=null;
+  };
+  const suspend=()=>{if(PLAYER!==p) clear();else cancel();};
+  const ready=()=>{
+    if(retired) return;
+    if(PLAYER!==p){clear();return;}
+    // Safari native HLS can strand a request registered before the initial
+    // load/seek. Subscribe against current data after the seek completes,
+    // and renew the subscription when a later seek or source load replaces it.
+    // Readiness only permits registration; actual callbacks remain the proof
+    // of presentation used by the existing progress detector.
+    if(id!=null||v.readyState<2||v.seeking) return;
+    const registration=++generation;
+    id=v.requestVideoFrameCallback((now,meta)=>{
+      if(retired||registration!==generation) return;
+      id=null;clear();
+      if(PLAYER===p) callback(now,meta,epoch);
+    });
+  };
+  p.controlFrameCancel=clear;v._plurxFrameCancel=clear;
+  v.addEventListener("emptied",suspend);
+  v.addEventListener("seeking",suspend);
+  v.addEventListener("loadeddata",ready);
+  v.addEventListener("seeked",ready);
+  ready();
 }
 function armHitchDetector(v){
   const p=PLAYER; if(!p) return;
@@ -13226,30 +13268,13 @@ function playbackProgressTick(v,p){
   let frames=null, frameSource="none";
   if(streamHasVideo(p,v)){
     if(p.controlHasFrameCallbacks){
-      // Once callbacks arrive they remain the presentation authority, even if
-      // the decoder continues advancing while the compositor is frozen.
+      // Callback support is itself the observation contract. Zero presented
+      // callbacks is real evidence and must not fall through to a decoded-frame
+      // counter that can advance while the compositor remains frozen.
       frames=Number(p.controlPresentedFrames)||0; frameSource="callbacks";
-    }
-    // Native VOD can play without delivering advertised frame callbacks.
-    // Until a callback arrives, require both clock and displayed-frame
-    // progress; do not relax MSE or a callback stream that stops.
-    const nativeCallbackSilence=p.controlHasFrameCallbacks&&frames===0
-      &&p.copyHls&&p.vod&&!p.hls;
-    if(!p.controlHasFrameCallbacks||nativeCallbackSilence) try{
+    }else try{
       const q=v.getVideoPlaybackQuality?.();
-      if(nativeCallbackSilence){
-        // totalVideoFrames includes drops, even before decoding. Drops alone
-        // cannot prove that a picture was displayed or complete a recovery.
-        if(Number.isFinite(q?.totalVideoFrames)&&q.totalVideoFrames>=0
-          &&Number.isFinite(q?.droppedVideoFrames)&&q.droppedVideoFrames>=0
-          &&q.droppedVideoFrames<=q.totalVideoFrames){
-          frames=q.totalVideoFrames-q.droppedVideoFrames;
-          frameSource="native-displayed";
-        }
-      }else if(Number.isFinite(q?.totalVideoFrames)){
-        frames=q.totalVideoFrames;
-        frameSource="quality";
-      }
+      if(Number.isFinite(q?.totalVideoFrames)){frames=q.totalVideoFrames; frameSource="quality";}
     }catch(e){}
   }
   const key=`${p._seekToken||0}:${p.controlIntentGeneration||0}:${pending?.sequence||0}:${frameSource}`;
@@ -15125,6 +15150,7 @@ function closePlayer(){
   // changed a picker would be overruled by a choice they had moved on from.
   if(PLAYER) PLAYER.preplay=null;
   stopPlayerTimers();
+  if(PLAYER&&PLAYER.controlFrameCancel) PLAYER.controlFrameCancel();
   clearInterval(STATS_TIMER); STATS_TIMER=null; teardownHls();
   // The attempt is over, so every fault about it is about nothing. §3.6: the
   // model resets with the player.
