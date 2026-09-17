@@ -132,6 +132,21 @@ ARG PLURX_BUILD_SHA=""
 # Docker build args are stage-scoped, and a label inherited only by the build
 # stage would leave the shipped runtime unverifiable.
 LABEL org.opencontainers.image.revision="${PLURX_BUILD_SHA}"
+# Apache-2.0 sec. 4(a)/4(d) and the OFL both condition redistribution on the
+# license text and notices travelling with the work. The web UI is compiled
+# into the binary, fonts and all, so an image carrying only /plurxd
+# distributes those components with no notices attached.
+#
+# These copy from the BUILD CONTEXT rather than from the build stage, and
+# that is load bearing: validation/release_dockerfile.py rewrites the runtime
+# stage for release and rejects any build-stage copy it does not recognise as
+# a known binary artifact -- it matches on the literal token, so even naming
+# that form in a comment here fails the rewrite. A context copy passes
+# through untouched, and the release build's context (release-source) is a
+# full repo checkout, so these paths resolve there too.
+# tests/operations/test_release_publication.py holds both halves of that.
+COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/plurx/
+COPY licenses/ /usr/share/doc/plurx/licenses/
 COPY --from=build /plurxd /usr/local/bin/plurxd
 # Stopped-node recovery and cluster validation tooling. The WAL inspector is
 # read-only, refuses a live lock, and lets an operator diagnose the same image

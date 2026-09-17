@@ -300,5 +300,8 @@ it under the same terms, with no separate agreement to sign.
 
 Bundled fonts and libraries, the four vendored crates, and the one
 redistribution obligation that comes with the container image are documented
-in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Nothing plurx depends on
-is copyleft; ffmpeg is invoked as a subprocess and never linked.
+in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Nothing plurx ships is
+copyleft: ffmpeg is invoked as a subprocess and never linked, and the one
+copyleft dependency anywhere in the tree (JUnit, EPL-1.0) is test-scoped and
+reaches no artifact. `make license-check` enforces the allow-list in
+[deny.toml](deny.toml).

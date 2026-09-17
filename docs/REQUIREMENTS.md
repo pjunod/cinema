@@ -145,5 +145,5 @@ Hybrid strategy (detail in [CLIENTS.md](CLIENTS.md)): shared TypeScript web core
 ## 11. Posture & constraints
 
 - **Team:** solo + AI pair programming, steady nights-and-weekends cadence → roadmap must be small, always-shippable increments; every phase ends with something usable.
-- **License:** private for now; decision deferred until sharing matters. No dependencies whose licenses would foreclose either open-sourcing or staying private (note: GPL ffmpeg is invoked as a subprocess, not linked).
+- **License:** Apache-2.0, adopted 2026-09-17 after a full dependency audit ([THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md)). Nothing in the graph forecloses it: GPL ffmpeg is invoked as a subprocess, not linked, and `make license-check` keeps it that way.
 - **Quality bar:** playback correctness (HDR color, audio sync, seek accuracy) outranks feature count. A small library that plays flawlessly beats a big one that stutters.

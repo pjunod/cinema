@@ -8,4 +8,9 @@ docs/
 _to_delete/
 *.db
 *.md
+# ...except the notices, which Apache-2.0 sec. 4 and the OFL require to
+# travel with the redistributed work. The runtime image COPYs this out of
+# the build stage, so excluding it from the context breaks the image build
+# rather than silently shipping an unattributed one.
+!THIRD-PARTY-NOTICES.md
 .swarm/

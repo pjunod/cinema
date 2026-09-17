@@ -1,0 +1,51 @@
+# License policy for plurx. Enforced by `make license-check`
+# (`cargo deny check licenses`) so THIRD-PARTY-NOTICES.md cannot drift
+# quietly: a dependency whose license is not on this list fails the check
+# instead of arriving unannounced.
+#
+# plurx is Apache-2.0. The allow-list is every permissive license already in
+# the resolved graph and nothing else. Copyleft is absent on purpose and is
+# not listed -- adding one here is a licensing decision, not a build fix, so
+# it belongs in a commit that says so.
+
+[licenses]
+# Every identifier below is present in the current graph. Keep them sorted
+# and do not add one speculatively; an allow-list that permits more than the
+# build actually uses stops being evidence of anything.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+# LGPL-2.1-or-later is deliberately absent. `r-efi` offers
+# `MIT OR Apache-2.0 OR LGPL-2.1-or-later`; leaving LGPL off this list makes
+# cargo-deny satisfy the disjunction with MIT rather than silently accepting
+# the copyleft arm -- and makes a future LGPL-only dependency fail loudly.
+
+# A crate whose SPDX expression is ambiguous needs a stronger textual match
+# before its license is believed.
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"   # not a license concern; the gate owns dependency hygiene
+
+[advisories]
+# Security advisories are the RustSec job, run separately. This file is
+# licenses only, so an advisory must not make `check licenses` fail.
+yanked = "allow"
+
+[sources]
+unknown-registry = "deny"     # a crate from an unvetted registry has unvetted terms
+unknown-git = "deny"

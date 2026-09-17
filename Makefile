@@ -73,6 +73,9 @@ effort-rust-check: fmt-check spike-lock-check ## Compile every Rust target witho
 	$(CARGO) check --workspace --locked --all-targets
 
 .PHONY: lint
+license-check: ## Fail on any dependency license outside deny.toml's allow-list
+	cargo deny check licenses
+
 lint: ## Clippy across the workspace, warnings are errors
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
 

@@ -2,45 +2,57 @@
 
 Companion to [LICENSE](LICENSE) (plurx's own terms) and [NOTICE](NOTICE) —
 this file is *what else is in the box*, and the attribution those components
-require.
+require. Full license texts that are not Apache-2.0 live in
+[`licenses/`](licenses/); Apache-2.0 components are covered by the root
+[LICENSE](LICENSE).
 
-plurx is Apache-2.0. Every component it bundles, vendors, or links against is
-permissively licensed: there is no GPL, AGPL, LGPL-only, MPL, or SSPL code in
-the dependency graph, so nothing here imposes a copyleft obligation on plurx
-or on anything built with it. The one place a copyleft license is in the
-picture at all is ffmpeg, which plurx never links — see §1, because
-redistributing a container image is the case where it becomes your problem.
+plurx is Apache-2.0. Nothing it ships is copyleft, so nothing here imposes a
+copyleft obligation on plurx or on anything built with it. Two things sit
+close enough to that line to be worth stating plainly: ffmpeg, which plurx
+invokes but never links (§1), and JUnit, which is copyleft but test-scoped
+and never reaches a shipped artifact (§5).
 
-Audited against `Cargo.lock` at 519 external crates · verified 2026-09-17.
+Dependency licenses come from `cargo metadata` over the resolved graph, not
+from `Cargo.lock` — the lockfile records versions and sources, never license
+fields, so an audit claiming to read licenses "from Cargo.lock" has not done
+the work. 515 source-bearing crates in the root workspace · verified
+2026-09-17.
 
 ---
 
 ## 1. ffmpeg — invoked as a subprocess, never linked
 
-**What it is:** plurx shells out to `ffmpeg` and `ffprobe` for probing, remux,
-transcode, frame grabs, and DVR capture. Every call site is a
-`Command::new(...)` in `crates/plurx-core/src/` — there are no `libav*`
-bindings, no `ffmpeg-sys`/`ffmpeg-next` crate, and nothing in the dependency
-graph links ffmpeg's libraries.
+**What it is:** plurx shells out to `ffmpeg` and `ffprobe` for probing,
+remux, transcode, frame grabs, and DVR capture. There are 105 such call
+sites — 69 under `crates/plurxd/src/` and 36 under
+`crates/plurx-core/src/` — and every one of them is a `Command::new(...)`.
+There are no `libav*` bindings, no `ffmpeg-sys`/`ffmpeg-next` crate, no
+`dlopen`/`libloading` of a media library, and neither `build.rs` links
+anything (they stamp version strings). The single `#[link]` attribute in the
+tree is `ntdll` in `crates/plurx-core/src/process_control.rs`.
 
-**Why that matters:** running a separate program does not create a derivative
-work of it. ffmpeg's license — LGPL-2.1 for a default build, GPL-2.0 or
-GPL-3.0 once it is compiled with x264, x265, or other GPL components — does
-not reach plurx, whatever build you point it at.
+**Why that matters:** running a separate program does not create a
+derivative work of it. ffmpeg's license — LGPL-2.1 for a default build,
+GPL-2.0 or GPL-3.0 once compiled with x264, x265, or other GPL components —
+does not reach plurx, whatever build you point it at. This is the claim the
+whole license choice rests on, which is why the call-site locations are named
+above: check them, don't take them.
 
-**Where the obligation does exist:** `deploy/install` installs ffmpeg from the
-host's own package manager (`apt`, `dnf`, `pacman`, `zypper`, `apk`, `brew`),
-so a source install redistributes nothing. The `Dockerfile` is different — it
-installs both Debian `ffmpeg` and `jellyfin-ffmpeg8` into the runtime image.
-Both are GPL builds. Publishing that image is redistribution of GPL binaries,
-which carries the GPL's source-offer obligation for those binaries (not for
-plurx). Two ways to stay clean:
+**Where the obligation does exist:** `deploy/install` installs ffmpeg from
+the host's own package manager (`apt`, `dnf`, `pacman`, `zypper`, `apk`,
+`brew`), so a source install redistributes nothing. The `Dockerfile` is
+different — it installs both Debian `ffmpeg` and `jellyfin-ffmpeg8` into the
+runtime image. Both are GPL builds. Publishing that image is redistribution
+of GPL binaries and carries the GPL's source-offer obligation for those
+binaries, not for plurx. Two ways to stay clean:
 
 ```bash
-# Either: keep built images private to your own registry, or
+# Either: keep built images in your own registry, not a public one, or
 # drop ffmpeg from the image and let the host provide it, the way
 # deploy/install already does on bare metal.
 ```
+
+`Dockerfile.store-shard` installs no ffmpeg and is unaffected.
 
 **How to read it:** the distinction is linkage, not proximity. Shipping
 ffmpeg *next to* plurx is aggregation and leaves plurx's license alone;
@@ -52,31 +64,45 @@ subprocess boundary is load-bearing and should stay that way.
 ## 2. Bundled in the web UI
 
 These are served to every browser as part of the embedded SPA
-(`crates/plurxd/src/web/`), so they are distributed with every copy of plurx.
+(`crates/plurxd/src/web/`), so they are distributed with every copy of plurx
+and every container image.
 
-| Component | Version | License | Holder |
+| Component | Version | License | Copyright |
 |---|---|---|---|
 | [hls.js](https://github.com/video-dev/hls.js) | 1.6.16 | Apache-2.0 | Dailymotion and the hls.js contributors |
-| [Inter](https://github.com/rsms/inter) | embedded `woff2` | SIL OFL 1.1 | Rasmus Andersson |
-| [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | embedded `woff2` | SIL OFL 1.1 | JetBrains s.r.o. |
+| [eventemitter3](https://github.com/primus/eventemitter3) | bundled in `hls.min.js` | MIT — [full text](licenses/eventemitter3-MIT.txt) | Copyright (c) 2014 Arnout Kazemier |
+| [url-toolkit](https://github.com/tjenkinson/url-toolkit) | bundled in `hls.min.js` | Apache-2.0 | Tom Jenkinson |
+| [Material Design icons](https://github.com/google/material-design-icons) | inline SVG paths | Apache-2.0 | Google LLC |
+| [Inter](https://github.com/rsms/inter) | subset `woff2` | SIL OFL 1.1 — [full text](licenses/Inter-OFL.txt) | Copyright (c) 2016 The Inter Project Authors (https://github.com/rsms/inter) |
+| [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono) | subset `woff2` | SIL OFL 1.1 — [full text](licenses/JetBrainsMono-OFL.txt) | Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono) |
 
-`hls.min.js` is the upstream minified build with its license header stripped
-by the minifier; this table is its required Apache-2.0 §4 attribution.
+**hls.js and what it carries.** `hls.min.js` is the upstream minified `dist`
+build with its license header stripped by the minifier. hls.js 1.6.16
+declares no runtime `dependencies`; it bundles its build-time dependencies
+directly into `dist`, so eventemitter3 and url-toolkit ship inside that one
+file. They are separate copyright holders with their own terms — MIT
+requires its notice in all copies — and one row for hls.js does not discharge
+them. This table plus `licenses/` is their attribution.
 
-The two typefaces are inlined as `data:font/woff2` URIs in `index.html`. The
-SIL Open Font License permits bundling, modification, and commercial use, and
-places no restriction on plurx. It carries two conditions worth knowing: the
-license text must travel with the fonts (this file satisfies that), and the
-Reserved Font Names "Inter" and "JetBrains Mono" may not be used for a
-modified version — so if either font is ever subset or patched, rename it.
+**Material icons.** Four icon paths are inlined as SVG in `index.html`
+(search `Apache-2.0 Google Material icon paths`) so the self-hosted client
+needs no icon font and no CDN.
+
+**The fonts.** Both are inlined as `data:font/woff2` URIs in `index.html` —
+three faces: JetBrains Mono 500 and 700, and Inter variable 100–900. Both are
+**subset** (Inter to ~330 codepoints, JetBrains Mono to ~512) and remain
+under the OFL, which permits subsetting, modification, bundling, and
+commercial use. Its one operative condition here is that each copyright
+notice and the complete license text travel with the font — which is what
+`licenses/Inter-OFL.txt` and `licenses/JetBrainsMono-OFL.txt` are for.
+Neither upstream declares a Reserved Font Name, so no renaming is required.
 
 ---
 
 ## 3. Vendored Rust crates — upstream sources, locally modified
 
 Four crates are vendored under `vendor/` rather than pulled from crates.io.
-Each carries a `PLURX-PATCH.md` stating what plurx changed and why, which is
-what Apache-2.0 §4(b) requires of a modified file.
+Each carries a `PLURX-PATCH.md` recording what plurx changed and why.
 
 | Crate | Version | License | Upstream | Changes |
 |---|---|---|---|---|
@@ -87,18 +113,25 @@ what Apache-2.0 §4(b) requires of a modified file.
 
 Each directory carries its upstream license at `vendor/<crate>/LICENSE`.
 
+For the three Apache-2.0 crates, §4(b) asks that modified files carry
+prominent notices of the change. `PLURX-PATCH.md` records every change at the
+directory level, which is how the patches are kept reviewable against
+upstream; it is not a per-file annotation. `rust_decimal` is MIT, where no
+such requirement applies.
+
 ---
 
 ## 4. Rust dependencies
 
-519 external crates resolve into a plurx build. Every one is permissive:
+515 source-bearing crates resolve into a plurx build, excluding the five
+first-party crates and the four vendored above. Every one is permissive:
 
 | `MIT OR Apache-2.0` | 268 |
-| `MIT` | 118 |
+| `MIT` | 117 |
 | `Apache-2.0 OR MIT` | 27 |
 | `Unicode-3.0` | 18 |
 | `MIT/Apache-2.0` | 17 |
-| `Apache-2.0` | 14 |
+| `Apache-2.0` | 11 |
 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 5 |
 | `Unlicense OR MIT` | 4 |
 | `Unlicense/MIT` | 4 |
@@ -130,16 +163,25 @@ Each directory carries its upstream license at `vendor/<crate>/LICENSE`.
 | `MIT-0` | 1 |
 | `Zlib` | 1 |
 
-`r-efi` is the only crate whose license expression names a copyleft license at
-all (`MIT OR Apache-2.0 OR LGPL-2.1-or-later`). It is a disjunction, so plurx
-takes it under MIT — and the crate is a UEFI-target shim that does not compile
-for Linux or macOS in the first place.
+`r-efi` is the only crate whose license expression names a copyleft license
+at all (`MIT OR Apache-2.0 OR LGPL-2.1-or-later`). It is a disjunction, so
+plurx takes it under MIT — and the crate is a UEFI-target shim that does not
+compile for Linux or macOS.
 
 Crates under `Unicode-3.0` (18) and `CDLA-Permissive-2.0` (2, the webpki root
 stores) are permissive with attribution requirements, satisfied by this file.
 
+Two limits worth stating rather than hiding. This table reproduces each
+crate's declared SPDX expression only: `aws-lc-sys`, `onig_sys` and `lz4-sys`
+statically link bundled C whose own upstream notices are not carried here.
+And the repo has three lockfiles — `fuzz/Cargo.lock` and
+`spikes/hiqlite-m0/Cargo.lock` resolve 37 packages the root lock does not
+(`libfuzzer-sys`, `arbitrary`, `rkyv`, and others). All are permissive and
+neither workspace ships in any artifact, so they are out of scope for
+distribution, but they are not covered by the table above.
+
 <details>
-<summary>Full crate list (519)</summary>
+<summary>Full crate list (515)</summary>
 
 | Crate | Version | License |
 |---|---|---|
@@ -324,9 +366,7 @@ stores) are permissive with attribution requirements, satisfied by this file.
 | `heck` | 0.5.0 | MIT OR Apache-2.0 |
 | `hermit-abi` | 0.5.2 | MIT OR Apache-2.0 |
 | `hex` | 0.4.3 | MIT OR Apache-2.0 |
-| `hiqlite` | 0.14.0 | Apache-2.0 |
 | `hiqlite-derive` | 0.14.0 | Apache-2.0 |
-| `hiqlite-wal` | 0.14.0 | Apache-2.0 |
 | `hmac` | 0.12.1 | MIT OR Apache-2.0 |
 | `hostname` | 0.4.2 | MIT |
 | `http` | 1.4.2 | MIT OR Apache-2.0 |
@@ -480,7 +520,6 @@ stores) are permissive with attribution requirements, satisfied by this file.
 | `rust-embed` | 8.12.0 | MIT |
 | `rust-embed-impl` | 8.12.0 | MIT |
 | `rust-embed-utils` | 8.12.0 | MIT |
-| `rust_decimal` | 1.42.1 | MIT |
 | `rustc-hash` | 2.1.3 | Apache-2.0 OR MIT |
 | `rustc_version` | 0.4.1 | MIT OR Apache-2.0 |
 | `rusticata-macros` | 4.1.0 | MIT/Apache-2.0 |
@@ -493,7 +532,6 @@ stores) are permissive with attribution requirements, satisfied by this file.
 | `rustls-webpki` | 0.103.13 | ISC |
 | `rustversion` | 1.0.23 | MIT OR Apache-2.0 |
 | `ryu` | 1.0.23 | Apache-2.0 OR BSL-1.0 |
-| `s3-simple` | 0.8.0 | Apache-2.0 |
 | `safetensors` | 0.8.0 | Apache-2.0 |
 | `same-file` | 1.0.6 | Unlicense/MIT |
 | `schannel` | 0.1.29 | MIT |
@@ -669,31 +707,52 @@ stores) are permissive with attribution requirements, satisfied by this file.
 
 ## 5. Android client
 
-Every runtime dependency is Apache-2.0 — AndroidX and Compose, Media3 and
-ExoPlayer, OkHttp, Retrofit, Coil, and the kotlinx libraries — with one
+Every **runtime** dependency is Apache-2.0 — AndroidX and Compose, Media3
+and ExoPlayer, OkHttp, Retrofit, Coil, and the kotlinx libraries — with one
 exception:
 
-| Dependency | License | Consequence |
-|---|---|---|
-| `com.google.android.gms:play-services-code-scanner` | Google APIs Terms of Service / Android SDK License | Proprietary, not open source |
+| Dependency | Scope | License | Consequence |
+|---|---|---|---|
+| `com.google.android.gms:play-services-code-scanner` | runtime | Google APIs ToS / Android SDK License | Proprietary, not open source |
+| `junit:junit` 4.13.2 | `testImplementation` | EPL-1.0 | Copyleft, but never in a shipped artifact |
+| Gradle wrapper (`gradlew`, `gradlew.bat`, `gradle-wrapper.jar`) | build | Apache-2.0 · Gradle Inc. | Checked into the repo, so redistributed with every clone |
 
 **How to read it:** the Play Services scanner is redistributable inside a
 compiled app, so it does not affect plurx's license or the APKs you ship. It
-does mean the Android client is not fully open source end to end, and that it
-requires Google Play Services on the device. Anyone building a
-Play-Services-free variant has to drop or replace the QR scanner.
+does mean the Android client is not open source end to end, and that it needs
+Google Play Services on the device — a Play-Services-free variant has to drop
+or replace the QR scanner.
+
+JUnit is the one copyleft license anywhere in plurx's graph. EPL-1.0 is
+file-level copyleft and applies to distribution of the covered work; JUnit is
+`testImplementation` only, so it is absent from every APK and every server
+artifact. It is listed because "no copyleft anywhere" would be false, and a
+notices file that overstates its own cleanliness is not worth reading.
+
+The Gradle wrapper is third-party code committed into this repo rather than a
+resolved dependency, which is exactly the kind of thing a blanket
+repo-wide copyright claim swallows by accident. It remains Apache-2.0,
+copyright Gradle Inc. and the original authors, and plurx claims no copyright
+in it.
 
 ## 6. Apple client
 
-No third-party runtime dependencies — the iOS and tvOS clients are SwiftUI and
-AVFoundation only. [XcodeGen](https://github.com/yonaskolb/XcodeGen) (MIT)
-generates the project at build time and ships in nothing.
+No third-party runtime dependencies — the iOS and tvOS clients are SwiftUI
+and AVFoundation only, and the EPUB reader they embed
+(`reader.js`, `offline-reader.js`) is first-party.
+[XcodeGen](https://github.com/yonaskolb/XcodeGen) (MIT) generates the project
+at build time and ships in nothing.
 
 ---
 
 ## Keeping this file honest
 
 This document is a claim about what is in the dependency graph, so it goes
-stale the moment the graph moves. Regenerate it when `Cargo.lock` changes
-materially, when a web asset is added to `crates/plurxd/src/web/`, or when a
-client gains a dependency — in the same commit, not afterwards.
+stale the moment the graph moves. `deny.toml` is the mechanical half:
+`cargo deny check licenses` fails the build on any license not on the
+allow-list, so a new copyleft dependency cannot land quietly. Run it with
+`make license-check`.
+
+`cargo deny` cannot see the parts that are not crates — the web UI bundle,
+the fonts, the client dependencies, the Dockerfile's ffmpeg. Update §1, §2,
+§5 and §6 by hand when those move, in the same commit that moves them.
