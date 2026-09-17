@@ -10,6 +10,24 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **`make install` installs the server as a service in one command on every
+  platform it runs on.** `make install` detects the host and hands off to
+  `deploy/install`: a sandboxed systemd unit with a dedicated `plurx` user on
+  Linux, a LaunchAgent in the login session on macOS (so VideoToolbox stays
+  available), or the native Windows service through `deploy\install.ps1`.
+  `make install-docker` makes the first Compose run one command by writing
+  `deploy/.env` and the override file from their examples and creating the
+  data directory before `make docker-up`; `make install-binary` puts `plurxd`
+  on `PATH` with no service. Every path builds the same `--locked` release
+  binary (or installs a prebuilt one with `INSTALL_FLAGS=--binary`), installs
+  ffmpeg with the platform's package manager when it is missing, runs the
+  privileged steps and only those through sudo, and ends by waiting for
+  `/readyz` and printing the version the server reports rather than claiming
+  success. Running it again upgrades in place, stopping a running service
+  before its binary is replaced; `make uninstall` removes the service and
+  keeps data and configuration. `tests/operations/test_install.py` executes
+  each path against stubbed host tools and asserts on the calls and the files
+  written, including that the rendered launchd plist carries no placeholder.
 - **plurx records from the tuner, and tells you before a programme starts.**
   Every guide cell on web, Apple and Android now offers Record, Record series
   and Remind me beside Watch. The owner node writes the tuner's bytes straight
