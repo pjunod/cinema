@@ -44,7 +44,20 @@ use sha2::{Digest, Sha256};
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum DesiredQuality {
     /// The server picks the rung, and may change it.
-    Auto,
+    ///
+    /// `height` is the client's own automatic controller naming the rung it
+    /// currently wants, and it does **not** withdraw the server's authority to
+    /// move again — that is the whole difference from [`Self::Manual`]. It
+    /// exists because a client whose Auto controller moves 720 -> 1080 would
+    /// otherwise send the identical selection it sent at 720: the digest would
+    /// not change, the exchange would not be a selection change, and no
+    /// successor would ever be staged for a decision the client already made.
+    ///
+    /// `None` is plain Auto and digests exactly as Auto always has.
+    Auto {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        height: Option<i64>,
+    },
     /// Preserve the source representation and never grant the server automatic
     /// rung authority.
     ///
@@ -137,7 +150,16 @@ impl DesiredSelection {
     /// deliver the same height today.
     pub fn canonical_form(&self) -> String {
         let quality = match self.quality {
-            DesiredQuality::Auto => "auto".to_owned(),
+            // `Auto { height: None }` MUST render exactly "auto". Every session
+            // alive at deploy time is sending plain Auto against a stored
+            // digest taken from this string; a new spelling here would make
+            // every one of them record a selection change on its first
+            // exchange after the upgrade and stage a successor nobody asked
+            // for. The test below pins the literal.
+            DesiredQuality::Auto { height: None } => "auto".to_owned(),
+            DesiredQuality::Auto {
+                height: Some(height),
+            } => format!("auto:{height}"),
             DesiredQuality::Original => "original".to_owned(),
             DesiredQuality::Manual { height } => format!("manual:{height}"),
         };
@@ -186,13 +208,61 @@ mod tests {
 
     fn baseline() -> DesiredSelection {
         DesiredSelection {
-            quality: DesiredQuality::Auto,
+            quality: DesiredQuality::Auto { height: None },
             codec: DesiredCodec::Auto,
             dynamic_range: DesiredDynamicRange::Auto,
             audio_track: None,
             audio_offset_ms: 0,
             subtitles: DesiredSubtitles::Off,
         }
+    }
+
+    /// The canonical string for plain Auto is frozen.
+    ///
+    /// This is the only test in the file that asserts a literal rather than a
+    /// relation, and it is deliberate. D3-a gave `Auto` an optional rung;
+    /// every session alive at deploy time is sending it without one, against a
+    /// digest the store took from the OLD string. A relation test would agree
+    /// with whatever this renders and notice nothing. If this literal moves,
+    /// every current session records a selection change on its first exchange
+    /// after the upgrade and stages a successor nobody asked for.
+    #[test]
+    fn plain_auto_still_canonicalizes_to_the_string_every_stored_digest_holds() {
+        let plain = baseline();
+        assert_eq!(plain.quality, DesiredQuality::Auto { height: None });
+        assert_eq!(
+            plain.canonical_form(),
+            "v1;quality=auto;codec=auto;dynamic_range=auto;\
+             audio=default;audio_offset_ms=0;subtitles=off",
+        );
+    }
+
+    /// A rung the client's own Auto controller named is part of the ask, or
+    /// the exchange that carries it is not a selection change and no successor
+    /// is ever staged for it.
+    #[test]
+    fn a_named_auto_rung_changes_the_digest_without_becoming_a_manual_ask() {
+        let plain = baseline();
+        let named = DesiredSelection {
+            quality: DesiredQuality::Auto { height: Some(1080) },
+            ..baseline()
+        };
+        let other = DesiredSelection {
+            quality: DesiredQuality::Auto { height: Some(720) },
+            ..baseline()
+        };
+        let manual = DesiredSelection {
+            quality: DesiredQuality::Manual { height: 1080 },
+            ..baseline()
+        };
+        assert_eq!(named.canonical_form().contains("quality=auto:1080"), true);
+        assert_ne!(plain.digest(), named.digest());
+        assert_ne!(named.digest(), other.digest());
+        assert_ne!(
+            named.digest(),
+            manual.digest(),
+            "Auto at a rung still grants the server authority to move; Manual does not",
+        );
     }
 
     /// The three quality policies are three different asks, even where they
@@ -208,7 +278,7 @@ mod tests {
     fn auto_original_and_a_matching_manual_height_are_three_different_asks() {
         let source_height = 1080;
         let auto = DesiredSelection {
-            quality: DesiredQuality::Auto,
+            quality: DesiredQuality::Auto { height: None },
             ..baseline()
         };
         let original = DesiredSelection {
@@ -368,7 +438,7 @@ mod tests {
         );
         assert_eq!(
             DesiredSelection {
-                quality: DesiredQuality::Auto,
+                quality: DesiredQuality::Auto { height: None },
                 codec: DesiredCodec::Auto,
                 dynamic_range: DesiredDynamicRange::Auto,
                 audio_track: None,

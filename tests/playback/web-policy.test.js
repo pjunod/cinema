@@ -1797,10 +1797,15 @@ function autoRescueHarness(player, autoAbr = true) {
     "playerPixelHeight",
     "switchAutoRung",
     "rememberAutoRung",
+    "requestQualityChange",
     [
       shippedSourceIfPresent("claimAutoFallback"),
       shippedSource("hasPendingPlaybackOpen"),shippedSource("playbackOwnsAttachedMedia"),
       shippedSourceIfPresent("releaseAutoFallback"),
+      // The gate that keeps a stalled rescue a reopen is shipped code: it is
+      // exactly the decision this harness exists to pin.
+      shippedSource("preparedHandoffEnabled"),shippedSource("preparedHandoffOffered"),
+      shippedSource("directedChangeIncumbentReady"),
       shippedSource("autoCauseEvidence"),shippedSource("recordAutoDecision"),
       shippedSource("maybeDecodeRescue"),
       shippedSource("rescueAutoSupply"),
@@ -2085,27 +2090,40 @@ asyncTest("a failed automatic session-open releases the claim", async () => {
 function autoRungHarness(attaches) {
   const raises = [];
   const player = { abr: { switching: false }, autoFallbackInFlight: false, started: true };
+  const asked = [];
   const build = new Function(
     "PLAYER", "document", "raisePlaybackSurface",
     "positionForPlaybackIntent", "beginPlaybackControlSeek", "requestPlaybackMediaChange",
+    "requestQualityChange", "video",
     [
       shippedSource("hasPendingPlaybackOpen"),
       shippedSource("playbackOwnsAttachedMedia"),
       shippedSource("claimAutoFallback"),
       shippedSource("releaseAutoFallback"),
+      // Shipped: whether an Auto move is allowed to spend the offer bound is
+      // the decision this harness pins, so it must not be a stub.
+      shippedSource("preparedHandoffEnabled"),
+      shippedSource("preparedHandoffOffered"),
+      shippedSource("directedChangeIncumbentReady"),
       shippedSource("switchAutoRung"),
       "return {switchAutoRung};",
     ].join("\n"),
   );
+  const video = Object.assign({ paused: false, readyState: 0 }, attaches && attaches.video);
   const shipped = build(
     player,
-    { getElementById: () => ({}) },
+    { getElementById: () => video },
     (source, fault) => raises.push({ source, fault: fault || {} }),
     () => 120,
     () => {},
-    async () => attaches,
+    async () => (attaches && attaches.attached !== undefined ? attaches.attached : attaches),
+    async (p, reason, fallback) => {
+      asked.push({ reason, height: p.autoRequestedHeight });
+      return fallback ? await fallback("declined") : "declined";
+    },
+    video,
   );
-  return { ...shipped, raises, player };
+  return { ...shipped, raises, player, asked, video };
 }
 
 asyncTest("an Auto rung that attached says so as a degraded fault", async () => {
