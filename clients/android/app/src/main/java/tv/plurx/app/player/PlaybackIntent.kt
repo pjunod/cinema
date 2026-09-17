@@ -43,10 +43,70 @@ class PlaybackIntent(
     private var audioWasActive = false
     private var audioRate = 1.0
 
+    /**
+     * A rung the viewer asked for, with no destination of its own.
+     *
+     * [tappedAtMs] is the wait's anchor: the bound on a prepared offer is
+     * measured from the tap, and every later reading of it — the dispatch
+     * exchange, the server's admission, the offer — happens inside it.
+     */
+    data class PendingQualityChange(
+        val sequence: Long,
+        val quality: PlaybackQuality,
+        val tappedAtMs: Long,
+    )
+
+    var pendingQualityChange: PendingQualityChange? = null
+        private set
+
     /** Adopt the quality carried by the exact decision that a successor opens. */
     @Synchronized
     fun adoptQuality(quality: PlaybackQuality) {
         desiredQuality = quality
+    }
+
+    /**
+     * The viewer chose a different rung, and only that.
+     *
+     * Deliberately not a seek. Recording a quality change as a pending seek
+     * freezes the destination at the tap, and a prepared handoff spends seconds
+     * between the tap and the outcome — so a fallback would reopen at the
+     * position the viewer was at when they tapped, throwing away everything
+     * that played while they waited. Leaving the position intent alone means
+     * the fallback samples the playhead when the reopen actually starts.
+     *
+     * A viewer seek during that wait still goes through [beginSeek] and owns
+     * the position outright; the rung rides along with it, because
+     * [desiredQuality] is already part of the intent either way.
+     */
+    @Synchronized
+    fun beginQualityChange(
+        quality: PlaybackQuality,
+        tappedAtMs: Long = monotonicNowMs(),
+    ): PendingQualityChange {
+        desiredQuality = quality
+        return PendingQualityChange(++nextSequence, quality, tappedAtMs)
+            .also { pendingQualityChange = it }
+    }
+
+    /** Complete a quality-change publication only if it still owns the intent. */
+    @Synchronized
+    fun retainQualityChange(
+        pending: PendingQualityChange,
+        controlSequence: Long?,
+    ): Boolean {
+        if (pendingQualityChange?.sequence != pending.sequence) return false
+        if (desiredQuality != pending.quality) return false
+        if (controlSequence != null && controlSequence > 0L) {
+            controlSequenceFloor = maxOf(controlSequenceFloor ?: 0L, controlSequence)
+        }
+        return true
+    }
+
+    /** The change was honoured, or a newer one replaced it. */
+    @Synchronized
+    fun clearQualityChange(pending: PendingQualityChange) {
+        if (pendingQualityChange?.sequence == pending.sequence) pendingQualityChange = null
     }
 
     @Synchronized
@@ -332,6 +392,24 @@ internal suspend fun publishReplacementIntent(
     if (!isActive() || !intent.retainReplacementSequence(pending, quality, null)) return false
     val sequence = publish()
     return isActive() && intent.retainReplacementSequence(pending, quality, sequence)
+}
+
+/**
+ * The same publication for a rung change that carries no destination.
+ *
+ * Separate from [publishReplacementIntent] because the ownership it proves is
+ * different: there is no pending seek to still own, and the thing that must not
+ * have changed across the suspension is the rung itself.
+ */
+internal suspend fun publishQualityChangeIntent(
+    intent: PlaybackIntent,
+    pending: PlaybackIntent.PendingQualityChange,
+    isActive: () -> Boolean = { true },
+    publish: suspend () -> Long?,
+): Boolean {
+    if (!isActive() || !intent.retainQualityChange(pending, null)) return false
+    val sequence = publish()
+    return isActive() && intent.retainQualityChange(pending, sequence)
 }
 
 /** Fences delayed control work to its session and the owning controller's lifetime. */

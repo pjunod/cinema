@@ -1,6 +1,6 @@
 # Quality switch continuity — build plan for the executing agent
 
-**Status:** revised after review, awaiting re-review · **Executes:** the
+**Status:** in execution — M0 and M2-Apple built 2026-09-16 on `effort/quality-switch-continuity`; M2-Android, M1-web and M3 follow · **Executes:** the
 rulings in [QUALITY-SWITCH-CONTINUITY-PLAN.md](QUALITY-SWITCH-CONTINUITY-PLAN.md)
 §9, taken 2026-09-16 · **Review:** Astra, 2026-09-16, changes requested
 (R1–R8 + workflow); every finding is dispositioned in §11 · **Base:** `main`

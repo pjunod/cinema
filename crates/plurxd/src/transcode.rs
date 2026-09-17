@@ -32100,6 +32100,7 @@ pub(crate) mod tests {
                 .to_owned()
             }),
             subtitle_readiness: None,
+            preparation: None,
             owner_node_hash: "n-0123456789abcdef".to_owned(),
             owner_epoch: 1,
         };

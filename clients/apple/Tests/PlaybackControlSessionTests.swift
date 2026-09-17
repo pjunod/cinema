@@ -40,6 +40,7 @@ private final class ControlAnswer: @unchecked Sendable {
     private let lock = NSLock()
     private var value = ControlAction(type: "none")
     private var readiness: String?
+    private var preparation: String?
 
     func set(_ action: ControlAction) {
         lock.lock()
@@ -59,10 +60,17 @@ private final class ControlAnswer: @unchecked Sendable {
         self.readiness = readiness
     }
 
+    func setPreparation(_ preparation: String?) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.preparation = preparation
+    }
+
     func delivery() -> ControlDelivery? {
         lock.lock()
         defer { lock.unlock() }
-        return readiness.map { ControlDelivery(subtitleReadiness: $0) }
+        guard readiness != nil || preparation != nil else { return nil }
+        return ControlDelivery(subtitleReadiness: readiness, preparation: preparation)
     }
 }
 
@@ -262,16 +270,28 @@ private final class PlayerStub {
 /// quarter of a second away rather than five seconds.
 private struct ExchangeTimeout: Error {}
 
-private func sessionBootstrap() -> ControlBootstrap {
+/// `nextExchangeMs` defaults to the protocol floor because most of these tests
+/// want exchanges as fast as they can get them. One does not: the cadence test
+/// has to run against the value a real server sets, which is
+/// `NEXT_EXCHANGE_MS` — five seconds — or it cannot tell a solicited exchange
+/// from one the pump would have made anyway.
+private func sessionBootstrap(
+    nextExchangeMs: Int = PlaybackControl.minimumExchangeMs
+) -> ControlBootstrap {
     ControlBootstrap(
         proto: PlaybackControl.protocolName,
         url: "/api/v1/hls/session-1/control",
         generation: "11111111-1111-4111-8111-111111111111",
         controlEpoch: 7,
-        nextExchangeMs: PlaybackControl.minimumExchangeMs,
+        nextExchangeMs: nextExchangeMs,
         leaseTimeoutMs: 300_000
     )
 }
+
+/// What the server puts in every bootstrap, and the number the whole of A1
+/// turns on. Named here rather than inlined so the arithmetic in the cadence
+/// test's comments can be checked against it.
+private let serverNextExchangeMs = 5_000
 
 // MARK: - Tests
 
@@ -932,5 +952,284 @@ final class PlaybackControlSessionTests: XCTestCase {
         try await Task.sleep(nanoseconds: 400_000_000)
         XCTAssertTrue(controlExchanges.all().isEmpty)
         session.end()
+    }
+
+
+    // MARK: - Waiting for a prepared offer (M2)
+
+    /// The bug this milestone exists for: the server spawns the candidate
+    /// *after* it has built the response to the exchange that carried the ask,
+    /// so a wait bounded to that one exchange could never see a `prepare`. This
+    /// one waits across exchanges, and the incumbent keeps playing while it
+    /// does.
+    func testAPreparedOfferOnALaterExchangeIsTakenRatherThanMissed() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        controlAnswer.set(ControlAction(type: "none"))
+        controlAnswer.setPreparation("staging")
+        defer {
+            controlAnswer.set(ControlAction(type: "none"))
+            controlAnswer.setPreparation(nil)
+        }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        let session = PlaybackControlSession()
+        tearDownTransport(session, urlSession)
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        let dispatched = try await waitForExchange { $0.sequence == 1 }
+        XCTAssertEqual(dispatched.sequence, 1)
+        // The staging finishes two exchanges later, which is exactly what the
+        // old 1.5-second single-exchange ask could not survive.
+        let staging = Task.detached {
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            controlAnswer.setPreparation("offered")
+            controlAnswer.set(ControlAction(
+                type: PlaybackControl.prepareActionType,
+                actionId: "9f8e7d6c-5b4a-4938-8271-605f4e3d2c1b",
+                sessionId: "0c1d2e3f-4a5b-4c7d-8e9f-0a1b2c3d4e5f",
+                playlistUrl: "/api/v1/hls/0c1d2e3f-4a5b-4c7d-8e9f-0a1b2c3d4e5f/index.m3u8",
+                mediaOriginMs: 0,
+                effectiveSelection: EffectiveSelection(
+                    qualityAuto: false,
+                    height: 720,
+                    audioTrack: nil,
+                    subtitleBurn: nil,
+                    audioOffsetMs: 0,
+                    codec: "server_selected",
+                    dynamicRange: "sdr"
+                )
+            ))
+        }
+        let step = await session.awaitPreparedOffer(
+            tappedAt: PlaybackControlSession.monotonicMs(),
+            isSuperseded: { false },
+            publish: { session.reportEvidence() }
+        )
+        _ = await staging.value
+        guard case .offered(let action) = step else {
+            session.end()
+            return XCTFail("the offer arrived on a later exchange and should have been taken, got \(step)")
+        }
+        XCTAssertEqual(action.actionId, "9f8e7d6c-5b4a-4938-8271-605f4e3d2c1b")
+        XCTAssertEqual(session.latestPreparation, "offered")
+        session.end()
+    }
+
+    /// A server that has looked and says there will be no candidate is a
+    /// decline, and the viewer gets their change now rather than at the bound.
+    func testAServerThatKeepsSayingNoneDeclinesWellInsideTheBound() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        controlAnswer.set(ControlAction(type: "none"))
+        controlAnswer.setPreparation("none")
+        defer {
+            controlAnswer.set(ControlAction(type: "none"))
+            controlAnswer.setPreparation(nil)
+        }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        let session = PlaybackControlSession()
+        tearDownTransport(session, urlSession)
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        let started = Date()
+        let step = await session.awaitPreparedOffer(
+            tappedAt: PlaybackControlSession.monotonicMs(),
+            isSuperseded: { false },
+            publish: { session.reportEvidence() }
+        )
+        XCTAssertEqual(step, PreparedOfferWait.Step.reopen(reason: "declined"))
+        XCTAssertLessThan(
+            Date().timeIntervalSince(started),
+            Double(PreparedOfferWait.boundMs) / 1_000,
+            "a decline is an answer; it must not be waited out"
+        )
+        XCTAssertEqual(session.latestPreparation, "none")
+        session.end()
+    }
+
+    /// The adopted owner has a new sequence space and did not answer this ask.
+    func testAWaitForAPreparedOfferIsReleasedByAnOwnerChange() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        controlOwnerChange.reset()
+        controlAnswer.setPreparation("staging")
+        defer {
+            controlOwnerChange.reset()
+            controlAnswer.setPreparation(nil)
+        }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        let session = PlaybackControlSession()
+        tearDownTransport(session, urlSession)
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        controlOwnerChange.arm()
+        let started = Date()
+        let step = await session.awaitPreparedOffer(
+            tappedAt: PlaybackControlSession.monotonicMs(),
+            isSuperseded: { false },
+            publish: { session.reportEvidence() }
+        )
+        XCTAssertEqual(step, PreparedOfferWait.Step.reopen(reason: "owner_changed"))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 5,
+                          "the wait is released while the reporter adopts the new owner")
+        session.end()
+    }
+
+    /// A seek during the wait must land at once. Before M2 the viewer waited
+    /// out the whole bound first, and then the quality change reopened at the
+    /// position they had tapped twelve seconds earlier.
+    func testAViewerActionDuringTheWaitEndsItImmediately() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        controlAnswer.set(ControlAction(type: "none"))
+        controlAnswer.setPreparation("staging")
+        defer {
+            controlAnswer.set(ControlAction(type: "none"))
+            controlAnswer.setPreparation(nil)
+        }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        let session = PlaybackControlSession()
+        tearDownTransport(session, urlSession)
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        let tappedAt = PlaybackControlSession.monotonicMs()
+        var superseded = false
+        let started = Date()
+        let step = await session.awaitPreparedOffer(
+            tappedAt: tappedAt,
+            isSuperseded: {
+                defer { superseded = true }
+                return superseded
+            },
+            publish: { session.reportEvidence() }
+        )
+        XCTAssertEqual(step, PreparedOfferWait.Step.reopen(reason: "superseded"))
+        XCTAssertLessThan(Date().timeIntervalSince(started), 2,
+                          "the seek owns the position now and cannot wait out the bound")
+        session.end()
+    }
+
+    /// The bound, end to end, on a server that answers nothing about
+    /// preparation at all — an older node, or a relay that predates the field.
+    /// Absence is never read as a decline, so only the bound can end this.
+    func testAnOldServerThatSendsNoPreparationIsEndedByTheBound() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        controlAnswer.set(ControlAction(type: "none"))
+        controlAnswer.setPreparation(nil)
+        defer { controlAnswer.set(ControlAction(type: "none")) }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        let session = PlaybackControlSession()
+        tearDownTransport(session, urlSession)
+
+        session.begin(
+            bootstrap: sessionBootstrap(),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        // The bound measured from a tap that already happened, so the test
+        // costs a poll rather than twelve seconds of wall clock — the rule
+        // under test is that nothing *else* ends this wait.
+        let step = await session.awaitPreparedOffer(
+            tappedAt: PlaybackControlSession.monotonicMs() - PreparedOfferWait.boundMs,
+            isSuperseded: { false },
+            publish: { session.reportEvidence() }
+        )
+        XCTAssertEqual(step, PreparedOfferWait.Step.reopen(reason: "timed_out"))
+        XCTAssertNil(session.latestPreparation, "the field is absent, not none")
+        session.end()
+    }
+
+    func testTheWordingForEveryWayAWaitCanEndIsAdvisoryAndNeverEmpty() {
+        for reason in ["timed_out", "declined", "superseded", "owner_changed", "not_reporting"] {
+            XCTAssertFalse(PlayerController.preparedOfferOutcome(reason).isEmpty)
+        }
+        XCTAssertEqual(PlayerController.preparedOfferOutcome("timed_out"), "timed out")
+        XCTAssertEqual(PlayerController.preparedOfferOutcome("declined"), "declined")
+    }
+
+    /// A1 — the bound has to be winnable, and with `notify` it was not.
+    ///
+    /// `next_exchange_ms` is set once at bootstrap and the server sets it to
+    /// five seconds. `notify` only restarts the pump when it has stopped;
+    /// otherwise the pump sleeps out that five seconds, so a wait built on it
+    /// gets the dispatch exchange plus two more inside the twelve-second bound
+    /// — against a server whose priming budget is forty-five seconds and whose
+    /// admission queue alone can hold for five. The staging would essentially
+    /// never be seen, and the fleet counters would go on reading zero.
+    ///
+    /// `notifyUrgently` wakes the pump, which then paces on the reporter's own
+    /// `minimumExchangeMs` of 250 ms. One nudge a second is well inside that,
+    /// so the count here is roughly one per second of the bound.
+    func testTheWaitSolicitsAnExchangeEachSecondWhileTheServerIsStaging() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        controlAnswer.set(ControlAction(type: "none"))
+        controlAnswer.setPreparation("staging")
+        defer {
+            controlAnswer.set(ControlAction(type: "none"))
+            controlAnswer.setPreparation(nil)
+        }
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        let session = PlaybackControlSession()
+        tearDownTransport(session, urlSession)
+
+        session.begin(
+            bootstrap: sessionBootstrap(nextExchangeMs: serverNextExchangeMs),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+        let before = controlExchanges.all().count
+        let started = Date()
+        let step = await session.awaitPreparedOffer(
+            tappedAt: PlaybackControlSession.monotonicMs(),
+            isSuperseded: { false },
+            publish: { session.reportEvidence() }
+        )
+        let elapsed = Date().timeIntervalSince(started)
+        let solicited = controlExchanges.all().count - before
+
+        XCTAssertEqual(step, PreparedOfferWait.Step.reopen(reason: "timed_out"))
+        XCTAssertGreaterThan(elapsed, Double(PreparedOfferWait.boundMs) / 1_000 - 1)
+        // The unsolicited floor: the bound divided by the server's cadence,
+        // plus the dispatch exchange. Anything at or below it means the nudge
+        // did nothing, which is what `notify` produced.
+        let unsolicited = PreparedOfferWait.boundMs / serverNextExchangeMs + 1
+        XCTAssertGreaterThan(
+            solicited, unsolicited + 4,
+            "the staging cadence has to solicit exchanges, not wait out next_exchange_ms"
+        )
+        XCTAssertGreaterThanOrEqual(solicited, 9, "about one per second of the bound")
+        XCTAssertLessThanOrEqual(
+            solicited, 16,
+            "and never faster than the cadence it asked for"
+        )
     }
 }

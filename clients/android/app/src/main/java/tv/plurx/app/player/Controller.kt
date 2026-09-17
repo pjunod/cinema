@@ -52,6 +52,7 @@ import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.exoplayer.trackselection.DefaultTrackSelector
 import androidx.media3.session.MediaSession
@@ -162,6 +163,55 @@ class Controller(
         externalListeners -= value
         player.removeListener(value)
     }
+
+    /**
+     * M3. What the last prepared switch in this player measured.
+     *
+     * Observation only. Every input is a listener callback Media3 already
+     * dispatches, every method is a bounded list append, and nothing in this
+     * controller reads a single value back to decide anything — so
+     * instrumenting the switch cannot be the thing that changes it. The
+     * arithmetic lives in `PreparedSwitchMeasurement.kt` as pure functions.
+     */
+    private val preparedSwitch = PreparedSwitchRecorder()
+
+    /**
+     * The three rows the info panel shows, computed on demand. A closed panel
+     * costs nothing, and the panel cannot change what it is reading.
+     */
+    internal val preparedSwitchReading: PreparedSwitchReading get() = preparedSwitch.reading()
+
+    /**
+     * The analytics listener each pipeline gets, tagged with that pipeline's
+     * identity so a second directed change cannot file the first switch's
+     * successor on the wrong side of the second one.
+     *
+     * `onDroppedVideoFrames` is an increment and `onAudioUnderrun` an event;
+     * the recorder knows the difference. Attached for the life of the player
+     * rather than removed on a timer: a listener is cheaper than a clock, and
+     * a clock on the commit path is precisely what must not be added.
+     */
+    private fun preparedSwitchAnalytics(pipeline: ExoPlayer): AnalyticsListener =
+        object : AnalyticsListener {
+            private val tag = System.identityHashCode(pipeline)
+
+            override fun onDroppedVideoFrames(
+                eventTime: AnalyticsListener.EventTime,
+                droppedFrames: Int,
+                elapsedMs: Long,
+            ) {
+                preparedSwitch.noteDroppedFrames(monotonicNowMs(), droppedFrames, tag)
+            }
+
+            override fun onAudioUnderrun(
+                eventTime: AnalyticsListener.EventTime,
+                bufferSize: Int,
+                bufferSizeMs: Long,
+                elapsedSinceLastFeedMs: Long,
+            ) {
+                preparedSwitch.noteAudioUnderrun(monotonicNowMs(), tag)
+            }
+        }
 
     /** Immutable quality of this exact decision; pending intent is separate. */
     private val activeQuality = plan.requestedQuality
@@ -959,6 +1009,7 @@ class Controller(
     init {
         player.playWhenReady = playbackIntent.playbackRequested
         player.addListener(listener)
+        player.addAnalyticsListener(preparedSwitchAnalytics(player))
         pgsOverlay.select(selectedSubtitle.takeIf { subtitleDelivery == SubtitleDelivery.BitmapOverlay })
         attachSurfaceGeneration()
         targetPresentationWatchdogJob = scope.launch {
@@ -1183,9 +1234,21 @@ class Controller(
         }
     }
 
-    /** Publish a screen-owned replacement before Compose disposes this controller. */
+    /**
+     * The viewer chose a different rung. Tell the server, then wait for it.
+     *
+     * Until this waited, the M6 prepared-replacement path could not be reached
+     * by a viewer at all: this routed the replacement unconditionally the
+     * instant the server had been told, which disposes this controller and its
+     * player — so the `prepare` the server was at that moment staging arrived
+     * at a reporter that no longer existed. Every rung change was a reopen, and
+     * the whole handoff was dead code behind a live wire.
+     *
+     * The wait costs the viewer nothing: playback continues throughout, and the
+     * only thing that changes at the end of it is whether the new rung arrives
+     * on a second pipeline or through the ordinary reopen this always did.
+     */
     fun prepareReplacement(
-        positionMs: Long,
         quality: PlaybackQuality,
         onPrepared: (Long, PlaybackQuality) -> Unit,
     ) {
@@ -1193,17 +1256,154 @@ class Controller(
         planReplacement.retain(onPrepared)
         stallGuard.invalidateForUserAction()
         playbackControl.clearVerdict()
-        val pending = playbackIntent.beginSeek(
-            playbackIntent.positionForPlaybackIntent(positionMs),
-            realPosition(),
-            quality,
-        )
-        sampleTargetPresentationDeadline()
+        val tappedAtMs = monotonicNowMs()
+        // A rung is not a destination. Recording this as a pending seek pinned
+        // the fallback's reopen to the playhead at the tap, which after a
+        // seconds-long wait is seconds of playback thrown away.
+        val pending = playbackIntent.beginQualityChange(quality, tappedAtMs)
         val publicationEpoch = mediaMutationEpoch
         scope.launch {
-            val current = publishIntent(pending, quality, publicationEpoch)
-            if (current) planReplacement.route(playbackIntent, force = true)
+            val current = publishQualityChange(pending, publicationEpoch)
+            if (!current) return@launch
+            // One owner from here to either a commit or exactly one reopen.
+            // A rung the viewer already left is not worth routing to, so the
+            // previous change is told it has been replaced rather than left to
+            // fire later.
+            directedChange?.superseded()
+            val change = DirectedChange(epoch = publicationEpoch, quality = quality)
+            directedChange = change
+            when (val step = playbackControl.awaitPreparedOffer(tappedAtMs)) {
+                // The same entry point the reporter's push uses, and idempotent
+                // with it: the ledger answers `Same` for an id it has seen, so
+                // whichever of the two arrives first builds the one pipeline.
+                is PreparedOfferWait.Step.Offered -> onPrepareAction(step.action)
+                is PreparedOfferWait.Step.Reopen -> fallBackDirectedChange(change, step.reason)
+                is PreparedOfferWait.Step.KeepWaiting ->
+                    error("awaitPreparedOffer returned a non-terminal step")
+            }
         }
+    }
+
+    /**
+     * The viewer's directed change, from the tap until it is honoured.
+     *
+     * Null when the last stream change was not one the viewer directed — a
+     * fallback recipe, a recovery reopen, a title start. A preparation that did
+     * not come from a directed change keeps the release-only behaviour it had:
+     * there is no rung waiting to be applied, so there is nothing to apply.
+     */
+    private var directedChange: DirectedChange? = null
+
+    /** When the directed change was published, for the committed-in row. */
+    private var directedChangeTappedAtMs: Long? = null
+
+    private suspend fun publishQualityChange(
+        pending: PlaybackIntent.PendingQualityChange,
+        publicationEpoch: Long,
+    ): Boolean {
+        directedChangeTappedAtMs = pending.tappedAtMs
+        return publishQualityChangeIntent(
+            playbackIntent,
+            pending,
+            isActive = {
+                playbackControlBootstrapFence.isActive() && mediaMutationEpoch == publicationEpoch
+            },
+            publish = playbackControl::reportIntent,
+        )
+    }
+
+    /**
+     * The prepared path did not deliver. Take the ordinary reopen, once.
+     *
+     * The position is sampled *here* rather than at the tap, which is the whole
+     * reason a rung change no longer records itself as a seek: whatever played
+     * while the viewer waited is theirs to keep. A viewer seek during the wait
+     * has its own pending destination and owns this one, so it is preferred
+     * over the playhead.
+     */
+    private fun fallBackDirectedChange(change: DirectedChange, reason: String): Boolean {
+        val routed = change.fallBackOnce(reason, mediaMutationEpoch) {
+            val observed = realPosition()
+            playbackIntent.beginSeek(
+                playbackIntent.positionForPlaybackIntent(observed),
+                observed,
+                change.quality,
+            )
+            sampleTargetPresentationDeadline()
+            planReplacement.route(playbackIntent, force = true)
+        }
+        // Only a word the server actually said keeps its own name. Anything
+        // else — no reporter, a preparation that failed after it was offered —
+        // is the ordinary fallback, and claiming a decline for it would put a
+        // sentence about the server on a fact about this client.
+        val via = if (reason == "declined" || reason == "timed_out") reason else "fallback"
+        if (routed) logQualitySwitch(via, change.quality)
+        return routed
+    }
+
+    /**
+     * A prepared attempt ended without putting the viewer's rung on screen.
+     *
+     * Every terminal failure of an offered successor comes through here, so the
+     * rung the viewer asked for survives the failure of the mechanism that was
+     * meant to deliver it. Before this, such a failure released the successor,
+     * acknowledged `failed`, and left the viewer on the rung they had changed
+     * away from with nothing to say so.
+     *
+     * A preparation that did not come from a directed change — the server may
+     * stage one for its own reasons — keeps the release-only behaviour: there
+     * is no viewer intent outstanding, so there is nothing to fall back to.
+     */
+    private fun fallBackAfterPreparedFailure(reason: String = "fallback"): Boolean {
+        val change = directedChange ?: return false
+        return fallBackDirectedChange(change, reason)
+    }
+
+    /**
+     * A reopen this controller did not start is still a reopen. The viewer's
+     * rung rides it rather than being lost to whichever recovery got there
+     * first — a stall reopen, a transport failover, a track change.
+     */
+    private fun carryDirectedChangeIntoReopen(positionMs: Long) {
+        val change = directedChange ?: return
+        if (change.isSettled) return
+        // The route below needs a destination and a rung change deliberately
+        // records none. This reopen has one: the position it is restarting at.
+        if (playbackIntent.pendingSeek == null) {
+            playbackIntent.beginSeek(positionMs, positionMs, change.quality)
+        }
+        change.superseded()
+        logQualitySwitch("fallback", change.quality)
+    }
+
+    /**
+     * How a rung change was delivered, as a client-log event.
+     *
+     * `via=prepared` is the handoff; everything else is an ordinary reopen and
+     * says which kind, because "the server declined" and "the server never
+     * answered" are different facts about a server and only one of them is
+     * about this client.
+     */
+    private fun logQualitySwitch(via: String, quality: PlaybackQuality) {
+        val elapsedMs = directedChangeTappedAtMs?.let {
+            (monotonicNowMs() - it).coerceAtLeast(0L)
+        }
+        PreparedReplacementAdvisory.recordOutcome(
+            PreparedReplacementAdvisory.outcomeLabel(via, elapsedMs),
+        )
+        // M3. The switch's own measurements, for the developer screen, which
+        // is not inside a playback session and so cannot ask this controller.
+        PreparedReplacementAdvisory.recordSwitch(preparedSwitch.reading())
+        playbackTelemetry.report(
+            event = "quality_switch",
+            level = if (via == "prepared") "info" else "warn",
+            message = "viewer quality change delivered via $via",
+            detail = buildString {
+                append("via=").append(via)
+                append(" quality=").append(quality.rungHeight?.toString() ?: quality.toString())
+                elapsedMs?.let { append(" elapsed_ms=").append(it) }
+            },
+        )
     }
 
     fun playPause() {
@@ -1380,6 +1580,7 @@ class Controller(
         if (playbackIntent.playbackRequested) {
             surfaceOwner.preparingClientOpen(mediaMutationEpoch, SurfaceContext.Start)
         }
+        carryDirectedChangeIntoReopen(positionMs)
         if (planReplacement.route(playbackIntent, retry = reason == "presentation-recovery")) return
         // A user-initiated restart (seek, quality switch, track change) resets
         // the stall reopen budget and invalidates any in-flight stall.
@@ -2890,12 +3091,36 @@ class Controller(
 
     private val preparedLedger = PreparedReplacementLedger()
     private var preparedPlayer: ExoPlayer? = null
-    /** Film position used for the readiness seek; commit samples again. */
-    private var preparedAlignedFilmMs: Long? = null
-    /** A final seek is asynchronous; the incumbent stays frozen until a later
-     * poll proves the successor landed with fresh runway. */
-    private var preparedCommitAlignmentFilmMs: Long? = null
-    private var preparedCommitAlignmentObserved = false
+
+    /**
+     * Where the two pipelines are to meet, and the arithmetic of getting there.
+     *
+     * This replaces a chase. The successor used to be seeked onto the
+     * incumbent's *current* position while the incumbent was frozen at that
+     * frame — `playWhenReady = false` — so that it could not move away while
+     * the asynchronous seek landed. That freeze was a visible pause on every
+     * prepared switch: the one thing the whole handoff exists to avoid.
+     *
+     * The successor is now parked a lead ahead with `playWhenReady = false` and
+     * waits there, and the incumbent keeps playing until it arrives. Seeking
+     * the successor ahead and letting it *run* does not work and was tried on
+     * paper first: two pipelines at the same rate keep whatever gap the seek
+     * landed with, so a 1.5 s lead stays 1.5 s forever and never closes to the
+     * 250 ms the commit needs.
+     */
+    private var rendezvous: RendezvousHold? = null
+
+    /** The successor's parking seek has completed, per its own listener. */
+    private var rendezvousSeekObserved = false
+
+    /**
+     * The coroutine waiting for the incumbent to reach the rendezvous.
+     *
+     * A coroutine rather than the one-second tick that drives the rest of this
+     * path: the commit accepts 250 ms of error, and a one-second sampler misses
+     * that window four times out of five.
+     */
+    private var rendezvousJob: Job? = null
     private var preparedOrigin: ProgressiveMediaOrigin? = null
     private var preparedListener: Player.Listener? = null
     private var preparedStartedAtMs = 0L
@@ -3022,13 +3247,18 @@ class Controller(
             // A device that cannot stand up a second pipeline at all is the
             // measured Google TV case. It is a `failed`, not a crash.
             publishAcknowledgement(preparedLedger.failed())
+            // And the viewer still asked for a different rung. The ordinary
+            // reopen is what this device has; it is not seamless, and it is
+            // very much better than the tap doing nothing at all.
+            fallBackAfterPreparedFailure()
             return
         }
         preparedStartedAtMs = monotonicNowMs()
         preparedPlayer = built.player
-        preparedAlignedFilmMs = null
-        preparedCommitAlignmentFilmMs = null
-        preparedCommitAlignmentObserved = false
+        rendezvousJob?.cancel()
+        rendezvousJob = null
+        rendezvous = null
+        rendezvousSeekObserved = false
         preparedOrigin = built.progressiveMediaOrigin
         val successorListener = object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
@@ -3056,14 +3286,19 @@ class Controller(
             ) {
                 if (reason == Player.DISCONTINUITY_REASON_SEEK &&
                     preparedPlayer === built.player &&
-                    preparedCommitAlignmentFilmMs != null
+                    rendezvous?.rendezvousFilmMs != null
                 ) {
-                    preparedCommitAlignmentObserved = true
+                    rendezvousSeekObserved = true
                 }
             }
         }
         preparedListener = successorListener
         built.player.addListener(successorListener)
+        // M3. The successor's own dropped-frame and underrun stream, from
+        // before it is exposed to after it is the incumbent. It is never
+        // removed, so the two seconds *after* the commit are on the same
+        // series as the two before it.
+        built.player.addAnalyticsListener(preparedSwitchAnalytics(built.player))
         built.player.setMediaItem(
             MediaItem.fromUri(Session.url(playlist)),
             successorAttachPositionMs(originMs, realPosition()),
@@ -3091,8 +3326,12 @@ class Controller(
         awaitingCommitFrameSinceMs?.let { since ->
             if (monotonicNowMs() - since > PREPARED_COMMIT_FRAME_BOUND_MS) {
                 val restored = rollbackSwitchedReplacement()
-                failSwitchedReplacement()
-                if (!restored) {
+                // The directed change takes its one reopen here, and it carries
+                // the viewer's rung. The deferred rollback reopen would only
+                // repeat it at the rung they changed away from.
+                val routed = failSwitchedReplacement()
+                if (routed) preparedRollbackReopen = null
+                if (!restored && !routed) {
                     restartAt(realPosition(), "prepared successor rendered no frame")
                 }
                 return
@@ -3110,41 +3349,107 @@ class Controller(
         if (successor.currentTracks.groups.isEmpty()) return
         publishAcknowledgement(preparedLedger.metadataReady())
         val originMs = preparedLedger.action?.mediaOriginMs ?: return
-        val incumbentFilmMs = realPosition()
-        if (preparedAlignedFilmMs == null) {
-            preparedAlignedFilmMs = incumbentFilmMs
-            successor.seekTo(successorAttachPositionMs(originMs, incumbentFilmMs))
-            return
-        }
-        val bufferedThrough = successorFilmPositionMs(originMs, successor.bufferedPosition)
-        if (!successorIsBuffered(bufferedThrough, incumbentFilmMs)) return
-        val successorFilmMs = successorFilmPositionMs(originMs, successor.currentPosition)
-        val pendingAlignment = preparedCommitAlignmentFilmMs
-        if (pendingAlignment != null) {
-            // `seekTo` only requests alignment. A later tick must observe the
-            // completed position and re-check runway against the incumbent,
-            // which remains the surface owner while frozen on this frame.
-            if (!preparedCommitAlignmentObserved) return
-            if (kotlin.math.abs(incumbentFilmMs - pendingAlignment) > PREPARED_ALIGNMENT_SLACK_MS ||
-                kotlin.math.abs(successorFilmMs - incumbentFilmMs) > PREPARED_ALIGNMENT_SLACK_MS
-            ) {
-                preparedCommitAlignmentFilmMs = incumbentFilmMs
-                preparedCommitAlignmentObserved = false
-                player.playWhenReady = false
-                successor.seekTo(successorAttachPositionMs(originMs, incumbentFilmMs))
-                return
+        if (rendezvous != null) return
+        // From here the rendezvous owns this preparation. This tick keeps the
+        // readiness bound and the terminal failures; it is far too coarse for
+        // anything measured against a 250 ms window.
+        val hold = RendezvousHold()
+        rendezvous = hold
+        // The incumbent is *not* touched here, and that is the change. It keeps
+        // playing all the way to the meeting point.
+        parkSuccessor(hold.park(monotonicNowMs(), realPosition()), originMs, successor)
+        beginRendezvous(hold, originMs)
+    }
+
+    /** Send the successor to the meeting point and leave it waiting there. */
+    private fun parkSuccessor(
+        park: RendezvousHold.Park,
+        originMs: Long,
+        successor: ExoPlayer,
+    ) {
+        rendezvousSeekObserved = false
+        // Parked, not chasing. Everything else about this handoff follows from
+        // this one assignment being `false`.
+        successor.playWhenReady = park.playWhenReady
+        successor.seekTo(successorAttachPositionMs(originMs, park.rendezvousFilmMs))
+    }
+
+    /**
+     * Wait for the successor to reach the meeting point, then for the incumbent
+     * to arrive at it, then swap.
+     *
+     * One coroutine for both halves, on its own cadence, because both are
+     * measured against the same 250 ms window the one-second tick cannot see.
+     * The delay is recomputed from the incumbent's own rate on every pass, so a
+     * viewer who pauses during the hold simply postpones the swap: the
+     * rendezvous does not move, the successor stays parked on it, and the wait
+     * resumes from wherever the playhead is when play does.
+     */
+    private fun beginRendezvous(hold: RendezvousHold, originMs: Long) {
+        rendezvousJob?.cancel()
+        rendezvousJob = scope.launch {
+            while (true) {
+                if (rendezvous !== hold) return@launch
+                val successor = preparedPlayer ?: return@launch
+                if (!preparedLedger.isLive) return@launch
+                if (!hold.isReady) {
+                    delay(RENDEZVOUS_READY_POLL_MS)
+                    val target = hold.rendezvousFilmMs ?: return@launch
+                    // Two separate requirements, both measured at the
+                    // rendezvous rather than at the moving playhead: the seek
+                    // has landed there, and there is contiguous runway through
+                    // it. A pipeline that is merely positioned correctly has
+                    // nothing behind it to carry the viewer forward, and one
+                    // that is buffered but still seeking is not where the swap
+                    // needs it.
+                    if (!rendezvousSeekObserved) continue
+                    val bufferedThrough =
+                        successorFilmPositionMs(originMs, successor.bufferedPosition)
+                    if (!successorIsBuffered(bufferedThrough, target)) continue
+                    hold.ready(monotonicNowMs())
+                    publishAcknowledgement(preparedLedger.bufferReady(bufferedThrough))
+                    continue
+                }
+                delay(hold.delayMs(realPosition(), player.playbackParameters.speed.toDouble()))
+                if (rendezvous !== hold || preparedPlayer !== successor) return@launch
+                if (!preparedLedger.isLive) return@launch
+                val step = hold.fire(
+                    nowMs = monotonicNowMs(),
+                    incumbentFilmMs = realPosition(),
+                    successorFilmMs = successorFilmPositionMs(originMs, successor.currentPosition),
+                    successorReady = hold.isReady,
+                    speed = player.playbackParameters.speed.toDouble(),
+                )
+                when (step) {
+                    is RendezvousHold.Step.Commit -> {
+                        // `commitPreparedReplacement` gives the successor the
+                        // incumbent's own transport intent, which is what
+                        // starts it: it has been parked with `playWhenReady`
+                        // false since the moment it was seeked here.
+                        commitPreparedReplacement(step.filmMs)
+                        return@launch
+                    }
+                    // Short of the meeting point — still on its way, or paused.
+                    // The loop recomputes the delay from the new reading.
+                    is RendezvousHold.Step.Wait -> Unit
+                    // Past it: a seek that outran its lead, a forward seek, or a
+                    // rate above one. Pick a later point, park again, and wait
+                    // for it to land there.
+                    is RendezvousHold.Step.Repark -> parkSuccessor(step.park, originMs, successor)
+                    is RendezvousHold.Step.Abandon -> {
+                        // Bounded. Two misses is enough evidence that this
+                        // device is not going to meet a 250 ms window, and the
+                        // viewer's rung is owed the ordinary reopen instead.
+                        surfaceOwner.logOnly(
+                            mediaMutationEpoch,
+                            "prepared successor missed the rendezvous (${step.reason})",
+                        )
+                        abandonPreparedReplacement(failed = true)
+                        return@launch
+                    }
+                }
             }
-        } else if (kotlin.math.abs(successorFilmMs - incumbentFilmMs) > PREPARED_ALIGNMENT_SLACK_MS) {
-            preparedCommitAlignmentFilmMs = incumbentFilmMs
-            preparedCommitAlignmentObserved = false
-            // Freeze only transport execution, not `playbackIntent`; a user
-            // request during alignment remains the intent copied at commit.
-            player.playWhenReady = false
-            successor.seekTo(successorAttachPositionMs(originMs, incumbentFilmMs))
-            return
         }
-        publishAcknowledgement(preparedLedger.bufferReady(bufferedThrough))
-        commitPreparedReplacement(incumbentFilmMs)
     }
 
     /**
@@ -3178,6 +3483,14 @@ class Controller(
         // not is a window where a preparation can be left permanently
         // unsettleable.
         awaitingCommitFrameSinceMs = monotonicNowMs()
+        // M3. Three assignments, on the line the swap is decided at. Nothing
+        // is awaited, nothing is read back, and the picture is untouched.
+        preparedSwitch.noteCommit(
+            atMs = monotonicNowMs(),
+            tappedAtMs = directedChangeTappedAtMs,
+            predecessor = System.identityHashCode(player),
+            successor = System.identityHashCode(successor),
+        )
         val previous = player
         val previousVolume = previous.volume
         val previousPlayWhenReady = playbackIntent.playbackRequested
@@ -3209,8 +3522,10 @@ class Controller(
         preparedListener = null
         preparedPlayer = null
         preparedOrigin = null
-        preparedCommitAlignmentFilmMs = null
-        preparedCommitAlignmentObserved = false
+        rendezvousJob?.cancel()
+        rendezvousJob = null
+        rendezvous = null
+        rendezvousSeekObserved = false
 
         previous.removeListener(this.listener)
         externalListeners.forEach { previous.removeListener(it) }
@@ -3295,7 +3610,14 @@ class Controller(
     private fun settleCommitOnFirstFrame(firstFrameUnixMs: Long) {
         if (awaitingCommitFrameSinceMs == null) return
         awaitingCommitFrameSinceMs = null
+        preparedSwitch.noteFirstFrame(monotonicNowMs())
         publishAcknowledgement(preparedLedger.committed(firstFrameUnixMs))
+        // The viewer is looking at the rung they asked for. The directed change
+        // is honoured and owes nothing — least of all a reopen.
+        directedChange?.let { change ->
+            change.committed()
+            logQualitySwitch("prepared", change.quality)
+        }
         // A rendered successor is now the last known-good picture, so the
         // predecessor is no longer rollback authority and may release.
         preparedPredecessor = null
@@ -3345,11 +3667,17 @@ class Controller(
         return true
     }
 
-    /** Settle a switched-but-black successor without inventing a frame. */
-    private fun failSwitchedReplacement() {
-        if (awaitingCommitFrameSinceMs == null) return
+    /**
+     * Settle a switched-but-black successor without inventing a frame.
+     *
+     * Returns whether the viewer's directed change took its one ordinary reopen
+     * here, so the caller does not start a second one of its own.
+     */
+    private fun failSwitchedReplacement(): Boolean {
+        if (awaitingCommitFrameSinceMs == null) return false
         awaitingCommitFrameSinceMs = null
         publishAcknowledgement(preparedLedger.failedAfterSwitch())
+        return fallBackAfterPreparedFailure()
     }
 
     /**
@@ -3396,6 +3724,10 @@ class Controller(
         val owed = if (failed) preparedLedger.failed() else preparedLedger.aborted()
         releaseSuccessor()
         publishAcknowledgement(owed)
+        // A failure owes the viewer their rung through the ordinary path; a
+        // deliberate abandonment means something newer already owns the stream,
+        // and routing this one would drag the viewer back to it.
+        if (failed) fallBackAfterPreparedFailure() else directedChange?.superseded()
     }
 
     /**
@@ -3405,16 +3737,20 @@ class Controller(
      */
     private fun releaseSuccessor() {
         val successor = preparedPlayer ?: return
-        val restorePlayback = preparedCommitAlignmentFilmMs != null
         preparedListener?.let { successor.removeListener(it) }
         preparedListener = null
         preparedPlayer = null
         preparedOrigin = null
-        preparedAlignedFilmMs = null
-        preparedCommitAlignmentFilmMs = null
-        preparedCommitAlignmentObserved = false
+        rendezvousJob?.cancel()
+        rendezvousJob = null
+        rendezvous = null
+        rendezvousSeekObserved = false
         successor.release()
-        if (restorePlayback) player.playWhenReady = playbackIntent.playbackRequested
+        // Nothing to restore. The incumbent was never stopped: the rendezvous
+        // is the successor waiting for it, not the other way round, so a
+        // preparation that dies at any point leaves the picture exactly as the
+        // viewer has been watching it. The `playWhenReady` this used to put
+        // back is the visible pause the handoff exists to remove.
     }
 
     /**

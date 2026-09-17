@@ -2045,6 +2045,13 @@ final class PlayerController: ObservableObject {
     /// that replays film the viewer has already watched. Nil once it has been
     /// issued, which is also what lets the readiness monitor move on.
     private var preparedSeekMs: Int?
+    /// What the commit's alignment seek came back with, and which alignment it
+    /// belongs to. Written by the seek's own task and read by the bounded wait
+    /// beside it; both are `@MainActor`, so a pair of stored properties is the
+    /// whole bridge. The generation is what stops an abandoned seek — one this
+    /// commit gave up on — reporting into a later one.
+    private var preparedAlignmentOutcome: Bool?
+    private var preparedAlignmentGeneration = 0
     /// How long the viewer's picture was interrupted the last time a prepared
     /// handoff fell back, in milliseconds. Nil until one does. Published so
     /// the developer surfaces can show the number that is currently missing
@@ -2185,6 +2192,32 @@ final class PlayerController: ObservableObject {
     /// Every explicit viewer command invalidates recovery work that crossed an
     /// await. Session generation alone cannot see pause/resume or native seek.
     private var viewerActionEpoch = 0
+
+    /// M3. What the last prepared switch measured.
+    ///
+    /// Observation only. Every input is a read of an access log AVFoundation
+    /// already writes, taken on the status poll this controller already runs;
+    /// nothing here is awaited on the commit path and nothing in this
+    /// controller reads a value back to decide anything, so instrumenting the
+    /// switch cannot be the thing that changes it. The arithmetic lives in
+    /// `PreparedSwitchMeasurement.swift` as pure functions.
+    private var preparedSwitch = PreparedSwitchMeasurement.Recorder()
+
+    /// The three rows the info panel shows, computed on demand.
+    var preparedSwitchReading: PreparedSwitchMeasurement.Reading { preparedSwitch.reading() }
+
+    /// One reading of the item currently on the layer. A log read and two
+    /// appends; called from the status poll and from either end of the commit,
+    /// never from a render pass.
+    private func sampleThePreparedSwitch() {
+        guard let event = player.currentItem?.accessLog()?.events.last else { return }
+        preparedSwitch.note(
+            atMs: PlaybackControlSession.monotonicMs(),
+            droppedFrames: event.numberOfDroppedVideoFrames >= 0
+                ? event.numberOfDroppedVideoFrames : nil,
+            stalls: event.numberOfStalls >= 0 ? event.numberOfStalls : nil
+        )
+    }
     /// Request sequence already published by a predecessor for the seek that a
     /// replacement is about to attach. It lives above control-session lifetime.
     private var pendingControlSequence: UInt64?
@@ -3219,6 +3252,13 @@ final class PlayerController: ObservableObject {
                     || initialDecisionRequest.explicitHeight != height))
         else { return }
         let actionEpoch = beginViewerAction()
+        // Whether the viewer already had a seek in the air. It decides whose
+        // destination the pin below belongs to — theirs, or this change's —
+        // and so which of the two the fallback must resume at.
+        let carryingASeek = seekState.pendingMs != nil
+        // The presentation destination every in-place selection creates
+        // synchronously. It stays: the progress bar, the presentation monitor
+        // and the stall-recovery suppression are all built on it.
         let destination = seekState.absolute(
             positionForPlaybackIntent(),
             durationMs: knownDurationMs
@@ -3236,7 +3276,6 @@ final class PlayerController: ObservableObject {
         Task {
             let prepared = await offerPreparedQualityChange()
             guard actionEpoch == viewerActionEpoch,
-                  destination.generation == seekState.generation,
                   selectedHeight == height,
                   !selectedQualityIsOriginal
             else { return }
@@ -3244,13 +3283,38 @@ final class PlayerController: ObservableObject {
             // successor or fall back to exactly the reopen below. Doing both
             // would change the stream twice for one tap.
             guard !prepared else { return }
-            await reopen(at: destination.target)
+            // Sampled here, not at the tap — and nil when a viewer seek has
+            // taken the position meanwhile, because that seek carries the new
+            // selection already and owns where the film lands.
+            guard let target = QualityChangeReopen.target(
+                seekGenerationAtTap: destination.generation,
+                seekGenerationNow: seekState.generation,
+                positionNowMs: QualityChangeReopen.positionNowMs(
+                    pinnedAtTapMs: destination.target,
+                    livePositionMs: liveFilmPositionMs(),
+                    carryingASeek: carryingASeek
+                )
+            ) else { return }
+            await reopen(at: target)
         }
+    }
+
+    /// The incumbent's own clock, or nil when it cannot honestly be read —
+    /// nothing attached, or a replacement already in flight.
+    ///
+    /// Distinct from `positionForPlaybackIntent`, which answers with the
+    /// destination the command in progress pinned. That is the right answer
+    /// for building the next command on, and the wrong one for a change that
+    /// has spent twelve seconds waiting while the picture kept playing.
+    private func liveFilmPositionMs() -> Int? {
+        guard !isChangingStream, player.currentItem != nil else { return nil }
+        return realPositionMs()
     }
 
     func selectOriginalQuality() {
         guard selectedHeight != nil || !selectedQualityIsOriginal else { return }
         let actionEpoch = beginViewerAction()
+        let carryingASeek = seekState.pendingMs != nil
         let destination = seekState.absolute(
             positionForPlaybackIntent(),
             durationMs: knownDurationMs
@@ -3268,12 +3332,20 @@ final class PlayerController: ObservableObject {
         Task {
             let prepared = await offerPreparedQualityChange()
             guard actionEpoch == viewerActionEpoch,
-                  destination.generation == seekState.generation,
                   selectedHeight == nil,
                   selectedQualityIsOriginal
             else { return }
             guard !prepared else { return }
-            await reopen(at: destination.target)
+            guard let target = QualityChangeReopen.target(
+                seekGenerationAtTap: destination.generation,
+                seekGenerationNow: seekState.generation,
+                positionNowMs: QualityChangeReopen.positionNowMs(
+                    pinnedAtTapMs: destination.target,
+                    livePositionMs: liveFilmPositionMs(),
+                    carryingASeek: carryingASeek
+                )
+            ) else { return }
+            await reopen(at: target)
         }
     }
 
@@ -3288,13 +3360,13 @@ final class PlayerController: ObservableObject {
     /// delivery-rate telemetry may still be unknown on a new session without
     /// overriding the viewer's saved choice.
     ///
-    /// The bound is the one this platform already uses for "publish evidence
-    /// and wait briefly for the verdict", and the contract records how long a
-    /// client may wait as an open question rather than settling it. 1.5 s is
-    /// defensible here for a reason it is not defensible everywhere: the
-    /// alternative this wait might avoid is a full reopen, which costs the
-    /// viewer seconds of black and a rebuffer. It is spent only on a live
-    /// session whose client declares the capability.
+    /// The bound is `PreparedOfferWait.boundMs`, and it is not the stall ask's
+    /// 1.5 seconds. The server spawns the candidate *after* it has answered
+    /// the exchange that carried the ask, so a bound that only ever saw that
+    /// one exchange's answer could not, even in principle, see a `prepare` —
+    /// which is why every quality change reopened. This waits across
+    /// exchanges, and it is affordable for a reason the stall ask's is not:
+    /// the incumbent is still playing the whole time.
     private func offerPreparedQualityChange() async -> Bool {
         guard Caps.controlCapabilities().dualPlayerPreparation,
               preparedReplacement.shouldAskForPreparation,
@@ -3313,22 +3385,61 @@ final class PlayerController: ObservableObject {
         // number whenever the ask bails without building a request, and order
         // the reopen's create as more superseded than it is.
         let floor = ((await playbackControl.controlSequence) ?? 0) + 1
-        let answer = await playbackControl.askForAction(
-            bound: Self.controlAskSeconds,
-            cap: Self.controlAskCapSeconds,
+        // M3. The tap, in wall time because the first frame is. `reopened()`
+        // moves the incumbent's readings onto the before side of the switch
+        // that is about to be asked for, so a second change in one session
+        // cannot be measured against the first one's samples.
+        preparedSwitch.reopened()
+        preparedSwitch.note(tappedAtUnixMs: Int(Date().timeIntervalSince1970 * 1_000))
+        sampleThePreparedSwitch()
+        let actionEpoch = viewerActionEpoch
+        let step = await playbackControl.awaitPreparedOffer(
+            tappedAt: PlaybackControlSession.monotonicMs(),
+            isSuperseded: { [weak self] in
+                guard let self else { return true }
+                return self.viewerActionEpoch != actionEpoch
+            },
             publish: { [weak self] in self?.playbackControl.reportEvidence() }
         )
         retainControlSequence(max(floor, (await playbackControl.controlSequence) ?? 0))
-        guard let answer, let prepared = PreparedReplacementAction(answer) else { return false }
-        // Idempotent against the reporter's own return path, which offers the
-        // same staging from `onPreparedReplacement`: whichever arrives second
-        // is a replay and builds nothing. The answer decides whether the
-        // prepared path actually took the change — a staging this client has
-        // already settled, or one offered while a switch is in flight, changes
-        // nothing, and returning true for those would drop the viewer's tap.
-        return preparedReplacement.offer(
-            prepared, filmPositionMs: positionForPlaybackIntent()
-        ).ownsTheChange
+        Caps.PreparedHandoffTelemetry.shared.note(
+            preparation: playbackControl.latestPreparation
+        )
+        switch step {
+        case .offered(let prepared):
+            // Idempotent against the reporter's own return path, which offers
+            // the same staging from `onPreparedReplacement`: whichever arrives
+            // second is a replay and builds nothing. The offer decides whether
+            // the prepared path actually took the change — a staging this
+            // client has already settled, or one offered while a switch is in
+            // flight, changes nothing, and returning true for those would drop
+            // the viewer's tap.
+            return preparedReplacement.offer(
+                prepared, filmPositionMs: positionForPlaybackIntent()
+            ).ownsTheChange
+        case .reopen(let reason):
+            Caps.PreparedHandoffTelemetry.shared.note(
+                outcome: Self.preparedOfferOutcome(reason)
+            )
+            return false
+        case .keepWaiting:
+            // Unreachable: the wait only returns a terminal step. Taking the
+            // ordinary in-place path is the honest answer to a step that says
+            // nothing happened.
+            return false
+        }
+    }
+
+    /// The developer tab's wording for a wait that ended without an offer.
+    /// Advisory only — nothing reads it back and nothing is gated on it.
+    nonisolated static func preparedOfferOutcome(_ reason: String) -> String {
+        switch reason {
+        case "timed_out": return "timed out"
+        case "declined": return "declined"
+        case "superseded": return "superseded"
+        case "owner_changed": return "owner changed"
+        default: return reason
+        }
     }
 
     /// The link rate AVFoundation itself measured, in bits per second.
@@ -4421,6 +4532,10 @@ final class PlayerController: ObservableObject {
                     // untouched and the log line is the only trace.
                     self.noteSurfaceLogOnly("session_status_unavailable")
                 }
+                // M3. One access-log read every two seconds, which is the
+                // cadence this poll already has. Off the render path, and the
+                // only sampler there is outside the commit itself.
+                self.sampleThePreparedSwitch()
                 if let status {
                     self.diagnosticSessionStatus = status
                     self.diagnosticSessionStatusObservedAt = Date()
@@ -8620,6 +8735,54 @@ extension PlayerController: PreparedSuccessorHost {
         // monitor returns as soon as this call does.
         preparedMonitor = nil
         preparedLifecycle.removeAll()
+        // Put the successor on the incumbent's position BEFORE the viewer can
+        // see it.
+        //
+        // The successor is seeked exactly once — when its item first becomes
+        // playable, to the film position the offer named — and is never
+        // played. By the time it is worth switching to, the incumbent has run
+        // on by however long priming took, which since M2 is a wait the viewer
+        // spends watching. Exposing the item at its staged position would
+        // rewind the film by that much, and `boundaryMs` would then reject
+        // every frame until playback caught back up: at best a visible
+        // rewind-and-resync, at worst a `switchedWithoutAFrame` and a reopen,
+        // for a handoff whose whole point is that neither happens.
+        //
+        // So the alignment finishes first and the exposure follows it. The
+        // incumbent is still on the layer for the whole of this seek, so the
+        // picture the viewer is looking at keeps playing while it runs — the
+        // same reason the wait that produced this staging is affordable at
+        // all. The seek is issued while the item is still attached to its own
+        // player, which is where AVFoundation will honour one.
+        let rendezvous = PreparedCommitRendezvous.plan(
+            stagedFilmPositionMs: preparedFilmPositionMs,
+            incumbentFilmPositionMs: realPositionMs(),
+            mediaOriginMs: action.mediaOriginMs
+        )
+        // Bounded, because an unbounded one does not degrade the way it looks
+        // as though it would. The incumbent does keep playing — but the
+        // readiness monitor has already been dropped two statements above, so
+        // nothing can cancel a suspended commit; `.switching` makes `abandon`,
+        // `abandonWithoutFallback` and `offer` all bail, so the coordinator
+        // never frees and every later quality change in the session skips the
+        // prepared path; the server holds its one preparation slot for the full
+        // deadline because no acknowledgement is queued in `.switching`; and
+        // the viewer's tap produces nothing at all, because the prepared path
+        // already claimed it and suppressed the in-place reopen.
+        guard await awaitPreparedAlignment(of: item, to: rendezvous.itemPositionMs) else {
+            discardPreparedSuccessor()
+            return PreparedCommitRendezvous.outcomeWhenAlignmentCannotLand
+        }
+        // The staging can be taken away under that await — the player ending,
+        // the app backgrounding. `.switching` stops anything else *opening*
+        // one, but it does not stop the pipeline being freed, and handing a
+        // released item to the incumbent would be worse than refusing.
+        guard preparedItem === item, preparedPlayer === successor,
+              started, player.currentItem != nil
+        else {
+            discardPreparedSuccessor()
+            return .refused
+        }
         // Release the successor's claim, and *prove* it was released before
         // handing the item over. `currentItem` is the association itself, so
         // a nil here is the guard rather than an assumption about timing.
@@ -8639,12 +8802,15 @@ extension PlayerController: PreparedSuccessorHost {
         isChangingStream = true
         defer { isChangingStream = false }
 
-        // The film position the switch happens at. A first frame whose own
-        // display time falls before this boundary is a pixel buffer that
-        // predates the switch, and reporting it as `first_frame_unix_ms` would
-        // be worse than reporting nothing: it is the instrument that could not
-        // separate a codec change from no change.
-        let boundaryMs = max(preparedFilmPositionMs, realPositionMs())
+        // The film position the switch happens at — the position the successor
+        // was just aligned to, not a fresh reading of a clock that has moved
+        // on since. A first frame whose own display time falls before this
+        // boundary is a pixel buffer that predates the switch, and reporting
+        // it as `first_frame_unix_ms` would be worse than reporting nothing:
+        // it is the instrument that could not separate a codec change from no
+        // change. Taking it from the alignment is what makes the successor's
+        // own first frame able to satisfy it at all.
+        let boundaryMs = rendezvous.filmPositionMs
         stopStatusPolling()
         installSeekVideoOutput(on: item)
         #if os(iOS)
@@ -8656,7 +8822,12 @@ extension PlayerController: PreparedSuccessorHost {
         pgsOverlayWindowTask?.cancel()
         pgsOverlayWindow = nil
         stallObservation.reset()
+        // M3. The predecessor's final reading, and then the instant the item
+        // changed. Two synchronous log reads on either side of the swap, so the
+        // window has an endpoint at the commit rather than at the nearest poll.
+        sampleThePreparedSwitch()
         player.replaceCurrentItem(with: item)
+        preparedSwitch.note(commitAtMs: PlaybackControlSession.monotonicMs())
         // The successor is a full session in every respect but its pointer, so
         // everything keyed on "which session am I playing" moves with it.
         sessionId = action.sessionId
@@ -8674,6 +8845,7 @@ extension PlayerController: PreparedSuccessorHost {
         isPlaying = wantsPlayback
         refreshPGSOverlayWindow(at: boundaryMs, force: true)
         ttffMeasurement.rebasePosition(at: realPositionMs())
+        let exposedAtUnixMs = Int(Date().timeIntervalSince1970 * 1_000)
         let firstFrameUnixMs = await awaitPreparedFirstFrame(boundaryMs: boundaryMs)
         // Do not DELETE the predecessor here. The committed control exchange
         // is the compare-and-swap that makes this successor authoritative and
@@ -8681,7 +8853,51 @@ extension PlayerController: PreparedSuccessorHost {
         // exact route that CAS is bound to, so even a visibly successful
         // switch could never settle durably.
         guard let firstFrameUnixMs else { return .switchedWithoutAFrame }
+        Caps.PreparedHandoffTelemetry.shared.note(
+            outcome: "committed \(max(0, firstFrameUnixMs - exposedAtUnixMs)) ms"
+        )
+        // M3. The successor's first reading and the frame the viewer saw. The
+        // developer tab is not inside a playback session and so cannot ask this
+        // controller; these are advisory and nothing reads them back.
+        preparedSwitch.note(firstFrameUnixMs: firstFrameUnixMs)
+        sampleThePreparedSwitch()
+        Caps.PreparedHandoffTelemetry.shared.note(switch: preparedSwitch.reading())
         return .committed(firstFrameUnixMs: firstFrameUnixMs)
+    }
+
+    /// Put the successor's playhead on the rendezvous, and give up on the seek
+    /// if it does not come back inside `PreparedReplacementBounds.alignmentMs`.
+    ///
+    /// The seek runs in a task of its own rather than being awaited directly,
+    /// so that giving up on it is possible at all: `AVPlayerItem.seek` does not
+    /// observe task cancellation, and the readiness monitor that would
+    /// otherwise own this work was dropped before the commit began. The
+    /// abandoned seek is left to resolve or not; the generation check is what
+    /// stops it reporting into a commit that has moved on.
+    private func awaitPreparedAlignment(of item: AVPlayerItem, to itemMs: Int) async -> Bool {
+        preparedAlignmentGeneration &+= 1
+        let generation = preparedAlignmentGeneration
+        preparedAlignmentOutcome = nil
+        let seek = Task { @MainActor [weak self] in
+            let landed = await item.seek(
+                to: CMTime(value: CMTimeValue(max(0, itemMs)), timescale: 1_000),
+                toleranceBefore: .zero,
+                toleranceAfter: .zero
+            )
+            guard let self, self.preparedAlignmentGeneration == generation else { return }
+            self.preparedAlignmentOutcome = landed
+        }
+        let landed = await awaitBoundedValue(
+            boundMs: PreparedReplacementBounds.alignmentMs,
+            pollMs: PreparedReplacementBounds.pollMs,
+            now: { Int(ProcessInfo.processInfo.systemUptime * 1_000) },
+            sleep: { try? await Task.sleep(nanoseconds: UInt64($0) * 1_000_000) },
+            read: { [weak self] in self?.preparedAlignmentOutcome }
+        )
+        // Best effort, and expected to do nothing to the seek itself; it stops
+        // the wrapper task rather than the media operation inside it.
+        seek.cancel()
+        return landed ?? false
     }
 
     /// Wall clock at the successor's first frame that is actually at or past
@@ -8744,6 +8960,11 @@ extension PlayerController: PreparedSuccessorHost {
         let actionEpoch = viewerActionEpoch
         Task { @MainActor [weak self] in
             guard let self, self.started, self.viewerActionEpoch == actionEpoch else { return }
+            // Recorded inside the guard, never before it. A newer viewer
+            // action owns the player by the time this hop lands, and a
+            // fallback that reopened anyway would move the film out from under
+            // the command that superseded it.
+            Caps.PreparedHandoffTelemetry.shared.note(outcome: "fell back")
             await self.reopen(at: self.positionForPlaybackIntent())
         }
     }
