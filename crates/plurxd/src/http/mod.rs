@@ -5452,14 +5452,19 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "windows_server",
                 "library_channels",
+                "library_channel_subject_matching",
+                "embedded_semantic_search",
                 "dvr",
                 "cluster_transport_recovery",
                 "playback_control_protocol_v1",
                 "prepared_quality_handoff",
+                "content_analysis_repair",
                 "live_hls_recovery",
                 "pgs_overlay",
-                "dolby_vision_convert"
+                "dolby_vision_convert",
+                "source_probe_comparison"
             ],
             "every Developer card with prerequisites needs a row here: {body}"
         );
@@ -5499,7 +5504,11 @@ mod tests {
             green,
             vec![
                 "authoritative_store",
+                "durable_queue",
+                "runtime",
                 "server_preparation_is_real",
+                "source_fencing",
+                "sources_match_their_scan_whole",
                 "tuner_reserve"
             ]
         );

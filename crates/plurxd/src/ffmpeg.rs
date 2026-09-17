@@ -1236,6 +1236,29 @@ fn source_facts(document: &serde_json::Value) -> serde_json::Value {
     serde_json::Value::Object(facts)
 }
 
+/// Held sources this process admitted on their media facts rather than on the
+/// whole stored document. Work this server does on weaker evidence than it
+/// prefers is work an operator must be able to see without a shell.
+static REPORTER_DRIFT_ADMISSIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn note_reporter_drift_admission() {
+    REPORTER_DRIFT_ADMISSIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn reporter_drift_admissions() -> u64 {
+    REPORTER_DRIFT_ADMISSIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn reporter_drift_prometheus() -> String {
+    format!(
+        "# HELP plurx_probe_reporter_drift_admissions_total Held sources admitted on their media facts because their stored scan came from a different FFprobe build.\n\
+         # TYPE plurx_probe_reporter_drift_admissions_total counter\n\
+         plurx_probe_reporter_drift_admissions_total {}\n",
+        reporter_drift_admissions()
+    )
+}
+
 /// Whether the two stream lists can be compared position by position at all.
 /// The fact comparison pairs by position, so the pairing itself has to be
 /// proved first: the same count, and the same explicit non-negative integer

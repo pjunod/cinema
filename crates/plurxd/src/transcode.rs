@@ -17305,6 +17305,7 @@ impl TranscodeManager {
             // facts rather than on the whole document, because the stored scan
             // and this node's FFprobe are different builds. Reanalyzing the
             // item restores the stricter comparison.
+            crate::ffmpeg::note_reporter_drift_admission();
             tracing::info!(
                 file_id = file.id,
                 "admitted a held source on its media facts: its stored scan came from a \
