@@ -327,6 +327,146 @@ enum PreparedReplacementBounds {
     static let pollMs = 100
 }
 
+// MARK: - Waiting for the offer with the picture up
+
+/// What a directed selection change is waiting for after it has been
+/// published, read off each exchange's answer.
+///
+/// Pure, and in this file for the reason the file gives at the top: the rules
+/// that decide a viewer's picture are the ones that must be provable in a unit
+/// test. The controller feeds it answers and the clock; it says what to do,
+/// and it touches no player.
+///
+/// What it replaces is a 1.5-second `askForAction`, which could only ever see
+/// the answer to the exchange that carried the ask — and the server spawns the
+/// candidate *after* building that response, so a `prepare` is never on it.
+/// This waits across exchanges instead, with the incumbent still playing.
+struct PreparedOfferWait: Equatable {
+    enum Step: Equatable {
+        /// Keep the incumbent playing; exchange again after `nextExchangeMs`.
+        case keepWaiting(nextExchangeMs: Int)
+        /// A `prepare` for this ask arrived — hand it to the coordinator.
+        case offered(PreparedReplacementAction)
+        /// The server said `none` after accepting the ask, or the bound
+        /// expired: reopen in place now, at the CURRENT film position.
+        case reopen(reason: String)
+    }
+
+    /// D1: twelve seconds from the tap. Long enough for a server to stage a
+    /// whole second session; short enough that a viewer whose change is never
+    /// going to be prepared is not left tapping at a picture that will not
+    /// change.
+    static let boundMs = 12_000
+    /// 1 Hz while the server says `staging`.
+    static let stagingCadenceMs = 1_000
+
+    /// What a server that is building a candidate for this ask answers with.
+    static let stagingPreparation = "staging"
+    /// What a server that has decided there will be no candidate answers with.
+    /// **Absence is not this value** — see `observe`.
+    static let declinedPreparation = "none"
+
+    /// Monotonic milliseconds at the viewer's tap.
+    let tappedAtMs: Int
+    /// The first request sequence that could carry this ask's answer.
+    let floorSequence: Int
+    /// Whether any exchange at or past the floor has answered yet.
+    ///
+    /// The exchange that carried the ask is answered by a server that has only
+    /// just accepted it: a new server says `staging` on it, an old one says
+    /// nothing at all. A `none` on *that* exchange is therefore not a decline,
+    /// and reading it as one would reopen immediately on every server whose
+    /// ordering differs by a single hop.
+    private(set) var sawAcceptedAnswer = false
+    /// Whether the newest accepted answer said `staging` — the only thing that
+    /// earns an extra exchange at `stagingCadenceMs`. Absent is not staging:
+    /// an old server is waited out by the bound rather than nudged.
+    private(set) var lastSaidStaging = false
+
+    init(tappedAtMs: Int, floorSequence: Int) {
+        self.tappedAtMs = tappedAtMs
+        self.floorSequence = floorSequence
+    }
+
+    mutating func observe(answer: PlaybackControlAnswer?, nowMs: Int) -> Step {
+        // First, and before an exchange has been accepted at all. A server
+        // that never answers this ask is exactly what the bound exists for,
+        // and a bound checked after the answer branches would never fire on
+        // one.
+        if nowMs - tappedAtMs >= Self.boundMs { return .reopen(reason: "timed_out") }
+        guard let answer, answer.requestSequence >= floorSequence else {
+            // Nothing yet, or an answer from before the ask — including a
+            // replayed `prepare` for an older staging, which is why this test
+            // comes before the one below it. Not evidence about this change in
+            // either direction.
+            return .keepWaiting(nextExchangeMs: Self.stagingCadenceMs)
+        }
+        // An offer in hand outranks any hint about one: `preparation` is
+        // progress reporting, and a `prepare` is the thing it was reporting
+        // progress towards.
+        if let action = answer.action, let prepared = PreparedReplacementAction(action) {
+            return .offered(prepared)
+        }
+        let hadAcceptedOne = sawAcceptedAnswer
+        sawAcceptedAnswer = true
+        lastSaidStaging = answer.preparation == Self.stagingPreparation
+        // Absence is never a decline. Older servers and relays do not send
+        // this field at all, and reading a missing field as `none` would turn
+        // every one of them into an instant reopen — the exact regression this
+        // milestone exists to remove.
+        if answer.preparation == Self.declinedPreparation, hadAcceptedOne {
+            return .reopen(reason: "declined")
+        }
+        return .keepWaiting(nextExchangeMs: Self.stagingCadenceMs)
+    }
+}
+
+/// Where a quality-only change reopens when the prepared path hands it back.
+///
+/// A quality change changes what is delivered, not where the film is — but it
+/// still creates a presentation destination at the tap, because the progress
+/// bar, the presentation monitor and the stall-recovery suppression are all
+/// built on one. Resuming *at* that destination was harmless while the wait
+/// was 1.5 seconds and could not succeed; at twelve seconds it rewinds the
+/// film by the whole wait. So the destination is kept and the position is read
+/// again when the fallback actually runs.
+enum QualityChangeReopen {
+    /// Where the film is now, for a change whose own pin says where it was.
+    ///
+    /// `livePositionMs` is the incumbent's own clock, or nil when it cannot
+    /// honestly be read — nothing attached, or a replacement already in flight
+    /// — in which case the pin is the best reading anyone has.
+    ///
+    /// `carryingASeek` is the one case where the pin is NOT this change's own:
+    /// a quality change made on top of a seek that had not landed inherits the
+    /// viewer's destination, and the live clock is the position they were
+    /// leaving. The live clock is never taken out from under a seek.
+    static func positionNowMs(
+        pinnedAtTapMs: Int,
+        livePositionMs: Int?,
+        carryingASeek: Bool
+    ) -> Int {
+        guard !carryingASeek, let livePositionMs else { return pinnedAtTapMs }
+        // Never backwards. A clock read during a rebase, or one that has not
+        // caught up, must not send the viewer behind where they tapped.
+        return max(pinnedAtTapMs, livePositionMs)
+    }
+
+    /// `nil` when a viewer seek has taken the position since the tap: the seek
+    /// owns where the film is, and it already carries the new selection
+    /// because `recipeRevision.change()` ran at the tap. Reopening here as
+    /// well would change the stream twice for one tap, and land the second one
+    /// in the wrong place.
+    static func target(
+        seekGenerationAtTap: Int,
+        seekGenerationNow: Int,
+        positionNowMs: Int
+    ) -> Int? {
+        guard seekGenerationAtTap == seekGenerationNow else { return nil }
+        return max(0, positionNowMs)
+    }
+}
+
 // MARK: - The pipeline this client drives
 
 /// The AVFoundation half, behind a protocol so the ledger above can be driven

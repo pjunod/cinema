@@ -9,7 +9,7 @@ The implementation history, deployment evidence, and resolved copied-Dolby-
 Vision investigation are recorded in
 [APPLE-NATIVE-SUBTITLES-HANDOFF.md](APPLE-NATIVE-SUBTITLES-HANDOFF.md).
 
-> Status (2026-09-15): source is v0.3.0, Apple build 165. Timer-only
+> Status (2026-09-15): source is v0.3.0, Apple build 166. Timer-only
 > presentation stalls stay explicitly unknown and use one bounded same-recipe
 > repair without a legacy quality-reduction ticket. The repair preserves the
 > selected quality, HDR, tracks, offset, film position and pause intent; actual
