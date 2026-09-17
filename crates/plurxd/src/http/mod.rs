@@ -13,7 +13,7 @@ pub(crate) mod cluster_operations;
 pub mod comingsoon;
 pub use comingsoon::ComingSoonCache;
 mod developer;
-mod dto;
+pub(crate) mod dto;
 mod dv_disk;
 pub(crate) mod dvr;
 pub(crate) mod error;
@@ -299,6 +299,19 @@ pub fn router(state: AppState) -> Router {
         .route("/hubs", get(browse::hubs))
         .route("/home/previews", get(browse::home_previews))
         .route("/search", get(browse::search))
+        .route(
+            "/search/related",
+            get(crate::library_search::related_search),
+        )
+        .route(
+            "/search/settings",
+            get(crate::library_search::settings).put(crate::library_search::update_settings),
+        )
+        .route(
+            "/items/{id}/classification",
+            get(crate::library_search::get_classification)
+                .put(crate::library_search::correct_classification),
+        )
         // Watch
         .route("/items/{id}/photo", get(photos::serve))
         .route("/items/{id}/progress", post(watch::progress))
@@ -1826,6 +1839,283 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "setup failed: {body}");
         body["token"].as_str().expect("token").to_owned()
+    }
+
+    #[tokio::test]
+    async fn local_classification_refresh_preserves_corrections_and_discards_old_identity_keywords()
+    {
+        use plurx_core::{metadata::classification, store::classification::Record};
+        let (_, state) = test_state();
+        let seed = seed_content(&state).await;
+        state
+            .store
+            .apply_metadata(
+                seed.movie,
+                &plurx_core::domain::MetadataPatch {
+                    tmdb_id: Some(1),
+                    overview: Some("A filmed stand-up special".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("source");
+        let entry = state
+            .store
+            .classification_page(0, 1)
+            .await
+            .expect("page")
+            .remove(0);
+        let mut labels = classification::classify(
+            &entry.input().expect("input").metadata(),
+            vec!["space exploration".into()],
+        );
+        labels.provider_checked_at = crate::media_sessions::unix_ms() / 1000;
+        let record = Record {
+            source_json: entry.source_json,
+            classification: labels,
+            revision: 0,
+            overrides: classification::Overrides {
+                include: vec!["topic:music".into()],
+                exclude: vec!["topic:space".into()],
+            },
+        };
+        assert!(state
+            .store
+            .write_classification(seed.movie, &record)
+            .await
+            .expect("initial"));
+        state
+            .store
+            .apply_metadata(
+                seed.movie,
+                &plurx_core::domain::MetadataPatch {
+                    tmdb_id: Some(2),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("identity correction");
+        crate::library_search::classify_page(&state, &mut 0)
+            .await
+            .expect("automatic local classification");
+        let record = state
+            .store
+            .classification_page(0, 1)
+            .await
+            .expect("classified")
+            .remove(0)
+            .record
+            .expect("record");
+        assert_eq!(record.revision, 2);
+        assert!(record.classification.keywords.is_empty());
+        assert_eq!(record.classification.provider_checked_at, 0);
+        assert!(record
+            .classification
+            .labels
+            .iter()
+            .any(|l| l.dimension == "format" && l.value == "stand-up"));
+        assert_eq!(record.overrides.include, vec!["topic:music"]);
+        assert_eq!(record.overrides.exclude, vec!["topic:space"]);
+        for overview in ["Temporary edit", "A filmed stand-up special"] {
+            state
+                .store
+                .apply_metadata(
+                    seed.movie,
+                    &plurx_core::domain::MetadataPatch {
+                        overview: Some(overview.into()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("edit and revert");
+        }
+        assert!(
+            !state
+                .store
+                .classification_page(0, 1)
+                .await
+                .expect("invalidated")[0]
+                .indexed
+        );
+        crate::library_search::classify_page(&state, &mut 0)
+            .await
+            .expect("repair reverted source index");
+        assert!(
+            state
+                .store
+                .classification_page(0, 1)
+                .await
+                .expect("repaired")[0]
+                .indexed
+        );
+        assert_eq!(
+            state
+                .store
+                .search_items("topic:music", 10)
+                .await
+                .expect("restored manual label")
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn local_search_defaults_corrections_and_channel_preview_need_no_model() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seed = seed_content(&state).await;
+        state
+            .store
+            .apply_metadata(
+                seed.ep,
+                &plurx_core::domain::MetadataPatch {
+                    overview: Some("A filmed stand-up special.".into()),
+                    genres: Some(vec!["Comedy".into()]),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("metadata");
+        let (status, settings) = call(&app, get("/api/v1/search/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(settings["semantic_enabled"], false);
+        let (_, related) = call(&app, get("/api/v1/search/related?q=space", Some(&admin))).await;
+        assert_eq!(related["results"], json!([]));
+        let path = format!("/api/v1/items/{}/classification", seed.ep);
+        assert_eq!(
+            call(&app, get(&path, None)).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, _) = call(
+            &app,
+            put(
+                &path,
+                Some(&admin),
+                json!({"expected_revision":0,"include":["topic:space"],"exclude":[]}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, record) = call(&app, get(&path, Some(&admin))).await;
+        assert_eq!(record["classification"]["revision"], 1);
+        assert_eq!(record["pending"], false);
+        let (status, _) = call(
+            &app,
+            put(
+                &path,
+                Some(&admin),
+                json!({"expected_revision":0,"include":[],"exclude":[]}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let (_, search) = call(&app, get("/api/v1/search?q=standup", Some(&admin))).await;
+        assert!(search["results"]
+            .as_array()
+            .expect("results")
+            .iter()
+            .any(|i| i["id"] == seed.ep));
+        let recipe = plurx_core::library_channels::LibraryChannelRecipe {
+            subject: Some("format:stand-up".into()),
+            ..Default::default()
+        };
+        let (status, ack) = call(
+            &app,
+            post(
+                "/api/v1/library-channels/subject-previews",
+                Some(&admin),
+                json!({"request_id":"local-rules-test","recipe":recipe}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{ack}");
+        crate::channel_subjects::turn(&state, &tokio_util::sync::CancellationToken::new())
+            .await
+            .expect("local match");
+        let (_, preview) = call(
+            &app,
+            get(
+                &format!(
+                    "/api/v1/library-channels/subject-previews/{}",
+                    ack["job_id"].as_str().expect("job")
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(preview["complete"], true, "{preview}");
+        assert_eq!(preview["matched"], 1, "{preview}");
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({"username":"viewer","password":"longenough"}),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({"username":"viewer","password":"longenough"}),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("token");
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    &path,
+                    Some(viewer),
+                    json!({"expected_revision":1,"include":[],"exclude":[]})
+                )
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            call(
+                &app,
+                put(
+                    "/api/v1/search/settings",
+                    Some(viewer),
+                    json!({"semantic_enabled":true})
+                )
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        let (status, _) = call(
+            &app,
+            put(
+                "/api/v1/search/settings",
+                Some(&admin),
+                json!({"semantic_enabled":true}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, settings) = call(&app, get("/api/v1/search/settings", Some(&admin))).await;
+        assert_eq!(settings["semantic_enabled"], true);
+        // Tests do not spawn the background model worker: opting in is durable,
+        // and a not-yet-loaded model cannot interfere with title search.
+        let (_, search) = call(&app, get("/api/v1/search?q=standup", Some(&admin))).await;
+        assert!(!search["results"].as_array().expect("results").is_empty());
+        let (status, _) = call(
+            &app,
+            put(
+                "/api/v1/search/settings",
+                Some(&admin),
+                json!({"semantic_enabled":false}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
     }
 
     #[tokio::test]

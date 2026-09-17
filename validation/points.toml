@@ -616,6 +616,23 @@ checks = ["rust-gate", "rust-gate-ci"]
 depends_on = ["core.media", "server.api"]
 
 [[points]]
+id = "library.search"
+title = "Local search, reusable classification and optional embedded semantics"
+contract = "Catalogue text and explicit channel rules work without an inference service. Versioned metadata labels retain evidence and manual corrections, reject stale writes and disappear from search when their source changes. Embedded semantic search is off by default, enabled only by an administrator, and never replaces exact results or channel admission rules."
+paths = [
+  "crates/plurx-core/src/metadata/classification.rs",
+  "crates/plurx-core/src/store/classification.rs",
+  "crates/plurx-core/src/store/hiqlite_classification.rs",
+  "crates/plurx-core/src/store/sqlite/classification.rs",
+  "crates/plurxd/src/library_search.rs",
+  "crates/plurxd/src/library_search/**",
+  "tests/web/local-search.test.js",
+  "docs/features/LOCAL-LIBRARY-SEARCH.md",
+]
+checks = ["rust-gate", "rust-gate-ci", "web-static", "operations-contract"]
+depends_on = ["library.catalog", "metadata.enrichment", "identity.access"]
+
+[[points]]
 id = "metadata.enrichment"
 title = "Metadata matching and enrichment"
 contract = "Local and remote metadata improve catalog records deterministically, retry safely, and never overwrite stronger user-owned facts."
@@ -736,7 +753,7 @@ paths = [
   "crates/plurx-core/src/library_channels.rs",
   "crates/plurx-core/src/channel_subjects.rs",
   "crates/plurxd/src/channel_subjects.rs",
-  "crates/plurxd/src/channel_subjects/ollama.rs",
+  "crates/plurxd/src/channel_subjects/local.rs",
   "docs/features/LIBRARY-CHANNEL-SUBJECT-MATCHING-IMPLEMENTATION.md",
   "tests/web/library-channels.test.js",
   "tests/contracts/channel-subject-quality.json",

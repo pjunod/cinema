@@ -156,6 +156,8 @@ list.
 | [M6-APPLE-HARDWARE-ACCEPTANCE.md](playback-control/M6-APPLE-HARDWARE-ACCEPTANCE.md) | Historical hardware procedure; the lifecycle status contains the current finite sweep card. | superseded |
 | [M6-WEB-CLIENT.md](playback-control/M6-WEB-CLIENT.md) | Historical web implementation record; its throughput qualification prose is not current admission policy. | superseded |
 | [M6-SERVER-PRIME-HANDOFF.md](playback-control/M6-SERVER-PRIME-HANDOFF.md) | Phase 3 — the reserve/prime constraints and the implementation that now attaches the staged VOD worker. | built |
+| [QUALITY-SWITCH-CONTINUITY-PLAN.md](playback-control/QUALITY-SWITCH-CONTINUITY-PLAN.md) | Why every rung change is still a reopen although the prepared handoff is built and deployed on every side, and the plan (M0–M3) to make a quality change a handoff with the incumbent playing throughout. | open |
+| [QUALITY-SWITCH-CONTINUITY-BUILD.md](playback-control/QUALITY-SWITCH-CONTINUITY-BUILD.md) | The build plan for the executing agent: M0 server (`delivery.preparation`, supersession cancels the successor), M2 Apple/Android offer wait + rendezvous, M1 web owner + alignment, M3 measurement; Astra review disposition in §11. | open |
 | [M7-REMAINDER-HANDOFF.md](playback-control/M7-REMAINDER-HANDOFF.md) | M7: subtitle readiness, bounded materialization, seek coalescing, burn-join, prewarm. | open |
 | [M7-R-M3-CLAUDE-HANDOFF.md](playback-control/M7-R-M3-CLAUDE-HANDOFF.md) | Finish M2, then build seek coalescing. | open |
 | [M7-M1-LARGE-MKV-OBSERVATION.md](playback-control/M7-M1-LARGE-MKV-OBSERVATION.md) | Large-MKV readiness and bounded subtitle publication, observed. | done |
@@ -354,6 +356,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [LIVE-TV-DVR-IMPLEMENTATION.md](features/LIVE-TV-DVR-IMPLEMENTATION.md) | The executable plan for recording and reminders: transports and sinks, the ten-step owner loop, attempt-file recovery, the recordings library kind, and the reviewer's eleven findings with where each one landed. | built |
 | [LIVE-TV-DVR-VISIBILITY-STATUS.md](features/LIVE-TV-DVR-VISIBILITY-STATUS.md) | DVR foundation progress plus the web fidelity follow-up: programme recording panels, Activity cards/details, Saved cards and executable browser evidence. | open |
 | [LIVE-TV-GUIDE-AND-UI-PLAN.md](features/LIVE-TV-GUIDE-AND-UI-PLAN.md) | The Live TV page rebuilt — list and grid views, the guide feed, fullscreen and picture-in-picture on every client. | open |
+| [LOCAL-LIBRARY-SEARCH.md](features/LOCAL-LIBRARY-SEARCH.md) | Default local search, reusable classification, optional embedded semantic search, and validation evidence. | open |
 | [LIBRARY-CHANNEL-SUBJECT-MATCHING-IMPLEMENTATION.md](features/LIBRARY-CHANNEL-SUBJECT-MATCHING-IMPLEMENTATION.md) | Subject matching implementation contract and live P1–P4 progress, compiler evidence, review and merge status. | open |
 | [Channel subject Apple notes](apple-builds/313-library-channel-subjects.md) | Built | What changed in Apple channel subject authoring? |
 | [LIBRARY-CHANNELS-STATUS.md](features/LIBRARY-CHANNELS-STATUS.md) | Where Library channels is, what is proved, and what remains before promotion. | open |

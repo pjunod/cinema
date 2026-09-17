@@ -94,7 +94,8 @@ const DVR_SCHEMA_VERSION: i64 = 37;
 const SUBJECT_SCHEMA_VERSION: i64 = 38;
 const DVR_EVENT_SCHEMA_VERSION: i64 = 39;
 const VIDEO_CODEC_TAG_SCHEMA_VERSION: i64 = 40;
-pub const AUTH_SCHEMA_VERSION: i64 = VIDEO_CODEC_TAG_SCHEMA_VERSION;
+const CLASSIFICATION_SCHEMA_VERSION: i64 = 41;
+pub const AUTH_SCHEMA_VERSION: i64 = CLASSIFICATION_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -1429,6 +1430,13 @@ impl HiqliteAuthStore {
         super::hiqlite_library_channels::install_schema(&client).await?;
         super::hiqlite_dvr::install_schema(&client).await?;
         client
+            .txn(super::hiqlite_classification::migration_statements()?)
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        client
             .txn(super::hiqlite_library_channels::subject_migration_statements()?)
             .await
             .map_err(database_error)?;
@@ -2471,6 +2479,14 @@ impl HiqliteAuthStore {
                         ])
                         .await;
                     self.settle_migration_attempt(VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(VIDEO_CODEC_TAG_SCHEMA_VERSION) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_classification::migration_statements()?;
+                    statements.push(("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".to_owned(),params!(CLASSIFICATION_SCHEMA_VERSION,now,VIDEO_CODEC_TAG_SCHEMA_VERSION)));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(VIDEO_CODEC_TAG_SCHEMA_VERSION, attempt)
                         .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
@@ -4233,7 +4249,8 @@ fn schema_migration_action(
         | DVR_SCHEMA_MIGRATION_SOURCE
         | DVR_SCHEMA_VERSION
         | DVR_EVENT_SCHEMA_MIGRATION_SOURCE
-        | VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE => {
+        | VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE
+        | VIDEO_CODEC_TAG_SCHEMA_VERSION => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -6143,9 +6160,9 @@ mod tests {
             "v39 must advance exactly one step to the video-codec-tag schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 35,
+            AUTH_SCHEMA_MIGRATION_SOURCE + 36,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v40 step"
+            "this implementation contains every additive v5→v41 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

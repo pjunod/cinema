@@ -15,9 +15,13 @@
 //!   value is pending, and the response exposes only the durable state.
 //! - Implementations are shared via `Arc`, never cloned per-request.
 
+pub mod classification;
+pub use classification::ClassificationStore;
 mod dv_conversion;
 mod fragindex;
 mod fragment_index_cluster;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_classification;
 mod renditionplan;
 mod sqlite;
 mod telemetry;
@@ -4712,6 +4716,7 @@ pub trait Store:
     + LibraryChannelStore
     + DvrStore
     + MediaStore
+    + ClassificationStore
     + WatchStore
     + ReadingStore
     + TraktStore
@@ -4745,6 +4750,8 @@ impl<T> Store for T where
         + LibraryChannelStore
         + DvrStore
         + MediaStore
+        + ClassificationStore
+        + ClassificationStore
         + WatchStore
         + ReadingStore
         + TraktStore

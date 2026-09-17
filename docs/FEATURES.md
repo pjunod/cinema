@@ -608,24 +608,24 @@ checks capacity; a `503` then is normal and says so.
 ## 4b. Library channels — "turn a subject into a schedule"
 
 **What it does:** every signed-in account can define a personal subject from
-a natural-language subject, optional metadata filters and explicit titles, and plurx publishes that selection as a
+local search rules, optional metadata filters and explicit titles, and plurx publishes that selection as a
 deterministic, continuous schedule. Administrators can additionally publish a
 shared channel for all accounts. Viewers browse now/next cards or a vertical
 guide, tune into the programme already in progress, and keep following across
 programme boundaries. The underlying titles remain ordinary finite library
 media: no duplicate files, recording process, or live-tuner lease exists.
 
-- **Subjects match existing metadata in the background.** Describe what belongs
-  and what to exclude. One local Ollama model returns match, no-match or
-  uncertain with a quoted metadata reason. Stand-up, space documentaries,
-  nineties comedy and noir presets author real subjects. Web and mobile editors
-  show progress and named decisions, with Include/Exclude overrides. Save and
-  enable immediately; provider availability never blocks those actions.
-- **Matching survives leaving the editor.** Persisted jobs, reusable decisions
-  and renewable cluster claims resume work after restart. Changed metadata and
-  model artifacts invalidate only their cache keys. Existing schedules survive
-  outages and empty new selections. Settings → Developer shows cached advisory
-  provider/model/metadata information; its switch pauses only new inference.
+- **Subjects match locally in the background.** Words, phrases, exclusions and
+  format/topic/genre/year selectors use catalogue metadata and reusable labels.
+  Shipped presets distinguish stand-up from broad comedy. No inference service
+  is required. The classifier records evidence and preserves administrator
+  corrections; optional TMDB keywords enrich its metadata. Save and enable
+  immediately while an existing schedule keeps playing. Developer settings can
+  pause new rule evaluations without stopping playback.
+- **Semantic search is optional.** Settings → Developer offers an embedded CPU
+  model, disabled by default. Once downloaded, it keeps queries and catalogue
+  text local. Web search displays its suggestions separately from ordinary
+  text matches. Suggestions never alter channel admission rules.
 - **A recipe is inspectable before it is saved.** The web editor separates
   content, playback, and channel details; its preview names exclusions and
   shows the first matching titles. Drafts survive an accidental reload and are

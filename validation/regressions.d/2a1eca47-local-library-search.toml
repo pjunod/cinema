@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["2a1eca47"]
+points = ["library.search", "library.channels"]
+checks = ["rust-gate"]
+reason = "The classified_episodes_keep_inherited_genres_unless_explicitly_suppressed regression preserves series genre inheritance and explicit correction precedence. The local_classification_refresh_preserves_corrections_and_discards_old_identity_keywords API regression also edits and restores metadata, then verifies that the worker repairs the invalidated FTS row. The final fast lane compiles these tests; full unit execution remains in the separately scheduled batch workflow."
