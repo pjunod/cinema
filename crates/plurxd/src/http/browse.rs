@@ -729,6 +729,12 @@ mod tests {
             attempts: 2,
             next_attempt_at_ms: at_ms + 1_800_000,
             updated_at_ms: at_ms,
+            typed_code: None,
+            typed_retryable: None,
+            retry_deadline_ms: 0,
+            policy_revision: 0,
+            terminal_reason: None,
+            diagnostic: None,
         }
     }
 

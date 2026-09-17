@@ -132,6 +132,12 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         true,
     );
+    let content_analysis_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE)
+            .map(String::as_str),
+        true,
+    );
 
     // Parsed exactly the way the engine parses it. That was the point when all
     // three sites compared the raw value — a row that trimmed on its own would
@@ -176,11 +182,70 @@ pub(crate) async fn readiness(
             cluster_transport_recovery(&state).await,
             playback_control_protocol(control_advertised),
             prepared_quality_handoff(prepared_handoff_on),
+            content_analysis_repair(&state, content_analysis_on).await,
             live_hls_recovery(live_recovery_on),
             pgs_overlay(overlay_on),
             dolby_vision_convert(convert_on),
         ],
     }))
+}
+
+async fn content_analysis_repair(state: &AppState, enabled: bool) -> DeveloperEnableItem {
+    let tools_ready =
+        state.system.ffmpeg_version.is_some() && state.system.ffprobe_build_digest.is_some();
+    let queue = state.store.analysis_status_summary().await;
+    let queue_status = if queue.is_ok() {
+        RequirementStatus::Met
+    } else {
+        RequirementStatus::Unmet
+    };
+    let queue_evidence = match queue {
+        Ok(summary) => format!(
+            "The durable analysis store responded: {} running, {} queued, {} recent failures.",
+            summary.running, summary.queued, summary.attention
+        ),
+        Err(error) => format!("The durable analysis store could not be read: {error}"),
+    };
+    DeveloperEnableItem {
+        id: "content_analysis_repair",
+        title: "Enable durable selected-video analysis",
+        enabled: Some(enabled),
+        setting: Some("vod_index_cluster_cache"),
+        requirements: vec![
+            DeveloperRequirement {
+                id: "media_tools",
+                title: "Measured FFmpeg and FFprobe",
+                status: if tools_ready {
+                    RequirementStatus::Met
+                } else {
+                    RequirementStatus::Unmet
+                },
+                evidence: if tools_ready {
+                    "This node measured both media executables at startup; selected-stream probes and index passes can use the recorded binaries.".to_owned()
+                } else {
+                    "This node did not record both an FFmpeg version and an FFprobe build digest at startup.".to_owned()
+                },
+            },
+            DeveloperRequirement {
+                id: "durable_queue",
+                title: "Durable analysis authority",
+                status: queue_status,
+                evidence: queue_evidence,
+            },
+            DeveloperRequirement {
+                id: "source_fencing",
+                title: "Held-source fencing and bounded diagnostics",
+                status: RequirementStatus::Met,
+                evidence: "This build binds the metadata probe and index pass to one held source, stores typed diagnostics with the fenced transition, and uses a fixed retry deadline.".to_owned(),
+            },
+            DeveloperRequirement {
+                id: "compatibility_inventory",
+                title: "Successful-file timing sample",
+                status: RequirementStatus::Unobservable,
+                evidence: "The bounded successful-index timing inventory is an operator rollout receipt; the daemon does not receive that artifact. Enabling remains available without it.".to_owned(),
+            },
+        ],
+    }
 }
 
 fn windows_server(state: &AppState, enabled: bool) -> DeveloperEnableItem {

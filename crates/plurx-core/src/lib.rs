@@ -10,6 +10,7 @@
 pub mod auth;
 pub mod cluster;
 pub mod config;
+pub mod content_analysis;
 pub mod domain;
 pub mod dvr;
 pub mod error;

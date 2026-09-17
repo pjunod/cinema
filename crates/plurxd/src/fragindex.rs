@@ -18,14 +18,19 @@
 //! - **A partial read is not an index.** ffmpeg dying a third of the way
 //!   through a file emits a perfectly well-formed prefix, and an index built
 //!   from it would place every later boundary in the wrong part of the film.
-//!   [`IndexOutcome::Truncated`] is the only honest answer there, and the
-//!   caller retries rather than persisting it.
+//!   A typed failure is the only honest answer there, and the caller applies
+//!   the cause-specific retry policy rather than persisting the prefix.
 
+use std::collections::VecDeque;
+use std::io::{Seek, SeekFrom};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use plurx_core::content_analysis::{
+    CompletionProvenance, IndexDiagnostic, IndexFailureCode, VideoCompletionExpectation,
+};
 use plurx_core::domain::MediaFile;
 use plurx_core::fmp4::{self, FragmentReader, Init, PromotionInputs, TrackKind, Unit};
 use plurx_core::segplan::{FragmentIndex, IndexRow, SourceIdentity};
@@ -53,17 +58,259 @@ type SharedIndexProgress = Arc<IndexProgress>;
 pub enum IndexOutcome {
     /// A complete pass over the file.
     Built(Box<FragmentIndex>),
-    /// The pipe ended before the file did — a NAS read that went wrong, or a
-    /// per-file budget too optimistic for this disk on this day. Recorded as a
-    /// [`plurx_core::segplan::FragmentIndexOutcome`] with how far it got and a
-    /// backoff, because a pass that repeats a thirty-minute whole-file read
-    /// every wrap of the library is how one slow mount starves every other
-    /// title in it.
-    Truncated { reason: String, rows: usize },
     /// This file cannot be indexed by this path at all, and retrying will not
     /// change that. Recorded as terminal until the file's own identity
     /// changes, so the background job stops asking.
     Unsupported(String),
+    /// A production failure with a stable operator code and bounded facts.
+    /// Raw parser tests may still use the legacy variants above; production
+    /// callers receive this variant for operational and completion failures.
+    Failed(Box<IndexFailure>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexFailure {
+    pub code: IndexFailureCode,
+    pub reason: String,
+    pub rows: usize,
+    pub transient_allowlisted: bool,
+    pub diagnostic: IndexDiagnostic,
+}
+
+impl IndexFailure {
+    fn new(code: IndexFailureCode, reason: impl Into<String>, rows: usize) -> Self {
+        Self {
+            code,
+            reason: reason.into(),
+            rows,
+            transient_allowlisted: false,
+            diagnostic: IndexDiagnostic {
+                version: 1,
+                code: code.as_str().to_owned(),
+                fragment_count: Some(u32::try_from(rows).unwrap_or(u32::MAX)),
+                ..IndexDiagnostic::default()
+            },
+        }
+    }
+
+    fn transient(mut self, transient: bool) -> Self {
+        self.transient_allowlisted = transient;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CompletionExpectationError {
+    Unsupported(String),
+    Unverified(String),
+}
+
+fn parse_positive_decimal(value: &str) -> Option<(u64, u64)> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 64 || value.starts_with(['-', '+']) {
+        return None;
+    }
+    let (whole, fraction) = value.split_once('.').unwrap_or((value, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let denominator = 10_u128.checked_pow(u32::try_from(fraction.len()).ok()?)?;
+    let whole = whole.parse::<u128>().ok()?;
+    let fraction = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<u128>().ok()?
+    };
+    let numerator = whole.checked_mul(denominator)?.checked_add(fraction)?;
+    if numerator == 0 {
+        return None;
+    }
+    reduce_rational(numerator, denominator)
+}
+
+fn reduce_rational(mut numerator: u128, mut denominator: u128) -> Option<(u64, u64)> {
+    if numerator == 0 || denominator == 0 {
+        return None;
+    }
+    let (mut left, mut right) = (numerator, denominator);
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    numerator /= left;
+    denominator /= left;
+    let millis = numerator.checked_mul(1_000)?.checked_div(denominator)?;
+    if millis > i64::MAX as u128 {
+        return None;
+    }
+    Some((
+        u64::try_from(numerator).ok()?,
+        u64::try_from(denominator).ok()?,
+    ))
+}
+
+fn parse_time_base(value: &str) -> Option<(u64, u64)> {
+    if value.len() > 64 {
+        return None;
+    }
+    let (num, den) = value.split_once('/')?;
+    let num = num.parse::<u128>().ok()?;
+    let den = den.parse::<u128>().ok()?;
+    reduce_rational(num, den)
+}
+
+fn parse_matroska_duration(value: &str) -> Option<(u64, u64)> {
+    if value.len() > 64 {
+        return None;
+    }
+    let mut parts = value.split(':');
+    let hours = parts.next()?.parse::<u128>().ok()?;
+    let minutes = parts.next()?.parse::<u128>().ok()?;
+    let seconds = parts.next()?;
+    if parts.next().is_some() || minutes >= 60 {
+        return None;
+    }
+    let (seconds_num, seconds_den) = parse_positive_decimal(seconds)?;
+    if u128::from(seconds_num) >= 60 * u128::from(seconds_den) {
+        return None;
+    }
+    let whole_seconds = hours
+        .checked_mul(3_600)?
+        .checked_add(minutes.checked_mul(60)?)?;
+    let numerator = whole_seconds
+        .checked_mul(u128::from(seconds_den))?
+        .checked_add(u128::from(seconds_num))?;
+    reduce_rational(numerator, u128::from(seconds_den))
+}
+
+fn rational_diff_exceeds_two_seconds(left: (u64, u64), right: (u64, u64)) -> bool {
+    let left_scaled = u128::from(left.0).checked_mul(u128::from(right.1));
+    let right_scaled = u128::from(right.0).checked_mul(u128::from(left.1));
+    let bound = u128::from(left.1)
+        .checked_mul(u128::from(right.1))
+        .and_then(|value| value.checked_mul(2));
+    match (left_scaled, right_scaled, bound) {
+        (Some(left), Some(right), Some(bound)) => left.abs_diff(right) > bound,
+        _ => true,
+    }
+}
+
+fn completion_expectation_from_probe(
+    raw: &str,
+    source_object_version: &str,
+) -> Result<VideoCompletionExpectation, CompletionExpectationError> {
+    let document: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+        CompletionExpectationError::Unverified(format!("invalid ffprobe JSON: {error}"))
+    })?;
+    let streams = document
+        .get("streams")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            CompletionExpectationError::Unverified(
+                "ffprobe did not return a stream array".to_owned(),
+            )
+        })?;
+    let stream = streams
+        .iter()
+        .find(|stream| {
+            stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
+        })
+        .ok_or_else(|| {
+            CompletionExpectationError::Unsupported(
+                "the index map selects no video stream".to_owned(),
+            )
+        })?;
+    if stream
+        .pointer("/disposition/attached_pic")
+        .and_then(serde_json::Value::as_i64)
+        == Some(1)
+    {
+        return Err(CompletionExpectationError::Unsupported(
+            "the index map selects an attached picture".to_owned(),
+        ));
+    }
+    let stream_index = stream
+        .get("index")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| {
+            CompletionExpectationError::Unverified(
+                "the selected video has no valid absolute stream index".to_owned(),
+            )
+        })?;
+
+    let mut candidates = Vec::new();
+    let duration_ts = stream.get("duration_ts").and_then(|value| {
+        value
+            .as_i64()
+            .or_else(|| value.as_str()?.parse::<i64>().ok())
+            .filter(|value| *value > 0)
+    });
+    if let (Some(ticks), Some(time_base)) = (
+        duration_ts,
+        stream
+            .get("time_base")
+            .and_then(serde_json::Value::as_str)
+            .and_then(parse_time_base),
+    ) {
+        if let Some(value) = reduce_rational(
+            u128::try_from(ticks)
+                .ok()
+                .unwrap_or_default()
+                .checked_mul(u128::from(time_base.0))
+                .unwrap_or_default(),
+            u128::from(time_base.1),
+        ) {
+            candidates.push((value, CompletionProvenance::StreamTicks));
+        }
+    }
+    if let Some(value) = stream
+        .get("duration")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_positive_decimal)
+    {
+        candidates.push((value, CompletionProvenance::StreamSeconds));
+    }
+    let tags = stream.get("tags").and_then(serde_json::Value::as_object);
+    for key in ["DURATION", "DURATION-eng"] {
+        if let Some(value) = tags
+            .and_then(|tags| tags.get(key))
+            .and_then(serde_json::Value::as_str)
+            .and_then(parse_matroska_duration)
+        {
+            candidates.push((value, CompletionProvenance::MatroskaDurationTag));
+            break;
+        }
+    }
+    let Some(&(selected, provenance)) = candidates.first() else {
+        return Err(CompletionExpectationError::Unverified(
+            "the selected video has no trustworthy duration".to_owned(),
+        ));
+    };
+    if candidates
+        .iter()
+        .skip(1)
+        .any(|(candidate, _)| rational_diff_exceeds_two_seconds(selected, *candidate))
+    {
+        return Err(CompletionExpectationError::Unverified(
+            "the selected video's duration metadata conflicts by more than 2000 ms".to_owned(),
+        ));
+    }
+    let expectation = VideoCompletionExpectation {
+        stream_index,
+        duration_num: selected.0,
+        duration_den: selected.1,
+        provenance,
+        source_object_version: source_object_version.to_owned(),
+    };
+    expectation
+        .validate()
+        .map_err(|reason| CompletionExpectationError::Unverified(reason.to_owned()))?;
+    Ok(expectation)
 }
 
 /// Read one index pipe to exhaustion.
@@ -85,7 +332,17 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
     expected_ms: Option<i64>,
     dolby_vision: DolbyVisionPass,
 ) -> IndexOutcome {
-    index_stream_with_progress(src, identity, expected_ms, dolby_vision, None).await
+    let expectation =
+        expected_ms
+            .filter(|value| *value > 0)
+            .map(|value| VideoCompletionExpectation {
+                stream_index: 0,
+                duration_num: value as u64,
+                duration_den: 1_000,
+                provenance: CompletionProvenance::StreamSeconds,
+                source_object_version: "test-helper".to_owned(),
+            });
+    index_stream_with_progress(src, identity, expectation.as_ref(), dolby_vision, None).await
 }
 
 /// What this index pass does about the muxer's Dolby Vision record.
@@ -110,7 +367,7 @@ pub enum DolbyVisionPass {
 async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     mut src: R,
     identity: SourceIdentity,
-    expected_ms: Option<i64>,
+    expectation: Option<&VideoCompletionExpectation>,
     dolby_vision: DolbyVisionPass,
     progress: Option<&IndexProgress>,
 ) -> IndexOutcome {
@@ -142,10 +399,19 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
             Ok(0) => break,
             Ok(n) => n,
             Err(error) => {
-                return IndexOutcome::Truncated {
-                    reason: format!("index pipe read: {error}"),
-                    rows: rows.len(),
-                }
+                return IndexOutcome::Failed(Box::new(
+                    IndexFailure::new(
+                        IndexFailureCode::IndexSourceIo,
+                        format!("index pipe read: {error}"),
+                        rows.len(),
+                    )
+                    .transient(matches!(
+                        error.kind(),
+                        std::io::ErrorKind::Interrupted
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::WouldBlock
+                    )),
+                ));
             }
         };
         bytes_read = bytes_read.saturating_add(read as u64);
@@ -159,10 +425,14 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                     // Unlike a session, an index has no published playlist to
                     // protect, so there is no point past which a broken stream
                     // becomes something other than "do not index this".
-                    return IndexOutcome::Unsupported(format!(
-                        "lost the fragment stream after {} fragments: {error}",
-                        rows.len()
-                    ));
+                    return IndexOutcome::Failed(Box::new(IndexFailure::new(
+                        IndexFailureCode::IndexOutputMalformed,
+                        format!(
+                            "lost the fragment stream after {} fragments: {error}",
+                            rows.len()
+                        ),
+                        rows.len(),
+                    )));
                 }
             };
             match unit {
@@ -298,24 +568,75 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
     // `mfra` trailer, or the pipe closed on a fragment boundary. Bytes left in
     // hand mean the child died mid-write.
     if !reader.saw_trailer() && reader.buffered() != 0 {
-        return IndexOutcome::Truncated {
-            reason: format!("{} bytes left mid-fragment", reader.buffered()),
-            rows: rows.len(),
-        };
+        return IndexOutcome::Failed(Box::new(IndexFailure::new(
+            IndexFailureCode::IndexOutputMalformed,
+            format!("{} bytes left mid-fragment", reader.buffered()),
+            rows.len(),
+        )));
     }
-    if let Some(expected_ms) = expected_ms {
-        let covered: u64 = rows.iter().map(|row| row.duration).sum();
-        let expected = (expected_ms.max(0) as u64).saturating_mul(u64::from(timescale)) / 1000;
-        // Two seconds of slack. The probe's duration and the video track's
-        // summed sample durations are two measurements of the same film and
-        // they routinely disagree by the last frame or two; a container whose
-        // header rounds disagrees by more.
-        let slack = u64::from(timescale) * 2;
-        if covered + slack < expected {
-            return IndexOutcome::Truncated {
-                reason: format!("covered {covered} of {expected} ticks"),
-                rows: rows.len(),
-            };
+    if let Some(expectation) = expectation {
+        let covered = rows
+            .iter()
+            .try_fold(0_u64, |total, row| total.checked_add(row.duration));
+        let Some(covered) = covered else {
+            return IndexOutcome::Failed(Box::new(IndexFailure::new(
+                IndexFailureCode::IndexCompletionUnverified,
+                "video sample-duration sum overflowed",
+                rows.len(),
+            )));
+        };
+        let first_dts = rows.iter().map(|row| row.dts).min().unwrap_or_default();
+        let end_dts = rows.iter().try_fold(first_dts, |end, row| {
+            row.dts.checked_add(row.duration).map(|here| end.max(here))
+        });
+        let span = end_dts.and_then(|end| end.checked_sub(first_dts));
+        let Some(span) = span else {
+            return IndexOutcome::Failed(Box::new(IndexFailure::new(
+                IndexFailureCode::IndexCompletionUnverified,
+                "video decode timeline could not be normalized safely",
+                rows.len(),
+            )));
+        };
+        let tolerance = u64::from(timescale).saturating_mul(2);
+        if covered.abs_diff(span) > tolerance {
+            return IndexOutcome::Failed(Box::new(IndexFailure::new(
+                IndexFailureCode::IndexCompletionUnverified,
+                format!(
+                    "video sample coverage {covered} ticks differs from normalized decode span {span} ticks"
+                ),
+                rows.len(),
+            )));
+        }
+        match expectation.covers(covered, timescale) {
+            Ok(true) => {}
+            Ok(false) => {
+                let mut failure = IndexFailure::new(
+                    IndexFailureCode::IndexVideoShortfall,
+                    format!(
+                        "covered {covered} ticks below the selected-video expectation {}/{} seconds",
+                        expectation.duration_num, expectation.duration_den
+                    ),
+                    rows.len(),
+                );
+                failure.diagnostic.selected_stream = Some(expectation.stream_index);
+                failure.diagnostic.expectation_provenance = Some(expectation.provenance);
+                failure.diagnostic.covered_ms = i64::try_from(
+                    u128::from(covered)
+                        .saturating_mul(1_000)
+                        .checked_div(u128::from(timescale.max(1)))
+                        .unwrap_or_default(),
+                )
+                .ok();
+                failure.diagnostic.expected_ms = expectation.duration_ms_floor();
+                return IndexOutcome::Failed(Box::new(failure));
+            }
+            Err(reason) => {
+                return IndexOutcome::Failed(Box::new(IndexFailure::new(
+                    IndexFailureCode::IndexCompletionUnverified,
+                    reason,
+                    rows.len(),
+                )));
+            }
         }
     }
 
@@ -572,6 +893,7 @@ fn dolby_vision_pass_for(
 struct IndexPass {
     args: Vec<String>,
     dolby_vision: DolbyVisionPass,
+    expectation: VideoCompletionExpectation,
     /// The options all three of the above were derived from, carried so the
     /// index key is derived from them too. Passed separately, a caller could
     /// hand the runner a recipe built from one set of options and an identity
@@ -585,6 +907,7 @@ fn index_pass(
     file: &MediaFile,
     video: transcode::CopyVideoOptions,
     input: Option<&str>,
+    expectation: VideoCompletionExpectation,
 ) -> Result<IndexPass, String> {
     Ok(IndexPass {
         args: match input {
@@ -592,7 +915,64 @@ fn index_pass(
             None => transcode::copy_index_pipe_args(file, video),
         },
         dolby_vision: dolby_vision_pass_for(file, video)?,
+        expectation,
         video,
+    })
+}
+
+async fn probe_completion_expectation(
+    source: &std::fs::File,
+    source_object_version: &str,
+) -> Result<VideoCompletionExpectation, IndexFailure> {
+    let mut view = source;
+    view.seek(SeekFrom::Start(0)).map_err(|error| {
+        IndexFailure::new(
+            IndexFailureCode::IndexSourceIo,
+            format!("positioning held source before metadata probe: {error}"),
+            0,
+        )
+        .transient(matches!(
+            error.kind(),
+            std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::WouldBlock
+        ))
+    })?;
+    let result = crate::ffmpeg::held_source_index_probe_json(source).await;
+    let reset = view.seek(SeekFrom::Start(0));
+    if let Err(error) = reset {
+        return Err(IndexFailure::new(
+            IndexFailureCode::IndexSourceIo,
+            format!("resetting held source after metadata probe: {error}"),
+            0,
+        )
+        .transient(matches!(
+            error.kind(),
+            std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::WouldBlock
+        )));
+    }
+    let raw = result.map_err(|reason| {
+        let timeout = reason.contains("timed out after");
+        IndexFailure::new(
+            if timeout {
+                IndexFailureCode::IndexProbeTimeout
+            } else {
+                IndexFailureCode::IndexProcessFailed
+            },
+            reason,
+            0,
+        )
+        .transient(timeout)
+    })?;
+    completion_expectation_from_probe(&raw, source_object_version).map_err(|error| match error {
+        CompletionExpectationError::Unsupported(reason) => {
+            IndexFailure::new(IndexFailureCode::Unsupported, reason, 0)
+        }
+        CompletionExpectationError::Unverified(reason) => {
+            IndexFailure::new(IndexFailureCode::IndexCompletionUnverified, reason, 0)
+        }
     })
 }
 
@@ -607,11 +987,23 @@ pub async fn build(
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
-    let pass = match index_pass(file, video, None) {
-        Ok(pass) => pass,
-        Err(reason) => return IndexOutcome::Unsupported(reason),
+    let source = match crate::fragment_index_cluster::open_source_fence(file, None).await {
+        Ok(source) => source,
+        Err(reason) => {
+            return IndexOutcome::Failed(Box::new(
+                IndexFailure::new(IndexFailureCode::IndexSourceIo, reason, 0).transient(true),
+            ));
+        }
     };
-    build_with_args(file, pass, None, None, runtime_cache, budget, None).await
+    build_from_attested_file(
+        file,
+        &source.handle,
+        source.object_version(),
+        video,
+        runtime_cache,
+        budget,
+    )
+    .await
 }
 
 /// Build from the exact file descriptor whose complete digest was observed.
@@ -621,13 +1013,18 @@ pub async fn build(
 pub async fn build_from_attested_file(
     file: &MediaFile,
     source: &std::fs::File,
+    source_object_version: &str,
     video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
     use std::os::fd::AsRawFd;
 
-    let pass = match index_pass(file, video, Some("/dev/fd/3")) {
+    let expectation = match probe_completion_expectation(source, source_object_version).await {
+        Ok(expectation) => expectation,
+        Err(failure) => return IndexOutcome::Failed(Box::new(failure)),
+    };
+    let pass = match index_pass(file, video, Some("/dev/fd/3"), expectation) {
         Ok(pass) => pass,
         Err(reason) => return IndexOutcome::Unsupported(reason),
     };
@@ -647,6 +1044,7 @@ pub async fn build_from_attested_file(
 pub async fn build_from_attested_file_with_progress<F>(
     file: &MediaFile,
     source: &std::fs::File,
+    source_object_version: &str,
     video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
     budget: Duration,
@@ -657,7 +1055,11 @@ where
 {
     use std::os::fd::AsRawFd;
 
-    let pass = match index_pass(file, video, Some("/dev/fd/3")) {
+    let expectation = match probe_completion_expectation(source, source_object_version).await {
+        Ok(expectation) => expectation,
+        Err(failure) => return IndexOutcome::Failed(Box::new(failure)),
+    };
+    let pass = match index_pass(file, video, Some("/dev/fd/3"), expectation) {
         Ok(pass) => pass,
         Err(reason) => return IndexOutcome::Unsupported(reason),
     };
@@ -678,6 +1080,7 @@ where
 pub async fn build_from_attested_file(
     file: &MediaFile,
     source: &std::fs::File,
+    source_object_version: &str,
     video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
     budget: Duration,
@@ -686,7 +1089,11 @@ pub async fn build_from_attested_file(
         Ok(path) => path,
         Err(reason) => return IndexOutcome::Unsupported(reason),
     };
-    let pass = match index_pass(file, video, Some(&path.to_string_lossy())) {
+    let expectation = match probe_completion_expectation(source, source_object_version).await {
+        Ok(expectation) => expectation,
+        Err(failure) => return IndexOutcome::Failed(Box::new(failure)),
+    };
+    let pass = match index_pass(file, video, Some(&path.to_string_lossy()), expectation) {
         Ok(pass) => pass,
         Err(reason) => return IndexOutcome::Unsupported(reason),
     };
@@ -706,6 +1113,7 @@ pub async fn build_from_attested_file(
 pub async fn build_from_attested_file_with_progress<F>(
     file: &MediaFile,
     source: &std::fs::File,
+    source_object_version: &str,
     video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
     budget: Duration,
@@ -718,7 +1126,11 @@ where
         Ok(path) => path,
         Err(reason) => return IndexOutcome::Unsupported(reason),
     };
-    let pass = match index_pass(file, video, Some(&path.to_string_lossy())) {
+    let expectation = match probe_completion_expectation(source, source_object_version).await {
+        Ok(expectation) => expectation,
+        Err(failure) => return IndexOutcome::Failed(Box::new(failure)),
+    };
+    let pass = match index_pass(file, video, Some(&path.to_string_lossy()), expectation) {
         Ok(pass) => pass,
         Err(reason) => return IndexOutcome::Unsupported(reason),
     };
@@ -747,13 +1159,10 @@ async fn build_with_args(
     let IndexPass {
         args,
         dolby_vision,
+        expectation,
         video,
     } = pass;
     let identity = identity_for(file, video);
-    // The probe's duration, carried in so a short read is caught. Passed in
-    // milliseconds and converted against the pipe's own timescale inside the
-    // reader, because the timescale is not known until the moov arrives.
-    let expected_ms = file.duration_ms.filter(|ms| *ms > 0);
     let started = Instant::now();
 
     let mut command = tokio::process::Command::new(ffmpeg_bin());
@@ -790,7 +1199,11 @@ async fn build_with_args(
     #[cfg(windows)]
     if let Some((source, path)) = source_handoff {
         if let Err(reason) = crate::ffmpeg::verify_windows_source_path(source, path) {
-            return IndexOutcome::Truncated { reason, rows: 0 };
+            return IndexOutcome::Failed(Box::new(IndexFailure::new(
+                IndexFailureCode::IndexSourceIo,
+                reason,
+                0,
+            )));
         }
     }
     #[cfg(not(windows))]
@@ -798,74 +1211,153 @@ async fn build_with_args(
     let (mut child, _child_job) = match crate::process_control::spawn_job_owned(&mut command) {
         Ok(owned) => owned,
         Err(error) => {
-            return IndexOutcome::Truncated {
-                reason: format!("spawning the job-owned index pipe: {error}"),
-                rows: 0,
-            }
+            let transient = matches!(
+                error.kind(),
+                std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::OutOfMemory
+            );
+            return IndexOutcome::Failed(Box::new(
+                IndexFailure::new(
+                    IndexFailureCode::IndexProcessFailed,
+                    format!("spawning the job-owned index pipe: {error}"),
+                    0,
+                )
+                .transient(transient),
+            ));
         }
     };
     let Some(stdout) = child.stdout.take() else {
-        return IndexOutcome::Truncated {
-            reason: "the index pipe started without a stdout".into(),
-            rows: 0,
-        };
+        return IndexOutcome::Failed(Box::new(IndexFailure::new(
+            IndexFailureCode::IndexProcessFailed,
+            "the index pipe started without a stdout",
+            0,
+        )));
     };
 
     // stderr must be drained on its own task or ffmpeg blocks on a full pipe
     // and the whole build deadlocks — the same discipline `spawn_ffmpeg_pipe`
     // keeps for a live session.
-    if let Some(stderr) = child.stderr.take() {
-        let path = file.path.clone();
-        tokio::spawn(async move {
-            use tokio::io::{AsyncBufReadExt, BufReader};
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                tracing::debug!(file = %path.display(), "index pipe: {line}");
-            }
-        });
-    }
-
-    let outcome = match tokio::time::timeout(
+    let stderr_task = child
+        .stderr
+        .take()
+        .map(|stderr| tokio::spawn(read_stderr_tail(stderr)));
+    let observed = Arc::new(std::sync::Mutex::new((0_u64, 0_i64, 0_usize)));
+    let observed_for_progress = Arc::clone(&observed);
+    let caller_progress = progress.clone();
+    let record_progress = move |bytes: u64, media_ms: i64, rows: usize| {
+        if let Ok(mut current) = observed_for_progress.lock() {
+            *current = (bytes, media_ms, rows);
+        }
+        if let Some(progress) = caller_progress.as_deref() {
+            progress(bytes, media_ms, rows);
+        }
+    };
+    let (mut outcome, deadline_fired) = match tokio::time::timeout(
         budget,
         index_stream_with_progress(
             stdout,
             identity,
-            expected_ms,
+            Some(&expectation),
             dolby_vision,
-            progress.as_deref(),
+            Some(&record_progress),
         ),
     )
     .await
     {
-        Ok(outcome) => outcome,
-        Err(_) => IndexOutcome::Truncated {
-            reason: format!("exceeded the {}s index budget", budget.as_secs()),
-            rows: 0,
-        },
+        Ok(outcome) => (outcome, false),
+        Err(_) => {
+            let rows = observed.lock().map(|value| value.2).unwrap_or_default();
+            (
+                IndexOutcome::Failed(Box::new(IndexFailure::new(
+                    IndexFailureCode::IndexBudgetExceeded,
+                    format!("exceeded the {}s index budget", budget.as_secs()),
+                    rows,
+                ))),
+                true,
+            )
+        }
     };
+    if deadline_fired {
+        let _ = child.start_kill();
+    }
     let status = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-    let outcome = match (outcome, status) {
-        (IndexOutcome::Built(_), Ok(Ok(status))) if !status.success() => IndexOutcome::Truncated {
-            reason: format!("index pipe exited with {status}"),
-            rows: 0,
-        },
-        (outcome, Ok(Ok(_))) => outcome,
-        (IndexOutcome::Built(_), Ok(Err(error))) => IndexOutcome::Truncated {
-            reason: format!("waiting for the index pipe: {error}"),
-            rows: 0,
-        },
-        (IndexOutcome::Built(_), Err(_)) => {
-            let _ = child.start_kill();
-            IndexOutcome::Truncated {
-                reason: "index pipe did not exit after closing stdout".to_owned(),
-                rows: 0,
+    let exit_category = match status {
+        Ok(Ok(status)) if status.success() => Some("success".to_owned()),
+        Ok(Ok(status)) => {
+            if !deadline_fired {
+                let rows = observed.lock().map(|value| value.2).unwrap_or_default();
+                outcome = IndexOutcome::Failed(Box::new(IndexFailure::new(
+                    IndexFailureCode::IndexProcessFailed,
+                    format!("index pipe exited with {status}"),
+                    rows,
+                )));
             }
+            Some(format!("{status}"))
         }
-        (outcome, _) => {
+        Ok(Err(error)) => {
+            if !deadline_fired {
+                let rows = observed.lock().map(|value| value.2).unwrap_or_default();
+                let transient = matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::WouldBlock
+                );
+                outcome = IndexOutcome::Failed(Box::new(
+                    IndexFailure::new(
+                        IndexFailureCode::IndexProcessFailed,
+                        format!("waiting for the index pipe: {error}"),
+                        rows,
+                    )
+                    .transient(transient),
+                ));
+            }
+            Some("wait_failed".to_owned())
+        }
+        Err(_) => {
             let _ = child.start_kill();
-            outcome
+            if !deadline_fired {
+                let rows = observed.lock().map(|value| value.2).unwrap_or_default();
+                outcome = IndexOutcome::Failed(Box::new(IndexFailure::new(
+                    IndexFailureCode::IndexProcessFailed,
+                    "index pipe did not exit within the five-second grace",
+                    rows,
+                )));
+            }
+            Some("exit_grace_exceeded".to_owned())
         }
     };
+    let stderr_tail = match stderr_task {
+        Some(mut task) => match tokio::time::timeout(Duration::from_secs(5), &mut task).await {
+            Ok(Ok(lines)) => lines,
+            Ok(Err(error)) => vec![format!("stderr task failed: {error}")],
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                Vec::new()
+            }
+        },
+        None => Vec::new(),
+    };
+    if let IndexOutcome::Failed(failure) = &mut outcome {
+        let (output_bytes, covered_ms, rows) =
+            observed.lock().map(|value| *value).unwrap_or_default();
+        failure.rows = failure.rows.max(rows);
+        failure.diagnostic.fragment_count = Some(u32::try_from(failure.rows).unwrap_or(u32::MAX));
+        failure.diagnostic.output_bytes = Some(output_bytes);
+        failure.diagnostic.covered_ms = Some(covered_ms);
+        failure.diagnostic.expected_ms = expectation.duration_ms_floor();
+        failure.diagnostic.container_ms = file.duration_ms;
+        failure.diagnostic.selected_stream = Some(expectation.stream_index);
+        failure.diagnostic.expectation_provenance = Some(expectation.provenance);
+        failure.diagnostic.elapsed_ms =
+            Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
+        failure.diagnostic.budget_ms = Some(u64::try_from(budget.as_millis()).unwrap_or(u64::MAX));
+        failure.diagnostic.exit_category = exit_category;
+        failure.diagnostic.stderr_tail = stderr_tail;
+    }
     if let IndexOutcome::Built(ref index) = outcome {
         tracing::info!(
             file_id = file.id,
@@ -876,6 +1368,36 @@ async fn build_with_args(
         );
     }
     outcome
+}
+
+async fn read_stderr_tail(mut input: impl AsyncRead + Unpin) -> Vec<String> {
+    use plurx_core::content_analysis::{MAX_INDEX_STDERR_BYTES, MAX_INDEX_STDERR_LINES};
+
+    let mut tail = VecDeque::with_capacity(MAX_INDEX_STDERR_BYTES);
+    let mut chunk = [0_u8; 1_024];
+    loop {
+        match input.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                for byte in &chunk[..read] {
+                    if tail.len() == MAX_INDEX_STDERR_BYTES {
+                        tail.pop_front();
+                    }
+                    tail.push_back(*byte);
+                }
+            }
+        }
+    }
+    let bytes: Vec<u8> = tail.into_iter().collect();
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines: Vec<String> = text
+        .lines()
+        .rev()
+        .take(MAX_INDEX_STDERR_LINES)
+        .map(str::to_owned)
+        .collect();
+    lines.reverse();
+    lines
 }
 
 fn hex(bytes: impl AsRef<[u8]>) -> String {
@@ -900,6 +1422,59 @@ mod tests {
 
     fn identity() -> SourceIdentity {
         SourceIdentity::new(1, 1, "fingerprint")
+    }
+
+    #[test]
+    fn content_analysis_probe_uses_the_first_mapped_video_not_container_duration() {
+        let raw = serde_json::json!({
+            "streams": [
+                {"index": 0, "codec_type": "audio", "duration": "99.000"},
+                {"index": 3, "codec_type": "video", "duration_ts": 240, "time_base": "1/24", "duration": "10.000"},
+                {"index": 4, "codec_type": "video", "duration": "80.000"}
+            ],
+            "format": {"duration": "99.000"}
+        })
+        .to_string();
+        let expectation = completion_expectation_from_probe(&raw, "held-v1").expect("timing");
+        assert_eq!(expectation.stream_index, 3);
+        assert_eq!(expectation.duration_num, 10);
+        assert_eq!(expectation.duration_den, 1);
+        assert_eq!(expectation.provenance, CompletionProvenance::StreamTicks);
+    }
+
+    #[test]
+    fn content_analysis_probe_rejects_conflicting_selected_video_timing() {
+        let raw = serde_json::json!({
+            "streams": [{
+                "index": 2,
+                "codec_type": "video",
+                "duration_ts": 240,
+                "time_base": "1/24",
+                "duration": "13.001"
+            }]
+        })
+        .to_string();
+        assert!(matches!(
+            completion_expectation_from_probe(&raw, "held-v1"),
+            Err(CompletionExpectationError::Unverified(_))
+        ));
+    }
+
+    #[test]
+    fn content_analysis_probe_refuses_attached_picture_selected_by_ffmpeg() {
+        let raw = serde_json::json!({
+            "streams": [{
+                "index": 0,
+                "codec_type": "video",
+                "duration": "10.000",
+                "disposition": {"attached_pic": 1}
+            }]
+        })
+        .to_string();
+        assert!(matches!(
+            completion_expectation_from_probe(&raw, "held-v1"),
+            Err(CompletionExpectationError::Unsupported(_))
+        ));
     }
 
     fn hevc_file(hdr: Option<&str>, hdr_format: Option<&str>) -> MediaFile {
@@ -1274,7 +1849,19 @@ mod tests {
                     // builders could most plausibly disagree.
                     for probe in [None, Some(MINIMAL_HVCC_PROBE)] {
                         for video in video_identities(&file, probe, have_dovi, convert) {
-                            let pass = index_pass(&file, video, None).expect("a describable pass");
+                            let pass = index_pass(
+                                &file,
+                                video,
+                                None,
+                                VideoCompletionExpectation {
+                                    stream_index: 0,
+                                    duration_num: 60,
+                                    duration_den: 1,
+                                    provenance: CompletionProvenance::StreamSeconds,
+                                    source_object_version: "test".to_owned(),
+                                },
+                            )
+                            .expect("a describable pass");
                             let filter = pass
                                 .args
                                 .windows(2)
@@ -1704,7 +2291,11 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(outcome, IndexOutcome::Truncated { .. }),
+            matches!(
+                outcome,
+                IndexOutcome::Failed(ref failure)
+                    if failure.code == IndexFailureCode::IndexOutputMalformed
+            ),
             "a half-read pipe must not produce an index, got {outcome:?}"
         );
     }
@@ -1733,7 +2324,11 @@ mod tests {
         )
         .await;
         assert!(
-            matches!(outcome, IndexOutcome::Truncated { .. }),
+            matches!(
+                outcome,
+                IndexOutcome::Failed(ref failure)
+                    if failure.code == IndexFailureCode::IndexVideoShortfall
+            ),
             "got {outcome:?}"
         );
     }

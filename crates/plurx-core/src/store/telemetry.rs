@@ -87,7 +87,7 @@ CREATE INDEX network_priors_by_updated
     ON network_priors(updated_at_ms, user_id, client_class);";
 
 #[cfg(any(test, feature = "hiqlite-store"))]
-const SIDECAR_SCHEMA_VERSION: i64 = 8;
+const SIDECAR_SCHEMA_VERSION: i64 = 9;
 const MAX_QUERY_ROWS: i64 = 2_000;
 const MAX_PRUNE_ROWS: i64 = 10_000;
 const MAX_PRIORS_PER_USER_CLIENT: i64 = 64;
@@ -498,6 +498,16 @@ impl NodeLocalTelemetry {
                 migration.push_str(crate::store::fragindex::FRAGMENT_INDEX_OUTCOMES_SCHEMA);
                 migration.push('\n');
             }
+            // v9: typed retry disposition and bounded diagnostics. A fresh
+            // sidecar creates v8 in this same batch, so the version check
+            // deliberately includes that route.
+            if current < 9
+                && (!table_exists(&conn, "fragment_index_outcomes")?
+                    || !column_exists(&conn, "fragment_index_outcomes", "typed_code")?)
+            {
+                migration.push_str(crate::store::fragindex::FRAGMENT_INDEX_TYPED_OUTCOMES_SCHEMA);
+                migration.push('\n');
+            }
             migration.push_str(&format!(
                 "PRAGMA user_version = {SIDECAR_SCHEMA_VERSION};\nCOMMIT;"
             ));
@@ -634,6 +644,34 @@ impl NodeLocalTelemetry {
         self.with_conn(move |conn| {
             crate::store::fragindex::record_outcome(
                 conn, file_id, &source, refusal, &reason, now_ms,
+            )
+        })
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn record_fragment_index_typed_outcome(
+        &self,
+        file_id: i64,
+        source: crate::segplan::SourceIdentity,
+        code: crate::content_analysis::IndexFailureCode,
+        transient_allowlisted: bool,
+        reason: String,
+        rows: u32,
+        diagnostic: crate::content_analysis::IndexDiagnostic,
+        now_ms: i64,
+    ) -> Result<crate::segplan::FragmentIndexOutcome, StoreError> {
+        self.with_conn(move |conn| {
+            crate::store::fragindex::record_typed_outcome(
+                conn,
+                file_id,
+                &source,
+                code,
+                transient_allowlisted,
+                &reason,
+                rows,
+                &diagnostic,
+                now_ms,
             )
         })
         .await

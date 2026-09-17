@@ -429,6 +429,8 @@ fn history_filter(
 }
 
 fn history_row_value(row: plurx_core::store::AnalysisHistoryRow) -> serde_json::Value {
+    let index_diagnostic =
+        plurx_core::content_analysis::IndexDiagnostic::decode_bounded(&row.index_diagnostic_json);
     let effective_error = if row.job_error_code.is_empty() {
         row.request_error_code.as_str()
     } else {
@@ -469,6 +471,11 @@ fn history_row_value(row: plurx_core::store::AnalysisHistoryRow) -> serde_json::
             .split(',')
             .filter(|code| !code.is_empty())
             .collect::<Vec<_>>(),
+        "index_retry_deadline_ms": row.index_retry_deadline_ms,
+        "effective_retry_at_ms": (row.state == "queued").then_some(row.not_before_ms),
+        "terminal_reason": matches!(row.state.as_str(), "failed" | "cancelled")
+            .then(|| effective_error.to_owned()),
+        "index_diagnostic": index_diagnostic,
         "created_at_ms": row.created_at_ms,
         "updated_at_ms": row.updated_at_ms,
         "pipeline_version": row.pipeline_version,
@@ -749,6 +756,9 @@ pub struct AnalysisReopenParams {
     limit: Option<i64>,
     /// Restrict to one component (`fragment_index`, `skip_markers`, …).
     component: Option<String>,
+    repair_revision: Option<String>,
+    cursor: Option<String>,
+    candidates: Option<Vec<plurx_core::store::AnalysisIndexRepairCandidate>>,
 }
 
 /// The largest bulk reopen one call will perform.
@@ -808,6 +818,130 @@ pub async fn reopen(
                 "invalid analysis component".to_owned(),
             ));
         }
+    }
+    if let Some(revision) = params.repair_revision.as_deref() {
+        if revision != plurx_core::store::CONTENT_ANALYSIS_REPAIR_REVISION {
+            return Err(ApiError::BadRequest(
+                "unknown content-analysis repair revision".to_owned(),
+            ));
+        }
+        if params
+            .component
+            .as_deref()
+            .is_some_and(|value| value != "fragment_index")
+        {
+            return Err(ApiError::BadRequest(
+                "video-completion repair requires fragment_index".to_owned(),
+            ));
+        }
+        if params
+            .cursor
+            .as_ref()
+            .is_some_and(|cursor| cursor.len() > 256)
+        {
+            return Err(ApiError::BadRequest("invalid repair cursor".to_owned()));
+        }
+        let dry_run = params.dry_run.unwrap_or(true);
+        if dry_run {
+            if params
+                .candidates
+                .as_ref()
+                .is_some_and(|rows| !rows.is_empty())
+            {
+                return Err(ApiError::BadRequest(
+                    "repair preview does not accept candidate descriptors".to_owned(),
+                ));
+            }
+            let scanned = state
+                .store
+                .preview_analysis_index_repairs(
+                    params.cursor.as_deref(),
+                    plurx_core::store::CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES,
+                )
+                .await?;
+            let scanned_count = scanned.len();
+            let mut files = std::collections::BTreeSet::new();
+            let mut rows = Vec::new();
+            for candidate in scanned {
+                if !files.contains(&candidate.file_id)
+                    && i64::try_from(files.len()).unwrap_or(i64::MAX) >= limit
+                {
+                    break;
+                }
+                files.insert(candidate.file_id);
+                rows.push(candidate);
+            }
+            let next_cursor = rows.last().map(|candidate| {
+                format!(
+                    "{}|{}",
+                    candidate.predecessor_cache_key, candidate.target_node_id
+                )
+            });
+            let existing_receipts = rows
+                .iter()
+                .filter(|candidate| candidate.eligibility == "already_created")
+                .count();
+            let skipped = rows.iter().fold(
+                std::collections::BTreeMap::<String, usize>::new(),
+                |mut counts, candidate| {
+                    if candidate.eligibility != "eligible" {
+                        *counts.entry(candidate.eligibility.clone()).or_default() += 1;
+                    }
+                    counts
+                },
+            );
+            return Ok(Json(serde_json::json!({
+                "dry_run": true,
+                "repair_revision": revision,
+                "files": files.len(),
+                "identities": rows.len(),
+                "existing_receipts": existing_receipts,
+                "skipped": skipped,
+                "scan_truncated": scanned_count >= usize::try_from(plurx_core::store::CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES).unwrap_or(usize::MAX),
+                "next_cursor": next_cursor,
+                "candidates": rows,
+            })));
+        }
+        let candidates = params.candidates.ok_or_else(|| {
+            ApiError::BadRequest(
+                "repair apply requires the exact candidate descriptors from preview".to_owned(),
+            )
+        })?;
+        if candidates.is_empty()
+            || candidates.len()
+                > usize::try_from(plurx_core::store::CONTENT_ANALYSIS_REPAIR_MAX_CANDIDATES)
+                    .unwrap_or(usize::MAX)
+        {
+            return Err(ApiError::BadRequest(
+                "repair apply candidate count is out of bounds".to_owned(),
+            ));
+        }
+        let mut results = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            if candidate.repair_revision != revision {
+                return Err(ApiError::BadRequest(
+                    "repair candidate revision does not match the request".to_owned(),
+                ));
+            }
+            results.push(
+                state
+                    .store
+                    .apply_analysis_index_repair(
+                        &candidate,
+                        &uuid::Uuid::new_v4().to_string(),
+                        crate::state::clock_ms(),
+                    )
+                    .await?,
+            );
+        }
+        if results.iter().any(|result| result.status == "created") {
+            kick_analysis_queue(&state);
+        }
+        return Ok(Json(serde_json::json!({
+            "dry_run": false,
+            "repair_revision": revision,
+            "results": results,
+        })));
     }
     if !dry_run && !state.jobs.analysis_queue_enabled().await {
         return Err(ApiError::Conflict(
@@ -970,6 +1104,8 @@ mod tests {
             request_error_code: String::new(),
             job_error_code: "source_superseded".to_owned(),
             job_attempt_errors: String::new(),
+            index_retry_deadline_ms: 0,
+            index_diagnostic_json: String::new(),
             created_at_ms: 1,
             updated_at_ms: 1,
             pipeline_version: "v1".to_owned(),

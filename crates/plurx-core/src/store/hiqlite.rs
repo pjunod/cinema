@@ -58,7 +58,10 @@ use crate::error::StoreError;
 // adds the predecessor drain deadline and its old-writer ownership fence; v32
 // persists the decoder-recovery budget; v33 gives sessions a durable recovery
 // epoch; v34 adds an incarnation fence and monotone decoder-recovery state to
-// offline package claims. Every additive step is applied through Raft before
+// offline package claims; v35-v40 add library channels, DVR, subject matching,
+// DVR event history, and the source video sample-entry fact; v41 adds typed
+// content-analysis diagnostics, fixed retry deadlines, identity-aware request
+// indexes, and durable repair receipts. Every additive step is applied through Raft before
 // the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
@@ -94,7 +97,8 @@ const DVR_SCHEMA_VERSION: i64 = 37;
 const SUBJECT_SCHEMA_VERSION: i64 = 38;
 const DVR_EVENT_SCHEMA_VERSION: i64 = 39;
 const VIDEO_CODEC_TAG_SCHEMA_VERSION: i64 = 40;
-pub const AUTH_SCHEMA_VERSION: i64 = VIDEO_CODEC_TAG_SCHEMA_VERSION;
+const CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION: i64 = 41;
+pub const AUTH_SCHEMA_VERSION: i64 = CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -135,6 +139,7 @@ const LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_CHANNEL
 const DVR_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERSION;
 const DVR_EVENT_SCHEMA_MIGRATION_SOURCE: i64 = SUBJECT_SCHEMA_VERSION;
 const VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE: i64 = DVR_EVENT_SCHEMA_VERSION;
+const CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE: i64 = VIDEO_CODEC_TAG_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -2473,6 +2478,29 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(
+                    CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    let mut statements =
+                        super::hiqlite_fragment_index_cluster::content_analysis_repair_migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 \
+                         WHERE singleton=1 AND schema_version=$3"
+                            .to_owned(),
+                        params!(
+                            CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION,
+                            now,
+                            CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -3073,6 +3101,31 @@ impl crate::store::FragmentIndexStore for HiqliteAuthStore {
                 source.clone(),
                 refusal,
                 reason.to_owned(),
+                now_ms,
+            )
+            .await
+    }
+
+    async fn record_fragment_index_typed_outcome(
+        &self,
+        file_id: i64,
+        source: &crate::segplan::SourceIdentity,
+        code: crate::content_analysis::IndexFailureCode,
+        transient_allowlisted: bool,
+        reason: &str,
+        rows: u32,
+        diagnostic: &crate::content_analysis::IndexDiagnostic,
+    ) -> Result<crate::segplan::FragmentIndexOutcome, StoreError> {
+        let now_ms = sidecar_unix_ms()?;
+        self.telemetry
+            .record_fragment_index_typed_outcome(
+                file_id,
+                source.clone(),
+                code,
+                transient_allowlisted,
+                reason.to_owned(),
+                rows,
+                diagnostic.clone(),
                 now_ms,
             )
             .await
@@ -4233,7 +4286,8 @@ fn schema_migration_action(
         | DVR_SCHEMA_MIGRATION_SOURCE
         | DVR_SCHEMA_VERSION
         | DVR_EVENT_SCHEMA_MIGRATION_SOURCE
-        | VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE => {
+        | VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE
+        | CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(

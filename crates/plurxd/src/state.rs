@@ -6457,18 +6457,47 @@ impl JobManager {
                     // These make an HLS title unavailable, so the reason stays
                     // in the ordinary operator log — and is now also recorded,
                     // so the next pass knows what this one found out.
-                    crate::fragindex::IndexOutcome::Truncated { reason, rows } => {
-                        tracing::warn!(file_id, rows, "fragment index incomplete: {reason}");
-                        (
-                            plurx_core::segplan::IndexRefusal::Truncated {
-                                rows: u32::try_from(rows).unwrap_or(u32::MAX),
-                            },
-                            reason,
-                        )
-                    }
                     crate::fragindex::IndexOutcome::Unsupported(reason) => {
                         tracing::warn!(file_id, "file cannot be indexed: {reason}");
                         (plurx_core::segplan::IndexRefusal::Unsupported, reason)
+                    }
+                    crate::fragindex::IndexOutcome::Failed(failure) => {
+                        tracing::warn!(
+                            file_id,
+                            code = failure.code.as_str(),
+                            rows = failure.rows,
+                            reason = %failure.reason,
+                            "fragment index failed"
+                        );
+                        let rows = u32::try_from(failure.rows).unwrap_or(u32::MAX);
+                        match self
+                            .store
+                            .record_fragment_index_typed_outcome(
+                                file_id,
+                                &identity,
+                                failure.code,
+                                failure.transient_allowlisted,
+                                &failure.reason,
+                                rows,
+                                &failure.diagnostic,
+                            )
+                            .await
+                        {
+                            Ok(recorded) => tracing::info!(
+                                file_id,
+                                code = failure.code.as_str(),
+                                attempts = recorded.attempts,
+                                retryable = recorded.typed_retryable.unwrap_or(false),
+                                retry_deadline_ms = recorded.retry_deadline_ms,
+                                "recorded typed fragment-index failure"
+                            ),
+                            Err(error) => tracing::warn!(
+                                file_id,
+                                error = %error,
+                                "recording typed fragment-index failure"
+                            ),
+                        }
+                        continue;
                     }
                 };
                 match self
@@ -7593,6 +7622,34 @@ impl JobManager {
         }
     }
 
+    async fn record_local_index_failure(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        video: plurx_core::transcode::CopyVideoOptions,
+        failure: &crate::fragindex::IndexFailure,
+    ) {
+        let identity = crate::fragindex::identity_for(file, video);
+        if let Err(error) = self
+            .store
+            .record_fragment_index_typed_outcome(
+                file.id,
+                &identity,
+                failure.code,
+                failure.transient_allowlisted,
+                &failure.reason,
+                u32::try_from(failure.rows).unwrap_or(u32::MAX),
+                &failure.diagnostic,
+            )
+            .await
+        {
+            tracing::warn!(
+                file_id = file.id,
+                error = %error,
+                "recording a typed cluster fragment-index outcome locally"
+            );
+        }
+    }
+
     async fn run_cluster_fragment_index_job(
         self: Arc<Self>,
         transcode: Arc<TranscodeManager>,
@@ -8039,6 +8096,7 @@ impl JobManager {
             outcome = crate::fragindex::build_from_attested_file_with_progress(
                 &file,
                 &attested.handle,
+                &attested.observation.object_version,
                 video,
                 transcode.runtime_cache_dir(),
                 index_file_budget(file.duration_ms),
@@ -8086,37 +8144,6 @@ impl JobManager {
             // own operator surface and its background pass both know what this
             // worker found out.
             //
-            // The queue row's own policy is still unchanged: a truncated job
-            // stays non-retryable. What this effort adds is that the terminal
-            // write is no longer discarded — `fail_fragment_index_job` reports
-            // a write that did not land, which is most of why a queue that
-            // failed every job it claimed for seventy-two hours produced no
-            // log line saying so.
-            crate::fragindex::IndexOutcome::Truncated { reason, rows } => {
-                tracing::warn!(file_id = file.id, rows, %reason, "cluster fragment index incomplete");
-                self.record_local_index_refusal(
-                    &file,
-                    video,
-                    plurx_core::segplan::IndexRefusal::Truncated {
-                        rows: u32::try_from(rows).unwrap_or(u32::MAX),
-                    },
-                    &reason,
-                )
-                .await;
-                let retired = retire_heartbeat(stop, heartbeat).await;
-                let now = clock_ms();
-                self.fail_fragment_index_job(
-                    &retired,
-                    &job,
-                    &node_id,
-                    "truncated",
-                    false,
-                    now,
-                    now.saturating_add(retry_ms),
-                )
-                .await;
-                return false;
-            }
             crate::fragindex::IndexOutcome::Unsupported(reason) => {
                 tracing::warn!(file_id = file.id, %reason, "cluster fragment index unsupported");
                 self.record_local_index_refusal(
@@ -8138,6 +8165,37 @@ impl JobManager {
                     now.saturating_add(retry_ms),
                 )
                 .await;
+                return false;
+            }
+            crate::fragindex::IndexOutcome::Failed(failure) => {
+                tracing::warn!(
+                    file_id = file.id,
+                    code = failure.code.as_str(),
+                    rows = failure.rows,
+                    reason = %failure.reason,
+                    "cluster fragment index failed"
+                );
+                self.record_local_index_failure(&file, video, &failure)
+                    .await;
+                let retired = retire_heartbeat(stop, heartbeat).await;
+                let now = clock_ms();
+                let code = failure.code.as_str().to_owned();
+                let written = self
+                    .store
+                    .fail_cluster_fragment_index_typed(
+                        &plurx_core::store::ClusterFragmentIndexFailure {
+                            cache_key: job.cache_key.clone(),
+                            target_node_id: job.target_node_id.clone(),
+                            node_id: node_id.clone(),
+                            fence: job.fence,
+                            code: failure.code,
+                            transient_allowlisted: failure.transient_allowlisted,
+                            diagnostic: failure.diagnostic,
+                            now_ms: now,
+                        },
+                    )
+                    .await;
+                self.record_job_outcome(&retired, &job, "fail", &code, written);
                 return false;
             }
         };
@@ -9193,6 +9251,8 @@ mod tests {
             updated_at_ms: 0,
             last_error_code: String::new(),
             attempt_errors: String::new(),
+            index_retry_deadline_ms: 0,
+            index_diagnostic_json: String::new(),
         }
     }
 

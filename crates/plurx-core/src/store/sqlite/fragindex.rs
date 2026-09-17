@@ -53,6 +53,36 @@ impl FragmentIndexStore for SqliteStore {
         .await
     }
 
+    async fn record_fragment_index_typed_outcome(
+        &self,
+        file_id: i64,
+        source: &SourceIdentity,
+        code: crate::content_analysis::IndexFailureCode,
+        transient_allowlisted: bool,
+        reason: &str,
+        rows: u32,
+        diagnostic: &crate::content_analysis::IndexDiagnostic,
+    ) -> Result<FragmentIndexOutcome, StoreError> {
+        let source = source.clone();
+        let reason = reason.to_owned();
+        let diagnostic = diagnostic.clone();
+        let now_ms = unix_ms()?;
+        self.with_conn(move |conn| {
+            crate::store::fragindex::record_typed_outcome(
+                conn,
+                file_id,
+                &source,
+                code,
+                transient_allowlisted,
+                &reason,
+                rows,
+                &diagnostic,
+                now_ms,
+            )
+        })
+        .await
+    }
+
     async fn fragment_index_outcome(
         &self,
         file_id: i64,

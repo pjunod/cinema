@@ -129,6 +129,20 @@ CREATE TABLE fragment_index_outcomes (
     PRIMARY KEY (file_id, argv_fingerprint)
 ) STRICT;";
 
+pub(crate) const FRAGMENT_INDEX_TYPED_OUTCOMES_SCHEMA: &str = "
+ALTER TABLE fragment_index_outcomes
+    ADD COLUMN typed_code TEXT NOT NULL DEFAULT '';
+ALTER TABLE fragment_index_outcomes
+    ADD COLUMN typed_retryable INTEGER;
+ALTER TABLE fragment_index_outcomes
+    ADD COLUMN retry_deadline_ms INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE fragment_index_outcomes
+    ADD COLUMN policy_revision INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE fragment_index_outcomes
+    ADD COLUMN terminal_reason TEXT NOT NULL DEFAULT '';
+ALTER TABLE fragment_index_outcomes
+    ADD COLUMN diagnostic_json TEXT NOT NULL DEFAULT '';";
+
 /// How long a truncated build waits before the indexer spends another
 /// whole-file read on it, and the ceiling that wait doubles toward.
 ///
@@ -500,7 +514,94 @@ pub(crate) fn record_outcome(
         attempts,
         next_attempt_at_ms,
         updated_at_ms: now_ms,
+        typed_code: None,
+        typed_retryable: None,
+        retry_deadline_ms: 0,
+        policy_revision: 0,
+        terminal_reason: None,
+        diagnostic: None,
     })
+}
+
+pub(crate) fn record_typed_outcome(
+    conn: &Connection,
+    file_id: i64,
+    source: &SourceIdentity,
+    code: crate::content_analysis::IndexFailureCode,
+    transient_allowlisted: bool,
+    reason: &str,
+    rows: u32,
+    diagnostic: &crate::content_analysis::IndexDiagnostic,
+    now_ms: i64,
+) -> Result<FragmentIndexOutcome, StoreError> {
+    let transaction = conn.unchecked_transaction()?;
+    let existing_deadline = transaction
+        .query_row(
+            "SELECT retry_deadline_ms FROM fragment_index_outcomes
+              WHERE file_id = ?1 AND argv_fingerprint = ?2",
+            params![file_id, source.argv_fingerprint],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+    let refusal = if code == crate::content_analysis::IndexFailureCode::Unsupported {
+        IndexRefusal::Unsupported
+    } else {
+        IndexRefusal::Truncated { rows }
+    };
+    let mut recorded = record_outcome(&transaction, file_id, source, refusal, reason, now_ms)?;
+    let decision = crate::content_analysis::index_retry_decision(
+        code,
+        transient_allowlisted,
+        recorded.attempts,
+        crate::store::DEFAULT_ANALYSIS_MAX_ATTEMPTS as u32,
+        now_ms,
+        existing_deadline,
+    );
+    let mut diagnostic = diagnostic.clone();
+    diagnostic.version = 1;
+    diagnostic.code = code.as_str().to_owned();
+    diagnostic.retryable = decision.retryable;
+    diagnostic.attempt = i64::from(recorded.attempts);
+    diagnostic.recorded_at_ms = now_ms;
+    let diagnostic_json = diagnostic.encode_bounded().map_err(StoreError::Task)?;
+    let terminal_reason = if recorded.attempts >= crate::store::DEFAULT_ANALYSIS_MAX_ATTEMPTS as u32
+    {
+        "attempt_limit".to_owned()
+    } else {
+        decision
+            .terminal_code
+            .map(|terminal| terminal.as_str().to_owned())
+            .unwrap_or_default()
+    };
+    transaction.execute(
+        "UPDATE fragment_index_outcomes
+            SET typed_code = ?1, typed_retryable = ?2,
+                retry_deadline_ms = ?3, policy_revision = ?4,
+                terminal_reason = ?5, diagnostic_json = ?6,
+                next_attempt_at_ms = ?7
+          WHERE file_id = ?8 AND argv_fingerprint = ?9",
+        params![
+            code.as_str(),
+            if decision.retryable { 1_i64 } else { 0_i64 },
+            decision.retry_deadline_ms,
+            i64::from(crate::content_analysis::INDEX_FAILURE_POLICY_REVISION),
+            terminal_reason,
+            diagnostic_json,
+            decision.next_attempt_at_ms,
+            file_id,
+            source.argv_fingerprint,
+        ],
+    )?;
+    transaction.commit()?;
+    recorded.next_attempt_at_ms = decision.next_attempt_at_ms;
+    recorded.typed_code = Some(code);
+    recorded.typed_retryable = Some(decision.retryable);
+    recorded.retry_deadline_ms = decision.retry_deadline_ms;
+    recorded.policy_revision = crate::content_analysis::INDEX_FAILURE_POLICY_REVISION;
+    recorded.terminal_reason = (!terminal_reason.is_empty()).then_some(terminal_reason);
+    recorded.diagnostic = Some(diagnostic);
+    Ok(recorded)
 }
 
 /// The recorded refusal for this identity, if it still describes this source.
@@ -512,7 +613,9 @@ pub(crate) fn outcome(
     let row = conn
         .query_row(
             "SELECT source_size, source_mtime, outcome, reason, rows_built,
-                    attempts, next_attempt_at_ms, updated_at_ms
+                    attempts, next_attempt_at_ms, updated_at_ms,
+                    typed_code, typed_retryable, retry_deadline_ms,
+                    policy_revision, terminal_reason, diagnostic_json
                FROM fragment_index_outcomes
               WHERE file_id = ?1 AND argv_fingerprint = ?2",
             params![file_id, identity.argv_fingerprint],
@@ -526,11 +629,32 @@ pub(crate) fn outcome(
                     row.get::<_, i64>(5)?,
                     row.get::<_, i64>(6)?,
                     row.get::<_, i64>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
+                    row.get::<_, String>(12)?,
+                    row.get::<_, String>(13)?,
                 ))
             },
         )
         .optional()?;
-    let Some((size, mtime, outcome, reason, rows_built, attempts, next_attempt, updated)) = row
+    let Some((
+        size,
+        mtime,
+        outcome,
+        reason,
+        rows_built,
+        attempts,
+        next_attempt,
+        updated,
+        typed_code,
+        typed_retryable,
+        retry_deadline_ms,
+        policy_revision,
+        terminal_reason,
+        diagnostic_json,
+    )) = row
     else {
         return Ok(None);
     };
@@ -558,6 +682,12 @@ pub(crate) fn outcome(
         attempts: u32::try_from(attempts.max(0)).unwrap_or(u32::MAX),
         next_attempt_at_ms: next_attempt,
         updated_at_ms: updated,
+        typed_code: crate::content_analysis::IndexFailureCode::parse(&typed_code),
+        typed_retryable: typed_retryable.map(|value| value != 0),
+        retry_deadline_ms,
+        policy_revision: u32::try_from(policy_revision.max(0)).unwrap_or(u32::MAX),
+        terminal_reason: (!terminal_reason.is_empty()).then_some(terminal_reason),
+        diagnostic: crate::content_analysis::IndexDiagnostic::decode_bounded(&diagnostic_json),
     }))
 }
 
