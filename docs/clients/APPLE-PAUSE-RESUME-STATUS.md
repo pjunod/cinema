@@ -2,7 +2,8 @@
 
 **Status:** M1–M2 built and compiled; promotion packaging in progress · **Updated:** 2026-09-18 ·
 **Branch:** `codex/apple-pause-resume` · **Base:** `6fb0901d3d18` ·
-**Issue:** [#359](http://192.168.4.7:3000/noirr/plurx/issues/359)
+**Issue:** [#359](http://192.168.4.7:3000/noirr/plurx/issues/359) ·
+**Draft PR:** [#360](http://192.168.4.7:3000/noirr/plurx/pulls/360)
 
 Executes the reviewed
 [implementation handoff](APPLE-PAUSE-RESUME-IMPLEMENTATION-HANDOFF.md).
@@ -21,7 +22,7 @@ finished implementation. Work happens in an independent Forgejo clone under
 | Developer enablement advisory | Built; iOS/tvOS compile green | Developer settings exposes an operable enable switch and lists met/unmet requirements; readiness never rewrites or disables the switch. |
 | Apple release metadata | Claimed | Issue #359 owns Apple build 168 and its issue-keyed release fragment. |
 | Tests | Deliberately deferred | Run the single fast-lane window only after implementation review findings are addressed. |
-| Implementation adversarial review | Queued | Review the finished draft PR once, immediately before final validation. |
+| Implementation adversarial review | Queued now | Draft PR #360 is frozen for the one required adversarial pass before final validation. |
 | Fast lane | Queued | Mark the reviewed PR ready, fix failures, and rerun only when the candidate changes. |
 | Merge and cleanup | Queued | Merge only the reviewed current head with green required checks; remove temporary credentials and clone afterward. |
 | Physical Apple TV acceptance | Pending hardware | A merged simulator-tested build does not satisfy the matched fresh-open measurements in handoff §8. |
