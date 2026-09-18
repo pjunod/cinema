@@ -434,6 +434,14 @@ Per-surface adapters map inputs as follows; anything not listed is
 | `tap_surface` | — | — | tap on the video | click on the video |
 | `idle` | hide timer | hide timer | hide timer | hide timer |
 
+On Apple, every explicit Play/Pause producer—including the tvOS Siri Remote and
+iOS lock-screen/headset commands—routes through the same playback-request
+setter. Resume publishes active control intent in sequence order. If a seek or
+prepared replacement owns the next destination, the controller retains the
+requested-play state but does not start the predecessor item while that work is
+pending. Readiness evidence may be shown in Developer settings, but it never
+disables the user's enable control.
+
 ---
 
 ## 6. How it is enforced

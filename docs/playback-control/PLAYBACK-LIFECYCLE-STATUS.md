@@ -133,7 +133,7 @@ then merged the unchanged qualified head as
 | Server `resolve_action` | one control exchange chooses typed hold, retry, or terminal advice from fenced client/server facts | retain; this is the server decision owner, not a media attachment executor |
 | Server `process_preparation_candidate` plus `PreparationExecutor` | one durable successor transaction; client capability and saved server enablement are explicit asks, while throughput/fleet evidence is advisory | retain; exact slot, deadline, commit, abort, and cleanup ownership is already bounded |
 | Server `attempt_takeover` and release reconciliation | abrupt owner-loss authority under durable epoch/lease fencing | retain; this is cluster ownership recovery, not a duplicate client stall owner |
-| Apple `startPlaybackRecoveryMonitor` / `retrySameDeliveryAfterStall` | serialized native nudge and bounded reopen; status polling contributes facts to the same executor | retain; detector count is not executor count, and B01 needs the status observations |
+| Apple `startPlaybackRecoveryMonitor` / `retrySameDeliveryAfterStall` | serialized native nudge and bounded reopen; status polling contributes facts to the same executor | retain; the native nudge now uses the same guarded `playImmediately(atRate:)` decision as explicit resume, while one resume attempt owns repair admission across all detectors |
 | Android `OpenPlaybackStallTracker` / `onStall` / `restartAt` | one absolute no-progress episode and one attachment mutation path | retain; pause, visibility, selection, and generation guards fence stale work |
 | Web `beginWait` / `persistentWait` | one timer per player wait episode; control is consulted before the existing bounded replacement | retain; `stallDiagnose` and `retryPlayback` are viewer actions, not automatic competitors |
 | Apple/Android `retryMediaOnNextNode` | same session and authorization retried through a different advertised ingress | retain; alternate ingress changes transport, not playback identity or durable owner |
@@ -144,6 +144,15 @@ then merged the unchanged qualified head as
 The old M9 fixed-timer and blanket `/status` deletion instruction is now marked
 superseded in `REMAINING-ROADMAP-HANDOFF.md`. No caller above is deleted merely
 to satisfy that historical count.
+
+**Correction recorded 2026-09-18:** the historical Apple “pre-ask nudge” below
+documented ownership wiring, not an effective loaded-media reevaluation.
+Calling ordinary `play()` while AVPlayer was still minimizing stalls could
+leave a substantial ready buffer waiting indefinitely. The current
+[Apple pause/resume candidate](../clients/APPLE-PAUSE-RESUME-STATUS.md) replaces
+that operation with the guarded immediate-play reevaluation and gives explicit
+Resume its own 15-second presentation deadline. The historical receipt remains
+unchanged so it does not falsely describe a past candidate.
 
 ## Historical lifecycle campaign — PR #259 receipt
 
@@ -211,8 +220,11 @@ sweep supplies results.
 ### Recovery ownership audit
 
 - Apple `startPlaybackRecoveryMonitor` remains the serialized native nudge and
-  reopen executor. `startStatusPolling` observes delivery starvation and routes
-  through the same executor; it does not attach or reopen independently.
+  reopen executor. Its nudge uses the explicit-resume runway guard.
+  `startStatusPolling` observes delivery starvation and routes through the same
+  executor; it does not attach or reopen independently. During an explicit
+  resume attempt, native waiting, item failure, and status observations all
+  share the attempt's single repair admission and absolute deadline.
 - Android `stallWatchdogJob` samples the one `OpenPlaybackStallTracker`.
   `applyStallVerdict` may defer that tracker but cannot own a replacement;
   `restartAt` remains the attachment mutation path.

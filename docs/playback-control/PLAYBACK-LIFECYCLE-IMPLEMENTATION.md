@@ -554,18 +554,27 @@ It does not cover the observed substantial-buffer AVPlayer wait.
 |---|---|---|
 | Required bytes not yet produced/materialized | Existing producer/VOD owner makes bounded refill progress | Complete next required segment available, then fetched |
 | Complete bytes published but current request makes no progress | Existing delivery retry policy repairs the exact resource/attempt | Body completes without accepting truncated EOF |
-| Contiguous media loaded, native player still waiting | Existing client recovery owner performs one native play/readiness reevaluation, if intent is still active | Actual presentation and advancing position |
+| Contiguous media loaded, native player still waiting | Existing client recovery owner performs one native play/readiness reevaluation, if intent is still active. On Apple, the reevaluation is `playImmediately(atRate:)` only when contiguous runway is strictly greater than `rate * 10s` | Actual presentation and advancing position; AVPlayer status or one displayed frame is insufficient |
 | Hard resource pressure | Prioritize foreground, cancel/preempt speculative work through existing scheduler | Admission becomes available or existing bounded failure is surfaced |
 | Terminal producer/decoder decision | Existing supported terminal or retry action | Exact decision handled once; no blind wait |
 | Evidence insufficient | Keep media, gather the next joined snapshot under the same deadline | Classify or enter existing bounded recovery; never reset the episode |
 
 Production holds may describe server state but cannot indefinitely defer the
-client's loaded-media recovery. Retain Apple's existing 20-second absolute
-stall-deferral ceiling as an initial upper bound; it is not a mandatory wait
-before a harmless native reevaluation. Reuse the current shorter ask/revisit
-timing. Do not globally disable AVPlayer stall minimization, enlarge every
-buffer, or lower all restart timers. One native reevaluation is not a reopen;
-if it fails, the existing recovery owner decides the next bounded action.
+client's loaded-media recovery. Ordinary Apple stalls retain the existing
+20-second absolute deferral ceiling, while an explicit resume of established
+on-demand playback owns one narrower attempt: a one-second buffered fast-path
+allowance, one same-delivery repair, and one absolute 15-second deadline shared
+across that repair. Resume publishes active intent in control-sequence order
+before repair; a pending seek or replacement retains that intent without
+starting the predecessor item. Success requires display timestamps newer than
+the paused baseline and 250 milliseconds of continuing motion. The same
+strictly-greater-than-ten-wall-seconds runway guard governs both buffered
+resume and the ordinary native nudge. Keep
+`automaticallyWaitsToMinimizeStalling` enabled; do not globally enlarge buffers
+or lower unrelated restart timers. The exact Apple implementation contract and
+live promotion state are in the
+[Apple pause/resume handoff](../clients/APPLE-PAUSE-RESUME-IMPLEMENTATION-HANDOFF.md)
+and [status page](../clients/APPLE-PAUSE-RESUME-STATUS.md).
 
 **P1 acceptance:** drive real flow/materialization policy through fixed-position
 empty-buffer and substantial-buffer waits; verify reachable supply or a named
@@ -600,7 +609,7 @@ cannot attach after a newer seek. Replayed actions return the existing result.
 |---|---|
 | L01–L04 open/admission/start | One cancellable start owner; startup demand reaches source/producer before loader waits; metadata-ready and first presentation remain separate. |
 | L05–L11 normal/wait/refill/resume | Use P1 episode; event-driven exchange plus existing cadence; only actual presentation closes wait. One recovery executor even if status, native event and server verdict arrive together. |
-| L12–L14 pause/resume/background | Pause sends hold, retains bounded buffer/lease under current policy; resume promptly sends active even with native rate zero. Suspend obeys platform lifecycle; expiry while asleep leads to fresh ownership on wake. |
+| L12–L14 pause/resume/background | Pause sends hold and retains bounded buffer/lease under current policy. Apple explicit Resume publishes active intent in sequence order, suppresses predecessor playback while a seek/replacement is pending, and uses the bounded presentation/repair attempt in §4.4. Suspend obeys platform lifecycle; background expiry leads to fresh ownership on wake rather than extending the resume deadline. |
 | L15–L17 seek/seek storm | In-range seek reuses current media; cold seek updates foreground window/rolling origin as applicable. Coalesce to latest target, cancel old job ownership, preserve subtitle alignment and explicit play/pause intent. |
 | L18–L24 reserve/change/reopen | Latest intent can cancel preparation. Selection changes resolve one coherent recipe. Same-delivery recovery and recipe replacement cannot both attach a successor. P3 owns prepared settlement. |
 | L25–L28 stop/restart/end | End cancels work and settles once. Restart gets fresh incarnation. Natural finite EOF requires expected duration/complete delivery; truncation is failure, not successful end. |
@@ -819,7 +828,7 @@ claims that tests already exist or pass.
 |---|---|---|
 | T01 rolling coupled refill | Real flow actor + scripted client observations; fixed playhead; empty and 22-second loaded buffer | Credit/hold has a reachable exit; no heartbeat rearm; real bounds preserved; one resumed episode |
 | T02 VOD contiguous refill | Materialization + request/read-window fixture; near gap and distant cached island | Near segment completes before prewarm; no duplicate materializer or eviction of active reader |
-| T03 loaded native wait | Client adapter test with media already loaded and server held | Active intent survives; one reevaluation; hold cannot reset deadline; presentation ends episode |
+| T03 loaded native wait | Apple `PlayerResumeTests` plus the existing client adapter tests, with media already loaded and server held | Active intent survives; the strict runway boundary chooses at most one immediate play; a stale paused frame cannot pass; two fresh frames separated by 250ms close the episode; hold/repair cannot reset the 15s deadline |
 | T04 delivery fault | Existing body/attempt fixture with delayed chunk and truncated EOF | Retry exact resource; partial body never counted complete; old attempt cannot commit |
 | T05 lifecycle races | Existing per-client ownership/intent suites with controlled callback ordering | Stop/restart/seek/pause/recipe changes preserve latest intent and one attachment |
 | T06 prepared lifecycle | Existing transaction plus adapter fixtures | Reserve/prime/ready/local switch/first presentation/commit/drain, rejected commit after local switch, and lost reply/stop are bounded and idempotent |

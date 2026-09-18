@@ -1,6 +1,6 @@
 # Apple pause/resume — implementation and promotion status
 
-**Status:** M0 complete; implementation in progress · **Updated:** 2026-09-18 ·
+**Status:** M1–M2 built and compiled; promotion packaging in progress · **Updated:** 2026-09-18 ·
 **Branch:** `codex/apple-pause-resume` · **Base:** `6fb0901d3d18`
 
 Executes the reviewed
@@ -15,9 +15,9 @@ finished implementation. Work happens in an independent Forgejo clone under
 | Milestone | State | Evidence / next action |
 |---|---|---|
 | M0 · current base and contract | Complete | Forgejo `main` is `6fb0901d3d18`; revised handoff and retained review imported. |
-| M1 · ordered intent and buffered immediate play | In progress | Centralize explicit Play/Pause, preserve current owner, and prevent predecessor playback during seek/replacement. |
-| M2 · shared resume deadline and presentation proof | Queued | One attempt, one absolute 15-second budget, fresh continuing picture, and one repair admission. |
-| Developer enablement advisory | Queued | Add an advisory-only entry in Developer settings; unmet conditions never disable the enable control. |
+| M1 · ordered intent and buffered immediate play | Built; iOS/tvOS compile green | One playback-request setter serves UI and remote commands; ordered intent publication fences repair; seek/replacement suppresses predecessor playback; eligible runway uses immediate play once. |
+| M2 · shared resume deadline and presentation proof | Built; iOS/tvOS compile green | One immutable attempt ID and 15-second budget survive successor attachment; fresh timestamps plus 250ms continuing motion prove video; all detectors share one repair admission. |
+| Developer enablement advisory | Built; iOS/tvOS compile green | Developer settings exposes an operable enable switch and lists met/unmet requirements; readiness never rewrites or disables the switch. |
 | Tests | Deliberately deferred | Run the single fast-lane window only after implementation review findings are addressed. |
 | Implementation adversarial review | Queued | Review the finished draft PR once, immediately before final validation. |
 | Fast lane | Queued | Mark the reviewed PR ready, fix failures, and rerun only when the candidate changes. |
@@ -46,6 +46,7 @@ finished implementation. Work happens in an independent Forgejo clone under
 | Independent clone | `/private/tmp/plurx-apple-pause-resume-20260918` from Forgejo; credential-free remote URL. |
 | Reviewed source | `6fb0901d3d18c1b181f7299f4faddfb73994fd1a` (Apple build 167 in the reviewed contract). |
 | Rust scope | None planned; no Rust file has changed. |
+| Apple compile-only check | `make apple-build` passed for generic iOS and tvOS simulator targets after the final lifecycle edits; no test action ran. |
 | Unit or UI tests | Not run during implementation by explicit instruction. |
 | Physical hardware | Not yet available to this implementation session; acceptance remains open unless a device run is completed. |
 

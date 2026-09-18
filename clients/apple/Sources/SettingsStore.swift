@@ -34,6 +34,7 @@ struct SettingsStore {
         static let offlineQuality = "plurx.offlineQuality"
         static let offlineNetwork = "plurx.offlineNetwork"
         static let preparedHandoff = "plurx.preparedHandoff"
+        static let boundedResume = "plurx.boundedResume"
         static let liveTvLayout = "plurx.liveTvLayout"
         static let liveTvMobileGuide = "plurx.liveTvMobileGuide"
     }
@@ -170,6 +171,14 @@ struct SettingsStore {
     var preparedHandoffEnabled: Bool {
         get { defaults.object(forKey: Key.preparedHandoff) as? Bool ?? true }
         nonmutating set { defaults.set(newValue, forKey: Key.preparedHandoff) }
+    }
+
+    /// Operator control for the bounded Apple pause/resume path. It defaults
+    /// on. Developer-settings readiness is explanatory only: no requirement
+    /// below that switch can disable it or rewrite this value.
+    var boundedResumeEnabled: Bool {
+        get { defaults.object(forKey: Key.boundedResume) as? Bool ?? true }
+        nonmutating set { defaults.set(newValue, forKey: Key.boundedResume) }
     }
 
     /// Television presentation only. The phone's list/grid preference remains

@@ -5,6 +5,7 @@ import SwiftUI
 struct LiveTvDeveloperView: View {
     @EnvironmentObject private var model: AppModel
     @AppStorage("plurx.preparedHandoff") private var preparedHandoffEnabled = true
+    @AppStorage("plurx.boundedResume") private var boundedResumeEnabled = true
     @ObservedObject private var handoff = Caps.PreparedHandoffTelemetry.shared
     @State private var api: LiveTvAPI?
     @State private var saved: LiveTvSettings?
@@ -28,6 +29,17 @@ struct LiveTvDeveloperView: View {
 
     var body: some View {
         Form {
+            Section("Bounded pause/resume · advisory enablement") {
+                Toggle("Enable bounded pause/resume", isOn: $boundedResumeEnabled)
+                Text("On by default. Resume consumes a healthy retained buffer immediately and gives an established on-demand item one recipe-preserving repair inside one 15-second budget.")
+                Label("Client ownership and deadline implementation: Met", systemImage: "checkmark.circle")
+                Label("Server or protocol change required: Met · None", systemImage: "checkmark.circle")
+                Label("Matched physical Apple TV latency: Not met", systemImage: "exclamationmark.triangle")
+                Text("Qualification still needs matched fresh-open and pause/resume trials on the same Apple TV, delivery presentation, recipe, cache state, and network. This unmet row never disables or overrides the switch.")
+                    .font(.caption)
+                Text("Live TV, cold startup, AirPlay, and Picture in Picture keep their existing owners and budgets. A missing local video sample is not treated as a failed picture on an external display.")
+                    .font(.caption)
+            }
             Section("Prepared quality handoff · advisory enablement") {
                 Toggle("Enable two-player prepared handoff", isOn: $preparedHandoffEnabled)
                 Text("On by default. This controls whether Apple advertises dual-player preparation. The checks below explain risk; they never disable or override the switch, and you can turn it off here.")

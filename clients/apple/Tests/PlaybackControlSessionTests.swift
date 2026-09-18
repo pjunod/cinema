@@ -224,6 +224,7 @@ private final class ControlExchangeURLProtocol: URLProtocol {
 @MainActor
 private final class PlayerStub {
     var positionMs = 4_000
+    var isPaused = false
     var reads = 0
     var subtitleTrack: Int?
 
@@ -235,7 +236,7 @@ private final class PlayerStub {
             bufferedFromMs: positionMs,
             bufferedThroughMs: positionMs + 30_000,
             rate: 1,
-            isPaused: false,
+            isPaused: isPaused,
             isEnded: false,
             isSeeking: false,
             hasStarted: true,
@@ -372,6 +373,38 @@ final class PlaybackControlSessionTests: XCTestCase {
         XCTAssertEqual(first.generation, "11111111-1111-4111-8111-111111111111")
         XCTAssertEqual(first.controlEpoch, 7)
         XCTAssertNotNil(first.capabilities)
+    }
+
+    func testRapidPauseResumePublishesLatestDemandAfterHeldResponse() async throws {
+        controlExchanges.reset()
+        controlGate.reset()
+        controlAnswer.set(ControlAction(type: "none"))
+        let player = PlayerStub()
+        let (transport, urlSession) = makeTransport()
+        let session = PlaybackControlSession()
+        tearDownTransport(session, urlSession)
+        session.begin(
+            bootstrap: sessionBootstrap(nextExchangeMs: 60_000),
+            transport: transport,
+            observe: { player.observation() }
+        )
+        _ = try await waitForExchange { $0.sequence == 1 }
+
+        controlGate.arm()
+        player.isPaused = true
+        let pauseFloor = await session.reportIntent()
+        let pause = try await waitForExchange(timeout: 2) { $0.sequence == 2 }
+        XCTAssertEqual(pause.demand, .hold)
+
+        player.isPaused = false
+        let resumeFloor = await session.reportIntent()
+        controlGate.release()
+        let resume = try await waitForExchange(timeout: 2) { $0.sequence == 3 }
+        XCTAssertEqual(resume.demand, .active)
+        XCTAssertEqual(resume.positionMs, pause.positionMs)
+        XCTAssertEqual(pauseFloor, 2)
+        XCTAssertEqual(resumeFloor, 3)
+        session.end()
     }
 
     func testSourceActorPublishesBeforeReporterCadenceAndNeverPullsLivePlayer() async throws {
