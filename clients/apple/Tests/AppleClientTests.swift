@@ -3746,29 +3746,25 @@ final class AppleClientTests: XCTestCase {
             source.contains("player.pause()\n        isPlaying = false\n        wantsPlayback = false"),
             "an owner stop written out by hand is a second implementation of §3.4"
         )
-        // One hand-written stop survives, and it is the viewer's own pause
-        // rather than an owner's — which is the distinction the whole property
-        // turns on.
-        let byHand = "player.pause()\n            isPlaying = false\n            wantsPlayback = false"
-        XCTAssertEqual(
-            source.components(separatedBy: byHand).count - 1, 1,
-            "an owner stop written out by hand is a second implementation of §3.4"
-        )
-        let toggle = try XCTUnwrap(source.range(of: "func togglePlayPause() {"))
-        let toggleEnd = try XCTUnwrap(
-            source.range(of: "\n    }\n", range: toggle.upperBound..<source.endIndex)
+        // One explicit viewer stop survives in the centralized setter. The
+        // lock screen, remote controls and on-screen toggle all route here.
+        let viewerStop = "wantsPlayback = false\n            player.pause()\n            isPlaying = false"
+        let setter = try XCTUnwrap(source.range(of: "func setPlaybackRequested(_ requested: Bool) {"))
+        let setterEnd = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: setter.upperBound..<source.endIndex)
         )
         XCTAssertTrue(
-            String(source[toggle.upperBound..<toggleEnd.lowerBound]).contains(byHand),
-            "the one stop written out by hand is the viewer's own pause"
+            String(source[setter.upperBound..<setterEnd.lowerBound]).contains(viewerStop),
+            "the one explicit viewer stop belongs to the centralized intent setter"
         )
-        // Every remaining writer, named. Two are the viewer (the on-screen
-        // transport and the lock screen), one is the end of the film, one is
-        // teardown, and one is the owner's single helper.
+        XCTAssertTrue(source.contains("self?.setPlaybackRequested(true)"))
+        XCTAssertTrue(source.contains("self?.setPlaybackRequested(false)"))
+        // Every remaining writer, named. One is the viewer, one is the end of
+        // the film, one is teardown, and one is the owner's single helper.
         let writers = source.components(separatedBy: "wantsPlayback = false").count - 1
         XCTAssertEqual(
-            writers, 5,
-            "a sixth writer of the viewer's transport intent wants a reason in this test"
+            writers, 4,
+            "a fifth writer of the viewer's transport intent wants a reason in this test"
         )
         let start = try XCTUnwrap(source.range(
             of: "private func stopForBlockingSurface(revokingPlaybackIntent: Bool = false) {"
@@ -4137,10 +4133,9 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testAPresentingSampleAfterAStopDemotesToABannerAndLogsTheDisagreement() {
-        // The lock-screen `playCommand` still calls `player.play()` directly:
-        // the contract's answer to it is not to fight it but to record it
-        // (§3.2). The picture wins, the fault keeps its actions and its data,
-        // and the ledger gets a row naming what started the player.
+        // Platform presentation can still outrun an owner stop after an
+        // already-issued command. The picture wins, the fault keeps its
+        // actions and data, and the ledger names the disagreement (§3.2).
         var model = PlaybackSurfaceModel()
         let origin = ContinuousClock.now
         model.apply(.attach(1), now: origin)
