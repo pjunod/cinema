@@ -4129,7 +4129,7 @@ mod tests {
 
     #[tokio::test]
     async fn direct_range_response_has_exact_status_headers_and_bytes() {
-        let directory = tempfile::tempdir().expect("temporary raw file");
+        let directory = crate::test_tempdir().expect("temporary raw file");
         let path = directory.path().join("movie.mp4");
         tokio::fs::write(&path, b"0123456789")
             .await
@@ -4207,7 +4207,7 @@ mod tests {
     #[tokio::test]
     async fn direct_range_empty_head_and_unvalidated_if_range_cannot_underflow_or_send_partial_media(
     ) {
-        let directory = tempfile::tempdir().expect("temporary raw files");
+        let directory = crate::test_tempdir().expect("temporary raw files");
         let path = directory.path().join("empty.mp4");
         tokio::fs::write(&path, b"").await.expect("empty fixture");
         for (headers, status) in [

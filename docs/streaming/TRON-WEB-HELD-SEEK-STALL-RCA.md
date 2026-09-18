@@ -1,6 +1,6 @@
 # TRON held-seek stall — two commits, one source change, one recovery spent too early
 
-**Status:** implementation candidate complete; review and fast lane pending, 2026-09-18  
+**Status:** implementation and adversarial review complete; current-main qualification in progress, 2026-09-18
 **Incident:** 2026-09-18, approximately 04:17–04:25 UTC
 **Incident build:** `v0.3.0-2770-g6fb0901d`
 **Exact source:** `6fb0901d3d18c1b181f7299f4faddfb73994fd1a`
@@ -522,14 +522,16 @@ The first review resolved the open policy choices:
 Diagnosis changed no service, media, or deployment. The old session retired
 after the client released it, and later cold-start plus single-seek playback
 succeeded. Implementation now lives in an agent-owned clean clone based on
-`a5454c40`; the user's dirty checkout remains untouched. The candidate has a
-clean Rust 1.97.1 compile check, but its test suite is intentionally deferred
-until the single adversarial review is complete.
+`a5454c40`; the user's dirty checkout remains untouched. The candidate passed
+its single adversarial review and focused validation. Current `main` is now
+being incorporated so its newly landed unit-test repairs qualify the final
+head before promotion.
 
 ## 10. Implementation status
 
-**Base:** `a5454c40` · **Branch:** `codex/tron-held-seek-recovery`  
-**Draft PR:** [Forgejo #361](http://192.168.4.7:3000/noirr/plurx/pulls/361)  
+**Original base:** `a5454c40` · **Current main merged:** `7cdbdd1a`
+**Branch:** `codex/tron-held-seek-recovery`
+**PR:** [Forgejo #361](http://192.168.4.7:3000/noirr/plurx/pulls/361)
 **Working clone:** agent-owned Forgejo clone; the user's checkout is untouched
 
 - [x] Original incident and independent review incorporated.
@@ -542,5 +544,8 @@ until the single adversarial review is complete.
   Stop cancellation, adapter harness ownership, and truthful drop telemetry.
 - [x] Focused reviewed-head validation green: four web suites, documentation
   index, two segment-delivery Rust regressions, and `git diff --check`.
+- [x] Current `main` merged and newly landed unit-test repairs qualified: the
+  complete fast Rust unit lane, 18 operations/docs tests, three playback web
+  suites, and the Live TV suite are green.
 - [ ] Fast lane green on the reviewed head.
 - [ ] Pull request merged into `main` and branch cleaned up.

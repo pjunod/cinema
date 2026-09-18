@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import subprocess
 import unittest
 
 from validation.doc_versions import check_repository, validate_documented_builds
@@ -321,10 +322,15 @@ class AndroidToolchainClaimCase(unittest.TestCase):
     def test_every_document_naming_agp_names_the_pinned_one(self) -> None:
         pinned = self.pinned()
         wrong: list[str] = []
-        for path in sorted(ROOT.rglob("*.md")):
-            relative = path.relative_to(ROOT).as_posix()
-            if relative.startswith(("target/", "clients/android/.gradle")):
-                continue
+        tracked = subprocess.run(
+            ["git", "ls-files", "-z", "--", "*.md"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.split("\0")
+        for relative in sorted(path for path in tracked if path):
+            path = ROOT / relative
             for line, text in enumerate(
                 path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
             ):

@@ -866,7 +866,6 @@ impl ClusterFragmentIndexStore for SqliteStore {
                                           state = 'cancelled'
                                           OR (state = 'failed'
                                             AND last_error_code = 'queue_expired'
-                                            AND attempts = 0
                                             AND index_retry_deadline_ms = 0
                                             AND ?11 >= 1))))))))",
                 params![
@@ -907,14 +906,12 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     owner_node_id = NULL, lease_expires_ms = NULL,
                     attempts = CASE WHEN ?12 = 1 THEN 0
                       WHEN cluster_fragment_index_jobs.state = 'cancelled'
-                        OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                            AND cluster_fragment_index_jobs.attempts = 0)
+                        OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                         OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                       ELSE cluster_fragment_index_jobs.attempts END,
                     attempt_errors = CASE WHEN ?12 = 1 THEN ''
                       WHEN cluster_fragment_index_jobs.state = 'cancelled'
-                        OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                            AND cluster_fragment_index_jobs.attempts = 0)
+                        OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                         OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
                       ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = excluded.not_before_ms,
@@ -931,7 +928,6 @@ impl ClusterFragmentIndexStore for SqliteStore {
                        cluster_fragment_index_jobs.state = 'cancelled'
                        OR (cluster_fragment_index_jobs.state = 'failed'
                          AND cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                         AND cluster_fragment_index_jobs.attempts = 0
                          AND cluster_fragment_index_jobs.index_retry_deadline_ms = 0
                          AND ?13 >= 1)))",
                 params![
@@ -2219,14 +2215,12 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
                     attempts = CASE
                         WHEN cluster_fragment_index_jobs.state = 'cancelled'
-                          OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                              AND cluster_fragment_index_jobs.attempts = 0)
+                          OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                           OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                         ELSE cluster_fragment_index_jobs.attempts END,
                     attempt_errors = CASE
                         WHEN cluster_fragment_index_jobs.state = 'cancelled'
-                          OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                              AND cluster_fragment_index_jobs.attempts = 0)
+                          OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                           OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
                         ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = CASE
@@ -2245,7 +2239,6 @@ impl ClusterFragmentIndexStore for SqliteStore {
                   WHERE cluster_fragment_index_jobs.state = 'cancelled'
                      OR (cluster_fragment_index_jobs.state = 'failed'
                        AND cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                       AND cluster_fragment_index_jobs.attempts = 0
                        AND cluster_fragment_index_jobs.index_retry_deadline_ms = 0)
                      OR (cluster_fragment_index_jobs.state = 'queued'
                        AND cluster_fragment_index_jobs.priority = 'normal'
@@ -2507,14 +2500,12 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
                     attempts = CASE
                       WHEN cluster_fragment_index_jobs.state = 'ready'
-                        OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                            AND cluster_fragment_index_jobs.attempts = 0)
+                        OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                         OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                       ELSE cluster_fragment_index_jobs.attempts END,
                     attempt_errors = CASE
                       WHEN cluster_fragment_index_jobs.state = 'ready'
-                        OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                            AND cluster_fragment_index_jobs.attempts = 0)
+                        OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                         OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
                       ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = excluded.not_before_ms,
@@ -2524,7 +2515,6 @@ impl ClusterFragmentIndexStore for SqliteStore {
                   WHERE cluster_fragment_index_jobs.state = 'ready'
                      OR (cluster_fragment_index_jobs.state = 'failed'
                        AND cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                       AND cluster_fragment_index_jobs.attempts = 0
                        AND cluster_fragment_index_jobs.index_retry_deadline_ms = 0)",
                 params![
                     replacement.cache_key,

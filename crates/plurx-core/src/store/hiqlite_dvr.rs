@@ -29,6 +29,9 @@ use crate::dvr::{
 };
 use crate::error::StoreError;
 
+const DVR_ACTIVE_RECORDING_PREDICATE: &str =
+    "state = 'recording' OR (state = 'scheduled' AND capture_start <= $1)";
+
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
     let mut statements = migration_statements()?;
     statements.extend(event_migration_statements()?);
@@ -1269,11 +1272,13 @@ impl DvrStore for HiqliteAuthStore {
         now_s: i64,
         limit: i64,
     ) -> Result<(Vec<DvrRecording>, i64, Option<i64>), StoreError> {
-        let active = "state='recording' OR (state='scheduled' AND capture_start<=$1)";
         let total = self
             .client()
             .query_consistent_map::<CountRow, _>(
-                format!("SELECT COUNT(*) AS count FROM dvr_recordings WHERE {active}"),
+                format!(
+                    "SELECT COUNT(*) AS count FROM dvr_recordings \
+                     WHERE {DVR_ACTIVE_RECORDING_PREDICATE}"
+                ),
                 params!(now_s),
             )
             .await?
@@ -1282,7 +1287,8 @@ impl DvrStore for HiqliteAuthStore {
         let rows = read_recordings(
             self,
             format!(
-                "SELECT {RECORDING_COLS} FROM dvr_recordings WHERE {active} \
+                "SELECT {RECORDING_COLS} FROM dvr_recordings \
+                 WHERE {DVR_ACTIVE_RECORDING_PREDICATE} \
                  ORDER BY capture_start,id LIMIT $2"
             ),
             params!(now_s, limit.clamp(1, DVR_RECORDINGS_LIST_PAGE)),
