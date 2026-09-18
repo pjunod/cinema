@@ -36,14 +36,18 @@ fmt: ## Auto-format all code
 # and daemon fixtures also require explicit features, so production dependency
 # feature unification cannot pull them into this target accidentally.
 # `--no-fail-fast` reports every failing target in one run.
-.PHONY: unit test test-full
-unit: spike-lock-check ## Run the fast Rust unit and SQLite contract lane
+.PHONY: test-socket-permission-check unit test test-full
+test-socket-permission-check: ## Verify unit tests may bind loopback mock-server sockets
+	@python3 -c 'import socket; listener = socket.socket(); listener.bind(("127.0.0.1", 0)); listener.close()' 2>/dev/null \
+		|| { echo >&2 "unit tests require permission to bind local loopback sockets; rerun outside the network-restricted sandbox or grant local-socket access"; exit 1; }
+
+unit: spike-lock-check test-socket-permission-check ## Run the fast Rust unit and SQLite contract lane
 	$(CARGO) test --workspace --exclude plurx-cluster-check --no-fail-fast
 	$(MAKE) vodencode-restart-check CARGO="$(CARGO_RAW)"
 
 test: unit ## Run the fast Rust test lane
 
-test-full: ## Run every Rust test, including replicated and daemon contracts
+test-full: test-socket-permission-check ## Run every Rust test, including replicated and daemon contracts
 	$(CARGO) test --workspace \
 	  --features plurx-core/hiqlite-contract-tests,plurxd/cluster-integration-tests \
 	  --no-fail-fast
@@ -93,7 +97,7 @@ rust-check: fmt-check lint test ## Rust format, lint, and workspace tests
 # contracts. Cluster jobs own WAL, replicated Store, topology, and daemon
 # contracts. Explicit test features keep those processes out of this lane.
 .PHONY: ci-rust-gate
-ci-rust-gate: fmt-check spike-lock-check lint ## CI Rust gate: format, Clippy, and fast workspace tests
+ci-rust-gate: fmt-check spike-lock-check lint test-socket-permission-check ## CI Rust gate: format, Clippy, and fast workspace tests
 	$(CARGO) test --workspace --locked --exclude plurx-cluster-check --no-fail-fast
 	$(MAKE) vodencode-restart-check CARGO="$(CARGO_RAW)"
 
