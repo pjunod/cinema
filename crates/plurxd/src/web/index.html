@@ -19073,7 +19073,8 @@ function detachLiveTvMedia(){
 async function stopLiveTv(){
   // Stop owns the tuner immediately. A keyup delivered after this point must
   // not commit a preview that was accumulated before Stop and reacquire it.
-  cancelLiveTvChannelGesture();
+  if(typeof cancelLiveTvChannelGesture==="function") cancelLiveTvChannelGesture();
+  else { LIVE_TV.pendingChannel=null; LIVE_TV.preview=null; }
   ++LIVE_TV.serial;
   const host=document.getElementById("live-tv-host");
   // `document.exitFullscreen()` resolves before Chromium dispatches its

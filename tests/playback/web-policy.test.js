@@ -1816,12 +1816,12 @@ test("every shipped stall report carries the wait's start as its identity", () =
   );
   assert.match(
     shippedSource("endWait"),
-    /recordWaitStall\(p,kind,ms,runway,[^;]*,began\)/,
+    /recordWaitStall\(p,kind,ms,runway,runway,[^;]*,began\)/,
     "endWait must report the stall against the instant the wait began",
   );
   assert.match(
     shippedSource("persistentWait"),
-    /recordWaitStall\(p,kind,ms,runway,[^;]*,began,controlTrigger\)/,
+    /recordWaitStall\(p,kind,ms,startedRunway,currentRunway,[^;]*,began,controlTrigger\)/,
     "persistentWait must preserve the wait instant and its exact control trigger",
   );
 });
@@ -4087,6 +4087,7 @@ asyncTest("a burn session-open refusal reaches the surface as a refused change",
       shippedSource("showSessionOpenFailure"),
       shippedSource("positionForPlaybackIntent"),
       shippedSource("selectedAudioIndex"),
+      "function cancelPendingSeek(){}",
       shippedSource("requestPlaybackMediaChange"),shippedSource("executePlaybackMediaChange"),
       shippedSource("beginPlaybackPreparation"),
       shippedSource("burnSub"),

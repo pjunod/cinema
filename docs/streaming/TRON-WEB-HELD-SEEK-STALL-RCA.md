@@ -540,5 +540,7 @@ until the single adversarial review is complete.
 - [x] One adversarial agent review of the complete candidate.
 - [x] Four review findings addressed: post-control evidence resampling, Live TV
   Stop cancellation, adapter harness ownership, and truthful drop telemetry.
+- [x] Focused reviewed-head validation green: four web suites, documentation
+  index, two segment-delivery Rust regressions, and `git diff --check`.
 - [ ] Fast lane green on the reviewed head.
 - [ ] Pull request merged into `main` and branch cleaned up.

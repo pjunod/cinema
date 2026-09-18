@@ -1010,6 +1010,7 @@ async function main() {
       "function closeMenu(){} function toast(){} function qualityLabel(){return '720p';}",
       "function clientLog(){} function playbackContext(){return {};} function renderPlayerInfo(){}",
       "function clearPlaybackControlWaiters(){} function notifyPlaybackControl(){} function endWait(){}",
+      "function cancelPendingSeek(){}",
       "function play(id,title,position){calls.push({kind:'play',position});}",
       "function newAttempt(){} function teardownHls(){} function resetMediaSource(){}",
       "function clearSubs(){} function pbSyncSubIcon(){} function setLoading(){} function armStall(){}",
@@ -2405,6 +2406,7 @@ async function main() {
         shippedSource("stallRecoverySnapshot"),
         shippedSource("persistentWait"),
         "function settlePlaybackControlSeek(){} function completeHlsStartup(){} function clearStall(){} function finishStallRecovery(){return false;}",
+        "function playbackExhaustedActions(){return ['keep_waiting','retry','close'];}",
         shippedSource("streamHasVideo"),
         shippedSource("samplePlaybackPresentationClock"),
         shippedSource("playbackProgressTick"),
@@ -2595,7 +2597,10 @@ async function main() {
   }
   {
     let now=8_001;
-    const h=stallHarness({clock:{now:()=>now},answer:()=>({type:"none"})});
+    const h=stallHarness({clock:{now:()=>now},answer:()=>({type:"none"}),policy:{
+      stallRecoveryAction:({alreadyRecovered})=>alreadyRecovered?"prompt":"reconnect",
+      stallRecoveryTargetHeight:()=>720,
+    }});
     const player=Object.assign(stalledPlayer(),{waitAt:1,waitStartedRunway:9.6,
       stallRecoveries:1});
     const video=bufferedVideo(9.6,{play(){return Promise.resolve();}});

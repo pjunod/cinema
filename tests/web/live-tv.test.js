@@ -207,7 +207,7 @@ async function main() {
         signal: { strength_percent: 96, quality_percent: 89, symbol_quality_percent: 100 } },
     );
     assert.match(markup, /Source[\s\S]*HD · HEVC · AC4/);
-    assert.match(markup, /Playing[\s\S]*H\.264 · 720p · AAC · VAAPI encoder/);
+    assert.match(markup, /Stream format[\s\S]*H\.264 · 720p · AAC · VAAPI encoder/);
     assert.match(markup, /Strength[\s\S]*96%[\s\S]*Quality[\s\S]*89%[\s\S]*Symbol[\s\S]*100%/);
   });
 
