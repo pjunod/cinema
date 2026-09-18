@@ -3886,7 +3886,7 @@ function beginWait(v){
   if(!playbackOwnsAttachedMedia(p)) return;
   if(p.waitAt) return;                       // already hungry; not a second one
   p.waitAt=performance.now();
-  p.waitRunway=bufferRunway(v);
+  p.waitStartedRunway=bufferRunway(v);
   p.waitNudgedAt=null;
   p.waitReported=false;
   const began=p.waitAt;
@@ -3908,7 +3908,8 @@ function noteAutoStall(p,kind,episodeAtMs){
   });
   abr.lastStallAtMs=now;
 }
-function recordWaitStall(p, kind, ms, runway, detail, episodeAtMs, controlTrigger){
+function recordWaitStall(p, kind, ms, startedRunway, currentRunway, detail, episodeAtMs,
+  controlTrigger){
   p.stalls=(p.stalls||0)+1;
   PLAYBACK_LIFETIME_STALLS++;
   p.stallsByKind=p.stallsByKind||{supply:0,decode:0,presentation:0};
@@ -3916,9 +3917,11 @@ function recordWaitStall(p, kind, ms, runway, detail, episodeAtMs, controlTrigge
   noteAutoStall(p,kind,episodeAtMs);
   const ctx=playbackContext();
   clientLog(Object.assign({level:"warn",event:"stall",detail:detail||kind,ms,
-    message:`${kind} stall, ${(ms/1000).toFixed(1)}s, ${runway==null?"?":runway}s buffered`,
+    message:`${kind} stall, ${(ms/1000).toFixed(1)}s, ${currentRunway==null?"?":currentRunway}s buffered`+
+      ` (started ${startedRunway==null?"?":startedRunway}s)`,
     control_trigger:controlTrigger||null},
-    ctx, {runway}));
+    ctx, {runway:currentRunway,wait_started_runway:startedRunway,
+      current_runway:currentRunway}));
 }
 // Called when playback resumes (or is abandoned). Decides, in retrospect,
 // whether that gap was worth anyone's attention.
@@ -3927,14 +3930,14 @@ function endWait(resumed){
   clearTimeout(p.waitTimer); p.waitTimer=null;
   const began=p.waitAt;
   const ms=Math.round(performance.now()-began);
-  const runway=p.waitRunway;
+  const runway=p.waitStartedRunway;
   const reported=!!p.waitReported;
-  p.waitAt=null; p.waitRunway=null; p.waitNudgedAt=null; p.waitReported=false;
+  p.waitAt=null; p.waitStartedRunway=null; p.waitNudgedAt=null; p.waitReported=false;
   if(reported) return;                       // persistentWait already emitted it
   if(!resumed || ms<STALL_MIN_MS) return;    // a hitch, not a stall
   let video=null; try{video=document.getElementById&&document.getElementById("video");}catch(e){}
   const kind=persistentWaitEvidence(video,runway).kind;
-  recordWaitStall(p,kind,ms,runway,kind,began);
+  recordWaitStall(p,kind,ms,runway,runway,kind,began);
 }
 // Classify only what the browser actually exposed. A stationary film clock
 // with loaded media is a presentation wait, not a decoder verdict. Typed media
@@ -3995,8 +3998,9 @@ async function persistentWait(v,p,began,generation,actionGeneration){
      p.wantsPlayback===false || (p.wantsPlayback==null&&v.paused) ||
      (v.seeking&&!p.controlSeek?.executed&&!p.progressWatch?.fired)) return;
   p.waitTimer=null;
-  const ms=Math.round(performance.now()-began), runway=p.waitRunway;
-  const evidence=persistentWaitEvidence(v,runway), kind=evidence.kind;
+  const ms=Math.round(performance.now()-began);
+  const startedRunway=p.waitStartedRunway, currentRunway=bufferRunway(v);
+  const evidence=persistentWaitEvidence(v,currentRunway), kind=evidence.kind;
   const firstReport=!p.waitReported;
   p.waitReported=true;
   // This exact transition owns the legacy reopen. Cadence alone is too late:
@@ -4005,7 +4009,8 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   const controlObservation=evidence.observation;
   // Presentation recovery belongs to this client, not to the producer
   // verdict. Spend the one harmless browser reevaluation before the bounded
-  // ask; once it resolves, a passive response leaves no work pending.
+  // ask, then observe actual clock/frame progress through the same absolute
+  // deadline rather than treating play() itself as recovery.
   let nativeReevaluated=false;
   if(kind==="presentation"&&p.waitNudgedAt!==began){
     p.waitNudgedAt=began;
@@ -4024,9 +4029,11 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   if(nativeReevaluated){
     clientLog({level:"info",event:"stall_recovery",detail:"native_reevaluation:wait",
       message:"loaded media remained waiting — native playback reevaluated before recovery",
-      control_trigger:controlTrigger});
+      control_trigger:controlTrigger,wait_started_runway:startedRunway,
+      current_runway:currentRunway});
   }
-  if(firstReport) recordWaitStall(p,kind,ms,runway,`${kind}-persistent`,began,controlTrigger);
+  if(firstReport) recordWaitStall(p,kind,ms,startedRunway,currentRunway,
+    `${kind}-persistent`,began,controlTrigger);
   p.stallFrom=p.controlSeek?.targetMs!=null
     ? (p.controlSeek.targetMs+(p.bookOffset||0))/1000 : pbPosSec();
   // An armed verdict is used only when this ask produced none of its own: a
@@ -4062,6 +4069,16 @@ async function persistentWait(v,p,began,generation,actionGeneration){
     raisePlaybackSurface("owner_stopped",{player_stopped:true,
       title:verdictText,detail:"Your place is saved.",
       actions:playbackStallActions(p,"stall-terminal")});
+    return;
+  }
+  if(kind==="presentation"&&controlElapsedMs<CONTROL_STALL_DEFER_DEADLINE_MS){
+    const remaining=CONTROL_STALL_DEFER_DEADLINE_MS-controlElapsedMs;
+    const again=Math.min(PERSISTENT_STALL_MS,remaining);
+    clientLog({level:"info",event:"stall_recovery",detail:"deferred:presentation_observation",
+      message:`loaded media remains stationary — observing progress for ${(again/1000).toFixed(1)}s`,
+      control_trigger:controlTrigger,wait_started_runway:startedRunway,
+      current_runway:currentRunway,deadline_remaining_ms:remaining});
+    p.waitTimer=setTimeout(()=>persistentWait(v,p,began,generation,actionGeneration).catch(()=>{}),again);
     return;
   }
   if(p.stallDeferralsAt!==began){ p.stallDeferralsAt=began; p.stallDeferrals=0; }
@@ -7521,7 +7538,7 @@ function attachHls(video, playlistUrl, startAt){
           const p=PLAYER;
           if(p){
             if(/bufferstallederror/i.test(det)){
-              const stallRunway=p.waitAt!=null?p.waitRunway:bufferRunway(video);
+              const stallRunway=bufferRunway(video);
               noteAutoStall(p,
                 stallRunway<SUPPLY_RUNWAY_SECS?'supply':'decode',p.waitAt);
             }
@@ -10693,7 +10710,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
       // Rungs this playback has already failed to open. Per playback, not
       // persisted: a transient server failure must not cap quality forever.
       failedHeights:new Set()},
-    waitAt:null, waitRunway:null, waitTimer:null, waitReported:false,
+    waitAt:null, waitStartedRunway:null, waitTimer:null, waitReported:false,
     stallsByKind:null, stallRecoveries:0, recoveringStall:null,
     // The presenter's state, shared by every player object this page has: the
     // overlay is one element with one history and identity is the generation
@@ -10920,6 +10937,9 @@ function restartPendingPlaybackOpen(p,reason){
 // route until it attaches; a newer seek/track command inherits it even on VOD.
 // Each execution snapshots options before its await and owns its own response.
 function requestPlaybackMediaChange(p,change){
+  // Track and quality changes replace the attachment that owned any pending
+  // keyboard preview. Cancel it so a late keyup cannot seek the successor.
+  if(p===PLAYER) cancelPendingSeek();
   p.pendingMediaChange=Object.assign({},p.pendingMediaChange||{},change);
   return executePlaybackMediaChange(p,p.pendingMediaChange);
 }
@@ -12549,7 +12569,7 @@ async function autoControllerTick(){
   const estimateBps=(p.hls&&p.hls.bandwidthEstimate)||p.bandwidthSeedBps;
   const estimateKbps=estimateBps>0?estimateBps/1000:(p.priorKbps||null);
   const runway=bufferRunway(v);
-  const activeSupplyStall=!!p.waitAt && p.waitRunway<SUPPLY_RUNWAY_SECS;
+  const activeSupplyStall=!!p.waitAt && runway<SUPPLY_RUNWAY_SECS;
   const result=PlaybackPolicy.decideRung({
     ladder,currentHeight,estimateKbps,
     recentEstimateKbps:p.abr.recentEstimateKbps,
@@ -13312,7 +13332,7 @@ function playbackProgressTick(v,p){
   if(watch.fired||p.waitAt!=null||Math.max(age,landingAge)<PERSISTENT_STALL_MS) return;
   watch.fired=true;
   p.waitAt=now-Math.max(age,landingAge);
-  p.waitRunway=bufferRunway(v);
+  p.waitStartedRunway=bufferRunway(v);
   p.waitReported=false;
   persistentWait(v,p,p.waitAt,p._seekToken||0,p.controlIntentGeneration||0).catch(()=>{});
 }
@@ -13413,15 +13433,20 @@ function togglePlay(){
   if(PLAYER)playerActivity();
   notifyPlaybackControl();
 }
-// Directional nudges coalesce: accumulate against a frozen base, preview live
-// on the scrubber, and fire ONE seekTo after a short quiet — so mashing a
-// button (or an arrow) doesn't restart the transcode stream over and over.
+// Pointer nudges coalesce after a short quiet. Keyboard arrows use physical
+// key ownership below: the first repeat may arrive after this timer, so quiet
+// alone cannot mean that a held key was released.
 let NUDGE_T=null;
+const PLAYER_SEEK_GESTURE=PlaybackPolicy.createHeldKeyCommitter({
+  delayMs:PlaybackPolicy.contractTiming("desktop_hotkey_coalesce_ms"),
+  commit:owner=>{ if(PLAYER===owner) commitPendingSeek(); }
+});
 // A skip and a scrub preview are the same pending position with different
 // commit rules — the skip commits itself after a quiet, the scrub waits for
 // Select. Keeping them in one field is what stops a debounced skip from
 // firing over a committed scrub (and from seeking a player that has closed).
-function clearPendingSeekTimer(){ clearTimeout(NUDGE_T); NUDGE_T=null; }
+function clearPointerSeekTimer(){ clearTimeout(NUDGE_T); NUDGE_T=null; }
+function clearPendingSeekTimer(){ clearPointerSeekTimer(); PLAYER_SEEK_GESTURE.cancel(); }
 function commitPendingSeek(){
   const me=PLAYER; if(!me) return;
   clearPendingSeekTimer();
@@ -13437,13 +13462,26 @@ function cancelPendingSeek(){
 function nudge(d){
   const me=PLAYER; if(!me) return;
   if(me.libraryChannel){ toast("Resume live or Watch from start to change position."); return; }
+  // A pointer press takes ownership of the visible pending target. A later
+  // keyup from an older keyboard gesture must not commit it a second time.
+  PLAYER_SEEK_GESTURE.cancel();
   const total=pbTotalSec();
   const base=me._seekPending!=null?me._seekPending:pbPosSec();
   let t=Math.max(0,base+d); if(total>0) t=Math.min(total,t);
   me._seekPending=t; pbTick(); playerActivity();
-  clearTimeout(NUDGE_T);
+  clearPointerSeekTimer();
   NUDGE_T=setTimeout(()=>{ if(PLAYER!==me) return; commitPendingSeek(); },
     PlaybackPolicy.contractTiming("desktop_hotkey_coalesce_ms"));
+}
+function nudgeKeyboard(d,key){
+  const me=PLAYER; if(!me) return;
+  if(me.libraryChannel){ toast("Resume live or Watch from start to change position."); return; }
+  clearPointerSeekTimer();
+  PLAYER_SEEK_GESTURE.press(key,me);
+  const total=pbTotalSec();
+  const base=me._seekPending!=null?me._seekPending:pbPosSec();
+  let t=Math.max(0,base+d); if(total>0) t=Math.min(total,t);
+  me._seekPending=t; pbTick(); playerActivity();
 }
 // §3.3 row 17's PiP failure. The browser refuses picture-in-picture for its own
 // reasons — no user gesture left, a disabled policy, an element it will not
@@ -15241,7 +15279,9 @@ function applyPlayerOutcome(outcome,ctx={}){
       return !!marker;
     }
     case "skip":
-      nudge(direction==="left"||direction==="skip_back"?-10:10);
+      if(ctx.key==="ArrowLeft"||ctx.key==="ArrowRight")
+        nudgeKeyboard(direction==="left"?-10:10,ctx.key);
+      else nudge(direction==="left"||direction==="skip_back"?-10:10);
       return true;
     case "preview": {
       const total=pbTotalSec(); if(!(total>0)) return true;
@@ -15316,14 +15356,22 @@ function handlePlayerKeydown(e){
   if(PLAYER_REPEAT_KEY!==e.key){ PLAYER_REPEAT_KEY=e.key; PLAYER_REPEAT_COUNT=0; }
   else if(e.repeat) PLAYER_REPEAT_COUNT+=1;
   const outcome=PlaybackPolicy.routeInput(playerInputSurface(),state,input);
-  const consumed=applyPlayerOutcome(outcome,{repeat:e.repeat,repeatCount:PLAYER_REPEAT_COUNT,direction:input});
+  const consumed=applyPlayerOutcome(outcome,{repeat:e.repeat,repeatCount:PLAYER_REPEAT_COUNT,
+    direction:input,key:e.key});
   if(consumed) e.preventDefault();
   return consumed;
 }
 window.addEventListener("keydown",handlePlayerKeydown);
 // Only the key that owns the ladder resets it: releasing Shift mid-hold used
 // to drop the acceleration back to the first rung.
-window.addEventListener("keyup",e=>{ if(e.key===PLAYER_REPEAT_KEY){ PLAYER_REPEAT_KEY=null; PLAYER_REPEAT_COUNT=0; } });
+window.addEventListener("keyup",e=>{
+  PLAYER_SEEK_GESTURE.release(e.key,PLAYER);
+  if(e.key===PLAYER_REPEAT_KEY){ PLAYER_REPEAT_KEY=null; PLAYER_REPEAT_COUNT=0; }
+});
+// Blur commits the target already shown on the scrubber. Close and attachment
+// replacement call cancelPendingSeek(), which cancel instead because ownership
+// has ended.
+window.addEventListener("blur",()=>{ PLAYER_SEEK_GESTURE.blur(PLAYER); });
 // Both panels are dialogs while they are open, so Tab cycles inside them
 // rather than walking out into chrome the viewer cannot see. Arrow movement
 // inside them belongs to `menu_focus` above — one answer, one place.
@@ -18019,6 +18067,8 @@ function liveTvSearch(value){
 function liveTvSelect(id){
   const index=LIVE_TV.channels.findIndex(channel=>channel.id===id);
   if(index<0) return;
+  LIVE_TV_CHANNEL_GESTURE.cancel();
+  LIVE_TV.pendingChannel=null; LIVE_TV.preview=null;
   LIVE_TV.selected=id; liveTvSetPref("plurx_live_tv_last",id);
   watchLiveTv(index);
   renderLiveTvChannels();
@@ -18205,7 +18255,16 @@ function liveTvTargetOwnsKey(target,key){
 function liveTvInputSurface(){
   return window.matchMedia&&window.matchMedia("(pointer:coarse)").matches?"touch":"desktop";
 }
-function liveTvChangeChannel(delta){
+const LIVE_TV_CHANNEL_GESTURE=PlaybackPolicy.createHeldKeyCommitter({
+  delayMs:PlaybackPolicy.liveContractTiming("channel_coalesce_ms"),
+  commit:owner=>{
+    if(owner!==LIVE_TV) return;
+    const pending=LIVE_TV.pendingChannel;
+    LIVE_TV.pendingChannel=null; LIVE_TV.preview=null;
+    if(pending) liveTvSelect(pending);
+  }
+});
+function liveTvChangeChannel(delta,key){
   const visible=liveTvVisible();
   // Step from where the held key has already got to, not from the channel
   // still on screen. Reading `selected` on every repeat made ten presses
@@ -18214,15 +18273,10 @@ function liveTvChangeChannel(delta){
   const from=LIVE_TV.pendingChannel||LIVE_TV.preview||LIVE_TV.selected;
   const id=PlurxLiveTv.adjacentChannel(visible,from,delta);
   if(!id) return;
-  // Coalesce: a held key must be one tuner start, not ten. The contract's
-  // 350 ms of stillness is the whole guardrail against a channel-surf storm.
+  // The quiet timer batches repeats, but physical key ownership decides when
+  // the gesture may commit. Default desktop repeat delay exceeds 350 ms.
   LIVE_TV.pendingChannel=id;
-  clearTimeout(LIVE_TV.channelTimer);
-  LIVE_TV.channelTimer=setTimeout(()=>{
-    const pending=LIVE_TV.pendingChannel; LIVE_TV.pendingChannel=null;
-    LIVE_TV.preview=null;
-    if(pending) liveTvSelect(pending);
-  },PlaybackPolicy.liveContractTiming("channel_coalesce_ms"));
+  LIVE_TV_CHANNEL_GESTURE.press(key,LIVE_TV);
   LIVE_TV.preview=id; liveTvPaint();
 }
 function liveTvPreviewChannel(delta){
@@ -18231,15 +18285,15 @@ function liveTvPreviewChannel(delta){
   LIVE_TV.preview=PlurxLiveTv.adjacentChannel(visible,from,delta);
   liveTvReveal(); liveTvPaint();
 }
-function liveTvApplyOutcome(outcome){
+function liveTvApplyOutcome(outcome,ctx={}){
   switch(outcome){
     case "reveal": liveTvReveal(); return true;
     case "hide": liveTvIdle(); return true;
     case "toggle_chrome":
       if(liveTvHost().classList.contains("idle")) liveTvReveal(); else liveTvIdle();
       return true;
-    case "channel_up": liveTvChangeChannel(-1); return true;
-    case "channel_down": liveTvChangeChannel(1); return true;
+    case "channel_up": liveTvChangeChannel(-1,ctx.key); return true;
+    case "channel_down": liveTvChangeChannel(1,ctx.key); return true;
     case "strip_prev": liveTvPreviewChannel(-1); return true;
     case "strip_next": liveTvPreviewChannel(1); return true;
     case "tune": if(LIVE_TV.preview) liveTvSelect(LIVE_TV.preview); return true;
@@ -18291,10 +18345,12 @@ function liveTvKeydown(event){
   if(!input) return;
   const outcome=PlaybackPolicy.routeLiveInput(liveTvInputSurface(),state,input);
   if(outcome==="ignore") return;
-  if(liveTvApplyOutcome(outcome)) event.preventDefault();
+  if(liveTvApplyOutcome(outcome,{key:event.key})) event.preventDefault();
 }
 function liveTvWireKeys(){
   window.addEventListener("keydown",liveTvKeydown);
+  window.addEventListener("keyup",event=>LIVE_TV_CHANNEL_GESTURE.release(event.key,LIVE_TV));
+  window.addEventListener("blur",()=>LIVE_TV_CHANNEL_GESTURE.blur(LIVE_TV));
 }
 // live-tv-input-adapter:end
 function liveTvReveal(){

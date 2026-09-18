@@ -84,6 +84,88 @@ function test(name, run) {
   }
 }
 
+function heldKeyFixture() {
+  let now = 0;
+  let nextTimer = 1;
+  let pending = 0;
+  const timers = new Map();
+  const commits = [];
+  const setTimer = (fn, ms) => {
+    const id = nextTimer++;
+    timers.set(id, { at: now + ms, fn });
+    return id;
+  };
+  const clearTimer = (id) => timers.delete(id);
+  const advance = (to) => {
+    while (true) {
+      const due = Array.from(timers.entries())
+        .filter(([, timer]) => timer.at <= to)
+        .sort((a, b) => a[1].at - b[1].at || a[0] - b[0])[0];
+      if (!due) break;
+      timers.delete(due[0]);
+      now = due[1].at;
+      due[1].fn();
+    }
+    now = to;
+  };
+  const owner = {};
+  const committer = policy.createHeldKeyCommitter({
+    delayMs: 350,
+    setTimer,
+    clearTimer,
+    commit: () => commits.push(pending),
+  });
+  return {
+    commits,
+    press(at, key, delta) { advance(at); pending += delta; committer.press(key, owner); },
+    release(at, key) { advance(at); committer.release(key, owner); },
+    blur(at) { advance(at); committer.blur(owner); },
+    cancel(at) { advance(at); committer.cancel(); },
+    advance,
+  };
+}
+
+for (const [initialRepeatMs, repeatMs] of [[375, 90], [500, 90], [225, 90]]) {
+  test(`held ArrowRight ${initialRepeatMs}/${repeatMs} ms commits only the final target`, () => {
+    const fixture = heldKeyFixture();
+    fixture.press(0, "ArrowRight", 10);
+    let at = initialRepeatMs;
+    while (at <= 2_000) {
+      fixture.press(at, "ArrowRight", 10);
+      at += repeatMs;
+    }
+    fixture.release(2_050, "ArrowRight");
+    fixture.advance(2_500);
+    assert.deepEqual(fixture.commits, [10 * (2 + Math.floor((2_000 - initialRepeatMs) / repeatMs))]);
+  });
+}
+
+test("held-key ownership survives opposite-direction overlap and commits once", () => {
+  const fixture = heldKeyFixture();
+  fixture.press(0, "ArrowRight", 10);
+  fixture.press(200, "ArrowLeft", -10);
+  fixture.release(300, "ArrowRight");
+  fixture.advance(700);
+  assert.deepEqual(fixture.commits, [], "one physical key still owns the gesture");
+  fixture.release(725, "ArrowLeft");
+  assert.deepEqual(fixture.commits, [0]);
+});
+
+test("held-key blur commits while cancellation discards", () => {
+  const blurred = heldKeyFixture();
+  blurred.press(0, "ArrowRight", 10);
+  blurred.press(100, "ArrowRight", 10);
+  blurred.blur(150);
+  blurred.advance(1_000);
+  assert.deepEqual(blurred.commits, [20]);
+
+  const cancelled = heldKeyFixture();
+  cancelled.press(0, "ArrowRight", 10);
+  cancelled.cancel(100);
+  cancelled.advance(1_000);
+  assert.deepEqual(cancelled.commits, []);
+});
+
 test("playback info exposes and remembers the shared playback-info levels", () => {
   for (const mode of ["mini", "standard", "details", "debug"]) {
     assert.match(

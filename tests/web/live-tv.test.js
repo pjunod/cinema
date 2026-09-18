@@ -39,6 +39,14 @@ function memoryStorage() {
 }
 
 async function main() {
+  await test("held channel keys are owned by keyup rather than repeat cadence", () => {
+    assert.match(shipped("liveTvChangeChannel"), /LIVE_TV_CHANNEL_GESTURE\.press\(key,LIVE_TV\)/);
+    assert.match(shipped("liveTvWireKeys"), /keyup[\s\S]*LIVE_TV_CHANNEL_GESTURE\.release\(event\.key,LIVE_TV\)/);
+    assert.match(shipped("liveTvWireKeys"), /blur[\s\S]*LIVE_TV_CHANNEL_GESTURE\.blur\(LIVE_TV\)/);
+    assert.match(shipped("liveTvSelect"), /LIVE_TV_CHANNEL_GESTURE\.cancel\(\)/,
+      "a direct tune cancels a pending held-key preview");
+  });
+
   await test("both guide views put the compact player above a full-width player-height guide", () => {
     const list = shipped("liveTvListMarkup"), grid = shipped("liveTvGridMarkup");
     const stage = shipped("liveTvStageMarkup"), now = shipped("liveTvNowBar");
