@@ -24300,8 +24300,13 @@ mod tests {
         assert!(
             extra.contains("\"segment\":\"seg00002.m4s\"")
                 && extra.contains(&format!("\"expected_bytes\":{}", body.len()))
-                && extra.contains(&format!("\"delivered_bytes\":{}", first.len())),
-            "the event names the segment, what was owed, and what arrived: {extra}"
+                && extra.contains(&format!("\"delivered_bytes\":{}", first.len()))
+                && extra.contains("\"attachment_generation\":")
+                && extra.contains("\"segment_start_ms\":")
+                && extra.contains("\"segment_duration_ms\":")
+                && extra.contains("\"superseded\":false")
+                && extra.contains("\"cut_class\":\"client_cancelled\""),
+            "the event names the exact response, timeline, generation, and cut: {extra}"
         );
         assert_eq!(
             fixture.delivered_bytes(),

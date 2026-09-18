@@ -8023,6 +8023,8 @@ pub(crate) struct SegmentDelivery {
     producer_attempt: u64,
     session_id: String,
     segment: String,
+    segment_start_ms: Option<i64>,
+    segment_duration_ms: Option<i64>,
     method: &'static str,
     encoder: String,
     purpose: DeliveryPurpose,
@@ -8042,6 +8044,8 @@ struct SegmentDeliveryContext {
     producer_attempt: u64,
     session_id: String,
     segment: String,
+    segment_start_ms: Option<i64>,
+    segment_duration_ms: Option<i64>,
     encoder: String,
 }
 
@@ -8057,6 +8061,8 @@ impl SegmentDelivery {
             producer_attempt,
             session_id,
             segment,
+            segment_start_ms,
+            segment_duration_ms,
             encoder,
         } = context;
         let method = match session.method {
@@ -8070,6 +8076,8 @@ impl SegmentDelivery {
             producer_attempt,
             session_id,
             segment,
+            segment_start_ms,
+            segment_duration_ms,
             method,
             encoder,
             purpose: DeliveryPurpose::ClientResponse,
@@ -8119,6 +8127,35 @@ impl SegmentDelivery {
             fields.insert(
                 "purpose".to_owned(),
                 serde_json::Value::from(self.purpose.as_str()),
+            );
+            fields.insert(
+                "attachment_generation".to_owned(),
+                serde_json::Value::from(self.producer_attempt),
+            );
+            fields.insert(
+                "segment_start_ms".to_owned(),
+                self.segment_start_ms
+                    .map_or(serde_json::Value::Null, serde_json::Value::from),
+            );
+            fields.insert(
+                "segment_duration_ms".to_owned(),
+                self.segment_duration_ms
+                    .map_or(serde_json::Value::Null, serde_json::Value::from),
+            );
+            let superseded = self.session.replacing_child.load(Acquire)
+                || self.session.control.current_producer_attempt() != self.producer_attempt;
+            fields.insert("superseded".to_owned(), serde_json::Value::from(superseded));
+            fields.insert(
+                "cut_class".to_owned(),
+                serde_json::Value::from(match reason {
+                    "storage_unexpected_eof" => "source_eof",
+                    "storage_read_error" => "storage_error",
+                    "body_lifetime_exceeded" => "transport_lifetime",
+                    "downstream_no_progress" => "transport_stall",
+                    "response_dropped" if superseded => "attachment_superseded",
+                    "response_dropped" => "client_cancelled",
+                    _ => "none",
+                }),
             );
         }
         crate::telemetry::emit(
@@ -24129,6 +24166,15 @@ impl TranscodeManager {
                     .await;
                 }
                 let encoder = (*session.encoder_label.lock().await).to_owned();
+                let (segment_start_ms, segment_duration_ms) = match idx {
+                    Some(index) => session.segments.lock().await.window_ms_of(index).map_or(
+                        (None, None),
+                        |(start_ms, end_ms)| {
+                            (Some(start_ms), Some(end_ms.saturating_sub(start_ms)))
+                        },
+                    ),
+                    None => (None, None),
+                };
                 let delivery = SegmentDelivery::new(
                     SegmentDeliveryContext {
                         store: Arc::clone(&self.store),
@@ -24136,6 +24182,8 @@ impl TranscodeManager {
                         producer_attempt,
                         session_id: session_id.to_owned(),
                         segment: name.to_owned(),
+                        segment_start_ms,
+                        segment_duration_ms,
                         encoder,
                     },
                     len,
@@ -33176,6 +33224,8 @@ pub(crate) mod tests {
                 producer_attempt: session.control.current_producer_attempt(),
                 session_id: "delivery-test".to_owned(),
                 segment: "seg00001.m4s".to_owned(),
+                segment_start_ms: Some(2_000),
+                segment_duration_ms: Some(2_000),
                 encoder: "test".to_owned(),
             },
             1_024,
@@ -33223,6 +33273,12 @@ pub(crate) mod tests {
             .extra
             .as_deref()
             .is_some_and(|extra| extra.contains("\"delivered_bytes\":640")));
+        assert!(incomplete.extra.as_deref().is_some_and(|extra| {
+            extra.contains("\"segment_start_ms\":2000")
+                && extra.contains("\"segment_duration_ms\":2000")
+                && extra.contains("\"cut_class\":\"source_eof\"")
+                && extra.contains("\"superseded\":false")
+        }));
         assert!(
             incomplete
                 .extra
