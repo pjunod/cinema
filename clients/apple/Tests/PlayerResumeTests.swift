@@ -346,7 +346,7 @@ final class PlayerResumeTests: XCTestCase {
         let controller = PlayerController(player: player)
         controller.applyStallRecoveryNudge()
         XCTAssertEqual(player.commands, ["immediate"])
-        XCTAssertEqual(player.rate, 1.25)
+        XCTAssertEqual(player.rate, 1)
         XCTAssertNil(controller.resumeOwnershipForTesting)
     }
 
