@@ -1,6 +1,6 @@
 # Wicked playback — root cause evidence and proposed callback lifecycle fix
 
-**Status:** open, awaiting Fable review · **Written:** 2026-09-17 ·
+**Status:** open, Fable findings addressed; awaiting CI qualification · **Written:** 2026-09-17 ·
 **Candidate:** `codex/wicked-native-progress`, including the Fable follow-up ·
 **Previously reviewed code:** `c8abdf7fa` · **Base:** `2b9146233`
 
@@ -8,8 +8,7 @@ Companion to [PLAYBACK.md](../PLAYBACK.md) (delivery architecture) and
 [PLAYBACK-TESTING.md](../PLAYBACK-TESTING.md) (playback validation). This is the
 review packet for [PR #358](http://192.168.4.7:3000/noirr/plurx/pulls/358),
 branch `codex/wicked-native-progress`. It describes the final net change,
-including the buffering and Fable follow-ups. The PR is draft and unmerged; nothing
-has been deployed. Review the diagnosis independently of the proposed code.
+including the buffering and Fable follow-ups. The PR remains unmerged; nothing has been deployed. Review the diagnosis independently of the proposed code.
 
 ## 1. The failure is missing browser frame delivery
 
@@ -93,8 +92,9 @@ The detector retained its original behavior in all trials below.
 | Proposed lifecycle function | Inject the exact replacement function, resume at 566.055 seconds, then seek to 1,200 seconds | More than 11 minutes of playback; 16,155 callbacks at export, no pending seek, zero dropped frames in the captured samples, no observed recovery. | The replacement registration lifecycle works across cold resume and a subsequent seek in this Safari session. |
 
 The long trial preceded the review follow-up that adds `canplay` as another
-readiness event. That final listener has regression-test evidence, but has
-not received a new real-Safari soak test.
+readiness event. Final Safari cold-resume, paused-seek, and buffer-recovery
+checks are recorded in §5; the final revision has not had another 11-minute
+soak test.
 
 The long trace uses bounded buffers: its export retains the last 3,000
 request records and roughly five minutes of periodic samples, plus media
@@ -206,12 +206,21 @@ page for these trials:
 |---|---|
 | Wicked native-HLS cold resume at 566.055 seconds | 1,176 callbacks at 615.242 seconds, zero captured errors and zero fired detector samples. |
 | Paused seek to 650 seconds | One landing callback: counter advanced from the seek's frame floor of 1,665 to 1,666. Video stayed paused at the destination. The existing pending-seek settlement limitation remains, as Fable predicted; no epoch or settlement rule changed. |
-| Native-HLS buffer recovery | Still open. The first local fixture released its withheld segments on a startup `waiting` event, so it did not prove buffer depletion/recovery and was discarded as acceptance evidence. Restarting the corrected fixture was blocked by automatic approval review's usage limit. |
+| Native-HLS buffer recovery | Passed in an isolated local native-HLS fixture using the exact final subscriber. Buffer depletion produced `waiting` at media time 26.357 seconds, ready state 2, and 631 callbacks. The fixture released withheld segments after 2 seconds; `canplay` and `playing` followed 2.064 seconds after `waiting`, at ready state 3. Callback delivery resumed to 749 at export; `loadeddata` fired only once, at startup. |
 
-The production page was restored and the temporary test tab closed.
+The buffer test used a minimal callback consumer around the exact production
+subscriber, not the full production progress detector. It proves real Safari
+callback delivery survives buffer depletion/replenishment; the regression
+test separately pins the deferred-registration path at ready state 1. Its
+first run released the gate on a startup event and was discarded. The
+corrected run excluded startup waiting and used a fresh local origin.
+
+The production page was restored, the temporary test tab closed, and the
+local buffer server stopped.
 Final cold-resume and paused-seek traces are local files
-`fable-final-cold-resume.json` and `fable-final-paused-seek.json` in the same
-fixture directory as the earlier evidence.
+`fable-final-cold-resume.json`, `fable-final-paused-seek.json`, and
+`fable-final-buffer-recovery.json` in the same fixture directory as the earlier
+evidence.
 
 **Separate follow-ups.** Fable identified a raw frame registration in
 `preparedFirstFrame` that bypasses the shared subscriber. Interference with
@@ -240,9 +249,10 @@ old implementation. Tests also exercise stale callback delivery, source
 reset, replacement, element adoption, cleanup, and epoch ownership.
 
 These are focused results, not a claim that the full web suite or CI passed.
-The draft PR has not been qualified for merge. Fable supplied Chromium file-playback evidence for the preceding candidate;
+The PR has not been qualified for merge. Fable supplied Chromium file-playback evidence for the preceding candidate;
 MSE/HLS.js and Live TV were not run. The final Safari cold-resume and paused
-seek results are in §5. Real buffer recovery remains a merge-blocking check.
+seek and buffer-recovery results are in §5. All three Safari checks requested
+by Fable are complete; CI qualification and merge are separate steps.
 
 **Requested Fable review:**
 
