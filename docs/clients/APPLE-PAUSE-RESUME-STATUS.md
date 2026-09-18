@@ -1,9 +1,9 @@
 # Apple pause/resume — implementation and promotion status
 
-**Status:** reviewed candidate in the promotion test window · **Updated:** 2026-09-18 ·
+**Status:** reviewed candidate; promotion policy correction in progress · **Updated:** 2026-09-18 ·
 **Branch:** `codex/apple-pause-resume` · **Base:** `6fb0901d3d18` ·
 **Issue:** [#359](http://192.168.4.7:3000/noirr/plurx/issues/359) ·
-**Draft PR:** [#360](http://192.168.4.7:3000/noirr/plurx/pulls/360)
+**PR:** [#360](http://192.168.4.7:3000/noirr/plurx/pulls/360)
 
 Executes the reviewed
 [implementation handoff](APPLE-PAUSE-RESUME-IMPLEMENTATION-HANDOFF.md).
@@ -21,9 +21,9 @@ finished implementation. Work happens in an independent Forgejo clone under
 | M2 · shared resume deadline and presentation proof | Built; iOS/tvOS compile green | One immutable attempt ID and 15-second budget survive successor attachment; fresh timestamps plus 250ms continuing motion prove video; all detectors share one repair admission. |
 | Developer enablement advisory | Built; iOS/tvOS compile green | Developer settings exposes an operable enable switch and lists met/unmet requirements; readiness never rewrites or disables the switch. |
 | Apple release metadata | Claimed | Issue #359 owns Apple build 168 and its issue-keyed release fragment. |
-| Tests | In progress | Focused Apple test build is green; the first iOS run passed 15/16 and exposed one incorrect watchdog-rate expectation, now corrected without production changes. |
+| Tests | Complete | Focused Apple test builds and the selected resume/control regressions pass 16/16 on iOS and 16/16 on tvOS; the first iOS run's incorrect watchdog-rate expectation was corrected without production changes. |
 | Implementation adversarial review | Complete; five findings addressed | Final Pause/background/deadline fence stale repair attachments; shared detectors bypass holds after admission; item failures keep transport/HDR/compatibility classification; publication tasks are cancelled; controller coverage now drives the established owner. |
-| Fast lane | Running on corrected head | PR #360 is ready; each candidate push restarts the required Main promotion gate, and merge waits for its green receipt. |
+| Fast lane | Correcting policy metadata | The first exact-head run reached the history audit and identified two missing `tests/client-fixes.toml` anchors. Both corrective commits now map to retained focused regressions; the policy check and a fresh exact-head lane must pass before merge. |
 | Merge and cleanup | Queued | Merge only the reviewed current head with green required checks; remove temporary credentials and clone afterward. |
 | Physical Apple TV acceptance | Pending hardware | A merged simulator-tested build does not satisfy the matched fresh-open measurements in handoff §8. |
 
@@ -52,12 +52,13 @@ finished implementation. Work happens in an independent Forgejo clone under
 | Apple compile-only check | `make apple-build` passed for generic iOS and tvOS simulator targets after all adversarial-review corrections; no test action ran. |
 | Implementation commit | `4ebd156e` (`feat(apple): bound pause resume presentation`). |
 | Adversarial review | One required pass completed against frozen head `46c196dd`; all five findings corrected before opening the test window. |
-| Unit or UI tests | Not run during implementation by explicit instruction. |
+| Focused promotion tests | `PlayerResumeTests` plus the rapid Pause/Resume publication regression passed 16/16 on iOS and 16/16 on tvOS after the one required review. No full suite was run. |
+| First fast-lane result | Failed only `history-check`: commits `4ebd156e` and `8ecf363a` lacked client-fix ledger anchors. The candidate correction adds durable production-to-regression mappings. |
 | Physical hardware | Not yet available to this implementation session; acceptance remains open unless a device run is completed. |
 
 ## Completion rule
 
-The implementation is complete only when the draft PR contains the bounded
+The implementation is complete only when the PR contains the bounded
 resume owner, regression coverage, synchronized lifecycle documentation,
 issue-keyed Apple build note, and advisory Developer setting; one adversarial
 review has been addressed; the current candidate passes the fast lane; and

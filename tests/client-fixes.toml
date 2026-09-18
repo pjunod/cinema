@@ -2090,3 +2090,27 @@ source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackSurface.
 source_anchor = "SurfaceSources.STARTUP_EXHAUSTED,"
 test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackSurfaceReducerTest.kt"
 test_anchor = "fun sourcesAreTheFixtureVerbatimAndInOrder()"
+
+[[fixes]]
+# The production predicate keeps the buffered path bounded to an established,
+# ready item with more than ten playback-seconds of runway at the intended
+# rate. The focused test carries the captured Heartstopper runway and rejects
+# the exact boundary, missing/invalid runway, and active-destination cases.
+id = "apple.bounded-buffered-resume-admission"
+commits = ["4ebd156e"]
+source = "clients/apple/Sources/PlaybackResume.swift"
+source_anchor = "nonisolated static func bufferedFastPathQualifies("
+test = "clients/apple/Tests/PlayerResumeTests.swift"
+test_anchor = "func testHeartstopperRunwayQualifiesAndBoundaryCasesDoNot()"
+
+[[fixes]]
+# Cancellation of an admitted repair is cooperative, so the production owner
+# also advances its attachment generation. This controller-level regression
+# proves a final Pause clears the attempt, fences the old generation, and is
+# the last command observed by the player.
+id = "apple.resume-repair-final-pause-fence"
+commits = ["8ecf363a"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func invalidateResumeAttempt(outcome: String)"
+test = "clients/apple/Tests/PlayerResumeTests.swift"
+test_anchor = "func testOneSecondAdmissionIsOneShotAndFinalPauseFencesTheRepair()"
