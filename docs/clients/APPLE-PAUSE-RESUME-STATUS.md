@@ -1,6 +1,6 @@
 # Apple pause/resume — implementation and promotion status
 
-**Status:** adversarial findings addressed; candidate compiling before promotion · **Updated:** 2026-09-18 ·
+**Status:** reviewed candidate in the promotion test window · **Updated:** 2026-09-18 ·
 **Branch:** `codex/apple-pause-resume` · **Base:** `6fb0901d3d18` ·
 **Issue:** [#359](http://192.168.4.7:3000/noirr/plurx/issues/359) ·
 **Draft PR:** [#360](http://192.168.4.7:3000/noirr/plurx/pulls/360)
@@ -21,9 +21,9 @@ finished implementation. Work happens in an independent Forgejo clone under
 | M2 · shared resume deadline and presentation proof | Built; iOS/tvOS compile green | One immutable attempt ID and 15-second budget survive successor attachment; fresh timestamps plus 250ms continuing motion prove video; all detectors share one repair admission. |
 | Developer enablement advisory | Built; iOS/tvOS compile green | Developer settings exposes an operable enable switch and lists met/unmet requirements; readiness never rewrites or disables the switch. |
 | Apple release metadata | Claimed | Issue #359 owns Apple build 168 and its issue-keyed release fragment. |
-| Tests | Deliberately deferred | The one permitted test window opens after this reviewed correction commit is pushed and PR #360 is marked ready. |
+| Tests | In progress | Focused Apple test build found three test-source compile errors; unavailable fixture initializers and the missing local path helper are corrected on the current candidate. |
 | Implementation adversarial review | Complete; five findings addressed | Final Pause/background/deadline fence stale repair attachments; shared detectors bypass holds after admission; item failures keep transport/HDR/compatibility classification; publication tasks are cancelled; controller coverage now drives the established owner. |
-| Fast lane | Queued | Mark the corrected PR ready, run the focused Apple resume tests while the required promotion gate runs, and fix any failure before merge. |
+| Fast lane | Running on corrected head | PR #360 is ready; each candidate push restarts the required Main promotion gate, and merge waits for its green receipt. |
 | Merge and cleanup | Queued | Merge only the reviewed current head with green required checks; remove temporary credentials and clone afterward. |
 | Physical Apple TV acceptance | Pending hardware | A merged simulator-tested build does not satisfy the matched fresh-open measurements in handoff §8. |
 

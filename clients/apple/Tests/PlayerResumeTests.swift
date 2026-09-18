@@ -74,6 +74,10 @@ private final class ResumeIntentGate {
 
 @MainActor
 final class PlayerResumeTests: XCTestCase {
+    private var testsDirectory: URL {
+        URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+    }
+
     private func startEstablished(_ controller: PlayerController) {
         SettingsStore().boundedResumeEnabled = true
         controller.start(
@@ -107,7 +111,9 @@ final class PlayerResumeTests: XCTestCase {
             lifecycleGeneration: 3,
             viewerActionEpoch: 7,
             attachmentGeneration: 11,
-            itemIdentity: ObjectIdentifier(ResumeItem()),
+            itemIdentity: ObjectIdentifier(ResumeItem(
+                url: URL(fileURLWithPath: "/resume-attempt")
+            )),
             targetMs: 29_661,
             startedAt: 10,
             fastPathDeadline: fastDeadline,
@@ -210,7 +216,9 @@ final class PlayerResumeTests: XCTestCase {
         XCTAssertEqual(attempt.admitRepair(at: 11.1), .alreadyAdmitted)
         let successor = attempt.boundToSuccessor(
             attachmentGeneration: 12,
-            itemIdentity: ObjectIdentifier(ResumeItem()),
+            itemIdentity: ObjectIdentifier(ResumeItem(
+                url: URL(fileURLWithPath: "/resume-successor")
+            )),
             baselineVideoDisplaySeconds: nil
         )
         XCTAssertEqual(successor.id, attempt.id)
