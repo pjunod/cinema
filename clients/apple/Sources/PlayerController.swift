@@ -631,6 +631,10 @@ struct PlayerRecipeRevision: Equatable {
 enum PlayerOpenIntent: Equatable {
     case normal
     case sameDeliveryRepair
+    /// A bounded explicit-resume repair that may preserve the recipe or use
+    /// the already-classified transport/HDR/compatibility route. Unlike a
+    /// viewer action it inherits the resume attempt's absolute deadline.
+    case resumeRepair
     case stallReopen(StallReopenTicket)
 }
 
@@ -1681,6 +1685,7 @@ final class PlayerController: ObservableObject {
     private let requestPlaybackDecision: @MainActor (AppModel, Int, PrePlaySelection, PlaybackQuality) async throws -> (decision: Decision, caps: DeviceCaps)
     private let requestHlsSession: @MainActor (AppModel, Int, CreateSessionRequest) async throws -> HlsStart
     private let readControlSequence: @MainActor (PlaybackControlSession) async -> UInt64?
+    private let reportPlaybackIntent: @MainActor (PlaybackControlSession) async -> UInt64?
     private let mediaSelectionPreparation: MediaSelectionPreparation
     private let itemPreparation: ItemPreparation
     private let canPlayOffline: (AVURLAsset) -> Bool
@@ -1720,6 +1725,9 @@ final class PlayerController: ObservableObject {
         readControlSequence: @escaping @MainActor (PlaybackControlSession) async -> UInt64? = {
             await $0.controlSequence
         },
+        reportPlaybackIntent: @escaping @MainActor (PlaybackControlSession) async -> UInt64? = {
+            await $0.reportIntent()
+        },
         resumeNow: @escaping @MainActor () -> TimeInterval = {
             ProcessInfo.processInfo.systemUptime
         },
@@ -1737,6 +1745,7 @@ final class PlayerController: ObservableObject {
         self.releaseHlsSession = releaseHlsSession
         self.requestHlsSession = requestHlsSession
         self.readControlSequence = readControlSequence
+        self.reportPlaybackIntent = reportPlaybackIntent
         self.resumeNow = resumeNow
         self.waitResumeSample = waitResumeSample
     }
@@ -2033,6 +2042,10 @@ final class PlayerController: ObservableObject {
     private var resumeRepairTask: Task<Void, Never>?
     private var resumeAttempt: PlaybackResumeAttempt?
     private var resumeRepairPendingReason: String?
+    /// A failed retained item waits only for the ordered Resume publication.
+    /// Its AVFoundation classification is preserved when publication lands;
+    /// it is never collapsed into the timer-only same-delivery route.
+    private var resumePendingFailedItem: AVPlayerItem?
     private var pauseBeganAt: TimeInterval?
     private var seekPresentationLifecycle: [AnyCancellable] = []
     private var seekPresentationBackgrounded = false
@@ -2207,6 +2220,17 @@ final class PlayerController: ObservableObject {
     var pendingPlaybackIntentForTesting: (targetMs: Int?, generation: Int) {
         (seekState.pendingMs, seekState.generation)
     }
+    var resumeOwnershipForTesting: (
+        id: String,
+        publicationCompleted: Bool,
+        repairAdmitted: Bool,
+        expiresAt: TimeInterval
+    )? {
+        resumeAttempt.map {
+            ($0.id, $0.publicationCompleted, $0.repairAdmitted, $0.expiresAt)
+        }
+    }
+    var openGenerationForTesting: Int { openGeneration }
     /// Every explicit viewer command invalidates recovery work that crossed an
     /// await. Session generation alone cannot see pause/resume or native seek.
     private var viewerActionEpoch = 0
@@ -2931,7 +2955,7 @@ final class PlayerController: ObservableObject {
                   self.player.currentItem.map(ObjectIdentifier.init) == itemIdentity,
                   self.sessionId == currentSession
             else { return }
-            let floor = await self.playbackControl.reportIntent()
+            let floor = await self.reportPlaybackIntent(self.playbackControl)
             guard !Task.isCancelled,
                   self.lifecycleGeneration == lifecycle,
                   self.viewerActionEpoch == actionEpoch,
@@ -2955,12 +2979,17 @@ final class PlayerController: ObservableObject {
                     owningActionEpoch: actionEpoch,
                     intentAlreadyPublished: true
                 )
+            } else if let failedItem = self.resumePendingFailedItem {
+                self.resumePendingFailedItem = nil
+                await self.handleItemFailure(failedItem)
             } else if repairAfterPublication || self.resumeRepairPendingReason != nil {
                 let reason = self.resumeRepairPendingReason ?? "retained-media-unusable"
                 self.resumeRepairPendingReason = nil
                 self.admitResumeRepair(at: self.resumeNow(), reason: reason)
             }
-            self.resumeIntentTask = nil
+            if self.viewerActionEpoch == actionEpoch {
+                self.resumeIntentTask = nil
+            }
         }
     }
 
@@ -3086,6 +3115,7 @@ final class PlayerController: ObservableObject {
                     self.resumeRepairTask?.cancel()
                     self.resumeRepairTask = nil
                     self.resumeRepairPendingReason = nil
+                    self.resumePendingFailedItem = nil
                     self.resumeAttempt = nil
                     self.resumePresentationTask = nil
                     return
@@ -3120,37 +3150,49 @@ final class PlayerController: ObservableObject {
         return displayTime.seconds
     }
 
-    private func admitResumeRepair(at now: TimeInterval, reason: String) {
-        guard var attempt = resumeAttempt else { return }
+    /// Spend the single repair admission without choosing its route. Timer
+    /// stalls call `admitResumeRepair`; item failures claim here and then keep
+    /// their already-classified transport/HDR/compatibility path.
+    private func claimResumeRepair(at now: TimeInterval, reason: String) -> PlaybackResumeAttempt? {
+        guard var attempt = resumeAttempt else { return nil }
         guard attempt.publicationCompleted else {
             resumeRepairPendingReason = reason
-            return
+            return nil
         }
         switch attempt.admitRepair(at: now) {
         case .expired:
             resumeAttempt = attempt
             expireResumeAttempt(at: now)
+            return nil
         case .alreadyAdmitted:
-            return
+            return nil
         case .admitted:
             resumeAttempt = attempt
             reportResumeTransition(attempt, phase: "repair-admitted", outcome: reason, at: now)
             reportControlEvidence(Self.stallEvidence(for: .buffering), render: .stalled)
-            let id = attempt.id
-            let position = attempt.targetMs
-            resumeRepairTask?.cancel()
-            resumeRepairTask = Task { [weak self] in
-                guard let self else { return }
-                await self.retrySameDeliveryAfterStall(
-                    PlaybackStallEvent(
-                        kind: .buffering,
-                        action: .reopen,
-                        positionMs: position,
-                        durationMs: Int(max(0, (now - attempt.startedAt) * 1_000))
-                    ),
-                    consultControl: false,
-                    resumeAttemptId: id
-                )
+            return attempt
+        }
+    }
+
+    private func admitResumeRepair(at now: TimeInterval, reason: String) {
+        guard let attempt = claimResumeRepair(at: now, reason: reason) else { return }
+        let id = attempt.id
+        let position = attempt.targetMs
+        resumeRepairTask?.cancel()
+        resumeRepairTask = Task { [weak self] in
+            guard let self else { return }
+            await self.retrySameDeliveryAfterStall(
+                PlaybackStallEvent(
+                    kind: .buffering,
+                    action: .reopen,
+                    positionMs: position,
+                    durationMs: Int(max(0, (now - attempt.startedAt) * 1_000))
+                ),
+                consultControl: false,
+                resumeAttemptId: id
+            )
+            if self.resumeAttempt?.id == id {
+                self.resumeRepairTask = nil
             }
         }
     }
@@ -3181,6 +3223,9 @@ final class PlayerController: ObservableObject {
         )
         resumeAttempt = nil
         resumeRepairPendingReason = nil
+        resumePendingFailedItem = nil
+        resumeIntentTask?.cancel()
+        resumeIntentTask = nil
         resumeRepairTask?.cancel()
         resumeRepairTask = nil
         resumePresentationTask?.cancel()
@@ -3200,6 +3245,7 @@ final class PlayerController: ObservableObject {
     }
 
     private func invalidateResumeAttempt(outcome: String) {
+        let repairWasAdmitted = resumeAttempt?.repairAdmitted == true
         if let attempt = resumeAttempt {
             reportResumeTransition(
                 attempt,
@@ -3210,10 +3256,22 @@ final class PlayerController: ObservableObject {
         }
         resumeAttempt = nil
         resumeRepairPendingReason = nil
+        resumePendingFailedItem = nil
+        resumeIntentTask?.cancel()
+        resumeIntentTask = nil
         resumePresentationTask?.cancel()
         resumePresentationTask = nil
         resumeRepairTask?.cancel()
         resumeRepairTask = nil
+        if repairWasAdmitted {
+            // Cancellation is cooperative. This generation fence is what
+            // prevents a create or item-readiness await that ignores task
+            // cancellation from attaching, playing, or surfacing a fault
+            // after a final Pause/background/stop.
+            openGeneration &+= 1
+            reopenQueue.clear()
+            isChangingStream = false
+        }
     }
 
     private func reportResumeTransition(
@@ -4487,6 +4545,12 @@ final class PlayerController: ObservableObject {
                     previousHeight: previousHeight,
                     at: startMs
                 )
+            } else if case .resumeRepair = intent {
+                stallReopenBudget.resolved(
+                    height: hls.height,
+                    previousHeight: previousHeight,
+                    at: startMs
+                )
             }
             sessionId = hls.sessionId
             beginPlaybackControl(hls, origin: model.origin)
@@ -4570,7 +4634,7 @@ final class PlayerController: ObservableObject {
         // The attached media generation changed: every fault about the
         // generation this replaces stops being about anything and is dropped.
         present(.attach(generation))
-        if case .sameDeliveryRepair = intent {
+        if intent == .sameDeliveryRepair || intent == .resumeRepair {
             bindResumeRepairSuccessor(item, generation: generation)
         }
         recipeRevision.didAttach(requestedRecipeRevision)
@@ -5110,19 +5174,7 @@ final class PlayerController: ObservableObject {
                 case .none:
                     continue
                 case .nudge:
-                    let buffered = PlaybackResumeAttempt.bufferedFastPathQualifies(
-                        ready: self.player.currentItem?.status == .readyToPlay,
-                        runwaySeconds: self.bufferedRunwaySeconds(),
-                        intendedRate: self.preferredRate,
-                        hasPendingDestination: self.seekState.pendingMs != nil,
-                        replacementInFlight: self.isChangingStream
-                    )
-                    Self.applyPlaybackCommand(
-                        to: self.player,
-                        preferredRate: self.preferredRate,
-                        immediately: buffered
-                    )
-                    self.isPlaying = true
+                    self.applyStallRecoveryNudge()
                 case .reopen:
                     self.currentMs = position
                     // A stationary film clock is presentation evidence, not a
@@ -5135,6 +5187,24 @@ final class PlayerController: ObservableObject {
         }
     }
 
+    /// The ordinary watchdog uses the same buffered command seam as explicit
+    /// Resume, but owns no resume deadline or repair admission.
+    func applyStallRecoveryNudge() {
+        let buffered = PlaybackResumeAttempt.bufferedFastPathQualifies(
+            ready: player.currentItem?.status == .readyToPlay,
+            runwaySeconds: bufferedRunwaySeconds(),
+            intendedRate: preferredRate,
+            hasPendingDestination: seekState.pendingMs != nil,
+            replacementInFlight: isChangingStream
+        )
+        Self.applyPlaybackCommand(
+            to: player,
+            preferredRate: preferredRate,
+            immediately: buffered
+        )
+        isPlaying = true
+    }
+
     /// One bounded same-recipe recovery shared by every timer-only stall. It
     /// changes no capability flag or selected format and deliberately omits
     /// the legacy bound stall ticket: that ticket asks the server to lower an
@@ -5144,38 +5214,24 @@ final class PlayerController: ObservableObject {
         consultControl: Bool = true,
         resumeAttemptId: String? = nil
     ) async {
-        if consultControl, deferredStall != nil { return }
-        if var attempt = resumeAttempt {
-            if let resumeAttemptId {
-                guard attempt.id == resumeAttemptId,
-                      attempt.publicationCompleted,
-                      attempt.repairAdmitted else { return }
-            } else {
-                guard attempt.publicationCompleted else {
-                    resumeRepairPendingReason = "shared-stall-detector"
-                    return
-                }
-                switch attempt.admitRepair(at: resumeNow()) {
-                case .expired:
-                    resumeAttempt = attempt
-                    expireResumeAttempt(at: resumeNow())
-                    return
-                case .alreadyAdmitted:
-                    // Another detector named the same unresolved resume. The
-                    // owner already spent its one repair; detector labels do
-                    // not mint a second create or a second budget spend.
-                    return
-                case .admitted:
-                    resumeAttempt = attempt
-                    reportResumeTransition(
-                        attempt,
-                        phase: "repair-admitted",
-                        outcome: "shared-stall-detector",
-                        at: resumeNow()
-                    )
-                }
-            }
+        if let resumeAttemptId {
+            // An explicit resume repair is valid only while its root attempt
+            // is still current. A cancelled task must not fall through into
+            // ordinary recovery after Pause removed the attempt.
+            guard let attempt = resumeAttempt,
+                  attempt.id == resumeAttemptId,
+                  attempt.publicationCompleted,
+                  attempt.repairAdmitted else { return }
+        } else if resumeAttempt != nil {
+            // Every general detector funnels through the resume owner. That
+            // owner publishes first, admits once, and invokes this function
+            // again with `consultControl: false`; a hold can therefore never
+            // consume the sole admitted repair.
+            admitResumeRepair(at: resumeNow(), reason: "shared-stall-detector")
+            return
         }
+        let shouldConsultControl = consultControl && resumeAttemptId == nil
+        if shouldConsultControl, deferredStall != nil { return }
         // The ask goes here, before the first statement, and the placement is
         // the one detail worth getting right. `next(for:)` below sets
         // `attempted` and returns `.stop` on every later call — it IS the
@@ -5184,12 +5240,12 @@ final class PlayerController: ObservableObject {
         // which is the exact failure a hold exists to avoid.
         let generation = openGeneration
         let actionEpoch = viewerActionEpoch
-        let deferralDeadline = consultControl
+        let deferralDeadline = shouldConsultControl
             ? ProcessInfo.processInfo.systemUptime
                 + Double(max(0, Self.controlStallDeferralDeadlineMs - event.durationMs)) / 1_000
             : nil
         let verdict: ControlAction?
-        if consultControl, Self.controlMayDeferStall(durationMs: event.durationMs) {
+        if shouldConsultControl, Self.controlMayDeferStall(durationMs: event.durationMs) {
             verdict = await controlVerdictForStall(event)
         } else {
             verdict = nil
@@ -6759,7 +6815,7 @@ final class PlayerController: ObservableObject {
                 self.noteMediaWaiting()
                 if isActuallyPlaying {
                     self.preferredRate = self.player.rate
-                    self.attachmentRecovery.observe(
+                    self.observeAttachmentPlayback(
                         positionMs: observedPosition,
                         playing: true
                     )
@@ -6784,6 +6840,13 @@ final class PlayerController: ObservableObject {
                     self.reportObservedPlaybackStalls(at: self.currentMs)
                 }
         }
+    }
+
+    /// Feed the established-playback owner from the periodic observation.
+    /// Kept as an internal seam so ownership tests can establish the exact
+    /// production state without waiting five seconds of wall time.
+    func observeAttachmentPlayback(positionMs: Int, playing: Bool) {
+        attachmentRecovery.observe(positionMs: positionMs, playing: playing)
     }
 
     /// Record the bounded retry before it happens, and clear it on every
@@ -6937,14 +7000,6 @@ final class PlayerController: ObservableObject {
     /// genuinely failed replacement is still handled.
     private func handleItemFailure(_ item: AVPlayerItem) async {
         guard player.currentItem === item, !isChangingStream else { return }
-        if resumeAttempt != nil {
-            // An item failure is another detector label for the same explicit
-            // resume. It shares that attempt's single admission and inherited
-            // deadline instead of entering the compatibility ladder and
-            // minting an independent replacement.
-            admitResumeRepair(at: resumeNow(), reason: "item-failure")
-            return
-        }
         let event = item.errorLog()?.events.last
         let isCompatibilityFailure = Self.isCompatibilityPlaybackFailure(
             error: item.error as NSError?,
@@ -6960,6 +7015,24 @@ final class PlayerController: ObservableObject {
             eventDomain: event?.errorDomain,
             eventStatus: event?.errorStatusCode
         )
+        if let attempt = resumeAttempt {
+            guard attempt.publicationCompleted else {
+                // Preserve the failed item until the urgent Resume publication
+                // has established its sequence floor. Classification above is
+                // repeated against this same identity when publication lands.
+                resumePendingFailedItem = item
+                resumeRepairPendingReason = nil
+                return
+            }
+            let reason = isTransportFailure && !isCompatibilityFailure
+                ? "item-failure-transport"
+                : isCompatibilityFailure
+                    ? "item-failure-compatibility"
+                    : "item-failure-same-delivery"
+            guard claimResumeRepair(at: resumeNow(), reason: reason) != nil else {
+                return
+            }
+        }
         // Publish this failure and wait briefly for the verdict it earns. The
         // ask goes here, ahead of every rung, because the answer governs one
         // of them and the exchange has to be out before any reopen replaces
@@ -7117,6 +7190,9 @@ final class PlayerController: ObservableObject {
         pgsOverlayWindowTask?.cancel()
         pgsOverlayWindow = nil
         player.replaceCurrentItem(with: item)
+        if resumeAttempt?.repairAdmitted == true {
+            bindResumeRepairSuccessor(item, generation: generation)
+        }
         if wantsPlayback { player.play() } else { player.pause() }
         // The overlay is per-item and was just torn down; `open()` rebuilds it
         // at this point and so must this, or a PGS-subtitled film loses its
@@ -7768,7 +7844,10 @@ final class PlayerController: ObservableObject {
         }
         establishedHDRRetryAttempted = true
         isChangingStream = false
-        await reopen(at: position)
+        await reopen(
+            at: position,
+            intent: resumeAttempt?.repairAdmitted == true ? .resumeRepair : .normal
+        )
         return true
     }
 
@@ -7816,7 +7895,10 @@ final class PlayerController: ObservableObject {
                 detail: "The compatible stream did not start. Retrying a universal stream…"
             )
         }
-        await reopen(at: position)
+        await reopen(
+            at: position,
+            intent: resumeAttempt?.repairAdmitted == true ? .resumeRepair : .normal
+        )
         return true
     }
 

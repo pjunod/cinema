@@ -53,7 +53,51 @@ private final class ResumePlayer: AVPlayer {
 }
 
 @MainActor
+private final class ResumeIntentGate {
+    private(set) var calls = 0
+    private var continuations: [CheckedContinuation<UInt64?, Never>] = []
+
+    func report() async -> UInt64? {
+        calls += 1
+        return await withCheckedContinuation { continuations.append($0) }
+    }
+
+    func releaseNext(_ sequence: UInt64? = 1) {
+        guard !continuations.isEmpty else { return }
+        continuations.removeFirst().resume(returning: sequence)
+    }
+
+    func releaseAll() {
+        while !continuations.isEmpty { releaseNext() }
+    }
+}
+
+@MainActor
 final class PlayerResumeTests: XCTestCase {
+    private func startEstablished(_ controller: PlayerController) {
+        SettingsStore().boundedResumeEnabled = true
+        controller.start(
+            model: AppModel(),
+            itemId: 1,
+            fileId: 1,
+            startMs: 0,
+            durationMs: 600_000,
+            title: "Resume owner"
+        )
+        controller.observeAttachmentPlayback(positionMs: 6_000, playing: true)
+    }
+
+    private func waitUntil(
+        _ description: String,
+        condition: @escaping @MainActor () -> Bool
+    ) async throws {
+        for _ in 0..<200 {
+            if condition() { return }
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        XCTFail("Timed out waiting for \(description)")
+    }
+
     private func attempt(
         fastDeadline: TimeInterval? = 11,
         expiresAt: TimeInterval = 25,
@@ -206,6 +250,96 @@ final class PlayerResumeTests: XCTestCase {
         XCTAssertEqual(player.commands, ["pause", "play"])
         XCTAssertEqual(player.rate, 1.5)
         XCTAssertTrue(controller.wantsPlayback)
+    }
+
+    func testEstablishedBufferedResumeUsesTheProductionImmediatePath() async {
+        let player = ResumePlayer()
+        player.observedRate = 1.5
+        let controller = PlayerController(
+            player: player,
+            requestPlaybackDecision: { _, _, _, _ in
+                try await Task.sleep(for: .seconds(3_600))
+                throw CancellationError()
+            },
+            reportPlaybackIntent: { _ in 1 }
+        )
+        startEstablished(controller)
+        controller.setPlaybackRequested(false)
+        controller.setPlaybackRequested(true)
+        XCTAssertEqual(Array(player.commands.suffix(2)), ["pause", "immediate"])
+        XCTAssertEqual(player.rate, 1.5)
+        XCTAssertNotNil(controller.resumeOwnershipForTesting)
+        controller.stop()
+    }
+
+    func testOneSecondAdmissionIsOneShotAndFinalPauseFencesTheRepair() async throws {
+        var now: TimeInterval = 10
+        let player = ResumePlayer()
+        let controller = PlayerController(
+            player: player,
+            requestPlaybackDecision: { _, _, _, _ in
+                try await Task.sleep(for: .seconds(3_600))
+                throw CancellationError()
+            },
+            reportPlaybackIntent: { _ in 1 },
+            resumeNow: { now },
+            waitResumeSample: {
+                now += 0.25
+                await Task.yield()
+            }
+        )
+        startEstablished(controller)
+        controller.setPlaybackRequested(false)
+        controller.setPlaybackRequested(true)
+        try await waitUntil("the fast-path repair admission") {
+            controller.resumeOwnershipForTesting?.repairAdmitted == true
+        }
+        let ownership = try XCTUnwrap(controller.resumeOwnershipForTesting)
+        XCTAssertEqual(ownership.expiresAt, 25, "repair inherits the root deadline")
+        let generation = controller.openGenerationForTesting
+        controller.setPlaybackRequested(false)
+        XCTAssertNil(controller.resumeOwnershipForTesting)
+        XCTAssertGreaterThan(controller.openGenerationForTesting, generation)
+        XCTAssertEqual(player.commands.last, "pause")
+        controller.stop()
+    }
+
+    func testResumeRepairWaitsForPublicationAndCannotOutliveFinalPause() async throws {
+        let gate = ResumeIntentGate()
+        let player = ResumePlayer()
+        let controller = PlayerController(
+            player: player,
+            requestPlaybackDecision: { _, _, _, _ in
+                try await Task.sleep(for: .seconds(3_600))
+                throw CancellationError()
+            },
+            reportPlaybackIntent: { _ in await gate.report() }
+        )
+        startEstablished(controller)
+        controller.setPlaybackRequested(false)
+        try await waitUntil("Pause publication") { gate.calls == 1 }
+        gate.releaseNext()
+        controller.setPlaybackRequested(true)
+        try await waitUntil("Resume publication") { gate.calls == 2 }
+        XCTAssertEqual(controller.resumeOwnershipForTesting?.publicationCompleted, false)
+        XCTAssertEqual(controller.resumeOwnershipForTesting?.repairAdmitted, false)
+        controller.setPlaybackRequested(false)
+        try await waitUntil("final Pause publication") { gate.calls == 3 }
+        gate.releaseAll()
+        await Task.yield()
+        XCTAssertNil(controller.resumeOwnershipForTesting)
+        XCTAssertEqual(player.commands.last, "pause")
+        controller.stop()
+    }
+
+    func testOrdinaryWatchdogNudgeUsesImmediatePlayWhenRunwayIsSafe() {
+        let player = ResumePlayer()
+        player.observedRate = 1.25
+        let controller = PlayerController(player: player)
+        controller.applyStallRecoveryNudge()
+        XCTAssertEqual(player.commands, ["immediate"])
+        XCTAssertEqual(player.rate, 1.25)
+        XCTAssertNil(controller.resumeOwnershipForTesting)
     }
 
     func testUnreadyOrInsufficientItemUsesOrdinaryPlaybackOutsideEstablishedResume() {
