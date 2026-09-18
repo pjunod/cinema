@@ -5,7 +5,7 @@ enforce_after = "e8a910f"
 # lifecycle repair; retain their history mappings against the current proof.
 [[fixes]]
 id = "web.frame-callback-registration-lifecycle"
-commits = ["790ffc9da", "4c8830b2c", "b217c615e", "85b177a1b"]
+commits = ["790ffc9da", "4c8830b2c", "b217c615e", "85b177a1b", "3d22d5ee2"]
 source = "crates/plurxd/src/web/index.html"
 source_anchor = "if(id!=null||v.readyState<2||v.seeking) return;"
 test = "tests/playback/web-control.test.js"
