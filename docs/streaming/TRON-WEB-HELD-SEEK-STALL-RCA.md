@@ -1,6 +1,6 @@
 # TRON held-seek stall — two commits, one source change, one recovery spent too early
 
-**Status:** implementation, adversarial review, and current-main qualification complete; fast lane pending, 2026-09-18
+**Status:** implementation, adversarial review, and current-main qualification complete; fast-lane history mapping in progress, 2026-09-18
 **Incident:** 2026-09-18, approximately 04:17–04:25 UTC
 **Incident build:** `v0.3.0-2770-g6fb0901d`
 **Exact source:** `6fb0901d3d18c1b181f7299f4faddfb73994fd1a`
@@ -523,9 +523,11 @@ Diagnosis changed no service, media, or deployment. The old session retired
 after the client released it, and later cold-start plus single-seek playback
 succeeded. Implementation now lives in an agent-owned clean clone based on
 `a5454c40`; the user's dirty checkout remains untouched. The candidate passed
-its single adversarial review and focused validation. Current `main` is now
-being incorporated so its newly landed unit-test repairs qualify the final
-head before promotion.
+its single adversarial review and focused validation. Current `main` and its
+newly landed unit-test repairs are incorporated and qualified. The first
+current-head fast lane stopped in policy preflight because two candidate
+commits and two commits newly inherited from `main` lacked required historical
+regression mappings; the mappings are now part of the promotion candidate.
 
 ## 10. Implementation status
 
@@ -547,5 +549,7 @@ head before promotion.
 - [x] Current `main` merged and newly landed unit-test repairs qualified: the
   complete fast Rust unit lane, 18 operations/docs tests, three playback web
   suites, and the Live TV suite are green.
+- [x] Current-head history-policy failure diagnosed and all four required
+  `validation/regressions.d` mappings added.
 - [ ] Fast lane green on the reviewed head.
 - [ ] Pull request merged into `main` and branch cleaned up.
