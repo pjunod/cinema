@@ -553,5 +553,7 @@ regression mappings; the mappings are now part of the promotion candidate.
   `validation/regressions.d` mappings added.
 - [x] Rolling-producer ownership inventory updated for the two telemetry
   observations, bounded test poll, and current-main test-only FFmpeg probe.
+- [x] Five stale documentation instructions updated for the automatic,
+  label-free fast lane required by the newly integrated operations contract.
 - [ ] Fast lane green on the reviewed head.
 - [ ] Pull request merged into `main` and branch cleaned up.

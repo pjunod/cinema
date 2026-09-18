@@ -414,8 +414,9 @@ not advance native build counters, but any added native scope must follow the
 mobile-version rules.
 
 Open a main-bound PR as draft, request exactly one adversarial agent review,
-address its findings, mark ready, apply `fast-lane`, and merge only after the
-current head's **Main promotion gate** is green. Do not request a second review.
+address its findings, and mark ready; the fast lane starts automatically. Merge
+only after the current head's **Main promotion gate** is green. Do not request
+a second review.
 Full test suites remain owned by the separate sweep; targeted implementation
 verification and visual evidence do not redefine the pre-merge gate. Deployment
 is a separate action and must not be inferred from this handoff.

@@ -693,10 +693,11 @@ pre-commit hooks disabled.
 For an effort, freeze task merges and integrate current main first. Open the
 resulting main-bound PR (or the small independent correction PR) as draft.
 Request exactly one adversarial agent review, address its findings,
-mark ready, apply `fast-lane`, and merge only after the current head's green
-**Main promotion gate**. The author verifies fixes; do not request a second
-review. Full runtime suites belong to the separate manual sweep and are not a
-new pre-merge gate. Targeted implementation evidence does not change that policy.
+mark ready, let the automatic fast lane complete, and merge only after the
+current head's green **Main promotion gate**. The author verifies fixes; do not
+request a second review. Full runtime suites belong to the separate manual
+sweep and are not a new pre-merge gate. Targeted implementation evidence does
+not change that policy.
 
 ### 13.3 Sol's final handoff and stop point
 

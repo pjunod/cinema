@@ -510,9 +510,10 @@ from historical Live TV/layout plans.
 4. Open the integrated main-bound PR **as draft**. Request **exactly one**
    adversarial agent review of the integrated result. Address every finding;
    the author verifies the fixes. No re-review, panel, or follow-up approval.
-5. Mark ready, then apply `fast-lane`. Merge only when the **current head** has
-   a green **Main promotion gate**. If returning to draft, remove the label
-   first. The lane runs policy/static contracts and affected compilation,
+5. Mark ready; the fast lane starts automatically. Merge only when the
+   **current head** has a green **Main promotion gate**. Returning to draft
+   stops the ready-PR lane; there is no fast-lane label. The lane runs
+   policy/static contracts and affected compilation,
    not runtime, browser, simulator, emulator, playback, or smoke suites.
 6. Merge is not deployment. Normal main pushes no longer start the old fleet
    publisher. Use the explicit client deployment instructions in
