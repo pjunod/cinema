@@ -862,15 +862,17 @@ async function main() {
   }
   {
     const callbacks=[];
-    const queue=new Function(shippedSource("queuePlaybackFrame")+"; return queuePlaybackFrame;")();
+    const queue=new Function("getPlayer",shippedSource("queuePlaybackFrame").replaceAll("PLAYER","getPlayer()")+"; return queuePlaybackFrame;")(()=>p);
     const p={started:true,offset:0,source:{video_codec:"h264"},controlHasFrameCallbacks:true};
-    const v={currentTime:80,paused:false,seeking:false,
+    const v={currentTime:80,paused:false,seeking:false,readyState:2,
+      addEventListener(){},removeEventListener(){},cancelVideoFrameCallback(){},
       requestVideoFrameCallback:callback=>callbacks.push(callback)};
     const epochs=[];
     queue(v,p,(_now,_meta,epoch)=>epochs.push(epoch));
     seekIntentAdapter.begin(p,80); seekIntentAdapter.mark(p,80,v);
+    callbacks[0](presentationNow,{mediaTime:80});
     queue(v,p,(_now,_meta,epoch)=>epochs.push(epoch));
-    callbacks.forEach(callback=>callback(presentationNow,{mediaTime:80}));
+    callbacks[1](presentationNow,{mediaTime:80});
     assert.notEqual(epochs[0],p.controlPresentationEpoch,
       "a callback queued by the predecessor cannot settle the new execution");
     assert.equal(epochs[1],p.controlPresentationEpoch);
@@ -879,6 +881,116 @@ async function main() {
       "delayed video presentation is checked against the active media timeline");
     assert.match(SHIPPED_UI,/if\(epoch===\(p\.controlPresentationEpoch\|\|0\)\)\s*settlePlaybackControlSeek/,
       "the shipped detector enforces callback ownership before settlement");
+  }
+
+  {
+    // Model the observed browser boundary: a native request made before the
+    // initial seek completes stays pending forever. Only a request made after
+    // current data and seek completion can deliver a real presentation sample.
+    const p={controlPresentationEpoch:0};
+    let current=p;
+    const queue=new Function("getPlayer",shippedSource("queuePlaybackFrame").replaceAll("PLAYER","getPlayer()")+"; return queuePlaybackFrame;")(()=>current);
+    const events=new Map(),registered=[],delivered=[],cancelled=[];
+    const v={readyState:0,seeking:false,
+      addEventListener(type,fn){if(!events.has(type))events.set(type,new Set());events.get(type).add(fn);},
+      removeEventListener(type,fn){events.get(type)?.delete(fn);},
+      cancelVideoFrameCallback(id){cancelled.push(id);},
+      requestVideoFrameCallback(fn){registered.push({fn,deliverable:this.readyState>=2&&!this.seeking});return registered.length;}
+    };
+    const emit=type=>[...(events.get(type)||[])].forEach(fn=>fn());
+    queue(v,p,(_now,meta,epoch)=>delivered.push({time:meta.mediaTime,epoch}));
+    assert.equal(registered.length,0,"initial frame registration waits for current media data");
+    v.readyState=2;v.seeking=true;emit("loadeddata");
+    assert.equal(registered.length,0,"loadeddata during the initial seek must not strand a frame request");
+    p.controlPresentationEpoch=1;v.seeking=false;emit("seeked");
+    assert.equal(registered.length,1,"seek completion registers exactly one frame request");
+    assert.equal(registered[0].deliverable,true);
+    assert.equal(delivered.length,0,"media readiness is not presentation evidence");
+    registered[0].fn(100,{mediaTime:566.055});
+    assert.deepEqual(delivered,[{time:566.055,epoch:0}],"waiting must preserve the request's presentation epoch");
+    emit("loadeddata");emit("seeked");assert.equal(registered.length,1,"readiness listeners retire after registration");
+    queue(v,p,()=>{});assert.equal(registered.length,2,"established playback immediately queues its next frame");
+    v.readyState=0;queue(v,p,()=>{});current={};v.readyState=2;emit("loadeddata");
+    assert.equal(registered.length,2,"a replaced player cannot register a delayed callback");
+    current=p;v.readyState=0;queue(v,p,()=>{throw new Error("superseded listener");});
+    queue(v,p,()=>delivered.push("replacement"));v.readyState=2;emit("loadeddata");
+    assert.equal(registered.length,3,"a new observer replaces the element's pending readiness listener");
+    assert.equal(typeof v._plurxFrameCancel,"function");
+    const beforeReset=registered[2];
+    v.readyState=0;emit("emptied");
+    assert.ok(cancelled.includes(3),"source replacement cancels the outstanding native request");
+    v.readyState=2;v.seeking=true;emit("loadeddata");
+    assert.equal(registered.length,3,"replacement data cannot rearm before the seek finishes");
+    v.seeking=false;emit("seeked");assert.equal(registered.length,4);
+    beforeReset.fn(200,{mediaTime:9});
+    assert.equal(delivered.length,1,"a cancelled browser delivery cannot become presentation evidence");
+    registered[3].fn(250,{mediaTime:60});
+    assert.equal(delivered[1],"replacement","the renewed request can deliver a real frame");
+    queue(v,p,()=>{});
+    p.controlFrameCancel();assert.equal(v._plurxFrameCancel,null);
+    assert.equal(p.controlFrameCancel,null);
+    assert.ok([...events.values()].every(set=>set.size===0),"retirement removes every media lifecycle listener");
+    queue(v,p,()=>delivered.push("retired-element"));
+    const retiredRequest=registered.at(-1);
+    const adopted={...v,_plurxFrameCancel:null};
+    queue(adopted,p,()=>delivered.push("adopted-element"));
+    assert.equal(v._plurxFrameCancel,null,"adopting an element retires the player's former subscription");
+    retiredRequest.fn(300,{mediaTime:61});
+    assert.equal(delivered.length,2,"a retired element cannot contribute presentation evidence");
+    registered.at(-1).fn(350,{mediaTime:62});
+    assert.equal(delivered.at(-1),"adopted-element");
+    assert.equal(p.controlFrameCancel,null);
+
+    // loadeddata fires only once per resource. A callback delivered as the
+    // buffer drains can leave the next request waiting for readiness again.
+    v.readyState=1;
+    const beforeBuffering=registered.length, beforePresentation=delivered.length;
+    queue(v,p,()=>delivered.push("buffer-recovered"));
+    assert.equal(registered.length,beforeBuffering);
+    v.readyState=3;emit("canplay");
+    assert.equal(registered.length,beforeBuffering+1,
+      "buffer recovery must resume registration without a second loadeddata event");
+    emit("canplay");emit("seeked");
+    assert.equal(registered.length,beforeBuffering+1,"readiness events cannot duplicate a pending request");
+    assert.equal(delivered.length,beforePresentation,"buffer readiness is not presentation evidence");
+    registered.at(-1).fn(400,{mediaTime:63});
+    assert.equal(delivered.at(-1),"buffer-recovered");
+    assert.ok([...events.values()].every(set=>set.size===0),"delivery removes buffering listeners too");
+
+
+    // Preserve an already valid request through a same-resource paused seek:
+    // the landing frame may be composited before seeked, with no later frame.
+    v.readyState=3;v.paused=true;
+    queue(v,p,()=>delivered.push("paused-landing"));
+    const landingRequest=registered.at(-1), beforeSeekCancel=cancelled.length;
+    v.seeking=true;emit("seeking");
+    assert.equal(cancelled.length,beforeSeekCancel,"seeking must preserve an established frame request");
+    landingRequest.fn(450,{mediaTime:25});
+    v.seeking=false;emit("seeked");
+    assert.equal(delivered.at(-1),"paused-landing","the only paused landing frame remains observable");
+
+    // New PLAYER, same video: delivery can run before the replacement calls
+    // queue(), so the owner fence must stand independently of cancellation.
+    current=p;queue(v,p,()=>delivered.push("obsolete-owner"));
+    const obsolete=registered.at(-1), beforeObsolete=delivered.length;
+    current={};obsolete.fn(500,{mediaTime:26});
+    assert.equal(delivered.length,beforeObsolete,"a replaced player cannot deliver evidence on the shared element");
+    assert.equal(p.controlFrameCancel,null);
+
+    current=p;queue(v,p,()=>{});current={};v.readyState=0;emit("emptied");
+    assert.equal(p.controlFrameCancel,null,"source reset retires the replaced player's subscription");
+    assert.equal(v._plurxFrameCancel,null);
+    assert.ok([...events.values()].every(set=>set.size===0),"replaced-owner reset removes its readiness listeners");
+
+    // A new player has no player-side cancel handle for the old subscription.
+    current=p;v.readyState=3;queue(v,p,()=>{});
+    const oldHandle=registered.length;
+    const successor={};current=successor;queue(v,successor,()=>{});
+    assert.ok(cancelled.includes(oldHandle),"element adoption by a new player cancels the old native request");
+    assert.equal(p.controlFrameCancel,null,"element-side retirement clears its previous player's handle");
+    successor.controlFrameCancel();
+    assert.match(shippedSource("closePlayer"),/PLAYER\.controlFrameCancel\(\)/,
+      "closing the retained PLAYER must retire its frame subscription");
   }
 
   // Run the actual menu operations, including the progressive audio branch
@@ -2469,7 +2581,7 @@ async function main() {
     const player=Object.assign(stalledPlayer(),{waitAt:null,wantsPlayback:true});
     const video={paused:false,seeking:false,ended:false,currentTime:10};
     h.stub.monitor(player,video);now=9000;h.stub.monitor(player,video);
-    const listener=SHIPPED_UI.match(/v\.addEventListener\("seeking",[^\n]+/)[0];
+    const listener=shippedSource("wirePlayerMedia").match(/v\.addEventListener\("seeking",[^\n]+/)[0];
     const seeking=new Function('PLAYER','performance',[
       'let callback;const v={addEventListener(_,fn){callback=fn;}};const STALL_MIN_MS=350;function clearTimeout(){}function notifyPlaybackControl(){}',
       shippedSource('endWait'),listener,'return callback;',

@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+points = []
+checks = []
+commits = ["5c401c27"]
+reason = "Documentation only: Wicked callback root-cause review packet and docs index entry; no executable behavior changed."
+ignore = true

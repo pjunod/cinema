@@ -11310,7 +11310,52 @@ async function refreshSegTimes(){
 // predecessor, even if the browser delivers it after the source was replaced.
 function queuePlaybackFrame(v,p,callback){
   const epoch=p.controlPresentationEpoch||0;
-  v.requestVideoFrameCallback((now,meta)=>callback(now,meta,epoch));
+  // One subscription belongs to this player and element. Retire it when an
+  // element is adopted or reused, including callbacks already queued by the
+  // browser before cancellation.
+  if(p.controlFrameCancel) p.controlFrameCancel();
+  if(v._plurxFrameCancel) v._plurxFrameCancel();
+  let id=null, generation=0, retired=false;
+  const cancel=()=>{
+    generation++;
+    if(id!=null&&typeof v.cancelVideoFrameCallback==="function") v.cancelVideoFrameCallback(id);
+    id=null;
+  };
+  const clear=()=>{
+    retired=true;cancel();
+    v.removeEventListener("emptied",suspend);
+    v.removeEventListener("loadeddata",ready);
+    v.removeEventListener("canplay",ready);
+    v.removeEventListener("seeked",ready);
+    if(p.controlFrameCancel===clear) p.controlFrameCancel=null;
+    if(v._plurxFrameCancel===clear) v._plurxFrameCancel=null;
+  };
+  const suspend=()=>{if(PLAYER!==p) clear();else cancel();};
+  const ready=()=>{
+    if(retired) return;
+    if(PLAYER!==p){clear();return;}
+    // Safari native HLS can strand a request registered before the initial
+    // load/seek. Subscribe against current data after the seek completes,
+    // and renew it when a source load replaces it. A request already armed
+    // with current data survives ordinary seeks so it can observe the landing
+    // frame, including when playback stays paused.
+    // Readiness only permits registration; actual callbacks remain the proof
+    // of presentation used by the existing progress detector.
+    if(id!=null||v.readyState<2||v.seeking) return;
+    const registration=++generation;
+    id=v.requestVideoFrameCallback((now,meta)=>{
+      if(registration!==generation) return;
+      id=null;clear();
+      if(PLAYER===p) callback(now,meta,epoch);
+    });
+  };
+  p.controlFrameCancel=clear;v._plurxFrameCancel=clear;
+  v.addEventListener("emptied",suspend);
+  v.addEventListener("loadeddata",ready);
+  // loadeddata is once per resource; canplay also covers buffer replenishment.
+  v.addEventListener("canplay",ready);
+  v.addEventListener("seeked",ready);
+  ready();
 }
 function armHitchDetector(v){
   const p=PLAYER; if(!p) return;
@@ -15108,6 +15153,7 @@ function closePlayer(){
   // changed a picker would be overruled by a choice they had moved on from.
   if(PLAYER) PLAYER.preplay=null;
   stopPlayerTimers();
+  if(PLAYER&&PLAYER.controlFrameCancel) PLAYER.controlFrameCancel();
   clearInterval(STATS_TIMER); STATS_TIMER=null; teardownHls();
   // The attempt is over, so every fault about it is about nothing. §3.6: the
   // model resets with the player.
