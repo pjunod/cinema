@@ -562,8 +562,9 @@ their changed tests directly provide it.
 
 **Acceptance:** local applicable static contracts pass. Open the main-bound
 PR as a draft, request exactly one adversarial agent review, address every
-finding and verify it yourself, then mark ready and apply `fast-lane`.
-Merge only after the current head's `Main promotion gate` is green. No
+finding and verify it yourself, then mark ready; the fast lane starts
+automatically for every ready PR. Merge only after the current head's
+`Main promotion gate` is green. No
 second review or follow-up approval is part of this workflow.
 
 ## 10. Verification — prove the adapter, then observe the real tool
@@ -672,8 +673,9 @@ all normal build/validation paths independent of its installation.
 Complete docs/index/catalog bookkeeping in each introducing commit.
 For final main promotion, merge current main, open a draft, request exactly
 one adversarial agent review, address and verify findings yourself, mark
-ready, apply fast-lane, and merge only with the current head's green Main
-promotion gate. Follow AGENTS over stale swarm prompt instructions.
+ready, let the automatic fast lane complete, and merge only with the current
+head's green Main promotion gate. Follow AGENTS over stale swarm prompt
+instructions.
 
 Finish with the implemented paths, exact checks and trial results, rollout
 verdict, platform/coverage gaps, PR/head state, and any genuine blockers.

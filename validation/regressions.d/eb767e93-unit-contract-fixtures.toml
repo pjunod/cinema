@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["eb767e93"]
+points = ["core.media", "cluster.auth", "playback.pipeline", "live-tv.integration", "live.dvr", "operations.packaging"]
+checks = ["rust-gate", "operations-contract"]
+reason = "The repaired Store inventory, historical import fixtures, serialized real-FFmpeg restart cases, Live TV two-node fixture, and tracked-document Android claim scan all remain executable evidence. `make rust-check` runs the Rust unit and Store contracts, and the operations contract runs the mobile-build claim regression without reading generated or untracked documentation."

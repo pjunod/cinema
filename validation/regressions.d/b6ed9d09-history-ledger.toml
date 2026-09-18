@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["b6ed9d09"]
+points = []
+checks = []
+reason = "This commit changes only historical validation metadata and the incident status document; it has no runtime behavior to exercise."
+ignore = true

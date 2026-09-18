@@ -16,7 +16,7 @@
     "notes": [
       "hide_after_ms: chrome hides this long after the last input while playing. Never while paused, failed, scrubbing, or with a menu or the info panel open.",
       "preview_auto_commit_ms is null: a pending preview commits only on `select` (ten-foot) or pointer release (touch); it never commits on a timer.",
-      "desktop_hotkey_coalesce_ms: arrow hotkeys on the desktop body accumulate against one frozen base and issue one seek after this much quiet \u2014 the shipped web `nudge()` behaviour, kept."
+      "desktop_hotkey_coalesce_ms: arrow hotkeys on the desktop body accumulate against one frozen base, but the physical key owns the gesture. The timer may commit only after keyup; blur commits the visible target and attachment replacement cancels it."
     ]
   },
   "steps": {
@@ -539,7 +539,7 @@
       "guide_poll_ceiling_s": 1200,
       "notes": [
         "hide_after_ms and hidden_only_while_playing are the finite player's values unchanged: the overlay hides this long after the last input while playing, and never while paused or failed.",
-        "channel_coalesce_ms: a held channel key accumulates and starts ONE session after this much quiet. Ten presses must not be ten tuner GETs.",
+        "channel_coalesce_ms: a held channel key accumulates one preview gesture and starts ONE session only after keyup plus the remaining quiet interval. Blur commits; direct selection or owner replacement cancels. Ten repeats must not be ten tuner GETs.",
         "preview_auto_commit_ms is null: the neighbour strip's preview commits on select or a click, never on a timer.",
         "guide_poll_unavailable_s: when the guide answers unavailable and says nothing about when it comes back, ask again this often. Short, because an owner with nothing to serve is usually an owner about to have something.",
         "guide_poll_min_s: never poll the guide faster than this, whatever next_refresh_at says. A floor on fan-out, not a cadence.",
