@@ -96,6 +96,7 @@ impl Daemon {
             .env("NO_COLOR", "1")
             .env("PLURX_TEST_SCHEDULER_TICK_MS", "250")
             .env("PLURX_NODE_HOSTNAME", hostname)
+            .env("PLURX_HWACCEL", "software")
             .stdin(Stdio::null())
             .stdout(Stdio::from(output))
             .stderr(Stdio::from(errors))
@@ -514,7 +515,10 @@ impl Cluster {
 
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(20))
+            // A readiness refresh performs real device and FFmpeg graph
+            // probes. Keep the test client aligned with the web client's
+            // 40-second refresh budget, with a little room for JSON delivery.
+            .timeout(Duration::from_secs(45))
             .build()
             .expect("test client");
 
@@ -716,7 +720,7 @@ impl Cluster {
             }
             let names: Vec<String> = text
                 .lines()
-                .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+                .filter(|line| line.trim().starts_with("segment-"))
                 .map(|line| line.trim().to_owned())
                 .collect();
             assert!(

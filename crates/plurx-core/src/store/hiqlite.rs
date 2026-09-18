@@ -2444,7 +2444,12 @@ impl HiqliteAuthStore {
                     let now = self.now()?;
                     let mut statements =
                         super::hiqlite_library_channels::subject_migration_statements()?;
-                    statements.push(("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".to_owned(),params!(SUBJECT_SCHEMA_VERSION,now,DVR_SCHEMA_VERSION)));
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(SUBJECT_SCHEMA_VERSION, now, DVR_SCHEMA_VERSION),
+                    ));
                     let attempt = self.client().txn(statements).await;
                     self.settle_migration_attempt(DVR_SCHEMA_VERSION, attempt)
                         .await?;
@@ -2453,8 +2458,8 @@ impl HiqliteAuthStore {
                     let now = self.now()?;
                     let mut statements = super::hiqlite_dvr::event_migration_statements()?;
                     statements.push((
-                        "UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 \
-                         WHERE singleton=1 AND schema_version=$3"
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
                             .to_owned(),
                         params!(
                             DVR_EVENT_SCHEMA_VERSION,
@@ -2473,8 +2478,8 @@ impl HiqliteAuthStore {
                         .txn([
                             (super::FILES_VIDEO_CODEC_TAG_COLUMN, params!()),
                             (
-                                "UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 \
-                                 WHERE singleton=1 AND schema_version=$3",
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
                                 params!(
                                     VIDEO_CODEC_TAG_SCHEMA_VERSION,
                                     now,
@@ -2489,7 +2494,16 @@ impl HiqliteAuthStore {
                 SchemaMigrationAction::MigrateFrom(VIDEO_CODEC_TAG_SCHEMA_VERSION) => {
                     let now = self.now()?;
                     let mut statements = super::hiqlite_classification::migration_statements()?;
-                    statements.push(("UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 WHERE singleton=1 AND schema_version=$3".to_owned(),params!(CLASSIFICATION_SCHEMA_VERSION,now,VIDEO_CODEC_TAG_SCHEMA_VERSION)));
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            CLASSIFICATION_SCHEMA_VERSION,
+                            now,
+                            VIDEO_CODEC_TAG_SCHEMA_VERSION
+                        ),
+                    ));
                     let attempt = self.client().txn(statements).await;
                     self.settle_migration_attempt(VIDEO_CODEC_TAG_SCHEMA_VERSION, attempt)
                         .await?;
@@ -2501,8 +2515,8 @@ impl HiqliteAuthStore {
                     let mut statements =
                         super::hiqlite_fragment_index_cluster::content_analysis_repair_migration_statements()?;
                     statements.push((
-                        "UPDATE cluster_meta SET schema_version=$1,migrated_at=$2 \
-                         WHERE singleton=1 AND schema_version=$3"
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
                             .to_owned(),
                         params!(
                             CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION,
@@ -6214,9 +6228,23 @@ mod tests {
             "v39 must advance exactly one step to the video-codec-tag schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 36,
+            VIDEO_CODEC_TAG_SCHEMA_VERSION + 1,
+            CLASSIFICATION_SCHEMA_VERSION,
+            "v40 must advance exactly one step to the classification schema"
+        );
+        assert_eq!(
+            CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE, CLASSIFICATION_SCHEMA_VERSION,
+            "the content-analysis repair must start from the exact v41 shape"
+        );
+        assert_eq!(
+            CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE + 1,
+            CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION,
+            "v41 must advance exactly one step to the content-analysis repair schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 37,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v41 step"
+            "this implementation contains every additive v5→v42 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

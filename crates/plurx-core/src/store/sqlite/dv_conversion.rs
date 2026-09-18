@@ -1270,6 +1270,22 @@ mod tests {
                 // `media_playback_pointers` fails with "no such table" rather
                 // than with anything about this fixture.
                 "DROP TRIGGER IF EXISTS cache_publication_generation_guard;
+                 DROP INDEX IF EXISTS analysis_requests_one_active_forced_fragment_successor;
+                 DROP INDEX IF EXISTS analysis_requests_one_active_forced_skip_successor;
+                 DROP INDEX IF EXISTS analysis_requests_one_active_source;
+                 DROP TRIGGER IF EXISTS analysis_index_repairs_delete_source;
+                 DROP TABLE IF EXISTS analysis_index_repairs;
+                 DROP TRIGGER IF EXISTS classification_source_changed;
+                 DROP TRIGGER IF EXISTS classification_au;
+                 DROP TRIGGER IF EXISTS classification_ad;
+                 DROP TRIGGER IF EXISTS classification_ai;
+                 DROP TABLE IF EXISTS classification_fts;
+                 DROP TABLE IF EXISTS media_classifications;
+                 DROP TABLE IF EXISTS dvr_attention_acks;
+                 DROP TABLE IF EXISTS dvr_events;
+                 DROP TABLE IF EXISTS dvr_event_heads;
+                 DROP TABLE IF EXISTS library_channel_subject_decisions;
+                 DROP TABLE IF EXISTS library_channel_subject_jobs;
                  DROP TABLE IF EXISTS dvr_reminders;
                  DROP TABLE IF EXISTS dvr_recordings;
                  DROP TABLE IF EXISTS dvr_rules;
@@ -1300,7 +1316,10 @@ mod tests {
                  DROP TABLE IF EXISTS fragment_index_outcomes;
                  ALTER TABLE dv_conversions DROP COLUMN recovery_guard_id;
                  ALTER TABLE cluster_fragment_index_jobs DROP COLUMN attempt_errors;
+                 ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_diagnostic_json;
+                 ALTER TABLE cluster_fragment_index_jobs DROP COLUMN index_retry_deadline_ms;
                  ALTER TABLE analysis_requests DROP COLUMN video_identity;
+                 ALTER TABLE files DROP COLUMN video_codec_tag;
                  PRAGMA user_version = 43;",
             )
             .expect("construct unrecoverable v43 commit");
@@ -1390,7 +1409,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 13] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 19] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1411,6 +1430,12 @@ mod tests {
             // recordings table here is enough to identify the migration,
             // because it is the only one that creates it.
             "CREATE TABLE IF NOT EXISTS dvr_recordings",
+            "CREATE TABLE IF NOT EXISTS library_channel_subject_jobs",
+            "CREATE TABLE IF NOT EXISTS dvr_event_heads",
+            "ADD COLUMN video_codec_tag",
+            "CREATE TABLE IF NOT EXISTS media_classifications",
+            "CREATE TABLE analysis_index_repairs",
+            "ADD COLUMN typed_code",
         ];
 
         assert!(

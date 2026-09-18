@@ -78,6 +78,19 @@ fn refresh_encoded_plan(file: &MediaFile, encoding: &mut crate::vodencode::Encod
 // production resource boundary without weakening any product concurrency.
 static ENCODED_INTEGRATION_CAMPAIGN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+async fn ffmpeg_has_filters(names: &[&str]) -> bool {
+    let Ok(output) = tokio::process::Command::new(ffmpeg_bin())
+        .args(["-hide_banner", "-filters"])
+        .kill_on_drop(true)
+        .output()
+        .await
+    else {
+        return false;
+    };
+    output.status.success()
+        && crate::pipeprobe::declares_filters(&String::from_utf8_lossy(&output.stdout), names)
+}
+
 async fn encoded_fixture(base: &Path) -> (MediaFile, Arc<crate::vodencode::Encoding>) {
     use plurx_core::transcode::{Encoder, TranscodeOptions, VodFrameGrid};
     testfixtures::require_ffmpeg();
@@ -765,6 +778,15 @@ async fn burn_extractor_physically_caps_oversized_matroska_attachment() {
 #[tokio::test]
 async fn encoded_vod_hdr10_gets_keep_main10_and_pq_across_restarts() {
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    testfixtures::require_ffmpeg();
+    if !ffmpeg_has_filters(&["zscale"]).await {
+        eprintln!(
+            "skipping encoded_vod_hdr10_gets_keep_main10_and_pq_across_restarts: \
+             `{}` has no zscale filter",
+            ffmpeg_bin()
+        );
+        return;
+    }
     let base = crate::test_tempdir().expect("HDR10 grid");
     let (mut file, mut encoding) = encoded_fixture(base.path()).await;
     let path = base.path().join("pq-source.mkv");
@@ -1606,6 +1628,15 @@ async fn encoded_vod_manual_audio_correction_keeps_restart_init_stable() {
 #[tokio::test]
 async fn encoded_vod_text_burn_gets_keep_absolute_cue_time_after_seek() {
     let _campaign = ENCODED_INTEGRATION_CAMPAIGN.lock().await;
+    testfixtures::require_ffmpeg();
+    if !ffmpeg_has_filters(&["subtitles"]).await {
+        eprintln!(
+            "skipping encoded_vod_text_burn_gets_keep_absolute_cue_time_after_seek: \
+             `{}` has no subtitles filter",
+            ffmpeg_bin()
+        );
+        return;
+    }
     let base = crate::test_tempdir().expect("burn fixture");
     let (mut file, mut encoding) = encoded_fixture(base.path()).await;
     let path = base.path().join("burn.vtt");

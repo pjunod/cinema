@@ -1568,16 +1568,16 @@ pub fn promote_hevc_parameter_sets_from(
         return Ok(false);
     }
 
-    let candidate_nals: Vec<&[u8]> = parameter_sets.iter().map(Vec::as_slice).collect();
-    if candidate_nals.is_empty() {
-        return Ok(false);
-    }
-
     let Some(location) = locate_hvcc(&init.bytes)? else {
         return Err(Fmp4Error::Unsupported(
             "the HEVC video sample entry has no hvcC box to enrich".into(),
         ));
     };
+    let candidate_nals: Vec<&[u8]> = parameter_sets.iter().map(Vec::as_slice).collect();
+    if candidate_nals.is_empty() {
+        return Ok(false);
+    }
+
     let record = &init.bytes[location.payload.clone()];
     let present = hvcc_nal_array_types(record)?;
     let mut appended = Vec::new();
