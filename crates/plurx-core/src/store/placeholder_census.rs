@@ -34,6 +34,10 @@ const STORE_SOURCES: &[(&str, &str)] = &[
     ("hiqlite.rs", include_str!("hiqlite.rs")),
     ("hiqlite_catalog.rs", include_str!("hiqlite_catalog.rs")),
     (
+        "hiqlite_classification.rs",
+        include_str!("hiqlite_classification.rs"),
+    ),
+    (
         "hiqlite_coordination.rs",
         include_str!("hiqlite_coordination.rs"),
     ),
@@ -125,7 +129,7 @@ const STATEMENT_KEYWORDS: [&str; 5] = ["UPDATE", "INSERT", "SELECT", "DELETE", "
 /// `SELECT {…}`, by `replicated_generation_guard_matches_only_canonical_integer_state`;
 /// that is a `#[cfg(test)]` fixture bound by rusqlite's positional `params!`,
 /// stripped before this census runs, and not a replicated statement.
-const EXPECTED_FRAGMENTS: usize = 5;
+const EXPECTED_FRAGMENTS: usize = 6;
 
 /// One Rust string literal, with its escapes decoded.
 struct Literal {

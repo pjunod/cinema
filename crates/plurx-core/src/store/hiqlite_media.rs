@@ -3303,7 +3303,7 @@ mod tests {
     fn fts_expression_quotes_tokens_and_prefixes_only_the_last() {
         assert_eq!(
             fts_query("The Matrix"),
-            Some("\"the\" \"matrix\"*".to_owned())
+            Some("(\"the\") AND (\"matrix\"*)".to_owned())
         );
         assert_eq!(fts_query("..."), None);
     }

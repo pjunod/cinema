@@ -1723,7 +1723,6 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                                               state = 'cancelled'
                                               OR (state = 'failed'
                                                 AND last_error_code = 'queue_expired'
-                                                AND attempts = 0
                                                 AND index_retry_deadline_ms = 0
                                                 AND $13 >= 1))))))))"
                         .to_owned(),
@@ -1766,14 +1765,12 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         owner_node_id = NULL, lease_expires_ms = NULL,
                         attempts = CASE WHEN $15 = 1 THEN 0
                           WHEN cluster_fragment_index_jobs.state = 'cancelled'
-                            OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                                AND cluster_fragment_index_jobs.attempts = 0)
+                            OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                             OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                           ELSE cluster_fragment_index_jobs.attempts END,
                         attempt_errors = CASE WHEN $15 = 1 THEN ''
                           WHEN cluster_fragment_index_jobs.state = 'cancelled'
-                            OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                                AND cluster_fragment_index_jobs.attempts = 0)
+                            OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                             OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
                           ELSE cluster_fragment_index_jobs.attempt_errors END,
                         not_before_ms = excluded.not_before_ms,
@@ -1790,7 +1787,6 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                            cluster_fragment_index_jobs.state = 'cancelled'
                            OR (cluster_fragment_index_jobs.state = 'failed'
                              AND cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                             AND cluster_fragment_index_jobs.attempts = 0
                              AND cluster_fragment_index_jobs.index_retry_deadline_ms = 0
                              AND $16 >= 1)))"
                         .to_owned(),
@@ -3081,14 +3077,12 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
                     attempts = CASE
                         WHEN cluster_fragment_index_jobs.state = 'cancelled'
-                          OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                              AND cluster_fragment_index_jobs.attempts = 0)
+                          OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                           OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                         ELSE cluster_fragment_index_jobs.attempts END,
                     attempt_errors = CASE
                         WHEN cluster_fragment_index_jobs.state = 'cancelled'
-                          OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                              AND cluster_fragment_index_jobs.attempts = 0)
+                          OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                           OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
                         ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = CASE
@@ -3107,7 +3101,6 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                   WHERE cluster_fragment_index_jobs.state = 'cancelled'
                      OR (cluster_fragment_index_jobs.state = 'failed'
                        AND cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                       AND cluster_fragment_index_jobs.attempts = 0
                        AND cluster_fragment_index_jobs.index_retry_deadline_ms = 0)
                      OR (cluster_fragment_index_jobs.state = 'queued'
                        AND cluster_fragment_index_jobs.priority = 'normal'
@@ -3385,14 +3378,12 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
                     attempts = CASE
                       WHEN cluster_fragment_index_jobs.state = 'ready'
-                        OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                            AND cluster_fragment_index_jobs.attempts = 0)
+                        OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                         OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                       ELSE cluster_fragment_index_jobs.attempts END,
                     attempt_errors = CASE
                       WHEN cluster_fragment_index_jobs.state = 'ready'
-                        OR (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                            AND cluster_fragment_index_jobs.attempts = 0)
+                        OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                         OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN ''
                       ELSE cluster_fragment_index_jobs.attempt_errors END,
                     not_before_ms = excluded.not_before_ms,
@@ -3402,7 +3393,6 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                   WHERE cluster_fragment_index_jobs.state = 'ready'
                      OR (cluster_fragment_index_jobs.state = 'failed'
                        AND cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                       AND cluster_fragment_index_jobs.attempts = 0
                        AND cluster_fragment_index_jobs.index_retry_deadline_ms = 0)",
                 params!(
                     &replacement.cache_key,
@@ -4357,8 +4347,12 @@ mod tests {
             // The history reset is the budget reset with the column and the
             // reset value swapped. Anything else is a different rule.
             let expected = squeeze(budget)
-                .replace("attempts", "attempt_errors")
-                .replace("THEN 0", "THEN ''");
+                .replacen("attempts = CASE", "attempt_errors = CASE", 1)
+                .replace("THEN 0", "THEN ''")
+                .replace(
+                    "ELSE cluster_fragment_index_jobs.attempts END",
+                    "ELSE cluster_fragment_index_jobs.attempt_errors END",
+                );
             let tail = &production[open..(close + CLOSE.len() + 900).min(production.len())];
             let window = squeeze(tail);
             assert!(

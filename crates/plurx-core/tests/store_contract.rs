@@ -283,15 +283,27 @@ const DVR_METHODS: &[&str] = &[
     "delete_dvr_rule",
     "reorder_dvr_rules",
     "insert_dvr_airing_if_absent",
+    "insert_dvr_airing_with_event",
     "get_dvr_recording",
     "get_dvr_recording_for_airing",
     "list_dvr_recordings",
     "list_dvr_recordings_in",
+    "dvr_overview_rows",
+    "list_dvr_schedule_window",
     "transition_dvr_recording",
+    "transition_dvr_recording_with_event",
     "progress_dvr_recording",
     "request_dvr_stop",
+    "request_dvr_stop_with_event",
     "repoint_dvr_rule_rows",
     "link_dvr_recording_media",
+    "link_dvr_recording_media_with_event",
+    "append_dvr_observation_event",
+    "mark_dvr_history_gap",
+    "list_dvr_events",
+    "acknowledge_dvr_attention",
+    "list_dvr_attention",
+    "prune_dvr_events",
     "list_dvr_reminders",
     "list_dvr_reminders_in",
     "put_dvr_reminder",
@@ -366,6 +378,8 @@ const MEDIA_METHODS: &[&str] = &[
     "item_media_facts",
     "set_file_audio_offset",
     "files_missing_dolby_vision",
+    "files_missing_video_codec_tag",
+    "set_file_video_codec_tag",
     "set_file_dolby_vision",
     "get_file_probe_json",
     "get_file_probe_chapters_json",
@@ -520,6 +534,7 @@ const FRAGMENT_INDEX_METHODS: &[&str] = &[
     // what stops the background pass spending the same whole-file read every
     // wrap of the library on a file that has already answered.
     "record_fragment_index_outcome",
+    "record_fragment_index_typed_outcome",
     "fragment_index_outcome",
     // The orphan sweep's two halves. Node-local on one side and replicated on
     // the other, which is the reason the sweep exists rather than a hook in
@@ -14578,6 +14593,22 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              -- conversion ledger.
              DROP TRIGGER IF EXISTS cache_publication_generation_guard;
              DROP TRIGGER IF EXISTS offline_claim_lifecycle_guard;
+             DROP INDEX IF EXISTS analysis_requests_one_active_forced_fragment_successor;
+             DROP INDEX IF EXISTS analysis_requests_one_active_forced_skip_successor;
+             DROP INDEX IF EXISTS analysis_requests_one_active_source;
+             DROP TRIGGER IF EXISTS analysis_index_repairs_delete_source;
+             DROP TABLE IF EXISTS analysis_index_repairs;
+             DROP TRIGGER IF EXISTS classification_source_changed;
+             DROP TRIGGER IF EXISTS classification_au;
+             DROP TRIGGER IF EXISTS classification_ad;
+             DROP TRIGGER IF EXISTS classification_ai;
+             DROP TABLE IF EXISTS classification_fts;
+             DROP TABLE IF EXISTS media_classifications;
+             DROP TABLE IF EXISTS dvr_attention_acks;
+             DROP TABLE IF EXISTS dvr_events;
+             DROP TABLE IF EXISTS dvr_event_heads;
+             DROP TABLE IF EXISTS library_channel_subject_decisions;
+             DROP TABLE IF EXISTS library_channel_subject_jobs;
              DROP TABLE IF EXISTS dvr_reminders;
              DROP TABLE IF EXISTS dvr_recordings;
              DROP TABLE IF EXISTS dvr_rules;
@@ -14630,6 +14661,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              ALTER TABLE files DROP COLUMN dv_bl_compat_id;
              ALTER TABLE files DROP COLUMN dv_level;
              ALTER TABLE files DROP COLUMN dv_profile;
+             ALTER TABLE files DROP COLUMN video_codec_tag;
              DROP TRIGGER transcode_cache_location_identity_au;
              DROP TRIGGER transcode_cache_location_identity_ai;
              DROP INDEX transcode_cache_storage_lru;
@@ -16371,7 +16403,7 @@ fn contract_inventory_matches_every_store_method() {
     // Both independently reviewed method sets survive this integration. Read
     // the total from the merged trait rather than carrying either parent's
     // count across the promotion merge.
-    assert_eq!(declared.len(), 351, "review the Store method count");
+    assert_eq!(declared.len(), 369, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
