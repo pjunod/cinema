@@ -1,6 +1,6 @@
 # Apple pause/resume — implementation and promotion status
 
-**Status:** reviewed candidate; promotion policy correction in progress · **Updated:** 2026-09-18 ·
+**Status:** promotion ready under owner-approved Windows waiver · **Updated:** 2026-09-18 ·
 **Branch:** `codex/apple-pause-resume` · **Base:** `6fb0901d3d18` ·
 **Issue:** [#359](http://192.168.4.7:3000/noirr/plurx/issues/359) ·
 **PR:** [#360](http://192.168.4.7:3000/noirr/plurx/pulls/360)
@@ -23,8 +23,8 @@ finished implementation. Work happens in an independent Forgejo clone under
 | Apple release metadata | Claimed | Issue #359 owns Apple build 168 and its issue-keyed release fragment. |
 | Tests | Complete | Focused Apple test builds and the selected resume/control regressions pass 16/16 on iOS and 16/16 on tvOS; the first iOS run's incorrect watchdog-rate expectation was corrected without production changes. |
 | Implementation adversarial review | Complete; five findings addressed | Final Pause/background/deadline fence stale repair attachments; shared detectors bypass holds after admission; item failures keep transport/HDR/compatibility classification; publication tasks are cancelled; controller coverage now drives the established owner. |
-| Fast lane | Correcting policy metadata | The first exact-head run reached the history audit and identified two missing `tests/client-fixes.toml` anchors. Both corrective commits now map to retained focused regressions; the policy check and a fresh exact-head lane must pass before merge. |
-| Merge and cleanup | Queued | Merge only the reviewed current head with green required checks; remove temporary credentials and clone afterward. |
+| Fast lane | Accepted with explicit Windows waiver | On corrected head `056e1aa4`, validation scope, mobile release version, policy/contracts, Rust, and Apple passed. Windows stopped before compilation because runner cache pruning could not restore its configured bound; the owner explicitly directed that result and the dependent aggregate gate be ignored for this PR. |
+| Merge and cleanup | Authorized | Merge the reviewed implementation plus this waiver record, verify Forgejo's merge state, then remove temporary credentials and clone. |
 | Physical Apple TV acceptance | Pending hardware | A merged simulator-tested build does not satisfy the matched fresh-open measurements in handoff §8. |
 
 ## Decisions made without waiting
@@ -54,6 +54,7 @@ finished implementation. Work happens in an independent Forgejo clone under
 | Adversarial review | One required pass completed against frozen head `46c196dd`; all five findings corrected before opening the test window. |
 | Focused promotion tests | `PlayerResumeTests` plus the rapid Pause/Resume publication regression passed 16/16 on iOS and 16/16 on tvOS after the one required review. No full suite was run. |
 | First fast-lane result | Failed only `history-check`: commits `4ebd156e` and `8ecf363a` lacked client-fix ledger anchors. The candidate correction adds durable production-to-regression mappings. |
+| Corrected fast-lane result | Release version, policy/contracts, Rust, and Apple passed on `056e1aa4`. Web and Android were correctly skipped. Windows failed during pre-compile cache maintenance (`ci-cache-prune`), and the owner explicitly waived Windows plus the dependent Main promotion gate. |
 | Physical hardware | Not yet available to this implementation session; acceptance remains open unless a device run is completed. |
 
 ## Completion rule
@@ -61,6 +62,6 @@ finished implementation. Work happens in an independent Forgejo clone under
 The implementation is complete only when the PR contains the bounded
 resume owner, regression coverage, synchronized lifecycle documentation,
 issue-keyed Apple build note, and advisory Developer setting; one adversarial
-review has been addressed; the current candidate passes the fast lane; and
-Forgejo records the merge. Physical latency acceptance remains separately
-truthful if hardware cannot be exercised.
+review has been addressed; selected fast-lane evidence passes or carries an
+explicit recorded owner exception; and Forgejo records the merge. Physical
+latency acceptance remains separately truthful if hardware cannot be exercised.
