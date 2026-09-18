@@ -956,6 +956,41 @@ async function main() {
     registered.at(-1).fn(400,{mediaTime:63});
     assert.equal(delivered.at(-1),"buffer-recovered");
     assert.ok([...events.values()].every(set=>set.size===0),"delivery removes buffering listeners too");
+
+
+    // Preserve an already valid request through a same-resource paused seek:
+    // the landing frame may be composited before seeked, with no later frame.
+    v.readyState=3;v.paused=true;
+    queue(v,p,()=>delivered.push("paused-landing"));
+    const landingRequest=registered.at(-1), beforeSeekCancel=cancelled.length;
+    v.seeking=true;emit("seeking");
+    assert.equal(cancelled.length,beforeSeekCancel,"seeking must preserve an established frame request");
+    landingRequest.fn(450,{mediaTime:25});
+    v.seeking=false;emit("seeked");
+    assert.equal(delivered.at(-1),"paused-landing","the only paused landing frame remains observable");
+
+    // New PLAYER, same video: delivery can run before the replacement calls
+    // queue(), so the owner fence must stand independently of cancellation.
+    current=p;queue(v,p,()=>delivered.push("obsolete-owner"));
+    const obsolete=registered.at(-1), beforeObsolete=delivered.length;
+    current={};obsolete.fn(500,{mediaTime:26});
+    assert.equal(delivered.length,beforeObsolete,"a replaced player cannot deliver evidence on the shared element");
+    assert.equal(p.controlFrameCancel,null);
+
+    current=p;queue(v,p,()=>{});current={};v.readyState=0;emit("emptied");
+    assert.equal(p.controlFrameCancel,null,"source reset retires the replaced player's subscription");
+    assert.equal(v._plurxFrameCancel,null);
+    assert.ok([...events.values()].every(set=>set.size===0),"replaced-owner reset removes its readiness listeners");
+
+    // A new player has no player-side cancel handle for the old subscription.
+    current=p;v.readyState=3;queue(v,p,()=>{});
+    const oldHandle=registered.length;
+    const successor={};current=successor;queue(v,successor,()=>{});
+    assert.ok(cancelled.includes(oldHandle),"element adoption by a new player cancels the old native request");
+    assert.equal(p.controlFrameCancel,null,"element-side retirement clears its previous player's handle");
+    successor.controlFrameCancel();
+    assert.match(shippedSource("closePlayer"),/PLAYER\.controlFrameCancel\(\)/,
+      "closing the retained PLAYER must retire its frame subscription");
   }
 
   // Run the actual menu operations, including the progressive audio branch

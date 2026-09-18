@@ -11324,7 +11324,6 @@ function queuePlaybackFrame(v,p,callback){
   const clear=()=>{
     retired=true;cancel();
     v.removeEventListener("emptied",suspend);
-    v.removeEventListener("seeking",suspend);
     v.removeEventListener("loadeddata",ready);
     v.removeEventListener("canplay",ready);
     v.removeEventListener("seeked",ready);
@@ -11337,20 +11336,21 @@ function queuePlaybackFrame(v,p,callback){
     if(PLAYER!==p){clear();return;}
     // Safari native HLS can strand a request registered before the initial
     // load/seek. Subscribe against current data after the seek completes,
-    // and renew the subscription when a later seek or source load replaces it.
+    // and renew it when a source load replaces it. A request already armed
+    // with current data survives ordinary seeks so it can observe the landing
+    // frame, including when playback stays paused.
     // Readiness only permits registration; actual callbacks remain the proof
     // of presentation used by the existing progress detector.
     if(id!=null||v.readyState<2||v.seeking) return;
     const registration=++generation;
     id=v.requestVideoFrameCallback((now,meta)=>{
-      if(retired||registration!==generation) return;
+      if(registration!==generation) return;
       id=null;clear();
       if(PLAYER===p) callback(now,meta,epoch);
     });
   };
   p.controlFrameCancel=clear;v._plurxFrameCancel=clear;
   v.addEventListener("emptied",suspend);
-  v.addEventListener("seeking",suspend);
   v.addEventListener("loadeddata",ready);
   // loadeddata is once per resource; canplay also covers buffer replenishment.
   v.addEventListener("canplay",ready);

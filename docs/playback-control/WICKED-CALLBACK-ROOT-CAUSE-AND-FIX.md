@@ -1,13 +1,14 @@
 # Wicked playback — root cause evidence and proposed callback lifecycle fix
 
 **Status:** open, awaiting Fable review · **Written:** 2026-09-17 ·
-**Candidate:** `c8abdf7fa` · **Base:** `2b9146233`
+**Candidate:** `codex/wicked-native-progress`, including the Fable follow-up ·
+**Previously reviewed code:** `c8abdf7fa` · **Base:** `2b9146233`
 
 Companion to [PLAYBACK.md](../PLAYBACK.md) (delivery architecture) and
 [PLAYBACK-TESTING.md](../PLAYBACK-TESTING.md) (playback validation). This is the
 review packet for [PR #358](http://192.168.4.7:3000/noirr/plurx/pulls/358),
 branch `codex/wicked-native-progress`. It describes the final net change,
-including the buffering follow-up. The PR is draft and unmerged; nothing
+including the buffering and Fable follow-ups. The PR is draft and unmerged; nothing
 has been deployed. Review the diagnosis independently of the proposed code.
 
 ## 1. The failure is missing browser frame delivery
@@ -128,7 +129,8 @@ native request handle, and cancellation generation. Its transitions are:
 | Queue an observation | Retire the player's and element's prior subscription; capture the original presentation epoch. |
 | Element has current data (`readyState >= 2`) and is not seeking | Register exactly one native frame callback. |
 | Element is not ready or is seeking | Wait on media lifecycle events; do not claim presentation. |
-| `emptied` or `seeking` | Cancel the pending native request and invalidate deliveries from that registration. |
+| `emptied` | Cancel the pending native request and invalidate deliveries from that registration. |
+| `seeking` with an already registered request | Preserve the request so it can observe the landing frame, including during a paused seek. New registration remains deferred while `v.seeking` is true. |
 | `loadeddata`, `seeked`, or `canplay` | Re-evaluate readiness; register only if no request is pending. |
 | Native callback arrives | Reject retired/cancelled generations; clean up the subscription; deliver the callback with its original epoch if the player still owns it. The existing detector queues the next observation. |
 | Player close or subscription replacement | Cancel the request and remove all lifecycle listeners. |
@@ -151,10 +153,12 @@ especially for seeks that land while paused.
    callback already queued for delivery must not contribute evidence after
    its subscription was retired.
 4. **Remove listeners on delivery/retirement.** This keeps lifetime bounded.
-   The implementation adds/removes five event listeners per observation;
-   no dedicated performance benchmark has been run for that overhead.
+   The final implementation adds/removes four event listeners per observation.
+   Fable measured the preceding five-listener version at 7.6 microseconds
+   per observation in Chromium versus 2.5 for base; this is reviewer-provided
+   evidence, not a Safari performance measurement.
 
-## 5. The partial adversarial review found a buffering gap
+## 5. Review findings and their disposition
 
 The fresh review agent identified that a deferred registration could wait
 forever after buffering if it listened only for `loadeddata` and `seeked`.
@@ -170,9 +174,50 @@ adds the corresponding `canplay` listener and cleanup; the test passes. It
 also checks that repeated readiness events cannot create duplicate requests
 or count as presentation, and that the listener is removed after delivery.
 
-The agent hit its usage limit before finishing the remaining review. There
-is no complete adversarial approval or final independent verdict. This
-finding was addressed locally; Fable's review is still needed.
+The first agent hit its usage limit before finishing its review. Fable then
+reviewed `c8abdf7fa` independently in a private clone and returned **APPROVE
+WITH CHANGES**. Fable ran the focused suites, 20 source mutations, and real
+Chromium file-playback trials. Those results belong to the preceding
+candidate, not an approval of the follow-up implementation.
+
+**Cancel-on-seek removed.** Fable observed that cancelling on every `seeking`
+lost the sole paused landing frame in Chromium. The Safari evidence only
+justified deferring an initial request, not cancelling an established one.
+The final subscriber therefore preserves an existing request through an
+ordinary seek. The regression now fails if this cancellation is restored;
+initial-seek deferral and source-reset cancellation remain intact.
+
+**Ownership and cleanup fences pinned.** New tests independently exercise
+callback delivery after `PLAYER` replacement on the same video element,
+source reset after owner replacement, and element reuse by a new player with
+no prior player-side cancel handle. A close-path assertion pins explicit
+retirement because `PLAYER` survives close. Removing each respective owner
+check, element retirement, or close cancellation fails its test. Restoring
+both the old seeking listener and its cleanup also fails the paused-landing
+regression. The redundant `retired` half of the native delivery fence was
+removed: cancellation already advances the generation. The readiness path
+still checks retirement.
+
+**Final Safari checks completed.** The exact final subscriber, including
+`canplay` and removal of cancel-on-seek, was injected into the production
+page for these trials:
+
+| Check | Result |
+|---|---|
+| Wicked native-HLS cold resume at 566.055 seconds | 1,176 callbacks at 615.242 seconds, zero captured errors and zero fired detector samples. |
+| Paused seek to 650 seconds | One landing callback: counter advanced from the seek's frame floor of 1,665 to 1,666. Video stayed paused at the destination. The existing pending-seek settlement limitation remains, as Fable predicted; no epoch or settlement rule changed. |
+| Native-HLS buffer recovery | Still open. The first local fixture released its withheld segments on a startup `waiting` event, so it did not prove buffer depletion/recovery and was discarded as acceptance evidence. Restarting the corrected fixture was blocked by automatic approval review's usage limit. |
+
+The production page was restored and the temporary test tab closed.
+Final cold-resume and paused-seek traces are local files
+`fable-final-cold-resume.json` and `fable-final-paused-seek.json` in the same
+fixture directory as the earlier evidence.
+
+**Separate follow-ups.** Fable identified a raw frame registration in
+`preparedFirstFrame` that bypasses the shared subscriber. Interference with
+the adopted element's subscription is a hypothesis, not a reproduced
+failure, and is outside this patch. Paused-seek settlement also remains an
+existing limitation. Neither is silently claimed repaired here.
 
 ## 6. Validation and remaining review work
 
@@ -195,8 +240,9 @@ old implementation. Tests also exercise stale callback delivery, source
 reset, replacement, element adoption, cleanup, and epoch ownership.
 
 These are focused results, not a claim that the full web suite or CI passed.
-The draft PR has not been qualified for merge. No new Chromium, MSE/HLS.js,
-Live TV, or paused-seek browser acceptance run was performed for this patch.
+The draft PR has not been qualified for merge. Fable supplied Chromium file-playback evidence for the preceding candidate;
+MSE/HLS.js and Live TV were not run. The final Safari cold-resume and paused
+seek results are in §5. Real buffer recovery remains a merge-blocking check.
 
 **Requested Fable review:**
 
@@ -219,7 +265,7 @@ Live TV, or paused-seek browser acceptance run was performed for this patch.
 Review the net implementation with:
 
 ```bash
-git diff 2b9146233 c8abdf7fa -- crates/plurxd/src/web/index.html \
+git diff 2b9146233 HEAD -- crates/plurxd/src/web/index.html \
   tests/playback/web-control.test.js tests/client-fixes.toml
 ```
 
