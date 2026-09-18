@@ -1,6 +1,6 @@
 # TRON held-seek stall — two commits, one source change, one recovery spent too early
 
-**Status:** implementation, adversarial review, and current-main qualification complete; fast-lane history mapping in progress, 2026-09-18
+**Status:** implementation, adversarial review, and current-main qualification complete; fast-lane contract inventory updated, 2026-09-18
 **Incident:** 2026-09-18, approximately 04:17–04:25 UTC
 **Incident build:** `v0.3.0-2770-g6fb0901d`
 **Exact source:** `6fb0901d3d18c1b181f7299f4faddfb73994fd1a`
@@ -551,5 +551,7 @@ regression mappings; the mappings are now part of the promotion candidate.
   suites, and the Live TV suite are green.
 - [x] Current-head history-policy failure diagnosed and all four required
   `validation/regressions.d` mappings added.
+- [x] Rolling-producer ownership inventory updated for the two telemetry
+  observations, bounded test poll, and current-main test-only FFmpeg probe.
 - [ ] Fast lane green on the reviewed head.
 - [ ] Pull request merged into `main` and branch cleaned up.
