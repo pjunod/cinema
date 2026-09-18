@@ -525,13 +525,14 @@ until the single adversarial review is complete.
 ## 10. Implementation status
 
 **Base:** `a5454c40` · **Branch:** `codex/tron-held-seek-recovery`  
+**Draft PR:** [Forgejo #361](http://192.168.4.7:3000/noirr/plurx/pulls/361)  
 **Working clone:** agent-owned Forgejo clone; the user's checkout is untouched
 
 - [x] Original incident and independent review incorporated.
 - [x] Fresh spent-recovery reproduction incorporated with its causal limits.
 - [x] Held-key ownership, current-runway recovery, telemetry, and regressions implemented.
 - [x] Pinned Rust 1.97.1 compile check green on the candidate.
-- [ ] Reviewable commits and draft pull request.
+- [x] Reviewable commits and draft pull request.
 - [ ] One adversarial agent review of the complete candidate.
 - [ ] Review findings addressed.
 - [ ] Fast lane green on the reviewed head.
