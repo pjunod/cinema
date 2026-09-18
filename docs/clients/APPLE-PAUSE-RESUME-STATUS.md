@@ -1,7 +1,8 @@
 # Apple pause/resume — implementation and promotion status
 
 **Status:** M1–M2 built and compiled; promotion packaging in progress · **Updated:** 2026-09-18 ·
-**Branch:** `codex/apple-pause-resume` · **Base:** `6fb0901d3d18`
+**Branch:** `codex/apple-pause-resume` · **Base:** `6fb0901d3d18` ·
+**Issue:** [#359](http://192.168.4.7:3000/noirr/plurx/issues/359)
 
 Executes the reviewed
 [implementation handoff](APPLE-PAUSE-RESUME-IMPLEMENTATION-HANDOFF.md).
@@ -18,6 +19,7 @@ finished implementation. Work happens in an independent Forgejo clone under
 | M1 · ordered intent and buffered immediate play | Built; iOS/tvOS compile green | One playback-request setter serves UI and remote commands; ordered intent publication fences repair; seek/replacement suppresses predecessor playback; eligible runway uses immediate play once. |
 | M2 · shared resume deadline and presentation proof | Built; iOS/tvOS compile green | One immutable attempt ID and 15-second budget survive successor attachment; fresh timestamps plus 250ms continuing motion prove video; all detectors share one repair admission. |
 | Developer enablement advisory | Built; iOS/tvOS compile green | Developer settings exposes an operable enable switch and lists met/unmet requirements; readiness never rewrites or disables the switch. |
+| Apple release metadata | Claimed | Issue #359 owns Apple build 168 and its issue-keyed release fragment. |
 | Tests | Deliberately deferred | Run the single fast-lane window only after implementation review findings are addressed. |
 | Implementation adversarial review | Queued | Review the finished draft PR once, immediately before final validation. |
 | Fast lane | Queued | Mark the reviewed PR ready, fix failures, and rerun only when the candidate changes. |
@@ -47,6 +49,7 @@ finished implementation. Work happens in an independent Forgejo clone under
 | Reviewed source | `6fb0901d3d18c1b181f7299f4faddfb73994fd1a` (Apple build 167 in the reviewed contract). |
 | Rust scope | None planned; no Rust file has changed. |
 | Apple compile-only check | `make apple-build` passed for generic iOS and tvOS simulator targets after the final lifecycle edits; no test action ran. |
+| Implementation commit | `4ebd156e` (`feat(apple): bound pause resume presentation`). |
 | Unit or UI tests | Not run during implementation by explicit instruction. |
 | Physical hardware | Not yet available to this implementation session; acceptance remains open unless a device run is completed. |
 
