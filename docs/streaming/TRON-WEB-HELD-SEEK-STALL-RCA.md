@@ -374,11 +374,14 @@ watch writes the same snapshot and calls `persistentWait()` directly.
 ### 5.5 Partial-response telemetry makes the browser lead testable
 
 For a first-segment response that ends early, record the expected and delivered
-bytes, segment media duration, start offset, cut class, attachment generation,
-and whether client supersession or cancellation was observed. This must not
-turn an untyped partial response into a server-failure verdict. It exists to
-separate expected replacement from unexpected transfer loss and to compare
-oversized first segments with successful starts.
+bytes, segment media duration, start offset, response incarnation, producer
+attempt, cut class, and whether producer supersession was observed. A dropped
+body does not prove whether the browser cancelled or replaced an attachment;
+that client disposition remains explicitly unknown unless a future client
+signal supplies it. This must not turn an untyped partial response into a
+server-failure verdict. It exists to separate observed in-session replacement
+from unclassified transfer loss and to compare oversized first segments with
+successful starts.
 
 ### 5.6 Preserve ownership and fencing
 
@@ -510,8 +513,9 @@ The first review resolved the open policy choices:
 3. **Presentation gets the remaining observation interval.** `play()` alone
    is not the repair; actual clock/frame progress inside the existing
    20-second deadline is.
-4. **Partial-response telemetry records size and duration.** Cancellation
-   reason alone cannot test the oversized-first-segment lead.
+4. **Partial-response telemetry records size, duration, and truthful server
+   ownership.** The server records response incarnation and producer attempt,
+   but does not relabel an unclassified dropped body as a client cancellation.
 
 ## 9. Current disposition
 
@@ -533,7 +537,8 @@ until the single adversarial review is complete.
 - [x] Held-key ownership, current-runway recovery, telemetry, and regressions implemented.
 - [x] Pinned Rust 1.97.1 compile check green on the candidate.
 - [x] Reviewable commits and draft pull request.
-- [ ] One adversarial agent review of the complete candidate.
-- [ ] Review findings addressed.
+- [x] One adversarial agent review of the complete candidate.
+- [x] Four review findings addressed: post-control evidence resampling, Live TV
+  Stop cancellation, adapter harness ownership, and truthful drop telemetry.
 - [ ] Fast lane green on the reviewed head.
 - [ ] Pull request merged into `main` and branch cleaned up.

@@ -3999,8 +3999,9 @@ async function persistentWait(v,p,began,generation,actionGeneration){
      (v.seeking&&!p.controlSeek?.executed&&!p.progressWatch?.fired)) return;
   p.waitTimer=null;
   const ms=Math.round(performance.now()-began);
-  const startedRunway=p.waitStartedRunway, currentRunway=bufferRunway(v);
-  const evidence=persistentWaitEvidence(v,currentRunway), kind=evidence.kind;
+  const startedRunway=p.waitStartedRunway;
+  let currentRunway=bufferRunway(v);
+  let evidence=persistentWaitEvidence(v,currentRunway), kind=evidence.kind;
   const firstReport=!p.waitReported;
   p.waitReported=true;
   // This exact transition owns the legacy reopen. Cadence alone is too late:
@@ -4051,6 +4052,32 @@ async function persistentWait(v,p,began,generation,actionGeneration){
   // The ask itself consumes frozen-picture time. Re-read the absolute age
   // after it settles so a slow control response cannot extend the deadline.
   const controlElapsedMs=Math.round(performance.now()-began);
+  // The control exchange may consume most of the remaining observation
+  // window. Its pre-await runway is telemetry, not authority over a buffer
+  // that can refill, drain, or acquire a typed media error while we wait.
+  const decisionRunway=bufferRunway(v);
+  const decisionEvidence=persistentWaitEvidence(v,decisionRunway);
+  if(decisionRunway!==currentRunway||decisionEvidence.kind!==kind){
+    clientLog({level:"info",event:"stall_recovery",detail:"evidence_resampled",
+      message:`stall evidence changed during control: ${kind}/${currentRunway}s -> `+
+        `${decisionEvidence.kind}/${decisionRunway}s`,control_trigger:controlTrigger,
+      wait_started_runway:startedRunway,current_runway:decisionRunway});
+  }
+  currentRunway=decisionRunway; evidence=decisionEvidence; kind=evidence.kind;
+  // A supply wait can refill while the ask is outstanding. It has not yet
+  // received the presentation reevaluation that an initially loaded wait got,
+  // so spend that harmless step now before observing the remaining deadline.
+  if(kind==="presentation"&&p.waitNudgedAt!==began){
+    p.waitNudgedAt=began;
+    try{
+      const nudge=v.play();
+      if(nudge&&typeof nudge.catch==="function") nudge.catch(()=>{});
+    }catch(e){}
+    clientLog({level:"info",event:"stall_recovery",detail:"native_reevaluation:refill",
+      message:"media refilled during control — native playback reevaluated before recovery",
+      control_trigger:controlTrigger,wait_started_runway:startedRunway,
+      current_runway:currentRunway});
+  }
   if(verdict&&verdict.type==="terminal"){
     // Ruling D1: the verdict is armed, not executed. Everything this player
     // had buffered is already spent — that is what a persistent wait means —
@@ -18067,8 +18094,7 @@ function liveTvSearch(value){
 function liveTvSelect(id){
   const index=LIVE_TV.channels.findIndex(channel=>channel.id===id);
   if(index<0) return;
-  LIVE_TV_CHANNEL_GESTURE.cancel();
-  LIVE_TV.pendingChannel=null; LIVE_TV.preview=null;
+  cancelLiveTvChannelGesture();
   LIVE_TV.selected=id; liveTvSetPref("plurx_live_tv_last",id);
   watchLiveTv(index);
   renderLiveTvChannels();
@@ -18264,6 +18290,10 @@ const LIVE_TV_CHANNEL_GESTURE=PlaybackPolicy.createHeldKeyCommitter({
     if(pending) liveTvSelect(pending);
   }
 });
+function cancelLiveTvChannelGesture(){
+  LIVE_TV_CHANNEL_GESTURE.cancel();
+  LIVE_TV.pendingChannel=null; LIVE_TV.preview=null;
+}
 function liveTvChangeChannel(delta,key){
   const visible=liveTvVisible();
   // Step from where the held key has already got to, not from the channel
@@ -19041,6 +19071,9 @@ function detachLiveTvMedia(){
   if(video){ video.onerror=null; video.onended=null; video.pause(); video.removeAttribute("src"); video.load(); }
 }
 async function stopLiveTv(){
+  // Stop owns the tuner immediately. A keyup delivered after this point must
+  // not commit a preview that was accumulated before Stop and reacquire it.
+  cancelLiveTvChannelGesture();
   ++LIVE_TV.serial;
   const host=document.getElementById("live-tv-host");
   // `document.exitFullscreen()` resolves before Chromium dispatches its

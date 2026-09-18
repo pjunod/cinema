@@ -43,8 +43,50 @@ async function main() {
     assert.match(shipped("liveTvChangeChannel"), /LIVE_TV_CHANNEL_GESTURE\.press\(key,LIVE_TV\)/);
     assert.match(shipped("liveTvWireKeys"), /keyup[\s\S]*LIVE_TV_CHANNEL_GESTURE\.release\(event\.key,LIVE_TV\)/);
     assert.match(shipped("liveTvWireKeys"), /blur[\s\S]*LIVE_TV_CHANNEL_GESTURE\.blur\(LIVE_TV\)/);
-    assert.match(shipped("liveTvSelect"), /LIVE_TV_CHANNEL_GESTURE\.cancel\(\)/,
+    assert.match(shipped("liveTvSelect"), /cancelLiveTvChannelGesture\(\)/,
       "a direct tune cancels a pending held-key preview");
+    assert.match(shipped("stopLiveTv"), /cancelLiveTvChannelGesture\(\)/,
+      "Stop cancels the old physical key owner before releasing the tuner");
+  });
+
+  await test("stopping a held channel gesture cannot reacquire a tuner on keyup", () => {
+    let now=0,nextTimer=1;
+    const timers=new Map(),watched=[];
+    const setTimer=(fn,ms)=>{const id=nextTimer++;timers.set(id,{at:now+ms,fn});return id;};
+    const clearTimer=id=>timers.delete(id);
+    const advance=to=>{
+      while(true){
+        const due=Array.from(timers.entries()).filter(([,timer])=>timer.at<=to)
+          .sort((a,b)=>a[1].at-b[1].at||a[0]-b[0])[0];
+        if(!due) break;
+        timers.delete(due[0]);now=due[1].at;due[1].fn();
+      }
+      now=to;
+    };
+    const state={channels:[{id:"a"},{id:"b"},{id:"c"}],selected:"a",
+      pendingChannel:null,preview:null};
+    const harness=new Function("PlaybackPolicy","PlurxLiveTv","LIVE_TV","setTimer","clearTimer",
+      "liveTvVisible","liveTvPaint","liveTvSetPref","watchLiveTv","renderLiveTvChannels",[
+        "const LIVE_TV_CHANNEL_GESTURE=PlaybackPolicy.createHeldKeyCommitter({"+
+          "delayMs:PlaybackPolicy.liveContractTiming('channel_coalesce_ms'),"+
+          "commit:owner=>{if(owner!==LIVE_TV)return;const pending=LIVE_TV.pendingChannel;"+
+          "LIVE_TV.pendingChannel=null;LIVE_TV.preview=null;if(pending)liveTvSelect(pending);},"+
+          "setTimer,clearTimer});",
+        shipped("cancelLiveTvChannelGesture"),
+        shipped("liveTvSelect"),
+        shipped("liveTvChangeChannel"),
+        "return {change:liveTvChangeChannel,cancel:cancelLiveTvChannelGesture,"+
+          "release:key=>LIVE_TV_CHANNEL_GESTURE.release(key,LIVE_TV)};",
+      ].join("\n"))(policy,liveTv,state,setTimer,clearTimer,()=>state.channels,()=>{},()=>{},
+        index=>watched.push(index),()=>{});
+
+    harness.change(1,"ArrowDown");advance(350);
+    harness.cancel();harness.release("ArrowDown");advance(1_000);
+    assert.deepEqual(watched,[],"the keyup after Stop starts no tuner session");
+
+    harness.change(1,"ArrowDown");advance(1_100);
+    harness.change(1,"ArrowDown");harness.release("ArrowDown");advance(1_450);
+    assert.deepEqual(watched,[2],"an uninterrupted held gesture starts one final channel");
   });
 
   await test("both guide views put the compact player above a full-width player-height guide", () => {

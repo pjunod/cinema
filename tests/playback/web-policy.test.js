@@ -2753,13 +2753,19 @@ test("the shipped player adapter applies state precedence and preview-then-commi
     "setTimeout", "clearTimeout",
     [
       "let PLAYER_REPEAT_KEY=null; let PLAYER_REPEAT_COUNT=0; let NUDGE_T=null;",
+      "const PLAYER_SEEK_GESTURE=PlaybackPolicy.createHeldKeyCommitter({"+
+        "delayMs:PlaybackPolicy.contractTiming('desktop_hotkey_coalesce_ms'),"+
+        "commit:owner=>{if(PLAYER===owner)commitPendingSeek();},"+
+        "setTimer:setTimeout,clearTimer:clearTimeout});",
       shippedSource("playerInputSurface"),
       shippedSource("playerSeekPending"),
       shippedSource("playerInputState"),
+      shippedSource("clearPointerSeekTimer"),
       shippedSource("clearPendingSeekTimer"),
       shippedSource("commitPendingSeek"),
       shippedSource("cancelPendingSeek"),
       shippedSource("nudge"),
+      shippedSource("nudgeKeyboard"),
       shippedSource("playerContractInput"),
       shippedSource("playerHotkey"),
       shippedSource("applyPlayerOutcome"),

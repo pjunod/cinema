@@ -8129,8 +8129,12 @@ impl SegmentDelivery {
                 serde_json::Value::from(self.purpose.as_str()),
             );
             fields.insert(
-                "attachment_generation".to_owned(),
+                "producer_attempt".to_owned(),
                 serde_json::Value::from(self.producer_attempt),
+            );
+            fields.insert(
+                "response_incarnation".to_owned(),
+                serde_json::Value::from(self.session.response_incarnation.to_string()),
             );
             fields.insert(
                 "segment_start_ms".to_owned(),
@@ -8142,9 +8146,20 @@ impl SegmentDelivery {
                 self.segment_duration_ms
                     .map_or(serde_json::Value::Null, serde_json::Value::from),
             );
-            let superseded = self.session.replacing_child.load(Acquire)
+            let producer_superseded = self.session.replacing_child.load(Acquire)
                 || self.session.control.current_producer_attempt() != self.producer_attempt;
-            fields.insert("superseded".to_owned(), serde_json::Value::from(superseded));
+            fields.insert(
+                "producer_superseded".to_owned(),
+                serde_json::Value::from(producer_superseded),
+            );
+            // A dropped body proves only that this response ended before EOF.
+            // A new browser attachment can abandon an old Session without
+            // changing that Session's producer attempt, so the server must not
+            // manufacture "client_cancelled" or "client_superseded" here.
+            fields.insert(
+                "client_disposition".to_owned(),
+                serde_json::Value::from("unknown"),
+            );
             fields.insert(
                 "cut_class".to_owned(),
                 serde_json::Value::from(match reason {
@@ -8152,8 +8167,8 @@ impl SegmentDelivery {
                     "storage_read_error" => "storage_error",
                     "body_lifetime_exceeded" => "transport_lifetime",
                     "downstream_no_progress" => "transport_stall",
-                    "response_dropped" if superseded => "attachment_superseded",
-                    "response_dropped" => "client_cancelled",
+                    "response_dropped" if producer_superseded => "producer_superseded",
+                    "response_dropped" => "unclassified_drop",
                     _ => "none",
                 }),
             );
@@ -33277,7 +33292,7 @@ pub(crate) mod tests {
             extra.contains("\"segment_start_ms\":2000")
                 && extra.contains("\"segment_duration_ms\":2000")
                 && extra.contains("\"cut_class\":\"source_eof\"")
-                && extra.contains("\"superseded\":false")
+                && extra.contains("\"producer_superseded\":false")
         }));
         assert!(
             incomplete
@@ -33286,6 +33301,60 @@ pub(crate) mod tests {
                 .is_some_and(|extra| extra.contains("\"purpose\":\"client_response\"")),
             "every delivery event names who was reading"
         );
+    }
+
+    #[tokio::test]
+    async fn segment_delivery_drop_names_same_session_producer_replacement() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let dir = crate::test_tempdir().expect("segment-delivery replacement directory");
+        let mut raw_session = test_session(dir.path().to_path_buf());
+        raw_session.file_id = file_id;
+        let session = Arc::new(raw_session);
+        let delivery = SegmentDelivery::new(
+            SegmentDeliveryContext {
+                store: Arc::clone(&store),
+                session: Arc::clone(&session),
+                producer_attempt: session.control.current_producer_attempt(),
+                session_id: "delivery-replaced".to_owned(),
+                segment: "seg00002.m4s".to_owned(),
+                segment_start_ms: Some(4_000),
+                segment_duration_ms: Some(2_000),
+                encoder: "test".to_owned(),
+            },
+            1_024,
+            None,
+        );
+
+        session.replacing_child.store(true, Release);
+        drop(delivery);
+
+        let event = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(event) = store
+                    .playback_events(&plurx_core::domain::PlaybackEventQuery {
+                        since_ms: None,
+                        event: None,
+                        limit: 20,
+                    })
+                    .await
+                    .expect("segment-delivery telemetry query")
+                    .into_iter()
+                    .find(|event| event.reason.as_deref() == Some("response_dropped"))
+                {
+                    return event;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("replacement telemetry persisted");
+        let extra = event.extra.as_deref().unwrap_or_default();
+        assert!(extra.contains("\"producer_superseded\":true"));
+        assert!(extra.contains("\"cut_class\":\"producer_superseded\""));
+        assert!(extra.contains("\"client_disposition\":\"unknown\""));
     }
 
     fn reopen_request(

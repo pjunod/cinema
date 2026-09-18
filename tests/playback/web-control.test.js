@@ -2572,6 +2572,28 @@ async function main() {
     assert.equal(h.stalls[0].kind,"supply");
   }
   {
+    let runway=0,nudges=0,release=null;
+    const h=stallHarness({clock:{now:()=>8_001}});
+    const player=Object.assign(stalledPlayer(),{waitAt:1,waitStartedRunway:0});
+    const video=bufferedVideo(0,{
+      buffered:{length:1,start:()=>10,end:()=>10+runway},
+      play(){nudges++;return Promise.resolve();},
+    });
+    h.stub.attach(player,video,bootstrap());h.attached.push(player);await flush();
+    h.holdWith(request=>new Promise(resolve=>{release=()=>resolve(Object.assign(response(request),
+      {action:{type:"none"}}));}));
+    const running=h.stub.stall(player,video,1,3);
+    await settleExchange();
+    assert.equal(typeof release,"function","the control decision is outstanding");
+    runway=9.6;release();await settleExchange();await running;
+    assert.deepEqual(h.reopened,[],
+      "a refill during the control await cannot use the stale supply decision");
+    assert.equal(nudges,1,"the newly loaded presentation receives one native reevaluation");
+    assert.notEqual(player.waitTimer,null,"the refilled presentation keeps the absolute deadline");
+    assert.notEqual(h.log.find(entry=>entry.detail==="evidence_resampled"),undefined);
+    h.stub.detach(player);
+  }
+  {
     let now=8_001;
     const h=stallHarness({clock:{now:()=>now},answer:()=>({type:"none"})});
     const player=Object.assign(stalledPlayer(),{waitAt:1,waitStartedRunway:9.6,
