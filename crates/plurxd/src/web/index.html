@@ -4303,15 +4303,6 @@ function fmtAgo(unix){ if(!unix) return ""; const s=Math.max(0,Math.floor(Date.n
 // attribute early and silently breaks the handler. Compose with JSON.stringify
 // for a JS string inside an attribute: esc(JSON.stringify(value)).
 function esc(s){ return String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
-// A recorded/EXIF date for display. Parsed by hand rather than through
-// `new Date("2019-06-14")`, which is UTC midnight and shows the day before in
-// every western timezone.
-function fmtDate(s){
-  const m=/^(\d{4})-(\d{2})-(\d{2})/.exec(s||"");
-  if(!m) return "";
-  return new Date(Number(m[1]),Number(m[2])-1,Number(m[3]))
-    .toLocaleDateString([], {year:"numeric",month:"short",day:"numeric"});
-}
 // Artwork with a graceful fallback: initials on a tinted card when there's
 // no poster (so a seasons grid never shows blank rectangles).
 function artHtml(it, cls){
@@ -4748,7 +4739,9 @@ function itemDurMs(it){ return (it&&it.watch&&it.watch.duration_ms) || (it&&it.r
 function fmtClock(d){ try{ return d.toLocaleTimeString([], {hour:"numeric",minute:"2-digit"}); }catch(e){ return ""; } }
 function endsAt(remMs){ if(!remMs||remMs<0) return ""; return fmtClock(new Date(Date.now()+remMs)); }
 // "2022-02-18" → "Feb 18, 2022" (plain text; callers escape). Falls back to the
-// raw string for anything that isn't an ISO date.
+// raw string for anything that isn't an ISO date. Parsed by hand rather than
+// through `new Date("2022-02-18")`, which is UTC midnight and so reads a day
+// early in every timezone west of Greenwich.
 function fmtDate(s){ const m=/^(\d{4})-(\d{2})-(\d{2})/.exec(s||""); if(!m) return s||"";
   const mo=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"][(+m[2])-1]||""; return `${mo} ${+m[3]}, ${m[1]}`; }
 // The 4-digit year from an ISO date/timestamp, or null.
