@@ -191,7 +191,7 @@ test_anchor = "every server verdict reaches exactly one initial web transport"
 
 [[decisions]]
 id = "web.progressive-hevc-admission"
-source = "crates/plurxd/src/web/index.html"
+source = "crates/plurxd/src/web/player/decode-tiers.js"
 source_anchor = "async function progressiveHevcSampleEntries("
 test = "tests/playback/web-policy.test.js"
 test_anchor = "mse_support_does_not_claim_progressive_hev1"
@@ -257,7 +257,7 @@ test_anchor = "two long supply-stall episodes do not satisfy the three-stall res
 # cannot observe.
 [[decisions]]
 id = "web.auto-fallback-claim"
-source = "crates/plurxd/src/web/index.html"
+source = "crates/plurxd/src/web/player/stall-diagnosis.js"
 source_anchor = "function claimAutoFallback("
 test = "tests/playback/web-policy.test.js"
 test_anchor = "a decode verdict and the third supply stall in one interval open one session"

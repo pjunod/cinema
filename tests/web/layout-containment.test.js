@@ -14,7 +14,7 @@ const path = require("node:path");
 
 const ROOT = path.join(__dirname, "../..");
 const ASSETS = [
-  "crates/plurxd/src/web/index.html",
+  "crates/plurxd/src/web/app.css",
   "crates/plurxd/src/web/reader.css",
   "crates/plurxd/src/web/offline-reader.html",
 ];

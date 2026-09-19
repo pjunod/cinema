@@ -170,7 +170,7 @@ def _slice_object_literal(src: str, start: int) -> str:
 
 
 def load_from_index(path: str) -> dict:
-    """Parse `const THEMES={...}` out of the shipped index.html.
+    """Parse `const THEMES={...}` out of the shipped theme engine.
 
     Located by pattern, never by line number. Evaluated with node (v22) so the
     literal's own syntax — trailing commas, comments, FONT_* const references —
@@ -455,7 +455,7 @@ the allowlist (--allow)
   never tell you to delete a line you still owe.
 
 examples
-  scripts/contrast-check --from-index crates/plurxd/src/web/index.html
+  scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js
   scripts/contrast-check --from-json scripts/themes-proposed.json --line-surfaces
   scripts/contrast-check --from-index ... --only classic --set light:--accent=#2e6cdb
   scripts/contrast-check --from-index ... --allow scripts/contrast-allow.txt

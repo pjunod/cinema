@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
 """Syntax-check the JavaScript embedded in the web UI.
 
-Why this exists: `crates/plurxd/src/web/index.html` is pulled into the binary
-with `include_str!`, so the Rust gate never parses it. A stray brace in that
-file compiles, links, passes `cargo test`, and then breaks the entire UI at
-runtime with a blank page. `make check` cannot see it; this can.
+Why this exists: the web app is pulled into the binary with `include_str!`, so
+the Rust gate never parses it. A stray brace compiles, links, passes
+`cargo test`, and then breaks the entire UI at runtime with a blank page.
+`make check` cannot see it; this can.
 
-It extracts every inline `<script>` block (external `src=` blocks are skipped —
-they are vendored libraries, not ours) and runs `node --check` on each. Exits
-nonzero on the first failure, printing node's own message with the line number
-translated back to the line number *in the HTML file*, because a parser error
-at "line 812" of an extracted fragment is useless when you are looking at a
-6000-line document.
+Two things get checked. Every JavaScript file the shell loads from `/assets/`
+— the sixty-two rows of the split web shell plus the sidecars — because that is
+where the app is (`docs/clients/WEB-SHELL-LAYOUT.md`). And every inline
+`<script>` block still in the shell, which is currently none: that path stays so
+that an inline block sneaking back in is checked rather than ignored.
 
-    scripts/js-check                       # checks the shipped index.html
-    scripts/js-check path/to/other.html    # or any other file
+Exits nonzero on the first failure, printing node's own message with the line
+number translated back to the line number in the file you would open.
+
+    scripts/js-check                       # checks the shipped web app
+    scripts/js-check path/to/other.html    # or any other HTML file
 """
 
 import re
@@ -23,7 +25,11 @@ import sys
 import tempfile
 from pathlib import Path
 
-DEFAULT = Path(__file__).resolve().parent.parent / "crates/plurxd/src/web/index.html"
+ROOT = Path(__file__).resolve().parent.parent
+DEFAULT = ROOT / "crates/plurxd/src/web/index.html"
+
+# Every `/assets/` script the shell loads, in document order.
+ASSET_SCRIPT = re.compile(r'<script src="/assets/([^"?]+)"')
 
 # Non-greedy so each <script>…</script> pair matches on its own; DOTALL because
 # the bodies are multi-line. `src=` blocks have no body worth checking.
@@ -39,6 +45,32 @@ def main(argv: list[str]) -> int:
     text = path.read_text(encoding="utf-8")
     checked = 0
     failed = 0
+
+    # The files the shell loads. Skipped for a file that is not the shipped
+    # shell, and skipped for `hls.min.js`, which is vendored and not ours.
+    served = 0
+    if path == DEFAULT:
+        for asset in ASSET_SCRIPT.findall(text):
+            if asset == "hls.min.js":
+                continue
+            asset_path = path.parent / asset
+            if not asset_path.is_file():
+                print(f"js-check: FAIL — the shell loads /assets/{asset}, "
+                      f"which is not a file", file=sys.stderr)
+                failed += 1
+                continue
+            proc = subprocess.run(
+                ["node", "--check", str(asset_path)],
+                capture_output=True, text=True, check=False,
+            )
+            served += 1
+            if proc.returncode != 0:
+                failed += 1
+                print(f"js-check: FAIL — {asset_path.relative_to(ROOT)}", file=sys.stderr)
+                print((proc.stderr or proc.stdout).rstrip(), file=sys.stderr)
+        if not served:
+            print(f"js-check: no /assets/ scripts found in {path}", file=sys.stderr)
+            return 2
 
     for m in BLOCK.finditer(text):
         if "src=" in m.group("attrs"):
@@ -75,13 +107,13 @@ def main(argv: list[str]) -> int:
             print(f"js-check: FAIL — inline <script> starting at {path}:{tag_line}", file=sys.stderr)
             print(err.rstrip(), file=sys.stderr)
 
-    if not checked:
-        print(f"js-check: no inline <script> blocks found in {path}", file=sys.stderr)
+    if not checked and not served:
+        print(f"js-check: nothing to check in {path}", file=sys.stderr)
         return 2
     if failed:
-        print(f"js-check: {failed} of {checked} inline script block(s) failed", file=sys.stderr)
+        print(f"js-check: {failed} of {served + checked} script(s) failed", file=sys.stderr)
         return 1
-    print(f"js-check: {checked} inline script block(s) OK — {path}")
+    print(f"js-check: {served} served script(s) and {checked} inline block(s) OK — {path}")
     return 0
 
 

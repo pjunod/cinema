@@ -12,7 +12,7 @@ changes.
 ## Verdict — the diagnosis stands; two repair contracts need changes
 
 The source establishes the container-versus-video duration mismatch, and
-the Avatar example directly illustrates it. The proposal appropriately
+the reference film K example directly illustrates it. The proposal appropriately
 limits its retained-record statistics and does not claim to have established
 a current 45% failure rate or independently decoded every affected file.
 

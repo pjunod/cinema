@@ -355,9 +355,10 @@ fn device_video_supports(source: &LiveSourceFacts, caps: &DeviceCaps) -> bool {
 fn audio_limit_supports(source: &LiveSourceFacts, limit: &LiveAudioLimit) -> bool {
     source.audio_codec.as_deref().is_some_and(|codec| {
         normalized(&limit.codec) == normalized(codec)
+            && source.audio_sample_rate.is_some_and(|rate| rate > 0)
             && source
                 .audio_channels
-                .is_some_and(|channels| channels <= limit.max_channels)
+                .is_some_and(|channels| channels > 0 && channels <= limit.max_channels)
     })
 }
 
@@ -410,7 +411,12 @@ pub(crate) fn resolve_live_delivery(
         .audio_codec
         .as_deref()
         .ok_or_else(|| "source_probe_incomplete: source audio codec is unknown".to_owned())?;
-    let source_channels = source.audio_channels.unwrap_or(2);
+    // A probe can identify AC-4 before the first random-access frame supplies
+    // its layout. Zero means unknown, not a request for `-ac 0`.
+    let source_channels = source
+        .audio_channels
+        .filter(|channels| *channels > 0)
+        .unwrap_or(2);
 
     let caps = request.map(LivePlaybackRequest::validate).transpose()?;
     let compatibility = request.and_then(|request| request.compatibility.as_ref());
@@ -567,7 +573,7 @@ pub(crate) fn resolve_live_delivery(
     } else {
         LivePackaging::Mpegts
     };
-    let packaging = if let Some(request) = request {
+    let mut packaging = if let Some(request) = request {
         if let Some(packaging) =
             claimed_packaging(request, preferred_packaging, &video_codec, &audio_codec)
         {
@@ -604,6 +610,36 @@ pub(crate) fn resolve_live_delivery(
         preferred_packaging
     };
 
+    // With short live segments, delayed AC-3 packets can arrive after hlsenc
+    // writes the fMP4 init file. FFmpeg can exit successfully yet leave an
+    // unreadable stsd entry ("Cannot write moov atom before AC3 packets").
+    // A larger input probe does not fix that output-side race. Preserve video
+    // and encode audio, provided the player actually claims the AAC route.
+    if packaging == LivePackaging::Fmp4
+        && audio_action == LiveTrackAction::Copy
+        && audio_codec == "ac3"
+    {
+        if !available.audio_encode {
+            return Err(
+                "audio_conversion_unavailable: live AC-3 in fMP4 requires AAC conversion".into(),
+            );
+        }
+        packaging = request
+            .and_then(|request| {
+                claimed_packaging(request, preferred_packaging, &video_codec, "aac")
+            })
+            .ok_or_else(|| {
+                "client_route_unsupported: live AC-3 in fMP4 requires a claimed AAC route"
+                    .to_owned()
+            })?;
+        audio_action = LiveTrackAction::Encode;
+        audio_codec = "aac".to_owned();
+        reasons.push(reason(
+            "audio_muxer_incompatible",
+            "AC-3 can arrive after the live fMP4 initialization metadata is written, so audio is converted to AAC.",
+        ));
+    }
+
     let client_video_ceiling = request.and_then(|request| {
         request
             .video_limits
@@ -637,6 +673,9 @@ pub(crate) fn resolve_live_delivery(
             })
             .unwrap_or(2)
             .min(source_channels)
+            // Native AAC rejects immersive layouts such as AC-4's 7.1.4.
+            // Use at most 5.1 while respecting a smaller source/client limit.
+            .min(6)
     };
 
     if max_bitrate_bps.is_some() {
@@ -696,6 +735,7 @@ mod tests {
             }),
             hdr: Some("pq".into()),
             audio_codec: Some("ac3".into()),
+            audio_sample_rate: Some(48000),
             audio_channels: Some(6),
             ..LiveSourceFacts::default()
         }
@@ -739,9 +779,11 @@ mod tests {
 
     #[test]
     fn compatible_main10_copies_both_tracks_in_fmp4() {
+        let mut source = source();
+        source.audio_codec = Some("aac".into());
         let plan = resolve_live_delivery(
-            &source(),
-            Some(&request("ac3")),
+            &source,
+            Some(&request("aac")),
             &LiveQualityPolicy::default(),
             &LiveExecutionSupport {
                 video_encode: true,
@@ -821,11 +863,12 @@ mod tests {
     #[test]
     fn ceiling_never_upscales() {
         let mut lower = source();
+        lower.audio_codec = Some("aac".into());
         lower.width = Some(1280);
         lower.height = Some(720);
         let plan = resolve_live_delivery(
             &lower,
-            Some(&request("ac3")),
+            Some(&request("aac")),
             &LiveQualityPolicy {
                 max_height: Some(2160),
                 max_bitrate_bps: None,

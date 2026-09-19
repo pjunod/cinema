@@ -80,7 +80,7 @@ An unavailable advisory measurement is not a reason to reject a tune.
 ### 2.1 The screenshot's failure is reproduced on the deployed build
 
 At 15:26:35 EDT / 19:26:35 UTC on 2026-09-10, media1 build
-`v0.3.0-1996-g9a857b2e` attempted file **5310**, *Leave the World Behind*, at
+`v0.3.0-1996-g9a857b2e` attempted file **5310**, *reference film D*, at
 **6275.560 seconds**. The source is HEVC in Matroska with E-AC-3 audio. The
 recorded sequence was:
 
@@ -154,7 +154,7 @@ connection rather than more classification-only assertions.
 ### 2.3 A later probe mismatch is a second, unresolved observation
 
 At 19:28:14 UTC the same title was rejected with
-`vod_source_rescan_required`. A separate attempt on *Nosferatu*, file 70,
+`vod_source_rescan_required`. A separate attempt on *reference film H*, file 70,
 also reported a probe mismatch. The logs do not identify which probe fields
 differed or prove that either media file changed.
 

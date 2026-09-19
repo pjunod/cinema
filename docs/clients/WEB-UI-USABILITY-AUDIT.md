@@ -124,7 +124,7 @@ failure leaves a usable season browser and a clear message.
 
 ### U03 — Give film and episode pages a playback hierarchy
 
-**Observed:** Wicked's Resume and Start over actions shared space with
+**Observed:** reference film G's Resume and Start over actions shared space with
 Make a channel. Refresh artwork sat beside the title. Video/audio/subtitle
 inventories, HLS capability, file information, another pair of track
 selectors, analysis actions, and a raw conversion error filled the page.

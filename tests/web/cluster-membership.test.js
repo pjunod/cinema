@@ -17,8 +17,12 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const INDEX = path.join(__dirname, "../../crates/plurxd/src/web/index.html");
-const SHIPPED_UI = fs.readFileSync(INDEX, "utf8");
+const {shellSource} = require("./shell-source.js");
+// The shipped app is a tree now, so the string these assertions slice is
+// the app's body rows, joined in served order. See tests/web/shell-source.js.
+// These assertions read across all three halves of the shipped app — the
+// markup, the stylesheet and the body rows — so they get the whole of it.
+const SHIPPED_UI = shellSource().everything;
 
 // The model has a file boundary now, so it is required rather than sliced out
 // of the shell. Everything still declared inline — the templates, the fold DOM
@@ -4676,9 +4680,19 @@ test("the model is a file, and the shell actually mounts it", () => {
   // paid for once, so the boundary is pinned from both sides: the shell loads
   // the served file before its own inline script, and the call sites that read
   // the model name it.
-  const tag = SHIPPED_UI.indexOf('<script src="/assets/cluster-panel.js">');
-  assert.notEqual(tag, -1, "index.html does not load the served model");
-  assert.ok(tag < SHIPPED_UI.indexOf("\nfunction clusterPanel("));
+  // Both sides as *served positions*, not as offsets into a string that
+  // happens to put the markup first: in `everything` the shell always precedes
+  // the rows, so an offset comparison is true for every possible shell and
+  // proves nothing.
+  const {rows} = shellSource();
+  const order = [...rows.sidecars, ...rows.head, ...rows.body];
+  const model = order.indexOf("cluster-panel.js");
+  assert.notEqual(model, -1, "the shell does not load the served model");
+  const caller = order.findIndex((row) => row.endsWith("cluster.js"));
+  assert.ok(
+    model < caller,
+    `cluster-panel.js is served at ${model} but its caller at ${caller}`,
+  );
   assert.match(shippedSource("clusterOperationsRail"), /PlurxClusterPanel\.clusterOperationRows\(clenv\(\),/);
   assert.match(shippedSource("clusterDatabasePanel"), /PlurxClusterPanel\.clusterDatabaseRows\(clenv\(\),/);
   assert.match(shippedSource("clusterPanel"), /PlurxClusterPanel\.clusterStateView\(/);

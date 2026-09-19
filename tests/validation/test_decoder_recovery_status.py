@@ -69,7 +69,30 @@ HIQLITE = ROOT / "crates/plurx-core/src/store/hiqlite.rs"
 DV_CONVERSION = ROOT / "crates/plurx-core/src/store/sqlite/dv_conversion.rs"
 SQLITE_STORE = ROOT / "crates/plurx-core/src/store/sqlite/mod.rs"
 HTTP_SYSTEM = ROOT / "crates/plurxd/src/http/system.rs"
-WEB_INDEX = ROOT / "crates/plurxd/src/web/index.html"
+WEB = ROOT / "crates/plurxd/src/web"
+# The seven sidecars keep their own routes and are not part of the split shell.
+WEB_SIDECARS = frozenset({
+    "cluster-panel.js", "playback-policy.js", "playback-control.js", "reader.js",
+    "hls.min.js", "live-tv.js", "library-channels.js",
+})
+
+
+def web_body_script() -> str:
+    """The split shell's body rows, joined in served order.
+
+    This is what `crates/plurxd/src/web/index.html` used to be: the Developer
+    tab's cards are in `pages/settings-developer.js` and the save handlers they
+    post through are in `pages/settings-playback.js`, but the assertions below
+    include absences, and an absence checked against one file is not an absence.
+    See `docs/clients/WEB-SHELL-LAYOUT.md`.
+    """
+    _, _, body = (WEB / "index.html").read_text(encoding="utf-8").partition("</head>")
+    rows = re.findall(r'<script src="/assets/([^"?]+)"></script>', body)
+    return "".join(
+        (WEB / row).read_text(encoding="utf-8")
+        for row in rows
+        if row not in WEB_SIDECARS
+    )
 WEB_SETTINGS_TEST = ROOT / "tests/web/settings-sections.test.js"
 DAEMON_MAIN = ROOT / "crates/plurxd/src/main.rs"
 HTTP_HLS = ROOT / "crates/plurxd/src/http/hls.rs"
@@ -1177,7 +1200,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
         daemon = DAEMON_TRANSCODE.read_text(encoding="utf-8")
         system = HTTP_SYSTEM.read_text(encoding="utf-8")
         store = CORE_STORE.read_text(encoding="utf-8")
-        web = WEB_INDEX.read_text(encoding="utf-8")
+        web = web_body_script()
         main = DAEMON_MAIN.read_text(encoding="utf-8")
 
         self.assertIn(

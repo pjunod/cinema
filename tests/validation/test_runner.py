@@ -237,6 +237,10 @@ class CatalogCase(unittest.TestCase):
 
         for web_only_path in (
             "crates/plurxd/src/web/index.html",
+            # …and a row of the split shell, which the web.experience glob
+            # has to reach the same way it reaches the shell itself.
+            "crates/plurxd/src/web/router.js",
+            "crates/plurxd/src/web/player/transport.js",
             "tests/web/page-read-budget.test.js",
         ):
             with self.subTest(web_only_path=web_only_path):

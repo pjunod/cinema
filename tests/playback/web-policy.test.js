@@ -10,10 +10,14 @@ const inputContract = require("./player-input-contract.json");
 // which instant identifies a stall episode before it ever reaches
 // `recordStallEpisode`. Calling the policy helper directly cannot see that
 // wiring, so the counter regressions below run the shipped UI's own function.
-const SHIPPED_UI = fs.readFileSync(
-  path.join(__dirname, "../../crates/plurxd/src/web/index.html"),
-  "utf8",
-);
+const {shellSource} = require("../web/shell-source.js");
+// The app's body rows, joined in served order.
+const SHIPPED_SHELL = shellSource();
+const SHIPPED_UI = SHIPPED_SHELL.bodyScript;
+// The player's own DOM is in the shell's markup and its treatments are in
+// app.css; neither is in a body row.
+const SHIPPED_MARKUP = SHIPPED_SHELL.html;
+const SHIPPED_CSS = SHIPPED_SHELL.css;
 
 // Every function these tests borrow is declared at column zero in one inline
 // <script>, so the next top-level `function` is a reliable terminator and no
@@ -169,7 +173,7 @@ test("held-key blur commits while cancellation discards", () => {
 test("playback info exposes and remembers the shared playback-info levels", () => {
   for (const mode of ["mini", "standard", "details", "debug"]) {
     assert.match(
-      SHIPPED_UI,
+      SHIPPED_MARKUP,
       new RegExp(`data-stats-mode=["']${mode}["']`),
       `${mode} must remain selectable in the shipped player`,
     );
@@ -178,7 +182,7 @@ test("playback info exposes and remembers the shared playback-info levels", () =
   assert.match(SHIPPED_UI, /patchPlaybackInfoRows\(body,STATS_MODE,contractRows/);
   for (const tone of ["good", "warn", "bad", "muted"]) {
     assert.match(
-      SHIPPED_UI,
+      SHIPPED_CSS,
       new RegExp(`\\.statsov \\.stat-${tone}`),
       `${tone} playback diagnostics must have a visible text treatment`,
     );
@@ -5330,7 +5334,7 @@ test("every surface paints the badge from the same four answers", () => {
 });
 
 test("a session that lands on a different range repaints the badge", () => {
-  // The field bug: on a tone-mapped Dexter episode the chip read "DV P7 →
+  // The field bug: on a tone-mapped reference episode I the chip read "DV P7 →
   // HDR10" while the stats panel one line below read "Dynamic range: SDR".
   // Both surfaces call dynamicRangeBadge() with the same arguments — the
   // panel just repaints every second, and the chip was painted once at

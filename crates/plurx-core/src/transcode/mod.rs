@@ -111,7 +111,7 @@ pub const COPY_SEGMENT_SECONDS: u32 = 6;
 /// so MSE could hold two whole segments. That reasoning was arithmetic, and
 /// the arithmetic missed something: at 58 Mb/s a 48 MB ceiling arrives 6.6
 /// seconds in, so past the six-second floor the segmenter had **0.6 seconds**
-/// — less than one GOP — to find a clean keyframe in. On *Wicked* (2024),
+/// — less than one GOP — to find a clean keyframe in. On *reference film G* (2024),
 /// whose clean points come every 2.3 s, that produced 5.9 dropped frames a
 /// minute against ffmpeg's own muxer at 8.0: a segmenter barely beating the
 /// thing it replaced, on a source full of the cut points it was looking for.
@@ -187,7 +187,7 @@ pub const COPY_SEGMENT_MAX_SECS: u32 = 15;
 /// The first time it has to wait a whole publication out, the picture stops
 /// for one segment's worth of *production* time — once per film, always at
 /// the same second, because where the buffer first runs dry is a property of
-/// the film's early bitrate, not of timing. Measured on *Wicked* in Chrome:
+/// the film's early bitrate, not of timing. Measured on *reference film G* in Chrome:
 /// an 8.8 s freeze at 9.2 s in under a 15 s ceiling, a 5.5 s freeze at 6.0 s
 /// under a 6 s one — the freeze moved with the ceiling and scaled with it,
 /// which is the experiment that showed shrinking segments approaches this
@@ -210,13 +210,13 @@ pub const COPY_SEGMENT_MAX_SECS: u32 = 15;
 /// the paced rate before a viewer sees frame one. A duration gate promises
 /// the cushion in the unit the freeze is measured in; its realized size is
 /// this value up to this value plus one segment, whatever the title cuts.
-/// (*Tron*, the file that exposed the slow start at 21.0 s to first frame,
+/// (*reference film F*, the file that exposed the slow start at 21.0 s to first frame,
 /// turned out to cut clean 7.5–8.5 s segments — the overlay's own
 /// largest-appended figure said so — so its cushion was ~17 s under either
 /// unit, and its 21 s decomposes as ~8 s of cushion at the flat 2× pacing
 /// below plus a cold NFS open and probe of a Dolby Vision MKV plus fetch
 /// and decode; a warm second play started visibly faster with nothing
-/// changed. The count was still the wrong unit — it just wasn't *Tron's*
+/// changed. The count was still the wrong unit — it just wasn't *reference film F's*
 /// biggest cost.)
 ///
 /// Why 12 s clears the worst gap: the gap is one segment's production time,

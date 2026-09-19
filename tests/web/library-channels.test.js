@@ -5,8 +5,8 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const {test} = require("node:test");
 const LibraryChannelCore = require("../../crates/plurxd/src/web/library-channels.js");
-const shell = fs.readFileSync(require("node:path").join(__dirname,
-  "../../crates/plurxd/src/web/index.html"), "utf8");
+const {shellSource} = require("./shell-source.js");
+const shell = shellSource().bodyScript;
 const source = shell.slice(shell.indexOf("function libraryChannelDraftKey("),
   shell.indexOf("async function libraryChannelTune("));
 

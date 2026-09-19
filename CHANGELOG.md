@@ -2132,7 +2132,7 @@ bump may break compatibility and a **patch** bump never does.
   ffmpeg's own muxer wrote — `styp sidx sidx moof mdat`, one `trun` per
   track, and the same tracks (chapters are no longer muxed in as a text
   track, which Safari refused outright) — so the only thing a browser sees
-  differently is where the boundaries fall. Measured on *Wicked* (2024), a
+  differently is where the boundaries fall. Measured on *reference film G* (2024), a
   4K remux at 58 Mb/s: 1.9 dropped frames a minute against 8.0 for ffmpeg's
   own muxer, a 4.2x improvement. `scripts/gop-census --sweep <file>` reports
   the same figure for any file in your library.
@@ -2263,7 +2263,7 @@ bump may break compatibility and a **patch** bump never does.
   a fifth of the budget spent on video nobody would watch again.
 - **A film froze for several seconds, at the same second, every time you
   played it — playback now starts behind a cushion instead of at the live
-  edge.** *Wicked* in Chrome stalled 8.8 s at 9.2 s in; Safari saw the same
+  edge.** *reference film G* in Chrome stalled 8.8 s at 9.2 s in; Safari saw the same
   event as a 597 ms hiccup. The network was delivering at 137 Mb/s and the
   buffer was healthy either side of it, which is why it survived a day of
   looking at buffer numbers.
@@ -2309,7 +2309,7 @@ bump may break compatibility and a **patch** bump never does.
   the 15-second duration ceiling to bind turns three segments into a
   32-second cushion, so the gate is a duration now and promises twelve
   seconds of media whatever the title's segments happen to be. (The film
-  that exposed the 21-second first frame, *Tron*, turned out to cut clean
+  that exposed the 21-second first frame, *reference film F*, turned out to cut clean
   7.5–8.5 s segments — its cushion was ~17 s under either unit, and most of
   its 21 s was the pacing below plus a cold NFS open of a Dolby Vision MKV;
   a warm replay started visibly faster with nothing changed.) And producing

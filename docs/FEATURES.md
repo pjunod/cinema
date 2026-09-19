@@ -530,6 +530,15 @@ recordings library.
   live playlist. Six segments is the whole window: the scratch a live session
   can occupy is bounded by construction rather than by a reaper racing an
   encoder, and the segments behind the window are deleted as it moves.
+- **Live audio must fit the encoder and muxer.** AAC conversion keeps at most
+  six channels (5.1), bounded further by the source and client. Unknown or zero
+  source channels use stereo, or mono when the client requires it. Audio copy
+  requires a positive observed sample rate and channel count and gets a
+  2 MiB / 2 s FFmpeg probe; conversion retains the 512 KiB / 1 s probe.
+  AC-3 in live fMP4 is converted to AAC because late audio can otherwise leave
+  unreadable initialization metadata, while compatible video stays copied.
+  See [the ATSC audio investigation](streaming/ATSC3-AUDIO-STARTUP-RCA-AND-FIX.md)
+  for the capture evidence and the separate AC-4 random-access limitation.
 - **The session is a capability, not an account.** Starting a channel returns
   one opaque capability. The playlist and its segments are fetched with that
   capability alone and carry no account bearer, so a URL in a player's network

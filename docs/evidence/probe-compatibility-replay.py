@@ -41,7 +41,7 @@ DRIVER = r'''
 fn main() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let [stored_path, held_path] = arguments.as_slice() else {
-        eprintln!("usage: wicked-probe-replay <stored probe.json> <held probe.json>");
+        eprintln!("usage: probe-replay <stored probe.json> <held probe.json>");
         std::process::exit(2);
     };
     let stored = std::fs::read_to_string(stored_path).expect("stored probe");
@@ -206,7 +206,7 @@ def slice_of(text: str) -> str:
 def project(root: Path, deployed: str, shipped: str) -> Path:
     (root / "src").mkdir(parents=True, exist_ok=True)
     (root / "Cargo.toml").write_text(
-        '[package]\nname="wicked-probe-replay"\nversion="0.0.0"\nedition="2024"\n'
+        '[package]\nname="probe-replay"\nversion="0.0.0"\nedition="2024"\n'
         '[dependencies]\nserde_json="1"\nserde={version="1",features=["derive"]}\n'
     )
     (root / "src/main.rs").write_text(
@@ -241,7 +241,7 @@ def main() -> None:
     print(f"Deployed: {DEPLOYED_REVISION} (comparator SHA-256 {DEPLOYED_DIGEST})")
     print(f"Shipped:  {SHIPPED_SOURCE.relative_to(ROOT)} in this working tree", flush=True)
 
-    with tempfile.TemporaryDirectory(prefix="wicked-probe-replay-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="probe-replay-") as tmp:
         manifest = project(Path(tmp), deployed, shipped)
         if not options.real_pair:
             subprocess.run(

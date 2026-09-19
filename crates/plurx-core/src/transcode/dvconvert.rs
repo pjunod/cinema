@@ -791,7 +791,7 @@ mod tests {
         assert_eq!(
             report.enhancement_layer,
             EnhancementLayer::Full,
-            "the captured Nosferatu RPU declares a full enhancement layer"
+            "the captured reference film H RPU declares a full enhancement layer"
         );
         assert!(
             report.enhancement_layer.reason().contains("is lost"),

@@ -1,7 +1,12 @@
 "use strict";
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const source = fs.readFileSync('crates/plurxd/src/web/index.html', 'utf8');
+const {shellSource} = require("./shell-source.js");
+// The shipped app twice over: its script, for the painters these features
+// would need, and its CSS, for the class names they would style. Neither
+// half may come back.
+const shell = shellSource();
+const source = shell.bodyScript + shell.css;
 function declaration(name) {
   const start = source.indexOf(`function ${name}(`);
   assert.notEqual(start, -1);

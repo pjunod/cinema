@@ -302,7 +302,7 @@ class EvidenceWorkflowCase(unittest.TestCase):
     def test_library_channel_collection_urls_match_router_and_fail_truthfully(self) -> None:
         http = self.read("crates/plurxd/src/http/mod.rs")
         routes = self.read("crates/plurxd/src/http/library_channels.rs")
-        web = self.read("crates/plurxd/src/web/index.html")
+        web = self.read("crates/plurxd/src/web/pages/library-channels-page.js")
         web_errors = self.read("crates/plurxd/src/web/library-channels.js")
         apple = self.read("clients/apple/Sources/PlurxAPI.swift")
         android = self.read(

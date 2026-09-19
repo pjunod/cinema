@@ -8,10 +8,9 @@ const TEST_CAPTURE_OWNER=Object.freeze({lifecycleId:"test-player",attachmentGene
 const captureSnapshot=(value,intentGeneration=0,owner=TEST_CAPTURE_OWNER)=>
   control.capture(value,intentGeneration,owner);
 
-const SHIPPED_UI = fs.readFileSync(
-  path.join(__dirname, "../../crates/plurxd/src/web/index.html"),
-  "utf8",
-);
+const {shellSource} = require("../web/shell-source.js");
+// The app's body rows, joined in served order.
+const SHIPPED_UI = shellSource().bodyScript;
 const DECLARATIONS = ["\nfunction ", "\nasync function "];
 const TERMINATORS = DECLARATIONS.concat(["\nconst ", "\nlet ", "\nwindow.", "\ndocument.", "\nsetInterval("]);
 function shippedSource(name) {

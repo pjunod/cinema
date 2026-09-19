@@ -1,6 +1,7 @@
 'use strict';
 const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
-const html=fs.readFileSync('crates/plurxd/src/web/index.html','utf8');
+const {shellSource} = require("./shell-source.js");
+const html=shellSource().bodyScript;
 function source(name){let at=html.indexOf(`async function ${name}(`);if(at<0)at=html.indexOf(`function ${name}(`);assert.ok(at>=0);return html.slice(at,html.indexOf('\n}',at)+2);}
 test('search settings send a boolean object and leave the dialog open on failure',async()=>{
  let closed=false,request,error={textContent:''};const dialog={isConnected:true,querySelector:id=>id==='#semantic-enabled'?{checked:false}:error,close:()=>closed=true};

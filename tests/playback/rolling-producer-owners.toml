@@ -1919,15 +1919,18 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # and aborts and joins its retained task on expiry. No new detached producer.
 # +2 for the segment-delivery telemetry regression's enclosing timeout and
 # 10 ms Store-event poll, both test-only and reviewed under `all-async-sleeps`.
-# 789 -> 793 for the subtitle segment publication wait. Two are shipped and
-# bounded by construction: the `Instant::now()` + `SUBTITLE_SEGMENT_PUBLICATION_WAIT`
+# +4: ATSC audio replay tests bound helper media commands, live publication,
+# and producer completion, and poll scratch every 25 ms within that bound.
+# These test-only waits own no production recovery or replacement policy.
+# +4 for the subtitle segment publication wait. Two are shipped and bounded by
+# construction: the `Instant::now()` + `SUBTITLE_SEGMENT_PUBLICATION_WAIT`
 # give-up point and the `SUBTITLE_SEGMENT_PUBLICATION_RESERVE` subtraction that
 # keeps the rest of the response lifecycle its own budget — the poll loop reads
 # under a `timeout_at` and cannot outlive either. Two are test-only: the settle
 # sleep and the elapsed-time reading in the two publication-wait regressions.
 # No new detached producer, and nothing here waits on work it did not find
 # already running.
-expected_occurrences = 793
+expected_occurrences = 797
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2033,7 +2036,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # +1 for `ffmpeg_has_filters`, a test-only capability query awaited through
 # `.output()` before the encoded-VOD regression proceeds. It is kill-on-drop,
 # captures bounded FFmpeg help output, and cannot outlive its caller.
-expected_occurrences = 118
+# +3: ATSC audio replay tests generate delayed AC-3, probe the resulting HLS,
+# and decode both tracks. All use media_output, which awaits completion under
+# a 30-second timeout with kill-on-drop; no new production child owner.
+expected_occurrences = 121
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -2237,12 +2243,19 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # is awaited within a 30-second timeout and has kill-on-drop enabled.
 # +1 for the awaited `.output()` in the test-only `ffmpeg_has_filters` probe
 # inventoried under `process-command-construction` above.
-# 304 -> 310 for the subtitle reliability arc's `.status()` reads: four in the
-# new segment regressions (`response.status()` on the cold, waited, refused and
+# +1: test-only ATSC media_output awaits Command::output under a 30-second
+# timeout with kill-on-drop. The production live child retains its existing
+# spawn_live_ffmpeg owner and is awaited with stdin closed after publication.
+# +2 with the web-shell split: two `.status()` reads in the `mod.rs` route
+# test, one over every `web::WEB_ASSETS` row and one on the unknown-asset 404.
+# Both are `Response::status()` on an in-process `oneshot`; nothing is
+# launched and nothing is owned.
+# +6 for the subtitle reliability arc's `.status()` reads: four in the new
+# segment regressions (`response.status()` on the cold, waited, refused and
 # default-off answers) and two in the HDR burn-guard HTTP rows. Every one is a
 # read of an in-process `axum` response; none constructs a command, a child, a
 # task or a timer, and the segment handler's own ownership is unchanged.
-expected_occurrences = 310
+expected_occurrences = 313
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -2413,7 +2426,10 @@ pattern = "kill_on_drop\\s*\\("
 # commands. Drop protects cancellation; successful output awaits child exit.
 # +1 for `ffmpeg_has_filters`: cancellation of the test-only capability query
 # drops and terminates its child instead of leaking FFmpeg into later tests.
-expected_occurrences = 73
+# +1: ATSC replay media_output sets kill-on-drop before starting its bounded
+# fixture generator, HLS probe or decode command. Timeout cannot retain a
+# running helper; production child ownership is unchanged.
+expected_occurrences = 74
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

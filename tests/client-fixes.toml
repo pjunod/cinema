@@ -6,7 +6,7 @@ enforce_after = "e8a910f"
 [[fixes]]
 id = "web.frame-callback-registration-lifecycle"
 commits = ["790ffc9da", "4c8830b2c", "b217c615e", "85b177a1b", "3d22d5ee2"]
-source = "crates/plurxd/src/web/index.html"
+source = "crates/plurxd/src/web/player/decode-tiers.js"
 source_anchor = "if(id!=null||v.readyState<2||v.seeking) return;"
 test = "tests/playback/web-control.test.js"
 test_anchor = "loadeddata during the initial seek must not strand a frame request"
@@ -86,7 +86,7 @@ test_anchor = "testColdCommandsComposeIntoTheActualSessionRequestAndRejectStaleD
 [[fixes]]
 id = "web.bounded-preparation-and-retained-observers"
 commits = ["0a70d6fb"]
-source = "crates/plurxd/src/web/index.html"
+source = "crates/plurxd/src/web/player/stall-diagnosis.js"
 source_anchor = "function playbackOwnsAttachedMedia(p)"
 test = "tests/playback/web-control.test.js"
 test_anchor = "HLS callbacks cannot replace the original preparation deadline"
@@ -118,7 +118,7 @@ test_anchor = "seekAfterUnpublishedAudioOffsetOrBurnCarriesTheWholeMediaRecipe"
 [[fixes]]
 id = "web.composed-playback-and-attachment-intent"
 commits = ["ca0913c1"]
-source = "crates/plurxd/src/web/index.html"
+source = "crates/plurxd/src/web/player/decode-margin.js"
 source_anchor = "function beginPlaybackMediaAttachment(p)"
 test = "tests/playback/web-control.test.js"
 test_anchor = "a seek during manifest loading cannot suppress playback startup"
@@ -1155,7 +1155,7 @@ test_anchor = "testServerSettingsSnakeCaseContractDecodesWithoutUnrelatedSecrets
 # session only when that exact generation still owns it.
 id = "web.logout-captured-session-generation"
 commits = ["b1335e32"]
-source = "crates/plurxd/src/web/index.html"
+source = "crates/plurxd/src/web/core/auth.js"
 source_anchor = 'async function logout({revoke=true,notice=""}={})'
 test = "tests/web/page-read-budget.test.js"
 test_anchor = "logout revokes the captured bearer and cannot clear a newer login"
@@ -1928,7 +1928,7 @@ test_anchor = "no client's guide cell branches on airing — the defect was on a
 [[fixes]]
 id = "web.library-channel-create-draft-and-preview-fences"
 commits = ["c1d80a47"]
-source = "crates/plurxd/src/web/index.html"
+source = "crates/plurxd/src/web/pages/library-channels-page.js"
 source_anchor = "function libraryChannelDraftKey("
 test = "tests/web/library-channels.test.js"
 test_anchor = "Create never resumes an old edit ID, including legacy stored drafts"
@@ -1937,7 +1937,7 @@ test_anchor = "Create never resumes an old edit ID, including legacy stored draf
 [[fixes]]
 id = "clients.subject-save-attempt-survives-late-preview"
 commits = ["3cd9b6e5"]
-source = "crates/plurxd/src/web/index.html"
+source = "crates/plurxd/src/web/pages/library-channels-page.js"
 source_anchor = "const body=draft.saveBody||"
 test = "tests/web/library-channels.test.js"
 test_anchor = "a preview seed arriving after a lost save cannot change the retry body"
@@ -1965,7 +1965,7 @@ test_anchor = "func testRecordingsUseThePagedServerEnvelope"
 # are deliberately not claimed as unit coverage here.
 id = "web.dvr-review-keeps-recording-page-state"
 commits = ["c74310a2"]
-source = "crates/plurxd/src/web/index.html"
+source = "crates/plurxd/src/web/pages/recordings.js"
 source_anchor = "function paintRecordingsPage(){"
 test = "tests/web/dvr-visibility.test.js"
 test_anchor = "a failed Saved refresh keeps the last successful page and marks it stale"
@@ -1991,7 +1991,7 @@ test_anchor = "def test_android_counter_the_target_already_ships_fails_against_t
 # Do not interpret this anchor as unit coverage of every visual correction.
 id = "web.usability-review-complete-channel-name"
 commits = ["28bb4723"]
-source = "crates/plurxd/src/web/index.html"
+source = "crates/plurxd/src/web/pages/library-channels-page.js"
 source_anchor = "function lcStep(step){"
 test = "tests/web/library-channels.test.js"
 test_anchor = "channel naming waits for the complete subject and preserves a chosen name"
@@ -2010,7 +2010,7 @@ test_anchor = "tuning and layout changes do not force television fullscreen"
 # layout/focus evidence is compilation plus the fixture captures, not unit coverage.
 id = "clients.playback-info-picture-provenance"
 commits = ["104c8d0c", "daf9e789"]
-source = "crates/plurxd/src/web/index.html"
+source = "crates/plurxd/src/web/player/stats.js"
 source_anchor = "function playbackInfoOverview("
 test = "tests/web/player-dom.test.js"
 test_anchor = "const missingPicture = info.playbackInfoOverview({"
@@ -2114,3 +2114,11 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "private func invalidateResumeAttempt(outcome: String)"
 test = "clients/apple/Tests/PlayerResumeTests.swift"
 test_anchor = "func testOneSecondAdmissionIsOneShotAndFinalPauseFencesTheRepair()"
+
+[[fixes]]
+id = "apple.cinematic-tvos-item-detail"
+commits = ["ab8541b5"]
+source = "clients/apple/Sources/DetailView.swift"
+source_anchor = "static func presentation(kind: String, compact: Bool) -> Presentation"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testTVPlayableDetailUsesOneCinematicViewportAndUsefulMetadata()"
