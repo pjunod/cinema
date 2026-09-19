@@ -384,7 +384,12 @@ and delivers it. Full decision logic is [ARCHITECTURE.md](ARCHITECTURE.md) §3.
   only when the audio isn't the preferred language), *Always*, or *Off*.
   English/English/Auto out of the box. The same rule flags default tracks at
   `/decision` and picks the transcode burn-in, so every path agrees; 2- and
-  3-letter language tags match each other (`de` = `ger` = `deu`).
+  3-letter language tags match each other (`de` = `ger` = `deu`). A track only
+  becomes the *default* if it can be delivered as one: text always, PGS while
+  the overlay is enabled, a forced bitmap track only when the picture is
+  already SDR. A candidate that fails is skipped and the rule keeps looking.
+  Without that filter a `default`-flagged PGS track on an HDR remux was chosen
+  for the viewer and then refused as an SDR burn nobody had asked for.
 - **Selection-aware preflight:** `/decision` accepts a request-local audio index
   and subtitle index (`-1` means Off). The selected audio codec participates in
   direct/remux/transcode compatibility, and the response echoes the effective
@@ -404,12 +409,16 @@ and delivers it. Full decision logic is [ARCHITECTURE.md](ARCHITECTURE.md) §3.
   sources. The menu also shows the container's own declared audio/video
   start-time delta as a diagnostic (declared offsets are already honored and
   never double-applied).
-- **Subtitles:** text tracks (SRT/ASS) extracted to WebVTT on the fly and shown
-  as a selectable native track for direct/remux. Bitmap subs (PGS/VobSub) are
-  a picture rather than text, so there is nothing to hand a `<track>` — picking
-  one restarts the stream as a transcode with the subtitle drawn into the
-  frames. The menu says `burned in` on those, because that restart is a cost
-  worth knowing about before you choose between two English tracks.
+- **Subtitles:** text tracks are extracted to WebVTT on the fly. SRT/SubRip and
+  WebVTT become a selectable native track; ASS/SSA and `mov_text` are served
+  only as a sidecar, never as a native rendition, because converting them to
+  WebVTT while slicing segments would discard the positioning and typography
+  the release was authored with — picking one in a session burns it instead.
+  Bitmap subs (PGS/VobSub) are a picture rather than text, so there is nothing
+  to hand a `<track>` — picking one restarts the stream as a transcode with the
+  subtitle drawn into the frames. The menu says `burned in` on those, because
+  that restart is a cost worth knowing about before you choose between two
+  English tracks.
 - **Copy-video segments are cut where a player loses nothing:** on an HEVC or
   H.264 copy session, plurx does the segmenting itself and places a boundary
   only in front of a keyframe with no leading picture to discard — every

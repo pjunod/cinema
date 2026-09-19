@@ -2221,6 +2221,66 @@ mod tests {
         }
     }
 
+    /// The midpoint rule declines a window because the whole-track warm reads
+    /// the same bytes and publishes the authoritative answer instead. That
+    /// reason is about the warm being alive: once it has failed there is
+    /// nothing left to be redundant with, and declining meant the back half
+    /// of the film had no subtitles for good.
+    ///
+    /// Driven through `warm_vtt_window_with`, which is where the rule is
+    /// actually consulted — the HTTP boundary only forwards the anchor.
+    #[tokio::test]
+    async fn a_failed_whole_track_lets_a_window_past_the_midpoint_start() {
+        let dir = tempfile::tempdir().expect("cache dir");
+        let mut file = media_file(dir.path().join("past-midpoint.mkv"));
+        // An hour, so the midpoint is well clear of the window span below.
+        file.duration_ms = Some(3_600_000);
+        let session = &format!("past-midpoint-{}", uuid::Uuid::new_v4());
+        let anchor = 3_000; // past 1,800 s
+        let window = 200;
+
+        let never = |_tmp: PathBuf, _f: MediaFile, _i: i64, _a: i64, _w: i64| async move {
+            std::future::pending::<()>().await;
+            Ok(())
+        };
+
+        assert!(
+            !warm_vtt_window_with(session, None, dir.path(), &file, 0, anchor, window, never).await,
+            "a healthy whole-track warm keeps the midpoint rule"
+        );
+        assert_eq!(
+            peak_window_flights_for_test(session),
+            0,
+            "and starts nothing at all"
+        );
+
+        remember_whole_track_failure_for_test(
+            dir.path(),
+            &file,
+            0,
+            "the source could not be read",
+            Duration::from_secs(90),
+        )
+        .await;
+
+        assert!(
+            warm_vtt_window_with(session, None, dir.path(), &file, 0, anchor, window, never).await,
+            "a dead whole-track warm is not a reason to leave the second half blank"
+        );
+        // The flight is owned the moment `warm_vtt_window_with` returns true;
+        // the producer itself starts one poll later, which is what this yield
+        // is for. The count is the contract — one per playback, never two.
+        tokio::task::yield_now().await;
+        assert_eq!(
+            peak_window_flights_for_test(session),
+            1,
+            "and it is still one flight per playback"
+        );
+
+        release_session_window(session).await;
+        forget_failure(&vtt_path(dir.path(), &file, 0)).await;
+    }
+
     #[test]
     fn cache_key_changes_with_source_identity_and_track() {
         let first = vtt_name(42, 2, 1_000, 200);

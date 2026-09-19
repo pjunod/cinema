@@ -1941,8 +1941,14 @@ async fn create_with_purpose(
         validate_hevc_copy_transport(&state, source, caps, &request).await?;
     }
     let height = resolved.height;
-    if burn_would_discard_this_session_hdr(&state, source.as_ref(), &request, hdr10_requested, height)
-        .await
+    if burn_would_discard_this_session_hdr(
+        &state,
+        source.as_ref(),
+        &request,
+        hdr10_requested,
+        height,
+    )
+    .await
     {
         return Err(ApiError::Unprocessable(serde_json::json!({
             "code": "hdr_subtitle_burn_refused",
@@ -11302,7 +11308,9 @@ async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSource + ?Sized
                 // Developer tab reports what has been observed and does not
                 // gate the switch on it.
                 if state.subtitle_not_ready_503().await
-                    && source.whole_track_state(&state.subs_dir, &file, index).await
+                    && source
+                        .whole_track_state(&state.subs_dir, &file, index)
+                        .await
                         == crate::subtitles::SidecarState::Failed
                 {
                     let retry_after =
@@ -18166,13 +18174,19 @@ mod tests {
         #[tokio::test]
         async fn a_subtitle_segment_waits_out_a_live_window_and_no_longer() {
             let dir = crate::test_tempdir().expect("session directory");
-            let (fixture, file) = cold_windowed_fixture(dir.path(), "subtitle-publication-wait").await;
+            let (fixture, _file) =
+                cold_windowed_fixture(dir.path(), "subtitle-publication-wait").await;
             let source = Arc::new(WindowFixtureSubtitleSource::counting());
 
             // First request: nothing is live yet, so it answers immediately and
             // leaves a flight behind it.
-            let cold = subtitle_segment(&fixture.state, "subtitle-publication-wait", 1, source.as_ref())
-                .await;
+            let cold = subtitle_segment(
+                &fixture.state,
+                "subtitle-publication-wait",
+                1,
+                source.as_ref(),
+            )
+            .await;
             assert_eq!(cold.status(), StatusCode::OK);
             assert_eq!(
                 cold.into_body()
@@ -18232,17 +18246,25 @@ mod tests {
                 cold_windowed_fixture(dir.path(), "subtitle-publication-timeout").await;
             let source = Arc::new(WindowFixtureSubtitleSource::counting());
 
-            let cold =
-                subtitle_segment(&fixture.state, "subtitle-publication-timeout", 1, source.as_ref())
-                    .await;
+            let cold = subtitle_segment(
+                &fixture.state,
+                "subtitle-publication-timeout",
+                1,
+                source.as_ref(),
+            )
+            .await;
             assert_eq!(cold.status(), StatusCode::OK);
             producer_started(source.as_ref()).await;
 
             // The producer stays parked for the whole of this request.
             let began = std::time::Instant::now();
-            let response =
-                subtitle_segment(&fixture.state, "subtitle-publication-timeout", 1, source.as_ref())
-                    .await;
+            let response = subtitle_segment(
+                &fixture.state,
+                "subtitle-publication-timeout",
+                1,
+                source.as_ref(),
+            )
+            .await;
             let waited = began.elapsed();
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(
@@ -18320,76 +18342,6 @@ mod tests {
             assert!(
                 (1..=90).contains(&retry_after),
                 "Retry-After follows the memo's own remaining time, got {retry_after}"
-            );
-        }
-
-        /// The midpoint rule declines a window because the whole-track warm reads
-        /// the same bytes and publishes the authoritative answer instead. When
-        /// that warm has failed there is nothing left to be redundant with, and
-        /// declining means the back half of the film never gets subtitles at all.
-        #[tokio::test]
-        async fn a_failed_whole_track_lets_a_window_past_the_midpoint_start() {
-            let dir = crate::test_tempdir().expect("session directory");
-            let (fixture, file) = cold_windowed_fixture(dir.path(), "subtitle-past-midpoint").await;
-            let source = Arc::new(WindowFixtureSubtitleSource::counting());
-            let generation = fixture.begin_control("subtitle-past-midpoint").await;
-            let client = control_client();
-
-            // Past the fixture film's midpoint, where a window is normally worth
-            // nothing: it would read what the whole track is already reading.
-            let past_midpoint = SEGMENTS - 1;
-            settle_on(
-                &fixture,
-                "subtitle-past-midpoint",
-                &generation,
-                &client,
-                1,
-                past_midpoint * SEGMENT_SECONDS,
-            )
-            .await
-            .expect("accepted exchange");
-
-            let declined = subtitle_segment(
-                &fixture.state,
-                "subtitle-past-midpoint",
-                past_midpoint,
-                source.as_ref(),
-            )
-            .await;
-            assert_eq!(declined.status(), StatusCode::OK);
-            assert_eq!(
-                source.window_runs(),
-                0,
-                "a healthy whole-track warm keeps the midpoint rule"
-            );
-
-            crate::subtitles::remember_whole_track_failure_for_test(
-                &fixture.state.subs_dir,
-                &file,
-                0,
-                "the source could not be read",
-                Duration::from_secs(90),
-            )
-            .await;
-
-            let allowed = subtitle_segment(
-                &fixture.state,
-                "subtitle-past-midpoint",
-                past_midpoint,
-                source.as_ref(),
-            )
-            .await;
-            assert_eq!(allowed.status(), StatusCode::OK);
-            producer_started(source.as_ref()).await;
-            assert_eq!(
-                source.window_runs(),
-                1,
-                "a dead whole-track warm is not a reason to leave the second half blank"
-            );
-            assert_eq!(
-                crate::subtitles::peak_window_flights_for_test("subtitle-past-midpoint"),
-                1,
-                "and it is still one flight per playback"
             );
         }
     }
@@ -27518,13 +27470,12 @@ mod tests {
         };
         let transcode = crate::transcode::SessionKind::Transcode { height: 2160 };
 
-        let verdict = |kind: &crate::transcode::SessionKind,
-                       file: &MediaFile,
-                       base_grade: OutputGrade| {
-            let (method, preserve, _) = session_delivery_shape(kind);
-            let range = delivered_dynamic_range(file, method, preserve, base_grade);
-            (range, burn_would_discard_hdr(range, true))
-        };
+        let verdict =
+            |kind: &crate::transcode::SessionKind, file: &MediaFile, base_grade: OutputGrade| {
+                let (method, preserve, _) = session_delivery_shape(kind);
+                let range = delivered_dynamic_range(file, method, preserve, base_grade);
+                (range, burn_would_discard_hdr(range, true))
+            };
 
         for hdr in ["dolby_vision", "hdr10", "hlg"] {
             file.hdr = Some(hdr.into());

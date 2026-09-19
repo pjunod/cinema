@@ -13364,13 +13364,7 @@ impl TranscodeManager {
         base_is_hdr: bool,
     ) -> Tracks {
         let prefs = self.lang_prefs().await;
-        Self::select_tracks_with_prefs(
-            file,
-            audio_override,
-            subtitle_override,
-            &prefs,
-            base_is_hdr,
-        )
+        Self::select_tracks_with_prefs(file, audio_override, subtitle_override, &prefs, base_is_hdr)
     }
 
     /// `base_is_hdr` is whether the session this request would build delivers
@@ -13458,7 +13452,9 @@ impl TranscodeManager {
         &self,
         file: &plurx_core::domain::MediaFile,
     ) -> Option<i64> {
-        self.select_tracks(file, None, None, false).await.audio_index
+        self.select_tracks(file, None, None, false)
+            .await
+            .audio_index
     }
 
     /// Whether this file needs RPU-driven reshaping rather than the ordinary

@@ -663,6 +663,11 @@ pub struct DecisionSelection {
     /// The existing HDR guard refuses that burn instead of silently replacing
     /// HDR/Dolby Vision with SDR. False when no burn is needed.
     pub subtitle_burn_in_blocked_by_hdr: bool,
+    /// How this selection's cues reach the viewer: `native`, `overlay`,
+    /// `sidecar` or `burn`. See `subtitle_route`. Absent when nothing is
+    /// selected; additive, so older clients ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtitle_route: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -854,6 +859,56 @@ fn subtitle_requires_burn_in(
         .is_some_and(|track| {
             is_bitmap_subtitle(&track.codec) && !(overlay_enabled && is_pgs_subtitle(&track.codec))
         })
+}
+
+/// How this selected subtitle's cues reach the viewer.
+///
+/// One classifier, on the wire, because until now every client derived this
+/// for itself from `text`, `native` and `overlay` — and they derived it
+/// differently. The web client burns on `text === false`, so ASS/SSA are
+/// handed to a `<track>`; Android burns on `!isNativeHls`, so the same file
+/// re-encodes. Two clients, one file, two answers, and neither of them is
+/// the server's.
+///
+/// The four values, in the order they are decided:
+///
+/// - `overlay` — a PGS track while this server is serving the `pgs-v1`
+///   application overlay. The client draws the bitmaps; the video is
+///   untouched.
+/// - `native` — a codec that survives WebVTT conversion, so the server can
+///   publish it as an HLS rendition and the player renders text the server
+///   never drew.
+/// - `sidecar` — text the server can extract but cannot publish as a
+///   rendition: ASS/SSA and `mov_text`, whose authored positioning and
+///   typefaces do not survive the conversion. `GET /files/{id}/subs/{i}.vtt`
+///   is the route, and it is a *manual* pick only — see
+///   `plurx_core::tracks::deliverable_as_default`.
+/// - `burn` — nothing else is left. The server draws the track into the
+///   picture, which costs an encode and, on an HDR delivery, the grade.
+///
+/// This says how the cues are produced, not which transport carries them: a
+/// `native` track is an HLS rendition on a session and the container's own
+/// text track on direct play, and which of those applies is still the
+/// client's business. Additive; older clients ignore it.
+fn subtitle_route(
+    file: &MediaFile,
+    selected: Option<i64>,
+    overlay_enabled: bool,
+) -> Option<&'static str> {
+    let track = selected.and_then(|index| {
+        file.subtitle_streams
+            .iter()
+            .find(|track| track.index == index)
+    })?;
+    Some(if overlay_enabled && is_pgs_subtitle(&track.codec) {
+        "overlay"
+    } else if is_native_text_subtitle(&track.codec) {
+        "native"
+    } else if !is_bitmap_subtitle(&track.codec) {
+        "sidecar"
+    } else {
+        "burn"
+    })
 }
 
 /// The audio track a raw direct play actually delivers: the container's own
@@ -2168,6 +2223,7 @@ pub async fn decision(
             subtitle_index: selected_subtitle,
             subtitle_requires_burn_in: selected_subtitle_requires_burn,
             subtitle_burn_in_blocked_by_hdr,
+            subtitle_route: subtitle_route(&file, selected_subtitle, pgs_overlay),
         }),
         markers,
         audio_offset_ms: 0,
@@ -5352,12 +5408,86 @@ mod tests {
         );
     }
 
+    /// One classifier for all four routes, so a client never has to rebuild
+    /// it out of `text`/`native`/`overlay` — which is how the web client came
+    /// to hand ASS to a `<track>` while Android re-encoded the same file.
+    #[test]
+    fn the_subtitle_route_names_how_the_cues_are_produced() {
+        let file = MediaFile {
+            id: 1,
+            item_id: 1,
+            path: "/media/routes.mkv".into(),
+            size: 1,
+            mtime: 1,
+            duration_ms: Some(1_000),
+            container: Some("mkv".into()),
+            video_codec: Some("hevc".into()),
+            video_codec_tag: None,
+            video_profile: None,
+            width: Some(1920),
+            height: Some(1080),
+            bit_depth: Some(8),
+            hdr: None,
+            hdr_format: None,
+            bitrate: Some(1_000),
+            audio_streams: vec![],
+            subtitle_streams: ["subrip", "ass", "mov_text", "hdmv_pgs_subtitle", "dvd_subtitle"]
+                .iter()
+                .enumerate()
+                .map(|(index, codec)| plurx_core::domain::SubtitleStream {
+                    index: index as i64,
+                    codec: (*codec).into(),
+                    language: None,
+                    title: None,
+                    default: false,
+                    forced: false,
+                    hearing_impaired: false,
+                })
+                .collect(),
+            scanned_at: 0,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: Default::default(),
+        };
+
+        for (index, off, on) in [
+            (0, "native", "native"),
+            (1, "sidecar", "sidecar"),
+            (2, "sidecar", "sidecar"),
+            // The only row the overlay moves, and it moves it off `burn`.
+            (3, "burn", "overlay"),
+            // VobSub is not PGS; the overlay contract does not cover it.
+            (4, "burn", "burn"),
+        ] {
+            assert_eq!(subtitle_route(&file, Some(index), false), Some(off));
+            assert_eq!(subtitle_route(&file, Some(index), true), Some(on));
+        }
+
+        assert_eq!(subtitle_route(&file, None, true), None, "nothing selected");
+        assert_eq!(
+            subtitle_route(&file, Some(99), true),
+            None,
+            "a track this file does not have is not a route"
+        );
+
+        // And it agrees with the two flags it exists to stop clients from
+        // combining by hand.
+        for index in 0..5 {
+            let burns = subtitle_route(&file, Some(index), false) == Some("burn");
+            assert_eq!(burns, subtitle_requires_burn_in(&file, Some(index), false));
+        }
+    }
+
     /// The whole guard, as one table. Four rows, one function, and the same
     /// function the create path and the preparation path now call.
     #[test]
     fn one_burn_guard_judges_the_delivery_without_the_burn() {
         for (base, want, why) in [
-            ("dolby_vision", true, "an HDR copy has no encode to burn into"),
+            (
+                "dolby_vision",
+                true,
+                "an HDR copy has no encode to burn into",
+            ),
             ("hdr10", true, "including one a transcode negotiated"),
             ("hlg", true, "and HLG is HDR too"),
             ("sdr", false, "an already tone-mapped plan loses nothing"),

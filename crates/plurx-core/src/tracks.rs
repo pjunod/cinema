@@ -556,13 +556,7 @@ mod tests {
         }
     }
     /// A subtitle stream of an arbitrary codec, for the deliverability matrix.
-    fn coded(
-        index: i64,
-        codec: &str,
-        lang: &str,
-        forced: bool,
-        default: bool,
-    ) -> SubtitleStream {
+    fn coded(index: i64, codec: &str, lang: &str, forced: bool, default: bool) -> SubtitleStream {
         SubtitleStream {
             index,
             codec: codec.into(),
@@ -757,7 +751,12 @@ mod tests {
             assert!(!deliverable_as_default(codec, true, true, false), "{codec}");
         }
         // Bitmap: overlay any time it is PGS, else forced-and-SDR only.
-        assert!(deliverable_as_default("hdmv_pgs_subtitle", false, true, true));
+        assert!(deliverable_as_default(
+            "hdmv_pgs_subtitle",
+            false,
+            true,
+            true
+        ));
         assert!(!deliverable_as_default("dvd_subtitle", false, true, true));
         assert!(deliverable_as_default("dvd_subtitle", true, false, false));
         assert!(!deliverable_as_default("dvd_subtitle", false, false, false));
