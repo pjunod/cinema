@@ -424,7 +424,7 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
   // compatibility rule can offer an operator.
   assert.match(html, /CARDHEAD:Source probe compatibility\|/);
   assert.match(html, /Derived Atmos profile omissions/);
-  assert.match(html, /Typed source verification/);
+  assert.match(html, /Scan provenance/);
   assert.match(html, /Nothing on this card enables, disables, hides or overrides playback admission/);
   assert.match(html, /No feature flag is used/);
   assert.match(html, /Serving-fleet order/);
