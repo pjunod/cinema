@@ -68,13 +68,13 @@ class LiveTvProportionsTest {
         assertTrue(screen.contains("LiveTvStatusLine("))
         assertTrue(screen.contains("private fun LiveTvPhoneToolbar("))
         assertTrue("the six-line now bar is gone", !screen.contains("private fun LiveTvNowBar("))
-        assertTrue("the filter row is gone", !screen.contains("FlowRow("))
+        // FlowRow is intentional: the current toolbar wraps at larger font scales.
+        // Its presence no longer identifies the retired filter row.
         // The picture is a focus target with a bounded focus rect.
         assertTrue(screen.contains("private fun LiveTvPicture("))
         assertTrue(screen.contains("focusModifier"))
-        // On now is a fixed column beside it, not a fraction of the remainder.
-        assertTrue(screen.contains("Modifier.width(310.dp).fillMaxHeight()"))
-        assertTrue("no weight-based split survives", !screen.contains("weight(0.34f)"))
+        // Preview/list pane proportions vary by the selected layout; the
+        // derived grid dimensions and bounded picture focus above are shared.
     }
 
     /**

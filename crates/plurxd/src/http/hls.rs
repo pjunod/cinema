@@ -11389,7 +11389,7 @@ async fn exact_hls_context_at(
                 .segment_for_publication_before(session, &init_object, deadline)
                 .await
             {
-                Ok(crate::transcode::SegmentPublication::Ready(opened)) => opened,
+                Ok(crate::transcode::SegmentPublication::Ready(opened)) => *opened,
                 Ok(crate::transcode::SegmentPublication::Pending(_)) => {
                     return Err(HlsInitInspectionError::pending());
                 }
@@ -13266,7 +13266,7 @@ async fn segment_local_before(
     .await
     .map_err(|_| response_publication_timeout())?;
     let mut opened = match rolling {
-        Ok(crate::transcode::SegmentPublication::Ready(opened)) => opened,
+        Ok(crate::transcode::SegmentPublication::Ready(opened)) => *opened,
         Ok(crate::transcode::SegmentPublication::Missing(owner)) => {
             if let Some(owner) = owner.as_ref() {
                 authorize_attempt_status(
