@@ -79,6 +79,14 @@ function shellSource() {
     // a no-op expression statement between two files, which is harmless inside
     // any slice that happens to span it.
     bodyScript: bodyScripts.map(sourceOf).join(""),
+    // Everything the browser ends up with, in document order: the markup and
+    // its tags, the stylesheet they name, then the body rows. This is the whole
+    // of what `index.html` used to be, for the assertions that read across all
+    // three — an ordering claim like "the sidecar tag comes before the code
+    // that uses it" still holds in this string.
+    get everything() {
+      return `${html}\n${sourceOf(styles[0])}\n${bodyScripts.map(sourceOf).join("")}`;
+    },
     rows: {style: styles, head: headScripts, body: bodyScripts, sidecars},
     files,
   };

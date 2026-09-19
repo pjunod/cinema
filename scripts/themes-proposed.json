@@ -1,7 +1,7 @@
 {
   "_comment": [
     "Candidate theme token tables for scripts/contrast-check --from-json.",
-    "NOT shipped. The shipped tables live in crates/plurxd/src/web/index.html.",
+    "NOT shipped. The shipped tables live in crates/plurxd/src/web/core/theme.js.",
     "Sources, transcribed exactly:",
     "  Amber, Giallo, Silver, Void, VHS  -- docs/clients/UI-LAYOUTS-PLAN.md S4.2",
     "  Paper, Tide                       -- docs/clients/UI-LAYOUTS-REVIEW.md 'Reviewer additions'",

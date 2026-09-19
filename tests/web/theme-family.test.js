@@ -5,8 +5,10 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const INDEX = path.join(__dirname, "../../crates/plurxd/src/web/index.html");
-const SHIPPED_UI = fs.readFileSync(INDEX, "utf8");
+const {shellSource} = require("./shell-source.js");
+// The theme tables live in the <head> script, which runs before first
+// paint — crates/plurxd/src/web/core/theme.js.
+const SHIPPED_UI = shellSource().headScript;
 
 assert.doesNotMatch(
   SHIPPED_UI,

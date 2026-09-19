@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Structural + pixel baseline of the shipped web UI, swept over every layout.
 
-The whole web UI is one file — `crates/plurxd/src/web/index.html` — and the
-layout arc rearranges it. There is no component test to lean on and no design
-system to diff, so the only honest way to say "this refactor changed nothing"
+The whole web UI is one tree — `crates/plurxd/src/web/`, served from the shell
+in `index.html` (docs/clients/WEB-SHELL-LAYOUT.md) — and the layout arc
+rearranges it. There is no component test to lean on and no design system to
+diff, so the only honest way to say "this refactor changed nothing"
 is to photograph the app before and after and prove the photographs are
 identical. That was G0's contract, and G3 found two holes in it (see
 docs/clients/UI-LAYOUTS-G3-DECISION.md §3 and §5/R1):

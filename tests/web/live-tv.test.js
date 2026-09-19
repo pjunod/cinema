@@ -5,7 +5,12 @@ const liveTv = require("../../crates/plurxd/src/web/live-tv.js");
 const policy = require("../../crates/plurxd/src/web/playback-policy.js");
 const fs = require("node:fs");
 const path = require("node:path");
-const shell = fs.readFileSync(path.join(__dirname, "../../crates/plurxd/src/web/index.html"), "utf8");
+const {shellSource} = require("./shell-source.js");
+// The app's body rows, joined in served order.
+// The page and the geometry it depends on: the Live TV screens are laid out
+// by CSS that the assertions below read, so the stylesheet is part of "the
+// shipped shell" here.
+const shell = (() => { const s = shellSource(); return s.bodyScript + s.css; })();
 function shipped(name) {
   const match = new RegExp(`\\n(?:async )?function ${name}\\(`).exec(shell);
   assert.ok(match, `missing shipped function ${name}`);

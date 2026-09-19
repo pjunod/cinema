@@ -36,7 +36,10 @@ const SURFACE_FIXTURE_LINK = path
   .relative(path.dirname(SURFACE_DOC), SURFACE_FIXTURE)
   .split(path.sep)
   .join("/");
-const WEB = path.join(ROOT, "crates/plurxd/src/web/index.html");
+// The playback-info field list is embedded in the row that paints the stats
+// overlay, not in the shell — the shell is markup and tags now
+// (docs/clients/WEB-SHELL-LAYOUT.md).
+const WEB = path.join(ROOT, "crates/plurxd/src/web/player/stats.js");
 const BEGIN = "<!-- contract:routing:begin -->";
 const END = "<!-- contract:routing:end -->";
 const INFO_BEGIN = "<!-- contract:info:begin -->";

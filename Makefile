@@ -1447,7 +1447,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/asset-order.test.js
 	@node tests/web/asset-load.test.js
 	@scripts/js-check
-	@scripts/contrast-check --from-index crates/plurxd/src/web/index.html \
+	@scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
 		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
 		--allow scripts/contrast-allow.txt
 

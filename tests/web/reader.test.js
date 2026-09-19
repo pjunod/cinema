@@ -7,7 +7,11 @@ const path = require("node:path");
 
 const ROOT = path.resolve(__dirname, "../..");
 const Core = require(path.join(ROOT, "crates/plurxd/src/web/reader.js"));
-const INDEX = fs.readFileSync(path.join(ROOT, "crates/plurxd/src/web/index.html"), "utf8");
+const {shellSource} = require("./shell-source.js");
+// The shell's markup followed by the body rows in served order, so the
+// assertions below still read document order: the /assets/reader.js tag is
+// in the markup, and viewReader is in a row that loads after it.
+const INDEX = (() => { const s = shellSource(); return `${s.html}\n${s.bodyScript}`; })();
 const SERVER = fs.readFileSync(path.join(ROOT, "crates/plurxd/src/http/web.rs"), "utf8");
 const DTO = fs.readFileSync(path.join(ROOT, "crates/plurxd/src/http/dto.rs"), "utf8");
 
