@@ -44,6 +44,13 @@ pub struct VideoCompletionExpectation {
     pub source_object_version: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionCoverage {
+    Complete,
+    Short,
+    Excess,
+}
+
 impl VideoCompletionExpectation {
     pub fn validate(&self) -> Result<(), &'static str> {
         if self.duration_num == 0 {
@@ -76,6 +83,46 @@ impl VideoCompletionExpectation {
             .checked_mul(scale)
             .ok_or("expectation arithmetic overflow")?;
         Ok(left >= right)
+    }
+
+    /// Compare normalized index coverage with the selected-video authority.
+    /// Metadata proves only a lower bound; a packet-derived endpoint is
+    /// symmetric because output beyond that proved EOF is unverified too.
+    pub fn coverage(
+        &self,
+        covered_ticks: u64,
+        scale: u32,
+    ) -> Result<CompletionCoverage, &'static str> {
+        if self.provenance != CompletionProvenance::PacketTimeline {
+            return self.covers(covered_ticks, scale).map(|covers| {
+                if covers {
+                    CompletionCoverage::Complete
+                } else {
+                    CompletionCoverage::Short
+                }
+            });
+        }
+        self.validate()?;
+        if scale == 0 {
+            return Err("index timescale is zero");
+        }
+        let covered = u128::from(covered_ticks)
+            .checked_mul(u128::from(self.duration_den))
+            .ok_or("coverage arithmetic overflow")?;
+        let expected = u128::from(self.duration_num)
+            .checked_mul(u128::from(scale))
+            .ok_or("expectation arithmetic overflow")?;
+        let tolerance = u128::from(scale)
+            .checked_mul(u128::from(self.duration_den))
+            .and_then(|value| value.checked_mul(2))
+            .ok_or("coverage arithmetic overflow")?;
+        if covered.abs_diff(expected) <= tolerance {
+            Ok(CompletionCoverage::Complete)
+        } else if covered < expected {
+            Ok(CompletionCoverage::Short)
+        } else {
+            Ok(CompletionCoverage::Excess)
+        }
     }
 
     pub fn duration_ms_floor(&self) -> Option<i64> {
@@ -303,6 +350,25 @@ mod tests {
     fn content_analysis_exact_two_second_completion_boundary_passes() {
         assert_eq!(expectation(12).covers(10_000, 1_000), Ok(true));
         assert_eq!(expectation(12).covers(9_999, 1_000), Ok(false));
+    }
+
+    #[test]
+    fn mkv_hls_packet_completion_is_symmetric_at_two_seconds() {
+        let mut packet = expectation(12);
+        packet.provenance = CompletionProvenance::PacketTimeline;
+        assert_eq!(
+            packet.coverage(10_000, 1_000),
+            Ok(CompletionCoverage::Complete)
+        );
+        assert_eq!(
+            packet.coverage(14_000, 1_000),
+            Ok(CompletionCoverage::Complete)
+        );
+        assert_eq!(packet.coverage(9_999, 1_000), Ok(CompletionCoverage::Short));
+        assert_eq!(
+            packet.coverage(14_001, 1_000),
+            Ok(CompletionCoverage::Excess)
+        );
     }
 
     #[test]

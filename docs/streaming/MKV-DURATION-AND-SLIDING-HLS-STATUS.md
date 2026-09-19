@@ -17,7 +17,7 @@ operator decision.
 | W0 reproductions | in progress | Exact 32 s published / 20 s fetched / 0 ms presented regression added and compiled | Add deterministic missing-duration and reserve-drain regressions |
 | W0.5 startup admission | code complete; test pending | Actor owns generation/epoch/attempt-bound presentation evidence and the non-renewing 30 s deadline; all-target compile passed | Run `mkv_hls_startup` only in the final fast lane |
 | W1a diagnostic/history | code complete; test pending | Unknown future provenance remains observable; authoritative max-attempt policy is passed into the settings-free telemetry transaction; rollback/schema regressions compile | Run `mkv_hls_diagnostic` and `mkv_hls_typed_outcome` in the final fast lane |
-| W1b packet duration | not started | Incident packet contract and failure matrix reviewed | Add bounded head/tail packet evidence and symmetric agreement |
+| W1b packet duration | code complete; fixture/test pending | Full metadata range comparison; bounded 256-packet head and three natural-EOF tails; 1 MiB/4 MiB caps; signed PTS span; typed failure matrix; symmetric ±2 s agreement all compile | Run parser, cap, process, timeout, and real FFmpeg fixture matrix in the final fast lane |
 | W1c terminal repair | not started | Existing explicit force path named in the contract | Prove terminal-to-ready transition and add a read-only preview |
 | W2a fixed target | not started | Rolling copy writer and mutable target named in the contract | Enforce a fixed covering target before first publication |
 | W2b publication clock | not started | Existing actor observation contract named in the contract | Separate produced and served inventory and schedule publication |
@@ -49,6 +49,7 @@ operator decision.
 | 2026-09-19 | `1ae2c4ec3` | `rustup run 1.97.1 cargo check -p plurxd --all-targets --locked` | passed in 1m 24s |
 | 2026-09-19 | startup candidate | `rustup run 1.97.1 cargo fmt --all && rustup run 1.97.1 cargo check -p plurxd --all-targets --locked` | passed in 37 s; behavioral tests compiled but did not run |
 | 2026-09-19 | W1a candidate | `rustup run 1.97.1 cargo fmt --all && rustup run 1.97.1 cargo check -p plurxd --all-targets --locked` | passed in 11 s; behavioral tests compiled but did not run |
+| 2026-09-19 | W1b candidate | `rustup run 1.97.1 cargo fmt --all && rustup run 1.97.1 cargo check -p plurxd --all-targets --locked` | passed in 8 s; behavioral tests compiled but did not run |
 
 No behavioral test has run yet. A skipped or zero-match command will not be
 recorded as acceptance.
