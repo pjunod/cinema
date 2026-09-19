@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["049a5a5a", "eb3df523"]
+ignore = true
+reason = "Documentation and validation-ledger follow-ups only: publish the audio investigation status, record the independent review verdict and link the runtime commit above to its retained regression tests. Neither commit changes production behavior."
