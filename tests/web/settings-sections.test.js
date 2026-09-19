@@ -344,6 +344,7 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
       shippedSource("windowsServerCard"),
       shippedSource("webHlsStartupRecoveryCard"),
       shippedSource("hevcSampleEntryAdmissionCard"),
+      shippedSource("contentAnalysisEnableCard"),
       shippedSource("sourceProbeCompatibilityCard"),
       shippedSource("nzbdBittorrentEnableCard"),
       shippedSource("directedChangeDeveloperRows"),
