@@ -1124,6 +1124,54 @@ fn transcode_first_playlist_ready(raw: &[u8]) -> bool {
             .is_some_and(|segment| segment.end_ms >= TRANSCODE_START_CUSHION_MS)
 }
 
+/// Prove that a raw rolling-writer revision fits the presentation target that
+/// the serving adapter freezes into every response.
+///
+/// FFmpeg is allowed to rewrite its private target as it learns about later
+/// segments. Clients are not: once a target has crossed the response boundary
+/// it is part of the presentation contract. Validate the actual durations,
+/// then replace the private tag in [`served_live_playlist`]. Cached immutable
+/// VOD never passes through either function.
+fn validate_rolling_target(raw: &[u8]) -> Result<(), String> {
+    let text = std::str::from_utf8(raw)
+        .map_err(|_| "rolling HLS playlist was not valid UTF-8".to_owned())?;
+    let mut target_tags = 0usize;
+    let mut durations = 0usize;
+    for line in text.lines().map(str::trim) {
+        if let Some(value) = line.strip_prefix("#EXT-X-TARGETDURATION:") {
+            let _ = value
+                .parse::<u32>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| "rolling HLS playlist had an invalid target duration".to_owned())?;
+            target_tags += 1;
+        } else if let Some(value) = line.strip_prefix("#EXTINF:") {
+            let seconds = value
+                .split(',')
+                .next()
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .ok_or_else(|| "rolling HLS playlist had an invalid EXTINF".to_owned())?;
+            if seconds > f64::from(plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS) {
+                return Err(format!(
+                    "rolling HLS segment duration {seconds:.6}s exceeded the fixed {}s presentation target",
+                    plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS,
+                ));
+            }
+            durations += 1;
+        }
+    }
+    if target_tags != 1 {
+        return Err(format!(
+            "rolling HLS playlist had {target_tags} target-duration tags instead of one"
+        ));
+    }
+    if durations == 0 {
+        return Err("rolling HLS playlist had no complete segment durations".to_owned());
+    }
+    Ok(())
+}
+
 /// Turn the append-only writer playlist into the sliding view clients see.
 ///
 /// FFmpeg and the copy segmenter keep an EVENT playlist on disk because the
@@ -1193,7 +1241,12 @@ fn served_live_playlist(
         if trimmed.starts_with("#EXT-X-START:") {
             wrote_start = true;
         }
-        if trimmed.starts_with("#EXT-X-MEDIA-SEQUENCE:") {
+        if trimmed.starts_with("#EXT-X-TARGETDURATION:") {
+            out.push_str(&format!(
+                "#EXT-X-TARGETDURATION:{}\n",
+                plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS
+            ));
+        } else if trimmed.starts_with("#EXT-X-MEDIA-SEQUENCE:") {
             out.push_str(&format!("#EXT-X-MEDIA-SEQUENCE:{first_retained}\n"));
             wrote_media_sequence = true;
         } else if trimmed.starts_with("#EXT-X-DISCONTINUITY-SEQUENCE:") {
@@ -23614,6 +23667,31 @@ impl TranscodeManager {
                         {
                             return Err(PlaylistPublicationError::for_session(error, &session));
                         }
+                        if !session.cached {
+                            if let Err(reason) = validate_rolling_target(&bytes) {
+                                tracing::error!(
+                                    session = %session_log_id(session_id),
+                                    producer_attempt,
+                                    %reason,
+                                    "rolling writer violated its fixed presentation target"
+                                );
+                                session.fail(PlaylistError::SessionFailed(reason));
+                                let (_commit, _retirement) = spawn_rolling_retirement_owner(
+                                    Arc::clone(&self.sessions),
+                                    Arc::clone(&self.active_session_count),
+                                    Arc::clone(&self.store),
+                                    Arc::clone(&self.recent_marker_ambiguities),
+                                    session_id.to_owned(),
+                                    Arc::clone(&session),
+                                    None,
+                                    "playlist_contract",
+                                );
+                                return Err(PlaylistPublicationError::for_session(
+                                    session.failure_reason(),
+                                    &session,
+                                ));
+                            }
+                        }
                         // ffmpeg rewrites an EVENT playlist after each segment. Do
                         // not let hls.js race away with the first one-segment
                         // version: its first reload is scheduled at the exact edge
@@ -31476,6 +31554,35 @@ pub(crate) mod tests {
         assert!(transcode_first_playlist_ready(completed_short));
     }
 
+    #[test]
+    fn every_rolling_writer_is_wrapped_in_one_fixed_covering_target() {
+        let early = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:EVENT\n\
+                      #EXTINF:2.0,\nseg00000.ts\n";
+        let later = b"#EXTM3U\n#EXT-X-TARGETDURATION:9\n#EXT-X-PLAYLIST-TYPE:EVENT\n\
+                      #EXTINF:2.0,\nseg00000.ts\n#EXTINF:8.5,\nseg00001.ts\n";
+        assert!(validate_rolling_target(early).is_ok());
+        assert!(validate_rolling_target(later).is_ok());
+
+        for raw in [early.as_slice(), later.as_slice()] {
+            let served = String::from_utf8(
+                served_live_playlist(raw.to_vec(), Some(0), None).expect("served playlist"),
+            )
+            .expect("UTF-8");
+            assert_eq!(served.matches("#EXT-X-TARGETDURATION:16\n").count(), 1);
+            assert!(!served.contains("#EXT-X-TARGETDURATION:2\n"));
+            assert!(!served.contains("#EXT-X-TARGETDURATION:9\n"));
+        }
+    }
+
+    #[test]
+    fn rolling_target_validation_rejects_one_tick_over_without_rounding() {
+        let exact = b"#EXTM3U\n#EXT-X-TARGETDURATION:16\n#EXTINF:16.0,\nseg00000.ts\n";
+        let over = b"#EXTM3U\n#EXT-X-TARGETDURATION:17\n#EXTINF:16.000001,\nseg00000.ts\n";
+        assert!(validate_rolling_target(exact).is_ok());
+        let reason = validate_rolling_target(over).expect_err("oversized EXTINF");
+        assert!(reason.contains("exceeded the fixed 16s"), "{reason}");
+    }
+
     /// The writer keeps an append-only EVENT history, but a client must never
     /// be offered names retention already unlinked. This pure pin also covers
     /// the HLS shape: a playlist that removes old entries is a sliding media
@@ -31504,6 +31611,7 @@ pub(crate) mod tests {
         .expect("initial playlist");
         assert!(!first.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "{first}");
         assert!(first.contains("#EXT-X-START:TIME-OFFSET=0"), "{first}");
+        assert!(first.contains("#EXT-X-TARGETDURATION:16"), "{first}");
 
         let served = String::from_utf8(
             served_live_playlist(raw.as_bytes().to_vec(), Some(2), None)
