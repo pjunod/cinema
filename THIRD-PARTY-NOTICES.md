@@ -84,18 +84,23 @@ file. They are separate copyright holders with their own terms — MIT
 requires its notice in all copies — and one row for hls.js does not discharge
 them. This table plus `licenses/` is their attribution.
 
-**Material icons.** Four icon paths are inlined as SVG in `index.html`
-(search `Apache-2.0 Google Material icon paths`) so the self-hosted client
-needs no icon font and no CDN.
+**Material icons.** Four icon paths are inlined as SVG in
+`crates/plurxd/src/web/detail/helpers.js` (search `Apache-2.0 Google Material
+icon paths`) so the self-hosted client needs no icon font and no CDN.
 
-**The fonts.** Both are inlined as `data:font/woff2` URIs in `index.html` —
-three faces: JetBrains Mono 500 and 700, and Inter variable 100–900. Both are
+**The fonts.** Both are inlined as `data:font/woff2` URIs in
+`crates/plurxd/src/web/app.css` — three faces: JetBrains Mono 500 and 700, and
+Inter variable 100–900. Both are
 **subset** (Inter to ~330 codepoints, JetBrains Mono to ~512) and remain
 under the OFL, which permits subsetting, modification, bundling, and
 commercial use. Its one operative condition here is that each copyright
 notice and the complete license text travel with the font — which is what
 `licenses/Inter-OFL.txt` and `licenses/JetBrainsMono-OFL.txt` are for.
 Neither upstream declares a Reserved Font Name, so no renaming is required.
+
+Both paths above moved out of `index.html` when the web shell was cut into a
+tree (`docs/clients/WEB-SHELL-LAYOUT.md`). Nothing about what is served
+changed — only which file to open.
 
 ---
 
