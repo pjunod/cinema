@@ -18,10 +18,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const SHIPPED_UI = fs.readFileSync(
-  path.join(__dirname, "../../crates/plurxd/src/web/index.html"),
-  "utf8",
-);
+const {shellSource} = require("./shell-source.js");
+// The app's body rows, joined in served order.
+const SHIPPED_UI = shellSource().bodyScript;
 
 const DECLARATIONS = ["\nfunction ", "\nasync function "];
 const TERMINATORS = DECLARATIONS.concat([

@@ -106,6 +106,48 @@ class PlayerInputFenceTest(unittest.TestCase):
         self.assertEqual(len(self.fence.scan_lines(other, ["let c = MPRemoteCommandCenter.shared()"], set())), 1)
 
 
+    def test_every_web_row_is_scanned_and_a_handler_in_one_trips(self):
+        # The web app is a tree now (docs/clients/WEB-SHELL-LAYOUT.md). This
+        # fence used to name `index.html` and glob the flat `web/*.js`, which
+        # after the split reached none of the sixty rows the app actually lives
+        # in — a `keydown` listener in any of them would have been invisible.
+        scanned = set(self.fence.client_files())
+        rows = sorted((ROOT / "crates/plurxd/src/web").rglob("*.js"))
+        for row in rows:
+            if row.name.endswith(".min.js"):
+                continue
+            self.assertIn(
+                row.relative_to(ROOT), scanned,
+                f"{row.relative_to(ROOT)} is a shipped web script the fence does not scan",
+            )
+        handler = 'window.addEventListener("keydown", (ev) => { if (ev.key === "Escape") close(); });'
+        for name in ("pages/settings.js", "player/menus.js", "core/cards.js", "router.js"):
+            with self.subTest(row=name):
+                relative = Path("crates/plurxd/src/web") / name
+                self.assertEqual(
+                    len(self.fence.scan_lines(relative, [handler], set())), 2,
+                    f"a key handler added to {name} was not seen",
+                )
+
+    def test_each_web_region_names_the_file_it_lives_in(self):
+        # Scoping the regions per file is what stops an anchor that moves to
+        # another row from silently widening its region to everything between
+        # the two. Each anchor must appear exactly once, in the file named.
+        for path, start_text, end_text, reason in self.fence.WEB_REGIONS:
+            with self.subTest(region=start_text):
+                self.assertTrue(reason.strip(), f"{start_text} is allowed with no reason")
+                lines = (ROOT / path).read_text(encoding="utf-8").splitlines()
+                self.assertEqual(
+                    sum(1 for line in lines if start_text in line), 1,
+                    f"{path} does not carry {start_text!r} exactly once",
+                )
+                if end_text is not None:
+                    self.assertIn(end_text, "\n".join(lines), f"{path} lost {end_text!r}")
+        # …and a lost anchor is an error, not an empty allowlist nobody notices.
+        path, start_text, *_rest = self.fence.WEB_REGIONS[0]
+        with self.assertRaises(ValueError):
+            self.fence.web_allowed_lines(path, ["nothing();"])
+
     def test_the_fence_passes_the_repository_as_it_stands(self):
         self.assertEqual(self.fence.scan(), [])
 

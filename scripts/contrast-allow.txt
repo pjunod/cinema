@@ -28,7 +28,7 @@
 # the tool measures the real one on every run anyway.
 #
 # Regenerate the measurements (not this file) with:
-#   scripts/contrast-check --from-index crates/plurxd/src/web/index.html \
+#   scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
 #       --foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad'
 # --accent2 is absent from that list and from this file on purpose: it is not a
 # text token here (two uses, both the far end of a gradient), so measuring it

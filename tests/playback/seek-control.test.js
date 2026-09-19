@@ -7,7 +7,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const control = require("../../crates/plurxd/src/web/playback-control.js");
-const ui = fs.readFileSync(path.join(__dirname, "../../crates/plurxd/src/web/index.html"), "utf8");
+const {shellSource} = require("../web/shell-source.js");
+const ui = shellSource().bodyScript;
 function source(name) {
   const declarations = ["\nfunction ", "\nasync function "];
   const start = declarations.map(prefix => ui.indexOf(`${prefix}${name}(`)).find(i => i >= 0);

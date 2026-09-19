@@ -6,8 +6,10 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 
-const INDEX = path.join(__dirname, "../../crates/plurxd/src/web/index.html");
-const UI = fs.readFileSync(INDEX, "utf8");
+const {shellSource} = require("./shell-source.js");
+// The shipped app is a tree now, so the string these assertions slice is
+// the app's body rows, joined in served order. See tests/web/shell-source.js.
+const UI = shellSource().bodyScript;
 
 function shippedFunction(name) {
   const marker = new RegExp(`\\n(?:async )?function ${name}\\(`);

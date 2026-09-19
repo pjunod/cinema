@@ -4,10 +4,11 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const source = fs.readFileSync(
-  path.join(__dirname, "../../crates/plurxd/src/web/index.html"),
-  "utf8",
-);
+const {shellSource} = require("./shell-source.js");
+// The markup, for the player's own DOM, and the body rows, for the code
+// that paints into it — the two halves index.html used to hold together.
+const {html, bodyScript} = shellSource();
+const source = `${html}\n${bodyScript}`;
 const playerLine = source.split("\n").find((line) => line.includes('id="player"'));
 assert.ok(playerLine, "the shipped player markup must remain on a discoverable line");
 

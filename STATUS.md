@@ -1,8 +1,68 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-16 · Kept current by the working agent in the same
+**Updated:** 2026-09-19 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## The web app is a tree, and the bytes are the same ones
+
+**[#369](http://forge.lan:3000/noirr/plurx/pulls/369) (one line, M0) and
+[#371](http://forge.lan:3000/noirr/plurx/pulls/371) (M1–M6) from
+`agent/web-shell-split` into `main`; three adversarial reviews done, five
+findings folded.** `crates/plurxd/src/web/index.html` was 23,901 lines — one
+3,209-line `<style>` block, ~36 lines of markup, a 218-line theme engine in
+`<head>`, and a 20,433-line application in `<body>` with 1,152 top-level
+functions. It is now a 97-line shell and **sixty-two files** served from one
+ordered table, mapped by
+[docs/clients/WEB-SHELL-LAYOUT.md](docs/clients/WEB-SHELL-LAYOUT.md). Still no
+bundler, no build step, no ES modules: plain `<script src>` scripts sharing one
+global scope, exactly as the inline script did.
+
+**Nothing else changed, and that is the claim the PR is built to prove.** A
+one-shot `web-shell-identity` reassembled the tree from the shell's own tag
+order and compared it byte for byte to the pre-split file — 3,209 lines of CSS,
+218 of theme engine, 20,425 of application, identical. **Exactly one block
+moves**: the eight lines registering `LAYOUTS.classic.chrome`/`.views` execute
+at load and name five functions declared later, so cut at the section banners
+the app dies with `ReferenceError: classicItemBody is not defined`. They become
+`layouts/register-classic.js`, served between catalog and theater — still
+before the `applyLayout()` that paints the first frame. `make web-check`'s Node
+entries fail on the same six tests, **by name**, as they do on `main`.
+
+Serving is `WEB_ASSETS` plus a SHA-256 per row applied to the shell's tags at
+startup: assets are `immutable` for a year, `/` is `no-cache`, and
+`/assets/<unknown>` is a **404** where it used to be `200 text/html` — which a
+browser then tried to execute as JavaScript.
+
+**What the reviews caught is the part worth reading.** Three guards had
+stopped being able to fail. `theme-family` was refusing a CSS selector in a
+JavaScript file, so dropping Copper from all 54 cockpit rules stayed green. Two
+ordering claims compared offsets into a string where the markup always precedes
+the rows, so moving `cluster-panel.js`'s tag to the last line of `<body>` —
+after every row that reads it — also stayed green. The surface fence went
+**silently vacuous** on the split and the first repair was the same mistake one
+folder smaller: scoped to `player/*.js`, a rogue
+`document.getElementById("psurface").innerHTML=` in `core/chrome.js` still
+printed PASS. It globs the whole tree now, shell included, and fails closed if
+the glob shrinks.
+
+And the static order gate had a real double-miss: it skipped every function
+expression, so an immediately-invoked `.forEach` callback inside a branch the
+`vm` stub does not take passed **both** gates while shipping a blank page to
+every touch device. It enters immediate callbacks now, and models `class
+extends`, computed keys, static blocks, default parameters and destructuring
+defaults. Nineteen shapes of forward reference are required to be caught and
+five deferred shapes required not to fire — a gate that fails on a click
+handler is a gate people route around.
+
+Two things genuinely are different and are written down rather than left to be
+discovered: a load-time throw no longer takes the rest of the app with it (a
+half-working UI where there used to be a loud blank page), and `typeof` on a
+later row's `let`/`const` now returns `"undefined"` where it used to throw.
+Neither is reachable today. The 114 `index.html:NNNN` citations across 39
+documents were **not touched** — they resolve through the layout table's
+old-line column, and `rg 'index\.html:[0-9]+' docs/` counts 115 on both
+branches.
 
 ## The twenty red tests, and the three live defects three of them were reporting
 

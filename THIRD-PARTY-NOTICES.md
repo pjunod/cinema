@@ -84,18 +84,23 @@ file. They are separate copyright holders with their own terms — MIT
 requires its notice in all copies — and one row for hls.js does not discharge
 them. This table plus `licenses/` is their attribution.
 
-**Material icons.** Four icon paths are inlined as SVG in `index.html`
-(search `Apache-2.0 Google Material icon paths`) so the self-hosted client
-needs no icon font and no CDN.
+**Material icons.** Four icon paths are inlined as SVG in
+`crates/plurxd/src/web/detail/helpers.js` (search `Apache-2.0 Google Material
+icon paths`) so the self-hosted client needs no icon font and no CDN.
 
-**The fonts.** Both are inlined as `data:font/woff2` URIs in `index.html` —
-three faces: JetBrains Mono 500 and 700, and Inter variable 100–900. Both are
+**The fonts.** Both are inlined as `data:font/woff2` URIs in
+`crates/plurxd/src/web/app.css` — three faces: JetBrains Mono 500 and 700, and
+Inter variable 100–900. Both are
 **subset** (Inter to ~330 codepoints, JetBrains Mono to ~512) and remain
 under the OFL, which permits subsetting, modification, bundling, and
 commercial use. Its one operative condition here is that each copyright
 notice and the complete license text travel with the font — which is what
 `licenses/Inter-OFL.txt` and `licenses/JetBrainsMono-OFL.txt` are for.
 Neither upstream declares a Reserved Font Name, so no renaming is required.
+
+Both paths above moved out of `index.html` when the web shell was cut into a
+tree (`docs/clients/WEB-SHELL-LAYOUT.md`). Nothing about what is served
+changed — only which file to open.
 
 ---
 
@@ -745,6 +750,26 @@ at build time and ships in nothing.
 
 ---
 
+## 7. Checked into this repo, never shipped
+
+Not a dependency of anything plurx builds or serves — a source file living in
+the tree, so it is redistributed with every clone the way the Gradle wrapper in
+§5 is, and it needs its attribution for that reason alone.
+
+| Component | Version | Where | License | Copyright |
+|---|---|---|---|---|
+| [acorn](https://github.com/acornjs/acorn) | 8.18.0 | `tests/vendor/acorn.js` | MIT — [full text](licenses/acorn-MIT.txt) | Copyright (c) 2012-2022 by various contributors |
+
+`tests/web/asset-order.test.js` needs a real JavaScript parser: it refuses a
+web-asset order in which a file runs something at load that names a binding
+declared in a later file, and answering that over 1.3 MB of source with regular
+expressions would be a guess. This repo has no `package.json` and no
+`node_modules`, and adding either to run one test is a worse trade than 245 KB
+of vendored source. It is not in `WEB_ASSETS`, never reaches a browser, and
+never reaches the binary.
+
+---
+
 ## Keeping this file honest
 
 This document is a claim about what is in the dependency graph, so it goes
@@ -754,5 +779,6 @@ allow-list, so a new copyleft dependency cannot land quietly. Run it with
 `make license-check`.
 
 `cargo deny` cannot see the parts that are not crates — the web UI bundle,
-the fonts, the client dependencies, the Dockerfile's ffmpeg. Update §1, §2,
-§5 and §6 by hand when those move, in the same commit that moves them.
+the fonts, the client dependencies, the Dockerfile's ffmpeg, the source checked
+into the tree. Update §1, §2, §5, §6 and §7 by hand when those move, in the
+same commit that moves them.

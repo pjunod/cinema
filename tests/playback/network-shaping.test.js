@@ -2231,7 +2231,7 @@ test("player snapshots retain stall and hitch counts across object replacement",
     "a null interval cannot reset the page lifetime",
   );
 
-  const web = fs.readFileSync(path.join(ROOT, "crates/plurxd/src/web/index.html"), "utf8");
+  const web = require("../web/shell-source.js").shellSource().bodyScript;
   assert.match(web, /p\.stalls=\(p\.stalls\|\|0\)\+1;\s*PLAYBACK_LIFETIME_STALLS\+\+;/);
   assert.match(web, /h\.n\+\+;\s*PLAYBACK_LIFETIME_HITCHES\+\+;/);
 });

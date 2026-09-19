@@ -5,11 +5,18 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const INDEX = path.join(__dirname, "../../crates/plurxd/src/web/index.html");
-const SHIPPED_UI = fs.readFileSync(INDEX, "utf8");
+const {shellSource} = require("./shell-source.js");
+// The theme *tables* live in the <head> script, which runs before first paint
+// — crates/plurxd/src/web/core/theme.js. The rules that dress them are in
+// app.css, and the two claims below are about different halves: reading the
+// selector out of the head script would be refusing a pattern that file
+// structurally cannot contain, which is a guard that can never fail.
+const SHIPPED_SHELL = shellSource();
+const SHIPPED_UI = SHIPPED_SHELL.headScript;
+const SHIPPED_CSS = SHIPPED_SHELL.css;
 
 assert.doesNotMatch(
-  SHIPPED_UI,
+  SHIPPED_CSS,
   /:is\(\[data-theme=panoptic\],\[data-theme=redline\],\[data-theme=panovic\]\)(?!\[data-theme=copper\])/,
   "Burnt Pumpkin and Copper must both receive the cockpit design",
 );

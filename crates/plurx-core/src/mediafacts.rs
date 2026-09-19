@@ -7,7 +7,7 @@
 //! in SQL (one statement for the whole collection) and hands each item's
 //! answer here to be turned into the terse strings a card or table row prints.
 //!
-//! The labels are deliberately the ones `web/index.html` already prints
+//! The labels are deliberately the ones the web client already prints
 //! (`codecLabel`, `hdrChip`, `premiumAudio`, `fmtChannels`). A second
 //! vocabulary would mean the same file badged "HEVC · DV · TrueHD 7.1" on the
 //! detail page and something else on the grid — the kind of drift nobody
@@ -103,7 +103,7 @@ impl From<FactsRow> for MediaFacts {
 }
 
 /// ffprobe codec name to the badge text, mirroring `codecLabel` in
-/// `web/index.html`. Unknown codecs are upper-cased rather than dropped: a
+/// `web/detail/helpers.js`. Unknown codecs are upper-cased rather than dropped: a
 /// name we have not met is still more use on a card than a blank.
 fn video_codec_label(codec: Option<&str>) -> Option<String> {
     let codec = codec.map(str::trim).filter(|c| !c.is_empty())?;

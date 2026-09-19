@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -14,6 +15,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "crates" / "plurxd" / "src" / "web"
+
+ASSET_TAG = re.compile(r'(?:<script src|<link rel="stylesheet" href)="/assets/([^"?]+)"')
+
+
+def shell_assets() -> set[str]:
+    """Every `/assets/` file the shell asks for, table rows and sidecars alike.
+
+    The web app is a tree served from one ordered table
+    (`docs/clients/WEB-SHELL-LAYOUT.md`); this fixture server answers whatever
+    the shell names rather than a list that goes stale behind it.
+    """
+    return set(ASSET_TAG.findall((WEB / "index.html").read_text(encoding="utf-8")))
 MANIFEST_REFUSALS = 8
 TIMEOUT_MS = 38_000
 
@@ -87,19 +100,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         route = self.path.split("?", 1)[0]
-        assets = {
-            "/assets/playback-policy.js": WEB / "playback-policy.js",
-            "/assets/playback-control.js": WEB / "playback-control.js",
-            "/assets/reader.js": WEB / "reader.js",
-            "/assets/hls.min.js": WEB / "hls.min.js",
-            "/assets/live-tv.js": WEB / "live-tv.js",
-            "/assets/library-channels.js": WEB / "library-channels.js",
-            "/assets/cluster-panel.js": WEB / "cluster-panel.js",
-        }
         if route == "/":
             return self.reply(200, (WEB / "index.html").read_bytes(), "text/html; charset=utf-8")
-        if route in assets:
-            return self.reply(200, assets[route].read_bytes(), "text/javascript; charset=utf-8")
+        # Whatever the shell asks for, from wherever it lives. Hand-listing the
+        # assets here meant a new one silently 404'd and the page it broke
+        # looked like a playback bug.
+        asset = route.removeprefix("/assets/")
+        if route.startswith("/assets/") and asset in shell_assets():
+            kind = "text/css" if asset.endswith(".css") else "text/javascript"
+            return self.reply(200, (WEB / asset).read_bytes(), f"{kind}; charset=utf-8")
         if route == "/delayed/index.m3u8":
             with self.server.lock:
                 self.server.manifest_requests += 1
