@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ATSC 3.0 live audio repair status</title>
+<style>body{font:16px system-ui;max-width:900px;margin:48px auto;padding:0 24px;color:#17212b;background:#f6f8fa}h1{font-size:30px}table{width:100%;border-collapse:collapse;background:white}td,th{text-align:left;padding:12px;border-bottom:1px solid #ddd}code{font-size:13px}.note{padding:16px;background:#e8efff}a{color:#174da1}</style>
+<h1>ATSC 3.0 live audio repair</h1><p>Updated: 2026-09-19</p>
+<p class="note">Implementation complete in an independent agent clone. <a href="http://192.168.4.7:3000/noirr/plurx/pulls/370">PR #370 is the live status record for review, fast-lane checks and merge.</a> No deployment has been performed.</p>
+<p>Branch: <code>codex/atsc3-audio-startup</code> · Base: <code>a2d9c2fb7</code></p>
+<table><tr><th>Work</th><th>Status</th></tr>
+<tr><td>133.1: unsupported 12-channel AAC</td><td>Encoded AAC capped at six channels and smaller client/source limits. Supplied logs confirm the six-channel workaround.</td></tr>
+<tr><td>128.1: delayed AC-3 and invalid fMP4 initialization</td><td>Convert AC-3 to AAC for live fMP4 while preserving compatible video. Supplied capture produces decodable HLS with Jellyfin 8.1.2-5.</td></tr>
+<tr><td>103.1: missing AC-4 initialization</td><td>Zero channels become unknown, never an explicit zero-channel output. Capture lacks a random-access frame on either language track; live playback remains unverified.</td></tr>
+<tr><td>Regression evidence</td><td>157 focused Live TV tests passed before the final-only testing instruction. Four new tests fail against the old planner. No full unit suite scheduled.</td></tr>
+<tr><td>Adversarial review</td><td>Pending; exactly one review before final fast lane.</td></tr>
+<tr><td>Fast lane and merge</td><td>Held until review is addressed. See PR #370 for current state.</td></tr></table>
+<h2>Decisions and remaining acceptance</h2>
+<p>Keep the VideoToolbox caption repair. Retain AC-3 copy for MPEG-TS, require complete audio facts before copy, and enlarge its runtime probe. Do not substitute longer HLS segments for valid initialization. No new feature switches are needed for these corrections.</p>
+<p>A longer uninterrupted 103.1 capture spanning a global AC-4 random-access frame, or a real tuner run, is still required to establish live acceptance. The finite capture cannot prove or disprove that outcome.</p>
+<p><a href="ATSC3-AUDIO-STARTUP-RCA-AND-FIX.md">Evidence, implementation boundaries and reproduction commands</a> · <a href="../README.md">Documentation index</a></p></html>
