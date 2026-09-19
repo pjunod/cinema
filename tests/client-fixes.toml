@@ -2114,3 +2114,11 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "private func invalidateResumeAttempt(outcome: String)"
 test = "clients/apple/Tests/PlayerResumeTests.swift"
 test_anchor = "func testOneSecondAdmissionIsOneShotAndFinalPauseFencesTheRepair()"
+
+[[fixes]]
+id = "apple.cinematic-tvos-item-detail"
+commits = ["ab8541b5"]
+source = "clients/apple/Sources/DetailView.swift"
+source_anchor = "static func presentation(kind: String, compact: Bool) -> Presentation"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "func testTVPlayableDetailUsesOneCinematicViewportAndUsefulMetadata()"

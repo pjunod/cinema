@@ -215,8 +215,10 @@ test("the live overlay hides only from a visible overlay, and a held channel key
   // The same numbers as the finite player, deliberately.
   assert.equal(live.timings.hide_after_ms, contract.timings.hide_after_ms);
   assert.equal(live.timings.hidden_only_while_playing, contract.timings.hidden_only_while_playing);
-  // One tuner GET per held key: the coalescing window is the guardrail.
-  assert.ok(live.timings.channel_coalesce_ms >= 350, "channel coalescing is shorter than one held-key repeat");
+  // One tuner GET per physical held-key gesture, independent of OS repeat cadence.
+  assert.equal(live.timings.channel_coalesce_ms, 350);
+  assert.match(live.timings.notes.join("\n"), /keyup/i,
+    "channel coalescing must be owned by the physical key gesture, not repeat cadence");
 });
 
 test("the root live browser never retunes or controls playback behind native browsing", () => {

@@ -16,7 +16,7 @@ remains independent. No production backfill or service restart is authorized.
 The local indexer already builds stripped, preserved and P7-to-P8.1 converted
 identities. Shared VOD resolution begins by refusing preserved Dolby Vision.
 Remove the coverage gap through a complete producer-to-consumer path, keeping
-source and recipe verification. TRON must not depend on a pre-existing local
+source and recipe verification. Reference film F must not depend on a pre-existing local
 index merely because the chosen branch preserves or converts Dolby Vision.
 
 Do not make an index miss select SDR, transcode, lower resolution, or an

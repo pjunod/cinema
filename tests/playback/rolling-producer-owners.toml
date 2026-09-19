@@ -27,7 +27,11 @@ pattern = "replacing_child"
 # the mask is still clear at that point. No production reader was added and
 # nothing new elects a replacement.
 # +1 for the actor-transition regression assertion.
-expected_occurrences = 31
+# +2 for segment-delivery attribution: the shipped read reports whether the
+# actor is already replacing this response's producer, and the test-only write
+# creates that exact state before dropping the delivery. Neither elects or
+# starts a replacement; the actor remains the sole owner of that transition.
+expected_occurrences = 33
 kind = "recovery_election"
 replacement = "retained process-replacement serialization projection; actor decisions and exact attempts own transcode prepublication"
 
@@ -202,7 +206,10 @@ pattern = "tokio::time::sleep\\("
 # seconds" into "destroy the session".
 # +1 for the bounded test wait while the actor records the replacement attempt.
 # The copy-init regression delays fixture publication by 100 ms to reproduce the empty-init window; no runtime timer is added.
-expected_occurrences = 39
+# +1 for the segment-delivery telemetry regression. The 10 ms poll is test-only
+# and sits inside one two-second timeout; it waits for an already-enqueued Store
+# event and owns neither a producer nor a replacement decision.
+expected_occurrences = 40
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -331,7 +338,9 @@ id = "legacy-replacement-mask"
 pattern = "replacing_child"
 # 29 -> 30 with M5c3; the module-wide twin of `replacement-mask-flag` above,
 # and the same single test-only read.
-expected_occurrences = 31
+# +2 for the shipped telemetry read and its test-only state setup, reviewed
+# under `replacement-mask-flag` above.
+expected_occurrences = 33
 
 [[module_symbols]]
 id = "legacy-downgrade-owner"
@@ -1902,7 +1911,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # probe has a remaining-budget timeout; fragment-index cleanup bounds the
 # second wait after killing the retained child; the stderr join has a deadline
 # and aborts and joins its retained task on expiry. No new detached producer.
-expected_occurrences = 787
+# +2 for the segment-delivery telemetry regression's enclosing timeout and
+# 10 ms Store-event poll, both test-only and reviewed under `all-async-sleeps`.
+expected_occurrences = 789
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2005,7 +2016,10 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # +1 content-analysis fixture muxer for complete video with a longer audio
 # tail. This finite synthetic input is test-only and handed to testfixtures::run
 # for completion; it is not a production rolling producer.
-expected_occurrences = 117
+# +1 for `ffmpeg_has_filters`, a test-only capability query awaited through
+# `.output()` before the encoded-VOD regression proceeds. It is kill-on-drop,
+# captures bounded FFmpeg help output, and cannot outlive its caller.
+expected_occurrences = 118
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -2207,7 +2221,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # unchanged. Both matches are test-only HTTP assertions.
 # +1 VideoToolbox test-only output helper: each finite FFmpeg/FFprobe child
 # is awaited within a 30-second timeout and has kill-on-drop enabled.
-expected_occurrences = 303
+# +1 for the awaited `.output()` in the test-only `ffmpeg_has_filters` probe
+# inventoried under `process-command-construction` above.
+expected_occurrences = 304
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -2376,7 +2392,9 @@ pattern = "kill_on_drop\\s*\\("
 # cancellation backstop while its bounded readers and wait are joined.
 # +1 VideoToolbox test-only output helper, shared by five finite media
 # commands. Drop protects cancellation; successful output awaits child exit.
-expected_occurrences = 72
+# +1 for `ffmpeg_has_filters`: cancellation of the test-only capability query
+# drops and terminates its child instead of leaking FFmpeg into later tests.
+expected_occurrences = 73
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

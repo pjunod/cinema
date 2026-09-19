@@ -7972,7 +7972,7 @@ pub enum SegmentOpenError {
 /// the Session/attempt owner that produced the verdict so HTTP can fence a
 /// bodyless 404/502/503 before it becomes visible.
 pub(crate) enum SegmentPublication {
-    Ready(SegmentFile),
+    Ready(Box<SegmentFile>),
     Missing(Option<MediaResponseOwner>),
     /// The object was found for this exact owner, but its metadata could not
     /// be inspected. Absence and corrupt bytes are both stronger claims than
@@ -8023,6 +8023,8 @@ pub(crate) struct SegmentDelivery {
     producer_attempt: u64,
     session_id: String,
     segment: String,
+    segment_start_ms: Option<i64>,
+    segment_duration_ms: Option<i64>,
     method: &'static str,
     encoder: String,
     purpose: DeliveryPurpose,
@@ -8042,6 +8044,8 @@ struct SegmentDeliveryContext {
     producer_attempt: u64,
     session_id: String,
     segment: String,
+    segment_start_ms: Option<i64>,
+    segment_duration_ms: Option<i64>,
     encoder: String,
 }
 
@@ -8057,6 +8061,8 @@ impl SegmentDelivery {
             producer_attempt,
             session_id,
             segment,
+            segment_start_ms,
+            segment_duration_ms,
             encoder,
         } = context;
         let method = match session.method {
@@ -8070,6 +8076,8 @@ impl SegmentDelivery {
             producer_attempt,
             session_id,
             segment,
+            segment_start_ms,
+            segment_duration_ms,
             method,
             encoder,
             purpose: DeliveryPurpose::ClientResponse,
@@ -8119,6 +8127,50 @@ impl SegmentDelivery {
             fields.insert(
                 "purpose".to_owned(),
                 serde_json::Value::from(self.purpose.as_str()),
+            );
+            fields.insert(
+                "producer_attempt".to_owned(),
+                serde_json::Value::from(self.producer_attempt),
+            );
+            fields.insert(
+                "response_incarnation".to_owned(),
+                serde_json::Value::from(self.session.response_incarnation.to_string()),
+            );
+            fields.insert(
+                "segment_start_ms".to_owned(),
+                self.segment_start_ms
+                    .map_or(serde_json::Value::Null, serde_json::Value::from),
+            );
+            fields.insert(
+                "segment_duration_ms".to_owned(),
+                self.segment_duration_ms
+                    .map_or(serde_json::Value::Null, serde_json::Value::from),
+            );
+            let producer_superseded = self.session.replacing_child.load(Acquire)
+                || self.session.control.current_producer_attempt() != self.producer_attempt;
+            fields.insert(
+                "producer_superseded".to_owned(),
+                serde_json::Value::from(producer_superseded),
+            );
+            // A dropped body proves only that this response ended before EOF.
+            // A new browser attachment can abandon an old Session without
+            // changing that Session's producer attempt, so the server must not
+            // manufacture "client_cancelled" or "client_superseded" here.
+            fields.insert(
+                "client_disposition".to_owned(),
+                serde_json::Value::from("unknown"),
+            );
+            fields.insert(
+                "cut_class".to_owned(),
+                serde_json::Value::from(match reason {
+                    "storage_unexpected_eof" => "source_eof",
+                    "storage_read_error" => "storage_error",
+                    "body_lifetime_exceeded" => "transport_lifetime",
+                    "downstream_no_progress" => "transport_stall",
+                    "response_dropped" if producer_superseded => "producer_superseded",
+                    "response_dropped" => "unclassified_drop",
+                    _ => "none",
+                }),
             );
         }
         crate::telemetry::emit(
@@ -24129,6 +24181,15 @@ impl TranscodeManager {
                     .await;
                 }
                 let encoder = (*session.encoder_label.lock().await).to_owned();
+                let (segment_start_ms, segment_duration_ms) = match idx {
+                    Some(index) => session.segments.lock().await.window_ms_of(index).map_or(
+                        (None, None),
+                        |(start_ms, end_ms)| {
+                            (Some(start_ms), Some(end_ms.saturating_sub(start_ms)))
+                        },
+                    ),
+                    None => (None, None),
+                };
                 let delivery = SegmentDelivery::new(
                     SegmentDeliveryContext {
                         store: Arc::clone(&self.store),
@@ -24136,16 +24197,18 @@ impl TranscodeManager {
                         producer_attempt,
                         session_id: session_id.to_owned(),
                         segment: name.to_owned(),
+                        segment_start_ms,
+                        segment_duration_ms,
                         encoder,
                     },
                     len,
                     snapshot_lease,
                 );
-                return Ok(SegmentPublication::Ready(SegmentFile {
+                return Ok(SegmentPublication::Ready(Box::new(SegmentFile {
                     file,
                     len,
                     delivery,
-                }));
+                })));
             }
             // Give up if the session was declared dead, or ffmpeg has exited and
             // the file still isn't there.
@@ -24264,7 +24327,7 @@ impl TranscodeManager {
         self.segment_for_publication(session_id, name)
             .await
             .map(|outcome| match outcome {
-                SegmentPublication::Ready(file) => Some(file),
+                SegmentPublication::Ready(file) => Some(*file),
                 SegmentPublication::Missing(_)
                 | SegmentPublication::Unavailable(_)
                 | SegmentPublication::Pending(_)
@@ -33176,6 +33239,8 @@ pub(crate) mod tests {
                 producer_attempt: session.control.current_producer_attempt(),
                 session_id: "delivery-test".to_owned(),
                 segment: "seg00001.m4s".to_owned(),
+                segment_start_ms: Some(2_000),
+                segment_duration_ms: Some(2_000),
                 encoder: "test".to_owned(),
             },
             1_024,
@@ -33223,6 +33288,12 @@ pub(crate) mod tests {
             .extra
             .as_deref()
             .is_some_and(|extra| extra.contains("\"delivered_bytes\":640")));
+        assert!(incomplete.extra.as_deref().is_some_and(|extra| {
+            extra.contains("\"segment_start_ms\":2000")
+                && extra.contains("\"segment_duration_ms\":2000")
+                && extra.contains("\"cut_class\":\"source_eof\"")
+                && extra.contains("\"producer_superseded\":false")
+        }));
         assert!(
             incomplete
                 .extra
@@ -33230,6 +33301,60 @@ pub(crate) mod tests {
                 .is_some_and(|extra| extra.contains("\"purpose\":\"client_response\"")),
             "every delivery event names who was reading"
         );
+    }
+
+    #[tokio::test]
+    async fn segment_delivery_drop_names_same_session_producer_replacement() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let dir = crate::test_tempdir().expect("segment-delivery replacement directory");
+        let mut raw_session = test_session(dir.path().to_path_buf());
+        raw_session.file_id = file_id;
+        let session = Arc::new(raw_session);
+        let delivery = SegmentDelivery::new(
+            SegmentDeliveryContext {
+                store: Arc::clone(&store),
+                session: Arc::clone(&session),
+                producer_attempt: session.control.current_producer_attempt(),
+                session_id: "delivery-replaced".to_owned(),
+                segment: "seg00002.m4s".to_owned(),
+                segment_start_ms: Some(4_000),
+                segment_duration_ms: Some(2_000),
+                encoder: "test".to_owned(),
+            },
+            1_024,
+            None,
+        );
+
+        session.replacing_child.store(true, Release);
+        drop(delivery);
+
+        let event = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(event) = store
+                    .playback_events(&plurx_core::domain::PlaybackEventQuery {
+                        since_ms: None,
+                        event: None,
+                        limit: 20,
+                    })
+                    .await
+                    .expect("segment-delivery telemetry query")
+                    .into_iter()
+                    .find(|event| event.reason.as_deref() == Some("response_dropped"))
+                {
+                    return event;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("replacement telemetry persisted");
+        let extra = event.extra.as_deref().unwrap_or_default();
+        assert!(extra.contains("\"producer_superseded\":true"));
+        assert!(extra.contains("\"cut_class\":\"producer_superseded\""));
+        assert!(extra.contains("\"client_disposition\":\"unknown\""));
     }
 
     fn reopen_request(
@@ -35666,7 +35791,7 @@ pub(crate) mod tests {
                 .await
                 .expect("segment resolution")
             {
-                SegmentPublication::Ready(opened) => opened,
+                SegmentPublication::Ready(opened) => *opened,
                 _ => panic!("advertised segment was not ready"),
             };
             let segment_owner = opened.response_owner();

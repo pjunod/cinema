@@ -1,11 +1,11 @@
-# TRON held-seek stall — two commits, one source change, one recovery spent too early
+# reference film F held-seek stall — two commits, one source change, one recovery spent too early
 
-**Status:** review changes incorporated; re-review requested; no fix implemented, 2026-09-18
+**Status:** implementation, adversarial review, and current-main qualification complete; fast-lane contract inventory updated, 2026-09-18
 **Incident:** 2026-09-18, approximately 04:17–04:25 UTC
 **Incident build:** `v0.3.0-2770-g6fb0901d`
 **Exact source:** `6fb0901d3d18c1b181f7299f4faddfb73994fd1a`
 
-Holding Right Arrow while watching *TRON: Ares* split one physical key hold
+Holding Right Arrow while watching *reference film F* split one physical key hold
 into two client seek commits. The first commit was superseded before it opened
 a server session or attached media; it did not cause the stall. The final
 attachment received media and built 9.6 seconds of runway, but recovery still
@@ -16,12 +16,12 @@ missing presentation-observation interval: a refilled attachment spends the
 single reopen at the eight-second supply deadline instead of receiving the
 remainder of the existing 20-second absolute deadline to prove progress.
 
-This document records the evidence, causal limits, repair contract, and tests
-needed for review. It complements
+This document records the evidence, causal limits, implemented repair contract,
+and tests prepared for review. It complements
 [WEB-PLAYBACK-FREEZE-RECOVERY-IMPLEMENTATION.md](WEB-PLAYBACK-FREEZE-RECOVERY-IMPLEMENTATION.md),
 [PLAYBACK.md](../PLAYBACK.md), and
-[PLAYBACK-TESTING.md](../PLAYBACK-TESTING.md). It does not implement or deploy
-a repair.
+[PLAYBACK-TESTING.md](../PLAYBACK-TESTING.md). Deployment remains pending the
+review and validation sequence in §10.
 
 ## 1. Finding — the two defects are independent
 
@@ -221,6 +221,22 @@ presentation still has time inside the existing 20-second absolute deadline.
 `stallRecoveryAction()` permits one restart and returns `prompt` when
 `alreadyRecovered` is true. That bound behaved as designed and must remain.
 
+### 3.5 A second incident confirms the spent-recovery edge
+
+Build `v0.3.0-2780-ga5454c40` reproduced the outcome on another native-HLS
+title after a brief quorum loss had already consumed the player's one reopen.
+The later seek entered an 8.1-second `supply-persistent` wait and raised
+`owner_exhausted` immediately because no reopen remained. The producer had
+materialized and parked its demanded window, but that run did not retain the
+current client runway; it does not prove refill or the held-key split.
+
+There is no relevant web or test diff between the original incident SHA and
+`a5454c40`. The deployed code still reads `p.waitRunway`, immediately falls
+through from a passive presentation answer, commits `nudge()` after 350 ms,
+and leaves keyup outside seek ownership. This second incident is acceptance
+evidence for the previously-spent-recovery case, not additional proof of the
+Reference film F input branch.
+
 ## 4. Root cause — a refilled presentation spent recovery before its deadline
 
 ### 4.1 Sibling defect: quiet-time debounce did not model a held key
@@ -308,7 +324,7 @@ starts one tuner session at the final previewed channel. The existing
 `channel_coalesce_ms >= 350` assertion is not a valid held-key guarantee and
 must be replaced with behavioral fake-time coverage.
 
-This is a sibling-risk repair, not part of the TRON incident chain. Leaving it
+This is a sibling-risk repair, not part of the reference film F incident chain. Leaving it
 unchanged would preserve the same session-storm defect on another surface.
 
 ### 5.3 Reclassify from current evidence, then observe presentation
@@ -358,11 +374,14 @@ watch writes the same snapshot and calls `persistentWait()` directly.
 ### 5.5 Partial-response telemetry makes the browser lead testable
 
 For a first-segment response that ends early, record the expected and delivered
-bytes, segment media duration, start offset, cut class, attachment generation,
-and whether client supersession or cancellation was observed. This must not
-turn an untyped partial response into a server-failure verdict. It exists to
-separate expected replacement from unexpected transfer loss and to compare
-oversized first segments with successful starts.
+bytes, segment media duration, start offset, response incarnation, producer
+attempt, cut class, and whether producer supersession was observed. A dropped
+body does not prove whether the browser cancelled or replaced an attachment;
+that client disposition remains explicitly unknown unless a future client
+signal supplies it. This must not turn an untyped partial response into a
+server-failure verdict. It exists to separate observed in-session replacement
+from unclassified transfer loss and to compare oversized first segments with
+successful starts.
 
 ### 5.6 Preserve ownership and fencing
 
@@ -494,13 +513,47 @@ The first review resolved the open policy choices:
 3. **Presentation gets the remaining observation interval.** `play()` alone
    is not the repair; actual clock/frame progress inside the existing
    20-second deadline is.
-4. **Partial-response telemetry records size and duration.** Cancellation
-   reason alone cannot test the oversized-first-segment lead.
+4. **Partial-response telemetry records size, duration, and truthful server
+   ownership.** The server records response incarnation and producer attempt,
+   but does not relabel an unclassified dropped body as a client cancellation.
 
 ## 9. Current disposition
 
-No code, service, media, or deployment was changed during diagnosis. The old
-session retired after the client released it, and later cold-start plus
-single-seek playback succeeded. The current dirty documentation checkout
-contains unrelated work; implementation should begin from a clean worktree of
-the intended base and carry this RCA plus its single index row forward.
+Diagnosis changed no service, media, or deployment. The old session retired
+after the client released it, and later cold-start plus single-seek playback
+succeeded. Implementation now lives in an agent-owned clean clone based on
+`a5454c40`; the user's dirty checkout remains untouched. The candidate passed
+its single adversarial review and focused validation. Current `main` and its
+newly landed unit-test repairs are incorporated and qualified. The first
+current-head fast lane stopped in policy preflight because two candidate
+commits and two commits newly inherited from `main` lacked required historical
+regression mappings; the mappings are now part of the promotion candidate.
+
+## 10. Implementation status
+
+**Original base:** `a5454c40` · **Current main merged:** `7cdbdd1a`
+**Branch:** `codex/tron-held-seek-recovery`
+**PR:** [Forgejo #361](http://192.168.4.7:3000/noirr/plurx/pulls/361)
+**Working clone:** agent-owned Forgejo clone; the user's checkout is untouched
+
+- [x] Original incident and independent review incorporated.
+- [x] Fresh spent-recovery reproduction incorporated with its causal limits.
+- [x] Held-key ownership, current-runway recovery, telemetry, and regressions implemented.
+- [x] Pinned Rust 1.97.1 compile check green on the candidate.
+- [x] Reviewable commits and draft pull request.
+- [x] One adversarial agent review of the complete candidate.
+- [x] Four review findings addressed: post-control evidence resampling, Live TV
+  Stop cancellation, adapter harness ownership, and truthful drop telemetry.
+- [x] Focused reviewed-head validation green: four web suites, documentation
+  index, two segment-delivery Rust regressions, and `git diff --check`.
+- [x] Current `main` merged and newly landed unit-test repairs qualified: the
+  complete fast Rust unit lane, 18 operations/docs tests, three playback web
+  suites, and the Live TV suite are green.
+- [x] Current-head history-policy failure diagnosed and all four required
+  `validation/regressions.d` mappings added.
+- [x] Rolling-producer ownership inventory updated for the two telemetry
+  observations, bounded test poll, and current-main test-only FFmpeg probe.
+- [x] Five stale documentation instructions updated for the automatic,
+  label-free fast lane required by the newly integrated operations contract.
+- [ ] Fast lane green on the reviewed head.
+- [ ] Pull request merged into `main` and branch cleaned up.

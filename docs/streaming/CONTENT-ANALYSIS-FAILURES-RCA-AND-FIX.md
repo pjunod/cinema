@@ -6,7 +6,7 @@ proposed, not implemented or deployed · **Written:** 2026-09-17 UTC
 
 Companion to [queue repair verification](QUEUE-REPAIR-VERIFICATION-PROMPT.md)
 (the earlier queue recovery) and
-[Wicked startup](STUTTER-4K.md) (a separate playback failure
+[reference film G startup](STUTTER-4K.md) (a separate playback failure
 while an index was unavailable). This document explains the retained
 “Index output was incomplete” failures and proposes their correction.
 It is a review proposal, not authorization to deploy or reopen the fleet.
@@ -24,7 +24,7 @@ container duration. A longer audio track or another container-duration
 contributor can therefore make a complete video pass look truncated.
 The check allows only two seconds of difference.
 
-This is directly demonstrated by file 9, **Avatar: Fire and Ash**. Its index
+This is directly demonstrated by file 9, **Reference film K**. Its index
 covers exactly the duration reported for the primary video. The checker
 instead expects the duration of the longer French audio track and refuses
 the result. Retrying unchanged code reproduces the same refusal.
@@ -94,15 +94,15 @@ by their expected ticks and catalogued durations. All durations are seconds.
 
 | File | Title | Indexed video | Probe video | Container expectation | Excess expectation |
 |---|---|---:|---:|---:|---:|
-| 9 | Avatar: Fire and Ash | 11824.916 | 11824.916 | 11844.896 | 19.980 |
-| 3451 | Dexter S02E11 | 3089.006 | 3089.008 | 3117.664 | 28.658 |
-| 3498 | Dexter S06E10 | 2957.287 | 2957.288 | 2966.298 | 9.011 |
+| 9 | reference film K | 11824.916 | 11824.916 | 11844.896 | 19.980 |
+| 3451 | reference episode L S02E11 | 3089.006 | 3089.008 | 3117.664 | 28.658 |
+| 3498 | reference episode L S06E10 | 2957.287 | 2957.288 | 2966.298 | 9.011 |
 | 3634 | Family Guy S19E04 | 1297.045 | 1297.046 | 1301.772 | 4.727 |
 
-Avatar's retained reason is `covered 189198656 of 189518336 ticks`, with
+Reference film K's retained reason is `covered 189198656 of 189518336 ticks`, with
 4,520 fragments; its latest retained refusal was 2026-09-16 15:42:02 UTC.
 The French audio duration is `11844.896`, exactly the container expectation.
-The Dexter examples also carry audio longer than video. Family Guy's
+The reference episode I examples also carry audio longer than video. Family Guy's
 container exceeds both reported primary video and audio durations; the
 specific contributor was not established.
 
@@ -116,7 +116,7 @@ budget_seconds = clamp(ceil(film_seconds / 8) + 30, 90, 1800)
 ```
 
 This assumes approximately 8× playback speed, adds 30 seconds and caps the
-pass at 30 minutes. File 120, **Wicked**, retained an `exceeded the 1232s
+pass at 30 minutes. File 120, **Reference film G**, retained an `exceeded the 1232s
 index budget` refusal from 2026-09-15 23:30:35 UTC. At 2026-09-17
 01:06:46.358316 UTC, nynuc logged a successful build for file 120:
 12,247 fragments, timescale 16,000 and elapsed time 812,146 ms.
@@ -318,7 +318,7 @@ recovery must not relabel those as successes.
 
 | Package | Deliverable | Required acceptance |
 |---|---|---|
-| A — completion expectation | Source-bound, stream-matched metadata resolution and completion validation | Avatar-shaped fixture fails under old code and passes with all video intact; deliberately shortened video still fails |
+| A — completion expectation | Source-bound, stream-matched metadata resolution and completion validation | reference film K-shaped fixture fails under old code and passes with all video intact; deliberately shortened video still fails |
 | B — failure policy | Typed causes, shared disposition, bounded diagnostics and cross-node visibility | Timeout preserves progress, schedules a bounded charged retry, eventually respects attempt limit, and cannot publish partial output |
 | C — operator surface | Cause-specific messages and accurate retry state | UI tests cover timeout, shortfall, missing metadata and legacy `truncated`; no unsupported source-replacement advice |
 | D — recovery | Targeted preview and idempotent successor creation | Both backends cover existing success, active successor, changed source, multiple DV identities, standalone job, repeated recovery, headroom and stale owner |
@@ -374,7 +374,7 @@ blindly downgrade a migrated database.
 
 ## 8. Fable review — decisions needed before implementation
 
-1. **Causal strength:** does the source comparison plus exact Avatar match
+1. **Causal strength:** does the source comparison plus exact reference film K match
    establish the proposed root cause, with the cohort limitations stated
    accurately? Is any additional targeted media reproduction needed first?
 2. **Timing authority:** approve or revise the metadata precedence,

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["14b5a32e"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The retained fMP4 promotion unit suite requires a landing fragment with no HEVC parameter sets to remain a no-op and preserves canonical captured promotion across generation boundaries. The Rust gate runs that suite and therefore keeps empty promotion input isolated from hvcC enrichment work."

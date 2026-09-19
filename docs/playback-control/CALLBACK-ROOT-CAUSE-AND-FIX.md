@@ -1,4 +1,4 @@
-# Wicked playback — root cause evidence and proposed callback lifecycle fix
+# reference film G playback — root cause evidence and proposed callback lifecycle fix
 
 **Status:** open, Fable findings addressed; awaiting CI qualification · **Written:** 2026-09-17 ·
 **Candidate:** `codex/wicked-native-progress`, including the Fable follow-up ·
@@ -12,7 +12,7 @@ including the buffering and Fable follow-ups. The PR remains unmerged; nothing h
 
 ## 1. The failure is missing browser frame delivery
 
-Cold-resuming Wicked in Safari loaded the native HLS stream and sought to
+Cold-resuming reference film G in Safari loaded the native HLS stream and sought to
 the saved position. Media time and browser frame counters advanced, but the
 browser never invoked the registered `requestVideoFrameCallback` callback.
 Plurx therefore received no callback-based evidence of presentation, and its
@@ -73,7 +73,7 @@ it. Historical commits remain in the branch, so review the net diff against
 ## 3. Controlled playback tests isolate registration timing
 
 The reproduced environment was Safari 27.0, build `22625.1.29.11.27`, using
-the web UI on `nynuc:32400`. Wicked is library file 120, using native copy
+the web UI on `nynuc:32400`. Reference film G is library file 120, using native copy
 HLS with 4K Dolby Vision P7-to-P8 delivery. The controlled resume position
 was 566.055 seconds. The server remained at build
 `1e530d32c87df15a2d2ded10b46c185c07cdb832` throughout these trials.
@@ -204,7 +204,7 @@ page for these trials:
 
 | Check | Result |
 |---|---|
-| Wicked native-HLS cold resume at 566.055 seconds | 1,176 callbacks at 615.242 seconds, zero captured errors and zero fired detector samples. |
+| reference film G native-HLS cold resume at 566.055 seconds | 1,176 callbacks at 615.242 seconds, zero captured errors and zero fired detector samples. |
 | Paused seek to 650 seconds | One landing callback: counter advanced from the seek's frame floor of 1,665 to 1,666. Video stayed paused at the destination. The existing pending-seek settlement limitation remains, as Fable predicted; no epoch or settlement rule changed. |
 | Native-HLS buffer recovery | Passed in an isolated local native-HLS fixture using the exact final subscriber. Buffer depletion produced `waiting` at media time 26.357 seconds, ready state 2, and 631 callbacks. The fixture released withheld segments after 2 seconds; `canplay` and `playing` followed 2.064 seconds after `waiting`, at ready state 3. Callback delivery resumed to 749 at export; `loadeddata` fired only once, at startup. |
 
@@ -289,6 +289,6 @@ bounded startup tests did not reproduce that failure. A later playlist GET
 also returned 503; a different failing endpoint is not proof of the same cause.
 
 This PR contains no server-side fix and does not establish that every original
-Wicked error is resolved. Callback lifecycle repair should be evaluated on
+Reference film G error is resolved. Callback lifecycle repair should be evaluated on
 its own evidence. Keep the separate publication failure open rather than
 expanding the callback watchdog or claiming the 503 was fixed by this patch.

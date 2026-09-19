@@ -1045,10 +1045,10 @@ checks or feature-profile compilation. Do not use CI to find compiler errors.
 For task PRs into the effort, no main-only review or fast lane is requested.
 For the completed effort's PR into **main**: open draft, request exactly one
 adversarial agent review, address every finding on the draft, verify the
-fixes as author, mark ready, then apply `fast-lane`. Merge only after the
-**current head** has a green **Main promotion gate**. No second review,
-re-review, panel, or approval follow-up. If returning to draft, remove
-`fast-lane` first.
+fixes as author, then mark ready; the fast lane starts automatically. Merge
+only after the **current head** has a green **Main promotion gate**. No second
+review, re-review, panel, or approval follow-up. Returning to draft stops the
+ready-PR lane; there is no fast-lane label to add or remove.
 
 Full runtime suites belong to the separately dispatched sweep. Focused
 feature tests and device evidence guide implementation, but this handoff

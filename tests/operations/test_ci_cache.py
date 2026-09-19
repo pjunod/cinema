@@ -961,6 +961,63 @@ class CiCacheContractCase(unittest.TestCase):
             # 20 % of 78 GiB, and demonstrably less than the whole filesystem.
             self.assertIn("filesystem floor: 15 GiB", report)
 
+    def test_cache_floor_is_satisfiable_on_the_largest_runner_disk(self):
+        """The mirror image: a share of a large filesystem is also unmeetable.
+
+        `gha-media1-general-01` is a 517 GiB root at 80 % with a 12 MiB plurx
+        cache. Twenty per cent of that filesystem is 103 GiB, the host holds
+        101 GiB free, and nothing the pruner is allowed to delete closes a
+        2 GiB gap — so it deleted every cache it could and failed the Rust gate
+        anyway, on 2026-09-19, on two different hosts. The reserve is capped at
+        40 GiB: enough for the 25 GiB `ci-require-disk` demands, and no longer
+        a report on what the rest of the machine is doing.
+        """
+        script = ROOT / "scripts/ci-cache-prune"
+        with tempfile.TemporaryDirectory() as raw_directory:
+            tool_cache = Path(raw_directory) / "tool"
+            tool_cache.mkdir()
+            fake_bin = tool_cache / "bin"
+            fake_bin.mkdir()
+            fake_df = fake_bin / "df"
+            # 517 GiB total, 101 GiB available: media1's root volume at 80 %.
+            fake_df.write_text(
+                "#!/bin/sh\n"
+                "printf '%s\\n' "
+                "'Filesystem 1024-blocks Used Available Capacity Mounted' "
+                "'fixture 542113792 436207616 105906176 80% /fixture'\n",
+                encoding="utf-8",
+            )
+            fake_df.chmod(0o755)
+            cache_root = tool_cache / "plurx-ci/cargo/runner-01/rust-1.97.1"
+            target = cache_root / "rust-gate/target"
+            target.mkdir(parents=True)
+            (target / "proof").write_bytes(b"cache")
+            summary = tool_cache / "summary.md"
+            environment = os.environ.copy()
+            environment.update(
+                {
+                    "GITHUB_STEP_SUMMARY": str(summary),
+                    "PATH": f"{fake_bin}{os.pathsep}{environment['PATH']}",
+                    "RUNNER_TOOL_CACHE": str(tool_cache),
+                }
+            )
+
+            result = subprocess.run(
+                [str(script), str(cache_root), "30"],
+                env=environment,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            # The cache it was told to protect is still there: the pruner had
+            # no reason to delete anything, and before the cap it deleted this.
+            self.assertTrue(target.is_dir())
+            report = summary.read_text()
+            self.assertIn("prune decision: `within-budget`", report)
+            # Capped, not 20 % of 517 GiB.
+            self.assertIn("filesystem floor: 40 GiB", report)
+
     def test_runner_cache_server_is_reported_and_never_deleted(self):
         """The one cache a job can see and must not touch.
 

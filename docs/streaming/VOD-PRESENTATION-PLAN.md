@@ -742,7 +742,7 @@ Flag + VOD path + timeout behavior; build bump; STATUS.html device rows.
 **Acceptance (gpt device runs, exact protocol in STATUS.html):** the
 historical killer cases on real hardware — the 2160p HEVC copy title that
 wedged tvOS (Three Months, file 5836), a DV P5 episode, the
-trailing-audio title (Dexter S01E01), a >60 s pause deep in a film, an
+trailing-audio title (reference episode I S01E01), a >60 s pause deep in a film, an
 autoplay episode boundary, a 30-minute scrub torture run — all with zero
 terminal screens, zero resume-behind, and stall beacons only for genuine
 starvation.

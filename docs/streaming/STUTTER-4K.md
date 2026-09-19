@@ -145,7 +145,7 @@ and the number that settled it. The harnesses are in §6.
 
 Four traces on media1, per-mount, replayed against a simulated client buffer:
 no 250 ms window ever fell below realtime for the source bitrate. Storage
-under Wicked reads 2428 Mb/s against a 69 Mb/s need — 35× headroom. The
+under reference film G reads 2428 Mb/s against a 69 Mb/s need — 35× headroom. The
 built-in probe (`storeprobe.rs`) reports this per mount; §4.9ter of
 [PERF-PLAN.md](../performance/PERF-PLAN.md) has the baseline.
 
@@ -292,7 +292,7 @@ fragments through MSE. The stats panel also now names the transport outright
 (`Transport: segmented fMP4 · MediaSource` / `one continuous file · range
 requests`).
 
-**Acceptance:** play Wicked with that selected and read the Hitches row.
+**Acceptance:** play reference film G with that selected and read the Hitches row.
 
 - No held frames → fragmenting through MSE is the cause. Next step is §5.1.
 - Held frames every ~1.8 s → **impossible**, there are no segments; a
@@ -774,7 +774,7 @@ summed video sample durations in the video timescale, so it is exact by
 construction rather than by luck.
 
 **What it was worth on the reference file, measured (2026-07-30).** The first
-census of *Wicked* said 32% of cuts clean and looked like a source problem. It
+census of *reference film G* said 32% of cuts clean and looked like a source problem. It
 was not. Clean points on that file come every 2.3 seconds (median, 189 IDRs in
 a 600 s sample) — but at 58 Mb/s the 48 MB ceiling arrived 6.6 seconds in, so
 past the six-second floor the segmenter had **0.6 seconds**, less than one GOP,
@@ -783,7 +783,7 @@ replays the policy over a floor × ceiling grid and reports dirty cuts per
 minute — the rate of the artifact, since a clean cut costs nothing — against
 what ffmpeg's own muxer would do at the same floor:
 
-| policy | dropped frames / min on *Wicked* |
+| policy | dropped frames / min on *reference film G* |
 |---|---|
 | ffmpeg's HLS muxer, 6 s | 8.0 |
 | segmenter, floor 6 s · ceiling 48 MB (as first shipped) | 5.9 |
@@ -817,7 +817,7 @@ traded against. 64 MB is the last rung that measured clean.
 > The experiment above did not catch it because **a headless Chromium in a
 > container is not the client**. Its quota is a function of the device memory
 > class, and it let all four arms park at 155 MB — above what a real desktop
-> Chrome allowed on the same bitrate. Reported from the sofa on *Tron*, Chrome,
+> Chrome allowed on the same bitrate. Reported from the sofa on *reference film F*, Chrome,
 > the same day: 6 quota refusals in two and a half minutes and then a fatal
 > append failure that froze playback. The lesson is the one this document keeps
 > re-learning: a measurement taken on the machine that is not the one
@@ -847,7 +847,7 @@ once, automatically, before anything is published.
 
 ### 5.7 The once-per-film freeze — the client was starting at the live edge
 
-Reported the day the segmenter shipped, on the reference file itself: *Wicked*
+Reported the day the segmenter shipped, on the reference file itself: *reference film G*
 in Chrome froze for 8.8 seconds at 9.2 seconds in, deterministically, every
 play. Safari saw the same event as a 597 ms hiccup. Every buffer number either
 side of the freeze was healthy — 137 Mb/s delivered, 7.6 s held against a 7 s
@@ -910,7 +910,7 @@ a NAS-bound 4K remux — the reference file is the worst case of its own fix.
 That is a spinner at open, once, priced against a mid-scene freeze at a
 second the film chose, every single play.
 
-**Measured the same day, and corrected (Tron: 21.0 s to first frame).** The
+**Measured the same day, and corrected (reference film F: 21.0 s to first frame).** The
 freeze was gone — 0 dropped in 486 frames, buffer steady — but the open cost
 far more than the cushion should. Two compounders, found in that order:
 
@@ -927,14 +927,14 @@ far more than the cushion should. Two compounders, found in that order:
    15/2 = 7.5 s), heavy stretches can be NAS-bound near 1× but cut
    byte-capped short (64 MB in ≤ ~8.5 s at any bitrate the NAS can sustain
    playback of at all). **A correction from the same day, because the first
-   version of this paragraph blamed the count for all of *Tron*'s 21 s:**
+   version of this paragraph blamed the count for all of *reference film F*'s 21 s:**
    the overlay's largest-appended segment on that title reads 8.5 s a
    minute in, so its opening cut clean 7.5–8.5 s segments and its cushion
    was ~17 s under either unit. Its 21 s decomposes as ~8 s of cushion at
    the flat 2× below, plus a cold NFS open and probe of a Dolby Vision MKV,
    plus fetch and decode — and a warm second play of the same file started
    visibly faster with nothing changed, which is the cold-open term showing
-   itself. The count was still the wrong unit; it just wasn't *Tron*'s
+   itself. The count was still the wrong unit; it just wasn't *reference film F*'s
    biggest cost.
 
 2. **`-readrate_initial_burst` is quietly load-bearing, and not every ffmpeg
@@ -949,7 +949,7 @@ far more than the cushion should. Two compounders, found in that order:
    first frame); jellyfin-ffmpeg7 — the Docker image's default engine — has
    the flag.
 
-With both in place the arithmetic says a *Tron*-class open lands around
+With both in place the arithmetic says a *reference film F*-class open lands around
 6–10 s with the burst working and a warm cache (ffprobe/decision + ffmpeg
 open + ~17 s of cushion at I/O speed + first fetch/decode), ~12–13 s paced
 flat, and worse from a cold NFS cache — the open/probe of a big DV MKV is
@@ -968,7 +968,7 @@ cut-rule numbers stand as written again.
 
 ### 5.7bis The 57:11 Apple TV loop — the final audio tail was one segment
 
-Reported 2026-08-12 on *Dexter: New Blood* S01E01: tvOS reached 57:11, then
+Reported 2026-08-12 on *reference episode I* S01E01: tvOS reached 57:11, then
 repeated the same second indefinitely. The file's last video frame is at
 57:11 but audio continues to 57:56, and ffmpeg carries both in one final
 fragment. The segmenter correctly stopped declaring that fragment as the
@@ -1092,8 +1092,8 @@ The keeper clears itself the moment its hls instance stops being the
 player's.
 
 Still open, smaller and separate: the `bufferStalledError at 0.0s` startup
-blip (recovers in under a second; likely first-append latency), and Tron's
-clean-cut density — 8 clean of 17 cuts, against Wicked's ~68% — which is a
+blip (recovers in under a second; likely first-append latency), and reference film F's
+clean-cut density — 8 clean of 17 cuts, against reference film G's ~68% — which is a
 `gop-census` question about that disc, not a defect. Whether Auto should
 rescue on a *sustained* chase remains a decision with beacons now feeding
 it.

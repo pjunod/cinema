@@ -9669,6 +9669,11 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testPhoneDetailUsesAnIntegratedHeroAndCompactControls() {
+        XCTAssertEqual(DetailView.presentation(kind: "movie", compact: true), .calm)
+        XCTAssertEqual(DetailView.presentation(kind: "episode", compact: false), .calm)
+        XCTAssertEqual(DetailView.presentation(kind: "video", compact: true), .calm)
+        XCTAssertEqual(DetailView.presentation(kind: "book", compact: true), .mobile)
+        XCTAssertEqual(DetailView.presentation(kind: "book", compact: false), .standard)
         XCTAssertGreaterThanOrEqual(IOSDetailMetrics.compactHeroHeight, 260)
         XCTAssertLessThanOrEqual(IOSDetailMetrics.compactHeroHeight, 300)
         XCTAssertGreaterThanOrEqual(IOSDetailMetrics.primaryControlHeight, 44)
@@ -9955,6 +9960,11 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testTVPlayableDetailUsesOneCinematicViewportAndUsefulMetadata() throws {
+        XCTAssertEqual(DetailView.presentation(kind: "movie", compact: false), .tvPlayable)
+        XCTAssertEqual(DetailView.presentation(kind: "episode", compact: false), .tvPlayable)
+        XCTAssertEqual(DetailView.presentation(kind: "video", compact: false), .tvPlayable)
+        XCTAssertEqual(DetailView.presentation(kind: "show", compact: false), .tvSeries)
+        XCTAssertEqual(DetailView.presentation(kind: "season", compact: false), .tvSeries)
         XCTAssertLessThanOrEqual(
             TVPlayableDetailMetrics.heroHeight,
             720,
@@ -9986,11 +9996,10 @@ final class AppleClientTests: XCTestCase {
             DetailView.tvPlayableMetadataParts(item, file: file, durationMs: file.durationMs),
             ["Season 4, Episode 2", "54 min", "4K", "HEVC"]
         )
-        let badges = DetailView.itemMetadataBadges(
+        let badges = DetailView.tvPlayableBadges(
             item,
             file: file,
-            durationMs: file.durationMs,
-            includeSeries: false
+            durationMs: file.durationMs
         )
         XCTAssertEqual(
             badges.map(\.symbol),
@@ -10129,7 +10138,7 @@ final class AppleClientTests: XCTestCase {
         )
         let movie = try decoder.decode(
             Item.self,
-            from: Data(#"{"id":2,"kind":"movie","title":"TRON: Ares","year":2025,"resolution":2160,"watch":{"position_ms":300000,"duration_ms":7200000}}"#.utf8)
+            from: Data(#"{"id":2,"kind":"movie","title":"reference film F","year":2025,"resolution":2160,"watch":{"position_ms":300000,"duration_ms":7200000}}"#.utf8)
         )
 
         XCTAssertEqual(cardShelfMetadata(episode), "S4 E2  44m left")
@@ -10145,7 +10154,7 @@ final class AppleClientTests: XCTestCase {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let movie = try decoder.decode(
             Item.self,
-            from: Data(#"{"id":1,"kind":"movie","title":"TRON: Ares","year":2025}"#.utf8)
+            from: Data(#"{"id":1,"kind":"movie","title":"reference film F","year":2025}"#.utf8)
         )
         let episode = try decoder.decode(
             Item.self,
@@ -10165,7 +10174,7 @@ final class AppleClientTests: XCTestCase {
         )
         let movie = try decoder.decode(
             Item.self,
-            from: Data(#"{"id":2,"kind":"movie","title":"TRON: Ares","year":2025,"watch":{"position_ms":300000,"duration_ms":7200000}}"#.utf8)
+            from: Data(#"{"id":2,"kind":"movie","title":"reference film F","year":2025,"watch":{"position_ms":300000,"duration_ms":7200000}}"#.utf8)
         )
 
         XCTAssertEqual(continueWatchingDetail(episode), "S4 E2  Fray")
