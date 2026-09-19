@@ -94,9 +94,26 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
             self.fence.region_allowed_lines(path, [f"  {begin}", "  inside();"])
         with self.assertRaises(ValueError):
             self.fence.region_allowed_lines(path, [f"  {begin}", f"  {begin}", "  x();", f"  {end}"])
-        # A region that has not been written yet is not an error: M1/M2/M3 add
-        # the anchors with the render they wrap.
-        self.assertEqual(self.fence.region_allowed_lines(path, ["nothing();"]), set())
+        # Every shipped region is `required` now — M1, M2 and M3 have all
+        # landed and the web's became required when its render moved into
+        # player/surface.js — so a file that has lost its anchors is an error,
+        # not a milestone that has not arrived yet.
+        self.assertTrue(
+            all(required for regions in self.fence.REGIONS.values()
+                for *_rest, required in regions),
+            "an optional region exempts its whole file by deletion",
+        )
+        with self.assertRaises(ValueError):
+            self.fence.region_allowed_lines(path, ["nothing();"])
+        # A scanned file with no region at all still allows nothing, which is
+        # the right answer for every file that is not a presenter.
+        self.assertEqual(
+            self.fence.region_allowed_lines(
+                self.fence.Path("crates/plurxd/src/web/playback-policy.js"),
+                ["nothing();"],
+            ),
+            set(),
+        )
 
     def test_a_write_inside_the_region_is_allowed_and_one_outside_is_not(self):
         path = next(iter(self.fence.REGIONS))
@@ -364,6 +381,47 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         self.assertTrue(required, "the Android publish region must be required after M3")
         with self.assertRaises(ValueError):
             self.fence.region_allowed_lines(path, ["_surface.value = surface"])
+
+    def test_every_web_player_row_is_scanned_not_just_the_one_it_was_named_for(self):
+        # The hole the web-shell split opened, and the reason this fence globs
+        # instead of listing. Before the split it named `index.html`; after it,
+        # a surface write in any of the sixty rows was invisible and the fence
+        # printed PASS. Proven here on the shipped tree: every `player/*.js`
+        # row is scanned, and a rogue write in one of them is found.
+        rows = sorted((ROOT / "crates/plurxd/src/web/player").glob("*.js"))
+        self.assertGreater(len(rows), 10, "the player folder should be the split shell's player rows")
+        for row in rows:
+            self.assertIn(
+                row.relative_to(ROOT), self.fence.SCANNED,
+                f"{row.name} is a web player row the fence does not scan",
+            )
+        rogue = 'function rogue(t){ document.getElementById("psurface").innerHTML = t; }'
+        for row in rows:
+            with self.subTest(row=row.name):
+                text = row.read_text(encoding="utf-8") + "\n" + rogue + "\n"
+                allowed = self.fence.region_allowed_lines(
+                    row.relative_to(ROOT), text.splitlines(),
+                )
+                shipped = self.fence.scan_text(
+                    "web", row.read_text(encoding="utf-8"),
+                    self.fence.region_allowed_lines(
+                        row.relative_to(ROOT), row.read_text(encoding="utf-8").splitlines(),
+                    ),
+                )
+                self.assertGreater(
+                    len(self.fence.scan_text("web", text, allowed)), len(shipped),
+                    f"a surface write appended to {row.name} was not seen",
+                )
+
+    def test_the_web_render_anchors_may_not_simply_be_deleted(self):
+        # Optional was defensible while the anchors sat inside a 24,000-line
+        # shell. In a 315-line row of its own, a missing anchor is a deleted
+        # anchor — and an optional one exempts the file that owns the render.
+        path = self.fence.Path("crates/plurxd/src/web/player/surface.js")
+        _begin, _end, _reason, required = self.fence.REGIONS[path][0]
+        self.assertTrue(required, "the web render region must be required")
+        with self.assertRaises(ValueError):
+            self.fence.region_allowed_lines(path, ["setLoading(false);"])
 
     def test_out_of_scope_files_are_named_not_forgotten(self):
         for path in self.fence.NEVER_SCANNED:

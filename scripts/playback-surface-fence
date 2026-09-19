@@ -172,8 +172,27 @@ PRESENTER_FORBIDDEN = (
 # The finite player's shipped surfaces, and nothing else. Scope is deliberate:
 # the offline players, the readers, Live TV and Library Channels' own Swift
 # screen are outside the finite player (contract §7) and are not scanned here.
+WEB_PLAYER = Path("crates/plurxd/src/web/player")
+
+
+def web_player_rows() -> dict[Path, str]:
+    """Every row of the split shell's `player/` folder.
+
+    Globbed, never listed. The web surface writes used to be in `index.html`
+    and this fence named that one file; after the split it went *silently
+    vacuous* — a rogue `document.getElementById("psurface").innerHTML=` dropped
+    into any player row printed PASS, while the same line in the un-split shell
+    failed. A fence that names its files by hand is a fence that stops working
+    the day someone adds a file.
+    """
+    return {
+        path.relative_to(ROOT): "web"
+        for path in sorted((ROOT / WEB_PLAYER).glob("*.js"))
+    }
+
+
 SCANNED = {
-    Path("crates/plurxd/src/web/index.html"): "web",
+    **web_player_rows(),
     Path("crates/plurxd/src/web/playback-policy.js"): "web",
     Path("clients/apple/Sources/PlayerController.swift"): "swift",
     Path("clients/apple/Sources/PlayerView.swift"): "swift",
@@ -211,12 +230,15 @@ PRESENTER_FILES = {
 # Bounded regions inside a scanned file that ARE the render. Anchors are
 # comments beside the code so a move keeps the reason with it.
 REGIONS = {
-    Path("crates/plurxd/src/web/index.html"): (
+    Path("crates/plurxd/src/web/player/surface.js"): (
         (
             "// playback-surface-render:begin",
             "// playback-surface-render:end",
             "The web presenter's render function: the only caller of setLoading and the only writer of the failed class.",
-            False,
+            # Required. It was optional while the anchors sat in a 24,000-line
+            # file; in a 315-line row of its own, a missing anchor is a deleted
+            # anchor, and an optional anchor exempts the file.
+            True,
         ),
     ),
     Path("clients/apple/Sources/PlayerController.swift"): (
@@ -248,7 +270,8 @@ REGIONS = {
 # removes it, and a file with no entry is held at zero by
 # `MIGRATION_BUDGET.get(relative, (0, ""))` below. A NEW write site fails the
 # fence either way, which is the point. All three client files have left:
-# `index.html` with M1 (every web surface write is inside the render anchors),
+# the web with M1 (every web surface write is inside `player/surface.js`'s
+# render anchors),
 # `PlayerController.swift` with M2 (every Apple one is inside the publish
 # region), and the two Android rows with M3 (`onError`, `playFailure` and
 # `playbackNotice` are gone).
@@ -378,6 +401,13 @@ def scan() -> list[str]:
     for relative in MIGRATION_BUDGET:
         if relative not in SCANNED:
             failures.append(f"{relative}:1: budgeted file is not scanned")
+    # Fail closed on the glob too: an empty player/ folder would scan nothing
+    # and print PASS.
+    if not web_player_rows():
+        failures.append(f"{WEB_PLAYER}:1: no web player rows found; the fence scanned none of the web")
+    for relative in REGIONS:
+        if relative not in SCANNED:
+            failures.append(f"{relative}:1: a file with render anchors is not scanned")
 
     for relative, kind in sorted(SCANNED.items()):
         path = ROOT / relative

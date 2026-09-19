@@ -56,53 +56,69 @@ TOKEN_FILE_ALLOWLIST = {
         "The media-remote commands are installed here and routed through PlayerInputRouting.",
 }
 
-# index.html contains several independent applications. These bounded regions
-# are non-player keyboard adapters with reasons beside their anchors. The
-# player itself gets one region only; adding a second handler makes the fence
-# fail even if it happens to agree with the reducer today.
-INDEX_REGIONS = (
+# The web app is several independent applications (docs/clients/WEB-SHELL-LAYOUT.md).
+# These bounded regions are non-player keyboard adapters with reasons beside
+# their anchors. The player itself gets one region only; adding a second handler
+# makes the fence fail even if it happens to agree with the reducer today.
+#
+# Each region names the file it is in, so an anchor that moves to another file
+# fails here rather than silently widening the region to whatever sits between
+# the two files. `None` for the end anchor means "to the end of this file" —
+# the region used to run up to the next section's banner, which is now the first
+# line of the next file.
+WEB = Path("crates/plurxd/src/web")
+WEB_REGIONS = (
     (
+        WEB / "core/theme-menu.js",
         "// Capture Escape before layout-specific sheet handlers",
-        "// ---- global activity indicator",
+        None,
         "The connection QR dialog owns Escape while it is modal.",
     ),
     (
+        WEB / "player/stats.js",
         "// Keyboard while the player is open: 'i' toggles stats",
         "// player-input-adapter:begin",
         "The photo lightbox owns Escape and previous/next while it is open.",
     ),
     (
+        WEB / "player/stats.js",
         "// player-input-adapter:begin",
         "// player-input-adapter:end",
         "The web player adapter maps browser keys to contract inputs.",
     ),
     (
+        WEB / "core/keyboard-reach.js",
         "// nav-keyboard-adapter:begin",
         "// nav-keyboard-adapter:end",
         "Card and episode-row activation (Enter/Space) outside playback, shared by every layout.",
     ),
     (
+        WEB / "pages/live-tv.js",
         "// live-tv-input-adapter:begin",
         "// live-tv-input-adapter:end",
         "Live TV owns the channel keys while its host is fullscreen or focused; "
         "it routes them through the fixture's `live` table, not its own opinions.",
     ),
     (
+        WEB / "layouts/catalog.js",
         "function catalogWireOnce(){",
         "// ---- phone: the library sheet and the search tab",
         "Catalog owns Escape for its phone library sheet.",
     ),
     (
+        WEB / "layouts/theater.js",
         "function theaterWireOnce(){",
         "// ---- registration",
         "Theater poster keys provide link/button activation outside playback.",
     ),
     (
+        WEB / "pages/reader.js",
         "function showReaderSearch(){",
         "function toggleReaderPanel(mode){",
         "The EPUB search field submits on Enter outside playback.",
     ),
     (
+        WEB / "detail/edit.js",
         "function paintTagChips(){",
         "function closeEdit(){",
         "The metadata tag field commits a chip on Enter or comma outside playback.",
@@ -120,8 +136,10 @@ def client_files() -> list[Path]:
             files.append(relative)
     files.append(Path("crates/plurxd/src/web/index.html"))
     # Every shipped web script, not the three that had key handling the day
-    # this was written. Vendored bundles are not ours to fence.
-    for path in sorted((ROOT / "crates/plurxd/src/web").glob("*.js")):
+    # this was written, and not only the flat ones: the app is a tree now and a
+    # key handler added to any row of it is a key handler. Vendored bundles are
+    # not ours to fence.
+    for path in sorted((ROOT / "crates/plurxd/src/web").rglob("*.js")):
         if path.name.endswith(".min.js"):
             continue
         files.append(path.relative_to(ROOT))
@@ -161,13 +179,28 @@ def is_comment_line(line: str) -> bool:
     return False
 
 
-def index_allowed_lines(lines: list[str]) -> set[int]:
+def web_allowed_lines(relative: Path, lines: list[str]) -> set[int]:
+    """The allowlisted line numbers of one web file, from its own regions."""
     allowed: set[int] = set()
-    for start_text, end_text, _reason in INDEX_REGIONS:
+    for path, start_text, end_text, _reason in WEB_REGIONS:
+        if path != relative:
+            continue
         starts = [index for index, line in enumerate(lines) if start_text in line]
-        ends = [index for index, line in enumerate(lines) if end_text in line and index >= starts[0]] if starts else []
-        if len(starts) != 1 or not ends:
-            raise ValueError(f"index.html lost keyboard allowlist anchors: {start_text!r} … {end_text!r}")
+        if len(starts) != 1:
+            raise ValueError(
+                f"{relative} lost a keyboard allowlist anchor: {start_text!r} "
+                f"appears {len(starts)} times"
+            )
+        if end_text is None:
+            allowed.update(range(starts[0] + 1, len(lines) + 1))
+            continue
+        ends = [index for index, line in enumerate(lines)
+                if end_text in line and index >= starts[0]]
+        if not ends:
+            raise ValueError(
+                f"{relative} lost a keyboard allowlist anchor: {end_text!r} "
+                f"after {start_text!r}"
+            )
         allowed.update(range(starts[0] + 1, ends[0] + 2))
     return allowed
 
@@ -194,7 +227,9 @@ def scan() -> list[str]:
     # accident.
     if not (ROOT / "clients").is_dir():
         failures.append("clients:1: the client tree is missing; the fence scanned nothing")
-    for expected in list(WHOLE_FILE_ALLOWLIST) + [file for _token, file in TOKEN_FILE_ALLOWLIST]:
+    for expected in (list(WHOLE_FILE_ALLOWLIST)
+                     + [file for _token, file in TOKEN_FILE_ALLOWLIST]
+                     + [path for path, *_ in WEB_REGIONS]):
         if not (ROOT / expected).is_file():
             failures.append(f"{expected}:1: allowlisted file no longer exists; re-check the allowlist")
     files = client_files()
@@ -205,9 +240,9 @@ def scan() -> list[str]:
             continue
         lines = path.read_text(encoding="utf-8").splitlines()
         allowed = set(range(1, len(lines) + 1)) if relative in WHOLE_FILE_ALLOWLIST else set()
-        if relative == Path("crates/plurxd/src/web/index.html"):
+        if any(path == relative for path, *_ in WEB_REGIONS):
             try:
-                allowed = index_allowed_lines(lines)
+                allowed = web_allowed_lines(relative, lines)
             except ValueError as error:
                 failures.append(f"{relative}:1: {error}")
                 continue
