@@ -1681,6 +1681,10 @@ pub struct SettingsDto {
     /// Forward subtitle materialization span. Absent storage resolves to the
     /// bounded 200-second server default.
     pub subtitle_window_secs: i64,
+    /// Answer a subtitle segment whose sidecar extraction has failed with
+    /// `503` + `Retry-After` rather than an empty track. Off by default; the
+    /// Developer tab's readiness rows are advisory and never override it.
+    pub subtitle_not_ready_503: bool,
     /// Cluster-wide opt-in for placing new HLS workers on another voter. The
     /// readiness bit is true only while the replicated flag is enabled and
     /// every committed voter publishes the current media protocol.
@@ -2026,6 +2030,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         analysis_backoff_base_secs,
         analysis_backoff_max_secs,
         subtitle_window_secs,
+        subtitle_not_ready_503: plurx_core::store::stored_switch(
+            setting(keys::SUBTITLE_NOT_READY_503).as_deref(),
+            false,
+        ),
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,
@@ -2240,6 +2248,7 @@ pub struct UpdateSettings {
     pub analysis_backoff_base_secs: Option<i64>,
     pub analysis_backoff_max_secs: Option<i64>,
     pub subtitle_window_secs: Option<i64>,
+    pub subtitle_not_ready_503: Option<bool>,
     /// Playback language defaults. ISO 639 codes ("eng"); mode is
     /// "auto" | "always" | "off".
     pub default_audio_lang: Option<String>,
@@ -2392,6 +2401,7 @@ impl UpdateSettings {
             || self.analysis_backoff_base_secs.is_some()
             || self.analysis_backoff_max_secs.is_some()
             || self.subtitle_window_secs.is_some()
+            || self.subtitle_not_ready_503.is_some()
             || self.default_audio_lang.is_some()
             || self.default_sub_lang.is_some()
             || self.sub_mode.is_some()
@@ -3146,6 +3156,12 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::SUBTITLE_WINDOW_SECS, &seconds.to_string())
+            .await?;
+    }
+    if let Some(on) = req.subtitle_not_ready_503 {
+        state
+            .store
+            .put_setting(keys::SUBTITLE_NOT_READY_503, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(name) = server_name {

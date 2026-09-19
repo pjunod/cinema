@@ -10843,7 +10843,46 @@ trait SubtitleSegmentSource: Send + Sync {
         anchor_seconds: i64,
         window_seconds: i64,
     ) -> BoxFuture<'a, bool>;
+
+    /// Is a producer for exactly this window span alive right now?
+    ///
+    /// Only asked after a `read_window` miss, and only to decide whether
+    /// waiting a moment longer could turn this request's answer from an empty
+    /// track into real cues. On the trait rather than called directly so the
+    /// boundary fixture measures the same decision production makes.
+    fn window_flight_is_live<'a>(
+        &'a self,
+        dir: &'a Path,
+        file: &'a MediaFile,
+        index: i64,
+        anchor_seconds: i64,
+        window_seconds: i64,
+    ) -> BoxFuture<'a, bool>;
+
+    /// What the whole-track sidecar for this track is doing. Observation
+    /// only; it starts nothing.
+    fn whole_track_state<'a>(
+        &'a self,
+        dir: &'a Path,
+        file: &'a MediaFile,
+        index: i64,
+    ) -> BoxFuture<'a, crate::subtitles::SidecarState>;
 }
+
+/// How long a subtitle segment may wait for a window that is already being
+/// extracted for it.
+///
+/// AVPlayer gives a subtitle segment about two seconds and stalls the muxed
+/// video while it waits, so this is not a budget to spend freely — it exists
+/// to win the *last* moment of a warm, which is the common case at a window
+/// boundary once the previous segment's request kicked the next window. A
+/// request that arrives at the start of an extraction still gets its empty
+/// answer immediately and leaves the recovery to the client's readiness
+/// retry; only a flight already in progress is worth standing still for.
+const SUBTITLE_SEGMENT_PUBLICATION_WAIT: Duration = Duration::from_millis(1_500);
+
+/// How often that wait re-reads the window path.
+const SUBTITLE_SEGMENT_PUBLICATION_POLL: Duration = Duration::from_millis(100);
 
 struct ProductionSubtitleSegmentSource;
 
@@ -10903,6 +10942,61 @@ impl SubtitleSegmentSource for ProductionSubtitleSegmentSource {
             window_seconds,
         ))
     }
+
+    fn window_flight_is_live<'a>(
+        &'a self,
+        dir: &'a Path,
+        file: &'a MediaFile,
+        index: i64,
+        anchor_seconds: i64,
+        window_seconds: i64,
+    ) -> BoxFuture<'a, bool> {
+        Box::pin(crate::subtitles::window_flight_is_live(
+            dir,
+            file,
+            index,
+            anchor_seconds,
+            window_seconds,
+        ))
+    }
+
+    fn whole_track_state<'a>(
+        &'a self,
+        dir: &'a Path,
+        file: &'a MediaFile,
+        index: i64,
+    ) -> BoxFuture<'a, crate::subtitles::SidecarState> {
+        Box::pin(crate::subtitles::sidecar_state(dir, file, index))
+    }
+}
+
+/// Wait out the tail of a window extraction that is already running for this
+/// exact span, and hand back its bytes if they land in time.
+///
+/// Bounded twice: by [`SUBTITLE_SEGMENT_PUBLICATION_WAIT`], which is the
+/// engine's constraint, and by the response publication deadline, which is
+/// the request's. Whichever is sooner wins, and missing both is not an error
+/// — the caller's empty segment is still a correct answer.
+async fn await_window_publication<S: SubtitleSegmentSource + ?Sized>(
+    source: &S,
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    anchor: i64,
+    window_seconds: i64,
+    publication_deadline: Instant,
+) -> Option<Vec<u8>> {
+    let give_up = (Instant::now() + SUBTITLE_SEGMENT_PUBLICATION_WAIT).min(publication_deadline);
+    while Instant::now() < give_up {
+        tokio::time::sleep(SUBTITLE_SEGMENT_PUBLICATION_POLL).await;
+        if let Ok(Some(bytes)) = source
+            .read_window(dir, file, index, anchor, window_seconds)
+            .await
+        {
+            return Some(bytes);
+        }
+    }
+    None
 }
 
 async fn subtitle_vtt_local_before(
@@ -11054,7 +11148,38 @@ async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSource + ?Sized
             )
             .await
             .map_err(|_| response_publication_timeout())?;
-            if let Ok(Some(bytes)) = window_bytes {
+            // A window for this exact span may be seconds from publishing —
+            // the common case at a window boundary, where the previous
+            // segment's request already kicked this one. Standing still for
+            // the tail of a flight that is *already running* turns an empty
+            // segment into real cues without adding an extraction, and
+            // without ever awaiting one that has not started.
+            let window_bytes = match window_bytes {
+                Ok(Some(bytes)) => Some(bytes),
+                _ if source
+                    .window_flight_is_live(
+                        &state.subs_dir,
+                        &file,
+                        index,
+                        anchor,
+                        subtitle_window_seconds,
+                    )
+                    .await =>
+                {
+                    await_window_publication(
+                        source,
+                        &state.subs_dir,
+                        &file,
+                        index,
+                        anchor,
+                        subtitle_window_seconds,
+                        publication_deadline,
+                    )
+                    .await
+                }
+                _ => None,
+            };
+            if let Some(bytes) = window_bytes {
                 // Start the whole-track warm even though this request is
                 // answered. A window is a bridge: it persists on disk across
                 // restarts while the whole-track sidecar may not exist yet, so
@@ -11160,6 +11285,54 @@ async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSource + ?Sized
                     windowing,
                     "serving an empty subtitle segment while its sidecar cache warms"
                 );
+                // An empty segment says "there are no cues here", which is
+                // true while a sidecar is warming and a lie once it has
+                // failed — and players keep the bytes in memory whatever
+                // `no-store` says, so the lie is what a client is left with.
+                // A refusal with `Retry-After` is the honest answer, and the
+                // memo's own remaining time is the only moment a retry could
+                // achieve anything.
+                //
+                // Behind an operator switch, and off by default, because the
+                // cost of being honest here is not yet measured: AVPlayer
+                // blocks the muxed video for about two seconds on a subtitle
+                // segment, and whether each engine keeps playing video
+                // through a subtitle 503 or stalls the picture has to be
+                // observed per engine before this becomes the default. The
+                // Developer tab reports what has been observed and does not
+                // gate the switch on it.
+                if state.subtitle_not_ready_503().await
+                    && source.whole_track_state(&state.subs_dir, &file, index).await
+                        == crate::subtitles::SidecarState::Failed
+                {
+                    let retry_after =
+                        crate::subtitles::failure_memo_remaining(&state.subs_dir, &file, index)
+                            .await
+                            .map(|remaining| remaining.as_secs().max(1))
+                            .unwrap_or(1);
+                    tracing::info!(
+                        session = %crate::transcode::session_log_id(session),
+                        file_id = file.id,
+                        index,
+                        retry_after,
+                        "refusing a subtitle segment whose sidecar extraction failed"
+                    );
+                    authorize_attempt_status(
+                        state,
+                        session,
+                        &owner,
+                        "subtitle-segment",
+                        None,
+                        publication_deadline,
+                    )
+                    .await?;
+                    return Ok((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        [(header::RETRY_AFTER, retry_after.to_string())],
+                        [(header::CACHE_CONTROL, "no-store")],
+                    )
+                        .into_response());
+                }
                 (b"WEBVTT\n\n".to_vec(), "no-store", false)
             }
         }
@@ -16588,6 +16761,32 @@ mod tests {
                 },
             ))
         }
+
+        fn window_flight_is_live<'a>(
+            &'a self,
+            dir: &'a Path,
+            file: &'a MediaFile,
+            index: i64,
+            anchor_seconds: i64,
+            window_seconds: i64,
+        ) -> BoxFuture<'a, bool> {
+            Box::pin(crate::subtitles::window_flight_is_live(
+                dir,
+                file,
+                index,
+                anchor_seconds,
+                window_seconds,
+            ))
+        }
+
+        fn whole_track_state<'a>(
+            &'a self,
+            dir: &'a Path,
+            file: &'a MediaFile,
+            index: i64,
+        ) -> BoxFuture<'a, crate::subtitles::SidecarState> {
+            Box::pin(crate::subtitles::sidecar_state(dir, file, index))
+        }
     }
 
     /// M7 R-M2 B7: exercise the real subtitle-segment handler boundary while
@@ -16658,7 +16857,14 @@ mod tests {
                 .await
                 .expect("whole-track producer starts")
                 .expect("whole started semaphore remains open");
-        let (first, second) = tokio::time::timeout(Duration::from_secs(2), async {
+        // Three seconds, not two, and the reason is the publication wait: the
+        // second request can find the first's flight already live and stand
+        // still for up to `SUBTITLE_SEGMENT_PUBLICATION_WAIT` hoping it
+        // publishes. It never does here — the producer is parked — so the
+        // answer is still the empty segment, and the point of the bound is
+        // that the request is not waiting for the *extraction*, which this
+        // fixture holds open indefinitely.
+        let (first, second) = tokio::time::timeout(Duration::from_secs(3), async {
             (
                 first.await.expect("first request task"),
                 second.await.expect("second request task"),
@@ -17947,6 +18153,244 @@ mod tests {
             })
             .await
             .expect("the whole-track producer settles before cleanup");
+        }
+        /// The last second of a warm, which is the common case at a window
+        /// boundary: the previous segment's request already kicked this window,
+        /// and this one arrives while it is finishing. Standing still for the
+        /// tail of a flight that is *already running* turns an empty segment into
+        /// real cues without starting anything.
+        ///
+        /// The bound is the point. A request that waits longer than
+        /// `SUBTITLE_SEGMENT_PUBLICATION_WAIT` is a request AVPlayer has already
+        /// given up on, with the muxed video stalled behind it.
+        #[tokio::test]
+        async fn a_subtitle_segment_waits_out_a_live_window_and_no_longer() {
+            let dir = crate::test_tempdir().expect("session directory");
+            let (fixture, file) = cold_windowed_fixture(dir.path(), "subtitle-publication-wait").await;
+            let source = Arc::new(WindowFixtureSubtitleSource::counting());
+
+            // First request: nothing is live yet, so it answers immediately and
+            // leaves a flight behind it.
+            let cold = subtitle_segment(&fixture.state, "subtitle-publication-wait", 1, source.as_ref())
+                .await;
+            assert_eq!(cold.status(), StatusCode::OK);
+            assert_eq!(
+                cold.into_body()
+                    .collect()
+                    .await
+                    .expect("cold body")
+                    .to_bytes()
+                    .as_ref(),
+                b"WEBVTT\n\n",
+                "a request that finds no live flight does not stand still for one"
+            );
+            producer_started(source.as_ref()).await;
+
+            // Second request for the same anchor, with the producer released a
+            // moment later: the wait catches the publication.
+            let waiting = tokio::spawn({
+                let state = fixture.state.clone();
+                let source = Arc::clone(&source);
+                async move {
+                    subtitle_segment(&state, "subtitle-publication-wait", 1, source.as_ref()).await
+                }
+            });
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            source.release.add_permits(1);
+            let served = tokio::time::timeout(Duration::from_secs(3), waiting)
+                .await
+                .expect("the waiting request settles")
+                .expect("request task");
+            assert_eq!(served.status(), StatusCode::OK);
+            let body = String::from_utf8(
+                served
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("served body")
+                    .to_bytes()
+                    .to_vec(),
+            )
+            .expect("utf8 VTT");
+            assert!(
+                body.contains("ready cue"),
+                "a window that publishes inside the wait is served as real cues: {body}"
+            );
+            assert_eq!(
+                source.window_runs(),
+                1,
+                "waiting for a live flight starts no second extraction"
+            );
+        }
+
+        /// The other half of the bound: a live flight that does *not* publish is
+        /// abandoned, and the empty segment goes out inside the engine's budget.
+        #[tokio::test]
+        async fn a_live_window_that_does_not_publish_still_answers_inside_the_wait() {
+            let dir = crate::test_tempdir().expect("session directory");
+            let (fixture, _file) =
+                cold_windowed_fixture(dir.path(), "subtitle-publication-timeout").await;
+            let source = Arc::new(WindowFixtureSubtitleSource::counting());
+
+            let cold =
+                subtitle_segment(&fixture.state, "subtitle-publication-timeout", 1, source.as_ref())
+                    .await;
+            assert_eq!(cold.status(), StatusCode::OK);
+            producer_started(source.as_ref()).await;
+
+            // The producer stays parked for the whole of this request.
+            let began = std::time::Instant::now();
+            let response =
+                subtitle_segment(&fixture.state, "subtitle-publication-timeout", 1, source.as_ref())
+                    .await;
+            let waited = began.elapsed();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("empty body")
+                    .to_bytes()
+                    .as_ref(),
+                b"WEBVTT\n\n"
+            );
+            assert!(
+                waited < SUBTITLE_SEGMENT_PUBLICATION_WAIT + Duration::from_millis(600),
+                "a subtitle segment must answer inside AVPlayer's patience, waited {waited:?}"
+            );
+        }
+
+        /// An empty segment says "there are no cues here". While a sidecar is
+        /// warming that is true; once its extraction has failed it is a lie, and
+        /// the player keeps the bytes whatever `no-store` says.
+        ///
+        /// Off by default, because whether each engine keeps its picture through
+        /// a subtitle refusal is a device measurement nobody has taken — so the
+        /// shipped answer is still the empty segment, and the switch is what an
+        /// operator who *has* taken it turns on.
+        #[tokio::test]
+        async fn a_failed_subtitle_extraction_is_refused_only_when_the_operator_asked() {
+            let dir = crate::test_tempdir().expect("session directory");
+            let (fixture, file) = cold_windowed_fixture(dir.path(), "subtitle-failed-memo").await;
+            let source = Arc::new(WindowFixtureSubtitleSource::counting());
+
+            crate::subtitles::remember_whole_track_failure_for_test(
+                &fixture.state.subs_dir,
+                &file,
+                0,
+                "the source could not be read",
+                Duration::from_secs(90),
+            )
+            .await;
+
+            let default_off =
+                subtitle_segment(&fixture.state, "subtitle-failed-memo", 1, source.as_ref()).await;
+            assert_eq!(
+                default_off.status(),
+                StatusCode::OK,
+                "the shipped default keeps the empty segment"
+            );
+            assert_eq!(
+                default_off
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("empty body")
+                    .to_bytes()
+                    .as_ref(),
+                b"WEBVTT\n\n"
+            );
+
+            fixture
+                .store
+                .put_setting(plurx_core::store::keys::SUBTITLE_NOT_READY_503, "1")
+                .await
+                .expect("the operator turns the refusal on");
+
+            let refused =
+                subtitle_segment(&fixture.state, "subtitle-failed-memo", 2, source.as_ref()).await;
+            assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let retry_after = refused
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .expect("a refusal says when a retry could achieve anything");
+            assert!(
+                (1..=90).contains(&retry_after),
+                "Retry-After follows the memo's own remaining time, got {retry_after}"
+            );
+        }
+
+        /// The midpoint rule declines a window because the whole-track warm reads
+        /// the same bytes and publishes the authoritative answer instead. When
+        /// that warm has failed there is nothing left to be redundant with, and
+        /// declining means the back half of the film never gets subtitles at all.
+        #[tokio::test]
+        async fn a_failed_whole_track_lets_a_window_past_the_midpoint_start() {
+            let dir = crate::test_tempdir().expect("session directory");
+            let (fixture, file) = cold_windowed_fixture(dir.path(), "subtitle-past-midpoint").await;
+            let source = Arc::new(WindowFixtureSubtitleSource::counting());
+            let generation = fixture.begin_control("subtitle-past-midpoint").await;
+            let client = control_client();
+
+            // Past the fixture film's midpoint, where a window is normally worth
+            // nothing: it would read what the whole track is already reading.
+            let past_midpoint = SEGMENTS - 1;
+            settle_on(
+                &fixture,
+                "subtitle-past-midpoint",
+                &generation,
+                &client,
+                1,
+                past_midpoint * SEGMENT_SECONDS,
+            )
+            .await
+            .expect("accepted exchange");
+
+            let declined = subtitle_segment(
+                &fixture.state,
+                "subtitle-past-midpoint",
+                past_midpoint,
+                source.as_ref(),
+            )
+            .await;
+            assert_eq!(declined.status(), StatusCode::OK);
+            assert_eq!(
+                source.window_runs(),
+                0,
+                "a healthy whole-track warm keeps the midpoint rule"
+            );
+
+            crate::subtitles::remember_whole_track_failure_for_test(
+                &fixture.state.subs_dir,
+                &file,
+                0,
+                "the source could not be read",
+                Duration::from_secs(90),
+            )
+            .await;
+
+            let allowed = subtitle_segment(
+                &fixture.state,
+                "subtitle-past-midpoint",
+                past_midpoint,
+                source.as_ref(),
+            )
+            .await;
+            assert_eq!(allowed.status(), StatusCode::OK);
+            producer_started(source.as_ref()).await;
+            assert_eq!(
+                source.window_runs(),
+                1,
+                "a dead whole-track warm is not a reason to leave the second half blank"
+            );
+            assert_eq!(
+                crate::subtitles::peak_window_flights_for_test("subtitle-past-midpoint"),
+                1,
+                "and it is still one flight per playback"
+            );
         }
     }
 

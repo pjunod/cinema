@@ -330,6 +330,12 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
     [
       shippedSource("preparedHandoffEnabled"), shippedSource("liveTvSettingsCard"),
       shippedSource("verifiedDecodeCard"), shippedSource("decodeRecoveryCard"),
+      // #309's sibling problem, twice over: a card or fragment `developerPanel`
+      // calls has to be composed here or the panel throws on the name and this
+      // whole gate reports one failure instead of checking anything.
+      shippedSource("directedChangeDeveloperRows"),
+      shippedSource("contentAnalysisEnableCard"),
+      shippedSource("subtitleNotReadyCard"),
       shippedSource("liveTvGuideCard"), shippedConst("DEV_READINESS_LABEL"),
       shippedSource("devReadinessRow"), shippedSource("devReadinessPill"),
       shippedSource("devReadinessEvidence"), shippedSource("devReq"),
@@ -343,7 +349,9 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
       shippedSource("webHlsStartupRecoveryCard"),
       shippedSource("hevcSampleEntryAdmissionCard"),
       shippedSource("sourceProbeCompatibilityCard"),
-      "const SETTINGS_DATA=null,ME=null;",
+      // `directedChangeDeveloperRows` reads the live player and returns ""
+      // when there is none, which is exactly the state a settings page is in.
+      "const SETTINGS_DATA=null,ME=null,PLAYER=null;",
       shippedSource("uiEnableAdvisory"),
       shippedSource("developerPanel"),
       shippedSource("liveTvPanel"),
@@ -376,6 +384,7 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
     playback_control_protocol_v1: true,
     prepared_quality_handoff: true,
     automatic_decoder_recovery: true,
+    subtitle_not_ready_503: false,
     live_tv_guide_source: "hdhomerun",
     live_tv_guide_hours: 24,
     dvr_enabled: false,
@@ -388,7 +397,7 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
     dvr_webhook_url: "",
   };
   const html = panels.developerPanel(settings, readiness);
-  for (const id of ["pqh", "pcpv1", "pdp", "dhqa", "adr", "dvrenabled"])
+  for (const id of ["pqh", "pcpv1", "pdp", "dhqa", "adr", "dvrenabled", "sub503"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   assert.doesNotMatch(html, /HDHomeRun Live TV|CARDHEAD:Programme guide/);
   for (const route of ["livetv", "playback", "cluster"])
@@ -411,7 +420,9 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
   // compatibility rule can offer an operator.
   assert.match(html, /CARDHEAD:Source probe compatibility\|/);
   assert.match(html, /Derived Atmos profile omissions/);
-  assert.match(html, /Typed source verification/);
+  // Renamed by 5409b567, which replaced the "not built" row with the one
+  // that says how a held source was actually compared.
+  assert.match(html, /Compared media facts/);
   assert.match(html, /Nothing on this card enables, disables, hides or overrides playback admission/);
   assert.match(html, /No feature flag is used/);
   assert.match(html, /Serving-fleet order/);
