@@ -3509,7 +3509,13 @@ mod tests {
             assert_eq!(difference.path, "/format/tags/<field>", "{difference:?}");
         }
         let rendered = comparison.rendered_differences();
-        for secret in ["reference film G", "title", "COMPANY_NAME", "private", "/media/"] {
+        for secret in [
+            "reference film G",
+            "title",
+            "COMPANY_NAME",
+            "private",
+            "/media/",
+        ] {
             assert!(!rendered.contains(secret), "{rendered} leaked {secret}");
         }
         // An unknown field a future FFprobe adds is named by category only.
