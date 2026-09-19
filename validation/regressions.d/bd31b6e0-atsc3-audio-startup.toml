@@ -5,3 +5,8 @@ commits = ["bd31b6e0"]
 points = ["live-tv.integration"]
 checks = ["rust-gate", "rust-gate-ci"]
 reason = "ATSC audio tests cover positive bounded AAC channel counts, zero probe facts, rejection of copy with incomplete parameters, AC-3 fMP4 conversion with compatible video preserved, refusal without a claimed AAC route or encoder, and retained MPEG-TS copy with its larger probe. The generated delayed-AC-3 fixture verifies production HLS publishes before EOF and decodes both tracks; the opt-in private 128.1 capture replay verifies the same with Jellyfin 8.1.2-5. Restoring the old delivery planner makes four of the eight new default tests fail."
+
+[[coverage]]
+commits = ["049a5a5a", "eb3df523"]
+ignore = true
+reason = "Documentation and validation-ledger follow-ups only: publish the audio investigation status, record the independent review verdict and link the runtime commit above to its retained regression tests. Neither commit changes production behavior."
