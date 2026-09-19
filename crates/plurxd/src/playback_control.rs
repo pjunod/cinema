@@ -90,6 +90,9 @@ const PRODUCER_EXIT_CLASSIFICATION_BUDGET: Duration = Duration::from_secs(5);
 pub(crate) const ROLLING_PRESENTATION_STARTUP_BUDGET: Duration = Duration::from_secs(30);
 /// Minimum forward media-clock movement that proves presentation began.
 pub(crate) const ROLLING_PRESENTATION_PROGRESS_MS: i64 = 250;
+/// A paused rolling presentation continues bounded maintenance publication,
+/// but cannot retain producer and scratch ownership indefinitely.
+pub(crate) const ROLLING_PAUSE_GRACE: Duration = Duration::from_secs(180);
 
 /// Preserve the ingress's absolute exchange deadline across a cluster hop.
 /// The cap also prevents a malformed trusted-peer envelope from extending the
@@ -4263,6 +4266,7 @@ pub(crate) struct RollingLeaseSnapshot {
     /// control may suspend on bytes/global limits while this is awaiting, but
     /// it must not create a time hold merely because the producer burst first.
     pub startup: RollingStartupSnapshot,
+    pub pause_remaining: Option<Duration>,
     pub delivery: RollingDeliverySnapshot,
     pub retired: bool,
     /// Immutable cause of the actor's first terminal transition. `None` is
@@ -5915,6 +5919,11 @@ pub(crate) struct RollingDeliverySnapshot {
     /// compatibility actors retain it for diagnostics only.
     pub producer_exit: Option<RollingProducerExitSnapshot>,
     pub playlist_ready: bool,
+    /// Completed writer inventory, including media still private to the
+    /// publication clock.
+    pub produced_segment: Option<i64>,
+    pub produced_end_ms: Option<i64>,
+    /// Externally retrievable immutable snapshot frontier.
     pub published_segment: Option<i64>,
     pub published_end_ms: Option<i64>,
     pub next_media_sequence: i64,
@@ -6132,6 +6141,8 @@ impl RollingProducerTransitionFence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RollingPublicationObservation {
     pub producer_attempt: u64,
+    pub produced_segment: Option<i64>,
+    pub produced_end_ms: Option<i64>,
     pub playlist_ready: bool,
     pub published_segment: Option<i64>,
     pub published_end_ms: Option<i64>,
@@ -8454,6 +8465,7 @@ struct RollingControlActor {
     retained_capabilities: Option<DynamicCapabilities>,
     settled_target: Option<SettledTarget>,
     startup: RollingStartupState,
+    pause_started_at: Option<Instant>,
     delivery: RollingDeliverySnapshot,
     producer_progress_at: Option<Instant>,
     producer_exit_at: Option<Instant>,
@@ -8563,6 +8575,7 @@ impl RollingControlActor {
             retained_capabilities: None,
             settled_target: None,
             startup: RollingStartupState::new(),
+            pause_started_at: None,
             delivery: RollingDeliverySnapshot::default(),
             producer_progress_at: None,
             producer_exit_at: None,
@@ -8614,7 +8627,6 @@ impl RollingControlActor {
 
     fn snapshot_at(&self, now: Instant) -> RollingLeaseSnapshot {
         let idle_for = now.saturating_duration_since(self.last_renewal);
-        let timeout = self.mode.timeout();
         let deadline = self.deadline();
         let mut delivery = self.delivery.clone();
         delivery.producer_progress_idle_ms = self.producer_progress_at.map_or(0, |observed_at| {
@@ -8631,12 +8643,17 @@ impl RollingControlActor {
         RollingLeaseSnapshot {
             mode: self.mode,
             idle_for,
-            remaining: timeout.saturating_sub(idle_for),
+            remaining: deadline.saturating_duration_since(now),
             deadline,
             last_renewal_kind: self.last_renewal_kind,
             demand: self.demand.clone(),
             settled_target: self.settled_target,
             startup: self.startup.snapshot(now),
+            pause_remaining: self.pause_started_at.and_then(|started| {
+                started
+                    .checked_add(ROLLING_PAUSE_GRACE)
+                    .map(|deadline| deadline.saturating_duration_since(now))
+            }),
             delivery,
             retired: self.retired,
             terminal: self.terminal,
@@ -8870,9 +8887,13 @@ impl RollingControlActor {
     }
 
     fn deadline(&self) -> Instant {
-        self.last_renewal
+        let lease = self
+            .last_renewal
             .checked_add(self.mode.timeout())
-            .unwrap_or(self.last_renewal)
+            .unwrap_or(self.last_renewal);
+        self.pause_started_at
+            .and_then(|started| started.checked_add(ROLLING_PAUSE_GRACE))
+            .map_or(lease, |pause| lease.min(pause))
     }
 
     fn sync_install_authorization(&self, transition: &mut RollingProducerTransitionFence) {
@@ -9285,6 +9306,15 @@ impl RollingControlActor {
             // told us, not one that has changed its mind.
             if let Some(capabilities) = &request.snapshot.capabilities {
                 self.retained_capabilities = Some(capabilities.clone());
+            }
+            if self.startup.snapshot(now).phase == RollingStartupPhase::Presented {
+                match request.snapshot.demand {
+                    PlaybackDemand::Hold => {
+                        self.pause_started_at.get_or_insert(now);
+                    }
+                    PlaybackDemand::Active => self.pause_started_at = None,
+                    PlaybackDemand::End => {}
+                }
             }
             self.demand = Some(request.snapshot);
             if accepted_end {
@@ -11138,8 +11168,14 @@ impl RollingControlActor {
                 })
         {
             if observation
-                .published_segment
+                .produced_segment
                 .is_some_and(|segment| segment > final_segment)
+                || observation
+                    .produced_end_ms
+                    .is_some_and(|end_ms| end_ms > final_end_ms)
+                || observation
+                    .published_segment
+                    .is_some_and(|segment| segment > final_segment)
                 || observation
                     .published_end_ms
                     .is_some_and(|end_ms| end_ms > final_end_ms)
@@ -11155,6 +11191,12 @@ impl RollingControlActor {
             }
         }
         self.delivery.playlist_ready |= observation.playlist_ready;
+        if observation.produced_segment >= self.delivery.produced_segment {
+            self.delivery.produced_segment = observation.produced_segment;
+        }
+        if observation.produced_end_ms >= self.delivery.produced_end_ms {
+            self.delivery.produced_end_ms = observation.produced_end_ms;
+        }
         if observation.published_segment >= self.delivery.published_segment {
             self.delivery.published_segment = observation.published_segment;
         }
@@ -19634,6 +19676,8 @@ mod tests {
     ) -> RollingPublicationObservation {
         RollingPublicationObservation {
             producer_attempt,
+            produced_segment: Some(published_segment),
+            produced_end_ms: Some(published_end_ms),
             playlist_ready,
             published_segment: Some(published_segment),
             published_end_ms: Some(published_end_ms),
@@ -25375,6 +25419,43 @@ mod tests {
     }
 
     #[test]
+    fn mkv_hls_schedule_pause_grace_is_finite_and_hold_does_not_renew_it() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        actor.startup = RollingStartupState::Presented;
+        let mut hold = request();
+        hold.demand = PlaybackDemand::Hold;
+        hold.playback_rate = 0.0;
+        hold.render_state = RenderState::Waiting;
+
+        let first = actor
+            .control_at(started, owned_control(&hold))
+            .expect("first pause");
+        assert_eq!(first.lease.pause_remaining, Some(ROLLING_PAUSE_GRACE));
+
+        for elapsed in (20..=160).step_by(20) {
+            hold.sequence += 1;
+            let repeated = actor
+                .control_at(started + Duration::from_secs(elapsed), owned_control(&hold))
+                .expect("repeated pause");
+            assert_eq!(
+                repeated.lease.pause_remaining,
+                Some(ROLLING_PAUSE_GRACE - Duration::from_secs(elapsed)),
+                "repeated Hold renewed the pause grace"
+            );
+        }
+
+        let RollingExpiryClaim::Claimed(expired) =
+            actor.claim_expiry_at(started + ROLLING_PAUSE_GRACE)
+        else {
+            panic!("the non-renewing pause deadline must retire the presentation");
+        };
+        assert_eq!(expired.terminal, Some(RollingTerminalCause::LeaseExpired));
+        assert_eq!(expired.pause_remaining, Some(Duration::ZERO));
+    }
+
+    #[test]
     fn rolling_status_authz_keeps_its_exact_attempt_and_binding() {
         let started = Instant::now();
         let mut actor = registered_prepublication_actor(started);
@@ -25942,6 +26023,8 @@ mod tests {
             deadline - Duration::from_millis(1),
             RollingPublicationObservation {
                 producer_attempt: 1,
+                produced_segment: Some(0),
+                produced_end_ms: Some(6_000),
                 playlist_ready: true,
                 published_segment: Some(0),
                 published_end_ms: Some(6_000),
@@ -26085,6 +26168,8 @@ mod tests {
             published_at - Duration::from_millis(1),
             RollingPublicationObservation {
                 producer_attempt: 1,
+                produced_segment: Some(1),
+                produced_end_ms: Some(12_000),
                 playlist_ready: true,
                 published_segment: Some(1),
                 published_end_ms: Some(12_000),
@@ -26241,6 +26326,8 @@ mod tests {
             published_at - Duration::from_millis(1),
             RollingPublicationObservation {
                 producer_attempt: 1,
+                produced_segment: Some(1),
+                produced_end_ms: Some(12_000),
                 playlist_ready: true,
                 published_segment: Some(1),
                 published_end_ms: Some(12_000),
@@ -26282,6 +26369,8 @@ mod tests {
                 deadline.instant + Duration::from_millis(1),
                 RollingPublicationObservation {
                     producer_attempt: 1,
+                    produced_segment: Some(2),
+                    produced_end_ms: Some(18_000),
                     playlist_ready: true,
                     published_segment: Some(2),
                     published_end_ms: Some(18_000),
@@ -26991,6 +27080,8 @@ mod tests {
             exit_at + Duration::from_millis(2),
             RollingPublicationObservation {
                 producer_attempt: 1,
+                produced_segment: Some(2),
+                produced_end_ms: Some(26_000),
                 playlist_ready: true,
                 published_segment: Some(2),
                 published_end_ms: Some(26_000),

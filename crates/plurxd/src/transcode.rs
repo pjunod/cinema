@@ -476,11 +476,6 @@ pub(crate) const HLS_BURST_SECS_DEFAULT: f64 = 90.0;
 /// a low-bitrate stream of the reserve it could afford.
 pub(crate) const HLS_AHEAD_MAX_SECS_DEFAULT: i64 = 180;
 pub(crate) const HLS_AHEAD_MAX_BYTES_DEFAULT: i64 = 2 * 1024 * 1024 * 1024;
-/// Extra published media kept beyond the runway an explicit client already
-/// reports. Scale it by playback rate so the reserve represents thirty
-/// seconds of wall-clock protection at every supported rate; the configured
-/// ahead ceiling remains the absolute media-time bound.
-const EXPLICIT_PRODUCTION_RESERVE_WALL_SECS: f64 = 30.0;
 /// Media a still-starting session may always produce, whatever the client's
 /// demand says.
 ///
@@ -1334,6 +1329,9 @@ struct FlowEvaluation {
 struct FlowInputs<'a> {
     physical_ahead: Option<Ahead>,
     published_end_ms: Option<i64>,
+    /// Completed media not yet present in the actor-authorized served
+    /// snapshot. `None` means the first snapshot has not opened yet.
+    staged_publication_seconds: Option<i64>,
     /// Actor-owned presentation admission. Server publication, downloads, and
     /// positive buffer reports do not spend this protection.
     startup_protected: bool,
@@ -1391,25 +1389,11 @@ fn flow_event_extra(
     .to_string()
 }
 
-fn explicit_production_target_seconds(
-    demand: &crate::playback_control::PlaybackDemandSnapshot,
-    configured_max_secs: i64,
-) -> i64 {
-    if configured_max_secs <= 0 {
-        return 0;
-    }
-    let runway_seconds = demand.runway_ms().saturating_add(999) / 1_000;
-    let reserve_seconds =
-        (demand.playback_rate * EXPLICIT_PRODUCTION_RESERVE_WALL_SECS).ceil() as i64;
-    runway_seconds
-        .saturating_add(reserve_seconds)
-        .clamp(1, configured_max_secs)
-}
-
 fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
     let FlowInputs {
         physical_ahead,
         published_end_ms,
+        staged_publication_seconds,
         media_origin_ms,
         lease_mode,
         demand,
@@ -1419,20 +1403,33 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
         currently_suspended,
         startup_protected,
     } = inputs;
+    let publication_target_seconds =
+        i64::from(plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS);
     if lease_mode == crate::playback_control::RollingLeaseMode::Legacy {
+        let hard_hold = physical_ahead.and_then(|ahead| {
+            ahead_hold(
+                ahead,
+                global_live_bytes,
+                global_ahead_bytes,
+                AheadLimits {
+                    max_secs: 0,
+                    ..limits
+                },
+                currently_suspended,
+            )
+        });
         return FlowEvaluation {
-            hold: physical_ahead.and_then(|ahead| {
-                ahead_hold(
-                    ahead,
-                    global_live_bytes,
-                    global_ahead_bytes,
-                    limits,
-                    currently_suspended,
-                )
+            hold: hard_hold.or_else(|| {
+                staged_publication_seconds
+                    .filter(|staged| *staged >= publication_target_seconds)
+                    .map(|_| AheadHold {
+                        reason: AheadHoldReason::Time,
+                        release_value: 0,
+                    })
             }),
-            policy: "legacy_fetch_frontier",
-            production_ahead_seconds: None,
-            production_target_seconds: None,
+            policy: "publication_clock_legacy",
+            production_ahead_seconds: staged_publication_seconds,
+            production_target_seconds: Some(publication_target_seconds),
         };
     }
 
@@ -1461,7 +1458,11 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
     // that cannot be honoured while starting.
     let demand_suspends = match demand.demand {
         crate::playback_control::PlaybackDemand::End => true,
-        crate::playback_control::PlaybackDemand::Hold => !starting,
+        crate::playback_control::PlaybackDemand::Hold => {
+            !starting
+                && staged_publication_seconds
+                    .is_some_and(|staged| staged >= publication_target_seconds)
+        }
         crate::playback_control::PlaybackDemand::Active => false,
     };
     if demand_suspends {
@@ -1481,35 +1482,16 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
         };
     }
 
-    let production_target_seconds = explicit_production_target_seconds(demand, limits.max_secs);
     let production_ahead_seconds = published_end_ms.map(|published_end_ms| {
         media_origin_ms
             .saturating_add(published_end_ms)
             .saturating_sub(demand.buffer_anchor_ms())
             / 1_000
     });
-    // **The time limiter is disabled while starting, and exempting only the
-    // demand hold is not enough.** `ahead_hold` releases a suspended session
-    // at `time_release_threshold`, which for any target at or under 60 is half
-    // of it — strictly below the floor the session is trying to reach. So a
-    // starting session that any limit suspends for one tick comes back to a
-    // resume line it cannot cross: nothing publishes while it is stopped, so
-    // its ahead never falls, and a holding client's anchor never advances. It
-    // stays held below the floor, its playlist never opens, and the request
-    // waiting on it 503s — the same deadlock this change removes, wearing
-    // `Time` instead of `Demand`. A limit whose release point is inside the
-    // window it is guarding cannot guard it.
-    //
-    // What that costs is bounded and small: production runs past the floor
-    // only until the next flow evaluation, which every control request and the
-    // repair pass both trigger. The byte limits are not disabled — those are
-    // disk, and disk is a hard bound at every stage.
-    let time_limit_secs = if starting {
-        0
-    } else {
-        production_target_seconds
-    };
-
+    // Time pacing belongs exclusively to the publication clock. The physical
+    // index still supplies byte accounting and an active-demand diagnostic,
+    // but the old ahead-time hysteresis must not compete with a scheduled
+    // batch or leave a held producer below the next publication floor.
     // A session inside the copy publish gate has an empty index: segments are
     // on disk, but `index.m3u8` is withheld until the gate opens, and the
     // segment index, the ahead-window suspend and the GC all read the playlist
@@ -1530,28 +1512,33 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
             seconds: 0,
             bytes: 0,
         }));
-    let hold = ahead_for_limits.and_then(|ahead| {
+    let hard_hold = ahead_for_limits.and_then(|ahead| {
         ahead_hold(
             ahead,
             global_live_bytes,
             global_ahead_bytes,
             AheadLimits {
-                max_secs: time_limit_secs,
+                max_secs: 0,
                 ..limits
             },
             currently_suspended,
         )
     });
+    let hold = hard_hold.or_else(|| {
+        (!starting)
+            .then_some(staged_publication_seconds)
+            .flatten()
+            .filter(|staged| *staged >= publication_target_seconds)
+            .map(|_| AheadHold {
+                reason: AheadHoldReason::Time,
+                release_value: 0,
+            })
+    });
     FlowEvaluation {
         hold,
-        policy: "explicit_demand",
-        production_ahead_seconds,
-        // Zero disables only the time limiter. Reporting `target: 0` for an
-        // active producer says the opposite, so expose no finite target while
-        // still passing zero through to `ahead_hold`'s disabled-limit rule —
-        // which is also exactly what a starting session has: no time target.
-        production_target_seconds: (limits.max_secs > 0 && !starting)
-            .then_some(production_target_seconds),
+        policy: "publication_clock_explicit",
+        production_ahead_seconds: staged_publication_seconds.or(production_ahead_seconds),
+        production_target_seconds: (!starting).then_some(publication_target_seconds),
     }
 }
 
@@ -1559,15 +1546,9 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
 /// scratch every session is using between them, and whether it is already
 /// held.
 ///
-/// Any single limit is enough to suspend; resuming needs all of them below
-/// their release thresholds. Byte budgets release at half because they are
-/// hard disk bounds. Media time keeps a 30-second gap from its ceiling (never
-/// below half) so a fast encoder does not SIGSTOP/SIGCONT for every client
-/// segment near the boundary. A one-second ceiling still releases at one
-/// second rather than accidentally disabling itself at zero.
-fn time_release_threshold(limit: i64) -> Option<i64> {
-    (limit > 0).then(|| limit.saturating_sub(30).max(limit / 2).max(1))
-}
+/// Byte budgets release at half because they are hard disk bounds. Media-time
+/// pacing is intentionally absent: [`evaluate_flow`] derives it from staged
+/// inventory and the immutable publication clock.
 
 fn ahead_hold(
     ahead: Ahead,
@@ -1577,11 +1558,6 @@ fn ahead_hold(
     currently_suspended: bool,
 ) -> Option<AheadHold> {
     let half = |limit: i64| limit / 2;
-    let time_limit = if currently_suspended {
-        time_release_threshold(limits.max_secs).unwrap_or(limits.max_secs)
-    } else {
-        limits.max_secs
-    };
     let byte_limit = |limit: i64| {
         if currently_suspended {
             half(limit)
@@ -1617,10 +1593,7 @@ fn ahead_hold(
             release_value: session_byte_limit,
         });
     }
-    over(ahead.seconds, time_limit).then_some(AheadHold {
-        reason: AheadHoldReason::Time,
-        release_value: time_limit,
-    })
+    None
 }
 
 #[cfg(test)]
@@ -5774,6 +5747,64 @@ struct RollingTerminalOperation {
     exact_commit: Arc<std::sync::Mutex<Option<crate::playback_control::TerminalCommitReceipt>>>,
 }
 
+const ROLLING_PUBLICATION_POLL: Duration = Duration::from_millis(250);
+const ROLLING_PUBLICATION_TARGET: Duration =
+    Duration::from_secs(plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS as u64);
+const ROLLING_PUBLICATION_EARLIEST: Duration =
+    Duration::from_secs((plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS / 2) as u64);
+const ROLLING_PUBLICATION_HARD: Duration = Duration::from_secs(
+    (plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS
+        + plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS / 2) as u64,
+);
+const ROLLING_INITIAL_RUNWAY_MS: i64 =
+    plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS as i64 * 3 * 1_000;
+
+#[derive(Clone)]
+struct ServedPlaylistSnapshot {
+    raw: Arc<[u8]>,
+    producer_attempt: u64,
+    revision: u64,
+    last_segment: i64,
+    end_ms: i64,
+    end_list: bool,
+    available_at: Instant,
+}
+
+#[derive(Default)]
+struct RollingPublicationClock {
+    served: Option<ServedPlaylistSnapshot>,
+    staged_attempt: Option<u64>,
+    staged_last_segment: Option<i64>,
+    staged_end_ms: Option<i64>,
+    next_publish_at: Option<Instant>,
+    hard_deadline: Option<Instant>,
+}
+
+impl RollingPublicationClock {
+    fn staged_seconds(&self) -> i64 {
+        let served = self.served.as_ref().map_or(0, |snapshot| snapshot.end_ms);
+        self.staged_end_ms.unwrap_or(served).saturating_sub(served) / 1_000
+    }
+
+    fn reset_for_attempt(&mut self, producer_attempt: u64) {
+        if self
+            .staged_attempt
+            .is_some_and(|attempt| attempt != producer_attempt)
+            || self
+                .served
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.producer_attempt != producer_attempt)
+        {
+            self.served = None;
+            self.staged_last_segment = None;
+            self.staged_end_ms = None;
+            self.next_publish_at = None;
+            self.hard_deadline = None;
+        }
+        self.staged_attempt = Some(producer_attempt);
+    }
+}
+
 impl RollingTerminalOperation {
     fn expired(&self, now_unix_ms: i64) -> bool {
         if let Some(commit) = self
@@ -5960,6 +5991,10 @@ struct Session {
     /// binds the full demand snapshot without creating a second liveness
     /// clock.
     control: crate::playback_control::RollingControlHandle,
+    /// Raw writer revisions are private staged inventory. Only the immutable
+    /// snapshot in this actor-authorized clock may cross the HTTP boundary.
+    publication: Mutex<RollingPublicationClock>,
+    publication_worker_started: AtomicBool,
     /// One detached, cancellation-safe consumer applies every actor-owned
     /// producer-policy wake. HTTP response futures may disappear after the
     /// actor accepts a command; this worker must not disappear with them.
@@ -6328,6 +6363,197 @@ fn ahead_of(index: &SegmentIndex, fetched_end_ms: i64) -> Option<Ahead> {
 }
 
 impl Session {
+    fn ensure_publication_worker(self: &Arc<Self>, session_id: &str) {
+        if self.cached || self.publication_worker_started.swap(true, AcqRel) {
+            return;
+        }
+        let session = Arc::clone(self);
+        let session_id = session_id.to_owned();
+        tokio::spawn(async move {
+            while !session.control.is_retired() {
+                if let Err(reason) = session.publication_cycle(&session_id).await {
+                    tracing::error!(
+                        session = %session_log_id(&session_id),
+                        %reason,
+                        "rolling publication clock retired an invalid presentation"
+                    );
+                    session.fail(PlaylistError::SessionFailed(reason));
+                    if let Some(ticket) =
+                        spawn_context_retirement_owner(&session, None, "publication_clock")
+                    {
+                        let _ = ticket.wait().await;
+                    }
+                    break;
+                }
+                tokio::time::sleep(ROLLING_PUBLICATION_POLL).await;
+            }
+            session.publication_worker_started.store(false, Release);
+        });
+    }
+
+    async fn publication_cycle(&self, session_id: &str) -> Result<(), String> {
+        if self.replacing_child.load(Acquire) {
+            return Ok(());
+        }
+        let producer_attempt = self.control.current_producer_attempt();
+        if self.compatibility_producer_attempt() != producer_attempt {
+            return Ok(());
+        }
+        let Some(raw) =
+            plurx_core::transcode::manifest::read_bounded_playlist(&self.dir, "index.m3u8")
+                .await
+                .map_err(|error| format!("reading rolling writer playlist: {error}"))?
+        else {
+            return Ok(());
+        };
+        if raw.is_empty() {
+            return Ok(());
+        }
+        let text = std::str::from_utf8(&raw)
+            .map_err(|_| "rolling writer playlist was not UTF-8".to_owned())?;
+        if !text.lines().any(|line| line.trim().starts_with("#EXTINF:")) {
+            return Ok(());
+        }
+        validate_rolling_target(&raw)?;
+        let index = SegmentIndex {
+            segs: parse_playlist(text),
+            revision: 0,
+        };
+        let Some(last_segment) = index.segs.last().map(|segment| segment.index) else {
+            return Ok(());
+        };
+        let Some(end_ms) = index.produced_playable_end_ms() else {
+            return Ok(());
+        };
+        let end_list = text.lines().any(|line| line.trim() == "#EXT-X-ENDLIST");
+        let now = Instant::now();
+        let (publish, expired) = {
+            let mut clock = self.publication.lock().await;
+            clock.reset_for_attempt(producer_attempt);
+            if clock
+                .staged_last_segment
+                .is_none_or(|current| last_segment >= current)
+            {
+                clock.staged_last_segment = Some(last_segment);
+                clock.staged_end_ms =
+                    Some(clock.staged_end_ms.map_or(end_ms, |old| old.max(end_ms)));
+            }
+            let publish = match clock.served.as_ref() {
+                None => end_list || end_ms >= ROLLING_INITIAL_RUNWAY_MS,
+                Some(served) if served.producer_attempt != producer_attempt => false,
+                Some(served)
+                    if end_list && (last_segment > served.last_segment || !served.end_list) =>
+                {
+                    true
+                }
+                Some(served) => {
+                    let staged_ms = end_ms.saturating_sub(served.end_ms);
+                    clock.next_publish_at.is_some_and(|target| {
+                        (now >= served.available_at + ROLLING_PUBLICATION_EARLIEST
+                            && staged_ms
+                                >= i64::try_from(ROLLING_PUBLICATION_TARGET.as_millis())
+                                    .unwrap_or(i64::MAX))
+                            || (now >= target && staged_ms > 0)
+                    })
+                }
+            };
+            let expired = !end_list
+                && clock.served.as_ref().is_some_and(|served| {
+                    clock.hard_deadline.is_some_and(|deadline| now >= deadline)
+                        && end_ms <= served.end_ms
+                });
+            (publish, expired)
+        };
+        if expired {
+            return Err(format!(
+                "rolling publication missed its {}s hard deadline without a completed segment",
+                ROLLING_PUBLICATION_HARD.as_secs()
+            ));
+        }
+        if !publish {
+            return Ok(());
+        }
+
+        // Snapshot admission and publication share the same producer
+        // transition as replacement and signaling. Actor acceptance happens
+        // first; only its exact attempt may then make these bytes retrievable.
+        let _transition = self.child_transition.lock().await;
+        if self.replacing_child.load(Acquire)
+            || self.control.current_producer_attempt() != producer_attempt
+            || self.compatibility_producer_attempt() != producer_attempt
+        {
+            return Ok(());
+        }
+        let accepted = self
+            .control
+            .observe_publication(crate::playback_control::RollingPublicationObservation {
+                producer_attempt,
+                produced_segment: Some(last_segment),
+                produced_end_ms: Some(end_ms),
+                playlist_ready: true,
+                published_segment: Some(last_segment),
+                published_end_ms: Some(end_ms),
+                next_media_sequence: index.next_media_sequence(),
+                resolved_fetched_segment: None,
+                resolved_fetched_end_ms: None,
+            })
+            .await;
+        if !accepted {
+            return Ok(());
+        }
+        let available_at = Instant::now();
+        let mut clock = self.publication.lock().await;
+        if self.control.current_producer_attempt() != producer_attempt {
+            return Ok(());
+        }
+        let revision = clock
+            .served
+            .as_ref()
+            .map_or(1, |served| served.revision.saturating_add(1));
+        clock.served = Some(ServedPlaylistSnapshot {
+            raw: Arc::from(raw),
+            producer_attempt,
+            revision,
+            last_segment,
+            end_ms,
+            end_list,
+            available_at,
+        });
+        clock.next_publish_at = (!end_list).then(|| available_at + ROLLING_PUBLICATION_TARGET);
+        clock.hard_deadline = (!end_list).then(|| available_at + ROLLING_PUBLICATION_HARD);
+        drop(clock);
+        self.control.request_flow();
+        tracing::debug!(
+            session = %session_log_id(session_id),
+            producer_attempt,
+            revision,
+            last_segment,
+            end_ms,
+            end_list,
+            "rolling playlist snapshot became available"
+        );
+        Ok(())
+    }
+
+    async fn served_playlist(&self, producer_attempt: u64) -> Option<Arc<[u8]>> {
+        self.publication
+            .lock()
+            .await
+            .served
+            .as_ref()
+            .filter(|snapshot| snapshot.producer_attempt == producer_attempt)
+            .map(|snapshot| Arc::clone(&snapshot.raw))
+    }
+
+    async fn staged_publication_seconds(&self, producer_attempt: u64) -> Option<i64> {
+        let clock = self.publication.lock().await;
+        clock
+            .served
+            .as_ref()
+            .filter(|snapshot| snapshot.producer_attempt == producer_attempt)
+            .map(|_| clock.staged_seconds())
+    }
+
     /// The identity a reservation against the recovery ledger is keyed by,
     /// when this session has one.
     ///
@@ -6451,6 +6677,7 @@ impl Session {
             self.ahead_bytes.store(0, Relaxed);
         }
         *self.segments.lock().await = SegmentIndex::default();
+        *self.publication.lock().await = RollingPublicationClock::default();
         if matches!(&self.kind, SessionKind::Transcode { .. }) {
             self.playlist_published.store(false, Relaxed);
         }
@@ -6467,6 +6694,7 @@ impl Session {
         self.fetched_end_ms.store(0, Relaxed);
         self.ahead_bytes.store(0, Relaxed);
         *self.segments.lock().await = SegmentIndex::default();
+        *self.publication.lock().await = RollingPublicationClock::default();
         self.playlist_published.store(false, Relaxed);
         self.suspended.store(false, Release);
         *self.suspended_at.lock().await = None;
@@ -7259,7 +7487,7 @@ impl Session {
         // successor publication. Only the final in-memory projection crosses
         // it; every filesystem operation above remains independently bounded
         // by the storage layer rather than blocking lifecycle actions.
-        let (published_segment, published_end_ms, next_media_sequence, resolved_fetched_end_ms) = {
+        let (produced_segment, produced_end_ms, resolved_fetched_end_ms) = {
             let producer_transition = self.child_transition.lock().await;
             if self.control.current_producer_attempt() != producer_attempt {
                 return;
@@ -7314,7 +7542,6 @@ impl Session {
             let result = (
                 index.segs.last().map(|segment| segment.index),
                 index.produced_playable_end_ms(),
-                index.next_media_sequence(),
                 pending_fetched_segment.and_then(|segment| index.end_ms_of(segment)),
             );
             drop(projected_attempt);
@@ -7322,6 +7549,14 @@ impl Session {
             drop(producer_transition);
             result
         };
+        let served = self
+            .publication
+            .lock()
+            .await
+            .served
+            .as_ref()
+            .filter(|snapshot| snapshot.producer_attempt == producer_attempt)
+            .cloned();
         // Never hold a filesystem/process or segment-index lock while waiting
         // on the actor mailbox. A replacement that wins after the projection
         // check increments the attempt first, and the actor rejects this stale
@@ -7330,10 +7565,14 @@ impl Session {
             .control
             .observe_publication(crate::playback_control::RollingPublicationObservation {
                 producer_attempt,
-                playlist_ready: self.playlist_published.load(Relaxed),
-                published_segment,
-                published_end_ms,
-                next_media_sequence,
+                produced_segment,
+                produced_end_ms,
+                playlist_ready: served.is_some(),
+                published_segment: served.as_ref().map(|snapshot| snapshot.last_segment),
+                published_end_ms: served.as_ref().map(|snapshot| snapshot.end_ms),
+                next_media_sequence: served
+                    .as_ref()
+                    .map_or(0, |snapshot| snapshot.last_segment.saturating_add(1)),
                 resolved_fetched_segment: pending_fetched_segment
                     .filter(|_| resolved_fetched_end_ms.is_some()),
                 resolved_fetched_end_ms,
@@ -7480,10 +7719,14 @@ async fn session_info(
         crate::playback_control::RenderState::Failed => "failed",
     });
     let suspended = s.suspended.load(Relaxed);
+    let staged_publication_seconds = s
+        .staged_publication_seconds(s.control.current_producer_attempt())
+        .await;
     let flow = lease.as_ref().map(|lease| {
         evaluate_flow(FlowInputs {
             physical_ahead: ahead,
             published_end_ms,
+            staged_publication_seconds,
             startup_protected: lease.startup.protects_from_time_hold(),
             media_origin_ms,
             lease_mode: lease.mode,
@@ -14868,6 +15111,8 @@ impl TranscodeManager {
             cache_manifest,
             cache_location: Some(cache_location),
             control,
+            publication: Mutex::new(RollingPublicationClock::default()),
+            publication_worker_started: AtomicBool::new(false),
             flow_worker_started: AtomicBool::new(false),
             file_id: file.id,
             item_id: file.item_id,
@@ -19995,6 +20240,8 @@ impl TranscodeManager {
             cache_manifest: None,
             cache_location: None,
             control,
+            publication: Mutex::new(RollingPublicationClock::default()),
+            publication_worker_started: AtomicBool::new(false),
             flow_worker_started: AtomicBool::new(false),
             file_id,
             item_id: file.item_id,
@@ -20533,6 +20780,8 @@ impl TranscodeManager {
             cache_manifest: None,
             cache_location: None,
             control,
+            publication: Mutex::new(RollingPublicationClock::default()),
+            publication_worker_started: AtomicBool::new(false),
             flow_worker_started: AtomicBool::new(false),
             file_id,
             item_id: file.item_id,
@@ -21654,6 +21903,7 @@ impl TranscodeManager {
             }
         };
         let Some(rejection) = rejection else {
+            session.ensure_publication_worker(session_id);
             return Ok(());
         };
         // Rejection occurred before registry publication, so ordinary
@@ -23514,6 +23764,7 @@ impl TranscodeManager {
             }
             return Err(PlaylistPublicationError::gone());
         };
+        session.ensure_publication_worker(session_id);
         match tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             self.playlist_with_owner_for_session_before(
@@ -23639,7 +23890,7 @@ impl TranscodeManager {
                             .ok()
                             .flatten()
                     }
-                } else {
+                } else if session.cached {
                     plurx_core::transcode::manifest::read_bounded_playlist(
                         &session.dir,
                         "index.m3u8",
@@ -23647,6 +23898,11 @@ impl TranscodeManager {
                     .await
                     .ok()
                     .flatten()
+                } else {
+                    session
+                        .served_playlist(producer_attempt)
+                        .await
+                        .map(|bytes| bytes.as_ref().to_vec())
                 };
                 if session.replacing_child.load(Acquire)
                     || session.control.current_producer_attempt() != producer_attempt
@@ -23723,6 +23979,11 @@ impl TranscodeManager {
                             .observe_publication_before(
                                 crate::playback_control::RollingPublicationObservation {
                                     producer_attempt,
+                                    produced_segment: exact_index
+                                        .segs
+                                        .last()
+                                        .map(|segment| segment.index),
+                                    produced_end_ms: exact_index.produced_playable_end_ms(),
                                     playlist_ready: true,
                                     published_segment: exact_index
                                         .segs
@@ -24178,6 +24439,23 @@ impl TranscodeManager {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
             };
+            if !session.cached {
+                let advertised = session
+                    .publication
+                    .lock()
+                    .await
+                    .served
+                    .as_ref()
+                    .filter(|snapshot| snapshot.producer_attempt == producer_attempt)
+                    .is_some_and(|snapshot| idx.is_none_or(|index| index <= snapshot.last_segment));
+                if !advertised {
+                    if Instant::now() >= deadline {
+                        return Ok(SegmentPublication::Pending(current_owner()));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+            }
             let opened = if let Some(opened) = authenticated_cached_file.take() {
                 Some((opened.file, Some(opened.bytes), Some(opened.lease)))
             } else if session.cached {
@@ -24505,9 +24783,13 @@ impl TranscodeManager {
             )
         };
         let suspended = session.suspended.load(Relaxed);
+        let staged_publication_seconds = session
+            .staged_publication_seconds(lease.delivery.producer_attempt)
+            .await;
         let evaluation = evaluate_flow(FlowInputs {
             physical_ahead: ahead,
             published_end_ms,
+            staged_publication_seconds,
             startup_protected: lease.startup.protects_from_time_hold(),
             media_origin_ms: (session.media_origin_seconds * 1_000.0).round() as i64,
             lease_mode: lease.mode,
@@ -26281,6 +26563,8 @@ fn test_session_with_control(
         cache_manifest: None,
         cache_location: None,
         control,
+        publication: Mutex::new(RollingPublicationClock::default()),
+        publication_worker_started: AtomicBool::new(false),
         flow_worker_started: AtomicBool::new(false),
         file_id: 1,
         item_id: 1,
@@ -31554,6 +31838,111 @@ pub(crate) mod tests {
         assert!(transcode_first_playlist_ready(completed_short));
     }
 
+    fn rolling_playlist(durations: &[f64], end: bool) -> String {
+        let mut playlist =
+            String::from("#EXTM3U\n#EXT-X-TARGETDURATION:16\n#EXT-X-PLAYLIST-TYPE:EVENT\n");
+        for (index, duration) in durations.iter().enumerate() {
+            playlist.push_str(&format!("#EXTINF:{duration:.6},\nseg{index:05}.ts\n"));
+        }
+        if end {
+            playlist.push_str("#EXT-X-ENDLIST\n");
+        }
+        playlist
+    }
+
+    #[tokio::test]
+    async fn mkv_hls_schedule_stages_short_segments_until_the_publication_clock() {
+        let directory = crate::test_tempdir().expect("publication clock");
+        let session = test_session(directory.path().to_path_buf());
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[16.0, 16.0, 16.0], false),
+        )
+        .await
+        .expect("initial writer playlist");
+        session
+            .publication_cycle("schedule-test")
+            .await
+            .expect("initial publication");
+        assert_eq!(
+            session
+                .publication
+                .lock()
+                .await
+                .served
+                .as_ref()
+                .map(|snapshot| (snapshot.revision, snapshot.last_segment)),
+            Some((1, 2))
+        );
+
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[16.0, 16.0, 16.0, 6.0], false),
+        )
+        .await
+        .expect("staged writer playlist");
+        session
+            .publication_cycle("schedule-test")
+            .await
+            .expect("staging cycle");
+        assert_eq!(
+            session
+                .publication
+                .lock()
+                .await
+                .served
+                .as_ref()
+                .map(|snapshot| snapshot.last_segment),
+            Some(2),
+            "a short raw writer revision leaked before its scheduled batch"
+        );
+
+        {
+            let mut clock = session.publication.lock().await;
+            let due = Instant::now() - Duration::from_millis(1);
+            clock.next_publish_at = Some(due);
+            clock.served.as_mut().expect("served snapshot").available_at =
+                due - ROLLING_PUBLICATION_TARGET;
+        }
+        session
+            .publication_cycle("schedule-test")
+            .await
+            .expect("scheduled publication");
+        assert_eq!(
+            session
+                .publication
+                .lock()
+                .await
+                .served
+                .as_ref()
+                .map(|snapshot| (snapshot.revision, snapshot.last_segment)),
+            Some((2, 3))
+        );
+    }
+
+    #[tokio::test]
+    async fn mkv_hls_schedule_fetch_stopped_session_has_a_finite_hard_deadline() {
+        let directory = crate::test_tempdir().expect("publication deadline");
+        let session = test_session(directory.path().to_path_buf());
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[16.0, 16.0, 16.0], false),
+        )
+        .await
+        .expect("writer playlist");
+        session
+            .publication_cycle("deadline-test")
+            .await
+            .expect("initial publication");
+        session.publication.lock().await.hard_deadline =
+            Some(Instant::now() - Duration::from_millis(1));
+        let reason = session
+            .publication_cycle("deadline-test")
+            .await
+            .expect_err("a stopped writer cannot keep the presentation forever");
+        assert!(reason.contains("hard deadline"), "{reason}");
+    }
+
     #[test]
     fn every_rolling_writer_is_wrapped_in_one_fixed_covering_target() {
         let early = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:EVENT\n\
@@ -32139,6 +32528,7 @@ pub(crate) mod tests {
                     bytes: 0,
                 }),
                 published_end_ms: Some(86_086),
+                staged_publication_seconds: None,
                 media_origin_ms: 729_643,
                 lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
                 demand: Some(demand),
@@ -32207,6 +32597,7 @@ pub(crate) mod tests {
                     bytes: 1_000,
                 }),
                 published_end_ms: Some(80_000),
+                staged_publication_seconds: None,
                 // Pre-existing coverage: the startup grant is already spent, so
                 // these assertions are about steady-state flow control.
                 startup_protected: false,
@@ -32291,6 +32682,7 @@ pub(crate) mod tests {
                 bytes: 1_000,
             }),
             published_end_ms: Some(80_000),
+            staged_publication_seconds: None,
             startup_protected: false,
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
@@ -32336,6 +32728,7 @@ pub(crate) mod tests {
                 bytes: 1_000,
             }),
             published_end_ms: Some(20_000),
+            staged_publication_seconds: None,
             startup_protected: false,
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
@@ -32394,6 +32787,7 @@ pub(crate) mod tests {
         let active = evaluate_flow(FlowInputs {
             physical_ahead: Some(physical),
             published_end_ms: Some(80_000),
+            staged_publication_seconds: None,
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
             startup_protected: false,
@@ -32420,6 +32814,7 @@ pub(crate) mod tests {
         let faster = evaluate_flow(FlowInputs {
             physical_ahead: Some(physical),
             published_end_ms: Some(80_000),
+            staged_publication_seconds: None,
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
             startup_protected: false,
@@ -32438,13 +32833,6 @@ pub(crate) mod tests {
         );
         assert_eq!(faster.hold, None);
 
-        demand.buffered_through_ms = 1_000_000;
-        assert_eq!(
-            explicit_production_target_seconds(&demand, limits.max_secs),
-            limits.max_secs,
-            "untrusted client runway cannot raise the configured time ceiling"
-        );
-
         demand.buffered_through_ms = 140_000;
         let capacity = evaluate_flow(FlowInputs {
             physical_ahead: Some(Ahead {
@@ -32452,6 +32840,7 @@ pub(crate) mod tests {
                 bytes: 2_001,
             }),
             published_end_ms: Some(120_000),
+            staged_publication_seconds: None,
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
             startup_protected: false,
@@ -32475,6 +32864,7 @@ pub(crate) mod tests {
                 bytes: 0,
             }),
             published_end_ms: Some(10_000_000),
+            staged_publication_seconds: None,
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
             startup_protected: false,
@@ -32531,6 +32921,7 @@ pub(crate) mod tests {
             evaluate_flow(FlowInputs {
                 physical_ahead: None,
                 published_end_ms,
+                staged_publication_seconds: None,
                 startup_protected: true,
                 media_origin_ms,
                 lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
@@ -32551,6 +32942,7 @@ pub(crate) mod tests {
                     bytes: 0,
                 }),
                 published_end_ms: Some(published_end_ms),
+                staged_publication_seconds: None,
                 startup_protected: true,
                 media_origin_ms,
                 lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
@@ -32634,6 +33026,7 @@ pub(crate) mod tests {
                 bytes: limits.max_bytes + 1,
             }),
             published_end_ms: Some(2_000),
+            staged_publication_seconds: None,
             startup_protected: true,
             media_origin_ms: 0,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
@@ -32654,6 +33047,7 @@ pub(crate) mod tests {
         let retried = evaluate_flow(FlowInputs {
             physical_ahead: None,
             published_end_ms: None,
+            staged_publication_seconds: None,
             startup_protected: false,
             media_origin_ms: 0,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
@@ -32675,6 +33069,7 @@ pub(crate) mod tests {
         let full_disk = evaluate_flow(FlowInputs {
             physical_ahead: None,
             published_end_ms: None,
+            staged_publication_seconds: None,
             startup_protected: true,
             media_origin_ms: 0,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
@@ -32723,6 +33118,7 @@ pub(crate) mod tests {
                 bytes: 0,
             }),
             published_end_ms: Some(65_000),
+            staged_publication_seconds: None,
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
             startup_protected: false,
@@ -32735,16 +33131,15 @@ pub(crate) mod tests {
             currently_suspended: false,
         });
         assert_eq!(seeking.production_ahead_seconds, Some(65));
-        assert_eq!(seeking.production_target_seconds, Some(60));
+        assert_eq!(seeking.production_target_seconds, Some(16));
         assert_eq!(
-            seeking.hold.map(|hold| hold.reason),
-            Some(AheadHoldReason::Time),
-            "the old pre-seek playhead must not inflate demand by ninety seconds"
+            seeking.hold, None,
+            "physical playhead distance must not replace staged publication inventory"
         );
     }
 
     #[test]
-    fn suspend_holds_on_any_limit_and_releases_on_all() {
+    fn capacity_holds_ignore_media_time_and_release_on_byte_reserve() {
         let limits = AheadLimits {
             max_secs: 180,
             max_bytes: 2_000,
@@ -32758,27 +33153,15 @@ pub(crate) mod tests {
             seconds: 0,
             bytes: n,
         };
-        assert_eq!(time_release_threshold(180), Some(150));
-        assert_eq!(time_release_threshold(60), Some(30));
-        assert_eq!(time_release_threshold(1), Some(1));
-        assert_eq!(time_release_threshold(0), None);
-        // Running: hold once past any single window.
+        // Media-time pacing belongs to the publication clock, not capacity.
         assert!(!should_suspend(secs(179), 0, 0, limits, false));
-        assert!(should_suspend(secs(181), 0, 0, limits, false));
+        assert!(!should_suspend(secs(181), 0, 0, limits, false));
         assert!(should_suspend(bytes(2_001), 0, 0, limits, false));
         // The global budget holds a session that is individually well behaved
         // — several healthy 4K streams fill a disk between them.
         assert!(should_suspend(secs(10), 8_001, 0, limits, false));
 
-        // Held: time keeps its 30-second release gap so a fast encoder does
-        // not toggle once per client segment near the ceiling.
-        assert!(should_suspend(secs(151), 0, 0, limits, true));
-        assert!(!should_suspend(secs(150), 0, 0, limits, true));
-        assert!(!should_suspend(secs(138), 0, 0, limits, true));
-        assert!(
-            should_suspend(secs(186), 0, 0, limits, true),
-            "without a client fetch, the producer can remain held"
-        );
+        assert!(!should_suspend(secs(10_000), 0, 0, limits, true));
         // The global byte cap enters on total scratch but releases on the
         // drainable reserve across all sessions. Retention behind the client
         // is intentionally absent from this half-cap comparison.
@@ -32805,13 +33188,7 @@ pub(crate) mod tests {
         assert!(!should_suspend(secs(10_000), 1 << 40, 1 << 40, off, false));
         assert!(!should_suspend(secs(10_000), 1 << 40, 1 << 40, off, true));
 
-        assert_eq!(
-            ahead_hold(secs(151), 0, 0, limits, true),
-            Some(AheadHold {
-                reason: AheadHoldReason::Time,
-                release_value: 150,
-            })
-        );
+        assert_eq!(ahead_hold(secs(151), 0, 0, limits, true), None);
         assert_eq!(
             ahead_hold(bytes(1_001), 0, 0, limits, true),
             Some(AheadHold {
@@ -32828,16 +33205,12 @@ pub(crate) mod tests {
         );
     }
 
-    /// A producer with no request-side evaluation can run until the repair
-    /// tick. Pin that gap at the shipped pace so a future cadence or pacing
-    /// change cannot quietly restore the observed +120-second overshoot.
+    /// Normal publication discovery runs on the session clock; the 15-second
+    /// global sweep is only repair. Pin the maximum normal discovery lag.
     #[test]
-    fn default_repair_cadence_bounds_time_overshoot() {
-        let overshoot =
-            (FLOW_CONTROL_REPAIR_INTERVAL.as_secs_f64() * HLS_READRATE_DEFAULT).ceil() as i64;
-        assert_eq!(FLOW_CONTROL_REPAIR_INTERVAL, Duration::from_secs(15));
-        assert_eq!(HLS_READRATE_DEFAULT, 2.0);
-        assert_eq!(overshoot, 30, "default worst-case overshoot in seconds");
+    fn publication_clock_is_faster_than_the_repair_backstop() {
+        assert_eq!(ROLLING_PUBLICATION_POLL, Duration::from_millis(250));
+        assert!(ROLLING_PUBLICATION_POLL < FLOW_CONTROL_REPAIR_INTERVAL);
     }
 
     /// Four retention floors can sit above the old half-cap release line even
@@ -34218,6 +34591,8 @@ pub(crate) mod tests {
                 .control
                 .observe_publication(crate::playback_control::RollingPublicationObservation {
                     producer_attempt: 0,
+                    produced_segment: Some(0),
+                    produced_end_ms: Some(4_000),
                     playlist_ready: true,
                     published_segment: Some(0),
                     published_end_ms: Some(4_000),
@@ -37475,6 +37850,8 @@ pub(crate) mod tests {
             cache_manifest: None,
             cache_location: None,
             control,
+            publication: Mutex::new(RollingPublicationClock::default()),
+            publication_worker_started: AtomicBool::new(false),
             flow_worker_started: AtomicBool::new(false),
             file_id: 1,
             item_id: 1,
@@ -37725,6 +38102,8 @@ pub(crate) mod tests {
             control
                 .observe_publication(crate::playback_control::RollingPublicationObservation {
                     producer_attempt,
+                    produced_segment: Some(0),
+                    produced_end_ms: Some(2_000),
                     playlist_ready: true,
                     published_segment: Some(0),
                     published_end_ms: Some(2_000),
@@ -42295,6 +42674,8 @@ pub(crate) mod tests {
                 .control
                 .observe_publication(crate::playback_control::RollingPublicationObservation {
                     producer_attempt: 0,
+                    produced_segment: Some(0),
+                    produced_end_ms: Some(published_end_ms),
                     playlist_ready: true,
                     published_segment: Some(0),
                     published_end_ms: Some(published_end_ms),
