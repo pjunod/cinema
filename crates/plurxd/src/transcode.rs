@@ -719,6 +719,27 @@ impl Progress {
 
 /// One completed, published segment — the unit of playlist, retention, and
 /// delivery-frontier accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SegmentVisibility {
+    Advertised,
+    Grace {
+        removed_at: Instant,
+        serve_until: Instant,
+    },
+    Deleted,
+}
+
+impl SegmentVisibility {
+    fn is_advertised(self) -> bool {
+        matches!(self, Self::Advertised)
+    }
+
+    fn is_servable(self, now: Instant) -> bool {
+        matches!(self, Self::Advertised)
+            || matches!(self, Self::Grace { serve_until, .. } if now < serve_until)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct SegmentMeta {
     index: i64,
@@ -732,12 +753,12 @@ struct SegmentMeta {
     /// is a lie on exactly the sessions this accounting exists to bound.
     start_ms: i64,
     end_ms: i64,
-    /// Size on disk, or 0 until it has been measured (or after it is pruned).
+    /// Size on disk, or 0 until it has been measured (or after it is deleted).
     bytes: i64,
-    /// Retention deleted the file. Without the flag, every refresh re-stats
-    /// every pruned segment forever — by the back half of a film that is
-    /// hundreds of ENOENTs per refresh, all to relearn `bytes: 0`.
-    pruned: bool,
+    /// Playlist removal and physical deletion are separate promises. Grace
+    /// objects remain charged and readable through their exact URI even
+    /// though new playlist clients can no longer discover them.
+    visibility: SegmentVisibility,
 }
 
 /// What a session has actually published, in media time and bytes.
@@ -789,7 +810,10 @@ impl SegmentIndex {
 
     /// First segment whose bytes are still available to a playlist client.
     fn first_retained_index(&self) -> Option<i64> {
-        self.segs.iter().find(|s| !s.pruned).map(|s| s.index)
+        self.segs
+            .iter()
+            .find(|s| s.visibility.is_advertised())
+            .map(|s| s.index)
     }
 
     /// Complete retained media contiguous with an absolute film-time anchor.
@@ -806,7 +830,7 @@ impl SegmentIndex {
             self.segs
                 .iter()
                 .position(|segment| {
-                    !segment.pruned
+                    segment.visibility.is_advertised()
                         && if inclusive {
                             segment.start_ms >= floor_ms
                         } else {
@@ -817,7 +841,7 @@ impl SegmentIndex {
                     let first = &self.segs[start];
                     let mut end_ms = first.end_ms;
                     for segment in self.segs.iter().skip(start + 1) {
-                        if segment.pruned || segment.start_ms > end_ms {
+                        if !segment.visibility.is_advertised() || segment.start_ms > end_ms {
                             break;
                         }
                         end_ms = end_ms.max(segment.end_ms);
@@ -843,7 +867,7 @@ impl SegmentIndex {
                 retained_interval_after(relative_anchor, false),
             );
         };
-        if self.segs[start].pruned {
+        if !self.segs[start].visibility.is_advertised() {
             return ReadyCoverage::without_anchor(
                 anchor_ms,
                 "unavailable",
@@ -852,7 +876,7 @@ impl SegmentIndex {
         }
         let mut end_ms = self.segs[start].end_ms;
         for segment in self.segs.iter().skip(start + 1) {
-            if segment.pruned || segment.start_ms > end_ms {
+            if !segment.visibility.is_advertised() || segment.start_ms > end_ms {
                 break;
             }
             end_ms = end_ms.max(segment.end_ms);
@@ -888,9 +912,9 @@ impl SegmentIndex {
     /// window opens. A segment straddling the boundary is kept — half a
     /// segment is no use to anyone and the arithmetic is cheap.
     fn prunable(&self, keep_from_ms: i64) -> impl Iterator<Item = &SegmentMeta> {
-        self.segs
-            .iter()
-            .filter(move |s| s.bytes > 0 && s.end_ms <= keep_from_ms)
+        self.segs.iter().filter(move |s| {
+            s.visibility.is_advertised() && s.bytes > 0 && s.end_ms <= keep_from_ms
+        })
     }
 
     /// Bring the index up to date with the playlist text by *appending* what
@@ -959,7 +983,7 @@ impl SegmentIndex {
                 start_ms: cursor_ms,
                 end_ms: cursor_ms + duration_ms,
                 bytes: 0,
-                pruned: false,
+                visibility: SegmentVisibility::Advertised,
             });
             cursor_ms += duration_ms;
         }
@@ -1000,7 +1024,7 @@ impl SegmentIndex {
             return Some(true);
         }
         for (current, observed) in self.segs.iter_mut().zip(observed.segs.iter()).take(overlap) {
-            if !current.pruned && current.bytes == 0 && observed.bytes > 0 {
+            if current.visibility.is_advertised() && current.bytes == 0 && observed.bytes > 0 {
                 current.bytes = observed.bytes;
             }
         }
@@ -1092,7 +1116,7 @@ fn parse_playlist(text: &str) -> Vec<SegmentMeta> {
             start_ms: cursor_ms,
             end_ms: cursor_ms + duration_ms,
             bytes: 0,
-            pruned: false,
+            visibility: SegmentVisibility::Advertised,
         });
         cursor_ms += duration_ms;
     }
@@ -3298,8 +3322,18 @@ struct RollingRetirementTicket {
 }
 
 #[derive(Clone)]
+struct RetiredPresentation {
+    session: Arc<Session>,
+    producer_attempt: u64,
+    serve_until: Instant,
+}
+
+type RetiredPresentations = Arc<Mutex<HashMap<String, RetiredPresentation>>>;
+
+#[derive(Clone)]
 struct RollingRetirementContext {
     sessions: Weak<Mutex<HashMap<String, Arc<Session>>>>,
+    retired_presentations: Weak<Mutex<HashMap<String, RetiredPresentation>>>,
     active_session_count: Arc<AtomicUsize>,
     store: Arc<dyn Store>,
     recent_marker_ambiguities: RecentMarkerAmbiguities,
@@ -3381,6 +3415,79 @@ fn spawn_rolling_scratch_cleanup_owner(
             attempts = ROLLING_SCRATCH_CLEANUP_ATTEMPTS,
             "rolling retirement scratch cleanup exhausted; orphan handed to startup/maintenance sweep"
         );
+    });
+}
+
+fn spawn_retired_presentation_cleanup_owner(
+    retired_presentations: RetiredPresentations,
+    session_id: String,
+    retired: RetiredPresentation,
+) {
+    tokio::spawn(async move {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(retired.serve_until)).await;
+        if retired
+            .session
+            .scratch_cleanup_started
+            .compare_exchange(false, true, AcqRel, Acquire)
+            .is_err()
+        {
+            return;
+        }
+        #[cfg(test)]
+        let cleanup_pause = retired
+            .session
+            .scratch_cleanup_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        #[cfg(test)]
+        if let Some(pause) = cleanup_pause {
+            pause.reached.notify_one();
+            pause.release.notified().await;
+        }
+        let mut attempt = 0_u64;
+        loop {
+            attempt = attempt.saturating_add(1);
+            let exact = retired_presentations
+                .lock()
+                .await
+                .get(&session_id)
+                .is_some_and(|current| {
+                    current.producer_attempt == retired.producer_attempt
+                        && Arc::ptr_eq(&current.session, &retired.session)
+                });
+            if !exact {
+                return;
+            }
+            let cleanup = tokio::time::timeout(ROLLING_SCRATCH_CLEANUP_ATTEMPT, async {
+                clear_session_dir(&retired.session.dir).await?;
+                match tokio::fs::remove_dir_all(&retired.session.dir).await {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error),
+                }
+            })
+            .await;
+            if matches!(cleanup, Ok(Ok(()))) {
+                let mut presentations = retired_presentations.lock().await;
+                if presentations.get(&session_id).is_some_and(|current| {
+                    current.producer_attempt == retired.producer_attempt
+                        && Arc::ptr_eq(&current.session, &retired.session)
+                }) {
+                    presentations.remove(&session_id);
+                    retired.session.live_bytes.store(0, Release);
+                    retired.session.retention_garbage_bytes.store(0, Release);
+                }
+                return;
+            }
+            tracing::warn!(
+                session = %session_log_id(&session_id),
+                path = %retired.session.dir.display(),
+                attempt,
+                "retired rolling object cleanup failed; promises remain charged for retry"
+            );
+            tokio::time::sleep(ROLLING_SCRATCH_CLEANUP_RETRY).await;
+        }
     });
 }
 
@@ -3498,6 +3605,7 @@ fn spawn_prepublication_cleanup_owner(
 #[allow(clippy::too_many_arguments)]
 async fn own_rolling_retirement(
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
+    retired_presentations: RetiredPresentations,
     recent_marker_ambiguities: RecentMarkerAmbiguities,
     active_session_count: Arc<AtomicUsize>,
     store: Arc<dyn Store>,
@@ -3619,8 +3727,18 @@ async fn own_rolling_retirement(
                 // Keep the exact retired Arc discoverable until process death
                 // and admission release are both facts. Adoption may rename it
                 // during actor settlement, so remove by pointer at the end.
-                let (removed, removed_key) = {
+                let retired_promise = if session.cached {
+                    None
+                } else {
+                    Some(RetiredPresentation {
+                        session: Arc::clone(&session),
+                        producer_attempt: session.control.current_producer_attempt(),
+                        serve_until: session.prepare_retired_object_promise().await,
+                    })
+                };
+                let (removed, removed_key, installed_retired) = {
                     let mut registry = sessions.lock().await;
+                    let mut retired_registry = retired_presentations.lock().await;
                     let exact_key = registry.iter().find_map(|(id, registered)| {
                         Arc::ptr_eq(registered, &session).then_some(id.clone())
                     });
@@ -3629,10 +3747,14 @@ async fn own_rolling_retirement(
                         // Consumers check live first and recent second, so
                         // there is no instant where both forms are absent.
                         remember_rolling_marker_ambiguity(&recent_marker_ambiguities, &session);
+                        if let Some(retired) = retired_promise.as_ref() {
+                            retired_registry.insert(exact_key.to_owned(), retired.clone());
+                        }
                         registry.remove(exact_key);
                         active_session_count.store(registry.len(), Relaxed);
                     }
-                    (exact_key.is_some(), exact_key)
+                    let removed = exact_key.is_some();
+                    (removed, exact_key, retired_promise.filter(|_| removed))
                 };
                 session.retirement_cleanup_finished.store(true, Release);
                 settlement.complete(Ok(removed));
@@ -3641,7 +3763,13 @@ async fn own_rolling_retirement(
                     .as_deref()
                     .or(registered_key.as_deref())
                     .unwrap_or(&session_id);
-                if !session.cached {
+                if let Some(retired) = installed_retired {
+                    spawn_retired_presentation_cleanup_owner(
+                        Arc::clone(&retired_presentations),
+                        settled_session_id.to_owned(),
+                        retired,
+                    );
+                } else if !session.cached {
                     spawn_rolling_scratch_cleanup_owner(
                         settled_session_id.to_owned(),
                         &session,
@@ -3684,6 +3812,7 @@ async fn own_rolling_retirement(
 #[allow(clippy::too_many_arguments)]
 fn spawn_rolling_retirement_owner(
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
+    retired_presentations: RetiredPresentations,
     active_session_count: Arc<AtomicUsize>,
     store: Arc<dyn Store>,
     recent_marker_ambiguities: RecentMarkerAmbiguities,
@@ -3716,6 +3845,7 @@ fn spawn_rolling_retirement_owner(
         tokio::spawn(async move {
             let outcome = own_rolling_retirement(
                 sessions,
+                retired_presentations,
                 recent_marker_ambiguities,
                 active_session_count,
                 store,
@@ -3833,8 +3963,10 @@ fn spawn_context_retirement_owner(
 ) -> Option<RollingRetirementTicket> {
     let context = session.retirement_context.as_ref()?;
     let sessions = context.sessions.upgrade()?;
+    let retired_presentations = context.retired_presentations.upgrade()?;
     let (_commit, ticket) = spawn_rolling_retirement_owner(
         sessions,
+        retired_presentations,
         Arc::clone(&context.active_session_count),
         Arc::clone(&context.store),
         Arc::clone(&context.recent_marker_ambiguities),
@@ -3855,6 +3987,7 @@ fn spawn_context_retirement_owner(
 async fn own_supersession_convergence(
     vod: Arc<crate::vodserve::VodServe>,
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
+    retired_presentations: RetiredPresentations,
     active_session_count: Arc<AtomicUsize>,
     store: Arc<dyn Store>,
     recent_marker_ambiguities: RecentMarkerAmbiguities,
@@ -3874,6 +4007,7 @@ async fn own_supersession_convergence(
         let retirement_deadline = if committed { None } else { deadline };
         let (mut commit, ticket) = spawn_rolling_retirement_owner(
             Arc::clone(&sessions),
+            Arc::clone(&retired_presentations),
             Arc::clone(&active_session_count),
             Arc::clone(&store),
             Arc::clone(&recent_marker_ambiguities),
@@ -5758,6 +5892,7 @@ const ROLLING_PUBLICATION_HARD: Duration = Duration::from_secs(
 );
 const ROLLING_INITIAL_RUNWAY_MS: i64 =
     plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS as i64 * 3 * 1_000;
+const ROLLING_SERVED_WINDOW_MS: i64 = RETENTION_SECS * 1_000;
 
 #[derive(Clone)]
 struct ServedPlaylistSnapshot {
@@ -5765,7 +5900,9 @@ struct ServedPlaylistSnapshot {
     producer_attempt: u64,
     revision: u64,
     last_segment: i64,
+    first_segment: i64,
     end_ms: i64,
+    duration_ms: i64,
     end_list: bool,
     available_at: Instant,
 }
@@ -5778,6 +5915,9 @@ struct RollingPublicationClock {
     staged_end_ms: Option<i64>,
     next_publish_at: Option<Instant>,
     hard_deadline: Option<Instant>,
+    /// Logical prefix removal requested by the download-frontier retention
+    /// policy. It takes effect only in the next segment-bearing snapshot.
+    retention_first_segment: Option<i64>,
 }
 
 impl RollingPublicationClock {
@@ -5800,6 +5940,7 @@ impl RollingPublicationClock {
             self.staged_end_ms = None;
             self.next_publish_at = None;
             self.hard_deadline = None;
+            self.retention_first_segment = None;
         }
         self.staged_attempt = Some(producer_attempt);
     }
@@ -6427,7 +6568,7 @@ impl Session {
         };
         let end_list = text.lines().any(|line| line.trim() == "#EXT-X-ENDLIST");
         let now = Instant::now();
-        let (publish, expired) = {
+        let (publish, expired, retention_first_segment) = {
             let mut clock = self.publication.lock().await;
             clock.reset_for_attempt(producer_attempt);
             if clock
@@ -6462,7 +6603,7 @@ impl Session {
                     clock.hard_deadline.is_some_and(|deadline| now >= deadline)
                         && end_ms <= served.end_ms
                 });
-            (publish, expired)
+            (publish, expired, clock.retention_first_segment)
         };
         if expired {
             return Err(format!(
@@ -6473,6 +6614,45 @@ impl Session {
         if !publish {
             return Ok(());
         }
+
+        let window_floor_ms = end_ms.saturating_sub(ROLLING_SERVED_WINDOW_MS);
+        let window_first_segment = index
+            .segs
+            .iter()
+            .find(|segment| segment.end_ms > window_floor_ms)
+            .map(|segment| segment.index)
+            .unwrap_or(last_segment);
+        let first_segment = retention_first_segment.map_or(window_first_segment, |retained| {
+            retained.max(window_first_segment)
+        });
+        let served_raw = served_live_playlist(raw, Some(first_segment), self.takeover.as_ref())
+            .ok_or_else(|| {
+                "rolling snapshot could not retain a complete media window".to_owned()
+            })?;
+        let served_index = SegmentIndex {
+            segs: parse_playlist(&String::from_utf8_lossy(&served_raw)),
+            revision: 0,
+        };
+        let served_first = served_index
+            .segs
+            .first()
+            .map(|segment| segment.index)
+            .ok_or_else(|| "rolling snapshot contained no served media".to_owned())?;
+        let served_last = served_index
+            .segs
+            .last()
+            .map(|segment| segment.index)
+            .ok_or_else(|| "rolling snapshot contained no served media".to_owned())?;
+        let served_end_ms = index
+            .end_ms_of(served_last)
+            .ok_or_else(|| "rolling snapshot had no playable end".to_owned())?;
+        let served_start_ms = index
+            .segs
+            .iter()
+            .find(|segment| segment.index == served_first)
+            .map(|segment| segment.start_ms)
+            .ok_or_else(|| "rolling snapshot had no playable start".to_owned())?;
+        let served_duration_ms = served_end_ms.saturating_sub(served_start_ms);
 
         // Snapshot admission and publication share the same producer
         // transition as replacement and signaling. Actor acceptance happens
@@ -6491,9 +6671,9 @@ impl Session {
                 produced_segment: Some(last_segment),
                 produced_end_ms: Some(end_ms),
                 playlist_ready: true,
-                published_segment: Some(last_segment),
-                published_end_ms: Some(end_ms),
-                next_media_sequence: index.next_media_sequence(),
+                published_segment: Some(served_last),
+                published_end_ms: Some(served_end_ms),
+                next_media_sequence: served_last.saturating_add(1),
                 resolved_fetched_segment: None,
                 resolved_fetched_end_ms: None,
             })
@@ -6510,12 +6690,34 @@ impl Session {
             .served
             .as_ref()
             .map_or(1, |served| served.revision.saturating_add(1));
+        let previous_duration_ms = clock
+            .served
+            .as_ref()
+            .map_or(served_duration_ms, |served| served.duration_ms);
+        {
+            let mut segments = self.segments.lock().await;
+            for segment in segments.segs.iter_mut().filter(|segment| {
+                segment.visibility.is_advertised() && segment.index < served_first
+            }) {
+                let segment_duration_ms = segment.end_ms.saturating_sub(segment.start_ms);
+                let promise_ms = segment_duration_ms.saturating_add(previous_duration_ms);
+                let promise =
+                    Duration::from_millis(u64::try_from(promise_ms.max(0)).unwrap_or(u64::MAX));
+                segment.visibility = SegmentVisibility::Grace {
+                    removed_at: available_at,
+                    serve_until: available_at.checked_add(promise).unwrap_or(available_at),
+                };
+            }
+            segments.revision = segments.revision.wrapping_add(1);
+        }
         clock.served = Some(ServedPlaylistSnapshot {
-            raw: Arc::from(raw),
+            raw: Arc::from(served_raw),
             producer_attempt,
             revision,
-            last_segment,
-            end_ms,
+            last_segment: served_last,
+            first_segment: served_first,
+            end_ms: served_end_ms,
+            duration_ms: served_duration_ms,
             end_list,
             available_at,
         });
@@ -6552,6 +6754,52 @@ impl Session {
             .as_ref()
             .filter(|snapshot| snapshot.producer_attempt == producer_attempt)
             .map(|_| clock.staged_seconds())
+    }
+
+    /// Convert the final advertised window into read-only object promises.
+    /// The producer is already terminal when this runs; only the original
+    /// paths, byte accounting, and immutable response incarnation survive.
+    async fn prepare_retired_object_promise(&self) -> Instant {
+        let now = Instant::now();
+        let playlist_duration_ms = self
+            .publication
+            .lock()
+            .await
+            .served
+            .as_ref()
+            .map_or(0, |served| served.duration_ms.max(0));
+        let mut serve_until = now
+            .checked_add(Duration::from_millis(
+                u64::try_from(playlist_duration_ms).unwrap_or(u64::MAX),
+            ))
+            .unwrap_or(now);
+        let mut segments = self.segments.lock().await;
+        for segment in &mut segments.segs {
+            match segment.visibility {
+                SegmentVisibility::Advertised => {
+                    let promise_ms = playlist_duration_ms
+                        .saturating_add(segment.end_ms.saturating_sub(segment.start_ms))
+                        .max(0);
+                    let deadline = now
+                        .checked_add(Duration::from_millis(
+                            u64::try_from(promise_ms).unwrap_or(u64::MAX),
+                        ))
+                        .unwrap_or(now);
+                    segment.visibility = SegmentVisibility::Grace {
+                        removed_at: now,
+                        serve_until: deadline,
+                    };
+                    serve_until = serve_until.max(deadline);
+                }
+                SegmentVisibility::Grace {
+                    serve_until: existing,
+                    ..
+                } => serve_until = serve_until.max(existing),
+                SegmentVisibility::Deleted => {}
+            }
+        }
+        segments.revision = segments.revision.wrapping_add(1);
+        serve_until
     }
 
     /// The identity a reservation against the recovery ledger is keyed by,
@@ -7447,7 +7695,7 @@ impl Session {
             segs: parse_playlist(&String::from_utf8_lossy(&raw)),
             revision: 0,
         };
-        // Preserve known sizes and pruning only when this observation agrees
+        // Preserve known sizes and visibility promises only when this observation agrees
         // with the snapshot it extends. A rewrite describes different files
         // even when it reused their names, so all of those sizes are measured
         // again.
@@ -7465,13 +7713,13 @@ impl Session {
         if compatible_prefix {
             for (observed, previous) in observed.segs.iter_mut().zip(&previous.segs) {
                 observed.bytes = previous.bytes;
-                observed.pruned = previous.pruned;
+                observed.visibility = previous.visibility;
             }
         }
         for segment in observed
             .segs
             .iter_mut()
-            .filter(|segment| segment.bytes == 0 && !segment.pruned)
+            .filter(|segment| segment.bytes == 0 && segment.visibility.is_advertised())
         {
             if let Ok(meta) = tokio::fs::metadata(self.dir.join(&segment.name)).await {
                 segment.bytes = meta.len() as i64;
@@ -12178,6 +12426,10 @@ pub struct TranscodeManager {
     /// The detached owner never needs to retain the complete manager merely
     /// to converge one registry entry.
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
+    /// Read-only object owners moved here after producer retirement. They
+    /// authorize only already-promised segment/init bytes and disappear at
+    /// the finite RFC removal deadline; no control or flow path reads them.
+    retired_presentations: RetiredPresentations,
     /// Recently retired rolling presentations remain ambiguous for delayed
     /// fire-and-forget marker beacons after their live registry row is gone.
     recent_marker_ambiguities: RecentMarkerAmbiguities,
@@ -12432,6 +12684,7 @@ impl TranscodeManager {
     fn rolling_retirement_context(&self) -> RollingRetirementContext {
         RollingRetirementContext {
             sessions: Arc::downgrade(&self.sessions),
+            retired_presentations: Arc::downgrade(&self.retired_presentations),
             active_session_count: Arc::clone(&self.active_session_count),
             store: Arc::clone(&self.store),
             recent_marker_ambiguities: Arc::clone(&self.recent_marker_ambiguities),
@@ -12510,6 +12763,7 @@ impl TranscodeManager {
             cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: Arc::new(Mutex::new(HashMap::new())),
+            retired_presentations: Arc::new(Mutex::new(HashMap::new())),
             recent_marker_ambiguities: Arc::new(std::sync::Mutex::new(
                 RecentMarkerAmbiguityLedger::default(),
             )),
@@ -14384,6 +14638,7 @@ impl TranscodeManager {
         let session_id = session_id.to_owned();
         let (_commit, retirement) = spawn_rolling_retirement_owner(
             Arc::clone(&self.sessions),
+            Arc::clone(&self.retired_presentations),
             Arc::clone(&self.active_session_count),
             Arc::clone(&self.store),
             Arc::clone(&self.recent_marker_ambiguities),
@@ -19413,6 +19668,7 @@ impl TranscodeManager {
         let (settled, result) = tokio::sync::oneshot::channel();
         let vod = Arc::clone(&self.vod);
         let sessions = Arc::clone(&self.sessions);
+        let retired_presentations = Arc::clone(&self.retired_presentations);
         let active_session_count = Arc::clone(&self.active_session_count);
         let store = Arc::clone(&self.store);
         let recent_marker_ambiguities = Arc::clone(&self.recent_marker_ambiguities);
@@ -19422,6 +19678,7 @@ impl TranscodeManager {
             let outcome = own_supersession_convergence(
                 vod,
                 sessions,
+                retired_presentations,
                 active_session_count,
                 store,
                 recent_marker_ambiguities,
@@ -21780,6 +22037,7 @@ impl TranscodeManager {
             // and winning cause; it never creates a second cleanup owner.
             let (_committed, ticket) = spawn_rolling_retirement_owner(
                 Arc::clone(&self.sessions),
+                Arc::clone(&self.retired_presentations),
                 Arc::clone(&self.active_session_count),
                 Arc::clone(&self.store),
                 Arc::clone(&self.recent_marker_ambiguities),
@@ -21820,7 +22078,16 @@ impl TranscodeManager {
         session: Arc<Session>,
         producer_attempt: u64,
     ) -> Result<(), SessionRegistrationRejection> {
-        let adoption = match self.session_adoption_token(session_id) {
+        let promised_namespace = self
+            .retired_presentations
+            .lock()
+            .await
+            .get(session_id)
+            .is_some_and(|retired| Instant::now() < retired.serve_until);
+        let adoption = match (!promised_namespace)
+            .then(|| self.session_adoption_token(session_id))
+            .flatten()
+        {
             Some(adoption) => adoption,
             None => {
                 let rejection = SessionRegistrationRejection::AdoptionCapacity;
@@ -21829,6 +22096,7 @@ impl TranscodeManager {
                 ));
                 let (_commit, retirement) = spawn_rolling_retirement_owner(
                     Arc::clone(&self.sessions),
+                    Arc::clone(&self.retired_presentations),
                     Arc::clone(&self.active_session_count),
                     Arc::clone(&self.store),
                     Arc::clone(&self.recent_marker_ambiguities),
@@ -21930,6 +22198,7 @@ impl TranscodeManager {
         };
         let (_commit, retirement) = spawn_rolling_retirement_owner(
             Arc::clone(&self.sessions),
+            Arc::clone(&self.retired_presentations),
             Arc::clone(&self.active_session_count),
             Arc::clone(&self.store),
             Arc::clone(&self.recent_marker_ambiguities),
@@ -22661,6 +22930,49 @@ impl TranscodeManager {
         self.serving_authority.is_current(admitted_generation)
     }
 
+    async fn retired_owner_is_current(
+        &self,
+        session_id: &str,
+        session: &Arc<Session>,
+        producer_attempt: u64,
+    ) -> bool {
+        self.retired_presentations
+            .lock()
+            .await
+            .get(session_id)
+            .is_some_and(|retired| {
+                retired.producer_attempt == producer_attempt
+                    && Arc::ptr_eq(&retired.session, session)
+                    && Instant::now() < retired.serve_until
+            })
+    }
+
+    async fn retired_object_is_current(
+        &self,
+        session_id: &str,
+        session: &Arc<Session>,
+        producer_attempt: u64,
+        object_name: Option<&str>,
+    ) -> bool {
+        if !self
+            .retired_owner_is_current(session_id, session, producer_attempt)
+            .await
+        {
+            return false;
+        }
+        let Some(index) = object_name.and_then(segment_index) else {
+            return object_name.is_some_and(is_init_object);
+        };
+        session
+            .segments
+            .lock()
+            .await
+            .segs
+            .iter()
+            .find(|segment| segment.index == index)
+            .is_some_and(|segment| segment.visibility.is_servable(Instant::now()))
+    }
+
     /// Admit a fully prepared response against the exact owner that resolved
     /// its bytes. The registry identity is checked on both sides of actor
     /// admission so a replacement cannot take the reusable session id during
@@ -22713,6 +23025,39 @@ impl TranscodeManager {
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, session))
             {
+                let object = publication.rolling_object();
+                let promised_object = matches!(
+                    object,
+                    crate::playback_control::RollingResponseObject::InitializationSegment
+                        | crate::playback_control::RollingResponseObject::MediaSegment
+                        | crate::playback_control::RollingResponseObject::ByteRange
+                        | crate::playback_control::RollingResponseObject::NotModified
+                        | crate::playback_control::RollingResponseObject::RangeNotSatisfiable
+                );
+                if promised_object
+                    && matches!(
+                        publication.binding,
+                        MediaResponsePublicationBinding::AttemptMedia
+                    )
+                    && self
+                        .retired_object_is_current(
+                            session_id,
+                            session,
+                            *producer_attempt,
+                            publication.object_name.as_deref(),
+                        )
+                        .await
+                {
+                    return Ok(MediaResponseAuthorization {
+                        session_id: session_id.to_owned(),
+                        owner: owner.clone(),
+                        release_gate: Arc::clone(&release_gate),
+                        admitted_serving_generation,
+                        kind: publication.kind,
+                        object_name: publication.object_name,
+                        rolling_generation_metadata_fingerprint: None,
+                    });
+                }
                 return Err(MediaResponsePublicationRejection::OwnerGone);
             }
             if !session.actor_managed_response_publication {
@@ -23300,7 +23645,10 @@ impl TranscodeManager {
         deadline: Instant,
     ) -> MediaResponsePublicationRejection {
         match &owner.0 {
-            MediaResponseOwnerKind::Rolling { session, .. } => {
+            MediaResponseOwnerKind::Rolling {
+                session,
+                producer_attempt,
+            } => {
                 let Ok(current) = tokio::time::timeout_at(
                     tokio::time::Instant::from_std(deadline),
                     self.sessions.lock(),
@@ -23313,6 +23661,9 @@ impl TranscodeManager {
                 if current
                     .as_ref()
                     .is_some_and(|current| Arc::ptr_eq(current, session))
+                    || self
+                        .retired_owner_is_current(session_id, session, *producer_attempt)
+                        .await
                 {
                     MediaResponsePublicationRejection::StateChanged
                 } else {
@@ -23377,6 +23728,15 @@ impl TranscodeManager {
             producer_attempt,
         } = &owner.0
         {
+            if self
+                .retired_object_is_current(session_id, session, *producer_attempt, object_name)
+                .await
+            {
+                // Read-only grace never renews a lease or advances a retired
+                // delivery frontier. Exact owner validation is the complete
+                // commit for these already-promised bytes.
+                return true;
+            }
             let Ok(current) = tokio::time::timeout_at(
                 tokio::time::Instant::from_std(deadline),
                 self.sessions.lock(),
@@ -23485,11 +23845,14 @@ impl TranscodeManager {
         } = &owner.0
         {
             let current = self.sessions.lock().await.get(session_id).cloned();
-            return current
+            return (current
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, session))
                 && session.control.current_producer_attempt() == *producer_attempt
-                && !session.control.is_retired();
+                && !session.control.is_retired())
+                || self
+                    .retired_owner_is_current(session_id, session, *producer_attempt)
+                    .await;
         }
         let MediaResponseOwnerKind::Vod(owner) = &owner.0 else {
             unreachable!("rolling response owner returned above")
@@ -23661,15 +24024,19 @@ impl TranscodeManager {
             .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
             .get(session_id)
             .cloned();
-            if !current
+            let exact_live = current
                 .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, session))
-            {
+                .is_some_and(|current| Arc::ptr_eq(current, session));
+            let exact_retired = self
+                .retired_owner_is_current(session_id, session, *producer_attempt)
+                .await;
+            if !exact_live && !exact_retired {
                 return Err(MediaResponsePublicationRejection::OwnerGone);
             }
-            if session.failed.load(Relaxed)
-                || session.control.is_retired()
-                || session.control.current_producer_attempt() != *producer_attempt
+            if !exact_retired
+                && (session.failed.load(Relaxed)
+                    || session.control.is_retired()
+                    || session.control.current_producer_attempt() != *producer_attempt)
             {
                 return Err(MediaResponsePublicationRejection::StateChanged);
             }
@@ -23934,6 +24301,7 @@ impl TranscodeManager {
                                 session.fail(PlaylistError::SessionFailed(reason));
                                 let (_commit, _retirement) = spawn_rolling_retirement_owner(
                                     Arc::clone(&self.sessions),
+                                    Arc::clone(&self.retired_presentations),
                                     Arc::clone(&self.active_session_count),
                                     Arc::clone(&self.store),
                                     Arc::clone(&self.recent_marker_ambiguities),
@@ -24092,13 +24460,8 @@ impl TranscodeManager {
                                 &session,
                             ));
                         }
-                        let Some(served) =
-                            served_live_playlist(bytes, first_retained, session.takeover.as_ref())
-                        else {
-                            break 'snapshot;
-                        };
                         return Ok((
-                            served,
+                            bytes,
                             MediaResponseOwner(MediaResponseOwnerKind::Rolling {
                                 session: Arc::clone(&session),
                                 producer_attempt,
@@ -24220,15 +24583,19 @@ impl TranscodeManager {
             .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
             .get(session_id)
             .cloned();
-            if !current
+            let exact_live = current
                 .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, session))
-            {
+                .is_some_and(|current| Arc::ptr_eq(current, session));
+            let exact_retired = self
+                .retired_owner_is_current(session_id, session, *producer_attempt)
+                .await;
+            if !exact_live && !exact_retired {
                 return Err(MediaResponsePublicationRejection::OwnerGone);
             }
-            if session.failed.load(Relaxed)
-                || session.control.is_retired()
-                || session.control.current_producer_attempt() != *producer_attempt
+            if !exact_retired
+                && (session.failed.load(Relaxed)
+                    || session.control.is_retired()
+                    || session.control.current_producer_attempt() != *producer_attempt)
             {
                 return Err(MediaResponsePublicationRejection::StateChanged);
             }
@@ -24292,7 +24659,7 @@ impl TranscodeManager {
         if !is_safe_segment(name) {
             return Ok(SegmentPublication::Missing(None));
         }
-        let session = tokio::time::timeout_at(
+        let live_session = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             self.sessions.lock(),
         )
@@ -24300,32 +24667,61 @@ impl TranscodeManager {
         .map_err(|_| SegmentOpenError::Capacity)?
         .get(session_id)
         .cloned();
-        let Some(session) = session else {
-            return Ok(SegmentPublication::Missing(None));
+        let retired = if live_session.is_none() {
+            tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.retired_presentations.lock(),
+            )
+            .await
+            .map_err(|_| SegmentOpenError::Capacity)?
+            .get(session_id)
+            .filter(|retired| Instant::now() < retired.serve_until)
+            .cloned()
+        } else {
+            None
+        };
+        let (session, retired_owner, resolved_attempt) = match (live_session, retired) {
+            (Some(session), _) => {
+                let attempt = session.control.current_producer_attempt();
+                (session, false, attempt)
+            }
+            (None, Some(retired)) => (retired.session, true, retired.producer_attempt),
+            (None, None) => return Ok(SegmentPublication::Missing(None)),
         };
         // Negative classifications must carry the attempt that was current
         // when this lookup began. If fallback crosses any later await, HTTP's
         // AttemptStatus admission rejects this owner instead of authorizing a
         // predecessor-derived 404 against the successor attempt.
-        let resolved_attempt = session.control.current_producer_attempt();
         let current_owner = || {
             MediaResponseOwner(MediaResponseOwnerKind::Rolling {
                 session: Arc::clone(&session),
                 producer_attempt: resolved_attempt,
             })
         };
-        if session.failed.load(Relaxed) {
+        if !retired_owner && session.failed.load(Relaxed) {
             return Ok(SegmentPublication::Failed(
                 PlaylistPublicationError::for_session(session.failure_reason(), &session),
             ));
         }
-        if session.control.is_retired() {
+        if !retired_owner && session.control.is_retired() {
             return Ok(SegmentPublication::Pending(current_owner()));
         }
         let path = session.dir.join(name);
         let idx = segment_index(name);
-        let first_retained = session.segments.lock().await.first_retained_index();
-        if segment_was_pruned(idx, first_retained) {
+        let (first_retained, requested_visibility) = {
+            let segments = session.segments.lock().await;
+            (
+                segments.first_retained_index(),
+                idx.and_then(|index| {
+                    segments
+                        .segs
+                        .iter()
+                        .find(|segment| segment.index == index)
+                        .map(|segment| segment.visibility)
+                }),
+            )
+        };
+        if requested_visibility.is_some_and(|visibility| !visibility.is_servable(Instant::now())) {
             tracing::warn!(
                 session = %session_log_id(session_id),
                 segment = name,
@@ -24424,7 +24820,12 @@ impl TranscodeManager {
 
         let started_waiting = Instant::now();
         loop {
-            let Some(producer_attempt) = session.coherent_path_producer_attempt().await else {
+            let producer_attempt = if retired_owner {
+                Some(resolved_attempt)
+            } else {
+                session.coherent_path_producer_attempt().await
+            };
+            let Some(producer_attempt) = producer_attempt else {
                 if Instant::now() >= deadline {
                     if session.failed.load(Relaxed) {
                         return Ok(SegmentPublication::Failed(
@@ -24440,15 +24841,60 @@ impl TranscodeManager {
                 continue;
             };
             if !session.cached {
-                let advertised = session
-                    .publication
-                    .lock()
-                    .await
-                    .served
-                    .as_ref()
-                    .filter(|snapshot| snapshot.producer_attempt == producer_attempt)
-                    .is_some_and(|snapshot| idx.is_none_or(|index| index <= snapshot.last_segment));
-                if !advertised {
+                let current_visibility = if let Some(index) = idx {
+                    session
+                        .segments
+                        .lock()
+                        .await
+                        .segs
+                        .iter()
+                        .find(|segment| segment.index == index)
+                        .map(|segment| segment.visibility)
+                } else {
+                    None
+                };
+                if current_visibility
+                    .is_some_and(|visibility| !visibility.is_servable(Instant::now()))
+                {
+                    return Ok(SegmentPublication::Missing(Some(current_owner())));
+                }
+                let available = if retired_owner {
+                    let owner_current = self
+                        .retired_presentations
+                        .lock()
+                        .await
+                        .get(session_id)
+                        .is_some_and(|retired| {
+                            retired.producer_attempt == producer_attempt
+                                && Arc::ptr_eq(&retired.session, &session)
+                                && Instant::now() < retired.serve_until
+                        });
+                    owner_current
+                        && idx.is_none_or(|_| {
+                            current_visibility
+                                .is_some_and(|visibility| visibility.is_servable(Instant::now()))
+                        })
+                } else {
+                    session
+                        .publication
+                        .lock()
+                        .await
+                        .served
+                        .as_ref()
+                        .filter(|snapshot| snapshot.producer_attempt == producer_attempt)
+                        .is_some_and(|snapshot| {
+                            idx.is_none_or(|index| {
+                                current_visibility.is_some_and(|visibility| {
+                                    visibility.is_servable(Instant::now())
+                                }) || (snapshot.first_segment <= index
+                                    && index <= snapshot.last_segment)
+                            })
+                        })
+                };
+                if !available {
+                    if retired_owner {
+                        return Ok(SegmentPublication::Missing(Some(current_owner())));
+                    }
                     if Instant::now() >= deadline {
                         return Ok(SegmentPublication::Pending(current_owner()));
                     }
@@ -24490,7 +24936,21 @@ impl TranscodeManager {
                 // the old handle and retry against the successor directory;
                 // sampling only at EOF would let predecessor bytes advance
                 // the successor's frontier.
-                if session.replacing_child.load(Acquire)
+                if retired_owner {
+                    let exact = self
+                        .retired_presentations
+                        .lock()
+                        .await
+                        .get(session_id)
+                        .is_some_and(|retired| {
+                            retired.producer_attempt == producer_attempt
+                                && Arc::ptr_eq(&retired.session, &session)
+                                && Instant::now() < retired.serve_until
+                        });
+                    if !exact {
+                        return Ok(SegmentPublication::Missing(Some(current_owner())));
+                    }
+                } else if session.replacing_child.load(Acquire)
                     || session.control.current_producer_attempt() != producer_attempt
                     || session.compatibility_producer_attempt() != producer_attempt
                 {
@@ -24562,6 +25022,9 @@ impl TranscodeManager {
                     len,
                     delivery,
                 })));
+            }
+            if retired_owner {
+                return Ok(SegmentPublication::Missing(Some(current_owner())));
             }
             // Give up if the session was declared dead, or ffmpeg has exited and
             // the file still isn't there.
@@ -25092,7 +25555,8 @@ impl TranscodeManager {
     /// session's retained history is real scratch but cannot fall until its
     /// client frontier moves beyond [`RETENTION_SECS`].
     async fn global_flow_bytes(&self) -> (i64, i64) {
-        self.sessions
+        let live = self
+            .sessions
             .lock()
             .await
             .values()
@@ -25101,7 +25565,16 @@ impl TranscodeManager {
                     live + session.live_bytes.load(Relaxed),
                     ahead + session.ahead_bytes.load(Relaxed),
                 )
-            })
+            });
+        let retired_bytes = self
+            .retired_presentations
+            .lock()
+            .await
+            .values()
+            .fold(0_i64, |total, retired| {
+                total.saturating_add(retired.session.live_bytes.load(Relaxed))
+            });
+        (live.0.saturating_add(retired_bytes), live.1)
     }
 
     /// Ensure this rolling incarnation has exactly one detached consumer for
@@ -25349,13 +25822,6 @@ fn segment_index(name: &str) -> Option<i64> {
         .and_then(|d| d.parse::<i64>().ok())
 }
 
-/// A segment behind the retained prefix cannot reappear. Waiting for ffmpeg's
-/// normal production deadline in that case turns an ordinary playlist reload
-/// into a 20-second transport stall.
-fn segment_was_pruned(index: Option<i64>, first_retained: Option<i64>) -> bool {
-    matches!((index, first_retained), (Some(index), Some(first)) if index < first)
-}
-
 fn producer_request_beyond_frontier(
     requested_segment: Option<i64>,
     published_segment: Option<i64>,
@@ -25515,23 +25981,47 @@ async fn gc_expired_segments(session: &Session) {
     }
     let frontier = session.fetched_end_ms.load(Relaxed);
     let keep_from = frontier - RETENTION_SECS * 1000;
-    if keep_from <= 0 {
-        return; // nothing can be old enough yet
+    if keep_from > 0 {
+        let first_after_retention = {
+            let index = session.segments.lock().await;
+            index
+                .prunable(keep_from)
+                .last()
+                .map(|segment| segment.index.saturating_add(1))
+        };
+        if let Some(first_after_retention) = first_after_retention {
+            let mut clock = session.publication.lock().await;
+            clock.retention_first_segment = Some(
+                clock
+                    .retention_first_segment
+                    .map_or(first_after_retention, |current| {
+                        current.max(first_after_retention)
+                    }),
+            );
+        }
     }
-    let doomed: Vec<(String, i64)> = {
+    let now = Instant::now();
+    let expired: Vec<(String, i64)> = {
         let index = session.segments.lock().await;
         index
-            .prunable(keep_from)
+            .segs
+            .iter()
+            .filter(|segment| {
+                matches!(
+                    segment.visibility,
+                    SegmentVisibility::Grace { serve_until, .. } if now >= serve_until
+                )
+            })
             .take(RETENTION_HANDOFF_BATCH)
             .map(|segment| (segment.name.clone(), segment.bytes.max(0)))
             .collect()
     };
-    if doomed.is_empty() {
+    if expired.is_empty() {
         return;
     }
     let sweep = RETENTION_SWEEP_ID.fetch_add(1, Relaxed);
-    let mut moved = Vec::with_capacity(doomed.len());
-    for (name, indexed_bytes) in doomed {
+    let mut moved = Vec::with_capacity(expired.len());
+    for (name, indexed_bytes) in expired {
         let garbage = session.dir.join(format!(
             ".plurx-retention-{producer_attempt}-{sweep}-{name}"
         ));
@@ -25563,8 +26053,9 @@ async fn gc_expired_segments(session: &Session) {
     if moved.is_empty() {
         return;
     }
-    // Forget sizes only for paths whose rename completed. A failed handoff
-    // leaves the served name and its accounting intact for the next sweep.
+    // Forget sizes only for grace paths whose rename completed. A failed
+    // handoff leaves the original promised identity and accounting intact for
+    // the next sweep, but the response path already refuses it at deadline.
     let moved_paths: std::collections::HashMap<&str, (&PathBuf, i64)> = moved
         .iter()
         .map(|(name, path, bytes)| (name.as_str(), (path, *bytes)))
@@ -25575,9 +26066,7 @@ async fn gc_expired_segments(session: &Session) {
         if let Some((path, bytes)) = moved_paths.get(seg.name.as_str()) {
             garbage.push(((*path).clone(), *bytes));
             seg.bytes = 0;
-            // The served path is gone; without the flag every later refresh
-            // would re-stat it forever to relearn that.
-            seg.pruned = true;
+            seg.visibility = SegmentVisibility::Deleted;
         }
     }
     index.revision = index.revision.wrapping_add(1);
@@ -25980,7 +26469,7 @@ impl HlsDeliveryFixture {
             start_ms: 0,
             end_ms: i64::from(plurx_core::transcode::COPY_PUBLISH_GATE_SECS) * 1_000,
             bytes: 0,
-            pruned: false,
+            visibility: SegmentVisibility::Advertised,
         });
         index.revision = index.revision.saturating_add(1);
         drop(index);
@@ -31482,7 +31971,11 @@ pub(crate) mod tests {
             start_ms,
             end_ms,
             bytes: if pruned { 0 } else { 1_024 },
-            pruned,
+            visibility: if pruned {
+                SegmentVisibility::Deleted
+            } else {
+                SegmentVisibility::Advertised
+            },
         };
         let index = SegmentIndex {
             segs: vec![
@@ -31943,6 +32436,217 @@ pub(crate) mod tests {
         assert!(reason.contains("hard deadline"), "{reason}");
     }
 
+    #[tokio::test]
+    async fn mkv_hls_retention_prefix_changes_only_with_a_segment_snapshot() {
+        let directory = crate::test_tempdir().expect("retention snapshot");
+        let session = Arc::new(test_session(directory.path().to_path_buf()));
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[16.0, 16.0, 16.0], false),
+        )
+        .await
+        .expect("initial playlist");
+        for index in 0..3 {
+            tokio::fs::write(
+                directory.path().join(format!("seg{index:05}.ts")),
+                vec![u8::try_from(index).expect("test index"); 32],
+            )
+            .await
+            .expect("segment");
+        }
+        session
+            .publication_cycle("retention-snapshot")
+            .await
+            .expect("initial snapshot");
+        session.refresh_segments().await;
+        session.fetched_end_ms.store(200_000, Relaxed);
+        gc_expired_segments(&session).await;
+        assert_eq!(
+            session
+                .publication
+                .lock()
+                .await
+                .served
+                .as_ref()
+                .map(|served| served.first_segment),
+            Some(0),
+            "a prune-only repair pass changed the immutable served snapshot"
+        );
+
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[16.0, 16.0, 16.0, 16.0], false),
+        )
+        .await
+        .expect("advanced playlist");
+        tokio::fs::write(directory.path().join("seg00003.ts"), vec![3_u8; 32])
+            .await
+            .expect("advanced segment");
+        {
+            let mut clock = session.publication.lock().await;
+            let due = Instant::now() - Duration::from_millis(1);
+            clock.next_publish_at = Some(due);
+            clock.served.as_mut().expect("served snapshot").available_at =
+                due - ROLLING_PUBLICATION_TARGET;
+        }
+        session
+            .publication_cycle("retention-snapshot")
+            .await
+            .expect("sliding snapshot");
+        let served = session
+            .publication
+            .lock()
+            .await
+            .served
+            .as_ref()
+            .expect("served snapshot")
+            .raw
+            .clone();
+        let served = String::from_utf8_lossy(&served);
+        assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:1"), "{served}");
+        let segments = session.segments.lock().await;
+        assert!(matches!(
+            segments.segs[0].visibility,
+            SegmentVisibility::Grace { .. }
+        ));
+        assert_eq!(segments.segs[0].bytes, 32, "grace remains charged");
+        assert!(directory.path().join("seg00000.ts").exists());
+    }
+
+    #[tokio::test]
+    async fn mkv_hls_retention_retired_objects_are_read_only_until_grace() {
+        use plurx_core::store::SqliteStore;
+
+        let directory = crate::test_tempdir().expect("retired grace");
+        let manager = Arc::new(TranscodeManager::new(
+            Arc::new(SqliteStore::open_in_memory().expect("store")),
+            directory.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let session = Arc::new(test_session(directory.path().to_path_buf()));
+        tokio::fs::write(directory.path().join("seg00000.ts"), b"promised")
+            .await
+            .expect("segment");
+        tokio::fs::write(directory.path().join("init.mp4"), b"init")
+            .await
+            .expect("init");
+        let now = Instant::now();
+        let serve_until = now + Duration::from_secs(30);
+        session.segments.lock().await.segs.push(SegmentMeta {
+            index: 0,
+            name: "seg00000.ts".to_owned(),
+            start_ms: 0,
+            end_ms: 16_000,
+            bytes: 8,
+            visibility: SegmentVisibility::Grace {
+                removed_at: now,
+                serve_until,
+            },
+        });
+        let producer_attempt = session.control.current_producer_attempt();
+        manager.retired_presentations.lock().await.insert(
+            "retired-grace".to_owned(),
+            RetiredPresentation {
+                session: Arc::clone(&session),
+                producer_attempt,
+                serve_until,
+            },
+        );
+
+        let segment = match manager
+            .segment_for_publication("retired-grace", "seg00000.ts")
+            .await
+            .expect("segment lookup")
+        {
+            SegmentPublication::Ready(segment) => segment,
+            _ => panic!("promised retired segment was not readable"),
+        };
+        let owner = segment.response_owner();
+        let authorization = manager
+            .authorize_response_publication(
+                "retired-grace",
+                &owner,
+                MediaResponsePublication::attempt_media("segment-range", Some("seg00000.ts")),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("read-only range authorization");
+        manager
+            .commit_authorized_media(authorization, true, Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("read-only completion");
+        let init = match manager
+            .segment_for_publication("retired-grace", "init.mp4")
+            .await
+            .expect("init lookup")
+        {
+            SegmentPublication::Ready(init) => init,
+            _ => panic!("promised retired init was not readable"),
+        };
+        let init_authorization = manager
+            .authorize_response_publication(
+                "retired-grace",
+                &init.response_owner(),
+                MediaResponsePublication::attempt_media("init-segment", Some("init.mp4")),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("read-only init authorization");
+        manager
+            .commit_authorized_media(
+                init_authorization,
+                true,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("read-only init completion");
+        assert_eq!(
+            session
+                .control
+                .snapshot()
+                .await
+                .expect("actor")
+                .delivery
+                .fetched_segment,
+            None,
+            "grace reads must not renew or advance retired delivery"
+        );
+
+        if let SegmentVisibility::Grace { serve_until, .. } =
+            &mut session.segments.lock().await.segs[0].visibility
+        {
+            *serve_until = Instant::now() - Duration::from_millis(1);
+        }
+        assert!(matches!(
+            manager
+                .segment_for_publication("retired-grace", "seg00000.ts")
+                .await
+                .expect("expired lookup"),
+            SegmentPublication::Missing(_)
+        ));
+    }
+
+    #[test]
+    fn mkv_hls_retention_grace_deadline_is_half_open() {
+        let removed_at = Instant::now();
+        let serve_until = removed_at + Duration::from_secs(64);
+        let visibility = SegmentVisibility::Grace {
+            removed_at,
+            serve_until,
+        };
+        assert!(visibility.is_servable(serve_until - Duration::from_millis(1)));
+        assert!(!visibility.is_servable(serve_until));
+        assert!(!visibility.is_servable(serve_until + Duration::from_millis(1)));
+        assert!(matches!(
+            visibility,
+            SegmentVisibility::Grace {
+                removed_at: recorded,
+                ..
+            } if recorded == removed_at
+        ));
+    }
+
     #[test]
     fn every_rolling_writer_is_wrapped_in_one_fixed_covering_target() {
         let early = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-PLAYLIST-TYPE:EVENT\n\
@@ -32356,7 +33060,7 @@ pub(crate) mod tests {
                     start_ms: i * 4_000,
                     end_ms: (i + 1) * 4_000,
                     bytes: 1_000_000,
-                    pruned: false,
+                    visibility: SegmentVisibility::Advertised,
                 })
                 .collect(),
             revision: 0,
@@ -32373,7 +33077,7 @@ pub(crate) mod tests {
         // Retention deletes two; the budget follows the disk down.
         for seg in index.segs.iter_mut().take(2) {
             seg.bytes = 0;
-            seg.pruned = true;
+            seg.visibility = SegmentVisibility::Deleted;
         }
         assert_eq!(index.total_bytes(), 8_000_000);
         assert_eq!(
@@ -32429,12 +33133,16 @@ pub(crate) mod tests {
             revision: 0,
         };
         index.segs[0].bytes = 0;
-        index.segs[0].pruned = true;
+        index.segs[0].visibility = SegmentVisibility::Deleted;
         let three = "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:2.0,\nseg00001.ts\n\
                      #EXTINF:2.0,\nseg00002.ts\n";
         assert!(!index.extend_from_playlist(three));
-        assert!(index.segs[0].pruned, "still pruned");
-        assert!(!index.segs[2].pruned, "the new entry is not");
+        assert_eq!(index.segs[0].visibility, SegmentVisibility::Deleted);
+        assert_eq!(
+            index.segs[2].visibility,
+            SegmentVisibility::Advertised,
+            "the new entry is advertised"
+        );
     }
 
     #[test]
@@ -32447,7 +33155,7 @@ pub(crate) mod tests {
                     start_ms: i * 4_000,
                     end_ms: (i + 1) * 4_000,
                     bytes: 1_000_000,
-                    pruned: false,
+                    visibility: SegmentVisibility::Advertised,
                 })
                 .collect(),
             revision: 0,
@@ -33229,7 +33937,7 @@ pub(crate) mod tests {
                         start_ms: segment * 4_000,
                         end_ms: (segment + 1) * 4_000,
                         bytes: 500,
-                        pruned: false,
+                        visibility: SegmentVisibility::Advertised,
                     })
                     .collect(),
                 revision: 0,
@@ -33267,11 +33975,11 @@ pub(crate) mod tests {
 
     #[test]
     fn a_pruned_segment_never_waits_for_a_producer_that_cannot_restore_it() {
-        assert!(segment_was_pruned(Some(41), Some(42)));
-        assert!(!segment_was_pruned(Some(42), Some(42)));
-        assert!(!segment_was_pruned(Some(43), Some(42)));
-        assert!(!segment_was_pruned(Some(41), None));
-        assert!(!segment_was_pruned(None, Some(42)));
+        assert!(!SegmentVisibility::Grace {
+            removed_at: Instant::now(),
+            serve_until: Instant::now(),
+        }
+        .is_servable(Instant::now()));
     }
 
     #[test]
@@ -35715,7 +36423,9 @@ pub(crate) mod tests {
             .await
             .segs
             .first()
-            .is_some_and(|segment| segment.pruned && segment.bytes == 0));
+            .is_some_and(|segment| {
+                segment.visibility == SegmentVisibility::Deleted && segment.bytes == 0
+            }));
         assert!(
             tokio::fs::metadata(&garbage)
                 .await
