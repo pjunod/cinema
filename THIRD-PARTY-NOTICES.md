@@ -750,6 +750,26 @@ at build time and ships in nothing.
 
 ---
 
+## 7. Checked into this repo, never shipped
+
+Not a dependency of anything plurx builds or serves — a source file living in
+the tree, so it is redistributed with every clone the way the Gradle wrapper in
+§5 is, and it needs its attribution for that reason alone.
+
+| Component | Version | Where | License | Copyright |
+|---|---|---|---|---|
+| [acorn](https://github.com/acornjs/acorn) | 8.18.0 | `tests/vendor/acorn.js` | MIT — [full text](licenses/acorn-MIT.txt) | Copyright (c) 2012-2022 by various contributors |
+
+`tests/web/asset-order.test.js` needs a real JavaScript parser: it refuses a
+web-asset order in which a file runs something at load that names a binding
+declared in a later file, and answering that over 1.3 MB of source with regular
+expressions would be a guess. This repo has no `package.json` and no
+`node_modules`, and adding either to run one test is a worse trade than 245 KB
+of vendored source. It is not in `WEB_ASSETS`, never reaches a browser, and
+never reaches the binary.
+
+---
+
 ## Keeping this file honest
 
 This document is a claim about what is in the dependency graph, so it goes
@@ -759,5 +779,6 @@ allow-list, so a new copyleft dependency cannot land quietly. Run it with
 `make license-check`.
 
 `cargo deny` cannot see the parts that are not crates — the web UI bundle,
-the fonts, the client dependencies, the Dockerfile's ffmpeg. Update §1, §2,
-§5 and §6 by hand when those move, in the same commit that moves them.
+the fonts, the client dependencies, the Dockerfile's ffmpeg, the source checked
+into the tree. Update §1, §2, §5, §6 and §7 by hand when those move, in the
+same commit that moves them.
