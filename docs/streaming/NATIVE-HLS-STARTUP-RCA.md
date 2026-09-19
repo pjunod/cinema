@@ -1,4 +1,4 @@
-# Wicked startup — native HLS mistakes an unavailable playlist for a codec failure
+# reference film G startup — native HLS mistakes an unavailable playlist for a codec failure
 
 **Status:** diagnosed; Fable review incorporated; implementation handoff ready ·
 **Written:** 2026-09-17 UTC (2026-09-16 Eastern).
@@ -7,10 +7,10 @@ the original proposal; product changes remain unimplemented in this task.
 
 Companion to [the HLS startup status](WEB-HLS-STARTUP-RECOVERY-STATUS.md)
 and [the freeze recovery repair](WEB-PLAYBACK-FREEZE-RECOVERY-IMPLEMENTATION.md).
-This investigation covers Wicked's failed Safari startup on nynuc. It extends
+This investigation covers reference film G's failed Safari startup on nynuc. It extends
 startup recovery to the native HLS transport, which the deployed hls.js
 startup controller does not cover. Build instructions now live in the
-[implementation handoff](WICKED-NATIVE-HLS-STARTUP-IMPLEMENTATION.md).
+[implementation handoff](NATIVE-HLS-STARTUP-IMPLEMENTATION.md).
 
 ## 1. Finding — a temporary preparation failure became a terminal refusal
 
@@ -28,7 +28,7 @@ establish either an unsupported codec or a changed source requiring rescan.
 
 The encoded-source error is an independent defect: `prepare_vod_encoding`
 returns before the held-source probe for copy without burn. Correct native
-readiness would have retained Wicked's copy/DV session without invoking that
+readiness would have retained reference film G's copy/DV session without invoking that
 probe. The false rescan verdict still needs repair for transcode/burn starts
 on web, Apple and Android, including errors from `open_source_fence`.
 
@@ -136,11 +136,11 @@ invokes transcode without a `fetch`; code 2 stops without transcode. This
 reproduces the application's decision, not Safari's internals. The production
 logs establish Safari's observed error code and correlated server response.
 
-The [replay script](../evidence/wicked-native-startup-replay.cjs) accepts an
+The [replay script](../evidence/native-startup-replay.cjs) accepts an
 extraction of the incident archive:
 
 ```bash
-node docs/evidence/wicked-native-startup-replay.cjs /path/to/incident-source
+node docs/evidence/native-startup-replay.cjs /path/to/incident-source
 ```
 
 Expected incident output is `CONFIRMED` with code 4 using transcode and zero
@@ -152,7 +152,7 @@ not establish mutation sensitivity of the decision assertion.
 
 ## 4. Accepted fix — distinct tracks with explicit ownership
 
-The [implementation handoff](WICKED-NATIVE-HLS-STARTUP-IMPLEMENTATION.md)
+The [implementation handoff](NATIVE-HLS-STARTUP-IMPLEMENTATION.md)
 is the build contract. It replaces the original proposal's unresolved
 budget choices and decoder-evidence questions.
 
@@ -243,7 +243,7 @@ Run:
 
 ```bash
 python3 -m unittest discover -s tests/operations -p test_docs_index.py
-node docs/evidence/wicked-native-startup-replay.cjs /path/to/incident-source
+node docs/evidence/native-startup-replay.cjs /path/to/incident-source
 ```
 
 The four documentation checks pass on that composed snapshot. The replay

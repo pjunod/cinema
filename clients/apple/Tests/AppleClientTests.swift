@@ -10129,7 +10129,7 @@ final class AppleClientTests: XCTestCase {
         )
         let movie = try decoder.decode(
             Item.self,
-            from: Data(#"{"id":2,"kind":"movie","title":"TRON: Ares","year":2025,"resolution":2160,"watch":{"position_ms":300000,"duration_ms":7200000}}"#.utf8)
+            from: Data(#"{"id":2,"kind":"movie","title":"reference film F","year":2025,"resolution":2160,"watch":{"position_ms":300000,"duration_ms":7200000}}"#.utf8)
         )
 
         XCTAssertEqual(cardShelfMetadata(episode), "S4 E2  44m left")
@@ -10145,7 +10145,7 @@ final class AppleClientTests: XCTestCase {
         decoder.keyDecodingStrategy = .convertFromSnakeCase
         let movie = try decoder.decode(
             Item.self,
-            from: Data(#"{"id":1,"kind":"movie","title":"TRON: Ares","year":2025}"#.utf8)
+            from: Data(#"{"id":1,"kind":"movie","title":"reference film F","year":2025}"#.utf8)
         )
         let episode = try decoder.decode(
             Item.self,
@@ -10165,7 +10165,7 @@ final class AppleClientTests: XCTestCase {
         )
         let movie = try decoder.decode(
             Item.self,
-            from: Data(#"{"id":2,"kind":"movie","title":"TRON: Ares","year":2025,"watch":{"position_ms":300000,"duration_ms":7200000}}"#.utf8)
+            from: Data(#"{"id":2,"kind":"movie","title":"reference film F","year":2025,"watch":{"position_ms":300000,"duration_ms":7200000}}"#.utf8)
         )
 
         XCTAssertEqual(continueWatchingDetail(episode), "S4 E2  Fray")

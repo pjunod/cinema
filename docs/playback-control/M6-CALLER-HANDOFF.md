@@ -549,7 +549,7 @@ often M6 can fire at all.
 
 **Read 2026-09-03**, on the build carrying the seam's file and ask gates, with
 the Apple TV on build 114. Two viewer quality changes, one HDR and one SDR:
-both `multiple_axes` — Avatar 2160 → 1080 ranked to `dynamic_range`, Dance
+both `multiple_axes` — reference film K 2160 → 1080 ranked to `dynamic_range`, Dance
 Flick 1080 → 720 ranked to `delivery_method`. Neither was a resolution change,
 because the top rung direct-plays and the lower rungs transcode, so the
 delivery method moves with the height every time.
@@ -599,7 +599,7 @@ metric stays comparable across the change.
 
 **What is still refused.** The grade axis: this run was SDR H.264 throughout,
 so `{ResolutionOrBitrate, DeliveryMethod, DynamicRange}` — what an HDR or Dolby
-Vision title's quality change actually crosses, and what Avatar 2160 → 1080
+Vision title's quality change actually crosses, and what reference film K 2160 → 1080
 booked in §3.3.3 — remains unmeasured and still books `multiple_axes`. Audio
 and burned subtitles were never measured in combination with anything. Add a
 row only with a receipt, and say which run.

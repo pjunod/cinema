@@ -112,7 +112,7 @@ list.
 
 | File | Answers | |
 |---|---|---|
-| [WICKED-CALLBACK-ROOT-CAUSE-AND-FIX.md](playback-control/WICKED-CALLBACK-ROOT-CAUSE-AND-FIX.md) | Why Safari cold resume lost frame callbacks, the lifecycle fix, controlled evidence, and questions for Fable review. | open |
+| [CALLBACK-ROOT-CAUSE-AND-FIX.md](playback-control/CALLBACK-ROOT-CAUSE-AND-FIX.md) | Why Safari cold resume lost frame callbacks, the lifecycle fix, controlled evidence, and questions for Fable review. | open |
 | [PLAYBACK-LIFECYCLE-COVERAGE.md](playback-control/PLAYBACK-LIFECYCLE-COVERAGE.md) | Playback states and transitions, buffer handoffs, communication contracts, existing test anchors, and open acceptance gaps. | open |
 | [PLAYBACK-REWRITE-REMAINDER.md](playback-control/PLAYBACK-REWRITE-REMAINDER.md) | Executed Sol handoff: the finite B01–B05 remainder, its boundaries, and the work promoted through PR #263. | done |
 | [PLAYBACK-LIFECYCLE-IMPLEMENTATION.md](playback-control/PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) | Completed S01–S09 implementation contract: code entry points, lifecycle/buffer contracts, compiler commands, deferred regression coverage, advisory Developer settings and batched fast-lane delivery. | built |
@@ -183,11 +183,11 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [CONTENT-ANALYSIS-FAILURES-ADVERSARIAL-REVIEW.md](streaming/CONTENT-ANALYSIS-FAILURES-ADVERSARIAL-REVIEW.md) | Independent design review that found retry expiry and lost video identity before implementation. | done |
 | [CONTENT-ANALYSIS-FAILURES-IMPLEMENTATION.md](streaming/CONTENT-ANALYSIS-FAILURES-IMPLEMENTATION.md) | Build contract for selected-video completion, typed diagnostics, bounded retry cycles, exact-identity recovery, migrations, tests, and rollout. | open |
 | [HEVC-SAMPLE-ENTRY-STATUS.md](streaming/HEVC-SAMPLE-ENTRY-STATUS.md) | Live execution ledger for the HEVC sample-entry admission repair: implementation, evidence, review, and promotion state. | open |
-| [AVATAR-SAFARI-DIAGNOSIS-AND-FIX.md](streaming/AVATAR-SAFARI-DIAGNOSIS-AND-FIX.md) | Why HEVC-in-MP4 admission fails on Safari, the decoder evidence behind the repair, and the accepted review findings. | open |
+| [SAFARI-DIAGNOSIS-AND-FIX.md](streaming/SAFARI-DIAGNOSIS-AND-FIX.md) | Why HEVC-in-MP4 admission fails on Safari, the decoder evidence behind the repair, and the accepted review findings. | open |
 | [HEVC-SAMPLE-ENTRY-IMPLEMENTATION.md](streaming/HEVC-SAMPLE-ENTRY-IMPLEMENTATION.md) | Executable contract for source sample-entry facts, compatible packaging, client admission, downgrade safety, and focused acceptance. | open |
 | [HEVC sample-entry qualification receipt](evidence/hevc-sample-entry-qualification-2026-09-16.md) | Exact reviewed head, focused commands and counts, F1–F10 disposition, rollout order, and physical-evidence limits for PR #337. | built |
-| [WICKED-TCL-PROBE-MISMATCH-RCA-AND-FIX.md](streaming/WICKED-TCL-PROBE-MISMATCH-RCA-AND-FIX.md) | Why one added E-AC-3 Atmos profile refused a whole movie, what shipped to admit it, and why report equality is the wrong source-verification contract. | built |
-| [Probe compatibility replay](evidence/wicked-probe-compatibility-replay.py) | Runs the deployed and shipped source-probe comparators side by side, on a synthetic pair or on two real FFprobe documents. | built |
+| [TCL-PROBE-MISMATCH-RCA-AND-FIX.md](streaming/TCL-PROBE-MISMATCH-RCA-AND-FIX.md) | Why one added E-AC-3 Atmos profile refused a whole movie, what shipped to admit it, and why report equality is the wrong source-verification contract. | built |
+| [Probe compatibility replay](evidence/probe-compatibility-replay.py) | Runs the deployed and shipped source-probe comparators side by side, on a synthetic pair or on two real FFprobe documents. | built |
 | [STREAMING-RELIABILITY-IMPLEMENTATION.md](streaming/STREAMING-RELIABILITY-IMPLEMENTATION.md) | Two-wave reliability effort: quality preservation, truthful recovery, first-play preparation, task ownership and finite qualification. | open |
 | [STREAMING-SHARED-INDEX-HANDOFF.md](streaming/STREAMING-SHARED-INDEX-HANDOFF.md) | Sol work package for exact shared Dolby Vision indexes and bounded first-play measurements. | open |
 | [STREAMING-WEB-RECOVERY-HANDOFF.md](streaming/STREAMING-WEB-RECOVERY-HANDOFF.md) | Sol work package for truthful web stall evidence, recipe-preserving recovery and native parity. | open |
@@ -209,10 +209,10 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [WEB-HLS-STARTUP-RECOVERY-STATUS.md](streaming/WEB-HLS-STARTUP-RECOVERY-STATUS.md) | Implementation, review, qualification, and promotion status for delayed-manifest web startup recovery. | open |
 | [WEB-HLS-STARTUP-RECOVERY-IMPLEMENTATION.md](streaming/WEB-HLS-STARTUP-RECOVERY-IMPLEMENTATION.md) | Build contract for unloaded-manifest recovery, bounded startup retries, and cause-correct decoder reporting. | open |
 | [WEB-PLAYBACK-FREEZE-RECOVERY-IMPLEMENTATION.md](streaming/WEB-PLAYBACK-FREEZE-RECOVERY-IMPLEMENTATION.md) | Free Fall playback repair: loader ownership, stable init identity and scoped drift verdicts, binary refusals, and causal Auto quality. | open |
-| [TRON-WEB-HELD-SEEK-STALL-RCA.md](streaming/TRON-WEB-HELD-SEEK-STALL-RCA.md) | Why one held Right Arrow became two client commits but one source change, how a refilled presentation wait spent recovery too early, and the live implementation status. | open |
-| [WICKED-NATIVE-HLS-STARTUP-RCA.md](streaming/WICKED-NATIVE-HLS-STARTUP-RCA.md) | Why native Safari turned a temporarily unavailable playlist into a codec failure and source-rescan refusal. | open |
-| [WICKED-NATIVE-HLS-STARTUP-IMPLEMENTATION.md](streaming/WICKED-NATIVE-HLS-STARTUP-IMPLEMENTATION.md) | Build contract for native-HLS readiness, bounded reload, joinable source preparation, and three-client parity. | open |
-| [Native startup replay](evidence/wicked-native-startup-replay.cjs) | Replays the native-HLS startup controller against delayed publication without private media or a running server. | open |
+| [WEB-HELD-SEEK-STALL-RCA.md](streaming/WEB-HELD-SEEK-STALL-RCA.md) | Why one held Right Arrow became two client commits but one source change, how a refilled presentation wait spent recovery too early, and the live implementation status. | open |
+| [NATIVE-HLS-STARTUP-RCA.md](streaming/NATIVE-HLS-STARTUP-RCA.md) | Why native Safari turned a temporarily unavailable playlist into a codec failure and source-rescan refusal. | open |
+| [NATIVE-HLS-STARTUP-IMPLEMENTATION.md](streaming/NATIVE-HLS-STARTUP-IMPLEMENTATION.md) | Build contract for native-HLS readiness, bounded reload, joinable source preparation, and three-client parity. | open |
+| [Native startup replay](evidence/native-startup-replay.cjs) | Replays the native-HLS startup controller against delayed publication without private media or a running server. | open |
 | [STREAMING-RELIABILITY-HANDOFF.md](streaming/STREAMING-RELIABILITY-HANDOFF.md) | The remaining work, for the next streaming agent. | open |
 | [STREAMING-CONTINUATION-HANDOFF.md](streaming/STREAMING-CONTINUATION-HANDOFF.md) | The continuation-session workflow, branch state, and integration queue for streaming reliability. | open |
 | [PLAYBACK-CAPS-V2-PLAN.md](streaming/PLAYBACK-CAPS-V2-PLAN.md) | Highest deliverable grade, negotiated rather than guessed. | open |

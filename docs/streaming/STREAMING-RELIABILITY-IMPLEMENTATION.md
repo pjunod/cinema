@@ -57,7 +57,7 @@ function. This is a scope budget, not a reason to combine unrelated changes.
 
 ### 1.2 What the incident proves, and what it does not
 
-Read-only September 15 telemetry for TRON: Ares, file 5418, on media1:
+Read-only September 15 telemetry for reference film F, file 5418, on media1:
 
 | UTC | Recorded fact |
 |---|---|

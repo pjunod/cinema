@@ -24,7 +24,7 @@ quality changes on an Apple TV:
 
 | title | change | axis | outcome | counterfactual |
 |---|---|---|---|---|
-| Avatar (HDR/DV) | 2160 → 1080 | `dynamic_range` | `multiple_axes` | identical |
+| reference film K (HDR/DV) | 2160 → 1080 | `dynamic_range` | `multiple_axes` | identical |
 | Dance Flick (SDR H.264) | 1080 → 720 | `delivery_method` | `multiple_axes` | identical |
 
 **Neither was a resolution change.** The top rung direct-plays and the lower

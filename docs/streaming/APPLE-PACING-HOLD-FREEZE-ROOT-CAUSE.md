@@ -196,7 +196,7 @@ The matching rolling-HLS rows split as follows:
 One 2026-08-28 `Love, Simon` row recorded zero runway, 182 seconds ahead,
 a `time` hold, and producer speed of 9.47× realtime. The pre-regression
 client reopened after a 64.1-second stall and presented a first frame in
-3.8 seconds. The latest retained Apple stall, `Heavy Is the Head` on
+3.8 seconds. The latest retained Apple stall, `reference episode C` on
 2026-08-31, recorded zero runway and 186 seconds ahead; its reopen presented
 a first frame in 4.2 seconds.
 

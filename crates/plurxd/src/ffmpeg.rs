@@ -3222,7 +3222,7 @@ mod tests {
         }
     }
 
-    /// Wicked's track arrangement: 4K HEVC, a default TrueHD Atmos track, a
+    /// reference film G's track arrangement: 4K HEVC, a default TrueHD Atmos track, a
     /// second E-AC-3 track, and two AC-3 tracks. Only the two Atmos-capable
     /// codecs have a derived profile a newer reporter can add.
     fn atmos_capable_probe(
@@ -3493,12 +3493,12 @@ mod tests {
             serde_json::from_str(&atmos_capable_probe(None, None)).expect("fixture");
         let mut stored = base.clone();
         stored["format"]["tags"] = serde_json::json!({
-            "title": "Wicked (2024) Private Cut",
+            "title": "reference film G (2024) Private Cut",
             "COMPANY_NAME": "a private label"
         });
         let mut held = base.clone();
         held["format"]["tags"] = serde_json::json!({
-            "title": "Wicked (2024) Other Cut",
+            "title": "reference film G (2024) Other Cut",
             "COMPANY_NAME": "a different private label"
         });
         let comparison = super::compare_probe_documents(&stored.to_string(), &held.to_string())
@@ -3509,7 +3509,13 @@ mod tests {
             assert_eq!(difference.path, "/format/tags/<field>", "{difference:?}");
         }
         let rendered = comparison.rendered_differences();
-        for secret in ["Wicked", "title", "COMPANY_NAME", "private", "/media/"] {
+        for secret in [
+            "reference film G",
+            "title",
+            "COMPANY_NAME",
+            "private",
+            "/media/",
+        ] {
             assert!(!rendered.contains(secret), "{rendered} leaked {secret}");
         }
         // An unknown field a future FFprobe adds is named by category only.

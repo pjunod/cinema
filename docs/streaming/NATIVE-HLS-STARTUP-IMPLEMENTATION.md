@@ -1,8 +1,8 @@
-# Wicked startup repair — an implementation contract for native HLS and source preparation
+# reference film G startup repair — an implementation contract for native HLS and source preparation
 
 **Status:** ready for implementation; no product patch or deployment claimed.
 **Written:** 2026-09-17. **Executes:** Fable's “approve with changes” review
-of the [Wicked RCA](WICKED-NATIVE-HLS-STARTUP-RCA.md).
+of the [reference film G RCA](NATIVE-HLS-STARTUP-RCA.md).
 **Verified source base:** `363a22e28aa53094d899a9ad3c812241a6243548`.
 **Audience:** the Sol or Opus agent implementing and validating the repair.
 
@@ -35,7 +35,7 @@ opening the source and launching FFprobe again. Web, Apple and Android must
 agree on the new response and retry contract.
 
 `prepare_vod_encoding` returns `Ok(None)` for copy without subtitle burn.
-Wicked's intended recipe takes that early return. Track N alone would have
+Reference film G's intended recipe takes that early return. Track N alone would have
 kept the successful recipe; Track S is not a prerequisite for that rescue.
 It was exposed only after the wrong transcode fallback and also affects
 other clients starting encoded or burned presentations.

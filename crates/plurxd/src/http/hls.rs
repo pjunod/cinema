@@ -27388,7 +27388,7 @@ mod tests {
         assert!(hevc_codec_from_init(&init[..12], "hvc1").is_none());
     }
 
-    /// A `dvcC` record laid out the way the Dexter Profile 5 title's init
+    /// A `dvcC` record laid out the way the reference episode I Profile 5 title's init
     /// segment carries it: version 1.0, profile 5, level 6, RPU and BL
     /// present, no enhancement layer, compatibility id 0.
     fn dolby_vision_init(profile: u8, level: u8) -> Vec<u8> {
