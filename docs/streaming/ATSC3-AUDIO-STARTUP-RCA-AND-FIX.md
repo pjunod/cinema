@@ -1,10 +1,11 @@
 # ATSC 3.0 audio — safe live startup and what the captures prove
 
-**Status:** implemented and locally validated; not deployed ·
+**Status:** implemented, locally validated and adversarially reviewed; not deployed ·
 **Written:** 2026-09-19
 
 Companion to [Live TV features](../FEATURES.md#4a-live-tv--the-antenna-on-every-screen)
 and the [original-quality delivery record](../features/LIVE-TV-ORIGINAL-QUALITY-IMPLEMENTATION.md).
+The [status page](ATSC3-AUDIO-STARTUP-STATUS.html) links the live PR checks and merge record.
 This investigation covers the September 16 macOS failures on channels 133.1,
 128.1 and 103.1. The VideoToolbox caption fix remains intact.
 
