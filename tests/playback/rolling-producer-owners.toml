@@ -2232,7 +2232,11 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # +1: test-only ATSC media_output awaits Command::output under a 30-second
 # timeout with kill-on-drop. The production live child retains its existing
 # spawn_live_ffmpeg owner and is awaited with stdin closed after publication.
-expected_occurrences = 305
+# +2 with the web-shell split: two `.status()` reads in the `mod.rs` route
+# test, one over every `web::WEB_ASSETS` row and one on the unknown-asset 404.
+# Both are `Response::status()` on an in-process `oneshot`; nothing is
+# launched and nothing is owned.
+expected_occurrences = 307
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
