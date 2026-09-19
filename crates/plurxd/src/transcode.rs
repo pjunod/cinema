@@ -7972,7 +7972,7 @@ pub enum SegmentOpenError {
 /// the Session/attempt owner that produced the verdict so HTTP can fence a
 /// bodyless 404/502/503 before it becomes visible.
 pub(crate) enum SegmentPublication {
-    Ready(SegmentFile),
+    Ready(Box<SegmentFile>),
     Missing(Option<MediaResponseOwner>),
     /// The object was found for this exact owner, but its metadata could not
     /// be inspected. Absence and corrupt bytes are both stronger claims than
@@ -24204,11 +24204,11 @@ impl TranscodeManager {
                     len,
                     snapshot_lease,
                 );
-                return Ok(SegmentPublication::Ready(SegmentFile {
+                return Ok(SegmentPublication::Ready(Box::new(SegmentFile {
                     file,
                     len,
                     delivery,
-                }));
+                })));
             }
             // Give up if the session was declared dead, or ffmpeg has exited and
             // the file still isn't there.
@@ -24327,7 +24327,7 @@ impl TranscodeManager {
         self.segment_for_publication(session_id, name)
             .await
             .map(|outcome| match outcome {
-                SegmentPublication::Ready(file) => Some(file),
+                SegmentPublication::Ready(file) => Some(*file),
                 SegmentPublication::Missing(_)
                 | SegmentPublication::Unavailable(_)
                 | SegmentPublication::Pending(_)
@@ -35791,7 +35791,7 @@ pub(crate) mod tests {
                 .await
                 .expect("segment resolution")
             {
-                SegmentPublication::Ready(opened) => opened,
+                SegmentPublication::Ready(opened) => *opened,
                 _ => panic!("advertised segment was not ready"),
             };
             let segment_owner = opened.response_owner();
