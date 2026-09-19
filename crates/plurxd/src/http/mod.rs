@@ -468,6 +468,10 @@ pub fn router(state: AppState) -> Router {
         .route("/assets/library-channels.js", get(web::library_channels_js))
         .route("/assets/reader.js", get(web::reader_js))
         .route("/assets/reader.css", get(web::reader_css))
+        // Everything else under /assets/ is a `web::WEB_ASSETS` row — the split
+        // web shell. The seven sidecars above keep their own routes because
+        // they are not in that table (docs/clients/WEB-SHELL-LAYOUT.md).
+        .route("/assets/{*path}", get(web::asset))
         .route("/connect.svg", get(web::connect_qr))
         // PWA install assets + the sideloadable Android APK.
         .route("/manifest.webmanifest", get(web::manifest))
@@ -1148,6 +1152,22 @@ mod tests {
             crate::media_pool::SNAPSHOT_PATH,
         ] {
             assert!(learner_route_eligible(&Method::GET, path), "{path}");
+        }
+        // The split web shell's assets are ordinary static GETs: a learner and
+        // a node in maintenance both still serve them, or the UI that is asking
+        // what is wrong cannot load. Both gates read `uri.path()`, so the
+        // `?v=<hash>` never reaches them — asserted with and without it so a
+        // future gate that starts matching whole URIs fails here.
+        for path in [
+            "/assets/core/api.js",
+            "/assets/core/api.js?v=0123456789abcdef",
+            "/assets/app.css",
+        ] {
+            assert!(learner_route_eligible(&Method::GET, path), "{path}");
+            assert!(
+                maintenance_route_eligible(&Method::GET, path),
+                "maintenance {path}"
+            );
         }
         for (method, path) in [
             (Method::GET, "/api/v1/search"),
@@ -10489,6 +10509,26 @@ mod tests {
                 .status();
             assert!(status.is_success(), "GET {uri} -> {status}");
         }
+        // Every split-shell asset, from the table rather than by hand, so a new
+        // file cannot be added to the shell and left unroutable.
+        for (path, _, _) in crate::http::web::WEB_ASSETS {
+            let uri = format!("/assets/{path}?v=deadbeefdeadbeef");
+            let status = app
+                .clone()
+                .oneshot(get(&uri, None))
+                .await
+                .expect("r")
+                .status();
+            assert!(status.is_success(), "GET {uri} -> {status}");
+        }
+        // …and an asset that is not in the table is a 404, not the shell.
+        let status = app
+            .clone()
+            .oneshot(get("/assets/nope.js", None))
+            .await
+            .expect("r")
+            .status();
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
         // Unknown icon → 404.
         let status = app
             .clone()

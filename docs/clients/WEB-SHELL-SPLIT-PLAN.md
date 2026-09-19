@@ -1,9 +1,17 @@
 # Web shell split — `index.html` becomes a tree, with no build step
 
-**Status:** ready to build, DEFERRED until the open playback branches land ·
+**Status:** BUILT — see [WEB-SHELL-LAYOUT.md](WEB-SHELL-LAYOUT.md) for the
+shell as it is now; this document is the record of how and why ·
 **Executes:** the architecture decision Paul approved 2026-09-19, revised by
 the same-day adversarial review · **Pinned to:** `main` @ `395ce5912d08` ·
-**Written:** 2026-09-19
+**Written:** 2026-09-19 · **Built:** 2026-09-19 from `main` @ `a2d9c2fb`
+
+Re-derived per §3.4 before cutting: `index.html` was byte-identical between
+`395ce5912d08` and `a2d9c2fb`, so every line number and every row of §3.3
+applied verbatim, and nothing in the table below needed changing. The one
+adjustment M0 makes is arithmetic — it removes nine lines at 4306, so every
+range below that starts at 4330 or later is nine lines lower in the file the
+split actually cut.
 
 Companion to [UI-LAYOUTS-IMPLEMENTATION.md](UI-LAYOUTS-IMPLEMENTATION.md)
 (what the layouts are) and

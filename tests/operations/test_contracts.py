@@ -342,7 +342,9 @@ class OperationsContractCase(unittest.TestCase):
     def test_activity_capture_observes_one_real_tick_without_hiding_extra_requests(self):
         script = read("scripts/ui-baseline")
         capture = runpy.run_path(str(ROOT / "scripts/ui-baseline"))["ACTIVITY_CAPTURE_JS"]
-        web = read("crates/plurxd/src/web/index.html")
+        # setPageTimer and render are both the router's; the shell is markup
+        # and tags now (docs/clients/WEB-SHELL-LAYOUT.md).
+        web = read("crates/plurxd/src/web/router.js")
         page_timer = web.split("function setPageTimer(", 1)[1].split("\nasync function render()", 1)[0]
         production = "function setPageTimer(" + page_timer
         contract = r"""

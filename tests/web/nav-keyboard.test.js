@@ -12,10 +12,9 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const source = fs.readFileSync(
-  path.join(__dirname, "../../crates/plurxd/src/web/index.html"),
-  "utf8",
-);
+const {shellSource} = require("./shell-source.js");
+// The app's body rows, joined in served order.
+const source = shellSource().bodyScript;
 
 function shippedSource(name) {
   const start = source.indexOf(`function ${name}(`);

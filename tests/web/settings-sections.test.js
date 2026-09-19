@@ -10,8 +10,10 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const INDEX = path.join(__dirname, "../../crates/plurxd/src/web/index.html");
-const SHIPPED_UI = fs.readFileSync(INDEX, "utf8");
+const {shellSource} = require("./shell-source.js");
+// The shipped app is a tree now, so the string these assertions slice is
+// the app's body rows, joined in served order. See tests/web/shell-source.js.
+const SHIPPED_UI = shellSource().bodyScript;
 const DECLARATIONS = ["\nfunction ", "\nasync function "];
 
 function shippedSource(name) {
@@ -342,8 +344,11 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
       shippedSource("windowsServerCard"),
       shippedSource("webHlsStartupRecoveryCard"),
       shippedSource("hevcSampleEntryAdmissionCard"),
+      shippedSource("contentAnalysisEnableCard"),
       shippedSource("sourceProbeCompatibilityCard"),
-      "const SETTINGS_DATA=null,ME=null;",
+      shippedSource("nzbdBittorrentEnableCard"),
+      shippedSource("directedChangeDeveloperRows"),
+      "const SETTINGS_DATA=null,ME=null,PLAYER=null;",
       shippedSource("uiEnableAdvisory"),
       shippedSource("developerPanel"),
       shippedSource("liveTvPanel"),
@@ -406,12 +411,20 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
   assert.match(html, /Final-send loader interception/);
   assert.match(html, /Recovery is enabled for every hls\.js attachment/);
   assert.match(html, /CARDHEAD:HEVC sample-entry admission\|/);
+  assert.match(html, /CARDHEAD:nzbd BitTorrent\|/);
+  assert.match(html, /Enablement belongs to nzbd/);
+  assert.match(html, /Cluster exclusion/);
+  assert.match(html, /Peer port and public discovery/);
+  assert.match(html, /Durable payload storage/);
+  assert.match(html, /Seeding policy/);
+  assert.match(html, /Unmet, unavailable and unobservable rows do not disable nzbd's switch/);
+  assert.match(html, /id="enable-bittorrent"/);
   // Source verification is always on and has no switch; the card exists to say
   // what is and is not known about it, which is the only honest thing a
   // compatibility rule can offer an operator.
   assert.match(html, /CARDHEAD:Source probe compatibility\|/);
   assert.match(html, /Derived Atmos profile omissions/);
-  assert.match(html, /Typed source verification/);
+  assert.match(html, /Scan provenance/);
   assert.match(html, /Nothing on this card enables, disables, hides or overrides playback admission/);
   assert.match(html, /No feature flag is used/);
   assert.match(html, /Serving-fleet order/);

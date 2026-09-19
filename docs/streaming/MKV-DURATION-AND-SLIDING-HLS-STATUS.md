@@ -1,7 +1,7 @@
 # MKV duration and sliding HLS — implementation status
 
 **Status:** implementation in progress · **Updated:** 2026-09-19 EDT ·
-**Branch:** `effort/mkv-duration-sliding-hls` · **Base:** `1ae2c4ec3`
+**Branch:** `effort/mkv-duration-sliding-hls` · **Base:** `87664620`
 
 Companion to the
 [reviewed RCA](MKV-DURATION-AND-APPLE-SLIDING-HLS-RCA-AND-FIX.md) and
@@ -22,7 +22,7 @@ operator decision.
 | W2a fixed target | code complete; test pending | Copy segmentation enforces a separate strict 16 s bound before admission and before write; EOF tails use the strict bound; the shared rolling serving adapter validates both ordinary transcode and direct-copy FFmpeg manifests, freezes their served target at 16 s, and retires an oversized revision before actor publication; cached immutable VOD remains separate | Run variable-GOP, crossing-fragment, oversized-fragment, audio-tail, H.264/HEVC, and all-writer regressions in the final fast lane |
 | W2b publication clock | code complete; test pending | Raw writer revisions remain staged; an exact-attempt actor observation commits immutable served snapshots on an independent 0.5T/T/1.5T clock; unfinished startup requires 3T; explicit and legacy flow pace from staged media; the 180 s pause grace is non-renewing | Run publication, pacing, EOF, replacement, pause, and fetch-stopped regressions in the final fast lane |
 | W3 object promises | code complete; test pending | Segment state is explicit Advertised → Grace → Deleted; prefix removal is coalesced into immutable segment-bearing snapshots; grace deadlines use segment plus prior bounded playlist duration; range/init/media reads retain exact retired ownership without lease renewal; grace bytes remain in global hard-cap accounting until successful cleanup | Run deadline-edge, range/init, retirement, replacement, failed-unlink, and cap regressions in the final fast lane |
-| W4 diagnostics/clients | code complete; test pending | Live status adds produced/served/staged publication coordinates, fixed target and deadlines, rate provenance, pause grace/retirement reason, maintenance, and Advertised/Grace/reserved/live bytes; Activity renders the fields; Apple and Android decode them additively; existing single-reopen and paused-intent fences remain intact; the false “every HLS session is VOD” comment is corrected; Developer now owns the explicit enable switch with build, usage, takeover, and physical-client advice that never gates it | Run server serialization, client contract, web syntax/policy, and paused-recovery regressions in the final fast lane |
+| W4 diagnostics/clients | code complete; test pending | Live status adds produced/served/staged publication coordinates, fixed target and deadlines, rate provenance, pause grace/retirement reason, maintenance, and Advertised/Grace/reserved/live bytes; Activity renders the fields; Apple and Android decode them additively; existing single-reopen and paused-intent fences remain intact; the false “every HLS session is VOD” comment is corrected in the split player module; Developer now owns the explicit enable switch with build, usage, takeover, and physical-client advice that never gates it | Run server serialization, client contract, served-web-tree policy, and paused-recovery regressions in the final fast lane |
 | W5 review/qualification | not started | Final fast-lane command set is defined in the handoff | Review once at the final candidate, fix findings, run the fast lane, merge |
 
 ## Working decisions — defaults remain visible

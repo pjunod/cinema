@@ -1442,8 +1442,13 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	# the target a web change reaches for, and the Cluster panel is a web
 	# surface like any other here. Two seconds.
 	@node tests/web/cluster-membership.test.js
+	# The split shell is sixty-two plain scripts in one scope: the order they
+	# are served in is a load order. One reads them, one runs them.
+	@node tests/web/asset-order.test.js
+	@node tests/web/asset-load.test.js
+	@node tests/web/asset-layout.test.js
 	@scripts/js-check
-	@scripts/contrast-check --from-index crates/plurxd/src/web/index.html \
+	@scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
 		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
 		--allow scripts/contrast-allow.txt
 

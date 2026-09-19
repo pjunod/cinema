@@ -17,8 +17,10 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const INDEX = path.join(__dirname, "../../crates/plurxd/src/web/index.html");
-const SHIPPED_UI = fs.readFileSync(INDEX, "utf8");
+const {shellSource} = require("./shell-source.js");
+// The shipped app is a tree now, so the string these assertions slice is
+// the app's body rows, joined in served order. See tests/web/shell-source.js.
+const SHIPPED_UI = shellSource().bodyScript;
 
 // Same extraction contract as tests/web/activity-node-names.test.js.
 const DECLARATIONS = ["\nfunction ", "\nasync function "];
@@ -307,7 +309,7 @@ test("the node label wears a class nothing else in the sheet styles", () => {
   // rendered as a bordered box inside a table cell, on two pages.
   const rule = /\.([a-z][\w-]*)(?![\w-])\s*(?=[,{])/g;
   const defined = new Map();
-  const sheet = SHIPPED_UI.slice(0, SHIPPED_UI.indexOf("</style>"));
+  const sheet = shellSource().css;
   for (const match of sheet.matchAll(rule)) {
     defined.set(match[1], (defined.get(match[1]) || 0) + 1);
   }
