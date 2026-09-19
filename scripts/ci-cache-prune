@@ -70,6 +70,24 @@ floor_kb=$percent_floor_kb
 if [ "$minimum_floor_kb" -gt "$floor_kb" ]; then
   floor_kb=$minimum_floor_kb
 fi
+# ...and a ceiling, for the same reason the minimum has one.
+#
+# A share of the filesystem is unbounded above, and the pruner may only delete
+# this repository's caches. On a large disk that is merely fairly full the
+# share can exceed everything the pruner is permitted to touch: a 517 GiB
+# runner root at 80 % asks for a 103 GiB reserve, holds 101 GiB free, and
+# carries a 12 MiB plurx cache. The pruner then deletes every cache it may
+# delete and fails the job anyway -- the flat-100-GiB failure the minimum was
+# written to prevent, arriving from the other end.
+#
+# The reserve exists so a build has somewhere to run. `ci-require-disk` states
+# what that costs -- 25 GiB -- so a reserve beyond 40 GiB is not protecting a
+# build, it is reporting on the rest of the machine, which is not this
+# pruner's to fix.
+ceiling_floor_kb=$((40 * 1024 * 1024))
+if [ "$floor_kb" -gt "$ceiling_floor_kb" ]; then
+  floor_kb=$ceiling_floor_kb
+fi
 
 healthy() {
   [ "$usage_kb" -le "$budget_kb" ] && [ "$available_kb" -ge "$floor_kb" ]

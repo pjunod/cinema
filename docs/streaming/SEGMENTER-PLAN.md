@@ -88,7 +88,7 @@ now; the missing `-readrate_initial_burst` on pre-6.1 ffmpeg builds is a
 startup WARN because the gate made it expensive (a flat 2× fills the cushion
 at half speed however fast the NAS is). The full diagnosis, the experiment
 that separated the two readings, and the measured startup arithmetic —
-including the correction that *Tron*'s own 21 s was mostly flat pacing plus
+including the correction that *reference film F*'s own 21 s was mostly flat pacing plus
 a cold NFS open, not the count — are `docs/streaming/STUTTER-4K.md` §5.7.
 
 ### 0.1 Deviations from this plan, each with its reason

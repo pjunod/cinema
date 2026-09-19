@@ -698,7 +698,7 @@ refused.
 What that costs is worse than the churn of §4.3ter, because hls.js escalates:
 `BUFFER_FULL_ERROR` → evict → halve its own target → retry, and after
 `appendErrorMaxRetry` (3) failures on the same segment it fails **fatally**.
-Reported from the sofa on *Tron* in Chrome, 2026-07-30: several rebuffers and
+Reported from the sofa on *reference film F* in Chrome, 2026-07-30: several rebuffers and
 then a freeze that would not resume without leaving and re-entering the
 stream. Safari never saw any of it — native HLS uses none of these numbers,
 which is why the same file was fine there and is the same asymmetry that made

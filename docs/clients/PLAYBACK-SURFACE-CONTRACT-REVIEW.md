@@ -184,7 +184,7 @@ No compensating client seek was found in the named progressive paths; the
 prepared successor does seek (C:2441). Require achieved-origin and first-frame
 measurements before prescribing the repair.
 
-**Device evidence:** Google TV Streamer, build 89: Nosferatu reported Remux,
+**Device evidence:** Google TV Streamer, build 89: reference film H reported Remux,
 73 Mb/s, no server-side session, and reached 0:36. A single timeline tap
 advanced to 11:14; the resulting transport was paused, so I resumed it. The
 observed failure was “Playback stopped responding after retrying this

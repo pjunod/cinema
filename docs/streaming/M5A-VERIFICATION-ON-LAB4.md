@@ -222,7 +222,7 @@ this branch can establish.
    pass — grep for `converting Dolby Vision to Profile 8.1` and `indexed a
    converted stream`. It matters to the viewer: MEL carries no picture detail
    of its own so dropping it is lossless, while FEL carries real residual
-   detail and dropping it is not. Nosferatu's captured RPU reads as **FEL**,
+   detail and dropping it is not. Reference film H's captured RPU reads as **FEL**,
    so expect the "its residual detail is lost" clause.
 
 3. **Throughput.** M5a's acceptance asks for ≥ 1.5× realtime on lab4 for a 4K

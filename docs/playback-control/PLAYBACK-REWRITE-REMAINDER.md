@@ -187,7 +187,7 @@ Record wait start, stage samples, action, resumed presentation or terminal
 outcome. A reopened player is not evidence that same-session refill passed.
 
 The retained [September 11 trace](../evidence/playback-lifecycle-observation-2026-09-11.json)
-for Ronny Chieng: Speakeasy contains both near-empty and substantial loaded
+for reference special A contains both near-empty and substantial loaded
 waits with producer holds. It does not isolate the initial cause. Use that
 title on Apple TV if available, but do not depend on it for deterministic
 fixtures or claim the original freeze fixed without a new observation.

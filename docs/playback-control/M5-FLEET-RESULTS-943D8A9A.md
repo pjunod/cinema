@@ -54,7 +54,7 @@ The retained release worktree is:
 
 ### Web rendered video but never asked the server
 
-The web client played file 247, item 264, *Good Cop / Bad Cop*, against lab3.
+The web client played file 247, item 264, *reference episode B*, against lab3.
 It rendered VOD HLS using a remux and reported an approximately 2.9-second
 start. Its Control panel remained:
 

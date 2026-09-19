@@ -1,4 +1,4 @@
-# Wicked on TCL — an E-AC-3 reporting change became a source-replacement refusal
+# reference film G on TCL — an E-AC-3 reporting change became a source-replacement refusal
 
 **Status:** root cause reproduced on the real movie; the narrow repair is built
 and merged. The architectural repair in §7 is scoped, not started.
@@ -11,7 +11,7 @@ read the difference as a replaced source.
 
 ## 1. Finding — one omitted E-AC-3 profile blocked the whole movie
 
-The scan of Wicked kept in the catalog omits `profile` on global stream index 2,
+The scan of reference film G kept in the catalog omits `profile` on global stream index 2,
 an E-AC-3 audio track. The playback node's FFprobe reports it:
 
 ```json
@@ -113,13 +113,13 @@ catalog content.
 
 ### 2.4 Executable replay, on the fixture and on the movie
 
-[The retained replay](../evidence/wicked-probe-compatibility-replay.py) extracts
+[The retained replay](../evidence/probe-compatibility-replay.py) extracts
 the comparator as it stood on the serving node, checks its SHA-256
 (`d07b5601eb330904573fbcee28a2cd3e597f401937bc7b5611a7c29ba894ea6c`), compiles
 it beside the comparator in the working tree, and runs both.
 
 ```bash
-python3 docs/evidence/wicked-probe-compatibility-replay.py
+python3 docs/evidence/probe-compatibility-replay.py
 ```
 
 Seven synthetic tests pass: the deployed comparator refuses the legacy/modern
@@ -131,10 +131,10 @@ The synthetic suite proves the rule; it does not prove the movie. The same
 script takes two real FFprobe documents:
 
 ```bash
-python3 docs/evidence/wicked-probe-compatibility-replay.py --real-pair stored.json held.json
+python3 docs/evidence/probe-compatibility-replay.py --real-pair stored.json held.json
 ```
 
-Run on lab6 on 2026-09-17 over the real Wicked remux, with
+Run on lab6 on 2026-09-17 over the real reference film G remux, with
 `/usr/bin/ffprobe` 5.1.9-0+deb12u1 as the stored document and
 `/usr/lib/jellyfin-ffmpeg/ffprobe` 8.1.2-Jellyfin as the held one:
 
@@ -266,7 +266,7 @@ Homebrew `rustc` on a Mac is newer; select 1.97.1 explicitly.
 rustup run 1.97.1 cargo test -p plurxd --bin plurxd held_probe_comparison
 rustup run 1.97.1 cargo test -p plurxd --bin plurxd eac3
 rustup run 1.97.1 cargo test -p plurxd --bin plurxd bound_source_rejects_same_size_same_mtime_path_replacement
-python3 docs/evidence/wicked-probe-compatibility-replay.py
+python3 docs/evidence/probe-compatibility-replay.py
 make web-check ui-check
 ```
 
@@ -291,7 +291,7 @@ that reports the derived profile the node's FFprobe omits, and requires
 field named, when the channel count genuinely changes. A comparator test alone
 would not prove the HTTP and session path.
 
-Wicked itself has already been reanalyzed, so success on that title cannot prove
+Reference film G itself has already been reanalyzed, so success on that title cannot prove
 the compatibility repair on its own; the legacy fixture is what retains that
 requirement. The old probe was not put back into the live catalog.
 
