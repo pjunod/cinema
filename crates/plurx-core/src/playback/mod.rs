@@ -930,6 +930,38 @@ pub fn is_dolby_vision(file: &MediaFile) -> bool {
 /// question is one no client that asked for it can play — the error path
 /// rescues it into a transcode, whose session then reports `"sdr"` for what
 /// the viewer actually got.
+/// Would drawing a subtitle into the picture take dynamic range away from the
+/// viewer?
+///
+/// One question, one function, one answer — for `/decision`, for session
+/// creation, and for the M6 preparation path, which between them used to hold
+/// three different opinions:
+///
+/// - `/decision` exempted **every** transcode, on the reasoning that a
+///   re-encode can tone-map on the way. That was true before the HDR10 rung
+///   existed. Since M4 a transcode's delivered grade is negotiated, so an HDR
+///   title transcoding for a height cap really is putting HDR10 on the wire,
+///   and burning into it really does drop the grade.
+/// - Session creation keyed on the **source** flag and demanded an
+///   acknowledgement the web client never sent and Apple computed from the
+///   wrong range — so it refused sessions that were already tone-mapped.
+/// - The preparation path ran no guard at all.
+///
+/// `base_delivered_range` must be the grade of the plan **without** the burn.
+/// Never the grade of the resulting burn session: that session is SDR
+/// *because of* the burn, so judging the burn by it always permits the burn.
+///
+/// | Case | base range (no burn) | Verdict |
+/// |---|---|---|
+/// | HDR copy / remux / direct | `dolby_vision` · `hdr10` · `hlg` | refuse |
+/// | HDR source, transcode negotiated to HDR10 | `hdr10` | refuse — the burn would drop the grade |
+/// | HDR source, transcode already tone-mapped | `sdr` | allow |
+/// | SDR source, any method | `sdr` | allow |
+#[must_use]
+pub fn burn_would_discard_hdr(base_delivered_range: &str, requires_burn: bool) -> bool {
+    requires_burn && matches!(base_delivered_range, "dolby_vision" | "hdr10" | "hlg")
+}
+
 pub fn delivered_dynamic_range(
     file: &MediaFile,
     method: PlaybackMethod,

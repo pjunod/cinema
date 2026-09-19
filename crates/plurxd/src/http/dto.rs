@@ -8,7 +8,8 @@ use plurx_core::domain::{
 };
 use plurx_core::mediafacts::MediaFacts;
 use plurx_core::tracks::{
-    lang_matches, prefers_original_audio, select_tracks, LangPrefs, TrackSelection,
+    deliverable_as_default, lang_matches, prefers_original_audio, select_tracks_with, LangPrefs,
+    TrackSelection,
 };
 use serde::{Deserialize, Serialize};
 
@@ -462,7 +463,22 @@ fn playback_defaults(
     subtitles: &[SubtitleStream],
     prefs: &LangPrefs,
 ) -> PlaybackDefaultsDto {
-    let selected = select_tracks(audio, subtitles, prefers_original_audio(audio), prefs);
+    // Item detail has no plan to judge against — nobody has asked how this
+    // file would be delivered yet — so the HDR term is omitted and a forced
+    // bitmap track stays eligible. `/decision` is what the clients act on,
+    // and it refines this with the base grade it actually computed.
+    //
+    // The overlay is reported as available here for the same reason: detail
+    // is describing what a viewer could end up with, not committing to a
+    // pipeline. An overlay that turns out to be off costs the viewer nothing
+    // worse than the answer they already got before this predicate existed.
+    let selected = select_tracks_with(
+        audio,
+        subtitles,
+        prefers_original_audio(audio),
+        prefs,
+        |track| deliverable_as_default(&track.codec, track.forced, true, false),
+    );
     defaults_from_selection(audio, subtitles, prefs, selected)
 }
 
