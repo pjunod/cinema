@@ -886,10 +886,23 @@ fn subtitle_requires_burn_in(
 /// - `burn` — nothing else is left. The server draws the track into the
 ///   picture, which costs an encode and, on an HDR delivery, the grade.
 ///
-/// This says how the cues are produced, not which transport carries them: a
-/// `native` track is an HLS rendition on a session and the container's own
-/// text track on direct play, and which of those applies is still the
-/// client's business. Additive; older clients ignore it.
+/// This names the route by **codec**, which is a deliberate limit and the one
+/// thing a client must not misread. `sidecar` means "this server can hand you
+/// this track as text at `GET /files/{id}/subs/{i}.vtt`" — it does not
+/// promise your player can use a fetched sidecar in the delivery you are on.
+/// A client that can attach its own text track (the web player does, on every
+/// route) uses it and pays nothing; a client that cannot must ask for a burn,
+/// and `POST …/hls/sessions` will refuse the same track as a native rendition
+/// with "the selected subtitle requires burn-in". `TranscodeManager` likewise
+/// burns an explicitly selected ASS track inside a session, because there is
+/// no rendition for it.
+///
+/// So: this says how the cues can be *produced*, not which transport carries
+/// them. A `native` track is an HLS rendition on a session and the
+/// container's own text track on direct play; a `sidecar` track is a fetch on
+/// any route that has somewhere to put it, and a burn everywhere else.
+/// `subtitle_requires_burn_in` beside it stays the answer to "must the server
+/// draw this into the picture". Additive; older clients ignore it.
 fn subtitle_route(
     file: &MediaFile,
     selected: Option<i64>,
@@ -5431,19 +5444,25 @@ mod tests {
             hdr_format: None,
             bitrate: Some(1_000),
             audio_streams: vec![],
-            subtitle_streams: ["subrip", "ass", "mov_text", "hdmv_pgs_subtitle", "dvd_subtitle"]
-                .iter()
-                .enumerate()
-                .map(|(index, codec)| plurx_core::domain::SubtitleStream {
-                    index: index as i64,
-                    codec: (*codec).into(),
-                    language: None,
-                    title: None,
-                    default: false,
-                    forced: false,
-                    hearing_impaired: false,
-                })
-                .collect(),
+            subtitle_streams: [
+                "subrip",
+                "ass",
+                "mov_text",
+                "hdmv_pgs_subtitle",
+                "dvd_subtitle",
+            ]
+            .iter()
+            .enumerate()
+            .map(|(index, codec)| plurx_core::domain::SubtitleStream {
+                index: index as i64,
+                codec: (*codec).into(),
+                language: None,
+                title: None,
+                default: false,
+                forced: false,
+                hearing_impaired: false,
+            })
+            .collect(),
             scanned_at: 0,
             audio_offset_ms: 0,
             probed: true,

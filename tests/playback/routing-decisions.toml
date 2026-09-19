@@ -129,9 +129,16 @@ test_anchor = "native_hls_text_and_burn_fallback_are_distinct"
 [[decisions]]
 id = "server.hdr-subtitle-burn-guard"
 source = "crates/plurxd/src/http/hls.rs"
-source_anchor = "fn hdr_subtitle_burn_is_refused("
+source_anchor = "async fn burn_would_discard_this_session_hdr("
 test = "crates/plurxd/src/http/mod.rs"
 test_anchor = "hls_create_refuses_hdr_downgrades_and_preserves_an_existing_sdr_plan"
+
+[[decisions]]
+id = "server.subtitle-segment-not-ready"
+source = "crates/plurxd/src/http/hls.rs"
+source_anchor = "async fn await_window_publication<"
+test = "crates/plurxd/src/http/hls.rs"
+test_anchor = "a_subtitle_segment_waits_out_a_live_window_and_no_longer"
 
 [[decisions]]
 id = "server.pgs-overlay"

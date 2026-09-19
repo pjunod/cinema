@@ -248,6 +248,49 @@ pub fn window_anchor_seconds(position_seconds: i64, window_seconds: i64) -> i64 
     (position_seconds.max(0) / window) * window
 }
 
+/// Whether the whole-track extraction is going to answer this playback.
+///
+/// The midpoint rule below exists because a window past the midpoint reads
+/// the same bytes the whole-track warm is reading, and publishes a disposable
+/// result for them. That reasoning holds exactly as long as the whole-track
+/// warm is alive and making progress. When it has failed, or has been running
+/// longer than the window it is being compared against, "the whole track will
+/// answer instead" stops being true — and then declining the window means the
+/// second half of the file has no subtitles at all, for good.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WholeTrackProgress {
+    /// Ready, absent, or warming. The midpoint rule's reason still holds, so
+    /// past-midpoint windows stay declined.
+    Healthy,
+    /// The last attempt failed and its memo still stands. There is nothing
+    /// left for a past-midpoint window to be redundant with.
+    Stalled,
+}
+
+/// How the whole-track sidecar for one track is doing, for the past-midpoint
+/// rule. Observation only, like [`sidecar_state`]: it starts nothing.
+///
+/// Only a remembered failure counts as stalled. "Warming for longer than I
+/// expected" deliberately does not, and the reason is that no clock here has
+/// any relationship to how long the extraction takes: a subtitle-only pass
+/// over a 40 GB remux on a network mount can legitimately run for minutes,
+/// and calling that stalled would start a second full-source scan against the
+/// same mount to publish a disposable result the healthy warm is about to
+/// supersede — the exact waste the midpoint rule exists to refuse.
+///
+/// A genuinely wedged extraction is not left forever either: `ensure_vtt_at`
+/// bounds it at [`EXTRACTION_TIMEOUT`], and the timeout writes the memo that
+/// this function reads.
+pub async fn whole_track_progress(dir: &Path, file: &MediaFile, index: i64) -> WholeTrackProgress {
+    if remembered_failure(&vtt_path(dir, file, index))
+        .await
+        .is_some()
+    {
+        return WholeTrackProgress::Stalled;
+    }
+    WholeTrackProgress::Healthy
+}
+
 /// Whether extracting a window is cheaper than extracting the whole track.
 ///
 /// Measured, not assumed. A subtitle-only extraction reads the container from
@@ -263,55 +306,6 @@ pub fn window_anchor_seconds(position_seconds: i64, window_seconds: i64) -> i64 
 /// This is also why the bridge is at its best exactly where it is needed: the
 /// defect it exists to fix is that the *first* minutes of a large file play
 /// with no subtitles, and that is the 7% case.
-/// Whether the whole-track extraction is going to answer this playback.
-///
-/// The midpoint rule below exists because a window past the midpoint reads
-/// the same bytes the whole-track warm is reading, and publishes a disposable
-/// result for them. That reasoning holds exactly as long as the whole-track
-/// warm is alive and making progress. When it has failed, or has been running
-/// longer than the window it is being compared against, "the whole track will
-/// answer instead" stops being true — and then declining the window means the
-/// second half of the file has no subtitles at all, for good.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WholeTrackProgress {
-    /// Ready, absent, or warming inside its grace period. The midpoint rule's
-    /// reason still holds, so past-midpoint windows stay declined.
-    Healthy,
-    /// Failed, or warming for longer than the window would have taken. There
-    /// is nothing left for a past-midpoint window to be redundant with.
-    Stalled,
-}
-
-/// How the whole-track sidecar for one track is doing, for the past-midpoint
-/// rule. Observation only, like [`sidecar_state`]: it starts nothing.
-pub async fn whole_track_progress(
-    dir: &Path,
-    file: &MediaFile,
-    index: i64,
-    window_seconds: i64,
-) -> WholeTrackProgress {
-    let cached = vtt_path(dir, file, index);
-    if let Some(flight) = extractions().lock().await.get(&cached) {
-        // Twice the window: long enough that an ordinary extraction of a
-        // large MKV is not called stalled the moment it starts, short enough
-        // that a viewer parked past the midpoint is not left waiting out a
-        // ten-minute timeout with a blank screen.
-        let grace = Duration::from_secs(
-            (bounded_window_seconds(window_seconds).saturating_mul(2)).max(0) as u64,
-        );
-        return if flight.started_at.elapsed() > grace {
-            WholeTrackProgress::Stalled
-        } else {
-            WholeTrackProgress::Healthy
-        };
-    }
-    if remembered_failure(&cached).await.is_some() {
-        return WholeTrackProgress::Stalled;
-    }
-    WholeTrackProgress::Healthy
-}
-
-/// Whether extracting a window is cheaper than extracting the whole track.
 ///
 /// `whole_track` is what makes the midpoint rule conditional rather than
 /// absolute — see [`WholeTrackProgress`].
@@ -351,7 +345,16 @@ pub async fn window_flight_is_live(
     window_seconds: i64,
 ) -> bool {
     let cached = vtt_window_path(dir, file, index, anchor_seconds, window_seconds);
-    warmups().lock().await.contains(&cached) || extractions().lock().await.contains_key(&cached)
+    // Two statements, `extractions` first, and neither guard is alive when the
+    // other lock is taken. Both matter. `||` keeps its left temporary alive to
+    // the end of the statement, so a single expression would hold the first
+    // guard across the second `await`; and every other site in this file locks
+    // `extractions` before `warmups` (`sidecar_state`, `sidecar_state_for_demand`).
+    // A single warmups-first site is a lock-order inversion, and with two async
+    // mutexes that have no timeout the result is both global registries wedged
+    // for the life of the process.
+    let extracting = extractions().lock().await.contains_key(&cached);
+    extracting || warmups().lock().await.contains(&cached)
 }
 
 fn vtt_window_name(
@@ -389,14 +392,6 @@ pub fn vtt_window_path(
 struct Extraction {
     result: tokio::sync::Mutex<Option<Result<PathBuf, String>>>,
     ready: tokio::sync::Notify,
-    /// When this flight was enlisted.
-    ///
-    /// The only consumer is [`whole_track_progress`], which has to tell a
-    /// whole-track extraction that is healthily under way from one that has
-    /// been grinding for longer than a window would have taken. Both look
-    /// identical to [`SidecarState::Warming`], and only one of them is a
-    /// reason to stop declining past-midpoint windows.
-    started_at: std::time::Instant,
 }
 
 type Extractions = tokio::sync::Mutex<HashMap<PathBuf, Arc<Extraction>>>;
@@ -807,7 +802,6 @@ async fn enlist(cached: &Path, max_bytes: u64) -> Flight {
     let flight = Arc::new(Extraction {
         result: tokio::sync::Mutex::new(None),
         ready: tokio::sync::Notify::new(),
-        started_at: std::time::Instant::now(),
     });
     active.insert(cached.to_owned(), Arc::clone(&flight));
     Flight::Own(flight)
@@ -1556,7 +1550,7 @@ where
         anchor_seconds,
         duration_seconds,
         window_seconds,
-        whole_track_progress(dir, file, index, window_seconds).await,
+        whole_track_progress(dir, file, index).await,
     ) {
         return false;
     }
@@ -1703,6 +1697,13 @@ pub(crate) async fn remember_whole_track_failure_for_test(
     ttl: Duration,
 ) {
     remember_failure(&vtt_path(dir, file, index), why, ttl).await;
+}
+
+/// Drop the memo a test wrote, so it cannot outlive its own fixture in the
+/// process-global registry.
+#[cfg(test)]
+pub(crate) async fn forget_whole_track_failure_for_test(dir: &Path, file: &MediaFile, index: i64) {
+    forget_failure(&vtt_path(dir, file, index)).await;
 }
 
 /// Lift the post-release fence so a test can reuse a session id it just ended.
@@ -2323,7 +2324,6 @@ mod tests {
             Arc::new(Extraction {
                 result: tokio::sync::Mutex::new(None),
                 ready: tokio::sync::Notify::new(),
-                started_at: std::time::Instant::now(),
             }),
         );
         assert_eq!(

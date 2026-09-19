@@ -1849,9 +1849,14 @@ async fn create_with_purpose(
     // own `hdr` column. It now runs after `resolve_plan`, against the grade
     // this request actually resolves to — see
     // `burn_would_discard_this_session_hdr`. Nothing between here and there
-    // opens an encoder or takes a durable admission row: the plan review, the
-    // ladder ceiling, the network prior and `resolve_plan` itself are all
-    // reads, and `claim_media_session_request` is the first write, after it.
+    // opens an encoder or takes a durable admission row: the ladder ceiling,
+    // the network prior, `resolve_plan` and `validate_hevc_copy_transport`
+    // are reads, and `claim_media_session_request` is the first write, after
+    // it. `plan_review_for` is the one exception and it is not a write
+    // either — it bumps the process-lifetime caps-migration counters, so a
+    // create that this guard now refuses is counted as a straggler where
+    // before it was refused first. That is a metric inflating slightly, not
+    // state being left behind.
     //
     // `subtitle_burn_sdr` stays on the wire for clients that still send it,
     // and is no longer load-bearing. It was an acknowledgement the web client
@@ -8265,12 +8270,33 @@ async fn plan_preparation_candidate(
                 .await
             }
         };
-        return Ok(crate::playback_control::candidate_request(
+        // The legacy branch builds a candidate too, and it carries the
+        // viewer's `subtitle_burn` just as the caps-v2 branch does — so it
+        // needs the same guard. Without it a client that sends no caps
+        // document (or one this build cannot parse) can still have a
+        // successor staged as a burn that tone-maps the picture at the moment
+        // it is committed, which is the failure this guard exists for.
+        let candidate = crate::playback_control::candidate_request(
             &predecessor.request,
             selection,
             height,
             source.height,
-        ));
+        );
+        if burn_would_discard_this_session_hdr(
+            state,
+            Some(source),
+            &candidate,
+            predecessor.request.hdr10,
+            height,
+        )
+        .await
+        {
+            return Err(ApiError::Unprocessable(serde_json::json!({
+                "code": "hdr_subtitle_burn_refused",
+                "error": HDR_SUBTITLE_BURN_REFUSAL,
+            })));
+        }
+        return Ok(candidate);
     };
 
     use plurx_core::playback::{DeviceProfile, Force, PlaybackMethod};
@@ -8510,11 +8536,15 @@ async fn plan_preparation_candidate(
     // viewer given no notice and no choice. Refusing the candidate is right
     // here — the incumbent keeps playing, which is what a refused preparation
     // means everywhere else.
+    // `resolved.hdr10`, not the pre-review `requested_hdr10`: the review may
+    // clamp the ask against the device profile, and the request this guard is
+    // judging carries the clamped value. Create reads its post-review value
+    // for the same reason.
     if burn_would_discard_this_session_hdr(
         state,
         Some(source),
         &resolved,
-        requested_hdr10,
+        resolved.hdr10,
         plan_height,
     )
     .await
@@ -10890,6 +10920,12 @@ const SUBTITLE_SEGMENT_PUBLICATION_WAIT: Duration = Duration::from_millis(1_500)
 /// How often that wait re-reads the window path.
 const SUBTITLE_SEGMENT_PUBLICATION_POLL: Duration = Duration::from_millis(100);
 
+/// What the wait leaves of the response publication budget for the work that
+/// still has to happen after it: the whole-track warm, the settled-target
+/// read, the window kick and the response publication itself. Without it a
+/// request that caught its cues at the deadline fails on the very next await.
+const SUBTITLE_SEGMENT_PUBLICATION_RESERVE: Duration = Duration::from_millis(750);
+
 struct ProductionSubtitleSegmentSource;
 
 impl SubtitleSegmentSource for ProductionSubtitleSegmentSource {
@@ -10992,17 +11028,34 @@ async fn await_window_publication<S: SubtitleSegmentSource + ?Sized>(
     window_seconds: i64,
     publication_deadline: Instant,
 ) -> Option<Vec<u8>> {
-    let give_up = (Instant::now() + SUBTITLE_SEGMENT_PUBLICATION_WAIT).min(publication_deadline);
-    while Instant::now() < give_up {
-        tokio::time::sleep(SUBTITLE_SEGMENT_PUBLICATION_POLL).await;
-        if let Ok(Some(bytes)) = source
-            .read_window(dir, file, index, anchor, window_seconds)
-            .await
+    // The handler still has to warm, settle and publish after this returns, so
+    // the wait may not spend the whole remaining budget — a request that
+    // caught its cues and then timed out on the work behind them has failed
+    // *because* it succeeded. Leave the rest of the lifecycle its own slack.
+    let reserved = publication_deadline.checked_sub(SUBTITLE_SEGMENT_PUBLICATION_RESERVE);
+    let give_up = match reserved {
+        Some(reserved) => (Instant::now() + SUBTITLE_SEGMENT_PUBLICATION_WAIT).min(reserved),
+        // Already inside the reserve. Answer now.
+        None => return None,
+    };
+    loop {
+        // Read first: a window that published while this request was deciding
+        // to wait is served without paying a poll interval for it, and the
+        // loop cannot overshoot `give_up` by a whole sleep before noticing.
+        if let Ok(Some(bytes)) = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(give_up),
+            source.read_window(dir, file, index, anchor, window_seconds),
+        )
+        .await
+        .unwrap_or(Ok(None))
         {
             return Some(bytes);
         }
+        if Instant::now() + SUBTITLE_SEGMENT_PUBLICATION_POLL >= give_up {
+            return None;
+        }
+        tokio::time::sleep(SUBTITLE_SEGMENT_PUBLICATION_POLL).await;
     }
-    None
 }
 
 async fn subtitle_vtt_local_before(
@@ -11227,15 +11280,32 @@ async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSource + ?Sized
                 // window declines itself past the midpoint of the file, where
                 // it would read the same bytes as the whole track for a
                 // disposable result.
+                // Read the whole track's state BEFORE warming it. `warm_vtt`
+                // enlists the key in `warmups` synchronously and clears it
+                // from a spawned task, and `sidecar_state` reports any
+                // enlisted key as `Warming` — so asking afterwards races the
+                // warm this very request just started, and a failed track
+                // answers `Failed` or `Warming` depending on which task the
+                // scheduler ran. A refusal that is a coin flip is worse than
+                // no refusal.
+                let whole_track = source
+                    .whole_track_state(&state.subs_dir, &file, index)
+                    .await;
                 // The whole-track warm keeps its original contract, including
                 // that a timeout here fails the request rather than being
                 // swallowed: it is the path every other consumer depends on.
-                tokio::time::timeout_at(
-                    tokio::time::Instant::from_std(publication_deadline),
-                    source.warm_whole(&state.subs_dir, &file, index),
-                )
-                .await
-                .map_err(|_| response_publication_timeout())?;
+                // A track inside its failure memo is the one exception: the
+                // warm cannot start an extraction while the memo stands, so
+                // enlisting the key would buy nothing and would corrupt the
+                // reading above for every request behind this one.
+                if whole_track != crate::subtitles::SidecarState::Failed {
+                    tokio::time::timeout_at(
+                        tokio::time::Instant::from_std(publication_deadline),
+                        source.warm_whole(&state.subs_dir, &file, index),
+                    )
+                    .await
+                    .map_err(|_| response_publication_timeout())?;
+                }
                 // The destination is read here, immediately before the warm,
                 // and not once at the top of the handler: a seek that lands
                 // between the two reads is exactly the case M7 is about, and
@@ -11307,11 +11377,8 @@ async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSource + ?Sized
                 // observed per engine before this becomes the default. The
                 // Developer tab reports what has been observed and does not
                 // gate the switch on it.
-                if state.subtitle_not_ready_503().await
-                    && source
-                        .whole_track_state(&state.subs_dir, &file, index)
-                        .await
-                        == crate::subtitles::SidecarState::Failed
+                if whole_track == crate::subtitles::SidecarState::Failed
+                    && state.subtitle_not_ready_503().await
                 {
                     let retry_after =
                         crate::subtitles::failure_memo_remaining(&state.subs_dir, &file, index)
@@ -18174,19 +18241,16 @@ mod tests {
         #[tokio::test]
         async fn a_subtitle_segment_waits_out_a_live_window_and_no_longer() {
             let dir = crate::test_tempdir().expect("session directory");
-            let (fixture, _file) =
-                cold_windowed_fixture(dir.path(), "subtitle-publication-wait").await;
+            // A fresh id per test: the ownership, warmup and memo registries
+            // are process-global, so a fixed id is a collision waiting for the
+            // day two of these run in one binary.
+            let wait_session = &uuid::Uuid::new_v4().to_string();
+            let (fixture, _file) = cold_windowed_fixture(dir.path(), wait_session).await;
             let source = Arc::new(WindowFixtureSubtitleSource::counting());
 
             // First request: nothing is live yet, so it answers immediately and
             // leaves a flight behind it.
-            let cold = subtitle_segment(
-                &fixture.state,
-                "subtitle-publication-wait",
-                1,
-                source.as_ref(),
-            )
-            .await;
+            let cold = subtitle_segment(&fixture.state, wait_session, 1, source.as_ref()).await;
             assert_eq!(cold.status(), StatusCode::OK);
             assert_eq!(
                 cold.into_body()
@@ -18205,9 +18269,8 @@ mod tests {
             let waiting = tokio::spawn({
                 let state = fixture.state.clone();
                 let source = Arc::clone(&source);
-                async move {
-                    subtitle_segment(&state, "subtitle-publication-wait", 1, source.as_ref()).await
-                }
+                let session = wait_session.clone();
+                async move { subtitle_segment(&state, &session, 1, source.as_ref()).await }
             });
             tokio::time::sleep(Duration::from_millis(120)).await;
             source.release.add_permits(1);
@@ -18235,6 +18298,7 @@ mod tests {
                 1,
                 "waiting for a live flight starts no second extraction"
             );
+            crate::subtitles::release_session_window(wait_session).await;
         }
 
         /// The other half of the bound: a live flight that does *not* publish is
@@ -18242,29 +18306,18 @@ mod tests {
         #[tokio::test]
         async fn a_live_window_that_does_not_publish_still_answers_inside_the_wait() {
             let dir = crate::test_tempdir().expect("session directory");
-            let (fixture, _file) =
-                cold_windowed_fixture(dir.path(), "subtitle-publication-timeout").await;
+            let timeout_session = &uuid::Uuid::new_v4().to_string();
+            let (fixture, _file) = cold_windowed_fixture(dir.path(), timeout_session).await;
             let source = Arc::new(WindowFixtureSubtitleSource::counting());
 
-            let cold = subtitle_segment(
-                &fixture.state,
-                "subtitle-publication-timeout",
-                1,
-                source.as_ref(),
-            )
-            .await;
+            let cold = subtitle_segment(&fixture.state, timeout_session, 1, source.as_ref()).await;
             assert_eq!(cold.status(), StatusCode::OK);
             producer_started(source.as_ref()).await;
 
             // The producer stays parked for the whole of this request.
             let began = std::time::Instant::now();
-            let response = subtitle_segment(
-                &fixture.state,
-                "subtitle-publication-timeout",
-                1,
-                source.as_ref(),
-            )
-            .await;
+            let response =
+                subtitle_segment(&fixture.state, timeout_session, 1, source.as_ref()).await;
             let waited = began.elapsed();
             assert_eq!(response.status(), StatusCode::OK);
             assert_eq!(
@@ -18277,10 +18330,22 @@ mod tests {
                     .as_ref(),
                 b"WEBVTT\n\n"
             );
+            // Both bounds. The ceiling alone passes with the wait deleted,
+            // and "it did not wait at all" is precisely what this test is
+            // named after not happening. The floor proves the live flight was
+            // waited on; the ceiling is AVPlayer's constraint.
+            assert!(
+                waited >= SUBTITLE_SEGMENT_PUBLICATION_WAIT - SUBTITLE_SEGMENT_PUBLICATION_POLL,
+                "a live flight must be waited on, not skipped: waited {waited:?}"
+            );
             assert!(
                 waited < SUBTITLE_SEGMENT_PUBLICATION_WAIT + Duration::from_millis(600),
                 "a subtitle segment must answer inside AVPlayer's patience, waited {waited:?}"
             );
+            // The fixture producer is parked on a zero-permit semaphore, so
+            // without this its flight and warmup entry outlive the test in the
+            // process-global registries.
+            crate::subtitles::release_session_window(timeout_session).await;
         }
 
         /// An empty segment says "there are no cues here". While a sidecar is
@@ -18294,7 +18359,8 @@ mod tests {
         #[tokio::test]
         async fn a_failed_subtitle_extraction_is_refused_only_when_the_operator_asked() {
             let dir = crate::test_tempdir().expect("session directory");
-            let (fixture, file) = cold_windowed_fixture(dir.path(), "subtitle-failed-memo").await;
+            let memo_session = &uuid::Uuid::new_v4().to_string();
+            let (fixture, file) = cold_windowed_fixture(dir.path(), memo_session).await;
             let source = Arc::new(WindowFixtureSubtitleSource::counting());
 
             crate::subtitles::remember_whole_track_failure_for_test(
@@ -18307,7 +18373,7 @@ mod tests {
             .await;
 
             let default_off =
-                subtitle_segment(&fixture.state, "subtitle-failed-memo", 1, source.as_ref()).await;
+                subtitle_segment(&fixture.state, memo_session, 1, source.as_ref()).await;
             assert_eq!(
                 default_off.status(),
                 StatusCode::OK,
@@ -18330,8 +18396,7 @@ mod tests {
                 .await
                 .expect("the operator turns the refusal on");
 
-            let refused =
-                subtitle_segment(&fixture.state, "subtitle-failed-memo", 2, source.as_ref()).await;
+            let refused = subtitle_segment(&fixture.state, memo_session, 2, source.as_ref()).await;
             assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
             let retry_after = refused
                 .headers()
@@ -18340,9 +18405,16 @@ mod tests {
                 .and_then(|value| value.parse::<u64>().ok())
                 .expect("a refusal says when a retry could achieve anything");
             assert!(
-                (1..=90).contains(&retry_after),
-                "Retry-After follows the memo's own remaining time, got {retry_after}"
+                (80..=90).contains(&retry_after),
+                "Retry-After is the memo's own remaining time, not a constant: got {retry_after}"
             );
+            crate::subtitles::release_session_window(memo_session).await;
+            crate::subtitles::forget_whole_track_failure_for_test(
+                &fixture.state.subs_dir,
+                &file,
+                0,
+            )
+            .await;
         }
     }
 

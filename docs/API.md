@@ -910,9 +910,14 @@ rendition (ASS/SSA, `mov_text` — a manual pick only), and `"burn"` otherwise.
 It is absent when no subtitle is selected, and it says nothing about which
 transport carries the result. Older clients ignore it.
 
-The policy default in `selection` is now filtered by the same rule: a
-non-forced bitmap track is never returned as the default subtitle, because the
-web client applies that default automatically.
+The server's own default is filtered by deliverability, and it surfaces in the
+top-level `subtitles[]` array — `default: true` marks the track the server
+chose, and the web client applies it automatically 400 ms after open. A
+non-forced bitmap track is never marked that way on an HDR delivery, and never
+at all while the PGS overlay is off, because the only way to show it would be
+a burn the HDR guard then refuses. It stays perfectly selectable by hand, and
+`selection` (present only when `audio=` or `subtitle=` was sent) reports the
+honest verdict for that manual pick.
 
 On a subtitle track, `text` and `native` are different claims: `text` means a
 WebVTT sidecar can be extracted, and is true for every non-bitmap codec;
