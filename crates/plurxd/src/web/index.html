@@ -9826,7 +9826,7 @@ function attachSession(v, t, info, wantSec){
   if(info.delivered_dynamic_range) t.deliveredDvProfile=info.delivered_dolby_vision_profile||null;
   // …and repaint, or the chip keeps its pre-session HTML forever while the
   // one-second stats panel follows the new truth. That is how "DV P7 → HDR10"
-  // sat beside "Dynamic range: SDR" on a tone-mapped reference episode: both
+  // sat beside "Dynamic range: SDR" on a tone-mapped reference episode I: both
   // surfaces call dynamicRangeBadge() with the same arguments, but only the
   // panel repaints. renderPlayerInfo() is otherwise painted once, at session
   // open — before the route is chosen and before the forced-burn override.

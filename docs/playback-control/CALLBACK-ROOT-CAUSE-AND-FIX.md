@@ -73,7 +73,7 @@ it. Historical commits remain in the branch, so review the net diff against
 ## 3. Controlled playback tests isolate registration timing
 
 The reproduced environment was Safari 27.0, build `22625.1.29.11.27`, using
-the web UI on `nynuc:32400`. reference film G is library file 120, using native copy
+the web UI on `nynuc:32400`. Reference film G is library file 120, using native copy
 HLS with 4K Dolby Vision P7-to-P8 delivery. The controlled resume position
 was 566.055 seconds. The server remained at build
 `1e530d32c87df15a2d2ded10b46c185c07cdb832` throughout these trials.
@@ -289,6 +289,6 @@ bounded startup tests did not reproduce that failure. A later playlist GET
 also returned 503; a different failing endpoint is not proof of the same cause.
 
 This PR contains no server-side fix and does not establish that every original
-reference film G error is resolved. Callback lifecycle repair should be evaluated on
+Reference film G error is resolved. Callback lifecycle repair should be evaluated on
 its own evidence. Keep the separate publication failure open rather than
 expanding the callback watchdog or claiming the 503 was fixed by this patch.

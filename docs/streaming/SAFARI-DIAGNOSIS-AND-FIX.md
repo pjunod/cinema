@@ -10,7 +10,7 @@ Companion to [PLAYBACK.md](../PLAYBACK.md) (the delivery decision),
 [PLAYBACK-CAPS-V2-PLAN.md](PLAYBACK-CAPS-V2-PLAN.md) (capability semantics), and
 [DV-DELIVERY-FINDINGS.md](DV-DELIVERY-FINDINGS.md) (Dolby Vision delivery).
 This document records the diagnosis and its review, not the executable task
-sequence. reference film K is the reproducer; the defect also affects admission of SDR
+sequence. Reference film K is the reproducer; the defect also affects admission of SDR
 and HDR10 HEVC-in-MP4 on web and Apple clients. Read this evidence before
 the linked implementation contract. If implementation requires rewriting
 library files, bypassing
@@ -24,12 +24,12 @@ numbers. Re-verify them against the intended implementation base. Neither
 commit is asserted to be the deployed server's exact build.
 The stale documentation checkout is not an implementation base: Sol must
 start from fresh main and re-resolve the named symbols. The retained filename
-keeps links to the original reference film K investigation stable; the title and scope
+keeps the original investigation's scope; the title and scope
 have been corrected after review.
 
 ## 1. Finding — the source packaging is admitted on the wrong evidence
 
-The affected source is **reference film K: Fire and Ash**, library file ID **9** in the
+The affected source is **Reference film K**, library file ID **9** in the
 investigated installation. Its video is HEVC Main 10, 3840 × 2076, with an
 MP4 `hev1` sample-entry label. Fable's stored-row inspection reports
 `extradata_size: 132`, DV Profile 8, `bl_compat_id: 1`, `el_present: 0`,
@@ -457,7 +457,7 @@ from Auto and Original. Test the final response and actual session recipe,
 not just a private helper. Check cached capability invalidation on web update.
 
 **Acceptance:** web and Apple hvc1-only claims plus supported SDR and
-reference film K-shaped hev1 sources select copy-video Remux in Auto and Original,
+Reference film K-shaped hev1 sources select copy-video Remux in Auto and Original,
 including the packaging reason. Progressive-only probes and the POST-error
 guard have negative regressions. Forced Transcode
 is unchanged; removing the new claim reproduces documented legacy behavior.

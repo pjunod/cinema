@@ -235,7 +235,7 @@ There is no relevant web or test diff between the original incident SHA and
 through from a passive presentation answer, commits `nudge()` after 350 ms,
 and leaves keyup outside seek ownership. This second incident is acceptance
 evidence for the previously-spent-recovery case, not additional proof of the
-reference film F input branch.
+Reference film F input branch.
 
 ## 4. Root cause — a refilled presentation spent recovery before its deadline
 

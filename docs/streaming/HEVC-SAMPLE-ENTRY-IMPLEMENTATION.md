@@ -33,7 +33,7 @@ For otherwise compatible HEVC-in-MP4:
 - Select a delivery whose **output** is compatible. A progressive remux can
   deliberately retain `hev1`/`dvhe`; “Remux” alone is not the guarantee.
 
-reference film K is one complete-hvcC DV P8 reproducer. The review's census reports
+Reference film K is one complete-hvcC DV P8 reproducer. The review's census reports
 111 SDR `hev1` MP4s, 28 compatible DV P8 `hev1`, 10 HDR10 `hev1` with minimal
 hvcC, one DV P5 `hev1`, and 21 DV P5 `dvhe` with minimal hvcC: **171 exposed
 rows**, not 171 device-tested failures. Build SDR and DV sibling regressions.
@@ -343,7 +343,7 @@ invalid present-field path must not enter it.
 
 Use `hevc_parameter_set_promotion_required` / existing copy options, not a
 new duplicate “extradata length means tag” policy. The reviewed implementation
-detects a minimal hvcC at 23 bytes. reference film K's 132-byte hvcC is a different
+detects a minimal hvcC at 23 bytes. Reference film K's 132-byte hvcC is a different
 case. Calculate/inspect the **actual progressive builder's output tag**;
 do not assume it has the same profile-aware choice as the segmented builder.
 Include preserved P5 and compatible P8 cases in this comparison.

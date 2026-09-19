@@ -8163,7 +8163,7 @@ mod tests {
         assert_eq!(
             longest.ceil(),
             16.0,
-            "the long audio tail raised TARGETDURATION above one sample of rounding"
+            "the trailing-audio shape raised TARGETDURATION above one sample of rounding"
         );
         let claimed: f64 = published.iter().map(|item| item.seconds).sum();
         assert!(

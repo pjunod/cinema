@@ -5291,7 +5291,7 @@ test("every surface paints the badge from the same four answers", () => {
 });
 
 test("a session that lands on a different range repaints the badge", () => {
-  // The field bug: on a tone-mapped reference episode I episode the chip read "DV P7 →
+  // The field bug: on a tone-mapped reference episode I the chip read "DV P7 →
   // HDR10" while the stats panel one line below read "Dynamic range: SDR".
   // Both surfaces call dynamicRangeBadge() with the same arguments — the
   // panel just repaints every second, and the chip was painted once at

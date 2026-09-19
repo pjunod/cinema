@@ -24,7 +24,7 @@ container duration. A longer audio track or another container-duration
 contributor can therefore make a complete video pass look truncated.
 The check allows only two seconds of difference.
 
-This is directly demonstrated by file 9, **reference film K: Fire and Ash**. Its index
+This is directly demonstrated by file 9, **Reference film K**. Its index
 covers exactly the duration reported for the primary video. The checker
 instead expects the duration of the longer French audio track and refuses
 the result. Retrying unchanged code reproduces the same refusal.
@@ -94,12 +94,12 @@ by their expected ticks and catalogued durations. All durations are seconds.
 
 | File | Title | Indexed video | Probe video | Container expectation | Excess expectation |
 |---|---|---:|---:|---:|---:|
-| 9 | reference film K: Fire and Ash | 11824.916 | 11824.916 | 11844.896 | 19.980 |
-| 3451 | reference episode I S02E11 | 3089.006 | 3089.008 | 3117.664 | 28.658 |
-| 3498 | reference episode I S06E10 | 2957.287 | 2957.288 | 2966.298 | 9.011 |
+| 9 | reference film K | 11824.916 | 11824.916 | 11844.896 | 19.980 |
+| 3451 | reference episode L S02E11 | 3089.006 | 3089.008 | 3117.664 | 28.658 |
+| 3498 | reference episode L S06E10 | 2957.287 | 2957.288 | 2966.298 | 9.011 |
 | 3634 | Family Guy S19E04 | 1297.045 | 1297.046 | 1301.772 | 4.727 |
 
-reference film K's retained reason is `covered 189198656 of 189518336 ticks`, with
+Reference film K's retained reason is `covered 189198656 of 189518336 ticks`, with
 4,520 fragments; its latest retained refusal was 2026-09-16 15:42:02 UTC.
 The French audio duration is `11844.896`, exactly the container expectation.
 The reference episode I examples also carry audio longer than video. Family Guy's
@@ -116,7 +116,7 @@ budget_seconds = clamp(ceil(film_seconds / 8) + 30, 90, 1800)
 ```
 
 This assumes approximately 8× playback speed, adds 30 seconds and caps the
-pass at 30 minutes. File 120, **reference film G**, retained an `exceeded the 1232s
+pass at 30 minutes. File 120, **Reference film G**, retained an `exceeded the 1232s
 index budget` refusal from 2026-09-15 23:30:35 UTC. At 2026-09-17
 01:06:46.358316 UTC, nynuc logged a successful build for file 120:
 12,247 fragments, timescale 16,000 and elapsed time 812,146 ms.

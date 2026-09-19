@@ -291,7 +291,7 @@ that reports the derived profile the node's FFprobe omits, and requires
 field named, when the channel count genuinely changes. A comparator test alone
 would not prove the HTTP and session path.
 
-reference film G itself has already been reanalyzed, so success on that title cannot prove
+Reference film G itself has already been reanalyzed, so success on that title cannot prove
 the compatibility repair on its own; the legacy fixture is what retains that
 requirement. The old probe was not put back into the live catalog.
 

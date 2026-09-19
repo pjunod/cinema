@@ -35,7 +35,7 @@ opening the source and launching FFprobe again. Web, Apple and Android must
 agree on the new response and retry contract.
 
 `prepare_vod_encoding` returns `Ok(None)` for copy without subtitle burn.
-reference film G's intended recipe takes that early return. Track N alone would have
+Reference film G's intended recipe takes that early return. Track N alone would have
 kept the successful recipe; Track S is not a prerequisite for that rescue.
 It was exposed only after the wrong transcode fallback and also affects
 other clients starting encoded or burned presentations.

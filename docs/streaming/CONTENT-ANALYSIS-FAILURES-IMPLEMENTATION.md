@@ -21,7 +21,7 @@ Operational timeouts must carry an accurate cause, bounded retry state and
 useful progress. Recovery must reach the exact failed video pipeline once,
 preserve successful siblings, and leave an auditable history.
 
-The observed examples are file 9 (reference film K), 3451 and 3498 (reference episode I), and 3634
+The observed examples are file 9 (reference film K), 3451 and 3498 (reference episode L), and 3634
 (Family Guy). Their indexed video coverage agrees with video metadata while
 container duration is longer. File 120 (reference film G) supplies timeout evidence,
 but its later success was not correlated to the same pipeline/source version;

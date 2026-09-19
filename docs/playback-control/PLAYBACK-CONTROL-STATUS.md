@@ -1079,7 +1079,7 @@ someone runs it or the floor learns the successor's rate.
 **What is still refused, deliberately.** The grade axis. This run was SDR H.264
 throughout, so `{ResolutionOrBitrate, DeliveryMethod, DynamicRange}` — the set
 an HDR or Dolby Vision quality change actually crosses, and exactly what the
-reference film K 2160 → 1080 row above booked — remains unmeasured and still falls back
+Reference film K 2160 → 1080 row above booked — remains unmeasured and still falls back
 to `multiple_axes`. Audio and burned subtitles were never measured in
 combination with anything at all. A row joins that table only with a hardware
 receipt, and the receipt has to name its run.
