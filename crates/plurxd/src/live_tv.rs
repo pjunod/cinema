@@ -30,8 +30,6 @@ use crate::state::SystemInfo;
 pub(crate) mod dvr;
 pub(crate) mod guide;
 
-#[cfg(test)]
-mod atsc_audio_tests;
 pub(crate) mod schedule;
 #[cfg(all(test, target_os = "macos"))]
 mod videotoolbox_tests;
@@ -7500,6 +7498,9 @@ pub(crate) fn unix_seconds() -> i64 {
         .and_then(|duration| i64::try_from(duration.as_secs()).ok())
         .unwrap_or_default()
 }
+
+#[cfg(test)]
+mod atsc_audio_tests;
 
 #[cfg(test)]
 mod tests {
