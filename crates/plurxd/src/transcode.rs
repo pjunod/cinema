@@ -501,19 +501,10 @@ const EXPLICIT_PRODUCTION_RESERVE_WALL_SECS: f64 = 30.0;
 /// most of all — died here, which turned one recoverable delivery fault into
 /// a terminal one.
 ///
-/// The floor is [`plurx_core::transcode::COPY_PUBLISH_GATE_SECS`] because
-/// opening the playlist at all is what it buys, and the copy path's gate is
-/// the largest amount any path needs to open one. Below it a session is
-/// *starting*, which suspends the demand hold and the time limiter both — see
-/// `evaluate_flow`, and note that exempting the demand hold alone is not
-/// enough, because the time limiter's release point sits below the floor and
-/// would pin a starting session under it. The byte limits are never
-/// suspended: disk is a hard bound at every stage.
-///
-/// Its whole cost is that a client which pauses inside the first few seconds
-/// keeps producing to the floor — bounded, and the same media that client
-/// would buffer anyway.
-const EXPLICIT_STARTUP_FLOOR_SECS: i64 = plurx_core::transcode::COPY_PUBLISH_GATE_SECS as i64;
+/// Startup admission is now actor-owned presentation state. Publication
+/// volume cannot end the protection: only accepted Rendering progress does,
+/// and the actor's non-renewing deadline bounds an abandoned client. The byte
+/// limits remain active throughout because disk is a hard bound.
 /// Ceiling on scratch across *all* live sessions. A per-session cap bounds one
 /// runaway; it does nothing about four healthy 4K sessions filling the disk
 /// between them.
@@ -1290,14 +1281,9 @@ struct FlowEvaluation {
 struct FlowInputs<'a> {
     physical_ahead: Option<Ahead>,
     published_end_ms: Option<i64>,
-    /// Whether this session has ever published `EXPLICIT_STARTUP_FLOOR_SECS`
-    /// of media. Latched on the session rather than derived from
-    /// `published_end_ms`, because the index is emptied on a producer retry
-    /// (`clear_compatibility_before_retry`) — and a floor re-derived from an
-    /// emptied index would hand a wedged encoder a fresh startup grant on
-    /// every restart, forever, while the viewer sits paused. The grant is
-    /// once per session.
-    startup_grant_spent: bool,
+    /// Actor-owned presentation admission. Server publication, downloads, and
+    /// positive buffer reports do not spend this protection.
+    startup_protected: bool,
     media_origin_ms: i64,
     lease_mode: crate::playback_control::RollingLeaseMode,
     demand: Option<&'a crate::playback_control::PlaybackDemandSnapshot>,
@@ -1332,6 +1318,11 @@ fn flow_event_extra(
         "lease_state": lease_state,
         "lease_timeout_ms": lease.timeout_ms(),
         "control_demand": demand.map(|demand| demand.demand),
+        "startup_state": lease.startup.status(),
+        "startup_remaining_ms": lease.startup.remaining.map(|remaining| {
+            i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX)
+        }),
+        "presentation_progress_seen": lease.startup.presentation_progress_seen,
         "producer_control": &lease.producer_control,
         "reported_position_ms": demand.map(|demand| demand.position_ms),
         "client_runway_ms": demand.map(|demand| demand.runway_ms()),
@@ -1373,7 +1364,7 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
         global_ahead_bytes,
         limits,
         currently_suspended,
-        startup_grant_spent,
+        startup_protected,
     } = inputs;
     if lease_mode == crate::playback_control::RollingLeaseMode::Legacy {
         return FlowEvaluation {
@@ -1407,15 +1398,10 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
         };
     };
 
-    // Whether this session still owes the client the media that lets it open a
-    // playlist at all. See `EXPLICIT_STARTUP_FLOOR_SECS`: a client that has not
-    // started reports `hold`, and obeying that before there is anything to play
-    // is the deadlock that made every fallback terminal.
-    // `.max(0)` because this predicate fails open: a negative published end
-    // would read as "still starting" and stop honouring holds for the rest of
-    // the session. Every other reader of the same value clamps it too.
-    let starting = !startup_grant_spent
-        && published_end_ms.unwrap_or(0).max(0) / 1_000 < EXPLICIT_STARTUP_FLOOR_SECS;
+    // Startup is presentation evidence, not an encoder-output threshold. The
+    // actor spends this once after two accepted Rendering observations advance
+    // the same settled timeline, or retires it at the finite startup deadline.
+    let starting = startup_protected;
 
     // `End` suspends from any state: that client is gone rather than waiting,
     // so there is nothing further production could unblock. `Hold` is the one
@@ -3557,6 +3543,9 @@ async fn own_rolling_retirement(
             } else {
                 "idle"
             });
+        }
+        crate::playback_control::RollingTerminalCause::StartupExpired => {
+            settlement.set_cause("startup_expired");
         }
     }
     session.retirement_cleanup_started.store(true, Release);
@@ -6077,12 +6066,6 @@ struct Session {
     /// playhead. Everything that judges a session's health has to know: a
     /// suspended encoder makes no progress *on purpose*.
     suspended: AtomicBool,
-    /// Latched once this session has published `EXPLICIT_STARTUP_FLOOR_SECS`
-    /// of media. See `FlowInputs::startup_grant_spent`: the startup grant that
-    /// lets a not-yet-started client's `hold` be ignored is once per session,
-    /// and a producer retry empties the segment index, so the grant cannot be
-    /// re-derived from the index without renewing itself on every restart.
-    startup_grant_spent: AtomicBool,
     /// When the current held interval began, for the resume event's duration.
     suspended_at: Mutex<Option<SuspendedAt>>,
     /// Successful running→held transitions during this session. A counter,
@@ -7448,8 +7431,7 @@ async fn session_info(
         evaluate_flow(FlowInputs {
             physical_ahead: ahead,
             published_end_ms,
-            // Status reports the flow; it never spends the grant.
-            startup_grant_spent: s.startup_grant_spent.load(Relaxed),
+            startup_protected: lease.startup.protects_from_time_hold(),
             media_origin_ms,
             lease_mode: lease.mode,
             demand: lease.demand.as_ref(),
@@ -7524,6 +7506,16 @@ async fn session_info(
         lease_mode,
         lease_state,
         lease_timeout_ms: lease.as_ref().map(|lease| lease.timeout_ms()),
+        startup_state: lease.as_ref().map(|lease| lease.startup.status()),
+        startup_remaining_ms: lease.as_ref().and_then(|lease| {
+            lease
+                .startup
+                .remaining
+                .map(|remaining| i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX))
+        }),
+        presentation_progress_seen: lease
+            .as_ref()
+            .map(|lease| lease.startup.presentation_progress_seen),
         control_demand,
         reported_position_ms: demand.map(|demand| demand.position_ms),
         client_runway_ms: demand.map(|demand| demand.runway_ms()),
@@ -7607,6 +7599,9 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         lease_mode: "vod",
         lease_state: "active",
         lease_timeout_ms: Some(crate::playback_control::VOD_LEASE_TIMEOUT_MS),
+        startup_state: None,
+        startup_remaining_ms: None,
+        presentation_progress_seen: None,
         control_demand: None,
         reported_position_ms: None,
         client_runway_ms: None,
@@ -9001,6 +8996,11 @@ pub struct SessionInfo {
     /// rollout-compatible lifetime; explicit viewers receive the shorter
     /// deadline renewed by control or authenticated media consumption.
     pub lease_timeout_ms: Option<u32>,
+    /// Presentation admission is actor-owned and finite. A positive remaining
+    /// value is time left for accepted Rendering progress, not lease time.
+    pub startup_state: Option<&'static str>,
+    pub startup_remaining_ms: Option<i64>,
+    pub presentation_progress_seen: Option<bool>,
     /// Last accepted viewer intent and render facts. These are observations,
     /// not inferred recovery decisions.
     pub control_demand: Option<&'static str>,
@@ -14861,7 +14861,6 @@ impl TranscodeManager {
             delivery: Meter::new(),
             readrate: 0.0,
             suspended: AtomicBool::new(false),
-            startup_grant_spent: AtomicBool::new(false),
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
             takeover: None,
@@ -19991,7 +19990,6 @@ impl TranscodeManager {
                 .readrate
                 .unwrap_or(if pacing.legacy_re { 1.0 } else { 0.0 }),
             suspended: AtomicBool::new(false),
-            startup_grant_spent: AtomicBool::new(false),
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
             takeover,
@@ -20523,7 +20521,6 @@ impl TranscodeManager {
                 .readrate
                 .unwrap_or(if pacing.legacy_re { 1.0 } else { 0.0 }),
             suspended: AtomicBool::new(false),
-            startup_grant_spent: AtomicBool::new(false),
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
             takeover,
@@ -24429,29 +24426,11 @@ impl TranscodeManager {
                 index.produced_playable_end_ms(),
             )
         };
-        // Spend the startup grant the moment the floor is reached, and never
-        // give it back. A retry empties the index; the grant is not renewed by
-        // that, or a wedged producer under a watchdog would spend one per
-        // restart while its viewer sits paused.
-        //
-        // `playlist_published` is required alongside the floor because the two
-        // are different notions of published. The index is filled from
-        // ffmpeg's own `index.m3u8` as fast as it is written, so a burst-rate
-        // producer can pass twelve seconds of media before any client has
-        // fetched a playlist — and a prepublication retry after that point
-        // would find the grant already spent and start a session no client can
-        // reach. The grant is spent when the client could actually have
-        // played, not when the encoder ran.
-        if session.playlist_published.load(Relaxed)
-            && published_end_ms.unwrap_or(0).max(0) / 1_000 >= EXPLICIT_STARTUP_FLOOR_SECS
-        {
-            session.startup_grant_spent.store(true, Relaxed);
-        }
         let suspended = session.suspended.load(Relaxed);
         let evaluation = evaluate_flow(FlowInputs {
             physical_ahead: ahead,
             published_end_ms,
-            startup_grant_spent: session.startup_grant_spent.load(Relaxed),
+            startup_protected: lease.startup.protects_from_time_hold(),
             media_origin_ms: (session.media_origin_seconds * 1_000.0).round() as i64,
             lease_mode: lease.mode,
             demand: lease.demand.as_ref(),
@@ -25624,7 +25603,7 @@ pub(crate) struct HlsDeliveryFixture {
 
 #[cfg(test)]
 impl HlsDeliveryFixture {
-    /// Put the session past `EXPLICIT_STARTUP_FLOOR_SECS` of published media.
+    /// Mark this synthetic session as having presented media to its client.
     ///
     /// A fixture session has an empty segment index, which is exactly the
     /// shape of a session that has not started — and a `hold` from a client
@@ -25639,18 +25618,16 @@ impl HlsDeliveryFixture {
             index: 0,
             name: "seg00000.ts".into(),
             start_ms: 0,
-            end_ms: EXPLICIT_STARTUP_FLOOR_SECS * 1_000,
+            end_ms: i64::from(plurx_core::transcode::COPY_PUBLISH_GATE_SECS) * 1_000,
             bytes: 0,
             pruned: false,
         });
         index.revision = index.revision.saturating_add(1);
         drop(index);
-        // A started session is one a client could have played: the playlist is
-        // open and the startup grant is spent. Seeding only the index would
-        // leave the two flow-control readers disagreeing, because the grant is
-        // latched from publication and not from the encoder's own output.
+        // A started fixture is one whose actor has accepted presentation, not
+        // merely one whose producer filled the old publication floor.
         self.session.playlist_published.store(true, Relaxed);
-        self.session.startup_grant_spent.store(true, Relaxed);
+        self.session.control.mark_startup_presented_for_test().await;
     }
 
     /// Publish a producer-less session under `session_id`, serving whatever
@@ -26266,7 +26243,6 @@ fn test_session_with_control(
         delivery: Meter::new(),
         readrate: 0.0,
         suspended: AtomicBool::new(false),
-        startup_grant_spent: AtomicBool::new(false),
         suspended_at: Mutex::new(None),
         suspend_count: AtomicU64::new(0),
         takeover: None,
@@ -32066,7 +32042,7 @@ pub(crate) mod tests {
                     global_max_bytes: 0,
                 },
                 currently_suspended: true,
-                startup_grant_spent: true,
+                startup_protected: false,
             })
         };
         let stale = flow(&demand);
@@ -32125,7 +32101,7 @@ pub(crate) mod tests {
                 published_end_ms: Some(80_000),
                 // Pre-existing coverage: the startup grant is already spent, so
                 // these assertions are about steady-state flow control.
-                startup_grant_spent: true,
+                startup_protected: false,
                 media_origin_ms: 100_000,
                 lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
                 demand: Some(&demand),
@@ -32207,7 +32183,7 @@ pub(crate) mod tests {
                 bytes: 1_000,
             }),
             published_end_ms: Some(80_000),
-            startup_grant_spent: true,
+            startup_protected: false,
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&loaded_demand),
@@ -32252,7 +32228,7 @@ pub(crate) mod tests {
                 bytes: 1_000,
             }),
             published_end_ms: Some(20_000),
-            startup_grant_spent: true,
+            startup_protected: false,
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
@@ -32312,7 +32288,7 @@ pub(crate) mod tests {
             published_end_ms: Some(80_000),
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
-            startup_grant_spent: true,
+            startup_protected: false,
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
@@ -32338,7 +32314,7 @@ pub(crate) mod tests {
             published_end_ms: Some(80_000),
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
-            startup_grant_spent: true,
+            startup_protected: false,
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
@@ -32370,7 +32346,7 @@ pub(crate) mod tests {
             published_end_ms: Some(120_000),
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
-            startup_grant_spent: true,
+            startup_protected: false,
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
@@ -32393,7 +32369,7 @@ pub(crate) mod tests {
             published_end_ms: Some(10_000_000),
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
-            startup_grant_spent: true,
+            startup_protected: false,
             media_origin_ms: 0,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
@@ -32447,7 +32423,7 @@ pub(crate) mod tests {
             evaluate_flow(FlowInputs {
                 physical_ahead: None,
                 published_end_ms,
-                startup_grant_spent: false,
+                startup_protected: true,
                 media_origin_ms,
                 lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
                 demand: Some(demand),
@@ -32467,7 +32443,7 @@ pub(crate) mod tests {
                     bytes: 0,
                 }),
                 published_end_ms: Some(published_end_ms),
-                startup_grant_spent: false,
+                startup_protected: true,
                 media_origin_ms,
                 lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
                 demand: Some(demand),
@@ -32489,19 +32465,19 @@ pub(crate) mod tests {
              enforce one releases below the floor it would be guarding"
         );
 
-        // The floor is an exit, not a state: it stops applying at exactly the
-        // point where there is a playlist for the hold to be about.
-        let below_floor = starting(&demand, 0, Some(EXPLICIT_STARTUP_FLOOR_SECS * 1_000 - 1));
-        assert_eq!(below_floor.hold, None);
-        assert_eq!(below_floor.production_target_seconds, None);
-
-        let at_floor = starting(&demand, 0, Some(EXPLICIT_STARTUP_FLOOR_SECS * 1_000));
+        // The incident trace: 32 seconds produced, 20 seconds fetched, no
+        // presentation progress. Publication and buffering are observations,
+        // not presentation evidence, so neither may create a time/demand hold.
+        let mut incident_trace = demand.clone();
+        incident_trace.position_ms = 0;
+        incident_trace.buffered_from_ms = Some(0);
+        incident_trace.buffered_through_ms = 20_000;
+        let published_burst = starting_with_ahead(&incident_trace, 0, 32_000, false);
         assert_eq!(
-            at_floor.hold.map(|hold| hold.reason),
-            Some(AheadHoldReason::Demand),
-            "once the floor is published a pause is a pause again"
+            published_burst.hold, None,
+            "32 s published / 20 s fetched / 0 ms presented remains startup-protected"
         );
-        assert_eq!(at_floor.production_target_seconds, Some(0));
+        assert_eq!(published_burst.production_target_seconds, None);
 
         // A mid-film start is the same session with a non-zero media origin.
         // `published_end_ms` is session-relative (see `ahead_of`), so the floor
@@ -32524,22 +32500,21 @@ pub(crate) mod tests {
         let mid_running = starting_with_ahead(&mid_film, 90_000, 8_000, false);
         assert_eq!(
             mid_running.hold, None,
-            "a mid-film start below the floor is still a start"
+            "a mid-film start awaiting presentation is still a start"
         );
 
         // **The quadrant that reinstated the deadlock under another name.**
         // `time_release_threshold` releases a suspended session at half its
-        // target, which is below the floor, so a starting session suspended
-        // for one tick used to come back to a resume line it could never
-        // cross: stopped producers publish nothing, so the ahead never falls,
-        // and a holding client's anchor never advances. Held below the floor,
-        // the playlist never opens and the request waiting on it 503s.
+        // target, so a starting session suspended for one tick used to come
+        // back to a resume line it could never cross: stopped producers
+        // publish nothing, so the ahead never falls, and a holding client's
+        // anchor never advances.
         for published_ms in [2_000, 8_000, 10_000] {
             let resumed = starting_with_ahead(&demand, 0, published_ms, true);
             assert_eq!(
                 resumed.hold, None,
                 "a starting session suspended at {published_ms} ms must be \
-                 able to reach the floor, not be pinned under it"
+                 remain runnable until presentation, not be pinned"
             );
         }
 
@@ -32551,7 +32526,7 @@ pub(crate) mod tests {
                 bytes: limits.max_bytes + 1,
             }),
             published_end_ms: Some(2_000),
-            startup_grant_spent: false,
+            startup_protected: true,
             media_origin_ms: 0,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
@@ -32566,12 +32541,12 @@ pub(crate) mod tests {
             "the startup grant suspends the clock, never the disk"
         );
 
-        // The grant is spent once. A producer retry empties the index, and the
-        // floor must not be handed back with it.
+        // Presentation is spent once. A producer retry empties the index, and
+        // must not hand startup protection back.
         let retried = evaluate_flow(FlowInputs {
             physical_ahead: None,
             published_end_ms: None,
-            startup_grant_spent: true,
+            startup_protected: false,
             media_origin_ms: 0,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
@@ -32592,7 +32567,7 @@ pub(crate) mod tests {
         let full_disk = evaluate_flow(FlowInputs {
             physical_ahead: None,
             published_end_ms: None,
-            startup_grant_spent: false,
+            startup_protected: true,
             media_origin_ms: 0,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
@@ -32642,7 +32617,7 @@ pub(crate) mod tests {
             published_end_ms: Some(65_000),
             // Pre-existing coverage: the startup grant is already spent, so
             // these assertions are about steady-state flow control.
-            startup_grant_spent: true,
+            startup_protected: false,
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
             demand: Some(&demand),
@@ -37428,7 +37403,6 @@ pub(crate) mod tests {
             delivery: Meter::new(),
             readrate: 0.0,
             suspended: AtomicBool::new(false),
-            startup_grant_spent: AtomicBool::new(false),
             suspended_at: Mutex::new(None),
             suspend_count: AtomicU64::new(0),
             takeover: None,

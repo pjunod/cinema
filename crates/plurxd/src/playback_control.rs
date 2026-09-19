@@ -85,6 +85,11 @@ const PRODUCER_PROGRESS_BUDGET: Duration = Duration::from_secs(10);
 /// Bound for exact-exit classification. It remains action-passive for legacy
 /// actors and decision-bearing only in the opted-in prepublication scope.
 const PRODUCER_EXIT_CLASSIFICATION_BUDGET: Duration = Duration::from_secs(5);
+/// Maximum time a served rolling playlist may wait for accepted presentation
+/// progress. Playlist reloads and producer retries do not renew this budget.
+pub(crate) const ROLLING_PRESENTATION_STARTUP_BUDGET: Duration = Duration::from_secs(30);
+/// Minimum forward media-clock movement that proves presentation began.
+pub(crate) const ROLLING_PRESENTATION_PROGRESS_MS: i64 = 250;
 
 /// Preserve the ingress's absolute exchange deadline across a cluster hop.
 /// The cap also prevents a malformed trusted-peer envelope from extending the
@@ -2895,6 +2900,41 @@ pub(crate) struct PlaybackDemandSnapshot {
     pub acknowledgement: Option<ActionAcknowledgement>,
 }
 
+/// Actor-owned admission state exposed to flow control and diagnostics.
+///
+/// The actor itself is scoped to one generation and owner epoch. The retained
+/// sequence and progress baseline therefore cannot be replayed into a
+/// successor presentation even though the wire request does not repeat those
+/// coordinates inside [`PlaybackDemandSnapshot`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RollingStartupPhase {
+    AwaitingPresentation,
+    Presented,
+    Expired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RollingStartupSnapshot {
+    pub phase: RollingStartupPhase,
+    pub remaining: Option<Duration>,
+    pub presentation_progress_seen: bool,
+}
+
+impl RollingStartupSnapshot {
+    pub(crate) fn protects_from_time_hold(self) -> bool {
+        self.phase == RollingStartupPhase::AwaitingPresentation
+    }
+
+    pub(crate) fn status(self) -> &'static str {
+        match self.phase {
+            RollingStartupPhase::AwaitingPresentation => "awaiting_presentation",
+            RollingStartupPhase::Presented => "presented",
+            RollingStartupPhase::Expired => "expired",
+        }
+    }
+}
+
 impl From<&ControlRequestV1> for PlaybackDemandSnapshot {
     fn from(request: &ControlRequestV1) -> Self {
         Self {
@@ -4219,6 +4259,10 @@ pub(crate) struct RollingLeaseSnapshot {
     /// every caller that needs to ask "is this work still wanted" already has
     /// a reason to hold the lease.
     pub settled_target: Option<SettledTarget>,
+    /// Presentation admission is distinct from server publication. Flow
+    /// control may suspend on bytes/global limits while this is awaiting, but
+    /// it must not create a time hold merely because the producer burst first.
+    pub startup: RollingStartupSnapshot,
     pub delivery: RollingDeliverySnapshot,
     pub retired: bool,
     /// Immutable cause of the actor's first terminal transition. `None` is
@@ -5783,6 +5827,7 @@ pub(crate) enum RollingTerminalCause {
     End,
     AuthorityFence,
     LeaseExpired,
+    StartupExpired,
 }
 
 impl RollingTerminalCause {
@@ -5791,6 +5836,7 @@ impl RollingTerminalCause {
             Self::End => "ended",
             Self::AuthorityFence => "authority_fenced",
             Self::LeaseExpired => "expired",
+            Self::StartupExpired => "startup_expired",
         }
     }
 
@@ -5799,6 +5845,7 @@ impl RollingTerminalCause {
             Self::End => 0,
             Self::AuthorityFence => 1,
             Self::LeaseExpired => 2,
+            Self::StartupExpired => 3,
         }
     }
 
@@ -5807,6 +5854,7 @@ impl RollingTerminalCause {
             Self::End => 1,
             Self::AuthorityFence => 2,
             Self::LeaseExpired => 3,
+            Self::StartupExpired => 4,
         }
     }
 
@@ -5815,6 +5863,7 @@ impl RollingTerminalCause {
             1 => Some(Self::End),
             2 => Some(Self::AuthorityFence),
             3 => Some(Self::LeaseExpired),
+            4 => Some(Self::StartupExpired),
             _ => None,
         }
     }
@@ -7410,6 +7459,10 @@ enum RollingControlCommand {
     BeginProducerAttempt {
         reply: tokio::sync::oneshot::Sender<Result<u64, ProducerAttemptRejection>>,
     },
+    #[cfg(test)]
+    MarkStartupPresented {
+        reply: tokio::sync::oneshot::Sender<()>,
+    },
     RegisterProducerExecutor {
         reply: tokio::sync::oneshot::Sender<Result<(), ProducerAttemptRejection>>,
     },
@@ -7571,7 +7624,9 @@ impl RollingControlCommand {
     fn metric_index(&self) -> Option<usize> {
         match self {
             #[cfg(test)]
-            Self::Renew { .. } | Self::SetRenewalForTest { .. } => None,
+            Self::Renew { .. }
+            | Self::MarkStartupPresented { .. }
+            | Self::SetRenewalForTest { .. } => None,
             Self::Control { .. } => Some(0),
             #[cfg(test)]
             Self::BeginProducerAttempt { .. } => Some(1),
@@ -8213,6 +8268,142 @@ struct PrepublicationProducerControl {
     completion: ProducerCompletionState,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct StartupPositionObservation {
+    generation: String,
+    owner_epoch: u64,
+    producer_attempt: u64,
+    accepted_sequence: u64,
+    position_ms: i64,
+    timeline_sequence: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RollingStartupState {
+    AwaitingPresentation {
+        first_served_at: Option<Instant>,
+        baseline: Option<StartupPositionObservation>,
+        timeline_sequence: u64,
+    },
+    Presented,
+    Expired,
+}
+
+impl RollingStartupState {
+    fn new() -> Self {
+        Self::AwaitingPresentation {
+            first_served_at: None,
+            baseline: None,
+            timeline_sequence: 0,
+        }
+    }
+
+    fn activate_at(&mut self, now: Instant) {
+        if let Self::AwaitingPresentation {
+            first_served_at, ..
+        } = self
+        {
+            first_served_at.get_or_insert(now);
+        }
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        match self {
+            Self::AwaitingPresentation {
+                first_served_at: Some(first_served_at),
+                ..
+            } => first_served_at.checked_add(ROLLING_PRESENTATION_STARTUP_BUDGET),
+            Self::AwaitingPresentation {
+                first_served_at: None,
+                ..
+            }
+            | Self::Presented
+            | Self::Expired => None,
+        }
+    }
+
+    fn observe_control(
+        &mut self,
+        generation: &str,
+        owner_epoch: u64,
+        producer_attempt: u64,
+        accepted_sequence: u64,
+        demand: &PlaybackDemandSnapshot,
+    ) {
+        let Self::AwaitingPresentation {
+            first_served_at,
+            baseline,
+            timeline_sequence,
+        } = self
+        else {
+            return;
+        };
+        if first_served_at.is_none() {
+            return;
+        }
+        if demand.seek_target_ms.is_some() || demand.render_state == RenderState::Seeking {
+            *timeline_sequence = accepted_sequence;
+            *baseline = None;
+            return;
+        }
+        if demand.demand != PlaybackDemand::Active || demand.render_state != RenderState::Rendering
+        {
+            *baseline = None;
+            return;
+        }
+        let current = StartupPositionObservation {
+            generation: generation.to_owned(),
+            owner_epoch,
+            producer_attempt,
+            accepted_sequence,
+            position_ms: demand.position_ms,
+            timeline_sequence: *timeline_sequence,
+        };
+        let presented = baseline.as_ref().is_some_and(|previous| {
+            current.generation == previous.generation
+                && current.owner_epoch == previous.owner_epoch
+                && current.producer_attempt == previous.producer_attempt
+                && current.accepted_sequence > previous.accepted_sequence
+                && current.timeline_sequence == previous.timeline_sequence
+                && current.position_ms.saturating_sub(previous.position_ms)
+                    >= ROLLING_PRESENTATION_PROGRESS_MS
+        });
+        if presented {
+            *self = Self::Presented;
+        } else {
+            *baseline = Some(current);
+        }
+    }
+
+    fn snapshot(&self, now: Instant) -> RollingStartupSnapshot {
+        match self {
+            Self::AwaitingPresentation {
+                first_served_at,
+                baseline,
+                ..
+            } => RollingStartupSnapshot {
+                phase: RollingStartupPhase::AwaitingPresentation,
+                remaining: first_served_at.and_then(|served| {
+                    served
+                        .checked_add(ROLLING_PRESENTATION_STARTUP_BUDGET)
+                        .map(|deadline| deadline.saturating_duration_since(now))
+                }),
+                presentation_progress_seen: baseline.is_some(),
+            },
+            Self::Presented => RollingStartupSnapshot {
+                phase: RollingStartupPhase::Presented,
+                remaining: None,
+                presentation_progress_seen: true,
+            },
+            Self::Expired => RollingStartupSnapshot {
+                phase: RollingStartupPhase::Expired,
+                remaining: Some(Duration::ZERO),
+                presentation_progress_seen: false,
+            },
+        }
+    }
+}
+
 /// Immutable response-admission contract shared with a process-local session.
 ///
 /// For a compatibility-owned producer this supplies both the presentation
@@ -8262,6 +8453,7 @@ struct RollingControlActor {
     #[cfg_attr(not(test), allow(dead_code))]
     retained_capabilities: Option<DynamicCapabilities>,
     settled_target: Option<SettledTarget>,
+    startup: RollingStartupState,
     delivery: RollingDeliverySnapshot,
     producer_progress_at: Option<Instant>,
     producer_exit_at: Option<Instant>,
@@ -8370,6 +8562,7 @@ impl RollingControlActor {
             demand: None,
             retained_capabilities: None,
             settled_target: None,
+            startup: RollingStartupState::new(),
             delivery: RollingDeliverySnapshot::default(),
             producer_progress_at: None,
             producer_exit_at: None,
@@ -8443,6 +8636,7 @@ impl RollingControlActor {
             last_renewal_kind: self.last_renewal_kind,
             demand: self.demand.clone(),
             settled_target: self.settled_target,
+            startup: self.startup.snapshot(now),
             delivery,
             retired: self.retired,
             terminal: self.terminal,
@@ -8703,8 +8897,12 @@ impl RollingControlActor {
         // Without this the action deadline would only be noticed the next time
         // something else happened to wake the actor — which, for a signal that
         // never comes back, is exactly never.
-        self.pending_producer_action
-            .map_or(deadline, |action| deadline.min(action.deadline))
+        let deadline = self
+            .pending_producer_action
+            .map_or(deadline, |action| deadline.min(action.deadline));
+        self.startup
+            .deadline()
+            .map_or(deadline, |startup| deadline.min(startup))
     }
 
     /// A retry is installed while its predecessor's retained Retry decision
@@ -9071,6 +9269,13 @@ impl RollingControlActor {
         };
         if disposition == ControlDisposition::Accepted {
             self.mode = RollingLeaseMode::Explicit;
+            self.startup.observe_control(
+                &request.generation,
+                request.owner_epoch,
+                self.delivery.producer_attempt,
+                accepted_sequence,
+                &request.snapshot,
+            );
             self.settled_target = Some(SettledTarget {
                 sequence: accepted_sequence,
                 anchor_ms: request.snapshot.buffer_anchor_ms(),
@@ -10536,7 +10741,8 @@ impl RollingControlActor {
         if self.has_terminal_prepublication_failure() {
             return Err(ResponsePublicationRejection::DecisionCommitted);
         }
-        match publication.binding {
+        let video_playlist = publication.object == RollingResponseObject::VideoMediaPlaylist;
+        let authorization = match publication.binding {
             RollingResponsePublicationBinding::GenerationMetadata {
                 presentation_contract_fingerprint,
             } => {
@@ -10610,72 +10816,77 @@ impl RollingControlActor {
                     return Err(ResponsePublicationRejection::StaleAttempt);
                 }
                 if self.prepublication.is_none() {
-                    return Ok(RollingResponseAuthorization {
+                    Ok(RollingResponseAuthorization {
                         first_producer_media_publication: false,
-                    });
-                }
-                if self.pending_decision.is_some()
-                    && self
-                        .prepublication
-                        .as_ref()
-                        .is_none_or(|control| !control.producer_media_published)
-                {
-                    return Err(ResponsePublicationRejection::DecisionCommitted);
-                }
-                // RetainPublished keeps exact bytes at or behind the frozen
-                // frontier readable, but a playlist reload is fresh demand for
-                // a mutable manifest. If the failure verdict wins this actor
-                // transaction, the caller must publish the typed ProducerEnded
-                // status instead of replaying a partial EVENT playlist.
-                if publication.object == RollingResponseObject::VideoMediaPlaylist
-                    && self.has_published_producer_failure_proposal()
-                {
-                    return Err(ResponsePublicationRejection::DecisionCommitted);
-                }
-                if self.has_published_producer_failure_proposal()
-                    && media_segment_index.is_some_and(|index| {
-                        self.delivery
-                            .published_segment
-                            .is_none_or(|published| index > published)
                     })
-                {
-                    return Err(ResponsePublicationRejection::DecisionCommitted);
+                } else {
+                    if self.pending_decision.is_some()
+                        && self
+                            .prepublication
+                            .as_ref()
+                            .is_none_or(|control| !control.producer_media_published)
+                    {
+                        return Err(ResponsePublicationRejection::DecisionCommitted);
+                    }
+                    // RetainPublished keeps exact bytes at or behind the frozen
+                    // frontier readable, but a playlist reload is fresh demand for
+                    // a mutable manifest. If the failure verdict wins this actor
+                    // transaction, the caller must publish the typed ProducerEnded
+                    // status instead of replaying a partial EVENT playlist.
+                    if publication.object == RollingResponseObject::VideoMediaPlaylist
+                        && self.has_published_producer_failure_proposal()
+                    {
+                        return Err(ResponsePublicationRejection::DecisionCommitted);
+                    }
+                    if self.has_published_producer_failure_proposal()
+                        && media_segment_index.is_some_and(|index| {
+                            self.delivery
+                                .published_segment
+                                .is_none_or(|published| index > published)
+                        })
+                    {
+                        return Err(ResponsePublicationRejection::DecisionCommitted);
+                    }
+                    if self
+                        .producer_process_exit_due
+                        .is_some_and(|due| due.producer_attempt == producer_attempt)
+                    {
+                        let _ = self.maybe_commit_producer_decision_at(now);
+                        return Err(ResponsePublicationRejection::DecisionCommitted);
+                    }
+                    if self.producer_progress_deadline.is_some_and(|deadline| {
+                        deadline.producer_attempt == producer_attempt && now > deadline.instant
+                    }) {
+                        let _ = self.settle_producer_deadline_at(now);
+                    }
+                    if self.producer_deadline_due.is_some_and(|due| {
+                        due.producer_attempt == producer_attempt && now > due.deadline
+                    }) {
+                        let _ = self.maybe_commit_producer_decision_at(now);
+                        return Err(ResponsePublicationRejection::DecisionCommitted);
+                    }
+                    let control = self
+                        .prepublication
+                        .as_mut()
+                        .expect("pre-publication policy was present");
+                    let first_producer_media_publication = !control.producer_media_published;
+                    control.producer_media_published = true;
+                    if matches!(&control.retry_state, PrepublicationRetryState::Available(_)) {
+                        control.retry_state = PrepublicationRetryState::ClosedByPublication;
+                    }
+                    if first_producer_media_publication {
+                        self.authorized_install = None;
+                    }
+                    Ok(RollingResponseAuthorization {
+                        first_producer_media_publication,
+                    })
                 }
-                if self
-                    .producer_process_exit_due
-                    .is_some_and(|due| due.producer_attempt == producer_attempt)
-                {
-                    let _ = self.maybe_commit_producer_decision_at(now);
-                    return Err(ResponsePublicationRejection::DecisionCommitted);
-                }
-                if self.producer_progress_deadline.is_some_and(|deadline| {
-                    deadline.producer_attempt == producer_attempt && now > deadline.instant
-                }) {
-                    let _ = self.settle_producer_deadline_at(now);
-                }
-                if self.producer_deadline_due.is_some_and(|due| {
-                    due.producer_attempt == producer_attempt && now > due.deadline
-                }) {
-                    let _ = self.maybe_commit_producer_decision_at(now);
-                    return Err(ResponsePublicationRejection::DecisionCommitted);
-                }
-                let control = self
-                    .prepublication
-                    .as_mut()
-                    .expect("pre-publication policy was present");
-                let first_producer_media_publication = !control.producer_media_published;
-                control.producer_media_published = true;
-                if matches!(&control.retry_state, PrepublicationRetryState::Available(_)) {
-                    control.retry_state = PrepublicationRetryState::ClosedByPublication;
-                }
-                if first_producer_media_publication {
-                    self.authorized_install = None;
-                }
-                Ok(RollingResponseAuthorization {
-                    first_producer_media_publication,
-                })
             }
+        };
+        if authorization.is_ok() && video_playlist {
+            self.startup.activate_at(now);
         }
+        authorization
     }
 
     fn admit_producer_retry_at(
@@ -11059,6 +11270,9 @@ impl RollingControlActor {
             .terminal_projection
             .store(cause.projection(), Ordering::Release);
         self.expiration_claimed = cause == RollingTerminalCause::LeaseExpired;
+        if cause == RollingTerminalCause::StartupExpired {
+            self.startup = RollingStartupState::Expired;
+        }
         self.producer_progress_deadline = None;
         self.producer_deadline_due = None;
         self.producer_process_exit_due = None;
@@ -11079,7 +11293,9 @@ impl RollingControlActor {
             RollingTerminalCause::LeaseExpired => {
                 ROLLING_LEASE_EXPIRATIONS.fetch_add(1, Ordering::Relaxed);
             }
-            RollingTerminalCause::End | RollingTerminalCause::AuthorityFence => {
+            RollingTerminalCause::End
+            | RollingTerminalCause::AuthorityFence
+            | RollingTerminalCause::StartupExpired => {
                 ROLLING_LEASE_RETIREMENTS.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -11090,6 +11306,17 @@ impl RollingControlActor {
         let snapshot = self.snapshot_at(now);
         if self.retired {
             RollingExpiryClaim::Retired(snapshot)
+        } else if self
+            .startup
+            .deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            let RollingTerminalOutcome::Won(RollingTerminalCause::StartupExpired) =
+                self.terminate(RollingTerminalCause::StartupExpired)
+            else {
+                unreachable!("a live expired startup must win its terminal transition");
+            };
+            RollingExpiryClaim::Claimed(self.snapshot_at(now))
         } else if snapshot.expired() {
             let RollingTerminalOutcome::Won(RollingTerminalCause::LeaseExpired) =
                 self.terminate(RollingTerminalCause::LeaseExpired)
@@ -11604,6 +11831,11 @@ impl RollingControlActor {
                     self.last_renewal = at;
                     self.last_renewal_kind = kind;
                     transition.lease_deadline = self.deadline();
+                    let _ = reply.send(());
+                }
+                #[cfg(test)]
+                RollingControlCommand::MarkStartupPresented { reply } => {
+                    self.startup = RollingStartupState::Presented;
                     let _ = reply.send(());
                 }
             }
@@ -13241,6 +13473,15 @@ impl RollingControlHandle {
             .expect("rolling actor available");
         response.await.expect("rolling actor reply");
     }
+
+    #[cfg(test)]
+    pub(crate) async fn mark_startup_presented_for_test(&self) {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.enqueue_command(RollingControlCommand::MarkStartupPresented { reply })
+            .await
+            .expect("rolling actor available");
+        response.await.expect("rolling actor reply");
+    }
 }
 
 fn node_hash(node_id: &str) -> String {
@@ -13364,9 +13605,9 @@ static ROLLING_PRODUCER_DEADLINE_OBSERVATIONS: [AtomicU64; 3] = [const { AtomicU
 static ROLLING_PRODUCER_EXIT_CLASSIFICATIONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static ROLLING_CONTROL_COMMANDS: [AtomicU64; 24] = [const { AtomicU64::new(0) }; 24];
 static ROLLING_PRODUCER_ACTION_DEADLINES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
-/// End won/already-terminal, authority-fence won/already-terminal, then lease
-/// expiry won/already-terminal.
-static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
+/// End, authority-fence, lease-expiry, and presentation-startup expiry; each
+/// records won/already-terminal independently.
+static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 
 const RELAY_VALID_RESPONSE: usize = 0;
 const RELAY_TRANSPORT_ERROR: usize = 1;
@@ -14075,7 +14316,7 @@ pub(crate) fn prometheus() -> String {
         "# HELP plurx_playback_rolling_terminal_events_total Rolling-session terminal events by bounded cause and immutable first-winner outcome.\n\
          # TYPE plurx_playback_rolling_terminal_events_total counter\n",
     );
-    for (event_index, event) in ["end", "authority_fence", "lease_expired"]
+    for (event_index, event) in ["end", "authority_fence", "lease_expired", "startup_expired"]
         .iter()
         .enumerate()
     {
@@ -19816,7 +20057,9 @@ mod tests {
             let outcome = match cause {
                 RollingTerminalCause::End => handle.end().await,
                 RollingTerminalCause::AuthorityFence => handle.authority_fence().await,
-                RollingTerminalCause::LeaseExpired => unreachable!(),
+                RollingTerminalCause::LeaseExpired | RollingTerminalCause::StartupExpired => {
+                    unreachable!()
+                }
             }
             .expect("terminal verdict");
             assert_eq!(
@@ -24932,6 +25175,203 @@ mod tests {
         let mut actor = prepublication_actor(now);
         assert_eq!(actor.register_producer_executor_at(), Ok(()));
         actor
+    }
+
+    #[test]
+    fn mkv_hls_startup_progress_is_bound_to_timeline_attempt_and_sequence() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert_eq!(actor.begin_producer_attempt_at(started), Ok(1));
+        actor.startup.activate_at(started);
+
+        let mut first = request();
+        first.sequence = 1;
+        first.position_ms = 10_000;
+        first.buffered_through_ms = 25_000;
+        let first_outcome = actor
+            .control_at(started + Duration::from_millis(10), owned_control(&first))
+            .expect("first rendering observation");
+        assert_eq!(
+            first_outcome.lease.startup.phase,
+            RollingStartupPhase::AwaitingPresentation
+        );
+        assert!(first_outcome.lease.startup.presentation_progress_seen);
+
+        let replay = actor
+            .control_at(started + Duration::from_millis(20), owned_control(&first))
+            .expect("exact replay");
+        assert_eq!(replay.disposition, ControlDisposition::Replay);
+        assert_eq!(
+            replay.lease.startup.phase,
+            RollingStartupPhase::AwaitingPresentation,
+            "a duplicated accepted sequence is not new presentation evidence"
+        );
+
+        // A source-only retry keeps the original deadline but cannot stitch
+        // its first position sample to the predecessor attempt.
+        assert_eq!(
+            actor.begin_producer_attempt_at(started + Duration::from_millis(30)),
+            Ok(2)
+        );
+        let mut successor_first = first.clone();
+        successor_first.sequence = 2;
+        successor_first.position_ms = 10_300;
+        let successor_first = actor
+            .control_at(
+                started + Duration::from_millis(40),
+                owned_control(&successor_first),
+            )
+            .expect("successor's first rendering observation");
+        assert_eq!(
+            successor_first.lease.startup.phase,
+            RollingStartupPhase::AwaitingPresentation,
+            "progress cannot be assembled across producer attempts"
+        );
+
+        let mut successor_progress = first.clone();
+        successor_progress.sequence = 3;
+        successor_progress.position_ms = 10_600;
+        let presented = actor
+            .control_at(
+                started + Duration::from_millis(50),
+                owned_control(&successor_progress),
+            )
+            .expect("successor's advancing rendering observation");
+        assert_eq!(
+            presented.lease.startup.phase,
+            RollingStartupPhase::Presented
+        );
+        assert_eq!(presented.lease.startup.remaining, None);
+    }
+
+    #[test]
+    fn mkv_hls_startup_seek_jump_resets_evidence_without_renewing_deadline() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        actor.startup.activate_at(started);
+
+        let mut before_seek = request();
+        before_seek.sequence = 1;
+        before_seek.position_ms = 5_000;
+        actor
+            .control_at(
+                started + Duration::from_millis(10),
+                owned_control(&before_seek),
+            )
+            .expect("pre-seek observation");
+
+        let mut seek = before_seek.clone();
+        seek.sequence = 2;
+        seek.position_ms = 90_000;
+        seek.seek_target_ms = Some(90_000);
+        seek.render_state = RenderState::Seeking;
+        let seeking = actor
+            .control_at(started + Duration::from_millis(20), owned_control(&seek))
+            .expect("seek observation");
+        assert_eq!(
+            seeking.lease.startup.phase,
+            RollingStartupPhase::AwaitingPresentation
+        );
+        assert!(!seeking.lease.startup.presentation_progress_seen);
+
+        let mut settled = before_seek.clone();
+        settled.sequence = 3;
+        settled.position_ms = 90_000;
+        let settled = actor
+            .control_at(started + Duration::from_millis(30), owned_control(&settled))
+            .expect("first settled post-seek observation");
+        assert_eq!(
+            settled.lease.startup.phase,
+            RollingStartupPhase::AwaitingPresentation,
+            "the requested seek position alone cannot spend startup"
+        );
+        assert_eq!(
+            settled.lease.startup.remaining,
+            Some(ROLLING_PRESENTATION_STARTUP_BUDGET - Duration::from_millis(30)),
+            "a seek resets only the position baseline, not the deadline"
+        );
+
+        let mut progress = before_seek;
+        progress.sequence = 4;
+        progress.position_ms = 90_300;
+        let presented = actor
+            .control_at(
+                started + Duration::from_millis(40),
+                owned_control(&progress),
+            )
+            .expect("post-seek presentation progress");
+        assert_eq!(
+            presented.lease.startup.phase,
+            RollingStartupPhase::Presented
+        );
+    }
+
+    #[test]
+    fn mkv_hls_startup_deadline_starts_once_on_first_video_playlist() {
+        let started = Instant::now();
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                InitialProducerPolicy::software(
+                    "presentation-startup".to_owned(),
+                    PRODUCER_PROGRESS_BUDGET,
+                ),
+            ),
+            Ok(1)
+        );
+
+        actor
+            .authorize_response_publication_at(
+                started,
+                RollingResponsePublication::attempt_status(RollingResponseObject::SessionStatus, 1),
+            )
+            .expect("status publication");
+        assert_eq!(actor.snapshot_at(started).startup.remaining, None);
+
+        let first_served_at = started + Duration::from_secs(1);
+        actor
+            .authorize_response_publication_at(
+                first_served_at,
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::VideoMediaPlaylist,
+                    1,
+                    None,
+                ),
+            )
+            .expect("first video playlist");
+        assert_eq!(
+            actor.snapshot_at(first_served_at).startup.remaining,
+            Some(ROLLING_PRESENTATION_STARTUP_BUDGET)
+        );
+
+        actor
+            .authorize_response_publication_at(
+                started + Duration::from_secs(10),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::VideoMediaPlaylist,
+                    1,
+                    None,
+                ),
+            )
+            .expect("playlist reload");
+        assert_eq!(
+            actor
+                .snapshot_at(started + Duration::from_secs(10))
+                .startup
+                .remaining,
+            Some(Duration::from_secs(21)),
+            "playlist reloads do not renew the admission budget"
+        );
+
+        let expiry = started + Duration::from_secs(31);
+        let RollingExpiryClaim::Claimed(expired) = actor.claim_expiry_at(expiry) else {
+            panic!("the startup deadline must retire an abandoned presentation");
+        };
+        assert_eq!(expired.terminal, Some(RollingTerminalCause::StartupExpired));
+        assert_eq!(expired.startup.phase, RollingStartupPhase::Expired);
     }
 
     #[test]
