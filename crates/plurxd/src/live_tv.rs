@@ -30,6 +30,8 @@ use crate::state::SystemInfo;
 pub(crate) mod dvr;
 pub(crate) mod guide;
 
+#[cfg(test)]
+mod atsc_audio_tests;
 pub(crate) mod schedule;
 #[cfg(all(test, target_os = "macos"))]
 mod videotoolbox_tests;
@@ -5767,11 +5769,13 @@ fn parse_probe_facts(bytes: &[u8]) -> Result<LiveSourceFacts, LiveTvError> {
         audio_sample_rate: audio
             .get("sample_rate")
             .and_then(serde_json::Value::as_str)
-            .and_then(|value| value.parse::<u32>().ok()),
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value > 0),
         audio_channels: audio
             .get("channels")
             .and_then(serde_json::Value::as_u64)
-            .and_then(|value| u8::try_from(value).ok()),
+            .and_then(|value| u8::try_from(value).ok())
+            .filter(|value| *value > 0),
         audio_layout: json_string(audio, "channel_layout"),
     })
 }
@@ -5959,7 +5963,13 @@ fn live_ffmpeg_command_for_input(
     command
         .args(["-hwaccel", "none"])
         .args(["-fflags", "+genpts+discardcorrupt"])
-        .args(live_probe_args());
+        .args(if plan.delivery.audio_action == LiveTrackAction::Copy {
+            // Copy needs complete codec parameters before the muxer header;
+            // the retained source probe does not configure this new demuxer.
+            ["-probesize", "2097152", "-analyzeduration", "2000000"]
+        } else {
+            live_probe_args()
+        });
     let audio_map = match input {
         LiveTvFfmpegInput::Tuner => {
             command.args(["-i", "pipe:0"]);
@@ -6172,8 +6182,17 @@ fn live_caption_args(encoder: Encoder) -> &'static [&'static str] {
 
 fn live_encoder_diagnostic(bytes: &[u8]) -> Option<&'static str> {
     let text = String::from_utf8_lossy(bytes).to_ascii_lowercase();
-    text.contains("unexpected end of sei nal unit parsing")
-        .then_some("VideoToolbox failed while inserting A/53 captions into H.264 SEI data")
+    if text.contains("unexpected end of sei nal unit parsing") {
+        Some("VideoToolbox failed while inserting A/53 captions into H.264 SEI data")
+    } else if text.contains("unsupported channel layout") {
+        Some("FFmpeg rejected the requested audio channel layout")
+    } else if text.contains("neither number of channels nor channel layout specified") {
+        Some("FFmpeg could not initialize live audio because the input channel layout was unknown")
+    } else if text.contains("sample rate not set") {
+        Some("FFmpeg could not mux live audio because the input sample rate was unknown")
+    } else {
+        None
+    }
 }
 
 async fn capture_live_stderr(
