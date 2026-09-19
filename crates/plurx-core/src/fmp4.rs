@@ -4839,7 +4839,7 @@ mod tests {
         }
     }
 
-    /// The Dexter WEB-DL shape: a valid 23-byte `hvcC` header with zero NAL
+    /// The reference episode I WEB-DL shape: a valid 23-byte `hvcC` header with zero NAL
     /// arrays, while VPS/SPS/PPS live only in the first sample. This is the
     /// only shape promotion fires on, and no encoder in the corpus produces
     /// it, so every test that needs it builds it.
@@ -6090,7 +6090,7 @@ mod tests {
         let (mut init, _, _) = read_all(&feed);
         let video = init.video().expect("HEVC video").clone();
 
-        // Reproduce the Dexter WEB-DL shape: a valid 23-byte hvcC header with
+        // Reproduce the reference episode I WEB-DL shape: a valid 23-byte hvcC header with
         // zero NAL arrays, while VPS/SPS/PPS live only in the first sample.
         let location = locate_hvcc(&init.bytes)
             .expect("locating hvcC")
@@ -8079,7 +8079,7 @@ mod tests {
         );
     }
 
-    /// Dexter: New Blood S01E01 ends its video at 57:11 but carries audio to
+    /// reference episode I S01E01 ends its video at 57:11 but carries audio to
     /// 57:56. ffmpeg puts the last video frames and that 45-second audio tail
     /// in one final fragment. The duration must cover every real sample, but
     /// publishing one 45-second segment also raises `TARGETDURATION` to 46 and
@@ -8163,7 +8163,7 @@ mod tests {
         assert_eq!(
             longest.ceil(),
             16.0,
-            "the Dexter-shaped tail raised TARGETDURATION above one sample of rounding"
+            "the long audio tail raised TARGETDURATION above one sample of rounding"
         );
         let claimed: f64 = published.iter().map(|item| item.seconds).sum();
         assert!(

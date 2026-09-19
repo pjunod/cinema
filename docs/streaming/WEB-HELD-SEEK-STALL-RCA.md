@@ -1,11 +1,11 @@
-# TRON held-seek stall — two commits, one source change, one recovery spent too early
+# reference film F held-seek stall — two commits, one source change, one recovery spent too early
 
 **Status:** implementation, adversarial review, and current-main qualification complete; fast-lane contract inventory updated, 2026-09-18
 **Incident:** 2026-09-18, approximately 04:17–04:25 UTC
 **Incident build:** `v0.3.0-2770-g6fb0901d`
 **Exact source:** `6fb0901d3d18c1b181f7299f4faddfb73994fd1a`
 
-Holding Right Arrow while watching *TRON: Ares* split one physical key hold
+Holding Right Arrow while watching *reference film F* split one physical key hold
 into two client seek commits. The first commit was superseded before it opened
 a server session or attached media; it did not cause the stall. The final
 attachment received media and built 9.6 seconds of runway, but recovery still
@@ -235,7 +235,7 @@ There is no relevant web or test diff between the original incident SHA and
 through from a passive presentation answer, commits `nudge()` after 350 ms,
 and leaves keyup outside seek ownership. This second incident is acceptance
 evidence for the previously-spent-recovery case, not additional proof of the
-TRON input branch.
+reference film F input branch.
 
 ## 4. Root cause — a refilled presentation spent recovery before its deadline
 
@@ -324,7 +324,7 @@ starts one tuner session at the final previewed channel. The existing
 `channel_coalesce_ms >= 350` assertion is not a valid held-key guarantee and
 must be replaced with behavioral fake-time coverage.
 
-This is a sibling-risk repair, not part of the TRON incident chain. Leaving it
+This is a sibling-risk repair, not part of the reference film F incident chain. Leaving it
 unchanged would preserve the same session-storm defect on another surface.
 
 ### 5.3 Reclassify from current evidence, then observe presentation

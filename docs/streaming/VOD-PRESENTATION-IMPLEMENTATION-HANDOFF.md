@@ -331,7 +331,7 @@ STATUS.html. **No deletions** (M8).
 Flag + VOD path (the `hls.vod` arm generalizes); build bump + doc claims
 + STATUS device rows; Swift is review-gated here, CI-compiled — run the
 adversarial-agent pass over the diff before handing to CI. Device matrix
-(plan §8 M5: the wedge title file 5836, DV P5, Dexter S01E01 audio tail,
+(plan §8 M5: the wedge title file 5836, DV P5, reference episode I S01E01 audio tail,
 >60 s deep pause, autoplay boundary, 30-min scrub torture) is a gpt
 protocol in STATUS.html with pass criteria phrased as observables (zero
 terminal screens, zero resume-behind, stall beacons only under induced

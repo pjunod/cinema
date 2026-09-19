@@ -3,9 +3,9 @@
 **Status:** ready for implementation; no runtime code built by this document
 · **Written:** 2026-09-16 UTC · **Executes:** Fable's F1–F10 review findings
 and the two follow-up safeguards in the
-[diagnosis, §1.2](AVATAR-SAFARI-DIAGNOSIS-AND-FIX.md).
+[diagnosis, §1.2](SAFARI-DIAGNOSIS-AND-FIX.md).
 
-Sol: read the [diagnosis and review disposition](AVATAR-SAFARI-DIAGNOSIS-AND-FIX.md)
+Sol: read the [diagnosis and review disposition](SAFARI-DIAGNOSIS-AND-FIX.md)
 first, then execute S01–S06 below in order. This file owns the implementation
 contract; the diagnosis owns incident evidence. Do not reopen rejected
 alternatives by quietly building a DV-only workaround. If current main has
@@ -33,7 +33,7 @@ For otherwise compatible HEVC-in-MP4:
 - Select a delivery whose **output** is compatible. A progressive remux can
   deliberately retain `hev1`/`dvhe`; “Remux” alone is not the guarantee.
 
-Avatar is one complete-hvcC DV P8 reproducer. The review's census reports
+reference film K is one complete-hvcC DV P8 reproducer. The review's census reports
 111 SDR `hev1` MP4s, 28 compatible DV P8 `hev1`, 10 HDR10 `hev1` with minimal
 hvcC, one DV P5 `hev1`, and 21 DV P5 `dvhe` with minimal hvcC: **171 exposed
 rows**, not 171 device-tested failures. Build SDR and DV sibling regressions.
@@ -343,7 +343,7 @@ invalid present-field path must not enter it.
 
 Use `hevc_parameter_set_promotion_required` / existing copy options, not a
 new duplicate “extradata length means tag” policy. The reviewed implementation
-detects a minimal hvcC at 23 bytes. Avatar's 132-byte hvcC is a different
+detects a minimal hvcC at 23 bytes. reference film K's 132-byte hvcC is a different
 case. Calculate/inspect the **actual progressive builder's output tag**;
 do not assume it has the same profile-aware choice as the segmented builder.
 Include preserved P5 and compatible P8 cases in this comparison.
@@ -429,7 +429,7 @@ minimal hvcC, null/zero tags, source replacement during backfill, and more
 than 256 eligible rows. A valid current scan overwrites stale facts with its
 own result; an old snapshot must not overwrite that scan.
 
-**Acceptance:** an already-scanned SDR and Avatar-shaped row acquire the
+**Acceptance:** an already-scanned SDR and reference film K-shaped row acquire the
 right tag without media access; unknown rows do not stall completion; changing
 only the stored tag leaves the fragment-index identity unchanged. Compile
 all targets to catch every `MediaFile` / `ProbeResult` literal.
@@ -524,7 +524,7 @@ runtime code independently reviewed because this design received a review.
 
 Do not commit commercial clips. Use generated rights-safe media for the
 ordinary SDR/hvcC integration cases and existing DV fixtures/argv contracts.
-The private Avatar copy is manual diagnostic evidence, not a distributable
+The private reference film K copy is manual diagnostic evidence, not a distributable
 unit-test asset. Hash equality of its original experiment does not imply
 that every legitimate production bitstream filter must leave every NAL byte
 unchanged; no video encoder is the relevant packaging-only guarantee.
@@ -576,7 +576,7 @@ index warmness, and observed result. Redact tokens and private URLs.
 
 Required finite sweep:
 
-1. **Safari SDR hev1 and Avatar-shaped DV P8:** establish the original-path
+1. **Safari SDR hev1 and reference film K-shaped DV P8:** establish the original-path
    control, then the repaired normalized path on the same machine. Require
    `video.getVideoPlaybackQuality().totalVideoFrames > 0`, increasing frames
    and currentTime, visible moving picture, and audio. If that API is absent,

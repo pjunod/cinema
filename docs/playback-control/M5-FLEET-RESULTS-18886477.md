@@ -70,7 +70,7 @@ build on every node.
 
 ## 4. Web gate — the reporter completed exchanges on lab3
 
-The web player used *Eye for an Eye (2025)* on lab3. Mac output was muted
+The web player used *reference film E (2025)* on lab3. Mac output was muted
 before playback and restored after the player was closed.
 
 The Control panel changed to:
@@ -146,7 +146,7 @@ that device policy.
 ## 6. Apple arm — complete vocabulary and a real hold on lab6
 
 Launching build 103 on the iPhone 17 Pro Max reattached an Apple viewer to
-*Heavy Is the Head* on lab6. The Apple complete-vocabulary counter was already
+*reference episode C* on lab6. The Apple complete-vocabulary counter was already
 moving when first sampled and reached 228 before the final snapshot.
 
 lab6 recorded a real `server_hold`. During the hold, repeated client reports

@@ -254,7 +254,7 @@ dovi_tool info -i head.rpu --summary
 | Title | Size | Extract | Time | Verdict |
 |---|---|---|---|---|
 | Iron Reef (1998) | 68.7 GiB | 70 MiB | 2 s | `Profile: 7 (MEL)` |
-| The Sound of Music (1965) | 77.0 GiB | 49 MiB | 2 s | `Profile: 7 (FEL)` |
+| reference film J (1965) | 77.0 GiB | 49 MiB | 2 s | `Profile: 7 (FEL)` |
 
 Two seconds and ~60 MiB, versus ~124 GiB and roughly an hour of NFS I/O, for
 exactly the same answer.

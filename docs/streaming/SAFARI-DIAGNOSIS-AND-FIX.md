@@ -1,4 +1,4 @@
-# HEVC-in-MP4 admission — Avatar's decoder evidence and the reviewed fix
+# HEVC-in-MP4 admission — reference film K's decoder evidence and the reviewed fix
 
 **Status:** open · review findings incorporated; runtime fix not implemented
 · **Written:** 2026-09-15 · **Revised:** 2026-09-16 UTC · **Executes:** the
@@ -10,7 +10,7 @@ Companion to [PLAYBACK.md](../PLAYBACK.md) (the delivery decision),
 [PLAYBACK-CAPS-V2-PLAN.md](PLAYBACK-CAPS-V2-PLAN.md) (capability semantics), and
 [DV-DELIVERY-FINDINGS.md](DV-DELIVERY-FINDINGS.md) (Dolby Vision delivery).
 This document records the diagnosis and its review, not the executable task
-sequence. Avatar is the reproducer; the defect also affects admission of SDR
+sequence. reference film K is the reproducer; the defect also affects admission of SDR
 and HDR10 HEVC-in-MP4 on web and Apple clients. Read this evidence before
 the linked implementation contract. If implementation requires rewriting
 library files, bypassing
@@ -24,19 +24,19 @@ numbers. Re-verify them against the intended implementation base. Neither
 commit is asserted to be the deployed server's exact build.
 The stale documentation checkout is not an implementation base: Sol must
 start from fresh main and re-resolve the named symbols. The retained filename
-keeps links to the original Avatar investigation stable; the title and scope
+keeps links to the original reference film K investigation stable; the title and scope
 have been corrected after review.
 
 ## 1. Finding — the source packaging is admitted on the wrong evidence
 
-The affected source is **Avatar: Fire and Ash**, library file ID **9** in the
+The affected source is **reference film K: Fire and Ash**, library file ID **9** in the
 investigated installation. Its video is HEVC Main 10, 3840 × 2076, with an
 MP4 `hev1` sample-entry label. Fable's stored-row inspection reports
 `extradata_size: 132`, DV Profile 8, `bl_compat_id: 1`, `el_present: 0`,
 `rpu_present: 1`, approximately 31.6 Mb/s, and eight E-AC-3 audio tracks.
 The video is the first stream; an attached MJPEG cover is stream 23.
 The 132-byte configuration is not the minimal 23-byte hvcC record that
-triggers parameter-set promotion. This makes Avatar the complete-hvcC case,
+triggers parameter-set promotion. This makes reference film K the complete-hvcC case,
 not proof of the minimal-hvcC delivery path.
 
 **One-line root cause:** the code applies its HEVC packaging compatibility
@@ -95,10 +95,10 @@ device failure and repair still need acceptance evidence.
 
 | Finding | Disposition |
 |---|---|
-| F1: scope and SDR population | Accepted: generic packaging admission, SDR and DV regression siblings; no Avatar/file-ID special case |
+| F1: scope and SDR population | Accepted: generic packaging admission, SDR and DV regression siblings; no reference film K/file-ID special case |
 | F2: Apple producer | Accepted: web and Apple capability changes ship in one PR; Android initially omits the field |
 | F3: two copy builders | Accepted: name and test progressive as well as segmented output; exclude incompatible progressive delivery |
-| F4: Avatar configuration | Accepted: retain the 132-byte hvcC and stored DV facts above |
+| F4: reference film K configuration | Accepted: retain the 132-byte hvcC and stored DV facts above |
 | F5: persistence | Accepted: nullable column and bounded M2-style backfill; no SQL-JSON projection; no fragment-index identity change |
 | F6: avoid unnecessary Chrome remux | Accepted with guard: probe each label for progressive playback, not MSE; predicted browser answers require measurement |
 | F7: Original reason | Accepted: assert both final method and packaging reason |
@@ -116,11 +116,11 @@ have explicit work and regression tests in the implementation contract.
 
 | Incident | Observed path / defect | Relationship to this proposal |
 |---|---|---|
-| Avatar in Safari | Direct MP4 playback; no HLS session or playback-control reporter in the observed attempt; native `hev1` decode failure | This document |
+| reference film K in Safari | Direct MP4 playback; no HLS session or playback-control reporter in the observed attempt; native `hev1` decode failure | This document |
 | Repeated seeking / `invalid_control` | Valid old-buffer/new-target snapshots rejected; backward-seek gaps could also inflate producer runway | Separate [draft PR #336](http://192.168.4.7:3000/noirr/plurx/pulls/336), as of this investigation |
 | Chrome startup with text subtitles | Separate startup/subtitle handling defect | Addressed by [PR #335](http://192.168.4.7:3000/noirr/plurx/pulls/335); not proof of Safari compatibility |
 
-Routing Avatar through HLS will make the seek/control path relevant to its
+Routing reference film K through HLS will make the seek/control path relevant to its
 future playback. That does not make the earlier direct-MP4 failure a control
 protocol failure. Acceptance should use a candidate that includes the seek
 repair, or explicitly report that dependency as unqualified.
@@ -445,7 +445,7 @@ Test first-video selection, attached pictures, multiple video tracks, null
 and malformed JSON, zero placeholders, and existing rows on both stores.
 Check import/publication round trips and mixed-version migration behavior.
 
-**Acceptance:** an already-scanned Avatar-shaped row yields `hev1` without
+**Acceptance:** an already-scanned reference film K-shaped row yields `hev1` without
 opening or rewriting the source; an unknown row stays explicitly unknown.
 No decision path performs a synchronous media probe.
 
@@ -457,7 +457,7 @@ from Auto and Original. Test the final response and actual session recipe,
 not just a private helper. Check cached capability invalidation on web update.
 
 **Acceptance:** web and Apple hvc1-only claims plus supported SDR and
-Avatar-shaped hev1 sources select copy-video Remux in Auto and Original,
+reference film K-shaped hev1 sources select copy-video Remux in Auto and Original,
 including the packaging reason. Progressive-only probes and the POST-error
 guard have negative regressions. Forced Transcode
 is unchanged; removing the new claim reproduces documented legacy behavior.
@@ -536,7 +536,7 @@ are satisfied unless the row says otherwise.
 | Existing database row, import, publication, both store backends | Same fact, including unknown; no rescan prerequisite |
 
 At least one fixture must demonstrate the old defect: current code admits
-the raw Avatar-shaped source, while repaired code requires normalization.
+the raw reference film K-shaped source, while repaired code requires normalization.
 Run the actual HTTP/session seam as well as the pure decision test. If the
 pure fixture already remuxes because of audio or DV policy, it does not
 exercise this bug; construct compatible ancillary facts deliberately.
@@ -587,7 +587,7 @@ rewrite originals or clear user media/caches as an implicit rollback step.
 
 Fable's review is “Approve with changes,” not approval of runtime code.
 The changes to this plan are summarized in §1.2. The review executed a
-decision fixture at `3129ce993`: Avatar-shaped DV P8 and SDR HEVC both
+decision fixture at `3129ce993`: reference film K-shaped DV P8 and SDR HEVC both
 returned DirectPlay; `dv_transport=hls` changed only the DV case to Remux;
 Original omitted a packaging reason; the preserved compatible-P8 copy tag
 was hvc1. The review did not rerun the native decoder experiment or test

@@ -977,7 +977,7 @@ Two deliberate quality changes, one HDR title and one SDR:
 
 | title | change | axis | outcome | counterfactual |
 |---|---|---|---|---|
-| Avatar (HDR/DV) | 2160 → 1080 | `dynamic_range` | `multiple_axes` | identical |
+| reference film K (HDR/DV) | 2160 → 1080 | `dynamic_range` | `multiple_axes` | identical |
 | Dance Flick (SDR H.264) | 1080 → 720 | `delivery_method` | `multiple_axes` | identical |
 
 **Neither is a resolution change.** The top rung direct-plays and the lower
@@ -1079,7 +1079,7 @@ someone runs it or the floor learns the successor's rate.
 **What is still refused, deliberately.** The grade axis. This run was SDR H.264
 throughout, so `{ResolutionOrBitrate, DeliveryMethod, DynamicRange}` — the set
 an HDR or Dolby Vision quality change actually crosses, and exactly what the
-Avatar 2160 → 1080 row above booked — remains unmeasured and still falls back
+reference film K 2160 → 1080 row above booked — remains unmeasured and still falls back
 to `multiple_axes`. Audio and burned subtitles were never measured in
 combination with anything at all. A row joins that table only with a hardware
 receipt, and the receipt has to name its run.
@@ -1089,7 +1089,7 @@ receipt, and the receipt has to name its run.
 ## Shadow mode ran, and the axis rule is what limits M6
 
 **Read 2026-09-03 on lab6**, on `v0.3.0-449-gd1a56d01`, from three deliberate
-viewer quality changes: Avatar 2160 → 1080, and a plain SDR title to 720.
+viewer quality changes: reference film K 2160 → 1080, and a plain SDR title to 720.
 These are in-memory counters and every deploy resets them, so this is what one
 build had decided at one moment, not a running total.
 

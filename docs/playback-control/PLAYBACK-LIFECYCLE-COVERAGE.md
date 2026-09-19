@@ -372,7 +372,7 @@ Every exclusion records why that transition cannot occur on that path.
 ## 7. Tonight's failure is an acceptance case, not a guessed root cause
 
 [Sanitized retained observations](../evidence/playback-lifecycle-observation-2026-09-11.json)
-contain 17 events for **Ronny Chieng: Speakeasy** on lab6, including 13 stall
+contain 17 events for **reference special A** on lab6, including 13 stall
 reports. Multiple reports may describe one episode; 13 is not a count of
 independent freezes. The viewer identifies Apple TV; telemetry identifies
 Apple AVPlayer but does not establish the installed client build. lab6, lab4 and

@@ -21,9 +21,9 @@ Operational timeouts must carry an accurate cause, bounded retry state and
 useful progress. Recovery must reach the exact failed video pipeline once,
 preserve successful siblings, and leave an auditable history.
 
-The observed examples are file 9 (Avatar), 3451 and 3498 (Dexter), and 3634
+The observed examples are file 9 (reference film K), 3451 and 3498 (reference episode I), and 3634
 (Family Guy). Their indexed video coverage agrees with video metadata while
-container duration is longer. File 120 (Wicked) supplies timeout evidence,
+container duration is longer. File 120 (reference film G) supplies timeout evidence,
 but its later success was not correlated to the same pipeline/source version;
 do not make that stronger claim in release notes or tests.
 
@@ -570,7 +570,7 @@ so the commands in §11 select them in both backends.
 
 | Area | Cases | Required result |
 |---|---|---|
-| Wrong duration | Avatar-shaped MP4; MKV with longer audio; subtitle/container tail | Complete video succeeds while unchanged old completion predicate fails |
+| Wrong duration | reference film K-shaped MP4; MKV with longer audio; subtitle/container tail | Complete video succeeds while unchanged old completion predicate fails |
 | True truncation | Same fixture with original video expectation and removed tail; clean-looking prefix | No artifact is published |
 | Metadata | Stream ticks/seconds/tags; malformed, missing, contradictory, overflow values | Deterministic provenance or typed unverified result; no container fallback |
 | Mapping | Cover-art-first, multiple video streams, absolute stream indices | Validator describes exactly the emitted stream or refuses it |
@@ -604,7 +604,7 @@ pinned compiler loop. Inventory a bounded sample of successful-file timing
 for §3.3 and record unknown/conflicting cases. This is read-only production
 inspection if live evidence is needed, not authorization to queue work.
 
-**Exit evidence:** failing Avatar-shaped integration fixture on old code;
+**Exit evidence:** failing reference film K-shaped integration fixture on old code;
 R1 deterministic-clock reproduction; R2 both-backend candidate/successor
 reproduction; base SHA and selected compatibility cohort recorded.
 

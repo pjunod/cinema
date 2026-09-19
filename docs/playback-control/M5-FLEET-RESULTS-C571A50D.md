@@ -70,7 +70,7 @@ The retained release worktree is:
 
 ### Normal web playback produced a picture but no verdict exchange
 
-The web client played *Good Cop / Bad Cop* against lab3. VOD HLS remux
+The web client played *reference episode B* against lab3. VOD HLS remux
 rendered a picture and reported an approximately 2.6-second start. The Control
 panel remained:
 

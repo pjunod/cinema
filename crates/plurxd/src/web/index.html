@@ -4229,7 +4229,7 @@ function showStallRecoveryFailure(note){
 // buffer, and the presentation clock quietly running at three-quarter speed.
 // No frame drops, no stall fires, and `slow` hitches accumulate on healthy
 // sessions too — so the one session that LOOKED like buffering reported
-// nothing. Seen live (Tron, 2026-07-30): 18.2 fps rendered at 75.8% speed,
+// nothing. Seen live (reference film F, 2026-07-30): 18.2 fps rendered at 75.8% speed,
 // 9 s buffered, VideoToolbox decoding in hardware per chrome://media-internals
 // — and not one line in the log ring. The realized rate over the detector's
 // ~10 s window is the clean signal: the window already clears on pause and
@@ -9826,7 +9826,7 @@ function attachSession(v, t, info, wantSec){
   if(info.delivered_dynamic_range) t.deliveredDvProfile=info.delivered_dolby_vision_profile||null;
   // …and repaint, or the chip keeps its pre-session HTML forever while the
   // one-second stats panel follows the new truth. That is how "DV P7 → HDR10"
-  // sat beside "Dynamic range: SDR" on a tone-mapped Dexter episode: both
+  // sat beside "Dynamic range: SDR" on a tone-mapped reference episode: both
   // surfaces call dynamicRangeBadge() with the same arguments, but only the
   // panel repaints. renderPlayerInfo() is otherwise painted once, at session
   // open — before the route is chosen and before the forced-burn override.
@@ -11889,7 +11889,7 @@ const MSE_QUOTA_BYTES=144e6;
 // being appended, so every append now asked for ~190 MB against a ~150 MB
 // quota and was refused. hls.js responds by evicting, halving its own target
 // and retrying; after `appendErrorMaxRetry` (3) failures on the same segment
-// it gives up fatally. Reported from the couch on Tron in Chrome, 2026-07-30:
+// it gives up fatally. Reported from the couch on reference film F in Chrome, 2026-07-30:
 // several rebuffers and then a freeze that would not resume. Safari never saw
 // it, because native HLS does not use any of this.
 //
@@ -11938,7 +11938,7 @@ function bufferTargets(segSecs){
   // it at the 69 Mb/s average says 129 MB, which is not merely wrong, it is
   // impossible: the byte ceiling forbids it.
   //
-  // What that did on Tron in Chrome: seg 129 MB left 15 MB of resident budget,
+  // What that did on reference film F in Chrome: seg 129 MB left 15 MB of resident budget,
   // the floor clamped it to 48 MB, and the client ran a **4 s forward buffer**
   // on a 69 Mb/s remux — 322 slow frames and a ten-second freeze, worse than
   // the bug this budget was written to fix a few hours earlier.
@@ -12368,7 +12368,7 @@ function maybeDecodeRescue(){
   if(!quota) rememberDecodeLimit(p.source, verdict);
   // Why this session is not the picture the viewer asked for, kept where they
   // can find it later. The toast says it once and then it is gone — which is
-  // exactly what happened on Tron: dropped to 1080p mid-film with a message
+  // exactly what happened on reference film F: dropped to 1080p mid-film with a message
   // that vanished, and nothing anywhere afterwards that said why.
   p.rescuedNote=quota
     ? `switched to a transcode: this browser refused buffered data ${quota}x on the original`
