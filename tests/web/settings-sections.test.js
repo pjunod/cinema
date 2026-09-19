@@ -345,6 +345,7 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
       shippedSource("webHlsStartupRecoveryCard"),
       shippedSource("hevcSampleEntryAdmissionCard"),
       shippedSource("sourceProbeCompatibilityCard"),
+      shippedSource("nzbdBittorrentEnableCard"),
       "const SETTINGS_DATA=null,ME=null;",
       shippedSource("uiEnableAdvisory"),
       shippedSource("developerPanel"),
@@ -408,6 +409,14 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
   assert.match(html, /Final-send loader interception/);
   assert.match(html, /Recovery is enabled for every hls\.js attachment/);
   assert.match(html, /CARDHEAD:HEVC sample-entry admission\|/);
+  assert.match(html, /CARDHEAD:nzbd BitTorrent\|/);
+  assert.match(html, /Enablement belongs to nzbd/);
+  assert.match(html, /Cluster exclusion/);
+  assert.match(html, /Peer port and public discovery/);
+  assert.match(html, /Durable payload storage/);
+  assert.match(html, /Seeding policy/);
+  assert.match(html, /Unmet, unavailable and unobservable rows do not disable nzbd's switch/);
+  assert.match(html, /id="enable-bittorrent"/);
   // Source verification is always on and has no switch; the card exists to say
   // what is and is not known about it, which is the only honest thing a
   // compatibility rule can offer an operator.
