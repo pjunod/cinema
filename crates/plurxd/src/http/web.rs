@@ -48,6 +48,12 @@ pub enum WebAsset {
 /// The seven pre-existing sidecars keep their own routes below and are **not**
 /// in this table: they are UMD modules `require()`d by path from forty-odd
 /// tests, and three of them are bundled into the native clients by path.
+///
+/// `rustfmt::skip` because this is a table: one row per line, columns aligned,
+/// read top to bottom as the load order it is. Left to rustfmt each row
+/// becomes five lines and 62 rows become 310, which hides the one property
+/// the table exists to show.
+#[rustfmt::skip]
 pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("app.css",                                WebAsset::HeadStyle,   include_str!("../web/app.css")),
     ("core/theme.js",                          WebAsset::HeadScript,  include_str!("../web/core/theme.js")),
@@ -132,9 +138,9 @@ static SHELL: LazyLock<String> = LazyLock::new(|| {
     let mut html = String::from(INDEX_HTML);
     for ((path, _, _), hash) in WEB_ASSETS.iter().zip(ASSET_HASHES.iter()) {
         let tag = format!("\"/assets/{path}\"");
-        let at = html.find(&tag).unwrap_or_else(|| {
-            panic!("index.html carries no tag for the WEB_ASSETS row {path}")
-        });
+        let at = html
+            .find(&tag)
+            .unwrap_or_else(|| panic!("index.html carries no tag for the WEB_ASSETS row {path}"));
         html.replace_range(at..at + tag.len(), &format!("\"/assets/{path}?v={hash}\""));
     }
     html
@@ -187,11 +193,7 @@ const APPLE_TOUCH: &[u8] = include_bytes!("../web/icons/apple-touch-icon.png");
 /// it, and the whole point of the hash is that the shell is the only thing that
 /// has to be re-read.
 pub async fn index() -> Response {
-    (
-        [(header::CACHE_CONTROL, "no-cache")],
-        Html(SHELL.as_str()),
-    )
-        .into_response()
+    ([(header::CACHE_CONTROL, "no-cache")], Html(SHELL.as_str())).into_response()
 }
 
 /// Serve one row of [`WEB_ASSETS`].
@@ -206,10 +208,7 @@ pub async fn asset(AxPath(path): AxPath<String>) -> Response {
             StatusCode::OK,
             [
                 (header::CONTENT_TYPE, asset_content_type(name)),
-                (
-                    header::CACHE_CONTROL,
-                    "public, max-age=31536000, immutable",
-                ),
+                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
             ],
             *body,
         )
@@ -528,15 +527,14 @@ mod tests {
                 in_head = false;
                 continue;
             }
-            let (is_style, rest) = if let Some(rest) =
-                line.strip_prefix("<link rel=\"stylesheet\" href=\"/assets/")
-            {
-                (true, rest)
-            } else if let Some(rest) = line.strip_prefix("<script src=\"/assets/") {
-                (false, rest)
-            } else {
-                continue;
-            };
+            let (is_style, rest) =
+                if let Some(rest) = line.strip_prefix("<link rel=\"stylesheet\" href=\"/assets/") {
+                    (true, rest)
+                } else if let Some(rest) = line.strip_prefix("<script src=\"/assets/") {
+                    (false, rest)
+                } else {
+                    continue;
+                };
             out.push((
                 rest.split('"').next().expect("a quoted asset path"),
                 is_style,
@@ -595,7 +593,10 @@ mod tests {
             let (_, is_style, in_head) = tags[at];
             match kind {
                 WebAsset::HeadStyle => {
-                    assert!(is_style, "{path} is a HeadStyle row but is not a stylesheet link");
+                    assert!(
+                        is_style,
+                        "{path} is a HeadStyle row but is not a stylesheet link"
+                    );
                     assert!(in_head, "{path} is a HeadStyle row but is not in <head>");
                     assert!(
                         at > reader_css,
@@ -605,7 +606,10 @@ mod tests {
                     last_style_in_head = last_style_in_head.max(at);
                 }
                 WebAsset::HeadScript => {
-                    assert!(!is_style, "{path} is a HeadScript row but is a stylesheet link");
+                    assert!(
+                        !is_style,
+                        "{path} is a HeadScript row but is a stylesheet link"
+                    );
                     assert!(
                         in_head,
                         "{path} is a HeadScript row but is not in <head>: it has to run \
@@ -617,8 +621,14 @@ mod tests {
                     );
                 }
                 WebAsset::BodyScript => {
-                    assert!(!is_style, "{path} is a BodyScript row but is a stylesheet link");
-                    assert!(!in_head, "{path} is a BodyScript row but its tag is in <head>");
+                    assert!(
+                        !is_style,
+                        "{path} is a BodyScript row but is a stylesheet link"
+                    );
+                    assert!(
+                        !in_head,
+                        "{path} is a BodyScript row but its tag is in <head>"
+                    );
                     assert!(
                         at > last_sidecar,
                         "{path} must load after the sidecars — the body rows read \
@@ -660,7 +670,9 @@ mod tests {
     #[test]
     fn app_shell_shows_the_running_build_to_signed_in_and_signed_out_users() {
         assert_eq!(
-            body_source().matches("Version ${esc(buildLabel())}").count(),
+            body_source()
+                .matches("Version ${esc(buildLabel())}")
+                .count(),
             2
         );
     }
@@ -710,7 +722,10 @@ mod tests {
             assert!(body.contains(label), "missing Activity field {label}");
         }
         // …and they are all one row's business, so a reader knows where to go.
-        assert_eq!(row_with("function activityStreamCell"), "pages/activity-stream.js");
+        assert_eq!(
+            row_with("function activityStreamCell"),
+            "pages/activity-stream.js"
+        );
     }
 
     #[test]
@@ -742,8 +757,12 @@ mod tests {
     #[test]
     fn signed_in_account_menu_can_show_the_server_qr_without_signing_out() {
         let body = body_source();
-        let menu = body.find("function profileMenuHtml()").expect("account menu");
-        let qr_action = body.find("Show server QR code").expect("signed-in QR action");
+        let menu = body
+            .find("function profileMenuHtml()")
+            .expect("account menu");
+        let qr_action = body
+            .find("Show server QR code")
+            .expect("signed-in QR action");
         let sign_out = body[menu..]
             .find("Sign out")
             .map(|offset| menu + offset)
