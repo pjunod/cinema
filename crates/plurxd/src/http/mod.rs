@@ -13778,6 +13778,11 @@ mod tests {
             "{sdr_preflight}"
         );
 
+        // No `subtitle_burn_sdr` on this body, deliberately. The whole point
+        // of the one guard is that the session's own grade decides: the web
+        // client never sent that acknowledgement, and requiring it is what
+        // refused every web burn on an HDR source. Reaching the rescan
+        // refusal means this request got *past* the HDR guard.
         let (status, accepted) = call(
             &app,
             post(
@@ -13786,14 +13791,39 @@ mod tests {
                 json!({
                     "playback_id": "tcl-existing-sdr-burn",
                     "height": 64,
-                    "subtitle_burn": 2,
-                    "subtitle_burn_sdr": true
+                    "subtitle_burn": 2
                 }),
             ),
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{accepted}");
         assert_eq!(accepted["code"], "vod_source_rescan_required", "{accepted}");
+
+        // And the acknowledgement no longer buys anything in the other
+        // direction either: a client that sends `true` on a delivery that
+        // really would lose its HDR is still refused. It is logged and
+        // ignored, not consulted.
+        let (status, still_refused) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{file}/hls/sessions"),
+                Some(&admin),
+                json!({
+                    "playback_id": "old-client-asserting-sdr",
+                    "height": 64,
+                    "subtitle_burn": 2,
+                    "copy": true,
+                    "preserve_dolby_vision": true,
+                    "subtitle_burn_sdr": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{still_refused}");
+        assert_eq!(
+            still_refused["code"], "hdr_subtitle_burn_refused",
+            "a client's word about the grade is not evidence about the grade: {still_refused}"
+        );
     }
 
     /// `/decision` used to promise more than the server would accept: a

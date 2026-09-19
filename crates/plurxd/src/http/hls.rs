@@ -1326,21 +1326,49 @@ fn bound(value: &str) -> Option<String> {
 const HDR_SUBTITLE_BURN_REFUSAL: &str =
     "That subtitle requires an SDR burn-in. HDR playback was kept unchanged.";
 
-/// Old clients can still post `subtitle_burn` without first applying the
-/// native clients' HDR guard. A known HDR source therefore fails closed unless
-/// the client explicitly acknowledges that its selected plan already delivers
-/// SDR. That acknowledgement is safe for an existing tone-map and remains
-/// absent when the burn would replace DV, HDR10, or HLG with SDR.
-fn hdr_subtitle_burn_is_refused(
+/// Would building this session with its requested burn cost the viewer the
+/// dynamic range they would otherwise be getting?
+///
+/// This asks [`plurx_core::playback::burn_would_discard_hdr`] — the one guard
+/// — about the grade this exact request resolves to **with no burn**, which
+/// is the only grade the question has an honest answer against.
+///
+/// It replaces a predicate that keyed on the *source* `hdr` column and
+/// demanded a `subtitle_burn_sdr` acknowledgement from the client. That
+/// failed closed on sessions which were already being tone-mapped: a display
+/// sending `hdr=0` gets an SDR transcode, drawing a forced PGS track into it
+/// takes nothing away, and the server refused it anyway because the *file*
+/// was HDR. The web client never sent the acknowledgement at all and Apple
+/// computed it from the wrong range, so in practice the only way past the
+/// guard was to not be an HDR title.
+///
+/// The grade comes from [`crate::transcode::TranscodeManager::grade_preview`]
+/// rather than `Decision::transcode_grade`: that field ignores encoder proof
+/// and can say HDR10 where `start` will deliver SDR, which would judge the
+/// request by a different function than the one that delivers it.
+async fn burn_would_discard_this_session_hdr(
+    state: &AppState,
     source: Option<&MediaFile>,
-    subtitle_burn: Option<i64>,
-    subtitle_burn_sdr: Option<bool>,
+    request: &crate::transcode::SessionRequest,
+    hdr10_requested: bool,
+    height: i64,
 ) -> bool {
-    subtitle_burn.is_some_and(|index| index >= 0)
-        && subtitle_burn_sdr != Some(true)
-        && source.is_some_and(|file| {
-            matches!(file.hdr.as_deref(), Some("dolby_vision" | "hdr10" | "hlg"))
-        })
+    let Some(file) = source else {
+        // No source row: this request is on its way to a 404, and there is
+        // nothing honest to say about a file we cannot see.
+        return false;
+    };
+    if !request.subtitle_burn.is_some_and(|index| index >= 0) {
+        return false;
+    }
+    let base_grade = state
+        .transcode
+        .grade_preview(file, hdr10_requested, height, None)
+        .await;
+    let (method, preserve, _) = session_delivery_shape(&request.kind);
+    let base_range =
+        plurx_core::playback::delivered_dynamic_range(file, method, preserve, base_grade);
+    plurx_core::playback::burn_would_discard_hdr(base_range, true)
 }
 
 /// The dynamic range this session puts on the wire, read off the session it
@@ -1817,11 +1845,25 @@ async fn create_with_purpose(
         .get_file(id)
         .await
         .map_err(|error| session_store_error("reading the source file", error))?;
-    if hdr_subtitle_burn_is_refused(source.as_ref(), req.subtitle_burn, req.subtitle_burn_sdr) {
-        return Err(ApiError::Unprocessable(serde_json::json!({
-            "code": "hdr_subtitle_burn_refused",
-            "error": HDR_SUBTITLE_BURN_REFUSAL,
-        })));
+    // The HDR subtitle-burn guard used to stand here, keyed on the source's
+    // own `hdr` column. It now runs after `resolve_plan`, against the grade
+    // this request actually resolves to — see
+    // `burn_would_discard_this_session_hdr`. Nothing between here and there
+    // opens an encoder or takes a durable admission row: the plan review, the
+    // ladder ceiling, the network prior and `resolve_plan` itself are all
+    // reads, and `claim_media_session_request` is the first write, after it.
+    //
+    // `subtitle_burn_sdr` stays on the wire for clients that still send it,
+    // and is no longer load-bearing. It was an acknowledgement the web client
+    // never sent and Apple computed from the wrong range, so consulting it
+    // decided nothing except which clients could burn at all.
+    if req.subtitle_burn_sdr.is_some() {
+        tracing::debug!(
+            file_id = id,
+            subtitle_burn = req.subtitle_burn,
+            subtitle_burn_sdr = req.subtitle_burn_sdr,
+            "client sent the legacy SDR burn acknowledgement; the session's own grade decides"
+        );
     }
     // Whose build this is, for every line below. The v2 document names
     // itself; a client that sends none leaves only its User-Agent, which is
@@ -1899,6 +1941,14 @@ async fn create_with_purpose(
         validate_hevc_copy_transport(&state, source, caps, &request).await?;
     }
     let height = resolved.height;
+    if burn_would_discard_this_session_hdr(&state, source.as_ref(), &request, hdr10_requested, height)
+        .await
+    {
+        return Err(ApiError::Unprocessable(serde_json::json!({
+            "code": "hdr_subtitle_burn_refused",
+            "error": HDR_SUBTITLE_BURN_REFUSAL,
+        })));
+    }
     let fingerprint = match library_channel.as_ref() {
         Some(purpose) => purpose.bind_session_fingerprint(&resolved.intent_fingerprint),
         None => resolved.intent_fingerprint,
@@ -8402,7 +8452,11 @@ async fn plan_preparation_candidate(
         )
         .then_some(selection.subtitle.track)
         .flatten(),
-        subtitle_burn_sdr: Some(!requested_hdr10),
+        // No acknowledgement. This path calls `resolve_plan` directly, so the
+        // create handler's guard never ran on it and `Some(!requested_hdr10)`
+        // had no reader at all — it was an answer to a question nobody asked.
+        // The candidate is judged by the same guard below instead.
+        subtitle_burn_sdr: None,
         native_subtitles: Some(native_subtitle.is_some()),
         subtitle: native_subtitle,
         start: Some(predecessor.request.start_seconds),
@@ -8428,7 +8482,7 @@ async fn plan_preparation_candidate(
         unix_ms(),
         false,
     );
-    let mut resolved = resolve_plan(
+    let plan = resolve_plan(
         PlanInputs {
             state,
             user_id: predecessor.user_id,
@@ -8439,9 +8493,31 @@ async fn plan_preparation_candidate(
         Some(review),
         body,
     )
-    .await?
-    .request;
+    .await?;
+    let plan_height = plan.height;
+    let mut resolved = plan.request;
     validate_hevc_copy_transport(state, source, caps, &resolved).await?;
+    // The same guard ordinary create runs, on the same function. This path
+    // reaches `resolve_plan` directly and therefore skipped it entirely: a
+    // successor prepared for an HDR delivery could be staged as a burn that
+    // silently tone-maps the picture at the moment it is committed, with the
+    // viewer given no notice and no choice. Refusing the candidate is right
+    // here — the incumbent keeps playing, which is what a refused preparation
+    // means everywhere else.
+    if burn_would_discard_this_session_hdr(
+        state,
+        Some(source),
+        &resolved,
+        requested_hdr10,
+        plan_height,
+    )
+    .await
+    {
+        return Err(ApiError::Unprocessable(serde_json::json!({
+            "code": "hdr_subtitle_burn_refused",
+            "error": HDR_SUBTITLE_BURN_REFUSAL,
+        })));
+    }
     // Planning chooses the codec/container recipe. It must not silently turn
     // a retained rolling fallback into VOD: the source prerequisite that made
     // the incumbent use rolling has not changed merely because its quality or
@@ -26978,28 +27054,64 @@ mod tests {
         ));
     }
 
+    /// The create guard's arithmetic, without a server around it: session
+    /// kind and no-burn grade in, wire range out, one guard's verdict on it.
+    ///
+    /// `burn_would_discard_this_session_hdr` is these three lines plus a store
+    /// read for the grade, so this pins everything about it that can be wrong
+    /// without pinning `grade_preview`'s own encoder proof — which belongs to
+    /// the pipeline, and which the HTTP regressions exercise end to end.
     #[test]
-    fn server_refuses_hdr_burns_unless_the_plan_is_already_sdr() {
+    fn the_create_guard_reads_the_grade_this_session_would_deliver_without_a_burn() {
+        use plurx_core::playback::{burn_would_discard_hdr, delivered_dynamic_range};
+        use plurx_core::transcode::OutputGrade;
+
         let mut file = hls_file(vec![]);
+        let copy = crate::transcode::SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: true,
+            convert_dolby_vision: false,
+        };
+        let transcode = crate::transcode::SessionKind::Transcode { height: 2160 };
+
+        let verdict = |kind: &crate::transcode::SessionKind,
+                       file: &MediaFile,
+                       base_grade: OutputGrade| {
+            let (method, preserve, _) = session_delivery_shape(kind);
+            let range = delivered_dynamic_range(file, method, preserve, base_grade);
+            (range, burn_would_discard_hdr(range, true))
+        };
+
         for hdr in ["dolby_vision", "hdr10", "hlg"] {
             file.hdr = Some(hdr.into());
-            assert!(hdr_subtitle_burn_is_refused(Some(&file), Some(5), None));
-            assert!(hdr_subtitle_burn_is_refused(
-                Some(&file),
-                Some(5),
-                Some(false)
-            ));
-            assert!(
-                !hdr_subtitle_burn_is_refused(Some(&file), Some(5), Some(true)),
-                "an existing HDR-to-SDR plan may keep its forced subtitle"
+            // Row 1: an HDR copy has no encode to burn into, so keeping the
+            // grade and honouring the request are genuinely exclusive.
+            assert_eq!(
+                verdict(&copy, &file, OutputGrade::Sdr).1,
+                true,
+                "{hdr}: an HDR copy must refuse"
+            );
+            // Row 2: the one the old predicate got wrong. Since the M4 rung a
+            // transcode can negotiate HDR10, and a burn into it drops the
+            // grade — being a transcode is not an exemption any more.
+            assert_eq!(
+                verdict(&transcode, &file, OutputGrade::Hdr10),
+                ("hdr10", true),
+                "{hdr}: a negotiated HDR10 transcode is an HDR delivery"
+            );
+            // Row 3: already tone-mapped. The old create guard refused this
+            // because the *file* was HDR; nothing is being taken away.
+            assert_eq!(
+                verdict(&transcode, &file, OutputGrade::Sdr),
+                ("sdr", false),
+                "{hdr}: an already tone-mapped transcode keeps its burn"
             );
         }
 
+        // Row 4: an SDR source, by any method.
         file.hdr = None;
-        assert!(!hdr_subtitle_burn_is_refused(Some(&file), Some(5), None));
-        assert!(!hdr_subtitle_burn_is_refused(Some(&file), Some(-1), None));
-        assert!(!hdr_subtitle_burn_is_refused(Some(&file), None, None));
-        assert!(!hdr_subtitle_burn_is_refused(None, Some(5), None));
+        assert_eq!(verdict(&copy, &file, OutputGrade::Sdr), ("sdr", false));
+        assert_eq!(verdict(&transcode, &file, OutputGrade::Sdr), ("sdr", false));
     }
 
     /// The session's answer is the one that wins once playback attaches, so
