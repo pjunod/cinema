@@ -90,7 +90,15 @@ test("the shipped frame allows parent inspection but no authored execution or na
 test("reader assets are embedded in the single binary and loaded before the route", () => {
   assert.match(SERVER, /include_str!\("\.\.\/web\/reader\.js"\)/);
   assert.match(SERVER, /include_str!\("\.\.\/web\/reader\.css"\)/);
-  assert.ok(INDEX.indexOf("/assets/reader.js") < INDEX.indexOf("async function viewReader"));
+  // Served positions, not offsets into `html + bodyScript` — in that string
+  // every tag precedes every row, so the comparison would hold whatever the
+  // shell said.
+  const {rows} = shellSource();
+  const order = [...rows.sidecars, ...rows.head, ...rows.body];
+  assert.ok(
+    order.indexOf("reader.js") < order.indexOf("pages/reader.js"),
+    "the reader sidecar must be served before the page that uses it",
+  );
 });
 
 test("reader open, save, keepalive, and close retain opaque 64-bit route identifiers", () => {

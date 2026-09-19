@@ -80,12 +80,15 @@ function shellSource() {
     // any slice that happens to span it.
     bodyScript: bodyScripts.map(sourceOf).join(""),
     // Everything the browser ends up with, in document order: the markup and
-    // its tags, the stylesheet they name, then the body rows. This is the whole
-    // of what `index.html` used to be, for the assertions that read across all
-    // three — an ordering claim like "the sidecar tag comes before the code
-    // that uses it" still holds in this string.
+    // its tags, the stylesheet they name, the head script, then the body rows.
+    // This is the whole of what `index.html` used to be, for assertions that
+    // read across all of it — an absence checked against one half is not an
+    // absence. It is NOT the string to use for an ordering claim: everything
+    // here precedes everything after it whatever the shell says, so compare
+    // `rows` positions instead.
     get everything() {
-      return `${html}\n${sourceOf(styles[0])}\n${bodyScripts.map(sourceOf).join("")}`;
+      return [html, sourceOf(styles[0]), sourceOf(headScripts[0]),
+        ...bodyScripts.map(sourceOf)].join("\n");
     },
     rows: {style: styles, head: headScripts, body: bodyScripts, sidecars},
     files,

@@ -315,7 +315,8 @@ assert.equal(read("typeof render"), "function", "the router never defined render
 assert.equal(read("typeof boot"), "function", "the app never defined boot()");
 assert.equal(read("typeof applyLayout"), "function",
   "the theme engine never defined applyLayout()");
-assert.equal(read("typeof PLAY_CAPS"), "object",
+// `typeof null` is also "object", so ask for a field only the built table has.
+assert.equal(read("typeof PLAY_CAPS.vcodec"), "string",
   "player/decode-tiers.js builds PLAY_CAPS at load and it did not survive");
 
 const layouts = read("LAYOUTS");

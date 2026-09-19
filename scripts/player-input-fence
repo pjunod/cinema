@@ -71,7 +71,10 @@ WEB_REGIONS = (
     (
         WEB / "core/theme-menu.js",
         "// Capture Escape before layout-specific sheet handlers",
-        None,
+        # The listener's own closing line. It is the last thing in the file, so
+        # `None` would have worked — and would then have silently absorbed
+        # whatever the next person appended.
+        "},true);",
         "The connection QR dialog owns Escape while it is modal.",
     ),
     (

@@ -382,35 +382,45 @@ class PlaybackSurfaceFenceTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.fence.region_allowed_lines(path, ["_surface.value = surface"])
 
-    def test_every_web_player_row_is_scanned_not_just_the_one_it_was_named_for(self):
+    def test_every_web_file_is_scanned_not_just_the_one_it_was_named_for(self):
         # The hole the web-shell split opened, and the reason this fence globs
-        # instead of listing. Before the split it named `index.html`; after it,
-        # a surface write in any of the sixty rows was invisible and the fence
-        # printed PASS. Proven here on the shipped tree: every `player/*.js`
-        # row is scanned, and a rogue write in one of them is found.
-        rows = sorted((ROOT / "crates/plurxd/src/web/player").glob("*.js"))
-        self.assertGreater(len(rows), 10, "the player folder should be the split shell's player rows")
-        for row in rows:
+        # instead of listing. Before the split it named `index.html`, which WAS
+        # the whole app; after it, a surface write in any of the sixty rows was
+        # invisible and the fence printed PASS. Scoping the repair to
+        # `player/*.js` would have been the same mistake one folder smaller —
+        # the surface ids are plain DOM ids and a second door can open from
+        # `core/chrome.js` as easily as from the player. So: every shipped web
+        # script, and the shell.
+        rows = [
+            path for path in sorted((ROOT / "crates/plurxd/src/web").rglob("*.js"))
+            if not path.name.endswith(".min.js")
+            and path.relative_to(ROOT) not in self.fence.NEVER_SCANNED
+        ]
+        self.assertGreater(len(rows), 50, "the fence should see the whole split shell")
+        for row in rows + [ROOT / "crates/plurxd/src/web/index.html"]:
             self.assertIn(
                 row.relative_to(ROOT), self.fence.SCANNED,
-                f"{row.name} is a web player row the fence does not scan",
+                f"{row.relative_to(ROOT)} is a shipped web file the fence does not scan",
             )
+        # …and it is seen, not merely listed. One rogue write per file, in a
+        # file from every folder, including ones with no player code in them.
         rogue = 'function rogue(t){ document.getElementById("psurface").innerHTML = t; }'
         for row in rows:
-            with self.subTest(row=row.name):
-                text = row.read_text(encoding="utf-8") + "\n" + rogue + "\n"
-                allowed = self.fence.region_allowed_lines(
-                    row.relative_to(ROOT), text.splitlines(),
-                )
+            with self.subTest(row=str(row.relative_to(ROOT))):
+                relative = row.relative_to(ROOT)
+                original = row.read_text(encoding="utf-8")
                 shipped = self.fence.scan_text(
-                    "web", row.read_text(encoding="utf-8"),
-                    self.fence.region_allowed_lines(
-                        row.relative_to(ROOT), row.read_text(encoding="utf-8").splitlines(),
-                    ),
+                    "web", original,
+                    self.fence.region_allowed_lines(relative, original.splitlines()),
                 )
+                text = original + "\n" + rogue + "\n"
                 self.assertGreater(
-                    len(self.fence.scan_text("web", text, allowed)), len(shipped),
-                    f"a surface write appended to {row.name} was not seen",
+                    len(self.fence.scan_text(
+                        "web", text,
+                        self.fence.region_allowed_lines(relative, text.splitlines()),
+                    )),
+                    len(shipped),
+                    f"a surface write appended to {relative} was not seen",
                 )
 
     def test_the_web_render_anchors_may_not_simply_be_deleted(self):

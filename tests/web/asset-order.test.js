@@ -92,3 +92,64 @@ const at = (path) => {
     "a row that lost its prologue must be refused");
   console.log("PASS a row without its \"use strict\"; prologue is refused");
 }
+
+// ---- the shapes a forward reference can take --------------------------------
+
+// A gate is only as good as the constructions it sees through, and this one
+// reads code rather than running it, so every shape it does NOT model is a hole
+// it will never report. Each case below plants a reference to `setPageTimer`
+// (declared in `router.js`, the last row) in `core/app.js`, the first. The
+// negatives matter as much as the positives: a gate that fires on a click
+// handler is a gate people route around.
+//
+// Five of these were holes when this file was first written — an immediately
+// invoked `.map`/`.forEach`/`.sort` callback, a `class extends` clause, a
+// default parameter, a destructuring default — and one of them, an immediate
+// callback inside a branch the load smoke does not take, passed BOTH gates
+// while shipping a blank page to every touch device.
+{
+  const POSITIVE = {
+    "a direct reference": "const probe = setPageTimer;",
+    "a direct call": 'setPageTimer("x");',
+    "an alias, then a call": "const f = setPageTimer; f();",
+    "an IIFE": "(function(){ setPageTimer(); })();",
+    "a .map callback": '["a"].map(function(x){ return setPageTimer(x); });',
+    "a .forEach callback": '["a"].forEach(x => setPageTimer(x));',
+    "a .sort comparator": '["a","b"].sort((x,y) => setPageTimer(x));',
+    "Array.from's callback": "Array.from([1], x => setPageTimer(x));",
+    "an immediate callback inside a branch":
+      'if (navigator.maxTouchPoints > 0) { ["a"].forEach(function(i){ setPageTimer(i); }); }',
+    "a class extends clause": "class Probe extends setPageTimer {}",
+    "a class computed key": "class Probe { [setPageTimer()](){} }",
+    "a class static block": "class Probe { static { setPageTimer(); } }",
+    "a default parameter": "function g(a = setPageTimer){ return a; } g();",
+    "a destructuring default": "const {q = setPageTimer} = {};",
+    "a call two hops away": "function a1(){ return a2(); } function a2(){ return setPageTimer(); } a1();",
+    "a spread": "const s = [...[setPageTimer]];",
+    "a tagged template": "String.raw`${setPageTimer}`;",
+    "a top-level loop": "for (let i = 0; i < 0; i++) { setPageTimer(); }",
+    "a try block": "try { setPageTimer(); } catch (e) {}",
+  };
+  const NEGATIVE = {
+    "an event handler": 'window.addEventListener("x", function(){ setPageTimer(); });',
+    "a setTimeout callback": "setTimeout(function(){ setPageTimer(); }, 0);",
+    "a .then continuation": "Promise.resolve().then(function(){ setPageTimer(); });",
+    "a function merely named": "window.zz = function(){ return setPageTimer(); };",
+    "a function nobody calls": "function never(){ return setPageTimer(); }",
+  };
+  const plant = (code) => analyze(served.map((row) => row.path === "core/app.js"
+    ? {...row, source: `${row.source}\n${code}\n`} : row))
+    .forwardRefs.filter((f) => f.row === "core/app.js");
+
+  for (const [shape, code] of Object.entries(POSITIVE)) {
+    const names = plant(code).map((f) => f.name);
+    assert.ok(names.includes("setPageTimer"),
+      `${shape} is a load-time forward reference this gate does not see: ${code}`);
+  }
+  for (const [shape, code] of Object.entries(NEGATIVE)) {
+    assert.deepEqual(plant(code), [],
+      `${shape} runs after every row is in; failing on it makes this gate a nuisance`);
+  }
+  console.log(`PASS ${Object.keys(POSITIVE).length} shapes of forward reference are caught, `
+    + `${Object.keys(NEGATIVE).length} deferred shapes are not`);
+}

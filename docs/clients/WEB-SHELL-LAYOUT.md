@@ -97,6 +97,30 @@ freezes `STATS_ROWS` and other tables, and a write to a frozen object is a
 `TypeError` in strict mode and a silent no-op in sloppy mode. The prologue is
 the file's first statement, and `asset-order` refuses a row without one.
 
+### 1.5 Two things that really are different
+
+The bytes are identical and the app behaves identically, but sixty-eight
+scripts are not one script, and two consequences are worth knowing before you
+debug something strange.
+
+**A load-time throw is no longer fatal.** In one `<script>`, anything that
+threw at load took the rest of the file with it, including the `boot()` on
+the last line — you got a blank page and a stack trace. Now the browser logs
+the error and moves to the next `<script>`, so the app boots with one row's
+`let`/`const` permanently in the temporal dead zone: a half-working UI where
+there used to be a loud failure. `tests/web/asset-load.test.js` rethrows, so
+it sees the throw; a browser will not.
+
+**`typeof` on a later row's `let`/`const` changed meaning.** On a binding in
+the temporal dead zone, `typeof X` *throws*; on an undeclared binding it
+returns `"undefined"`. Three guards in the shell do exactly this across a file
+boundary — `detail/dynamic-range.js`'s `typeof PLAYER`,
+`player/decode-tiers.js`'s `typeof LIVE_TV_LEASE`, and
+`pages/settings-live-tv.js`'s `typeof PAGE_RENDER_GENERATION`. None is
+reachable at load, so nothing differs in practice, but they are load-order
+sensitive now: if `pages/live-tv.js` ever failed to load, `play()` would
+silently stop stopping Live TV instead of failing loudly.
+
 ## 2. The table
 
 Served order, top to bottom. The last column is where that code was in
@@ -232,13 +256,22 @@ than reading `index.html` — a test that greps the shell for a function now
 passes by finding nothing, which is indistinguishable from passing for the
 right reason.
 
+Two traps worth naming, because both were shipped and caught in review. A
+`doesNotMatch` against the wrong half is a guard that can never fail: the
+cockpit-theme selector lives in `app.css`, so refusing it in `headScript`
+proves nothing. And an ordering claim written as `everything.indexOf(tag) <
+everything.indexOf(fn)` is true for every possible shell, because in that
+string the markup always precedes the rows — compare positions in `rows`
+instead.
+
 | You want | Ask for |
 |---|---|
 | The string the shell used to be, for slicing a function by name | `bodyScript` |
 | The stylesheet | `css` |
 | `THEMES`, `FONT_*`, `applyLayout` | `headScript` |
 | The player's DOM, the sidecar tags | `html` |
-| An assertion that crosses all three | `everything` |
+| An assertion that crosses all of it, especially an *absence* | `everything` |
+| Which row is served before which | `rows`, never string offsets |
 
 Python has no shared helper; `tests/validation/test_decoder_recovery_status.py`
 carries a nine-line `web_body_script()` that does the same thing, and the
@@ -272,3 +305,7 @@ is that nothing else changed:
   real improvement and its own PR.
 - `app.css` is still one 3,209-line file. Splitting it means measuring the
   cascade first, which is a riskier piece of work than moving JavaScript.
+- The three `typeof` guards in §1.5 would read better as `X === undefined`
+  against a binding the same row owns, or as a `null`-initialised `let` in an
+  earlier row. Changing them is a behaviour change, however small, so it is
+  not this PR's.

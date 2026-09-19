@@ -19,17 +19,24 @@
 //   * is any top-level name declared in two rows,
 //   * does any row lack its `"use strict";` prologue.
 //
-// Callbacks handed to `addEventListener`, `setTimeout` and friends are not
-// load-time: they run when the event does, by which point every row is in.
+// A function expression does not run because it was written down, so the walk
+// does not enter one — with one exception: the array and iterator methods that
+// call their callback on the spot. Those run now, and a forward reference
+// inside one is a real one. `addEventListener`, `setTimeout` and `.then` are
+// the opposite case and stay unentered: they run when the event does, by which
+// point every row is in.
 
 const acorn = require("../vendor/acorn.js");
 const {shellSource} = require("./shell-source.js");
 
-// A function argument to one of these runs later, not now.
-const DEFERRED_SINKS = new Set([
-  "addEventListener", "removeEventListener", "setTimeout", "setInterval",
-  "requestAnimationFrame", "requestIdleCallback", "queueMicrotask",
-  "then", "catch", "finally", "observe", "subscribe",
+// A function argument to one of these is called before the expression it is
+// written in has finished evaluating. Four of them are used at load in the
+// shipped rows today (`.map` in decode-tiers and stats, `.forEach` in stats,
+// `.flatMap` in settings-panels), so this is not hypothetical tidiness.
+const IMMEDIATE_CALLBACKS = new Set([
+  "map", "forEach", "filter", "flatMap", "reduce", "reduceRight", "sort",
+  "find", "findIndex", "findLast", "findLastIndex", "some", "every",
+  "from", "of", "keys", "values", "entries",
 ]);
 
 const PARSE = {ecmaVersion: "latest", sourceType: "script", locations: true};
@@ -119,14 +126,25 @@ function skipChild(node, child) {
   return false;
 }
 
-function deferredArguments(node) {
-  if (node.type !== "CallExpression") return new Set();
+/** The function arguments of a call that runs them now. */
+function immediateCallbacks(node) {
+  if (node.type !== "CallExpression") return [];
   const callee = node.callee;
-  const name = callee.type === "Identifier" ? callee.name
-    : callee.type === "MemberExpression" && !callee.computed ? callee.property.name
-    : null;
-  if (!name || !DEFERRED_SINKS.has(name)) return new Set();
-  return new Set(node.arguments.filter((a) => FUNCTIONISH.has(a.type)));
+  const name = callee.type === "MemberExpression" && !callee.computed
+    ? callee.property.name : null;
+  if (!name || !IMMEDIATE_CALLBACKS.has(name)) return [];
+  return node.arguments.filter((argument) => FUNCTIONISH.has(argument.type));
+}
+
+/** The default expressions inside a binding pattern — they evaluate at load. */
+function patternDefaults(pattern, into) {
+  if (!pattern || typeof pattern.type !== "string") return;
+  if (pattern.type === "AssignmentPattern") {
+    into.push(pattern.right);
+    patternDefaults(pattern.left, into);
+    return;
+  }
+  for (const child of children(pattern)) patternDefaults(child, into);
 }
 
 /**
@@ -143,8 +161,9 @@ function reachedNames(roots, declaredBy) {
     const {node, scopes, via} = work.pop();
 
     // A function expression does not run because it was written down. It runs
-    // when something calls it, and by then every row is loaded — the only
-    // exception being the one that calls itself on the spot, below.
+    // when something calls it, and by then every row is loaded — the two
+    // exceptions, an IIFE and an immediately-invoked callback, are pushed as
+    // their bodies below rather than as the function.
     if (FUNCTIONISH.has(node.type)) continue;
 
     if (node.type === "Identifier") {
@@ -154,11 +173,32 @@ function reachedNames(roots, declaredBy) {
       continue;
     }
 
-    // An IIFE is the one function expression that does run now.
+    // An IIFE runs now.
     if (node.type === "CallExpression" && FUNCTIONISH.has(node.callee.type)) {
       const fn = node.callee;
-      work.push({node: fn.body, scopes: [...scopes, functionScope(fn)], via});
+      const inner = [...scopes, functionScope(fn)];
+      work.push({node: fn.body, scopes: inner, via});
+      const defaults = [];
+      for (const p of fn.params) patternDefaults(p, defaults);
+      for (const d of defaults) work.push({node: d, scopes: inner, via});
       for (const argument of node.arguments) work.push({node: argument, scopes, via});
+      continue;
+    }
+
+    // `rows.map(r => later(r))` runs its callback before the expression it is
+    // written in finishes. The parser must go in.
+    const now = immediateCallbacks(node);
+    if (now.length) {
+      for (const fn of now) {
+        work.push({node: fn.body, scopes: [...scopes, functionScope(fn)], via});
+        const defaults = [];
+        for (const p of fn.params) patternDefaults(p, defaults);
+        for (const d of defaults) work.push({node: d, scopes: [...scopes, functionScope(fn)], via});
+      }
+      work.push({node: node.callee, scopes, via});
+      for (const argument of node.arguments) {
+        if (!now.includes(argument)) work.push({node: argument, scopes, via});
+      }
       continue;
     }
 
@@ -172,17 +212,21 @@ function reachedNames(roots, declaredBy) {
         const decl = declaredBy.get(name);
         if (decl && !entered.has(name)) {
           entered.add(name);
-          work.push({node: decl.body, scopes: [functionScope(decl)], via: [...via, name]});
+          const inner = [functionScope(decl)];
+          work.push({node: decl.body, scopes: inner, via: [...via, name]});
+          // A default parameter is an expression, and it evaluates on the call
+          // that is happening now.
+          const defaults = [];
+          for (const p of decl.params) patternDefaults(p, defaults);
+          for (const d of defaults) work.push({node: d, scopes: inner, via: [...via, name]});
         }
       }
       for (const argument of node.arguments) work.push({node: argument, scopes, via});
       continue;
     }
 
-    const deferred = deferredArguments(node);
     for (const c of children(node)) {
       if (skipChild(node, c)) continue;
-      if (deferred.has(c)) continue;
       // `X.onclick = function(){}` is a handler, not a call.
       if (node.type === "AssignmentExpression" && c === node.right
           && FUNCTIONISH.has(c.type) && node.left.type === "MemberExpression"
@@ -199,9 +243,23 @@ function reachedNames(roots, declaredBy) {
 function loadTimeRoots(program) {
   const roots = [];
   for (const node of program.body) {
-    if (node.type === "FunctionDeclaration" || node.type === "ClassDeclaration") continue;
+    if (node.type === "FunctionDeclaration") continue;
+    if (node.type === "ClassDeclaration") {
+      // The body is not evaluated, but `extends`, computed keys, field
+      // initialisers' keys and static blocks all are, right here.
+      if (node.superClass) roots.push(node.superClass);
+      for (const member of node.body.body) {
+        if (member.computed && member.key) roots.push(member.key);
+        if (member.type === "StaticBlock") roots.push(member);
+      }
+      continue;
+    }
     if (node.type === "VariableDeclaration") {
-      for (const d of node.declarations) if (d.init) roots.push(d.init);
+      for (const d of node.declarations) {
+        if (d.init) roots.push(d.init);
+        // `const {q = LATER} = {}` evaluates LATER at load, in the pattern.
+        patternDefaults(d.id, roots);
+      }
       continue;
     }
     if (node.type === "ExpressionStatement"
@@ -278,4 +336,7 @@ function analyze(sources = servedSources()) {
   };
 }
 
-module.exports = {analyze, servedSources, reachedNames, topLevelNames, loadTimeRoots, PARSE};
+module.exports = {
+  analyze, servedSources, reachedNames, topLevelNames, loadTimeRoots,
+  immediateCallbacks, patternDefaults, PARSE,
+};
