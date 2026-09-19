@@ -908,6 +908,22 @@ impl SegmentIndex {
         self.segs.iter().map(|s| s.bytes).sum()
     }
 
+    fn advertised_bytes(&self) -> i64 {
+        self.segs
+            .iter()
+            .filter(|segment| segment.visibility.is_advertised())
+            .map(|segment| segment.bytes)
+            .sum()
+    }
+
+    fn grace_bytes(&self) -> i64 {
+        self.segs
+            .iter()
+            .filter(|segment| matches!(segment.visibility, SegmentVisibility::Grace { .. }))
+            .map(|segment| segment.bytes)
+            .sum()
+    }
+
     /// Segments old enough to delete: those that END before the retention
     /// window opens. A segment straddling the boundary is kept — half a
     /// segment is no use to anyone and the arithmetic is cheap.
@@ -7908,6 +7924,7 @@ async fn session_info(
     global_live_bytes: i64,
     global_ahead_bytes: i64,
 ) -> SessionInfo {
+    let observed_at = Instant::now();
     let lease = s.control.snapshot().await;
     let demand = lease.as_ref().and_then(|lease| lease.demand.as_ref());
     let media_origin_ms = (s.media_origin_seconds * 1_000.0).round() as i64;
@@ -7926,7 +7943,15 @@ async fn session_info(
         }
     }
     let (fetched_end_ms, published_end_ms) = delivery_frontier(s, lease.as_ref()).await;
-    let (ahead, first_retained_segment, server_ready) = {
+    let (
+        ahead,
+        first_retained_segment,
+        server_ready,
+        produced_end_ms,
+        advertised_bytes,
+        grace_bytes,
+        produced_segments,
+    ) = {
         let index = s.segments.lock().await;
         (
             ahead_of(&index, fetched_end_ms.max(0)),
@@ -7934,6 +7959,51 @@ async fn session_info(
             ready_anchor_ms.map_or_else(ReadyCoverage::unavailable, |anchor| {
                 index.server_ready(media_origin_ms, anchor)
             }),
+            index.produced_playable_end_ms(),
+            index.advertised_bytes(),
+            index.grace_bytes(),
+            index
+                .segs
+                .iter()
+                .map(|segment| (segment.start_ms, segment.bytes))
+                .collect::<Vec<_>>(),
+        )
+    };
+    let (
+        served_end_ms,
+        served_revision,
+        last_segment_advanced_idle_ms,
+        next_publication_in_ms,
+        publication_deadline_remaining_ms,
+        staged_bytes,
+    ) = {
+        let publication = s.publication.lock().await;
+        let served_end_ms = publication.served.as_ref().map(|served| served.end_ms);
+        let staged_bytes = produced_segments
+            .iter()
+            .filter(|(start_ms, _)| *start_ms >= served_end_ms.unwrap_or(0))
+            .map(|(_, bytes)| *bytes)
+            .sum();
+        (
+            served_end_ms,
+            publication.served.as_ref().map(|served| served.revision),
+            publication.served.as_ref().map(|served| {
+                i64::try_from(
+                    observed_at
+                        .saturating_duration_since(served.available_at)
+                        .as_millis(),
+                )
+                .unwrap_or(i64::MAX)
+            }),
+            publication.next_publish_at.map(|deadline| {
+                i64::try_from(deadline.saturating_duration_since(observed_at).as_millis())
+                    .unwrap_or(i64::MAX)
+            }),
+            publication.hard_deadline.map(|deadline| {
+                i64::try_from(deadline.saturating_duration_since(observed_at).as_millis())
+                    .unwrap_or(i64::MAX)
+            }),
+            staged_bytes,
         )
     };
     let idle_seconds = lease
@@ -8014,6 +8084,19 @@ async fn session_info(
     let producer_exit = delivery
         .and_then(|delivery| delivery.producer_exit.clone())
         .or(fallback_exit);
+    let recent_speed = delivery
+        .and_then(|delivery| delivery.producer_recent_speed_milli)
+        .map(|speed| speed as f64 / 1_000.0);
+    let cumulative_speed = delivery
+        .and_then(|delivery| delivery.producer_speed_milli)
+        .map(|speed| speed as f64 / 1_000.0);
+    let rate_estimate_source = if recent_speed.is_some() {
+        "recent_progress"
+    } else if cumulative_speed.is_some() {
+        "cumulative_progress"
+    } else {
+        "unavailable"
+    };
     let actor_producer = lease.as_ref().map(|lease| &lease.producer_control);
     let producer_state = if s.failed.load(Relaxed) {
         "failed"
@@ -8060,6 +8143,45 @@ async fn session_info(
         presentation_progress_seen: lease
             .as_ref()
             .map(|lease| lease.startup.presentation_progress_seen),
+        produced_end_ms,
+        served_end_ms,
+        staged_bytes,
+        playlist_target_ms: Some(
+            i64::try_from(ROLLING_PUBLICATION_TARGET.as_millis()).unwrap_or(i64::MAX),
+        ),
+        served_revision,
+        last_segment_advanced_idle_ms,
+        next_publication_in_ms,
+        publication_deadline_remaining_ms,
+        maintenance_state: if s.retention_cleanup_active.load(Acquire) {
+            "retention_cleanup"
+        } else if s.retention_garbage_bytes.load(Acquire) > 0 {
+            "retention_pending"
+        } else {
+            "idle"
+        },
+        rate_estimate_source,
+        estimate_active_speed: recent_speed.or(cumulative_speed),
+        pause_grace_remaining_ms: lease.as_ref().and_then(|lease| {
+            lease
+                .pause_remaining
+                .map(|remaining| i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX))
+        }),
+        retirement_reason: lease.as_ref().and_then(|lease| {
+            lease.terminal.map(|cause| {
+                if cause == crate::playback_control::RollingTerminalCause::LeaseExpired
+                    && lease.pause_remaining == Some(Duration::ZERO)
+                {
+                    "pause_grace_expired"
+                } else {
+                    cause.status()
+                }
+            })
+        }),
+        advertised_bytes,
+        grace_bytes,
+        reserved_bytes: Some(limits.max_bytes).filter(|bytes| *bytes > 0),
+        live_bytes: s.live_bytes.load(Acquire),
         control_demand,
         reported_position_ms: demand.map(|demand| demand.position_ms),
         client_runway_ms: demand.map(|demand| demand.runway_ms()),
@@ -8080,12 +8202,8 @@ async fn session_info(
         published_segment: delivery.and_then(|delivery| delivery.published_segment),
         next_media_sequence: delivery.map(|delivery| delivery.next_media_sequence),
         pending_fetched_segment: delivery.and_then(|delivery| delivery.pending_fetched_segment),
-        speed: delivery
-            .and_then(|delivery| delivery.producer_speed_milli)
-            .map(|speed| speed as f64 / 1_000.0),
-        recent_speed: delivery
-            .and_then(|delivery| delivery.producer_recent_speed_milli)
-            .map(|speed| speed as f64 / 1_000.0),
+        speed: cumulative_speed,
+        recent_speed,
         out_time_ms: delivery.and_then(|delivery| delivery.producer_out_time_ms),
         progress_idle_ms: delivery.map_or(-1, |delivery| delivery.producer_progress_idle_ms),
         producer_exit_success: producer_exit.as_ref().map(|exit| exit.success),
@@ -8146,6 +8264,23 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         startup_state: None,
         startup_remaining_ms: None,
         presentation_progress_seen: None,
+        produced_end_ms: None,
+        served_end_ms: None,
+        staged_bytes: 0,
+        playlist_target_ms: None,
+        served_revision: None,
+        last_segment_advanced_idle_ms: None,
+        next_publication_in_ms: None,
+        publication_deadline_remaining_ms: None,
+        maintenance_state: "immutable",
+        rate_estimate_source: "unavailable",
+        estimate_active_speed: None,
+        pause_grace_remaining_ms: None,
+        retirement_reason: None,
+        advertised_bytes: 0,
+        grace_bytes: 0,
+        reserved_bytes: None,
+        live_bytes: 0,
         control_demand: None,
         reported_position_ms: None,
         client_runway_ms: None,
@@ -9545,6 +9680,30 @@ pub struct SessionInfo {
     pub startup_state: Option<&'static str>,
     pub startup_remaining_ms: Option<i64>,
     pub presentation_progress_seen: Option<bool>,
+    /// Produced inventory and the immutable served snapshot are distinct.
+    /// These coordinates expose that separation without making clients infer
+    /// it from playlist fetch timing.
+    pub produced_end_ms: Option<i64>,
+    pub served_end_ms: Option<i64>,
+    pub staged_bytes: i64,
+    pub playlist_target_ms: Option<i64>,
+    pub served_revision: Option<u64>,
+    pub last_segment_advanced_idle_ms: Option<i64>,
+    pub next_publication_in_ms: Option<i64>,
+    pub publication_deadline_remaining_ms: Option<i64>,
+    /// Maintenance and rate provenance are labels over measured state, not
+    /// feature gates or policy inputs.
+    pub maintenance_state: &'static str,
+    pub rate_estimate_source: &'static str,
+    pub estimate_active_speed: Option<f64>,
+    pub pause_grace_remaining_ms: Option<i64>,
+    pub retirement_reason: Option<&'static str>,
+    /// Object-lifetime accounting. Advertised and Grace bytes are both
+    /// included in live bytes until physical deletion succeeds.
+    pub advertised_bytes: i64,
+    pub grace_bytes: i64,
+    pub reserved_bytes: Option<i64>,
+    pub live_bytes: i64,
     /// Last accepted viewer intent and render facts. These are observations,
     /// not inferred recovery decisions.
     pub control_demand: Option<&'static str>,

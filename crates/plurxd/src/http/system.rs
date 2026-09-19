@@ -6169,6 +6169,23 @@ mod tests {
             startup_state: Some("awaiting_presentation"),
             startup_remaining_ms: Some(18_000),
             presentation_progress_seen: Some(true),
+            produced_end_ms: Some(48_000),
+            served_end_ms: Some(44_000),
+            staged_bytes: 400_000,
+            playlist_target_ms: Some(16_000),
+            served_revision: Some(9),
+            last_segment_advanced_idle_ms: Some(250),
+            next_publication_in_ms: Some(3_000),
+            publication_deadline_remaining_ms: Some(8_000),
+            maintenance_state: "idle",
+            rate_estimate_source: "recent_progress",
+            estimate_active_speed: Some(1.25),
+            pause_grace_remaining_ms: None,
+            retirement_reason: None,
+            advertised_bytes: 4_000_000,
+            grace_bytes: 500_000,
+            reserved_bytes: Some(8_000_000),
+            live_bytes: 4_500_000,
             control_demand: Some("active"),
             reported_position_ms: Some(9_000),
             client_runway_ms: Some(20_000),
@@ -6315,6 +6332,16 @@ mod tests {
         assert_eq!(extra["server"]["lease_mode"], "explicit");
         assert_eq!(extra["server"]["lease_state"], "active");
         assert_eq!(extra["server"]["lease_timeout_ms"], 30_000);
+        assert_eq!(extra["server"]["produced_end_ms"], 48_000);
+        assert_eq!(extra["server"]["served_end_ms"], 44_000);
+        assert_eq!(extra["server"]["staged_bytes"], 400_000);
+        assert_eq!(extra["server"]["playlist_target_ms"], 16_000);
+        assert_eq!(extra["server"]["served_revision"], 9);
+        assert_eq!(extra["server"]["rate_estimate_source"], "recent_progress");
+        assert_eq!(extra["server"]["advertised_bytes"], 4_000_000);
+        assert_eq!(extra["server"]["grace_bytes"], 500_000);
+        assert_eq!(extra["server"]["reserved_bytes"], 8_000_000);
+        assert_eq!(extra["server"]["live_bytes"], 4_500_000);
         assert_eq!(extra["server"]["control_demand"], "active");
         assert_eq!(extra["server"]["production_policy"], "explicit_demand");
         assert_eq!(extra["server"]["production_ahead_seconds"], 35);

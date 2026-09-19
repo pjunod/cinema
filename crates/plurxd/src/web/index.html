@@ -7409,9 +7409,11 @@ function attachHls(video, playlistUrl, startAt){
       ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
       ...(StockLoader?{loader:createHlsStartupLoader(StockLoader,startup)}:{}),
       manifestLoadPolicy:PlaybackPolicy.HLS_STARTUP.manifest_load_policy,
-      // Every HLS session is VOD. The old growing-playlist path is not an
-      // alternate response, so every fragment fetch uses the measured VOD
-      // materialization contract from its first request.
+      // HLS may be immutable VOD or the bounded sliding recovery presentation.
+      // Both use the same finite fragment retry budget: rolling publication
+      // advertises only completed objects and keeps removed URLs readable
+      // through Grace, so an unbounded client retry would hide a real terminal
+      // retirement rather than make a late object safer.
       fragLoadPolicy:vodClientContract().fragLoadPolicy,
       // Told before the first fragment loads, not seeked afterwards. Seeking
       // after attach downloads the opening of the film and throws it away —
@@ -16166,7 +16168,7 @@ function activityStreamState(session){
   if(!session) return null;
   // `lease_state` is "active" for a live lease and "unavailable" for a legacy
   // viewer with no actor at all; only the three terminal verdicts are news.
-  const terminal=({ended:"ended",expired:"expired",authority_fenced:"authority fenced"})[session.lease_state];
+  const terminal=({ended:"ended",expired:"expired",startup_expired:"startup expired",authority_fenced:"authority fenced"})[session.lease_state];
   if(terminal) return {cls:"bad",label:`Lease ${terminal}`};
   const hold=!session.suspended?""
     :({demand:"viewer has enough",time:"reserve full",bytes:"per-stream byte limit",
@@ -16257,6 +16259,21 @@ function activityStreamDetails(session){
   if(session.playlist_ready===true) rows.push(["Playlist","ready"]);
   else if(session.playlist_ready===false) rows.push(["Playlist","waiting"]);
   if(session.playlist_shape) rows.push(["Playlist shape",session.playlist_shape]);
+  if(Number.isSafeInteger(session.playlist_target_ms)) rows.push(["Playlist target",`${session.playlist_target_ms} ms`]);
+  if(Number.isSafeInteger(session.produced_end_ms)) rows.push(["Produced end",`${session.produced_end_ms} ms`]);
+  if(Number.isSafeInteger(session.served_end_ms)) rows.push(["Served end",`${session.served_end_ms} ms`]);
+  if(Number.isSafeInteger(session.staged_bytes)&&session.staged_bytes>0) rows.push(["Staged bytes",fmtBytes(session.staged_bytes)]);
+  if(Number.isSafeInteger(session.served_revision)) rows.push(["Served revision",String(session.served_revision)]);
+  if(Number.isSafeInteger(session.next_publication_in_ms)) rows.push(["Next publication",`${session.next_publication_in_ms} ms`]);
+  if(Number.isSafeInteger(session.publication_deadline_remaining_ms)) rows.push(["Publication deadline",`${session.publication_deadline_remaining_ms} ms`]);
+  if(Number.isSafeInteger(session.pause_grace_remaining_ms)) rows.push(["Pause grace",`${Math.round(session.pause_grace_remaining_ms/1000)} s`]);
+  if(session.retirement_reason) rows.push(["Retirement",String(session.retirement_reason).replace(/_/g," ")]);
+  if(session.maintenance_state) rows.push(["Maintenance",String(session.maintenance_state).replace(/_/g," ")]);
+  if(session.rate_estimate_source) rows.push(["Rate source",String(session.rate_estimate_source).replace(/_/g," ")]);
+  if(Number.isSafeInteger(session.advertised_bytes)) rows.push(["Advertised bytes",fmtBytes(session.advertised_bytes)]);
+  if(Number.isSafeInteger(session.grace_bytes)&&session.grace_bytes>0) rows.push(["Grace bytes",fmtBytes(session.grace_bytes)]);
+  if(Number.isSafeInteger(session.live_bytes)) rows.push(["Live scratch",Number.isSafeInteger(session.reserved_bytes)
+    ?`${fmtBytes(session.live_bytes)} of ${fmtBytes(session.reserved_bytes)}`:fmtBytes(session.live_bytes)]);
   if(Number.isSafeInteger(session.published_segment)) rows.push(["Published segment",String(session.published_segment)]);
   if(Number.isSafeInteger(session.next_media_sequence)) rows.push(["Next sequence",String(session.next_media_sequence)]);
   if(Number.isSafeInteger(session.fetched_segment)) rows.push(["Fetched segment",String(session.fetched_segment)]);
@@ -17312,7 +17329,6 @@ function playbackPanel(settings){
       ${setCardFoot("savePlaybackDefaults")}`);
   const streaming=setCard(`${cardHead("Streaming","Server delivery · Changes apply to new sessions. Existing playback keeps its current settings.",active)}
       ${togRow("pvod","VOD HLS — a fixed, seekable timeline","Preferred. Needs the file's analysis index; schedules and queue health are in Analysis.",settings.vod_presentation)}
-      ${togRow("pvlr","Fall back to Live HLS when a VOD prerequisite is missing","The growing recovery stream. Off means a title without an index refuses to start.",settings.vod_live_recovery)}
       ${togRow("pabr","Adjust Auto quality while playing","Off keeps the server's first Auto choice and the full manual quality menu, but makes no client-side rung changes or supply-stall restart. Enable it to let Auto respond to changing playback conditions.",settings.playback_auto_abr)}
       <div class="setfields">
         <div><label for="pvws">VOD working set</label><select id="pvws" style="min-width:190px">${presetOpts([[String(2*1024**3),"2 GB"],[String(4*1024**3),"4 GB"],[String(8*1024**3),"8 GB — recommended"],[String(16*1024**3),"16 GB"],[String(32*1024**3),"32 GB"]],vodWorking)}</select></div>
@@ -19557,7 +19573,7 @@ function uiEnableAdvisory(){
   const browser=typeof CSS!=='undefined'&&CSS.supports('display','grid')&&typeof fetch==='function';
   const libs=SETTINGS_DATA&&SETTINGS_DATA.libs;
   const row=(title,state,detail)=>`<div><strong>${esc(title)} · ${esc(state)}</strong><small>${esc(detail)}</small></div>`;
-  return `<section class="card" id="ui-enable"><h2>Enable</h2><p>The updated search and activity layouts are enabled in this build. They need no rollout flag.</p><div class="enable-advisory">${row('Browser support',browser?'Met':'Not confirmed','Responsive layout and API support. This observation is advisory.')}${row('Signed-in account',ME?'Met':'Not confirmed','Watch state and recording visibility use the signed-in account.')}${row('Library data',Array.isArray(libs)?libs.length?'Available':'No libraries configured':'Not loaded','Readable files and accurate metadata make continuation and preview useful. Missing data is shown in context.')}${row('Playback and recording','Your saved choices','Use the controls below to enable recording, channel playback or quality handoff. Readiness results never override your choice.')}</div><p class="hint">Advisory only: unmet or unknown checks do not hide features or disable enable switches. Existing authorization, file availability and operational safety rules still apply.</p><nav class="watch-browse" aria-label="Enable controls"><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-analysis')?.scrollIntoView({behavior:'smooth',block:'start'})">Content analysis ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-recording')?.scrollIntoView({behavior:'smooth',block:'start'})">Recording ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-channels')?.scrollIntoView({behavior:'smooth',block:'start'})">Library channels ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-quality')?.scrollIntoView({behavior:'smooth',block:'start'})">Quality handoff ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-hevc-sample-entry')?.scrollIntoView({behavior:'smooth',block:'start'})">HEVC admission ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-source-probe')?.scrollIntoView({behavior:'smooth',block:'start'})">Source verification ↓</a></nav></section>`;
+  return `<section class="card" id="ui-enable"><h2>Enable</h2><p>The updated search and activity layouts are enabled in this build. They need no rollout flag.</p><div class="enable-advisory">${row('Browser support',browser?'Met':'Not confirmed','Responsive layout and API support. This observation is advisory.')}${row('Signed-in account',ME?'Met':'Not confirmed','Watch state and recording visibility use the signed-in account.')}${row('Library data',Array.isArray(libs)?libs.length?'Available':'No libraries configured':'Not loaded','Readable files and accurate metadata make continuation and preview useful. Missing data is shown in context.')}${row('Playback and recording','Your saved choices','Use the controls below to enable recovery, recording, channel playback or quality handoff. Readiness results never override your choice.')}</div><p class="hint">Advisory only: unmet or unknown checks do not hide features or disable enable switches. Existing authorization, file availability and operational safety rules still apply.</p><nav class="watch-browse" aria-label="Enable controls"><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-live-hls')?.scrollIntoView({behavior:'smooth',block:'start'})">Live HLS ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-analysis')?.scrollIntoView({behavior:'smooth',block:'start'})">Content analysis ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-recording')?.scrollIntoView({behavior:'smooth',block:'start'})">Recording ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-channels')?.scrollIntoView({behavior:'smooth',block:'start'})">Library channels ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-quality')?.scrollIntoView({behavior:'smooth',block:'start'})">Quality handoff ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-hevc-sample-entry')?.scrollIntoView({behavior:'smooth',block:'start'})">HEVC admission ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-source-probe')?.scrollIntoView({behavior:'smooth',block:'start'})">Source verification ↓</a></nav></section>`;
 }
 // Source verification compatibility.
 //
@@ -19664,6 +19680,22 @@ function preparedSwitchDeveloperRows(p){
     <p class="devcheck-note">Advisory only. Instrumentation never gates a quality change, and an unmeasurable row is never read as a failure.</p>
     </div></details>`;
 }
+function liveHlsRecoveryCard(settings,readiness){
+  const enabled=!!settings.vod_live_recovery;
+  return setCard(`${cardHead("Sliding Live HLS recovery",
+      "Use the bounded growing presentation when immutable VOD cannot serve a title yet.",
+      enabled?`<span class="pill ok">enabled</span>`:`<span class="pill">disabled</span>`)}
+      ${togRow("dvlr","Enable sliding Live HLS recovery",
+        "Applies to new sessions. This checkbox is authoritative; the readiness rows below never disable it or turn it back off.",enabled)}
+      <div class="hint"><b>This checkbox is the enable path.</b> The engine uses a fixed 16-second playlist target, scheduled publication, a bounded 180-second served window, and object grace for URLs already promised to a player. Immutable VOD remains preferred.</div>
+      <details class="setdetails" open><summary>Safe enablement and current state</summary><div class="setdetails-body">
+      ${devReq(readiness,"live_hls_recovery","rolling_contract_built","Bounded sliding contract","Target, scheduler, served window and object grace must be present in this build.")}
+      ${devReq(readiness,"live_hls_recovery","vod_coverage_replaces_it","Why recovery is still needed","Recent VOD refusals show which viewers would lose playback with recovery disabled.")}
+      ${devReq(readiness,"live_hls_recovery","no_session_bypasses_the_switch","Peer takeover path","A relay takeover can require the existing rolling presentation independently of this fallback choice.")}
+      ${devReq(readiness,"live_hls_recovery","rolling_clients_qualified","Physical-client qualification","Apple native HLS, Media3 and hls.js should be checked for startup, long playback, pause and resume.")}
+      <p class="devcheck-note">Advisory only. Unmet, unavailable or unobservable rows do not gate this switch. Authorization, exact object ownership and scratch limits still protect each request.</p>
+      </div></details><div class="err" id="dvlrerr" role="alert"></div>${setCardFoot("saveLiveHlsRecoveryDeveloper")}`);
+}
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
     <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner and guide</span></a>
@@ -19694,6 +19726,7 @@ function developerPanel(settings,readiness){
       </div></details><div class="err" id="lcdeverr" role="alert"></div>${setCardFoot("saveLibraryChannelsDeveloper")}`);
   return `${setHead("Developer","Compatibility controls and device diagnostics.")}
       ${destinations}${uiEnableAdvisory()}
+      <div class="setsection" id="enable-live-hls"><h2>Sliding Live HLS</h2><p>Explicit recovery enablement with advisory build, usage and device evidence.</p></div>${liveHlsRecoveryCard(settings,readiness)}
       <div class="setsection" id="enable-analysis"><h2>Content analysis</h2><p>Explicit enablement for durable selected-video indexing with advisory rollout evidence.</p></div>${contentAnalysisEnableCard(settings,readiness)}
       <div class="setsection" id="enable-recording"><h2>Recording</h2><p>Explicit enablement for capturing the tuner to a disk, with advisory deployment facts.</p></div>${dvrCard(settings,readiness)}
       <div class="setsection" id="enable-channels"><h2>Library channels</h2><p>Explicit playback enablement with advisory deployment facts.</p></div>${libraryChannels}
@@ -21507,7 +21540,6 @@ async function saveStreaming(btn){
       hls_burst_secs:document.getElementById("phb").value,
       hls_ahead_max_secs:document.getElementById("pha").value,
       vod_presentation:document.getElementById("pvod").checked,
-      vod_live_recovery:document.getElementById("pvlr").checked,
       vod_working_set_bytes:document.getElementById("pvws").value,
       vod_block_budget_secs:"8",
       vod_materialize_budget_secs:document.getElementById("pvmb").value,
@@ -21523,6 +21555,15 @@ async function saveDeveloper(btn){
     cacheSettings(await api("/settings",{method:"PUT",body:{
       playback_control_protocol_v1:document.getElementById("pcpv1").checked}}));
     toast("Developer settings saved"); if(btn) setCardSaved(btn);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
+async function saveLiveHlsRecoveryDeveloper(btn){
+  const err=document.getElementById("dvlrerr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
+      vod_live_recovery:document.getElementById("dvlr").checked}}));
+    toast("Live HLS recovery setting saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
 async function saveContentAnalysisDeveloper(btn){
