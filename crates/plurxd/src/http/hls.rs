@@ -24254,7 +24254,7 @@ mod tests {
         assert!(init_fixture.settle().await.is_empty());
     }
 
-    /// A client that walks away mid-segment is the case nothing else observes:
+    /// A response body dropped mid-segment is the case nothing else observes:
     /// the handler has already returned, the stream never reaches EOF, and no
     /// error is raised. Only `Drop` can name it, which also makes it the
     /// easiest classification to lose to a later refactor.
@@ -24294,14 +24294,23 @@ mod tests {
         let dropped = events
             .iter()
             .find(|event| event.reason.as_deref() == Some("response_dropped"))
-            .expect("an abandoned body is attributed to the client, not to storage");
+            .expect(
+                "an abandoned body is recorded without blaming storage or inventing client intent",
+            );
         assert_eq!(dropped.event, "segment_delivery_incomplete");
         let extra = dropped.extra.as_deref().unwrap_or_default();
         assert!(
             extra.contains("\"segment\":\"seg00002.m4s\"")
                 && extra.contains(&format!("\"expected_bytes\":{}", body.len()))
-                && extra.contains(&format!("\"delivered_bytes\":{}", first.len())),
-            "the event names the segment, what was owed, and what arrived: {extra}"
+                && extra.contains(&format!("\"delivered_bytes\":{}", first.len()))
+                && extra.contains("\"producer_attempt\":")
+                && extra.contains("\"response_incarnation\":")
+                && extra.contains("\"segment_start_ms\":")
+                && extra.contains("\"segment_duration_ms\":")
+                && extra.contains("\"producer_superseded\":false")
+                && extra.contains("\"client_disposition\":\"unknown\"")
+                && extra.contains("\"cut_class\":\"unclassified_drop\""),
+            "the event names the exact response, timeline, generation, and cut: {extra}"
         );
         assert_eq!(
             fixture.delivered_bytes(),

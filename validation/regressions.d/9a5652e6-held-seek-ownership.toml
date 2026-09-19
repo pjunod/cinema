@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9a5652e6"]
+points = ["playback.pipeline", "live-tv.integration", "web.experience"]
+checks = ["web-static", "player-input-fence"]
+reason = "The retained player-input, web-policy, web-control, and Live TV cases exercise the shipped held-key owner: repeat keydowns preview against one frozen base, keyup or quiet commits once, blur and replacement cancel, opposite arrows share ownership, and a stopped Live TV session cannot be reacquired. `make web-check` runs those suites, while `scripts/player-input-fence` keeps the production adapters and contract fixtures wired together."

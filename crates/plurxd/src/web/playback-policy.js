@@ -50,7 +50,7 @@
   // ---- generated from tests/playback/player-input-contract.json by
   // scripts/player-contract-table --embed; do not edit by hand ----
   const INPUT_ROUTING = {"ten-foot":{"hidden":{"left":"reveal","right":"reveal","up":"reveal","down":"reveal","select":"reveal","back":"exit","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"reveal","idle":"ignore"},"transport":{"left":"focus_row","right":"focus_row","up":"focus_row","down":"focus_row","select":"activate","back":"hide","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"ignore","idle":"hide"},"timeline":{"left":"preview","right":"preview","up":"focus_marker_or_ignore","down":"focus_transport","select":"toggle_play","back":"hide","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"ignore","idle":"hide"},"scrub":{"left":"preview","right":"preview","up":"cancel_then_focus_marker_or_ignore","down":"cancel_then_focus_transport","select":"commit","back":"cancel","play_pause":"commit_then_toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"},"menu":{"left":"menu_focus","right":"menu_focus","up":"menu_focus","down":"menu_focus","select":"activate","back":"close_menu","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_menu","idle":"ignore"},"info":{"left":"menu_focus","right":"menu_focus","up":"menu_focus","down":"menu_focus","select":"activate","back":"close_info","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_info","idle":"ignore"},"failed":{"left":"focus_row","right":"focus_row","up":"ignore","down":"ignore","select":"activate","back":"exit","play_pause":"ignore","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"}},"desktop":{"hidden":{"left":"skip","right":"skip","up":"ignore","down":"ignore","select":"ignore","back":"exit","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_play","idle":"ignore"},"transport":{"left":"skip","right":"skip","up":"ignore","down":"ignore","select":"activate","back":"exit","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_play","idle":"hide"},"timeline":{"left":"preview","right":"preview","up":"ignore","down":"ignore","select":"toggle_play","back":"exit","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_play","idle":"hide"},"scrub":{"left":"preview","right":"preview","up":"ignore","down":"ignore","select":"commit","back":"cancel","play_pause":"commit_then_toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"},"menu":{"left":"menu_focus","right":"menu_focus","up":"menu_focus","down":"menu_focus","select":"activate","back":"close_menu","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_menu","idle":"ignore"},"info":{"left":"menu_focus","right":"menu_focus","up":"menu_focus","down":"menu_focus","select":"activate","back":"close_info","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_info","idle":"ignore"},"failed":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"exit","play_pause":"ignore","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"}},"touch":{"hidden":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"ignore","back":"exit","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_chrome","idle":"ignore"},"transport":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"hide","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_chrome","idle":"hide"},"timeline":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"ignore","back":"hide","play_pause":"toggle_play","skip_back":"skip","skip_forward":"skip","tap_surface":"toggle_chrome","idle":"hide"},"scrub":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"commit","back":"cancel","play_pause":"commit_then_toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"},"menu":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"close_menu","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_menu","idle":"ignore"},"info":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"close_info","play_pause":"toggle_play","skip_back":"ignore","skip_forward":"ignore","tap_surface":"close_info","idle":"ignore"},"failed":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"exit","play_pause":"ignore","skip_back":"ignore","skip_forward":"ignore","tap_surface":"ignore","idle":"ignore"}}};
-  const CONTRACT_TIMINGS = {"hide_after_ms":4000,"hidden_only_while_playing":true,"preview_auto_commit_ms":null,"desktop_hotkey_coalesce_ms":350,"notes":["hide_after_ms: chrome hides this long after the last input while playing. Never while paused, failed, scrubbing, or with a menu or the info panel open.","preview_auto_commit_ms is null: a pending preview commits only on `select` (ten-foot) or pointer release (touch); it never commits on a timer.","desktop_hotkey_coalesce_ms: arrow hotkeys on the desktop body accumulate against one frozen base and issue one seek after this much quiet — the shipped web `nudge()` behaviour, kept."]};
+  const CONTRACT_TIMINGS = {"hide_after_ms":4000,"hidden_only_while_playing":true,"preview_auto_commit_ms":null,"desktop_hotkey_coalesce_ms":350,"notes":["hide_after_ms: chrome hides this long after the last input while playing. Never while paused, failed, scrubbing, or with a menu or the info panel open.","preview_auto_commit_ms is null: a pending preview commits only on `select` (ten-foot) or pointer release (touch); it never commits on a timer.","desktop_hotkey_coalesce_ms: arrow hotkeys on the desktop body accumulate against one frozen base, but the physical key owns the gesture. The timer may commit only after keyup; blur commits the visible target and attachment replacement cancels it."]};
   const CONTRACT_STEPS = {"skip_seconds":10,"preview_step_seconds":10,"preview_acceleration":[{"from_repeat":0,"step_seconds":10},{"from_repeat":5,"step_seconds":30},{"from_repeat":10,"step_seconds":60}],"vertical_seek_seconds":null,"notes":["skip_seconds is the only immediate seek step: the two transport buttons and the FF/REW media keys.","preview_acceleration applies to a HELD direction while scrubbing: repeats 0–4 move 10 s, 5–9 move 30 s, 10+ move 60 s. A released key resets the ladder.","vertical_seek_seconds is null: Up/Down never seek. Vertical is navigation between rows on every surface."]};
   // ---- end generated ----
 
@@ -58,7 +58,7 @@
   // tests/playback/player-input-contract.json by scripts/player-contract-table
   // --embed; do not edit by hand ----
   const LIVE_INPUT_ROUTING = {"ten-foot":{"fullscreen_hidden":{"left":"reveal","right":"reveal","up":"reveal","down":"reveal","select":"reveal","back":"return_browser","play_pause":"toggle_play","tap_surface":"reveal","idle":"ignore"},"fullscreen_controls":{"left":"focus_control","right":"focus_control","up":"focus_control","down":"focus_control","select":"activate","back":"hide","play_pause":"toggle_play","tap_surface":"ignore","idle":"hide"},"browser":{"left":"delegate","right":"delegate","up":"delegate","down":"delegate","select":"delegate","back":"exit","play_pause":"ignore","tap_surface":"delegate","idle":"ignore"},"temporary_guide":{"left":"focus_cell","right":"focus_cell","up":"focus_cell","down":"focus_cell","select":"activate","back":"close_panel","play_pause":"toggle_play","tap_surface":"ignore","idle":"ignore"},"menu":{"left":"focus_panel","right":"focus_panel","up":"focus_panel","down":"focus_panel","select":"activate","back":"close_panel","play_pause":"toggle_play","tap_surface":"ignore","idle":"ignore"},"programme_details":{"left":"focus_panel","right":"focus_panel","up":"focus_panel","down":"focus_panel","select":"activate","back":"close_panel","play_pause":"toggle_play","tap_surface":"ignore","idle":"ignore"},"stream_info":{"left":"focus_panel","right":"focus_panel","up":"focus_panel","down":"focus_panel","select":"activate","back":"close_panel","play_pause":"toggle_play","tap_surface":"ignore","idle":"ignore"}},"desktop":{"fullscreen_hidden":{"left":"strip_prev","right":"strip_next","up":"channel_up","down":"channel_down","select":"ignore","back":"exit","play_pause":"toggle_play","tap_surface":"reveal","idle":"ignore"},"fullscreen_controls":{"left":"strip_prev","right":"strip_next","up":"channel_up","down":"channel_down","select":"tune","back":"exit","play_pause":"toggle_play","tap_surface":"ignore","idle":"hide"},"browser":{"left":"delegate","right":"delegate","up":"delegate","down":"delegate","select":"delegate","back":"ignore","play_pause":"ignore","tap_surface":"delegate","idle":"ignore"},"temporary_guide":{"left":"focus_cell","right":"focus_cell","up":"focus_cell","down":"focus_cell","select":"activate","back":"close_panel","play_pause":"toggle_play","tap_surface":"ignore","idle":"ignore"},"menu":{"left":"delegate","right":"delegate","up":"delegate","down":"delegate","select":"delegate","back":"close_panel","play_pause":"toggle_play","tap_surface":"ignore","idle":"ignore"},"programme_details":{"left":"delegate","right":"delegate","up":"delegate","down":"delegate","select":"delegate","back":"close_panel","play_pause":"toggle_play","tap_surface":"ignore","idle":"ignore"},"stream_info":{"left":"delegate","right":"delegate","up":"delegate","down":"delegate","select":"delegate","back":"close_panel","play_pause":"toggle_play","tap_surface":"ignore","idle":"ignore"}},"touch":{"fullscreen_hidden":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"ignore","back":"exit","play_pause":"ignore","tap_surface":"toggle_chrome","idle":"ignore"},"fullscreen_controls":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"exit","play_pause":"ignore","tap_surface":"toggle_chrome","idle":"hide"},"browser":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"ignore","back":"exit","play_pause":"ignore","tap_surface":"ignore","idle":"ignore"},"temporary_guide":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"close_panel","play_pause":"ignore","tap_surface":"ignore","idle":"ignore"},"menu":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"close_panel","play_pause":"ignore","tap_surface":"close_panel","idle":"ignore"},"programme_details":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"close_panel","play_pause":"ignore","tap_surface":"close_panel","idle":"ignore"},"stream_info":{"left":"ignore","right":"ignore","up":"ignore","down":"ignore","select":"activate","back":"close_panel","play_pause":"ignore","tap_surface":"close_panel","idle":"ignore"}}};
-  const LIVE_CONTRACT_TIMINGS = {"hide_after_ms":4000,"hidden_only_while_playing":true,"channel_coalesce_ms":350,"preview_auto_commit_ms":null,"guide_poll_unavailable_s":30,"guide_poll_min_s":15,"guide_poll_after_next_refresh_s":5,"retire_liveness_probe_ms":250,"retire_orphan_after_keepalives":3,"start_replay_attempts":1,"guide_poll_ceiling_s":1200,"notes":["hide_after_ms and hidden_only_while_playing are the finite player's values unchanged: the overlay hides this long after the last input while playing, and never while paused or failed.","channel_coalesce_ms: a held channel key accumulates and starts ONE session after this much quiet. Ten presses must not be ten tuner GETs.","preview_auto_commit_ms is null: the neighbour strip's preview commits on select or a click, never on a timer.","guide_poll_unavailable_s: when the guide answers unavailable and says nothing about when it comes back, ask again this often. Short, because an owner with nothing to serve is usually an owner about to have something.","guide_poll_min_s: never poll the guide faster than this, whatever next_refresh_at says. A floor on fan-out, not a cadence.","guide_poll_after_next_refresh_s: poll this long after the owner's next_refresh_at, so the client asks once the answer exists rather than just before it does.","retire_liveness_probe_ms: how long a pressing web document waits for a sibling tab to claim a hint before treating it as an orphan. It decides what to RETIRE, never whether to start.","retire_orphan_after_keepalives: a hint touched more recently than this many 5 s keepalives is held by something alive; leave it.","start_replay_attempts: how many times the lease re-sends a start that got no answer, with the same request id. One — the owner joins the replay to the same session.","guide_poll_ceiling_s: never wait longer than this between guide polls, whatever next_refresh_at says. A far-future answer must not park the grid for hours."]};
+  const LIVE_CONTRACT_TIMINGS = {"hide_after_ms":4000,"hidden_only_while_playing":true,"channel_coalesce_ms":350,"preview_auto_commit_ms":null,"guide_poll_unavailable_s":30,"guide_poll_min_s":15,"guide_poll_after_next_refresh_s":5,"retire_liveness_probe_ms":250,"retire_orphan_after_keepalives":3,"start_replay_attempts":1,"guide_poll_ceiling_s":1200,"notes":["hide_after_ms and hidden_only_while_playing are the finite player's values unchanged: the overlay hides this long after the last input while playing, and never while paused or failed.","channel_coalesce_ms: a held channel key accumulates one preview gesture and starts ONE session only after keyup plus the remaining quiet interval. Blur commits; direct selection or owner replacement cancels. Ten repeats must not be ten tuner GETs.","preview_auto_commit_ms is null: the neighbour strip's preview commits on select or a click, never on a timer.","guide_poll_unavailable_s: when the guide answers unavailable and says nothing about when it comes back, ask again this often. Short, because an owner with nothing to serve is usually an owner about to have something.","guide_poll_min_s: never poll the guide faster than this, whatever next_refresh_at says. A floor on fan-out, not a cadence.","guide_poll_after_next_refresh_s: poll this long after the owner's next_refresh_at, so the client asks once the answer exists rather than just before it does.","retire_liveness_probe_ms: how long a pressing web document waits for a sibling tab to claim a hint before treating it as an orphan. It decides what to RETIRE, never whether to start.","retire_orphan_after_keepalives: a hint touched more recently than this many 5 s keepalives is held by something alive; leave it.","start_replay_attempts: how many times the lease re-sends a start that got no answer, with the same request id. One — the owner joins the replay to the same session.","guide_poll_ceiling_s: never wait longer than this between guide polls, whatever next_refresh_at says. A far-future answer must not park the grid for hours."]};
   const LIVE_HOTKEYS = {"f":"fullscreen","m":"mute","p":"picture_in_picture","g":"guide_sheet","escape":"exit"};
   // ---- end generated live table ----
 
@@ -1106,6 +1106,79 @@
     }
   }
 
+  // A quiet timer is useful for batching repeats, but quiet is not release:
+  // desktop platforms commonly wait longer than the batching window before
+  // emitting the first repeated keydown. This owner keeps the timer and the
+  // physical key lifecycle together so a held gesture commits exactly once.
+  function createHeldKeyCommitter({ delayMs, commit, setTimer = setTimeout, clearTimer = clearTimeout }) {
+    if (!(delayMs >= 0)) throw new Error("held-key delay must be non-negative");
+    if (typeof commit !== "function") throw new Error("held-key commit callback is required");
+    const keys = new Set();
+    let owner = null;
+    let timer = null;
+    let quietElapsed = false;
+
+    const clearScheduled = () => {
+      if (timer != null) clearTimer(timer);
+      timer = null;
+    };
+    const reset = () => {
+      clearScheduled();
+      keys.clear();
+      owner = null;
+      quietElapsed = false;
+    };
+    const finish = () => {
+      const committedOwner = owner;
+      reset();
+      if (committedOwner != null) commit(committedOwner);
+    };
+    const arm = () => {
+      clearScheduled();
+      timer = setTimer(() => {
+        timer = null;
+        if (owner == null) return;
+        if (keys.size > 0) {
+          quietElapsed = true;
+          return;
+        }
+        finish();
+      }, delayMs);
+    };
+
+    return Object.freeze({
+      press(key, nextOwner) {
+        if (!key || nextOwner == null) return false;
+        if (owner !== nextOwner) {
+          reset();
+          owner = nextOwner;
+        }
+        keys.add(key);
+        quietElapsed = false;
+        arm();
+        return true;
+      },
+      release(key, nextOwner) {
+        if (owner !== nextOwner || !keys.delete(key)) return false;
+        if (keys.size === 0 && quietElapsed) finish();
+        return true;
+      },
+      blur(nextOwner) {
+        if (owner !== nextOwner) return false;
+        finish();
+        return true;
+      },
+      cancel() {
+        const active = owner != null;
+        reset();
+        return active;
+      },
+      active(nextOwner) {
+        return owner === nextOwner;
+      },
+    });
+  }
+
   function routeInput(surface, state, input) {
     const row = INPUT_ROUTING[surface] && INPUT_ROUTING[surface][state];
     if (!row || !(input in row)) {
@@ -1894,6 +1967,7 @@
     routeLiveInput,
     liveContractTiming,
     liveHotkey,
+    createHeldKeyCommitter,
     seekDeltaSeconds,
     previewStepSeconds,
     lostFrameRate,

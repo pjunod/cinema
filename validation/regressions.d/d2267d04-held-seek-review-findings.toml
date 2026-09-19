@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["d2267d04"]
+points = ["playback.pipeline", "live-tv.integration", "web.experience"]
+checks = ["rust-gate", "web-static", "player-input-fence"]
+reason = "The current Rust segment-delivery regressions require partial-response telemetry to report the response incarnation and producer attempt without inventing client cancellation, and the shipped web cases resample buffer evidence after awaited control work, fence Stop from a later keyup, and drive held seeking through the real committer. The Rust, web-static, and input-fence gates retain those adversarial-review corrections."

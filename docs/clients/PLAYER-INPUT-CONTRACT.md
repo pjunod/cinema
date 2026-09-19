@@ -257,7 +257,7 @@ _Generated from [`tests/playback/player-input-contract.json`](../../tests/playba
 
 - hide_after_ms: chrome hides this long after the last input while playing. Never while paused, failed, scrubbing, or with a menu or the info panel open.
 - preview_auto_commit_ms is null: a pending preview commits only on `select` (ten-foot) or pointer release (touch); it never commits on a timer.
-- desktop_hotkey_coalesce_ms: arrow hotkeys on the desktop body accumulate against one frozen base and issue one seek after this much quiet — the shipped web `nudge()` behaviour, kept.
+- desktop_hotkey_coalesce_ms: arrow hotkeys on the desktop body accumulate against one frozen base, but the physical key owns the gesture. The timer may commit only after keyup; blur commits the visible target and attachment replacement cancels it.
 
 <!-- contract:timings:end -->
 
