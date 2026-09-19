@@ -67,8 +67,26 @@ the section banners, the app dies at load. So they are
 `layouts/register-classic.js`, served after `layouts/catalog.js` and before
 `layouts/theater.js`, which still puts the registration before the
 `applyLayout()` that paints the first frame. **This is the only relocation
-the split made**, and `scripts/web-shell-identity` proved the rest is byte
-for byte the file it came from.
+the split made.**
+
+The rest is byte for byte the file it came from, and that was proved rather
+than asserted: the split commit carried a `scripts/web-shell-identity` that
+reassembled the tree from the shell's own tag order — stripping one
+`"use strict";` prologue per row — and compared it to the pre-split
+`index.html`.
+
+```
+web-shell-identity: OK against d651fc61
+  app.css              3209 lines == old <style> content
+  core/theme.js         218 lines == old <head> script
+  60 body rows   20425 lines == old <body> script (one prologue stripped per
+  row; 8 relocated lines re-inserted where layouts/register-classic.js is served)
+```
+
+It was removed in the same PR. It could only ever answer that one question
+about that one commit, and a script in `scripts/` that fails the first time
+anybody edits a web file is not a gate, it is a trap. The standing gates are
+the three in §1.1 and §3.
 
 ### 1.4 Every file carries its own `"use strict";`
 
