@@ -19,6 +19,17 @@ needs a row on that index **in the same commit**;
 `tests/operations/test_docs_index.py` fails the build otherwise, and the same
 test refuses any reference in the repo to a `docs/` path that does not exist.
 
+## Where the web app is
+
+`crates/plurxd/src/web/index.html` is a 97-line shell of markup and tags. The
+app itself is the sixty-two files
+[docs/clients/WEB-SHELL-LAYOUT.md](docs/clients/WEB-SHELL-LAYOUT.md) maps —
+open that before grepping the shell for a function that is not in it. Adding a
+file means the file, a row in `WEB_ASSETS`, a tag in the shell and a row in
+that table, all in one commit; three tests fail otherwise. They are plain
+scripts in one global scope, so served order is load order, and `export` /
+`import` / `module.exports` do not belong in any of them.
+
 ## Rust compile loop
 
 At the start of any session that may change Rust, establish a working compiler

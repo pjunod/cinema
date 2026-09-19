@@ -1446,6 +1446,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	# are served in is a load order. One reads them, one runs them.
 	@node tests/web/asset-order.test.js
 	@node tests/web/asset-load.test.js
+	@node tests/web/asset-layout.test.js
 	@scripts/js-check
 	@scripts/contrast-check --from-index crates/plurxd/src/web/core/theme.js \
 		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
