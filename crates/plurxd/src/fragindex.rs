@@ -619,7 +619,8 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                     rows.len(),
                 );
                 failure.diagnostic.selected_stream = Some(expectation.stream_index);
-                failure.diagnostic.expectation_provenance = Some(expectation.provenance);
+                failure.diagnostic.expectation_provenance =
+                    Some(expectation.provenance.as_str().to_owned());
                 failure.diagnostic.covered_ms = i64::try_from(
                     u128::from(covered)
                         .saturating_mul(1_000)
@@ -1400,7 +1401,8 @@ async fn build_with_args(
         failure.diagnostic.expected_ms = expectation.duration_ms_floor();
         failure.diagnostic.container_ms = file.duration_ms;
         failure.diagnostic.selected_stream = Some(expectation.stream_index);
-        failure.diagnostic.expectation_provenance = Some(expectation.provenance);
+        failure.diagnostic.expectation_provenance =
+            Some(expectation.provenance.as_str().to_owned());
         failure.diagnostic.elapsed_ms =
             Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
         failure.diagnostic.budget_ms = Some(u64::try_from(budget.as_millis()).unwrap_or(u64::MAX));

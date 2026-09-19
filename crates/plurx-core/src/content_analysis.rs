@@ -21,6 +21,18 @@ pub enum CompletionProvenance {
     StreamTicks,
     StreamSeconds,
     MatroskaDurationTag,
+    PacketTimeline,
+}
+
+impl CompletionProvenance {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StreamTicks => "stream_ticks",
+            Self::StreamSeconds => "stream_seconds",
+            Self::MatroskaDurationTag => "matroska_duration_tag",
+            Self::PacketTimeline => "packet_timeline",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -131,7 +143,10 @@ pub struct IndexDiagnostic {
     pub claim_fence: i64,
     pub attempt: i64,
     pub selected_stream: Option<u32>,
-    pub expectation_provenance: Option<CompletionProvenance>,
+    /// Informational provenance retained even when a newer writer adds a
+    /// value this reader does not understand. Completion authority continues
+    /// to use the strict [`CompletionProvenance`] enum separately.
+    pub expectation_provenance: Option<String>,
     pub covered_ms: Option<i64>,
     pub expected_ms: Option<i64>,
     pub container_ms: Option<i64>,
@@ -347,5 +362,35 @@ mod tests {
         assert!(encoded.len() <= MAX_INDEX_DIAGNOSTIC_BYTES);
         let decoded = IndexDiagnostic::decode_bounded(&encoded).expect("decoded diagnostic");
         assert!(!decoded.stderr_tail.is_empty());
+    }
+
+    #[test]
+    fn mkv_hls_diagnostic_keeps_unknown_future_provenance() {
+        let encoded = serde_json::json!({
+            "version": 1,
+            "code": "index_completion_unverified",
+            "retryable": false,
+            "claim_fence": 7,
+            "attempt": 2,
+            "selected_stream": 3,
+            "expectation_provenance": "future_packet_clock_v2",
+            "covered_ms": 10_000,
+            "expected_ms": 12_000,
+            "container_ms": null,
+            "fragment_count": 4,
+            "output_bytes": 512,
+            "elapsed_ms": 30,
+            "budget_ms": 1_000,
+            "exit_category": "unverified",
+            "stderr_tail": [],
+            "recorded_at_ms": 100
+        })
+        .to_string();
+        let decoded = IndexDiagnostic::decode_bounded(&encoded)
+            .expect("an unknown informational provenance does not erase the diagnostic");
+        assert_eq!(
+            decoded.expectation_provenance.as_deref(),
+            Some("future_packet_clock_v2")
+        );
     }
 }

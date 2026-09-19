@@ -4595,6 +4595,7 @@ pub trait FragmentIndexStore: Send + Sync + 'static {
         reason: &str,
         rows: u32,
         diagnostic: &crate::content_analysis::IndexDiagnostic,
+        max_attempts: u32,
     ) -> Result<crate::segplan::FragmentIndexOutcome, StoreError>;
 
     /// The recorded refusal for this identity, if it still describes this
