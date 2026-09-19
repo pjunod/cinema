@@ -9669,6 +9669,11 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testPhoneDetailUsesAnIntegratedHeroAndCompactControls() {
+        XCTAssertEqual(DetailView.presentation(kind: "movie", compact: true), .calm)
+        XCTAssertEqual(DetailView.presentation(kind: "episode", compact: false), .calm)
+        XCTAssertEqual(DetailView.presentation(kind: "video", compact: true), .calm)
+        XCTAssertEqual(DetailView.presentation(kind: "book", compact: true), .mobile)
+        XCTAssertEqual(DetailView.presentation(kind: "book", compact: false), .standard)
         XCTAssertGreaterThanOrEqual(IOSDetailMetrics.compactHeroHeight, 260)
         XCTAssertLessThanOrEqual(IOSDetailMetrics.compactHeroHeight, 300)
         XCTAssertGreaterThanOrEqual(IOSDetailMetrics.primaryControlHeight, 44)
@@ -9955,6 +9960,11 @@ final class AppleClientTests: XCTestCase {
     }
 
     func testTVPlayableDetailUsesOneCinematicViewportAndUsefulMetadata() throws {
+        XCTAssertEqual(DetailView.presentation(kind: "movie", compact: false), .tvPlayable)
+        XCTAssertEqual(DetailView.presentation(kind: "episode", compact: false), .tvPlayable)
+        XCTAssertEqual(DetailView.presentation(kind: "video", compact: false), .tvPlayable)
+        XCTAssertEqual(DetailView.presentation(kind: "show", compact: false), .tvSeries)
+        XCTAssertEqual(DetailView.presentation(kind: "season", compact: false), .tvSeries)
         XCTAssertLessThanOrEqual(
             TVPlayableDetailMetrics.heroHeight,
             720,
@@ -9986,11 +9996,10 @@ final class AppleClientTests: XCTestCase {
             DetailView.tvPlayableMetadataParts(item, file: file, durationMs: file.durationMs),
             ["Season 4, Episode 2", "54 min", "4K", "HEVC"]
         )
-        let badges = DetailView.itemMetadataBadges(
+        let badges = DetailView.tvPlayableBadges(
             item,
             file: file,
-            durationMs: file.durationMs,
-            includeSeries: false
+            durationMs: file.durationMs
         )
         XCTAssertEqual(
             badges.map(\.symbol),

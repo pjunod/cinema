@@ -26,6 +26,9 @@ struct ItemMetadataBadgeRow: View {
     let badges: [ItemMetadataBadge]
 
     var body: some View {
+        #if os(tvOS)
+        badgeContent
+        #else
         let media = badges.filter { [.resolution, .video, .dynamicRange, .container].contains($0.kind) }
         let plain = badges.filter { ![.resolution, .video, .dynamicRange, .container].contains($0.kind) }
         VStack(alignment: .leading, spacing: 8) {
@@ -39,7 +42,34 @@ struct ItemMetadataBadgeRow: View {
             Text(plain.map(Self.compactLabel).joined(separator: " · "))
                 .font(.caption).foregroundStyle(Palette.muted)
         }
+        #endif
     }
+
+    #if os(tvOS)
+    private var badgeContent: some View {
+        HStack(spacing: 9) {
+            ForEach(badges) { badge in
+                HStack(spacing: 6) {
+                    Image(systemName: badge.symbol)
+                    if let mark = badge.mark {
+                        Text(mark)
+                            .fontWeight(.semibold)
+                    }
+                }
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(Palette.surfaceHi.opacity(0.84), in: Capsule())
+                .overlay {
+                    Capsule().stroke(Palette.outline.opacity(0.72), lineWidth: 0.5)
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(badge.accessibilityLabel)
+            }
+        }
+        .font(.system(size: 19, weight: .medium, design: .rounded))
+        .foregroundColor(Palette.onBg.opacity(0.86))
+    }
+    #endif
 
     private func badgeLine(_ values: [ItemMetadataBadge]) -> some View {
         HStack(spacing: 6) {
@@ -613,6 +643,25 @@ struct ReaderContext: Identifiable, Equatable {
 #endif
 
 struct DetailView: View {
+    enum Presentation: Equatable {
+        case tvSeries
+        case tvPlayable
+        case calm
+        case mobile
+        case standard
+    }
+
+    static func presentation(kind: String, compact: Bool) -> Presentation {
+        #if os(tvOS)
+        return kind == "show" || kind == "season" ? .tvSeries : .tvPlayable
+        #else
+        if kind == "movie" || kind == "episode" || kind == "video" {
+            return .calm
+        }
+        return compact ? .mobile : .standard
+        #endif
+    }
+
     #if os(tvOS)
     private enum TVDetailFocus: Hashable { case primaryAction }
     #endif
@@ -915,23 +964,25 @@ struct DetailView: View {
 
     @ViewBuilder
     private func content(_ detail: ItemDetail) -> some View {
-        if detail.item.isMovieOrEpisode || detail.item.kind == "video" {
-            calmContent(detail)
-        } else {
         #if os(tvOS)
-        if detail.item.kind == "show" || detail.item.kind == "season" {
+        if Self.presentation(kind: detail.item.kind, compact: false) == .tvSeries {
             tvSeriesContent(detail)
         } else {
             tvPlayableContent(detail)
         }
         #else
-        if horizontalSizeClass == .compact {
+        switch Self.presentation(
+            kind: detail.item.kind,
+            compact: horizontalSizeClass == .compact
+        ) {
+        case .calm:
+            calmContent(detail)
+        case .mobile:
             mobileContent(detail)
-        } else {
+        default:
             standardContent(detail)
         }
         #endif
-        }
     }
 
     private func calmContent(_ detail: ItemDetail) -> some View {
@@ -1425,12 +1476,25 @@ struct DetailView: View {
     }
 
     private func tvMetadataLine(_ item: Item, file: MediaFile?, durationMs: Int?) -> some View {
-        ItemMetadataBadgeRow(badges: Self.itemMetadataBadges(
+        ItemMetadataBadgeRow(
+            badges: Self.tvPlayableBadges(item, file: file, durationMs: durationMs)
+        )
+    }
+
+    static func tvPlayableBadges(
+        _ item: Item,
+        file: MediaFile?,
+        durationMs: Int?
+    ) -> [ItemMetadataBadge] {
+        itemMetadataBadges(
             item,
             file: file,
             durationMs: durationMs,
             includeSeries: false
-        ))
+        ).filter { badge in
+            badge.kind != .container
+                && !(badge.kind == .dynamicRange && badge.accessibilityLabel == "SDR")
+        }
     }
 
     @ViewBuilder
