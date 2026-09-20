@@ -530,6 +530,7 @@ function closePlayer(options={}){
   // seekTo on a player the viewer had already left.
   if(PLAYER){ PLAYER.aoffset=0; PLAYER._seekDragging=false; PLAYER.controlSeek=null;
     PLAYER.wantsPlayback=false; PLAYER.pendingOpenAttempt=null; PLAYER.pendingMediaChange=null;
+    PLAYER.inFlightChangeKey=null;
     cancelPendingSeek(); }
   // Same reason, same scope: the track choice was this playback's, and this
   // playback is over. PLAYER survives the close, so leaving `preplay` set would

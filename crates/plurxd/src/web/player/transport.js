@@ -24,6 +24,61 @@ function positionForPlaybackIntent(v,p){
   if(Number.isFinite(target)) return Math.max(0,target/1000);
   return Math.max(0,((p&&p.offset)||0)+((v&&v.currentTime)||0));
 }
+// A committed destination no attachment has executed yet, on the scrubber's
+// global timeline. `executed` is the split the whole repair turns on: it is
+// set when a local seek is applied to the attached element or when a
+// successor attaches, so an unexecuted destination is a *desired* replacement
+// and the picture on screen is still the predecessor's.
+function unexecutedPlaybackDestinationSec(p){
+  const pending=p&&p.controlSeek;
+  if(!pending||pending.executed) return null;
+  // Multipart audiobooks address the scrubber globally and the element
+  // locally, and `controlSeek` is in the local timeline. They never take the
+  // replacement route this is about, so leave their arithmetic alone.
+  if(p.bookParts&&p.bookParts.length) return null;
+  const target=Number(pending.targetMs);
+  return Number.isFinite(target)?Math.max(0,target/1000):null;
+}
+// Where a relative seek counts from. Not the attached element's clock: while
+// a replacement is pending the incumbent is still showing 100 seconds, so
+// three separately committed +10 taps would each land on 110. The desired
+// destination is the base until an attachment actually executes it.
+function pbRelativeSeekBase(){
+  const me=PLAYER;
+  if(!me) return 0;
+  if(me._seekPending!=null) return me._seekPending;
+  const desired=unexecutedPlaybackDestinationSec(me);
+  return desired!=null?desired:pbPosSec();
+}
+// The identity of a media change, normalized. Position alone is not it: an
+// audio or subtitle switch at the same second is a different request and must
+// still execute, while the same recipe at the same target already in flight
+// is the same command arriving twice.
+function playbackChangeRecipeKey(p,targetSec){
+  if(!p) return null;
+  return JSON.stringify([
+    p.fileId,
+    Math.max(0,Math.round(Number(targetSec||0)*1000)),
+    p.method||null,
+    !!p.copyHls,
+    typeof selectedAudioIndex==="function"?selectedAudioIndex(p):null,
+    p.curSub==null?null:p.curSub,
+    p.burnedSub==null?null:p.burnedSub,
+    typeof transcodeHeight==="function"?(transcodeHeight()??null):null,
+    typeof qualityForce==="function"?qualityForce():null,
+    p.autoHeight==null?null:p.autoHeight,
+    !!p.requestHdr10,
+    !!p.preserveDolbyVision,
+    Number(p.aoffset)||0,
+  ]);
+}
+// R2. True only for a request identical to one whose create is still open.
+// Checked *before* the intent generation moves, because bumping it first and
+// then noticing the duplicate would cancel the very execution it matched.
+function playbackChangeAlreadyInFlight(p,targetSec){
+  if(!p||!p.inFlightChangeKey) return false;
+  return p.inFlightChangeKey===playbackChangeRecipeKey(p,targetSec);
+}
 // Same number, clamped to the runtime, for anything the viewer reads. A remux
 // seek to N starts ffmpeg at the keyframe *at or before* N while we count from
 // N, so the sum drifts a second or two long and the clock ends up reading past
@@ -226,7 +281,14 @@ function pbTick(){
   if(!PLAYER) return;
   const v=document.getElementById("video");
   const tot=pbTotalSec();
-  const pos=PLAYER._seekPending!=null?PLAYER._seekPending:(PLAYER._seekPreview!=null?PLAYER._seekPreview:pbShownSec());
+  // Desired first, then the drag preview, then the picture. A destination
+  // the viewer committed and no attachment has executed is where they asked
+  // to be; letting the thumb snap back to the incumbent's clock would make
+  // the next +10 read as +10 from the wrong place.
+  const desired=unexecutedPlaybackDestinationSec(PLAYER);
+  const pos=PLAYER._seekPending!=null?PLAYER._seekPending
+    :(PLAYER._seekPreview!=null?PLAYER._seekPreview
+    :(desired!=null?(desired>0&&tot>0?Math.min(desired,tot):desired):pbShownSec()));
   const f=tot>0?Math.min(1,Math.max(0,pos/tot)):0;
   const fill=document.getElementById("pseekfill"), thumb=document.getElementById("pseekthumb"), buf=document.getElementById("pseekbuf");
   if(fill) fill.style.width=(f*100)+"%";
@@ -317,7 +379,7 @@ function nudge(d){
   // keyup from an older keyboard gesture must not commit it a second time.
   PLAYER_SEEK_GESTURE.cancel();
   const total=pbTotalSec();
-  const base=me._seekPending!=null?me._seekPending:pbPosSec();
+  const base=pbRelativeSeekBase();
   let t=Math.max(0,base+d); if(total>0) t=Math.min(total,t);
   me._seekPending=t; pbTick(); playerActivity();
   clearPointerSeekTimer();
@@ -330,7 +392,7 @@ function nudgeKeyboard(d,key){
   clearPointerSeekTimer();
   PLAYER_SEEK_GESTURE.press(key,me);
   const total=pbTotalSec();
-  const base=me._seekPending!=null?me._seekPending:pbPosSec();
+  const base=pbRelativeSeekBase();
   let t=Math.max(0,base+d); if(total>0) t=Math.min(total,t);
   me._seekPending=t; pbTick(); playerActivity();
 }
@@ -691,6 +753,10 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   recoveryEpisode=null){
   const v=document.getElementById("video"); if(!v||!PLAYER) return;
   targetSec=Math.max(0,targetSec);
+  // An identical request whose create is still open is the same command, not
+  // a new one. `forceReopen` is the explicit Retry/stall-restart path and is
+  // always a fresh attempt.
+  if(!forceReopen&&playbackChangeAlreadyInFlight(PLAYER,targetSec)){ playerActivity(); return; }
   const markerEnd=Number(PLAYER._lastMarkerSkipEndMs)||0;
   if(markerEnd && targetSec*1000<markerEnd-1000 && markerNowMs()>=markerEnd-1000){
     clientLog({level:"info",event:"marker_seek_back",detail:"undo",
