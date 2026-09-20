@@ -1,6 +1,6 @@
 # Scan identity status — build, review and promotion ledger
 
-**Status:** M3 qualified; task promotion in progress · **Executes:**
+**Status:** complete candidate frozen for final review · **Executes:**
 [SCAN-IDENTITY-IMPLEMENTATION.md](SCAN-IDENTITY-IMPLEMENTATION.md) ·
 **Started:** 2026-09-19 · **Updated:** 2026-09-19
 
@@ -15,7 +15,7 @@ not authorize a production catalogue repair.
 | Field | Value |
 |---|---|
 | Forgejo repository | `noirr/plurx` |
-| Base | `main` at `535f95d228b1393033b09d497964079e4740e8ad` |
+| Base | current `main` at `15324dd9`, merged into the effort at `b0baa97c` |
 | Effort branch | `effort/scan-identity` |
 | Implementation checkout | Isolated clone; the authoring checkout remains untouched |
 | Required compiler | Rust 1.97.1 |
@@ -32,7 +32,7 @@ silently describing the wrong toolchain.
 | M0 base, compiler and failure fixtures | `effort/scan-identity` | complete | Pinned compiler, clean-base compile and three failing/one passing pre-fix probes recorded below. |
 | M1 ownership and directory lookup | `codex/scan-identity-ownership` | merged by PR #379 at `2cbea369` | Core, daemon, SQLite and three-voter Hiqlite focused contracts passed. Current workflow intentionally allocates no CI jobs for task PRs into an effort. |
 | M2 guarded series hints | `codex/scan-identity-hints` | merged by PR #380 at `54a65e93` | Atomic SQLite/Hiqlite outcomes, fenced stale-lease refusal and daemon import/report behavior passed. Current workflow intentionally allocates no CI jobs for task PRs into an effort. |
-| M3 bounded repair | `codex/scan-identity-repair` | qualified; promotion in progress | Deterministic planner, bounded admin cache/API, SQLite/Hiqlite fenced apply and retry recognition pass focused core, daemon, SQLite, three-voter and documentation contracts. |
+| M3 bounded repair | `codex/scan-identity-repair` | merged by PR #384 at `86cf04b4` | Deterministic planner, bounded admin cache/API, SQLite/Hiqlite fenced apply and retry recognition pass focused core, daemon, SQLite, three-voter and documentation contracts. |
 | Final adversarial review | `effort/scan-identity` into `main` | not started | One review after the complete candidate is frozen. |
 | Main fast lane and merge | final effort PR | not started | Exact-tree green lane and receipt required before merge. |
 | Production catalogue repair | separate operator action | not authorized | Fresh deployed preview and explicit authorization required. |
@@ -85,6 +85,6 @@ silently repaired as unrelated work.
 
 ## Next action
 
-Commit and merge M3 into `effort/scan-identity`, then freeze the complete
-effort for one adversarial review before the final fast lane and main
-promotion.
+Open the frozen effort candidate against `main`, complete the one adversarial
+review, address its findings, then run the final fast lane and promote the
+exact qualified tree.
