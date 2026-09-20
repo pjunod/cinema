@@ -561,6 +561,21 @@ class PlaybackControlFailureTest {
     }
 
     @Test
+    fun `pause grace expiry stops without reopening or retrying`() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.failure(
+                ControlTransportException(status = 410, code = "pause_grace_expired"),
+            ),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(30_001)
+        assertTrue(subject.isStopped())
+        assertEquals(1, harness.requests.size)
+    }
+
+    @Test
     fun `a retry honours the server's retry-after`() = runTest {
         val harness = Harness(this)
         harness.enqueue(

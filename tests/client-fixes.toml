@@ -2150,3 +2150,14 @@ source = "crates/plurxd/src/web/player/directed-change.js"
 source_anchor = "async function applyReadySubtitleSidecar(player,index){"
 test = "tests/playback/web-control.test.js"
 test_anchor = "retryReadyNativeSubtitle"
+
+[[fixes]]
+# A typed 410 pause expiry is terminal. The reporter's closed retry predicate
+# is the production boundary shared by this exact Apple regression and its
+# Android sibling added by the same corrective commit.
+id = "clients.pause-grace-expiry-is-terminal"
+commits = ["626ba0e4"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "let retryableTransport = status == 408 || status == nil"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "func testPauseGraceExpiryStopsWithoutReopeningOrRetrying()"

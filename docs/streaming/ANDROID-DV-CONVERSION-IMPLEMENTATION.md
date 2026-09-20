@@ -1,6 +1,6 @@
 # Android Dolby Vision — bounded delivery repair
 
-**Status:** implementation complete; promotion candidate · **Base:** `0f1e5e43` ·
+**Status:** implementation complete; promotion candidate · **Base:** `15324dd9` ·
 **Updated:** 2026-09-20 UTC · **Delivery PR:** `#381` · **Executes:** the Fable-reviewed
 [root cause and proposed fix](ANDROID-DV-CONVERSION-RCA-AND-FIX.md).
 
@@ -11,7 +11,7 @@ HTTP boundary coverage, Android lifecycle coverage, complete native-DV mux
 evidence, and correlatable v2/emitted-package diagnostics. The server narrows
 conversion by request transport, marks converted remuxes as HLS-required,
 re-decides concrete progressive requests, and uses structured source facts
-plus preserved-DV muxer strictness. Android build 109 retains the selected
+plus preserved-DV muxer strictness. Android build 110 retains the selected
 transport through initial play, seek, reopen, track changes, recovery,
 failover and prepared handoff. The final focused pass is green: 5 Rust
 delivery regressions, 4 documentation-index tests, the Android JVM suite,
@@ -437,8 +437,8 @@ unrelated discovery separate and close this work once its contract is met.
 
 ### Implementation result
 
-- Delivery candidate: Forgejo PR `#381`, Android build `109`, based on
-  `0f1e5e43`; the single adversarial review's five findings are addressed.
+- Delivery candidate: Forgejo PR `#381`, Android build `110`, integrated with
+  main at `15324dd9`; the single adversarial review's five findings are addressed.
 - Rust 1.97.1: formatting, all-target `check`, denied-warning Clippy, and five
   `android_dv_delivery` server regressions pass. The mux regression parses a
   complete generated init segment and media fragment rather than only argv.

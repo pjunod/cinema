@@ -25,7 +25,7 @@ function activityStreamState(session){
   if(!session) return null;
   // `lease_state` is "active" for a live lease and "unavailable" for a legacy
   // viewer with no actor at all; only the three terminal verdicts are news.
-  const terminal=({ended:"ended",expired:"expired",authority_fenced:"authority fenced"})[session.lease_state];
+  const terminal=({ended:"ended",expired:"expired",startup_expired:"startup expired",pause_expired:"pause expired",authority_fenced:"authority fenced"})[session.lease_state];
   if(terminal) return {cls:"bad",label:`Lease ${terminal}`};
   const hold=!session.suspended?""
     :({demand:"viewer has enough",time:"reserve full",bytes:"per-stream byte limit",
@@ -116,6 +116,21 @@ function activityStreamDetails(session){
   if(session.playlist_ready===true) rows.push(["Playlist","ready"]);
   else if(session.playlist_ready===false) rows.push(["Playlist","waiting"]);
   if(session.playlist_shape) rows.push(["Playlist shape",session.playlist_shape]);
+  if(Number.isSafeInteger(session.playlist_target_ms)) rows.push(["Playlist target",`${session.playlist_target_ms} ms`]);
+  if(Number.isSafeInteger(session.produced_end_ms)) rows.push(["Produced end",`${session.produced_end_ms} ms`]);
+  if(Number.isSafeInteger(session.served_end_ms)) rows.push(["Served end",`${session.served_end_ms} ms`]);
+  if(Number.isSafeInteger(session.staged_bytes)&&session.staged_bytes>0) rows.push(["Staged bytes",fmtBytes(session.staged_bytes)]);
+  if(Number.isSafeInteger(session.served_revision)) rows.push(["Served revision",String(session.served_revision)]);
+  if(Number.isSafeInteger(session.next_publication_in_ms)) rows.push(["Next publication",`${session.next_publication_in_ms} ms`]);
+  if(Number.isSafeInteger(session.publication_deadline_remaining_ms)) rows.push(["Publication deadline",`${session.publication_deadline_remaining_ms} ms`]);
+  if(Number.isSafeInteger(session.pause_grace_remaining_ms)) rows.push(["Pause grace",`${Math.round(session.pause_grace_remaining_ms/1000)} s`]);
+  if(session.retirement_reason) rows.push(["Retirement",String(session.retirement_reason).replace(/_/g," ")]);
+  if(session.maintenance_state) rows.push(["Maintenance",String(session.maintenance_state).replace(/_/g," ")]);
+  if(session.rate_estimate_source) rows.push(["Rate source",String(session.rate_estimate_source).replace(/_/g," ")]);
+  if(Number.isSafeInteger(session.advertised_bytes)) rows.push(["Advertised bytes",fmtBytes(session.advertised_bytes)]);
+  if(Number.isSafeInteger(session.grace_bytes)&&session.grace_bytes>0) rows.push(["Grace bytes",fmtBytes(session.grace_bytes)]);
+  if(Number.isSafeInteger(session.live_bytes)) rows.push(["Live scratch",Number.isSafeInteger(session.reserved_bytes)
+    ?`${fmtBytes(session.live_bytes)} of ${fmtBytes(session.reserved_bytes)}`:fmtBytes(session.live_bytes)]);
   if(Number.isSafeInteger(session.published_segment)) rows.push(["Published segment",String(session.published_segment)]);
   if(Number.isSafeInteger(session.next_media_sequence)) rows.push(["Next sequence",String(session.next_media_sequence)]);
   if(Number.isSafeInteger(session.fetched_segment)) rows.push(["Fetched segment",String(session.fetched_segment)]);
@@ -260,7 +275,7 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
   }).join("");
   m.innerHTML=`<div class="dvr-page-head"><div><h1>Activity</h1><p class="sub">What’s playing, recording and happening on your server.</p></div></div>
     <h2 class="section">Happening now · Watching</h2>
-    ${missing.length?`<div class="clrefusal" role="status"><b>Activity is incomplete</b> ${esc(missing.map(node=>activityNodeFailureText(node,nodeNames)).join("; "))}. Viewers on these nodes may be missing.</div>`:""}
+    ${missing.length?`<div class="clrefusal" role="status" aria-live="polite"><b>Activity is incomplete</b> ${esc(missing.map(node=>activityNodeFailureText(node,nodeNames)).join("; "))}. Streams on those nodes may be missing.</div>`:""}
     ${activityWatchingHtml(dels,d.live_tv,nodeNames,sessionsById,open)}
     ${dvrActivityRows(recording,nodeNames,dvrState)}
     ${d.analysis?`<h2 class="section">Content analysis</h2>${analysisSummaryCard(d.analysis,"activity")}${analysisLiveProgress(d.analysis,nodeNames)}`:""}
@@ -409,4 +424,3 @@ async function stopOfflinePackage(id){
   try{ await api(`/activity/offline/${id}`,{method:"DELETE"}); toast("Offline download stopped"); renderActivityBody(); }
   catch(e){ toast(e.message); }
 }
-

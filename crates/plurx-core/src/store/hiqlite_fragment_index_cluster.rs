@@ -2295,7 +2295,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                            AND request.target_node_id = job.target_node_id
                            AND request.video_identity <> ''
                          ORDER BY request.updated_at_ms DESC, request.request_id DESC LIMIT 1), '') AS video_identity,
-                        COALESCE(job.last_error_code, '') AS cause,
+                        CASE WHEN (CASE WHEN json_valid(job.index_diagnostic_json)
+                                        THEN json_extract(job.index_diagnostic_json, '$.code')
+                                        ELSE '' END) = 'index_completion_unverified'
+                             THEN 'index_completion_unverified'
+                             ELSE COALESCE(job.last_error_code, '') END AS cause,
                         COALESCE((SELECT repair.successor_request_id
                           FROM analysis_index_repairs repair
                          WHERE repair.repair_revision = 'video-completion-v1'
@@ -2315,7 +2319,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             AND request.target_node_id = job.target_node_id
                             AND request.video_identity <> '') AS identity_count
                    FROM cluster_fragment_index_jobs job
-                  WHERE job.state = 'failed' AND job.last_error_code = 'truncated'
+                  WHERE job.state = 'failed'
+                    AND (job.last_error_code IN ('truncated','index_completion_unverified')
+                      OR (CASE WHEN json_valid(job.index_diagnostic_json)
+                               THEN json_extract(job.index_diagnostic_json, '$.code')
+                               ELSE '' END) = 'index_completion_unverified')
                     AND (job.cache_key || '|' || job.target_node_id) > $1
                   ORDER BY job.cache_key, job.target_node_id LIMIT $2",
                 params!(after.unwrap_or_default(), limit),
@@ -2361,7 +2369,11 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                        FROM cluster_fragment_index_jobs job
                        JOIN files ON files.id = job.file_id
                       WHERE job.cache_key = $5 AND job.target_node_id = $6
-                        AND job.state = 'failed' AND job.last_error_code = 'truncated'
+                        AND job.state = 'failed'
+                        AND (job.last_error_code IN ('truncated','index_completion_unverified')
+                          OR (CASE WHEN json_valid(job.index_diagnostic_json)
+                                   THEN json_extract(job.index_diagnostic_json, '$.code')
+                                   ELSE '' END) = 'index_completion_unverified')
                         AND job.fence = $7 AND job.updated_at_ms = $8
                         AND job.file_id = $9 AND job.source_size = $10 AND job.source_mtime = $11
                         AND job.source_sha256 = $12 AND job.pipeline_sha256 = $13

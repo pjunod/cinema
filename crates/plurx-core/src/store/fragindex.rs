@@ -534,6 +534,7 @@ pub(crate) fn record_typed_outcome(
     rows: u32,
     diagnostic: &crate::content_analysis::IndexDiagnostic,
     now_ms: i64,
+    max_attempts: u32,
 ) -> Result<FragmentIndexOutcome, StoreError> {
     let transaction = conn.unchecked_transaction()?;
     let existing_deadline = transaction
@@ -551,15 +552,10 @@ pub(crate) fn record_typed_outcome(
         IndexRefusal::Truncated { rows }
     };
     let mut recorded = record_outcome(&transaction, file_id, source, refusal, reason, now_ms)?;
-    let configured_max_attempts = transaction
-        .query_row(
-            "SELECT value FROM settings WHERE key = ?1",
-            params![crate::store::keys::ANALYSIS_MAX_ATTEMPTS],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    let max_attempts =
-        crate::store::bounded_analysis_max_attempts(configured_max_attempts.as_deref()) as u32;
+    let max_attempts = max_attempts.clamp(
+        1,
+        u32::try_from(crate::store::MAX_ANALYSIS_MAX_ATTEMPTS).unwrap_or(u32::MAX),
+    );
     let decision = crate::content_analysis::index_retry_decision(
         code,
         transient_allowlisted,
@@ -781,6 +777,13 @@ mod tests {
         // is a fixture no deployment matches.
         conn.execute_batch(FRAGMENT_INDEX_OUTCOMES_SCHEMA)
             .expect("outcomes");
+        conn
+    }
+
+    fn typed_conn() -> Connection {
+        let conn = conn();
+        conn.execute_batch(FRAGMENT_INDEX_TYPED_OUTCOMES_SCHEMA)
+            .expect("typed outcome columns");
         conn
     }
 
@@ -1054,6 +1057,79 @@ mod tests {
             vec![7],
             "the sweep window counts files, not pipelines: a Dolby Vision \
              library must not halve the number of files each tick examines"
+        );
+    }
+
+    #[test]
+    fn mkv_hls_typed_outcome_uses_resolved_policy_without_a_settings_table() {
+        let conn = typed_conn();
+        let settings_tables: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'settings'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("schema inventory");
+        assert_eq!(
+            settings_tables, 0,
+            "the telemetry sidecar has no settings table"
+        );
+
+        let source = SourceIdentity::new(4_096, 1_700_000_000_000, "typed-policy");
+        let recorded = record_typed_outcome(
+            &conn,
+            77,
+            &source,
+            crate::content_analysis::IndexFailureCode::IndexProbeTimeout,
+            false,
+            "probe timed out",
+            0,
+            &crate::content_analysis::IndexDiagnostic::default(),
+            1_700_000_100_000,
+            1,
+        )
+        .expect("record typed outcome in the normal telemetry schema");
+        assert_eq!(recorded.attempts, 1);
+        assert_eq!(recorded.typed_retryable, Some(false));
+        assert_eq!(recorded.terminal_reason.as_deref(), Some("attempt_limit"));
+    }
+
+    #[test]
+    fn mkv_hls_typed_outcome_rolls_back_the_whole_local_transaction() {
+        let conn = typed_conn();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_typed_outcome
+             BEFORE UPDATE OF typed_code ON fragment_index_outcomes
+             WHEN NEW.typed_code <> ''
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced typed outcome rollback');
+             END;",
+        )
+        .expect("rollback trigger");
+        let source = SourceIdentity::new(4_096, 1_700_000_000_000, "typed-rollback");
+        assert!(record_typed_outcome(
+            &conn,
+            78,
+            &source,
+            crate::content_analysis::IndexFailureCode::IndexProbeTimeout,
+            false,
+            "probe timed out",
+            0,
+            &crate::content_analysis::IndexDiagnostic::default(),
+            1_700_000_100_000,
+            5,
+        )
+        .is_err());
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM fragment_index_outcomes WHERE file_id = 78",
+                [],
+                |row| row.get(0),
+            )
+            .expect("outcome count");
+        assert_eq!(
+            rows, 0,
+            "the untyped insert must roll back with the failed update"
         );
     }
 

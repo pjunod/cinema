@@ -31,14 +31,19 @@ pattern = "replacing_child"
 # actor is already replacing this response's producer, and the test-only write
 # creates that exact state before dropping the delivery. Neither elects or
 # starts a replacement; the actor remains the sole owner of that transition.
-expected_occurrences = 33
+# +2 for the rolling publication clock and immutable segment lookup. Both are
+# read-only fences: publication declines while replacement owns the child, and
+# a request waits only while the same exact attempt remains installed.
+expected_occurrences = 35
 kind = "recovery_election"
 replacement = "retained process-replacement serialization projection; actor decisions and exact attempts own transcode prepublication"
 
 [[symbols]]
 id = "shared-child-transition-lock"
 pattern = "child_transition\\.(?:lock|try_lock)"
-expected_occurrences = 17
+# +1 serializes immutable segment publication with the existing exact-attempt
+# replacement/signalling transition. It creates no new transition owner.
+expected_occurrences = 18
 kind = "mixed_ownership_lock"
 replacement = "specific attempt, response-admission, copy replacement, published cleanup, retirement, resource, or catalog-revision fences"
 
@@ -73,7 +78,10 @@ id = "direct-session-failure"
 pattern = "(?:self|session)\\.fail\\("
 # +1 is the rejected-snapshot request regression injecting a terminal cause
 # after deadline expiry; no production failure owner is added.
-expected_occurrences = 13
+# +2 are actor-owned terminal publications: a failed publication-clock cycle
+# and a rolling writer violating its frozen target. Both retire through the
+# existing bounded settlement owner rather than starting recovery themselves.
+expected_occurrences = 15
 kind = "failure_owner"
 replacement = "typed producer facts entering the actor; only prepublication and compatibility failures project Session::failed, while published actor failures retain admitted media"
 
@@ -136,7 +144,9 @@ pattern = "\\.observe_publication\\("
 # +1 for the pacing-hold rung backstop: one test helper publishes a frontier on
 # a predecessor session so claim normalization can read the wedge signature it
 # is being tested against. It is a fixture, not a producer owner.
-expected_occurrences = 4
+# +1 is the publication clock's exact-attempt frontier observation immediately
+# before its immutable bytes become visible.
+expected_occurrences = 5
 kind = "response_admission"
 replacement = "background flow refresh plus exact fixtures; HTTP playlist observation uses the separately inventoried absolute-deadline admission"
 
@@ -172,7 +182,10 @@ pattern = "tokio::spawn\\("
 # without it, replacing `DecodeFaultSink::report` with an empty body left the
 # whole workspace green and the feature dead in production.
 # The copy-init regression adds one joined synthetic producer; it publishes fixture bytes after a 100 ms delay.
-expected_occurrences = 81
+# +2 are the rolling publication-clock task and retired-object cleanup task.
+# Each holds the session it owns; the first exits on retirement/failure and the
+# second begins only at the fixed serve-until boundary and owns bounded retry.
+expected_occurrences = 83
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
 
@@ -209,7 +222,10 @@ pattern = "tokio::time::sleep\\("
 # +1 for the segment-delivery telemetry regression. The 10 ms poll is test-only
 # and sits inside one two-second timeout; it waits for an already-enqueued Store
 # event and owns neither a producer nor a replacement decision.
-expected_occurrences = 40
+# +3 are bounded rolling waits: retired-object cleanup retry, publication-clock
+# cadence, and segment availability polling under the request deadline. None
+# elects recovery or extends its already-owned deadline.
+expected_occurrences = 43
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -326,7 +342,9 @@ pattern = "child_transition"
 # callers hold `child_transition` across the call and its own comment forbids
 # sleeping under it. The symbol count sees prose as well as code, and the
 # reason this teardown may not sleep is exactly the reason worth writing down.
-expected_occurrences = 33
+# +1 is the immutable publication critical section reviewed under
+# `shared-child-transition-lock` above.
+expected_occurrences = 34
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
@@ -340,7 +358,8 @@ pattern = "replacing_child"
 # and the same single test-only read.
 # +2 for the shipped telemetry read and its test-only state setup, reviewed
 # under `replacement-mask-flag` above.
-expected_occurrences = 33
+# +2 are the publication/lookup read fences reviewed under that same symbol.
+expected_occurrences = 35
 
 [[module_symbols]]
 id = "legacy-downgrade-owner"
@@ -510,7 +529,10 @@ pattern = "SegmentPublication"
 # 29 -> 38: init inspection consumes the complete typed segment outcome and
 # the VOD facade preserves Unavailable separately from Missing. The new names
 # are classification arms and focused regressions, not additional owners.
-expected_occurrences = 38
+# +8 preserve typed Missing/Pending/Ready outcomes for retired rolling objects
+# and assert promised init/segment availability plus expiry. They add no worker;
+# the existing request owner still resolves one typed outcome.
+expected_occurrences = 46
 
 [[module_symbols]]
 id = "m4-typed-presentation-resolution"
@@ -721,7 +743,9 @@ pattern = "admitted_serving_generation"
 # 24 -> 28 with prepared rolling relocation: the existing admitted generation
 # is threaded through the ordinary and speculative cluster-start wrappers and
 # rechecked by the same owner. No second serving token or authority is minted.
-expected_occurrences = 28
+# +1 threads that existing token into the immutable object promise installed
+# by its exact publication owner.
+expected_occurrences = 29
 
 [[module_symbols]]
 id = "m4-owner-bound-status-publication"
@@ -951,12 +975,14 @@ expected_occurrences = 7
 [[module_symbols]]
 id = "m4-exact-rolling-scratch-owner-latch"
 pattern = "(?:spawn_rolling_scratch_cleanup_owner|scratch_cleanup_started)"
-expected_occurrences = 12
+# +1 is the retired-object cleanup owner's one-shot session latch.
+expected_occurrences = 13
 
 [[module_symbols]]
 id = "m4-bounded-rolling-scratch-cleanup"
 pattern = "ROLLING_SCRATCH_CLEANUP_(?:ATTEMPTS|ATTEMPT|RETRY)"
-expected_occurrences = 9
+# +2 are the cleanup attempt deadline and retry cadence used by that one owner.
+expected_occurrences = 11
 
 [[module_symbols]]
 id = "m4-bounded-relay-pump-owner"
@@ -1525,7 +1551,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # underneath it. Its join handle is awaited inside the test under a bounded
 # `timeout`, and it owns no shipped producer, process or timer. The feature
 # itself spawns nothing — the wait polls an extraction somebody else started.
-expected_occurrences = 520
+# +2 are the rolling publication-clock and retired-object cleanup tasks,
+# reviewed under `all-detached-tokio-tasks` above.
+expected_occurrences = 522
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1930,7 +1958,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # sleep and the elapsed-time reading in the two publication-wait regressions.
 # No new detached producer, and nothing here waits on work it did not find
 # already running.
-expected_occurrences = 797
+# +8 net constructors cover the bounded packet probe's collection/reap, the
+# fixed retirement grace and cleanup attempt/retry, publication cadence, and
+# request-bounded retired/live segment resolution. All inherit or own finite
+# deadlines; none is a replacement election.
+expected_occurrences = 805
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2039,7 +2071,9 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # +3: ATSC audio replay tests generate delayed AC-3, probe the resulting HLS,
 # and decode both tracks. All use media_output, which awaits completion under
 # a 30-second timeout with kill-on-drop; no new production child owner.
-expected_occurrences = 121
+# +1 is the selected-video packet ffprobe, held behind the existing bounded
+# process helper and explicitly reaped on completion, timeout, and error.
+expected_occurrences = 122
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -2255,7 +2289,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # default-off answers) and two in the HDR burn-guard HTTP rows. Every one is a
 # read of an in-process `axum` response; none constructs a command, a child, a
 # task or a timer, and the segment handler's own ownership is unchanged.
-expected_occurrences = 313
+# +3 are `status()` reads on startup/terminal state enums for diagnostics; they
+# are ordinary in-process methods and launch no child.
+expected_occurrences = 316
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -2341,7 +2377,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +1 fragment-index cleanup wait after start_kill when the first wait expires.
 # The second wait is bounded to one second and addresses the retained child;
 # it does not construct a new process or transfer its ownership.
-expected_occurrences = 366
+# +4 are the packet probe's awaited completion, explicit timeout reap, and the
+# publication retirement ticket wait. Only the first three concern a process;
+# all retain their owner until the wait settles.
+expected_occurrences = 370
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -2429,7 +2468,9 @@ pattern = "kill_on_drop\\s*\\("
 # +1: ATSC replay media_output sets kill-on-drop before starting its bounded
 # fixture generator, HLS probe or decode command. Timeout cannot retain a
 # running helper; production child ownership is unchanged.
-expected_occurrences = 74
+# +1 is the bounded selected-video packet probe's cancellation backstop; normal
+# completion and timeout still explicitly reap the child.
+expected_occurrences = 75
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

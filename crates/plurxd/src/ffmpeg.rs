@@ -397,6 +397,187 @@ pub(crate) async fn held_source_index_probe_json(source: &std::fs::File) -> Resu
     Ok(stamped_with_this_reporter(document).await)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct HeldPacketProbeRequest {
+    pub stream_index: u32,
+    /// `None` means the prefix. A value means an approximate seek followed by
+    /// an open-ended read to natural EOF.
+    pub start_seconds: Option<i64>,
+    /// The prefix uses an explicit selected-packet count. EOF probes must use
+    /// `None`; a capped tail is not EOF evidence.
+    pub packet_limit: Option<u32>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum HeldPacketProbeError {
+    Timeout,
+    OutputLimit,
+    Source(String),
+    Process(String),
+}
+
+impl HeldPacketProbeError {
+    pub(crate) fn reason(&self) -> String {
+        match self {
+            Self::Timeout => "packet probe timed out".to_owned(),
+            Self::OutputLimit => "packet probe exceeded its output bound".to_owned(),
+            Self::Source(reason) | Self::Process(reason) => reason.clone(),
+        }
+    }
+}
+
+/// Read selected packet timestamps from the already-held source.
+///
+/// Every exit path owns, kills when necessary, and reaps the child before it
+/// returns. The caller sequences requests sharing the descriptor and resets
+/// its offset even after an error.
+pub(crate) async fn held_source_packet_probe_json(
+    source: &std::fs::File,
+    request: HeldPacketProbeRequest,
+    timeout: Duration,
+    max_stdout_bytes: u64,
+) -> Result<Vec<u8>, HeldPacketProbeError> {
+    #[cfg(windows)]
+    let (source_path, held_identity) = {
+        let held_identity = plurx_core::fs_secure::std_file_identity(source).map_err(|error| {
+            HeldPacketProbeError::Source(format!("reading held source identity: {error}"))
+        })?;
+        let source_path = plurx_core::fs_secure::std_file_path(source).map_err(|error| {
+            HeldPacketProbeError::Source(format!("resolving held source path: {error}"))
+        })?;
+        let reopened =
+            plurx_core::fs_secure::open_read_nofollow_blocking(&source_path).map_err(|error| {
+                HeldPacketProbeError::Source(format!("reopening held source path: {error}"))
+            })?;
+        if plurx_core::fs_secure::std_file_identity(&reopened).map_err(|error| {
+            HeldPacketProbeError::Source(format!("reading reopened source identity: {error}"))
+        })? != held_identity
+        {
+            return Err(HeldPacketProbeError::Source(
+                "held source path changed before packet probe launch".to_owned(),
+            ));
+        }
+        (source_path, held_identity)
+    };
+
+    let mut command = tokio::process::Command::new(ffprobe_bin());
+    #[cfg(unix)]
+    inherit_file_descriptors(&mut command, &[(source, 3)]);
+    command.args([
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-select_streams",
+        &request.stream_index.to_string(),
+        "-show_packets",
+        "-show_entries",
+        "packet=stream_index,pts,dts,duration",
+    ]);
+    let interval = match (request.start_seconds, request.packet_limit) {
+        (None, Some(limit)) => Some(format!("%+#{limit}")),
+        (Some(start), None) => Some(format!("{}%", start.max(0))),
+        (None, None) => None,
+        (Some(_), Some(_)) => {
+            return Err(HeldPacketProbeError::Process(
+                "an EOF packet probe cannot carry a packet cap".to_owned(),
+            ));
+        }
+    };
+    if let Some(interval) = interval {
+        command.args(["-read_intervals", &interval]);
+    }
+    #[cfg(unix)]
+    command.arg("/dev/fd/3");
+    #[cfg(windows)]
+    command.arg(&source_path);
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+
+    let (mut child, _child_job) =
+        crate::process_control::spawn_job_owned(&mut command).map_err(|error| {
+            HeldPacketProbeError::Process(format!("spawning packet probe: {error}"))
+        })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        HeldPacketProbeError::Process("packet probe started without stdout".to_owned())
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        HeldPacketProbeError::Process("packet probe started without stderr".to_owned())
+    })?;
+    let collect = async {
+        tokio::try_join!(
+            read_packet_probe_pipe(stdout, max_stdout_bytes),
+            read_packet_probe_pipe(stderr, 64 * 1_024),
+            async {
+                child.wait().await.map_err(|error| {
+                    HeldPacketProbeError::Process(format!("waiting for packet probe: {error}"))
+                })
+            }
+        )
+    };
+    let collected = tokio::time::timeout(timeout, collect).await;
+    let result = match collected {
+        Ok(Ok((stdout, _stderr, status))) if status.success() => Ok(stdout),
+        Ok(Ok((_stdout, stderr, status))) => Err(HeldPacketProbeError::Process(format!(
+            "packet probe exited {status}: {}",
+            String::from_utf8_lossy(&stderr).trim()
+        ))),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(HeldPacketProbeError::Timeout),
+    };
+    if result.is_err() {
+        let _ = child.start_kill();
+        let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
+    }
+    #[cfg(windows)]
+    {
+        if plurx_core::fs_secure::std_file_identity(source).map_err(|error| {
+            HeldPacketProbeError::Source(format!("re-reading held source identity: {error}"))
+        })? != held_identity
+        {
+            return Err(HeldPacketProbeError::Source(
+                "held source changed during packet probe".to_owned(),
+            ));
+        }
+        let current =
+            plurx_core::fs_secure::open_read_nofollow_blocking(&source_path).map_err(|error| {
+                HeldPacketProbeError::Source(format!(
+                    "reopening packet-probed source path: {error}"
+                ))
+            })?;
+        if plurx_core::fs_secure::std_file_identity(&current).map_err(|error| {
+            HeldPacketProbeError::Source(format!("reading packet-probed source identity: {error}"))
+        })? != held_identity
+        {
+            return Err(HeldPacketProbeError::Source(
+                "held source path changed during packet probe".to_owned(),
+            ));
+        }
+    }
+    result
+}
+
+async fn read_packet_probe_pipe(
+    input: impl AsyncRead + Unpin,
+    max_bytes: u64,
+) -> Result<Vec<u8>, HeldPacketProbeError> {
+    let mut bytes = Vec::new();
+    input
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| {
+            HeldPacketProbeError::Process(format!("reading packet probe output: {error}"))
+        })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(HeldPacketProbeError::OutputLimit);
+    }
+    Ok(bytes)
+}
+
 async fn held_source_probe_json_with_limits(
     source: &std::fs::File,
     timeout: Duration,
