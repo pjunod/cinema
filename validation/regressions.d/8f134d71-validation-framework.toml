@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["8f134d71", "27f0bd5c", "8aa7eb12"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "These validation-only commits record the retained scan ownership, series-hint and bounded-repair mappings. Their subjects use corrective vocabulary because they identify the runtime commits whose evidence they preserve; this entry binds the metadata commits themselves to the historical-regression audit without claiming additional runtime behavior."
