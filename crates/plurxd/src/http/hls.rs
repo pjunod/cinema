@@ -6982,6 +6982,18 @@ async fn control_local_with_settlement_capacity(
                 None,
             );
         }
+        Some(Err(crate::playback_control::ControlStateError::PauseExpired)) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
+            return control_error(
+                StatusCode::GONE,
+                "pause_grace_expired",
+                "the paused rolling presentation reached its finite grace; resume may open one replacement at the saved position",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                None,
+                None,
+            );
+        }
         Some(Err(crate::playback_control::ControlStateError::OwnerTransition)) => {
             crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
             return control_error(
@@ -10249,7 +10261,8 @@ fn playlist_error(session: &str, err: PlaylistError) -> ApiError {
         PlaylistError::StartupTimedOut(_) => StatusCode::SERVICE_UNAVAILABLE,
         PlaylistError::ProducerExited(_)
         | PlaylistError::ProducerEnded(_)
-        | PlaylistError::SessionFailed(_) => StatusCode::BAD_GATEWAY,
+        | PlaylistError::SessionFailed(_)
+        | PlaylistError::InsufficientCapacity(_) => StatusCode::BAD_GATEWAY,
     };
     tracing::warn!(
         session = %crate::transcode::session_log_id(session),
@@ -24837,7 +24850,7 @@ mod tests {
 
     /// Every playlist refusal, from the session's verdict to the wire.
     ///
-    /// All five used to be `ApiError::NotFound("transcode session")` — one
+    /// These used to be `ApiError::NotFound("transcode session")` — one
     /// anonymous 404 that hls.js escalates to a fatal `levelLoadError`
     /// whatever caused it. The status now separates what the client can do
     /// about it, and the typed body carries the sentence a person reads.
@@ -24869,6 +24882,14 @@ mod tests {
                 StatusCode::BAD_GATEWAY,
                 "session_failed",
                 "never produced any video",
+            ),
+            (
+                PlaylistError::InsufficientCapacity(
+                    "rolling_insufficient_capacity: requested 2.00x".into(),
+                ),
+                StatusCode::BAD_GATEWAY,
+                "rolling_insufficient_capacity",
+                "requested 2.00x",
             ),
             (
                 // The #263 case: still inside the server's own recovery.

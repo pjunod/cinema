@@ -1341,6 +1341,23 @@ struct AheadLimits {
     global_max_bytes: i64,
 }
 
+/// Space that a live rolling producer may materialize before the next
+/// accounting pass can suspend it.  The configured per-session ceiling is
+/// reserved in full, plus one bounded in-flight filesystem envelope for an
+/// init object, temporary segment and playlist rewrite.
+const ROLLING_SCRATCH_IN_FLIGHT_BYTES: i64 = 64 * 1024 * 1024;
+
+struct RollingScratchReservation {
+    total: Arc<AtomicI64>,
+    bytes: i64,
+}
+
+impl Drop for RollingScratchReservation {
+    fn drop(&mut self) {
+        self.total.fetch_sub(self.bytes, AcqRel);
+    }
+}
+
 /// The active bound keeping an ahead-window session held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1382,6 +1399,26 @@ struct FlowInputs<'a> {
     global_ahead_bytes: i64,
     limits: AheadLimits,
     currently_suspended: bool,
+}
+
+fn rolling_playback_rate(demand: Option<&crate::playback_control::PlaybackDemandSnapshot>) -> f64 {
+    demand
+        .filter(|demand| demand.demand == crate::playback_control::PlaybackDemand::Active)
+        .map_or(1.0, |demand| demand.playback_rate)
+        .clamp(0.25, 4.0)
+}
+
+fn rolling_publication_batch_ms(rate: f64) -> i64 {
+    let base = i64::from(plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS) * 1_000;
+    ((base as f64) * rate).ceil() as i64
+}
+
+fn rolling_initial_runway_ms(rate: f64) -> i64 {
+    ((ROLLING_INITIAL_RUNWAY_MS as f64) * rate).ceil() as i64
+}
+
+fn rolling_insufficient_capacity(rate: f64, recent_speed: Option<f64>) -> bool {
+    rate > 0.0 && recent_speed.is_some_and(|speed| speed + 0.05 < rate)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1444,7 +1481,7 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
         startup_protected,
     } = inputs;
     let publication_target_seconds =
-        i64::from(plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS);
+        (rolling_publication_batch_ms(rolling_playback_rate(demand)) + 999) / 1_000;
     if lease_mode == crate::playback_control::RollingLeaseMode::Legacy {
         let hard_hold = physical_ahead.and_then(|ahead| {
             ahead_hold(
@@ -3696,6 +3733,9 @@ async fn own_rolling_retirement(
         }
         crate::playback_control::RollingTerminalCause::StartupExpired => {
             settlement.set_cause("startup_expired");
+        }
+        crate::playback_control::RollingTerminalCause::PauseExpired => {
+            settlement.set_cause("pause_expired");
         }
     }
     session.retirement_cleanup_started.store(true, Release);
@@ -6262,6 +6302,10 @@ struct Session {
     /// the cap it produced was not a bound: several healthy sessions could
     /// exceed the documented ceiling by their whole retention windows.
     live_bytes: Arc<AtomicI64>,
+    /// Admission charged before the producer starts.  The permit stays with
+    /// the exact session through retirement and is released only when its
+    /// final scratch owner disappears.
+    scratch_reservation: std::sync::Mutex<Option<RollingScratchReservation>>,
     /// Bytes renamed out of served segment paths but not yet physically
     /// unlinked. Hidden garbage still consumes the same scratch budget.
     retention_garbage_bytes: Arc<AtomicI64>,
@@ -6520,6 +6564,33 @@ fn ahead_of(index: &SegmentIndex, fetched_end_ms: i64) -> Option<Ahead> {
 }
 
 impl Session {
+    async fn refresh_scratch_bytes(&self) {
+        if self.cached {
+            return;
+        }
+        let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
+            // Preserve the last known charge on an unreadable directory.  A
+            // transient metadata failure must never make capacity reappear.
+            return;
+        };
+        let mut bytes = 0_i64;
+        loop {
+            let entry = match entries.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(_) => return,
+            };
+            let metadata = match entry.metadata().await {
+                Ok(metadata) => metadata,
+                Err(_) => return,
+            };
+            if metadata.is_file() {
+                bytes = bytes.saturating_add(i64::try_from(metadata.len()).unwrap_or(i64::MAX));
+            }
+        }
+        self.live_bytes.store(bytes, Release);
+    }
+
     fn ensure_publication_worker(self: &Arc<Self>, session_id: &str) {
         if self.cached || self.publication_worker_started.swap(true, AcqRel) {
             return;
@@ -6534,7 +6605,11 @@ impl Session {
                         %reason,
                         "rolling publication clock retired an invalid presentation"
                     );
-                    session.fail(PlaylistError::SessionFailed(reason));
+                    session.fail(if reason.starts_with("rolling_insufficient_capacity:") {
+                        PlaylistError::InsufficientCapacity(reason)
+                    } else {
+                        PlaylistError::SessionFailed(reason)
+                    });
                     if let Some(ticket) =
                         spawn_context_retirement_owner(&session, None, "publication_clock")
                     {
@@ -6549,6 +6624,7 @@ impl Session {
     }
 
     async fn publication_cycle(&self, session_id: &str) -> Result<(), String> {
+        self.refresh_scratch_bytes().await;
         if self.replacing_child.load(Acquire) {
             return Ok(());
         }
@@ -6583,8 +6659,14 @@ impl Session {
             return Ok(());
         };
         let end_list = text.lines().any(|line| line.trim() == "#EXT-X-ENDLIST");
+        let lease = self.control.snapshot().await;
+        let demand = lease.as_ref().and_then(|lease| lease.demand.as_ref());
+        let playback_rate = rolling_playback_rate(demand);
+        let batch_ms = rolling_publication_batch_ms(playback_rate);
+        let initial_runway_ms = rolling_initial_runway_ms(playback_rate);
+        let producer_speed = self.progress.recent_speed();
         let now = Instant::now();
-        let (publish, expired, retention_first_segment) = {
+        let (publish, expired, insufficient, retention_first_segment) = {
             let mut clock = self.publication.lock().await;
             clock.reset_for_attempt(producer_attempt);
             if clock
@@ -6596,7 +6678,7 @@ impl Session {
                     Some(clock.staged_end_ms.map_or(end_ms, |old| old.max(end_ms)));
             }
             let publish = match clock.served.as_ref() {
-                None => end_list || end_ms >= ROLLING_INITIAL_RUNWAY_MS,
+                None => end_list || end_ms >= initial_runway_ms,
                 Some(served) if served.producer_attempt != producer_attempt => false,
                 Some(served)
                     if end_list && (last_segment > served.last_segment || !served.end_list) =>
@@ -6605,12 +6687,9 @@ impl Session {
                 }
                 Some(served) => {
                     let staged_ms = end_ms.saturating_sub(served.end_ms);
-                    clock.next_publish_at.is_some_and(|target| {
-                        (now >= served.available_at + ROLLING_PUBLICATION_EARLIEST
-                            && staged_ms
-                                >= i64::try_from(ROLLING_PUBLICATION_TARGET.as_millis())
-                                    .unwrap_or(i64::MAX))
-                            || (now >= target && staged_ms > 0)
+                    clock.next_publish_at.is_some_and(|_| {
+                        now >= served.available_at + ROLLING_PUBLICATION_EARLIEST
+                            && staged_ms >= batch_ms
                     })
                 }
             };
@@ -6619,8 +6698,28 @@ impl Session {
                     clock.hard_deadline.is_some_and(|deadline| now >= deadline)
                         && end_ms <= served.end_ms
                 });
-            (publish, expired, clock.retention_first_segment)
+            let insufficient = !end_list
+                && rolling_insufficient_capacity(playback_rate, producer_speed)
+                && match clock.served.as_ref() {
+                    None => end_ms >= ROLLING_INITIAL_RUNWAY_MS,
+                    Some(served) => {
+                        clock.hard_deadline.is_some_and(|deadline| now >= deadline)
+                            && end_ms.saturating_sub(served.end_ms) < batch_ms
+                    }
+                };
+            (
+                publish,
+                expired,
+                insufficient,
+                clock.retention_first_segment,
+            )
         };
+        if insufficient {
+            return Err(format!(
+                "rolling_insufficient_capacity: playback rate {playback_rate:.2}x requires at least {playback_rate:.2}x production; measured {}x",
+                producer_speed.unwrap_or(0.0)
+            ));
+        }
         if expired {
             return Err(format!(
                 "rolling publication missed its {}s hard deadline without a completed segment",
@@ -7673,6 +7772,7 @@ impl Session {
     /// so slow storage cannot block stop/replacement/control while an old
     /// playlist still cannot enter its successor's compatibility index.
     async fn refresh_segments(&self) {
+        self.refresh_scratch_bytes().await;
         // Actor admission deliberately precedes predecessor teardown. During
         // that interval the current attempt already names the successor while
         // the directory can still contain predecessor bytes. Never prepare an
@@ -7792,16 +7892,6 @@ impl Session {
                 if let Some(ahead) = ahead_of(&index, self.fetched_end_ms.load(Relaxed).max(0)) {
                     self.ahead_bytes.store(ahead.bytes, Relaxed);
                 }
-                let _accounting = self
-                    .retention_cleanup_queue
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                self.live_bytes.store(
-                    index
-                        .total_bytes()
-                        .saturating_add(self.retention_garbage_bytes.load(Relaxed)),
-                    Relaxed,
-                );
             }
             let result = (
                 index.segs.last().map(|segment| segment.index),
@@ -8167,20 +8257,18 @@ async fn session_info(
                 .pause_remaining
                 .map(|remaining| i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX))
         }),
-        retirement_reason: lease.as_ref().and_then(|lease| {
-            lease.terminal.map(|cause| {
-                if cause == crate::playback_control::RollingTerminalCause::LeaseExpired
-                    && lease.pause_remaining == Some(Duration::ZERO)
-                {
-                    "pause_grace_expired"
-                } else {
-                    cause.status()
-                }
-            })
-        }),
+        retirement_reason: lease
+            .as_ref()
+            .and_then(|lease| lease.terminal.map(|cause| cause.status())),
         advertised_bytes,
         grace_bytes,
-        reserved_bytes: Some(limits.max_bytes).filter(|bytes| *bytes > 0),
+        reserved_bytes: s
+            .scratch_reservation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|permit| permit.bytes)
+            .filter(|bytes| *bytes > 0),
         live_bytes: s.live_bytes.load(Acquire),
         control_demand,
         reported_position_ms: demand.map(|demand| demand.position_ms),
@@ -9068,6 +9156,10 @@ pub enum PlaylistError {
     /// verdict or a fallback that could not spawn. Carries the operator-facing
     /// detail recorded at the moment of the verdict.
     SessionFailed(String),
+    /// The requested playback rate drained runway faster than this producer
+    /// could replace it.  This is distinct from an opaque encoder failure so
+    /// clients and operators can choose a lower rate/rendition.
+    InsufficientCapacity(String),
     /// Still starting when [`PLAYLIST_WAIT_BUDGET`] ran out. Not terminal —
     /// the session may yet publish — so clients are told to retry rather than
     /// to give up.
@@ -9083,6 +9175,7 @@ impl PlaylistError {
             PlaylistError::ProducerExited(_) => "producer_failed",
             PlaylistError::ProducerEnded(_) => "producer_ended",
             PlaylistError::SessionFailed(_) => "session_failed",
+            PlaylistError::InsufficientCapacity(_) => "rolling_insufficient_capacity",
             PlaylistError::StartupTimedOut(_) => "startup_timeout",
         }
     }
@@ -9107,6 +9200,9 @@ impl PlaylistError {
             ),
             PlaylistError::SessionFailed(detail) => {
                 format!("the server could not build this stream: {detail}")
+            }
+            PlaylistError::InsufficientCapacity(detail) => {
+                format!("this server cannot sustain the requested playback rate: {detail}")
             }
             PlaylistError::StartupTimedOut(waited) => format!(
                 "the server is still preparing this stream after {}s — a subtitle \
@@ -12571,6 +12667,11 @@ pub struct TranscodeManager {
     /// Even outside publication, odd while the two sample atomics change.
     /// Readers accept bytes only when both generation reads match.
     scratch_sample_generation: AtomicU64,
+    /// Serializes scratch reservations with the exact live/retired byte
+    /// projection.  Producers claim here before spawning, so concurrent starts
+    /// cannot each observe the same remaining capacity.
+    scratch_reservation_gate: Mutex<()>,
+    scratch_reserved_bytes: Arc<AtomicI64>,
     /// Shared with cache housekeeping. A row can say bytes exist, but only
     /// this registry can say an HTTP session on this node is using them now.
     cache_readers: crate::cachekeep::ActiveCacheReaders,
@@ -12918,6 +13019,8 @@ impl TranscodeManager {
             scratch_bytes_free: AtomicI64::new(0),
             scratch_sampled_at_unix_ms: AtomicI64::new(0),
             scratch_sample_generation: AtomicU64::new(0),
+            scratch_reservation_gate: Mutex::new(()),
+            scratch_reserved_bytes: Arc::new(AtomicI64::new(0)),
             cache_readers: crate::cachekeep::ActiveCacheReaders::default(),
             cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -15562,6 +15665,7 @@ impl TranscodeManager {
             segments: Mutex::new(SegmentIndex::default()),
             ahead_bytes: AtomicI64::new(0),
             live_bytes: Arc::new(AtomicI64::new(0)),
+            scratch_reservation: std::sync::Mutex::new(None),
             retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
             retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             retention_cleanup_active: Arc::new(AtomicBool::new(false)),
@@ -20259,6 +20363,7 @@ impl TranscodeManager {
         }
         let hw_slot = admission.hw_slot;
         let sw_permit = admission.sw_permit;
+        let scratch_reservation = self.reserve_rolling_scratch().await?;
 
         let session_id = takeover
             .as_ref()
@@ -20689,6 +20794,7 @@ impl TranscodeManager {
             segments: Mutex::new(SegmentIndex::default()),
             ahead_bytes: AtomicI64::new(0),
             live_bytes: Arc::new(AtomicI64::new(0)),
+            scratch_reservation: std::sync::Mutex::new(Some(scratch_reservation)),
             retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
             retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             retention_cleanup_active: Arc::new(AtomicBool::new(false)),
@@ -20930,6 +21036,7 @@ impl TranscodeManager {
             .flatten()
             .map(|i| i.title)
             .unwrap_or_else(|| "(unknown)".to_owned());
+        let scratch_reservation = self.reserve_rolling_scratch().await?;
 
         let session_id = takeover
             .as_ref()
@@ -21226,6 +21333,7 @@ impl TranscodeManager {
             segments: Mutex::new(SegmentIndex::default()),
             ahead_bytes: AtomicI64::new(0),
             live_bytes: Arc::new(AtomicI64::new(0)),
+            scratch_reservation: std::sync::Mutex::new(Some(scratch_reservation)),
             retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
             retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             retention_cleanup_active: Arc::new(AtomicBool::new(false)),
@@ -21902,6 +22010,28 @@ impl TranscodeManager {
             Err(error) => return Some(Err(error)),
             Ok(None) => {}
         }
+        let retired = self
+            .retired_presentations
+            .lock()
+            .await
+            .get(control.session_id)
+            .cloned();
+        if let Some(retired) = retired {
+            if retired
+                .session
+                .control
+                .snapshot()
+                .await
+                .is_some_and(|lease| {
+                    lease.terminal
+                        == Some(crate::playback_control::RollingTerminalCause::PauseExpired)
+                })
+            {
+                return Some(Err(
+                    crate::playback_control::ControlStateError::PauseExpired,
+                ));
+            }
+        }
         if let Some(result) = self
             .vod
             .control_with_terminal(
@@ -22080,7 +22210,16 @@ impl TranscodeManager {
             let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
             let _final_transition = session.child_transition.lock().await;
             if session.control.is_retired() && !acknowledged_end {
-                return Err(crate::playback_control::ControlStateError::SessionEnded);
+                return Err(
+                    if session.control.snapshot().await.is_some_and(|lease| {
+                        lease.terminal
+                            == Some(crate::playback_control::RollingTerminalCause::PauseExpired)
+                    }) {
+                        crate::playback_control::ControlStateError::PauseExpired
+                    } else {
+                        crate::playback_control::ControlStateError::SessionEnded
+                    },
+                );
             }
             if !self
                 .sessions
@@ -22100,7 +22239,16 @@ impl TranscodeManager {
             )
             .await;
             if session.control.is_retired() && !acknowledged_end {
-                return Err(crate::playback_control::ControlStateError::SessionEnded);
+                return Err(
+                    if session.control.snapshot().await.is_some_and(|lease| {
+                        lease.terminal
+                            == Some(crate::playback_control::RollingTerminalCause::PauseExpired)
+                    }) {
+                        crate::playback_control::ControlStateError::PauseExpired
+                    } else {
+                        crate::playback_control::ControlStateError::SessionEnded
+                    },
+                );
             }
             if !self
                 .sessions
@@ -23667,7 +23815,9 @@ impl TranscodeManager {
                 }
             }
             PlaylistError::ProducerEnded(_) => false,
-            PlaylistError::ProducerExited(_) | PlaylistError::SessionFailed(_) => {
+            PlaylistError::ProducerExited(_)
+            | PlaylistError::SessionFailed(_)
+            | PlaylistError::InsufficientCapacity(_) => {
                 session.failed.load(Relaxed) && session.failure_reason() == *error
             }
             PlaylistError::SessionGone => false,
@@ -25631,6 +25781,39 @@ impl TranscodeManager {
         limits
     }
 
+    /// Reserve the largest configured live working set before a producer can
+    /// create bytes.  This is deliberately an admission decision rather than
+    /// a later flow-control observation: the latter cannot make a disk ceiling
+    /// hard when several starts race through an empty pre-playlist directory.
+    async fn reserve_rolling_scratch(&self) -> Result<RollingScratchReservation, String> {
+        let _gate = self.scratch_reservation_gate.lock().await;
+        let limits = self.ahead_limits().await;
+        if limits.global_max_bytes <= 0 {
+            return Ok(RollingScratchReservation {
+                total: Arc::clone(&self.scratch_reserved_bytes),
+                bytes: 0,
+            });
+        }
+        let session_ceiling = if limits.max_bytes > 0 {
+            limits.max_bytes
+        } else {
+            limits.global_max_bytes
+        };
+        let requested = session_ceiling.saturating_add(ROLLING_SCRATCH_IN_FLIGHT_BYTES);
+        let (charged, _) = self.global_flow_bytes().await;
+        if charged.saturating_add(requested) > limits.global_max_bytes {
+            return Err(format!(
+                "rolling scratch capacity unavailable: {} bytes charged, {} requested, {} configured",
+                charged, requested, limits.global_max_bytes
+            ));
+        }
+        self.scratch_reserved_bytes.fetch_add(requested, AcqRel);
+        Ok(RollingScratchReservation {
+            total: Arc::clone(&self.scratch_reserved_bytes),
+            bytes: requested,
+        })
+    }
+
     /// Forget the snapshot, so the next evaluation reads the settings. For
     /// tests, which assert on the *policy* (cached-until-stale) and must not
     /// spend wall clock waiting a TTL out.
@@ -25714,26 +25897,50 @@ impl TranscodeManager {
     /// session's retained history is real scratch but cannot fall until its
     /// client frontier moves beyond [`RETENTION_SECS`].
     async fn global_flow_bytes(&self) -> (i64, i64) {
-        let live = self
-            .sessions
-            .lock()
-            .await
-            .values()
-            .fold((0, 0), |(live, ahead), session| {
+        let live = self.sessions.lock().await.values().fold(
+            (0_i64, 0_i64, 0_i64),
+            |(live, ahead, reserved), session| {
+                let reservation = session
+                    .scratch_reservation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                    .map_or(0, |permit| permit.bytes);
                 (
-                    live + session.live_bytes.load(Relaxed),
+                    live.saturating_add(session.live_bytes.load(Relaxed).max(reservation)),
                     ahead + session.ahead_bytes.load(Relaxed),
+                    reserved.saturating_add(reservation),
                 )
-            });
-        let retired_bytes = self
-            .retired_presentations
-            .lock()
-            .await
-            .values()
-            .fold(0_i64, |total, retired| {
-                total.saturating_add(retired.session.live_bytes.load(Relaxed))
-            });
-        (live.0.saturating_add(retired_bytes), live.1)
+            },
+        );
+        let retired = self.retired_presentations.lock().await.values().fold(
+            (0_i64, 0_i64),
+            |(total, reserved), retired| {
+                let reservation = retired
+                    .session
+                    .scratch_reservation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_ref()
+                    .map_or(0, |permit| permit.bytes);
+                (
+                    total.saturating_add(retired.session.live_bytes.load(Relaxed).max(reservation)),
+                    reserved.saturating_add(reservation),
+                )
+            },
+        );
+        // A start owns its permit before it can enter either registry.  Add
+        // only that provisional portion; registered reservations are already
+        // represented by max(actual, reserved) above.
+        let provisional = self
+            .scratch_reserved_bytes
+            .load(Relaxed)
+            .saturating_sub(live.2.saturating_add(retired.1))
+            .max(0);
+        (
+            live.0.saturating_add(retired.0).saturating_add(provisional),
+            live.1,
+        )
     }
 
     /// Ensure this rolling incarnation has exactly one detached consumer for
@@ -27242,6 +27449,7 @@ fn test_session_with_control(
         segments: Mutex::new(SegmentIndex::default()),
         ahead_bytes: AtomicI64::new(0),
         live_bytes: Arc::new(AtomicI64::new(0)),
+        scratch_reservation: std::sync::Mutex::new(None),
         retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
         retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
         retention_cleanup_active: Arc::new(AtomicBool::new(false)),
@@ -32502,6 +32710,34 @@ pub(crate) mod tests {
         playlist
     }
 
+    #[test]
+    fn mkv_hls_schedule_scales_runway_and_batches_with_playback_rate() {
+        let cases = [
+            (0.5, 8_000, 24_000),
+            (1.0, 16_000, 48_000),
+            (2.0, 32_000, 96_000),
+        ];
+        for (rate, batch_ms, initial_ms) in cases {
+            assert_eq!(
+                rolling_publication_batch_ms(rate),
+                batch_ms,
+                "{rate}x batch"
+            );
+            assert_eq!(
+                rolling_initial_runway_ms(rate),
+                initial_ms,
+                "{rate}x runway"
+            );
+            assert!(
+                !rolling_insufficient_capacity(rate, Some(rate)),
+                "{rate}x at capacity"
+            );
+        }
+        assert!(rolling_insufficient_capacity(2.0, Some(1.0)));
+        assert!(rolling_insufficient_capacity(1.0, Some(0.8)));
+        assert!(!rolling_insufficient_capacity(0.5, Some(0.8)));
+    }
+
     #[tokio::test]
     async fn mkv_hls_schedule_stages_short_segments_until_the_publication_clock() {
         let directory = crate::test_tempdir().expect("publication clock");
@@ -33279,6 +33515,51 @@ pub(crate) mod tests {
             999,
             "a stale snapshot re-reads the settings"
         );
+    }
+
+    #[tokio::test]
+    async fn mkv_hls_scratch_reservations_serialize_concurrent_starts() {
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            Arc::clone(&store),
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let per_session = 100_i64;
+        let reservation = per_session + ROLLING_SCRATCH_IN_FLIGHT_BYTES;
+        store
+            .put_setting(keys::HLS_AHEAD_MAX_BYTES, &per_session.to_string())
+            .await
+            .expect("per-session ceiling");
+        store
+            .put_setting(
+                keys::HLS_SCRATCH_MAX_BYTES,
+                &reservation.saturating_mul(2).saturating_sub(1).to_string(),
+            )
+            .await
+            .expect("global ceiling");
+
+        let first = mgr.reserve_rolling_scratch().await.expect("first permit");
+        assert!(mgr.reserve_rolling_scratch().await.is_err());
+        drop(first);
+        assert!(mgr.reserve_rolling_scratch().await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn mkv_hls_scratch_measurement_includes_non_playlist_files() {
+        let dir = crate::test_tempdir().expect("scratch");
+        tokio::fs::write(dir.path().join("init.mp4"), vec![0_u8; 17])
+            .await
+            .expect("init");
+        tokio::fs::write(dir.path().join("segment.tmp"), vec![0_u8; 29])
+            .await
+            .expect("temporary segment");
+        let session = test_session(dir.path().to_path_buf());
+        session.refresh_scratch_bytes().await;
+        assert_eq!(session.live_bytes.load(Acquire), 46);
     }
 
     /// A pruned segment's file is deleted on purpose; the flag is what stops
@@ -38746,6 +39027,7 @@ pub(crate) mod tests {
             segments: Mutex::new(SegmentIndex::default()),
             ahead_bytes: AtomicI64::new(0),
             live_bytes: Arc::new(AtomicI64::new(0)),
+            scratch_reservation: std::sync::Mutex::new(None),
             retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
             retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             retention_cleanup_active: Arc::new(AtomicBool::new(false)),

@@ -25,7 +25,7 @@ function activityStreamState(session){
   if(!session) return null;
   // `lease_state` is "active" for a live lease and "unavailable" for a legacy
   // viewer with no actor at all; only the three terminal verdicts are news.
-  const terminal=({ended:"ended",expired:"expired",startup_expired:"startup expired",authority_fenced:"authority fenced"})[session.lease_state];
+  const terminal=({ended:"ended",expired:"expired",startup_expired:"startup expired",pause_expired:"pause expired",authority_fenced:"authority fenced"})[session.lease_state];
   if(terminal) return {cls:"bad",label:`Lease ${terminal}`};
   const hold=!session.suspended?""
     :({demand:"viewer has enough",time:"reserve full",bytes:"per-stream byte limit",

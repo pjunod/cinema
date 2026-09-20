@@ -2137,7 +2137,7 @@ impl ControlErrorBody {
             (400, "invalid_control")
                 | (404, "session_gone")
                 | (409, "owner_changed" | "stale_control")
-                | (410, "session_ended" | "owner_lost")
+                | (410, "session_ended" | "owner_lost" | "pause_grace_expired")
                 | (425, "owner_transition")
                 | (429, "control_rate_limited")
                 | (503, "control_unavailable")
@@ -2201,6 +2201,7 @@ pub(crate) enum ControlStateError {
     StaleSequence,
     RateLimited(u32),
     SessionEnded,
+    PauseExpired,
     OwnerTransition,
     /// The owner is gone and its durable recipe can never be taken over, so
     /// no successor will answer this session's control exchange. Distinct
@@ -5832,6 +5833,7 @@ pub(crate) enum RollingTerminalCause {
     AuthorityFence,
     LeaseExpired,
     StartupExpired,
+    PauseExpired,
 }
 
 impl RollingTerminalCause {
@@ -5841,6 +5843,7 @@ impl RollingTerminalCause {
             Self::AuthorityFence => "authority_fenced",
             Self::LeaseExpired => "expired",
             Self::StartupExpired => "startup_expired",
+            Self::PauseExpired => "pause_expired",
         }
     }
 
@@ -5850,6 +5853,7 @@ impl RollingTerminalCause {
             Self::AuthorityFence => 1,
             Self::LeaseExpired => 2,
             Self::StartupExpired => 3,
+            Self::PauseExpired => 4,
         }
     }
 
@@ -5859,6 +5863,7 @@ impl RollingTerminalCause {
             Self::AuthorityFence => 2,
             Self::LeaseExpired => 3,
             Self::StartupExpired => 4,
+            Self::PauseExpired => 5,
         }
     }
 
@@ -5868,6 +5873,7 @@ impl RollingTerminalCause {
             2 => Some(Self::AuthorityFence),
             3 => Some(Self::LeaseExpired),
             4 => Some(Self::StartupExpired),
+            5 => Some(Self::PauseExpired),
             _ => None,
         }
     }
@@ -9242,7 +9248,13 @@ impl RollingControlActor {
             let Some((disposition, accepted_sequence, action, platform, action_suppressed)) =
                 replay
             else {
-                return Err(ControlStateError::SessionEnded);
+                return Err(
+                    if self.terminal == Some(RollingTerminalCause::PauseExpired) {
+                        ControlStateError::PauseExpired
+                    } else {
+                        ControlStateError::SessionEnded
+                    },
+                );
             };
             return Ok(RollingControlOutcome {
                 disposition,
@@ -11311,7 +11323,10 @@ impl RollingControlActor {
         self.decision_wake
             .terminal_projection
             .store(cause.projection(), Ordering::Release);
-        self.expiration_claimed = cause == RollingTerminalCause::LeaseExpired;
+        self.expiration_claimed = matches!(
+            cause,
+            RollingTerminalCause::LeaseExpired | RollingTerminalCause::PauseExpired
+        );
         if cause == RollingTerminalCause::StartupExpired {
             self.startup = RollingStartupState::Expired;
         }
@@ -11332,7 +11347,7 @@ impl RollingControlActor {
         self.last_flow_ticket = self.flow_sync.request();
         ROLLING_TERMINAL_EVENT_OUTCOMES[metric_base].fetch_add(1, Ordering::Relaxed);
         match cause {
-            RollingTerminalCause::LeaseExpired => {
+            RollingTerminalCause::LeaseExpired | RollingTerminalCause::PauseExpired => {
                 ROLLING_LEASE_EXPIRATIONS.fetch_add(1, Ordering::Relaxed);
             }
             RollingTerminalCause::End
@@ -11360,11 +11375,25 @@ impl RollingControlActor {
             };
             RollingExpiryClaim::Claimed(self.snapshot_at(now))
         } else if snapshot.expired() {
-            let RollingTerminalOutcome::Won(RollingTerminalCause::LeaseExpired) =
-                self.terminate(RollingTerminalCause::LeaseExpired)
-            else {
+            let lease_deadline = self
+                .last_renewal
+                .checked_add(self.mode.timeout())
+                .unwrap_or(self.last_renewal);
+            let pause_expired = self
+                .pause_started_at
+                .and_then(|started| started.checked_add(ROLLING_PAUSE_GRACE))
+                .is_some_and(|pause_deadline| {
+                    pause_deadline <= lease_deadline && now >= pause_deadline
+                });
+            let cause = if pause_expired {
+                RollingTerminalCause::PauseExpired
+            } else {
+                RollingTerminalCause::LeaseExpired
+            };
+            let RollingTerminalOutcome::Won(won) = self.terminate(cause) else {
                 unreachable!("a live expired actor must win its terminal transition");
             };
+            debug_assert_eq!(won, cause);
             // Report the committed transition, not the pre-claim observation.
             // The claimant may be the reaper, a snapshot reader, or the exact
             // timer; all of them must see the same terminal facts.
@@ -13647,9 +13676,10 @@ static ROLLING_PRODUCER_DEADLINE_OBSERVATIONS: [AtomicU64; 3] = [const { AtomicU
 static ROLLING_PRODUCER_EXIT_CLASSIFICATIONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static ROLLING_CONTROL_COMMANDS: [AtomicU64; 24] = [const { AtomicU64::new(0) }; 24];
 static ROLLING_PRODUCER_ACTION_DEADLINES: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
-/// End, authority-fence, lease-expiry, and presentation-startup expiry; each
+/// End, authority-fence, lease-expiry, presentation-startup expiry, and pause
+/// grace expiry; each
 /// records won/already-terminal independently.
-static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
 
 const RELAY_VALID_RESPONSE: usize = 0;
 const RELAY_TRANSPORT_ERROR: usize = 1;
@@ -14358,9 +14388,15 @@ pub(crate) fn prometheus() -> String {
         "# HELP plurx_playback_rolling_terminal_events_total Rolling-session terminal events by bounded cause and immutable first-winner outcome.\n\
          # TYPE plurx_playback_rolling_terminal_events_total counter\n",
     );
-    for (event_index, event) in ["end", "authority_fence", "lease_expired", "startup_expired"]
-        .iter()
-        .enumerate()
+    for (event_index, event) in [
+        "end",
+        "authority_fence",
+        "lease_expired",
+        "startup_expired",
+        "pause_expired",
+    ]
+    .iter()
+    .enumerate()
     {
         for (outcome_index, outcome) in ["won", "already_terminal"].iter().enumerate() {
             output.push_str(&format!(
@@ -20101,7 +20137,9 @@ mod tests {
             let outcome = match cause {
                 RollingTerminalCause::End => handle.end().await,
                 RollingTerminalCause::AuthorityFence => handle.authority_fence().await,
-                RollingTerminalCause::LeaseExpired | RollingTerminalCause::StartupExpired => {
+                RollingTerminalCause::LeaseExpired
+                | RollingTerminalCause::StartupExpired
+                | RollingTerminalCause::PauseExpired => {
                     unreachable!()
                 }
             }
@@ -22969,6 +23007,12 @@ mod tests {
             !lost.is_valid_for_status(425),
             "and must not be accepted at the retryable status it replaces"
         );
+        let pause_expired = ControlErrorBody {
+            code: "pause_grace_expired".to_owned(),
+            ..lost.clone()
+        };
+        assert!(pause_expired.is_valid_for_status(410));
+        assert!(!pause_expired.is_valid_for_status(425));
 
         // The rollout property, pinned rather than discovered: the relay's
         // validator is a strict allowlist, so an ingress node that predates
@@ -25451,8 +25495,24 @@ mod tests {
         else {
             panic!("the non-renewing pause deadline must retire the presentation");
         };
-        assert_eq!(expired.terminal, Some(RollingTerminalCause::LeaseExpired));
+        assert_eq!(expired.terminal, Some(RollingTerminalCause::PauseExpired));
         assert_eq!(expired.pause_remaining, Some(Duration::ZERO));
+
+        let mut resume = hold;
+        resume.sequence += 1;
+        resume.demand = PlaybackDemand::Active;
+        resume.playback_rate = 1.0;
+        resume.render_state = RenderState::Rendering;
+        assert!(
+            matches!(
+                actor.control_at(
+                    started + ROLLING_PAUSE_GRACE + Duration::from_millis(1),
+                    owned_control(&resume),
+                ),
+                Err(ControlStateError::PauseExpired)
+            ),
+            "resume cannot reopen the expired actor; the client may create one replacement"
+        );
     }
 
     #[test]

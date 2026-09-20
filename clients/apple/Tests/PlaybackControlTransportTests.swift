@@ -74,6 +74,10 @@ final class PlaybackControlTransportTests: XCTestCase {
         XCTAssertEqual(failure(409, #"{"code":"stale_control"}"#).code, "stale_control")
         XCTAssertEqual(failure(410, #"{"code":"session_ended"}"#).code, "session_ended")
         XCTAssertEqual(failure(410, #"{"code":"owner_lost"}"#).code, "owner_lost")
+        XCTAssertEqual(
+            failure(410, #"{"code":"pause_grace_expired"}"#).code,
+            "pause_grace_expired"
+        )
     }
 
     func testAControlPathIsRequiredBeforeAnyRequestIsBuilt() async {
