@@ -6574,26 +6574,22 @@ final class AppleClientTests: XCTestCase {
             ),
         ]
         let native = PlayerController.sessionSubtitleFields(
-            selected: 0, tracks: tracks, legacyBurn: false
-        )
+            selected: 0, tracks: tracks)
         XCTAssertEqual(native.native, 0, "the retry re-applies the native selection")
         XCTAssertNil(native.burn, "and never turns it into a burn")
 
         let bitmap = PlayerController.sessionSubtitleFields(
-            selected: 1, tracks: tracks, legacyBurn: false
-        )
+            selected: 1, tracks: tracks)
         XCTAssertEqual(bitmap.burn, 1)
         XCTAssertNil(bitmap.native)
 
         let legacy = PlayerController.sessionSubtitleFields(
-            selected: 0, tracks: tracks, legacyBurn: true
-        )
+            selected: 0, tracks: tracks)
         XCTAssertEqual(legacy.burn, 0, "only a legacy server burns a text track")
         XCTAssertNil(legacy.native)
 
         let off = PlayerController.sessionSubtitleFields(
-            selected: nil, tracks: tracks, legacyBurn: true
-        )
+            selected: nil, tracks: tracks)
         XCTAssertNil(off.burn)
         XCTAssertNil(off.native)
     }
@@ -6712,64 +6708,11 @@ final class AppleClientTests: XCTestCase {
         // The session that boundary creates carries the native fields, never
         // a burn — that is what makes the one reopen worth paying.
         let fields = PlayerController.sessionSubtitleFields(
-            selected: 0, tracks: tracks, legacyBurn: false
-        )
+            selected: 0, tracks: tracks)
         XCTAssertEqual(fields.native, 0)
         XCTAssertNil(fields.burn)
     }
 
-    @MainActor
-    func testLegacyBurnFallbackIsGatedOnAServerWithoutNativeSubtitles() {
-        // Every combination, because this gate is the guardrail against
-        // sending `subtitle_burn` for a track a current server calls native.
-        XCTAssertTrue(PlayerController.serverIsLegacy(
-            servesNative: false, hasSubtitleOptions: false, isDirect: false
-        ))
-        XCTAssertFalse(
-            PlayerController.serverIsLegacy(
-                servesNative: true, hasSubtitleOptions: false, isDirect: false
-            ),
-            "a server that answered with a native master is never legacy, "
-                + "however the selection failed"
-        )
-        XCTAssertFalse(PlayerController.serverIsLegacy(
-            servesNative: true, hasSubtitleOptions: true, isDirect: false
-        ))
-        XCTAssertFalse(
-            PlayerController.serverIsLegacy(
-                servesNative: false, hasSubtitleOptions: true, isDirect: false
-            ),
-            "renditions exist, so the master is current and the option lookup lost"
-        )
-        XCTAssertFalse(
-            PlayerController.serverIsLegacy(
-                servesNative: false, hasSubtitleOptions: false, isDirect: true
-            ),
-            "direct play has no create response to have judged"
-        )
-        XCTAssertFalse(PlayerController.serverIsLegacy(
-            servesNative: true, hasSubtitleOptions: false, isDirect: true
-        ))
-        XCTAssertFalse(PlayerController.serverIsLegacy(
-            servesNative: false, hasSubtitleOptions: true, isDirect: true
-        ))
-        XCTAssertFalse(PlayerController.serverIsLegacy(
-            servesNative: true, hasSubtitleOptions: true, isDirect: true
-        ))
-
-        XCTAssertTrue(PlayerController.playlistAdvertisesNativeSubtitles(
-            "/api/v1/hls/2f9c/index.m3u8?native=1&subtitle=2"
-        ))
-        XCTAssertTrue(PlayerController.playlistAdvertisesNativeSubtitles(
-            "http://media-box:32400/api/v1/hls/2f9c/index.m3u8?native=1"
-        ))
-        XCTAssertFalse(PlayerController.playlistAdvertisesNativeSubtitles(
-            "/api/v1/hls/2f9c/index.m3u8"
-        ))
-        XCTAssertFalse(PlayerController.playlistAdvertisesNativeSubtitles(
-            "/api/v1/hls/2f9c/index.m3u8?native=0"
-        ))
-    }
 
     @MainActor
     func testNativeSubtitleSwitchingUsesAVPlayerMediaSelectionWithoutAStreamReopen() {
@@ -7506,18 +7449,12 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(json["copy"] as? Bool, true)
     }
 
-    func testSubtitleBurnAcknowledgesOnlyAnAlreadySDRPlan() throws {
-        XCTAssertEqual(
-            PlayerController.subtitleBurnSDRAcknowledgement(2, deliveredRange: "sdr"),
-            true
-        )
-        XCTAssertNil(
-            PlayerController.subtitleBurnSDRAcknowledgement(2, deliveredRange: "hdr10")
-        )
-        XCTAssertNil(
-            PlayerController.subtitleBurnSDRAcknowledgement(nil, deliveredRange: "sdr")
-        )
-
+    /// The field still serialises for a server that reads it, and this build
+    /// no longer computes one. The server decides the grade a session would
+    /// deliver without the burn and judges the burn against that; a client's
+    /// claim about the grade was never evidence, and this client computed its
+    /// claim from the decision's range rather than the session's anyway.
+    func testSubtitleBurnAcknowledgementIsWireOnlyAndNeverComputed() throws {
         let request = CreateSessionRequest(
             playbackId: "player-sdr-burn",
             subtitleBurn: 2,
@@ -10936,9 +10873,7 @@ final class AppleClientTests: XCTestCase {
         ))
         let fields = PlayerController.sessionSubtitleFields(
             selected: 0,
-            tracks: tracks,
-            legacyBurn: true
-        )
+            tracks: tracks)
         XCTAssertNil(fields.burn)
         XCTAssertNil(fields.native)
         XCTAssertEqual(
