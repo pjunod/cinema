@@ -2062,22 +2062,14 @@ class Controller(
         controlSequence: Long? = null,
         recipe: PlaybackMediaRecipe = currentRecipe().recipe,
     ): CreateSessionReq = bindDecisionPlan(
-        body = subtitleSessionBody(
+        body = playbackSessionBody(
             playbackId = playbackIntent.playbackId,
             requestId = UUID.randomUUID().toString(),
             controlSequence = controlSequence,
             startSeconds = ms / 1000.0,
-            delivery = recipe.subtitleDelivery,
-            subtitleIndex = recipe.subtitleIndex,
-            // The resolved transport owns copy-vs-transcode. A required-HLS
-            // remux remains a copy session even with subtitles Off, while a
-            // burn or compatibility rescue is always a transcode session.
-            copyableVideo = recipe.desiredTransport == PlaybackMediaTransport.HlsCopy,
+            recipe = recipe,
             aac = plan.aac,
             preserveDolbyVision = plan.preserveDolbyVision,
-            audioIndex = recipe.audioIndex,
-            audioOffsetMs = recipe.audioOffsetMs,
-            quality = recipe.quality,
             sourceHeight = plan.sourceHeight,
         ),
         caps = decisionCaps,
@@ -3567,16 +3559,10 @@ class Controller(
         // passed through the ordinary session attachment, so record both the
         // desired recipe and the HLS transport this prepared player actually
         // owns. The server-selected codec distinguishes copy from transcode.
-        val preparedTransport = if (action.effectiveSelection?.codec == "source") {
-            attachedModeOverride = "remux"
-            attachedRequiresHlsOverride = true
-            PlaybackMediaTransport.HlsCopy
-        } else {
-            attachedModeOverride = "transcode"
-            attachedRequiresHlsOverride = false
-            PlaybackMediaTransport.HlsTranscode
-        }
-        attachRecipe(currentRecipe(), preparedTransport)
+        val preparedAdoption = preparedTransportAdoption(action.effectiveSelection?.codec)
+        attachedModeOverride = preparedAdoption.modeOverride
+        attachedRequiresHlsOverride = preparedAdoption.requiresHlsOverride
+        attachRecipe(currentRecipe(), preparedAdoption.transport)
 
         // The successor is its own session on its own timeline. Everything the
         // controller derives from "which session am I playing" moves with it,

@@ -7263,7 +7263,7 @@ mod tests {
     // ---- seeded integration surface -----------------------------------------
     // A router plus the AppState behind it, so a test can seed items/files
     // straight through the store and then drive the real handlers end to end.
-    fn test_state() -> (Router, AppState) {
+    fn test_state_with_system(system: crate::state::SystemInfo) -> (Router, AppState) {
         let store = SqliteStore::open_in_memory().expect("store");
         let base = crate::test_temp_path(format!("plurx-it-{}", uuid::Uuid::new_v4()));
         let state = AppState::new(
@@ -7272,10 +7272,14 @@ mod tests {
             test_dirs(&base),
             "test-node".into(),
             Default::default(),
-            Default::default(),
+            system,
             Arc::new(crate::logbuf::LogBuffer::new(64)),
         );
         (router(state.clone()), state)
+    }
+
+    fn test_state() -> (Router, AppState) {
+        test_state_with_system(Default::default())
     }
 
     fn test_state_with_dv_disk_tools() -> (Router, AppState) {
@@ -10114,6 +10118,162 @@ mod tests {
             "Auto is the server's call, not a field in the plan: {body}"
         );
         assert_eq!(body["delivered_dynamic_range"], "sdr", "{body}");
+    }
+
+    #[tokio::test]
+    async fn android_dv_delivery_http_boundaries_bind_conversion_to_hls_and_narrow_progressive() {
+        use plurx_core::domain::{AudioStream, DolbyVisionFacts, ProbeResult};
+
+        crate::transcode::require_ffmpeg();
+        let system = crate::state::SystemInfo {
+            dovi_rpu: true,
+            dolby_vision_convert: true,
+            ..Default::default()
+        };
+        let (app, state) = test_state_with_system(system);
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        let source = plurx_core::testfixtures::source("closed-gop");
+        let metadata = std::fs::metadata(&source).expect("DV boundary fixture metadata");
+        let file = state
+            .store
+            .upsert_file(
+                seeded.movie,
+                &source.to_string_lossy(),
+                metadata.len() as i64,
+                1,
+                &ProbeResult {
+                    duration_ms: Some(12_000),
+                    container: Some("mkv".into()),
+                    video_codec: Some("hevc".into()),
+                    video_profile: Some("Main 10".into()),
+                    width: Some(640),
+                    height: Some(360),
+                    bit_depth: Some(10),
+                    hdr: Some("dolby_vision".into()),
+                    hdr_format: Some("Dolby Vision · Profile 7 (HDR10-compatible)".into()),
+                    dolby_vision: DolbyVisionFacts {
+                        profile: Some(7),
+                        level: Some(6),
+                        bl_compat_id: Some(1),
+                        el_present: Some(true),
+                        rpu_present: Some(true),
+                    },
+                    bitrate: Some(2_000_000),
+                    audio_streams: vec![AudioStream {
+                        index: 0,
+                        codec: "aac".into(),
+                        channels: Some(2),
+                        language: Some("eng".into()),
+                        default: true,
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("seed Profile 7 source");
+
+        let caps = |transports: Value| {
+            json!({
+                "v": 2,
+                "client": {"kind": "android", "build": "109"},
+                "video": [{
+                    "codec": "hevc",
+                    "profiles": ["main10"],
+                    "max_height": 2160,
+                    "present": ["sdr", "pq"],
+                    "dv_profiles": [5, 8]
+                }],
+                "audio": ["aac"],
+                "containers": ["mp4"],
+                "transports": transports,
+                "dv_transport": "hls",
+                "display": {"hdr": true, "dolby_vision": true}
+            })
+        };
+        let decision_path = format!("/api/v1/files/{file}/decision");
+
+        let (status, hls) = call(
+            &app,
+            post(
+                &decision_path,
+                Some(&admin),
+                json!({"caps": caps(json!(["progressive", "hls"]))}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{hls}");
+        assert_eq!(hls["method"], "remux", "{hls}");
+        assert_eq!(hls["convert_dolby_vision"], true, "{hls}");
+        assert_eq!(hls["delivery"]["requires_hls"], true, "{hls}");
+        assert_eq!(hls["delivered_dolby_vision_profile"], 8, "{hls}");
+
+        for transports in [json!(["progressive"]), json!([])] {
+            let (status, narrowed) = call(
+                &app,
+                post(
+                    &decision_path,
+                    Some(&admin),
+                    json!({"caps": caps(transports)}),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{narrowed}");
+            assert_eq!(narrowed["method"], "remux", "{narrowed}");
+            assert_eq!(narrowed["convert_dolby_vision"], false, "{narrowed}");
+            assert_eq!(narrowed["preserve_dolby_vision"], false, "{narrowed}");
+            assert_eq!(narrowed["delivered_dynamic_range"], "hdr10", "{narrowed}");
+            assert!(
+                narrowed["delivery"].get("requires_hls").is_none(),
+                "{narrowed}"
+            );
+        }
+
+        let legacy_path = format!(
+            "{decision_path}?vcodec=hevc&acodec=aac&container=mp4&hdr=1&hdr10t=1&dvprofile=5,8&dvhls=1"
+        );
+        let (status, legacy) = call(&app, get(&legacy_path, Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{legacy}");
+        assert_eq!(legacy["convert_dolby_vision"], true, "{legacy}");
+        assert_eq!(legacy["delivery"]["requires_hls"], true, "{legacy}");
+
+        let progressive_path = format!(
+            "/api/v1/files/{file}/stream.mp4?start=1&audio=0&audio_offset_ms=250&vcodec=hevc&acodec=aac&container=mp4&hdr=1&hdr10t=1&dvprofile=5,8&dvhls=1"
+        );
+        let progressive = app
+            .clone()
+            .oneshot(get(&progressive_path, Some(&admin)))
+            .await
+            .expect("progressive response");
+        assert_eq!(
+            progressive.status(),
+            StatusCode::OK,
+            "a stale conversion URL must narrow to the compatible base"
+        );
+        assert!(progressive
+            .headers()
+            .get("x-plurx-media-origin-ms")
+            .is_some());
+        drop(progressive);
+
+        state
+            .store
+            .put_setting(plurx_core::store::keys::DV_CONVERT, "0")
+            .await
+            .expect("disable conversion explicitly");
+        let (status, disabled) = call(
+            &app,
+            post(
+                &decision_path,
+                Some(&admin),
+                json!({"caps": caps(json!(["progressive", "hls"]))}),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{disabled}");
+        assert_eq!(disabled["convert_dolby_vision"], false, "{disabled}");
+        assert_eq!(disabled["delivered_dynamic_range"], "hdr10", "{disabled}");
     }
 
     /// ADAPTIVE-QUALITY advertises the source-filtered ladder, and immutable

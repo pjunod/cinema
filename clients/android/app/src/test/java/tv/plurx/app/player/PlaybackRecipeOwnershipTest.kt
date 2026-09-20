@@ -33,6 +33,39 @@ class PlaybackRecipeOwnershipTest {
     }
 
     @Test
+    fun androidDvDeliveryPreparedHandoffKeepsIncumbentUntilCommitAndRestoresOnRollback() {
+        val owner = PlaybackRecipeOwnership()
+        val incumbent = owner.request(original.copy(mode = "remux", requiresHls = true))
+        owner.attach(incumbent)
+        assertEquals(PlaybackMediaTransport.HlsCopy, owner.attachedTransport)
+
+        val pending = owner.request(
+            original.copy(
+                mode = "transcode",
+                audioIndex = 2,
+                subtitleDelivery = SubtitleDelivery.NativeSession,
+            ),
+        )
+        assertTrue(owner.needsMediaReplacement(pending))
+        assertEquals(
+            PlaybackMediaTransport.HlsCopy,
+            owner.attachedTransport,
+            "a prepared successor is not incumbent state before commit",
+        )
+
+        val adoption = preparedTransportAdoption("server_selected")
+        owner.attach(pending, adoption.transport)
+        assertEquals(PlaybackMediaTransport.HlsTranscode, owner.attachedTransport)
+
+        owner.attach(incumbent, PlaybackMediaTransport.HlsCopy)
+        assertEquals(
+            PlaybackMediaTransport.HlsCopy,
+            owner.attachedTransport,
+            "rollback restores the predecessor's actual transport",
+        )
+    }
+
+    @Test
     fun seekAfterUnpublishedAudioOffsetOrBurnCarriesTheWholeMediaRecipe() = runBlocking {
         for (wanted in listOf(
             original.copy(audioIndex = 2),

@@ -92,6 +92,66 @@ class SubtitlePolicyTest {
     }
 
     @Test
+    fun androidDvDeliveryRequiredHlsSurvivesStartSeekTracksAndRecoveryBodies() {
+        val base = PlaybackMediaRecipe(
+            quality = PlaybackQuality.Auto,
+            mode = "remux",
+            requiresHls = true,
+            audioIndex = 0,
+            subtitleIndex = null,
+            subtitleDelivery = SubtitleDelivery.Plan,
+            audioOffsetMs = 0,
+        )
+        val cases = listOf(
+            base,
+            base.copy(audioIndex = 2, audioOffsetMs = 250),
+            base.copy(subtitleIndex = 4, subtitleDelivery = SubtitleDelivery.NativeSession),
+            base.copy(subtitleIndex = null, subtitleDelivery = SubtitleDelivery.Plan),
+        )
+
+        cases.forEachIndexed { index, recipe ->
+            val body = playbackSessionBody(
+                playbackId = "pb",
+                requestId = "rq-$index",
+                startSeconds = index * 30.0,
+                recipe = recipe,
+                aac = true,
+                preserveDolbyVision = true,
+                sourceHeight = 2160,
+                previousSessionId = "previous".takeIf { index == cases.lastIndex },
+                reopenReason = ReopenReason.Stall.takeIf { index == cases.lastIndex },
+                controlSequence = index.toLong(),
+            )
+            assertEquals(true, body.copy)
+            assertEquals(true, body.aac)
+            assertEquals(true, body.preserve_dolby_vision)
+            assertEquals(index * 30.0, body.start)
+            assertEquals(recipe.audioIndex?.toInt(), body.audio)
+            assertEquals(recipe.audioOffsetMs.takeIf { it != 0L }, body.audio_offset_ms)
+            assertEquals(index.toLong(), body.control_sequence)
+            if (recipe.subtitleDelivery == SubtitleDelivery.NativeSession) {
+                assertEquals(true, body.native_subtitles)
+                assertEquals(recipe.subtitleIndex?.toInt(), body.subtitle)
+            } else {
+                assertNull(body.native_subtitles)
+                assertNull(body.subtitle)
+            }
+        }
+    }
+
+    @Test
+    fun androidDvDeliveryPreparedSuccessorAdoptsItsActualHlsTransport() {
+        assertEquals(
+            PreparedTransportAdoption(PlaybackMediaTransport.HlsCopy, "remux", true),
+            preparedTransportAdoption("source"),
+        )
+        assertEquals(
+            PreparedTransportAdoption(PlaybackMediaTransport.HlsTranscode, "transcode", false),
+            preparedTransportAdoption("server_selected"),
+        )
+    }
+
+    @Test
     fun offReturnsToThePlanAndOnlyLeavingABurnReopens() {
         assertEquals(
             SubtitleRoute(SubtitleDelivery.Plan, reopen = false),

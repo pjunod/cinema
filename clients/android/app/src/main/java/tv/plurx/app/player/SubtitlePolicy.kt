@@ -81,6 +81,28 @@ internal fun desiredPlaybackTransport(
     else -> PlaybackMediaTransport.HlsTranscode
 }
 
+internal data class PreparedTransportAdoption(
+    val transport: PlaybackMediaTransport,
+    val modeOverride: String,
+    val requiresHlsOverride: Boolean,
+)
+
+/** The transport an already-prepared server successor actually owns. */
+internal fun preparedTransportAdoption(effectiveCodec: String?): PreparedTransportAdoption =
+    if (effectiveCodec == "source") {
+        PreparedTransportAdoption(
+            transport = PlaybackMediaTransport.HlsCopy,
+            modeOverride = "remux",
+            requiresHlsOverride = true,
+        )
+    } else {
+        PreparedTransportAdoption(
+            transport = PlaybackMediaTransport.HlsTranscode,
+            modeOverride = "transcode",
+            requiresHlsOverride = false,
+        )
+    }
+
 /**
  * [delivery] is where the selection belongs; [reopen] is whether getting there
  * costs a new server session (or, on direct play, a new media item).
@@ -369,6 +391,42 @@ internal fun subtitleSessionBody(
         quality_auto = qualityAuto(quality, delivery),
     )
 }
+
+/**
+ * Build the exact HLS create body for one effective media recipe.
+ *
+ * Start, seek, track changes and recovery all enter through this seam. Keeping
+ * copy-vs-transcode here prevents one reopen path from re-deriving transport
+ * from `mode` and dropping a server-required HLS copy.
+ */
+internal fun playbackSessionBody(
+    playbackId: String,
+    requestId: String,
+    startSeconds: Double,
+    recipe: PlaybackMediaRecipe,
+    aac: Boolean,
+    preserveDolbyVision: Boolean,
+    sourceHeight: Int?,
+    previousSessionId: String? = null,
+    reopenReason: ReopenReason? = null,
+    controlSequence: Long? = null,
+): CreateSessionReq = subtitleSessionBody(
+    playbackId = playbackId,
+    requestId = requestId,
+    startSeconds = startSeconds,
+    delivery = recipe.subtitleDelivery,
+    subtitleIndex = recipe.subtitleIndex,
+    copyableVideo = recipe.desiredTransport == PlaybackMediaTransport.HlsCopy,
+    aac = aac,
+    preserveDolbyVision = preserveDolbyVision,
+    audioIndex = recipe.audioIndex,
+    audioOffsetMs = recipe.audioOffsetMs,
+    quality = recipe.quality,
+    sourceHeight = sourceHeight,
+    previousSessionId = previousSessionId,
+    reopenReason = reopenReason,
+    controlSequence = controlSequence,
+)
 
 /** Whether this create repeats an HDR10 transcode selected by `/decision`.
  * Compatibility rescue and burn-in deliberately produce universal SDR bytes;
