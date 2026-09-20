@@ -5453,6 +5453,7 @@ mod tests {
                 hdr10: false,
                 presentation: crate::transcode::Presentation::Vod,
                 block_budget_secs: None,
+                transport: None,
             },
         }
     }

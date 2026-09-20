@@ -19,7 +19,7 @@ pub(crate) mod dvr;
 pub(crate) mod error;
 pub(crate) mod extract;
 pub(crate) use extract::CacheOnlyAdminProofCache;
-mod hls;
+pub(crate) mod hls;
 pub(crate) mod images;
 pub(crate) mod internal_activity;
 pub(crate) mod internal_auth_revocation;
