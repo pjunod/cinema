@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+"""Prove the shipped player puts cues on screen after a subtitle readiness edge.
+
+The defect this answers is "selected, nothing shows, no error". The server
+publishes a syntactically valid but empty `WEBVTT` body while a sidecar
+extraction is still warming, and then tells the client — over the playback
+control exchange — that the track has become ready. Everything after that
+point is the client's job, and the client's job was broken: re-selecting the
+hls.js rendition does not make it fetch the segment again.
+
+That is measured here rather than asserted in prose. The fixture serves the
+subtitle segment EMPTY on its first request and with cues on every request
+after it, so a mechanism that does not refetch cannot pass by accident. For
+the record, against the bundled hls.js 1.6.16 none of these produced a single
+cue, and each produced exactly ONE request for the segment:
+
+  * `subtitleTrack = -1` then back to the same ordinal
+  * the same wrapped in `subtitleDisplay = false` / `true`
+  * a bounce through a sibling rendition and back
+  * a purge of the fragment tracker before reselecting
+  * a reselect with a nudge seek
+
+hls.js does not re-request a subtitle fragment it has already processed. So
+the shipped retry stops asking it and reads the whole-track sidecar instead —
+which is exactly what exists once readiness says `ready` — and this check
+drives the shipped `retryReadyNativeSubtitle` to prove it.
+
+VP9/Opus rather than H.264/AAC: a stock Playwright Chromium ships without the
+proprietary decoders, and a fixture the browser cannot decode would make this
+check measure the scheduler instead of the player.
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+WEB = ROOT / "crates" / "plurxd" / "src" / "web"
+TIMEOUT_MS = 30_000
+
+ASSET_TAG = re.compile(r'(?:<script src|<link rel="stylesheet" href)="/assets/([^"?]+)"')
+
+
+def shell_assets() -> set[str]:
+    """Every `/assets/` file the shell asks for, table rows and sidecars alike.
+
+    The web app is a tree served from one ordered table, so this fixture
+    answers whatever the shell names rather than a hand-written list that goes
+    stale behind it — the same rule `web-hls-startup-browser-check` follows.
+    """
+    return set(ASSET_TAG.findall((WEB / "index.html").read_text(encoding="utf-8")))
+
+EMPTY_SEGMENT = b"WEBVTT\n\n"
+READY_SIDECAR = (
+    b"WEBVTT\n\n"
+    b"00:00:00.200 --> 00:00:02.800\n"
+    b"the sidecar the readiness edge promised\n"
+)
+
+MASTER = """#EXTM3U
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",AUTOSELECT=NO,DEFAULT=NO,URI="subs/0/index.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=800000,CODECS="vp09.00.10.08,opus",CLOSED-CAPTIONS=NONE,SUBTITLES="subs"
+index.m3u8
+"""
+
+SUB_PLAYLIST = """#EXTM3U
+#EXT-X-TARGETDURATION:3
+#EXT-X-VERSION:3
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXTINF:3.0,
+seg00000.vtt
+#EXT-X-ENDLIST
+"""
+
+
+def find_browser(explicit):
+    if explicit:
+        return explicit
+    for candidate in (
+        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        Path("/Applications/Chromium.app/Contents/MacOS/Chromium"),
+        Path("/usr/bin/google-chrome"),
+        Path("/usr/bin/chromium"),
+    ):
+        if candidate.is_file():
+            return str(candidate)
+    root = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "/opt/pw-browsers"))
+    for pattern in (
+        "chromium-*/chrome-linux/chrome",
+        "chromium_headless_shell-*/chrome-linux/headless_shell",
+    ):
+        found = sorted(root.glob(pattern)) if root.is_dir() else []
+        if found:
+            return str(found[-1])
+    return None
+
+
+def make_fixture(directory):
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is required to build the deterministic HLS fixture")
+    subprocess.run(
+        [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+            "-f", "lavfi", "-i", "color=c=black:s=320x180:r=25:d=3",
+            "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=3",
+            "-c:v", "libvpx-vp9", "-pix_fmt", "yuv420p", "-g", "25",
+            "-b:v", "200k", "-deadline", "realtime", "-cpu-used", "8",
+            "-c:a", "libopus", "-b:a", "64k", "-shortest",
+            "-f", "hls", "-hls_time", "3", "-hls_playlist_type", "vod",
+            "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
+            "-hls_segment_filename", str(directory / "seg%d.m4s"),
+            str(directory / "index.m3u8"),
+        ],
+        check=True,
+    )
+    digest = hashlib.sha256()
+    for path in sorted(directory.iterdir()):
+        digest.update(path.name.encode())
+        digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+class FixtureServer(ThreadingHTTPServer):
+    def __init__(self, fixture):
+        super().__init__(("127.0.0.1", 0), Handler)
+        self.fixture = fixture
+        self.segment_requests = 0
+        self.sidecar_requests = 0
+        self.lock = threading.Lock()
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *_args):
+        pass
+
+    def reply(self, status, body=b"", content_type="application/octet-stream"):
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        route = self.path.split("?", 1)[0]
+        if route == "/":
+            return self.reply(200, (WEB / "index.html").read_bytes(), "text/html; charset=utf-8")
+        asset = route.removeprefix("/assets/")
+        if route.startswith("/assets/") and asset in shell_assets():
+            kind = "text/css" if asset.endswith(".css") else "text/javascript"
+            return self.reply(200, (WEB / asset).read_bytes(), f"{kind}; charset=utf-8")
+        if route == "/master.m3u8":
+            return self.reply(200, MASTER.encode(), "application/vnd.apple.mpegurl")
+        if route.startswith("/subs/") and route.endswith("index.m3u8"):
+            return self.reply(200, SUB_PLAYLIST.encode(), "application/vnd.apple.mpegurl")
+        if route.startswith("/subs/") and route.endswith(".vtt"):
+            # The segment is empty forever. A retry that depends on it fetching
+            # a second, fuller copy would pass here for the wrong reason.
+            with self.server.lock:
+                self.server.segment_requests += 1
+            return self.reply(200, EMPTY_SEGMENT, "text/vtt")
+        if route.startswith("/api/v1/files/") and "/subs/" in route:
+            # The whole-track sidecar, which is what `ready` means exists.
+            with self.server.lock:
+                self.server.sidecar_requests += 1
+            return self.reply(200, READY_SIDECAR, "text/vtt")
+        fixture = self.server.fixture / route.lstrip("/")
+        if fixture.is_file():
+            kind = ("application/vnd.apple.mpegurl" if fixture.suffix == ".m3u8"
+                    else "video/mp4")
+            return self.reply(200, fixture.read_bytes(), kind)
+        self.reply(404, b"not found", "text/plain")
+
+
+SETUP = """
+    () => {
+      const video=document.getElementById('video');
+      video.muted=true;
+      PLAYER={method:'transcode',source:{video_codec:'vp9'},started:false,
+        wantsPlayback:true,controlIntentGeneration:1,attemptId:'subtitle-readiness',
+        bufSegSecs:4,marks:{},abr:{},offset:0,bookOffset:0,mediaAttachment:null,
+        fileId:5615,sessionId:'subtitle-readiness',burnedSub:null,curSub:0,
+        subs:[{index:0,codec:'subrip',language:'eng',text:true,native:true}]};
+      attachHls(video,'/master.m3u8',0);
+    }
+"""
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--browser", default=None)
+    args = parser.parse_args()
+    try:
+        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import TimeoutError as PlaywrightTimeout
+    except ImportError:
+        print("SKIP  playwright is not installed; subtitle readiness browser evidence unavailable")
+        return 0
+
+    with tempfile.TemporaryDirectory(prefix="plurx-subtitle-readiness-") as raw:
+        fixture = Path(raw)
+        fixture_hash = make_fixture(fixture)
+        server = FixtureServer(fixture)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        console = []
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(
+                    executable_path=find_browser(args.browser),
+                    args=["--no-sandbox", "--disable-dev-shm-usage",
+                          "--autoplay-policy=no-user-gesture-required"],
+                )
+                page = browser.new_page()
+                page.on("console", lambda m: console.append(f"{m.type}: {m.text}"))
+                page.goto(f"http://127.0.0.1:{server.server_port}/", wait_until="load")
+                page.wait_for_function(
+                    "() => typeof attachHls === 'function' && typeof retryReadyNativeSubtitle === 'function' && window.Hls"
+                )
+                page.evaluate(SETUP)
+                # Select the rendition the way the player does, and let it take
+                # delivery of the empty segment.
+                page.wait_for_function(
+                    "() => PLAYER.hls && PLAYER.hls.subtitleTracks && PLAYER.hls.subtitleTracks.length > 0",
+                    timeout=TIMEOUT_MS,
+                )
+                page.evaluate("() => { PLAYER.hls.subtitleTrack = 0; }")
+                page.wait_for_timeout(2500)
+                before = page.evaluate(
+                    """() => {
+                      const v=document.getElementById('video');
+                      let cues=0;
+                      for(const t of v.textTracks) cues += (t.cues ? t.cues.length : 0);
+                      return cues;
+                    }"""
+                )
+
+                # The readiness edge, through the shipped function.
+                directed = page.evaluate("() => retryReadyNativeSubtitle(PLAYER)")
+                # A retry that cannot work times out here. That is a result,
+                # not a crash: report it the way every other failure is
+                # reported, because this script's whole job is to tell the
+                # difference between "the cues arrived" and "they did not".
+                try:
+                    page.wait_for_function(
+                        """() => {
+                          const v=document.getElementById('video');
+                          for(const t of v.textTracks) if(t.mode==='showing' && t.cues && t.cues.length) return true;
+                          return false;
+                        }""",
+                        timeout=TIMEOUT_MS,
+                    )
+                except PlaywrightTimeout:
+                    pass
+                result = page.evaluate(
+                    """() => {
+                      const v=document.getElementById('video');
+                      let showing=0, cues=0;
+                      for(const t of v.textTracks){
+                        cues += (t.cues ? t.cues.length : 0);
+                        if(t.mode==='showing') showing += (t.cues ? t.cues.length : 0);
+                      }
+                      return {cues, showing, sessionId:PLAYER.sessionId,
+                              element:v.isConnected, hlsVersion:Hls.version,
+                              browser:navigator.userAgent};
+                    }"""
+                )
+                browser.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+    failures = []
+    if before != 0:
+        failures.append(f"the empty segment produced {before} cues before the readiness edge")
+    if not directed:
+        failures.append("the shipped retry declined to act on a native selection")
+    if result["showing"] < 1:
+        failures.append("no showing text track carries a cue after the readiness edge")
+    if result["sessionId"] != "subtitle-readiness" or not result["element"]:
+        failures.append("the retry replaced the video session or its element")
+    if failures:
+        print("FAIL  subtitle readiness did not put cues on screen")
+        for line in failures:
+            print(f"      {line}")
+        print(json.dumps(result, indent=2))
+        for line in console[-12:]:
+            print(f"      console: {line}")
+        return 1
+    print("PASS  a readiness edge put cues on screen without touching the video session")
+    print(f"      cues before: {before}; showing after: {result['showing']}")
+    print(f"      subtitle segment requests: {server.segment_requests} (all empty); "
+          f"sidecar requests: {server.sidecar_requests}")
+    print(f"      fixture sha256: {fixture_hash}; hls.js: {result['hlsVersion']}")
+    print(f"      browser: {result['browser']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
