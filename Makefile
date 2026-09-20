@@ -1422,6 +1422,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/playback/web-control.test.js
 	@node --test tests/playback/seek-control.test.js
 	@scripts/web-hls-startup-browser-check
+	@scripts/subtitle-readiness-browser-check
 	@node tests/playback/player-input-contract.test.js
 	@node tests/playback/playback-surface-contract.test.js
 	@node tests/web/player-dom.test.js

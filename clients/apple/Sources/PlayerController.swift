@@ -1663,15 +1663,12 @@ final class PlayerController: ObservableObject {
         let targetMs: Int
     }
 
-    enum DeliveryFallback: CaseIterable { case legacySubtitleBurn, hdrBase, transcode }
+    enum DeliveryFallback: CaseIterable { case hdrBase, transcode }
 
     /// Delivery fallbacks are recipe changes, even when a newer viewer task
     /// cancels the particular reopen that first requested them.
     func requireDeliveryFallback(_ fallback: DeliveryFallback) {
         switch fallback {
-        case .legacySubtitleBurn:
-            guard !forceLegacySubtitleBurn else { return }
-            forceLegacySubtitleBurn = true
         case .hdrBase:
             guard !forceCompatibleHDRBase else { return }
             forceCompatibleHDRBase = true
@@ -2291,14 +2288,6 @@ final class PlayerController: ObservableObject {
     /// own a frozen picture indefinitely.
     private var deferredStall: (event: PlaybackStallEvent, deadline: TimeInterval)?
     private var recoveryReopenBudget = RecoveryReopenBudget()
-    /// Evidence that this server understands `native_subtitles`: its create
-    /// response handed back a native master query. A server predating the
-    /// feature returns the plain playlist URL and advertises no subtitle
-    /// group, and only that combination may use the legacy burn fallback.
-    private var serverServesNativeSubtitles = false
-    /// Set only once a server has proved it predates `native_subtitles`: its
-    /// text tracks then go back through the pre-branch burn path.
-    private var forceLegacySubtitleBurn = false
     /// Identifies the newest `open()`. An older attempt that wakes from its
     /// awaits afterwards must not replace the item, clear the transition
     /// state, or report its own failure over the newer one's (P2-6).
@@ -2592,7 +2581,6 @@ final class PlayerController: ObservableObject {
         subtitleReadiness = model.subtitleReadiness
         markerAutoSkipLedger = MarkerAutoSkipLedger()
         wantsNativeSubtitleRenditions = false
-        forceLegacySubtitleBurn = false
         activeBurnedSubtitle = nil
         canRetryCurrentItemWithHDRBase = false
         dolbyVisionFallbackAttempted = false
@@ -2667,7 +2655,6 @@ final class PlayerController: ObservableObject {
         finished = false
         resetSurface()
         activeBurnedSubtitle = nil
-        forceLegacySubtitleBurn = false
         audioOverride = nil
         audioLanguage = model.audioLang
         selectedHeight = offline.actualHeight
@@ -4351,8 +4338,7 @@ final class PlayerController: ObservableObject {
         let requestedSubtitle = selectedSubtitle
         let subtitleFields = Self.sessionSubtitleFields(
             selected: requestedSubtitle,
-            tracks: subtitles,
-            legacyBurn: forceLegacySubtitleBurn
+            tracks: subtitles
         )
         let burnSubtitle = subtitleFields.burn
         let nativeSubtitle = subtitleFields.native
@@ -4446,10 +4432,12 @@ final class PlayerController: ObservableObject {
                     start: Double(startMs) / 1000.0,
                     audio: chosenAudio,
                     subtitleBurn: burnSubtitle,
-                    subtitleBurnSDR: Self.subtitleBurnSDRAcknowledgement(
-                        burnSubtitle,
-                        deliveredRange: decision.deliveredDynamicRange
-                    ),
+                    // No SDR acknowledgement. The server computes the grade
+                    // this session would deliver without the burn and decides
+                    // for itself; a client's assertion about that grade was
+                    // never evidence about it, and this one was computed from
+                    // the decision's range rather than the session's anyway.
+                    subtitleBurnSDR: nil,
                     nativeSubtitles: true,
                     subtitle: nativeSubtitle,
                     copy: copy ? true : nil,
@@ -4561,7 +4549,6 @@ final class PlayerController: ObservableObject {
             // rung the next stall reopen is measured against.
             sessionHeight = hls.height
             isDirectPlayback = false
-            serverServesNativeSubtitles = Self.playlistAdvertisesNativeSubtitles(hls.playlistUrl)
             activeBurnedSubtitle = burnSubtitle
             encoder = hls.encoder
             // The session that exists overrides the plan that was decided: a
@@ -7742,15 +7729,6 @@ final class PlayerController: ObservableObject {
         return subtitleRequiresBurn(index, in: tracks)
     }
 
-    /// The session endpoint remains fail-closed for an HDR source unless the
-    /// selected plan proves the burn is being added to an already-SDR output.
-    nonisolated static func subtitleBurnSDRAcknowledgement(
-        _ index: Int?,
-        deliveredRange: String?
-    ) -> Bool? {
-        guard index != nil, deliveredRange?.lowercased() == "sdr" else { return nil }
-        return true
-    }
 
     /// Whether the subtitle a starting playback wants must be dropped because
     /// drawing it would have traded the HDR picture away.
@@ -8213,28 +8191,6 @@ final class PlayerController: ObservableObject {
         }
     }
 
-    /// Guardrail (plan §6.4): sending `subtitle_burn` for a track a current
-    /// server classifies native recreates the exact bug this arc removed, so
-    /// the P1-3 fallback needs positive evidence that the server predates
-    /// `native_subtitles` — a create response with no native master query
-    /// *and* an asset advertising no subtitle rendition at all. A selection
-    /// that merely failed is not evidence, and direct play never qualifies:
-    /// there is no create response to have judged.
-    static func serverIsLegacy(
-        servesNative: Bool,
-        hasSubtitleOptions: Bool,
-        isDirect: Bool
-    ) -> Bool {
-        !servesNative && !hasSubtitleOptions && !isDirect
-    }
-
-    /// A server that predates native subtitles hands back the plain session
-    /// playlist; a current one carries the native master query. This is the
-    /// evidence the P1-3 legacy fallback is gated on.
-    static func playlistAdvertisesNativeSubtitles(_ playlistUrl: String) -> Bool {
-        guard let items = URLComponents(string: playlistUrl)?.queryItems else { return false }
-        return items.contains { $0.name == "native" && $0.value != "0" }
-    }
 
     /// Resolve player-local time zero onto the source timeline.
     ///
@@ -8356,31 +8312,22 @@ final class PlayerController: ObservableObject {
     ) async -> Bool {
         // The item itself failing is the status observer's story, not ours.
         guard item.status != .failed, selectedSubtitle == index else { return false }
-        let serverIsLegacy = Self.serverIsLegacy(
-            servesNative: serverServesNativeSubtitles,
-            hasSubtitleOptions: hasSubtitleOptions,
-            isDirect: isDirectPlayback
-        )
-        let isText = subtitles.first(where: { $0.index == index })?.text ?? false
-        if serverIsLegacy && isText {
-            requireDeliveryFallback(.legacySubtitleBurn)
-            let position = positionForPlaybackIntent()
-            if isChangingStream {
-                // Called from inside `open()`, which `reopen()` refuses to
-                // overlap. Run the burn once this open has finished.
-                let actionEpoch = viewerActionEpoch
-                Task { [weak self] in
-                    guard let self, self.started,
-                          self.viewerActionEpoch == actionEpoch,
-                          self.selectedSubtitle == index
-                    else { return }
-                    await self.reopen(at: position)
-                }
-            } else {
-                await reopen(at: position)
-            }
-            return false
-        }
+        // The legacy-server fallback used to stand here: a failed native
+        // selection on a server that advertised no renditions was reopened as
+        // a burn. It is gone, and the evidence it rested on with it.
+        //
+        // The evidence was "this create response carried no `native=` query
+        // and this asset advertised no subtitle group". There are no
+        // pre-native servers left in the fleet, so that combination can no
+        // longer mean "old server" — but it can still occur, on a master this
+        // build failed to parse or an asset that had not loaded its groups
+        // yet. When it did, a text track the viewer asked for was answered
+        // with a full SDR re-encode nobody requested: exactly the outcome this
+        // whole arc exists to stop, reached by a path meant to be a kindness.
+        //
+        // A selection that fails is now simply a selection that failed, and
+        // the viewer is told so.
+        _ = hasSubtitleOptions
         selectedSubtitle = nil
         showPlaybackNotice("That subtitle track could not be turned on.")
         // The selection resolved to Off without changing the item. The
@@ -8413,7 +8360,7 @@ final class PlayerController: ObservableObject {
         while started, player.currentItem === item {
             let actionEpoch = viewerActionEpoch
             let fields = Self.sessionSubtitleFields(
-                selected: selectedSubtitle, tracks: subtitles, legacyBurn: forceLegacySubtitleBurn
+                selected: selectedSubtitle, tracks: subtitles
             )
             let nativeSubtitle = pgsOverlayIsActive || activeBurnedSubtitle != nil ? nil : fields.native
             await applyPreferredAudioSelection(to: item, expectedActionEpoch: actionEpoch)
@@ -8609,14 +8556,11 @@ final class PlayerController: ObservableObject {
     /// the two fields are never sent together.
     static func sessionSubtitleFields(
         selected: Int?,
-        tracks: [SubtitleTrack],
-        legacyBurn: Bool
+        tracks: [SubtitleTrack]
     ) -> (burn: Int?, native: Int?) {
         guard let selected else { return (nil, nil) }
         if subtitleUsesOverlay(selected, in: tracks) { return (nil, nil) }
-        // A legacy server (P1-3) advertises no native renditions at all, so
-        // its text tracks return to the pre-branch burn path.
-        if legacyBurn || subtitleRequiresBurn(selected, in: tracks) {
+        if subtitleRequiresBurn(selected, in: tracks) {
             return (selected, nil)
         }
         return (nil, nativeSubtitleOrdinal(selected, in: tracks) == nil ? nil : selected)
@@ -8960,8 +8904,20 @@ extension PlayerController {
     /// only the legible selection when control reports the demanded window as
     /// ready; the video item and its producer stay untouched.
     private func retryNativeSubtitleAfterReadiness() {
+        // Gated on the ROUTE, not on `activeNativeSubtitle`. That property
+        // means "the index this session was opened with" — it is written only
+        // by `open()` and `stop()`, and never by `applySubtitleSelection` —
+        // so a viewer who turned subtitles on mid-playback left it `nil` and
+        // this retry silently declined for the rest of the session. That is
+        // the whole in-place selection path, which is the common one.
         guard let index = selectedSubtitle,
-              activeNativeSubtitle != nil,
+              Self.subtitleSelectionRoute(
+                for: index,
+                tracks: subtitles,
+                activeBurn: activeBurnedSubtitle,
+                isDirectPlayback: isDirectPlayback,
+                activeOverlay: pgsOverlayTrackIndex
+              ) == .mediaSelection,
               let item = player.currentItem
         else { return }
         let actionEpoch = viewerActionEpoch
@@ -9156,6 +9112,15 @@ extension PlayerController: PreparedSuccessorHost {
         // gets whatever the incumbent already established.
         successor.isMuted = true
         successor.volume = 0
+        // And it does not get to pick tracks. The incumbent owns media
+        // selection outright (see `start()`); this player was left at
+        // AVFoundation's default `true`, so while it primed it was free to
+        // enable a legible rendition from the master's AUTOSELECT/DEFAULT
+        // metadata and the system caption preference. The item it hands over
+        // at commit then carried whatever THIS player chose rather than what
+        // the viewer chose — which is how a subtitle that was showing stops
+        // while still selected in the menu.
+        successor.appliesMediaSelectionCriteriaAutomatically = false
         preparedPlayer = successor
         preparedItem = item
         preparedFilmPositionMs = max(0, filmPositionMs)
@@ -9417,11 +9382,27 @@ extension PlayerController: PreparedSuccessorHost {
         baseMs = action.mediaOriginMs
         activeMediaPath = clusterRelativeMediaPath(action.playlistUrl)
         activeMediaAuthenticated = false
-        serverServesNativeSubtitles = Self.playlistAdvertisesNativeSubtitles(action.playlistUrl)
         if action.effectiveSelection.height > 0 {
             sessionHeight = action.effectiveSelection.height
         }
         isDirectPlayback = false
+        // The viewer's audio and subtitle choices are per-ITEM state, and this
+        // is a different item. `open`, `loadOffline`, a seek and a node
+        // failover all reconcile them onto the item they attach; the commit
+        // did not, so a subtitle that was showing stopped at the moment of a
+        // server-driven quality change and stayed stopped while the menu still
+        // said it was on. Off is reconciled too — `sessionSubtitleFields`
+        // answers `nil` for it, and selecting `nil` on the legible group is
+        // what makes Off survive an item whose master carries a DEFAULT
+        // rendition.
+        //
+        // Under the same lifecycle guard `open()` uses: a viewer action that
+        // landed during the commit owns the selection, and this must not put
+        // the pre-commit choice back on top of it.
+        let reconcileGeneration = lifecycleGeneration
+        if isCurrentLifecycle(reconcileGeneration), player.currentItem === item {
+            await reconcileNativeMediaSelections(to: item)
+        }
         startStatusPolling()
         player.play()
         if !wantsPlayback { player.pause() }
