@@ -81,7 +81,7 @@ function watchLayout(){
     if(!present&&node.isConnected){WATCH_CONTROLS[id]=node;if(node===document.activeElement)document.getElementById("pbplay").focus({preventScroll:true});node.remove();}
   }
   const larger=document.getElementById("pblarger");
-  if(larger){larger.textContent=full?"Browse":WATCH.size==="compact"?"Larger":"Browse";larger.setAttribute("aria-label",larger.textContent);}
+  if(larger){larger.textContent=full?"Smaller":WATCH.size==="compact"?"Larger":"Smaller";larger.setAttribute("aria-label",larger.textContent);}
   if(full){modal.style.cssText="";}
   else if(slot){
     slot.style.height=narrow?`${slot.getBoundingClientRect().width*9/16+132}px`:"";
