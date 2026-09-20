@@ -140,6 +140,13 @@ const data=id=>id==='10'?{item:show,files:[],children:[season],ancestors:[]}:id=
   await page.locator('#pbplay').focus();await page.keyboard.press('Escape');
   await page.waitForFunction(()=>!WATCH&&!document.getElementById('modal').classList.contains('open'));
   assert.equal(new URL(page.url()).hash,'#/library-channels');
+  // A late-watch fence must never dismiss a later Live TV/other host fullscreen.
+  await page.evaluate(()=>{const b=document.createElement('button');b.id='other-fullscreen';b.textContent='Other fullscreen';b.onclick=()=>document.getElementById('app').requestFullscreen();document.getElementById('app').prepend(b);});
+  await page.locator('#other-fullscreen').click();
+  await page.waitForFunction(()=>document.fullscreenElement===document.getElementById('app'));
+  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+  assert.equal(await page.evaluate(()=>document.fullscreenElement===document.getElementById('app')),true);
+  await page.evaluate(()=>document.exitFullscreen());
   assert.deepEqual(errors,[]);
   console.log('PASS shipped watch browser: persistent media, fullscreen return, 11 widths, episode acceptance/failure, Play next, progress, Close ordering and chapter seek');
  }catch(e){console.error(e);console.error({errors,decisions});console.error(await page.evaluate(()=>({surface:PLAYBACK_SURFACE.surface,loading:document.getElementById('ploadText').textContent,paused:document.getElementById('video').paused,watch:WATCH&&{accepted:WATCH.accepted,page:WATCH.page?.item.id,mode:WATCH.mode},player:PLAYER&&{fileId:PLAYER.fileId,pending:PLAYER.pendingOpenAttempt,started:PLAYER.started,seek:PLAYER.controlSeek},time:document.getElementById('video').currentTime,chapters:Array.from(document.querySelectorAll('[data-watch-chapter]')).map(b=>b.dataset.startMs)})));if(output)await page.screenshot({path:path.join(output,'failure.png')});throw e;}finally{await browser.close();}

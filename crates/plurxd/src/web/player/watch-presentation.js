@@ -109,7 +109,11 @@ function watchBeforeFullscreen(){
   return WATCH_FULLSCREEN_REQUEST;
 }
 function watchFullscreenChanged(){
-  if(WATCH_FULLSCREEN_REQUEST&&!WATCH_FULLSCREEN_REQUEST.allowed&&isFullscreenAnywhere()){exitFullscreenAnywhere();return;}
+  const element=document.fullscreenElement||document.webkitFullscreenElement;
+  const video=document.getElementById("video");
+  const ownFullscreen=element===document.getElementById("player")||!!video?.webkitDisplayingFullscreen;
+  if(element&&!ownFullscreen)return; // Live TV and other surfaces own their exits.
+  if(WATCH_FULLSCREEN_REQUEST&&!WATCH_FULLSCREEN_REQUEST.allowed&&ownFullscreen){exitFullscreenAnywhere();return;}
   if(!WATCH)return;
   if(isFullscreenAnywhere())WATCH.mode="full";
   else {WATCH.mode=watchBrowserMounted()?"slot":"full";watchRestoreBrowserFocus();}
