@@ -25359,6 +25359,13 @@ mod tests {
             "22222222-2222-4222-8222-222222222222".into(),
         );
         object.insert("sequence".to_owned(), sequence.into());
+        // The real client always sends this, and what the server may answer
+        // with depends on it. A replayed request without it is a shape the
+        // web player never produces.
+        object.insert(
+            "supported_actions".to_owned(),
+            serde_json::json!(["retry_resource", "change_quality", "prepare", "stop"]),
+        );
         serde_json::from_value(value).expect("the recorded snapshot is a valid control request")
     }
 
@@ -25429,6 +25436,78 @@ mod tests {
                 .phase,
             RollingStartupPhase::Presented
         );
+    }
+
+    /// The negative control for the repair, and the reason the two `poisoned`
+    /// fixtures exist: replay what the client used to send, at the same
+    /// cadence the repaired client is replayed at, and watch the incumbent
+    /// die.
+    ///
+    /// Without this the survival test proves only that a healthy stream
+    /// survives, which was never in doubt. `observe_control` resets the
+    /// presentation baseline on every exchange carrying a seek target, so a
+    /// stream that is visibly playing never establishes `Presented` and is
+    /// retired at `first_served_at + 30 s` — which is exactly what happened
+    /// on media1.
+    #[test]
+    fn seek_scratch_the_old_snapshot_shape_reaps_a_playing_incumbent() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert_eq!(actor.begin_producer_attempt_at(started), Ok(1));
+        actor.startup.activate_at(started);
+
+        let generation = uuid::Uuid::new_v4().to_string();
+        let mut sequence = 1;
+        // The same media progress the repaired shape reports, and plenty of
+        // it: the picture is moving the whole time.
+        for millis in [10_u64, 310, 610, 910] {
+            let name = if sequence == 1 {
+                "incumbent_poisoned_by_a_refused_destination"
+            } else {
+                "incumbent_poisoned_after_250ms_of_progress"
+            };
+            let poisoned = web_snapshot_request(name, &generation, sequence);
+            assert_eq!(poisoned.render_state, RenderState::Seeking);
+            assert_eq!(poisoned.seek_target_ms, Some(174_000));
+            sequence += 1;
+            actor
+                .control_at(
+                    started + Duration::from_millis(millis),
+                    owned_control(&poisoned),
+                )
+                .expect("the incumbent is reporting");
+        }
+        assert_eq!(
+            actor.snapshot_at(started + Duration::from_secs(1)).startup.phase,
+            RollingStartupPhase::AwaitingPresentation,
+            "a foreign destination resets the baseline on every exchange, so \
+             presentation is never established however long the picture runs"
+        );
+
+        // Keep reporting right up to the deadline, exactly as a playing
+        // client would, and it is still reaped.
+        // Stop before the deadline: `control_at` claims expiry itself, and a
+        // claim already taken would make the assertion below read `Retired`
+        // instead of the transition it is about.
+        for second in [5_u64, 10, 15, 20, 25] {
+            let poisoned = web_snapshot_request(
+                "incumbent_poisoned_after_250ms_of_progress",
+                &generation,
+                sequence,
+            );
+            sequence += 1;
+            let _ = actor.control_at(
+                started + Duration::from_secs(second),
+                owned_control(&poisoned),
+            );
+        }
+        let RollingExpiryClaim::Claimed(expired) =
+            actor.claim_expiry_at(started + Duration::from_secs(31))
+        else {
+            panic!("this is the incident: the old shape must reap a playing incumbent");
+        };
+        assert_eq!(expired.terminal, Some(RollingTerminalCause::StartupExpired));
     }
 
     #[test]

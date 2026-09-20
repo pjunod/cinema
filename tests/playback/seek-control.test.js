@@ -142,3 +142,131 @@ test("wire failures retain a bounded invalid field in the durable log message", 
   await assert.rejects(send('/control',{},null),error=>error.invalidField===undefined
     &&error.message==='playback control invalid_control');
 });
+
+// ---- R2: relative input counts from the destination, and an identical -----
+// ---- in-flight request is suppressed --------------------------------------
+
+// The shipped relative-seek helpers, over a player that has committed a
+// destination its attachment has not executed. No DOM: the two functions read
+// `PLAYER`, `pbPosSec` and `pbTotalSec`, and all three are injected.
+function seekBaseHarness(player, positionSec, totalSec) {
+  return new Function(
+    "PLAYER", "pbPosSec", "pbTotalSec",
+    [
+      source("unexecutedPlaybackDestinationSec"),
+      source("pbRelativeSeekBase"),
+      "return {base:pbRelativeSeekBase, destination:unexecutedPlaybackDestinationSec};",
+    ].join("\n"),
+  )(player, () => positionSec, () => totalSec);
+}
+
+test("a relative seek counts from the destination while a replacement is pending", () => {
+  // The incident: the picture is still at 100 s because the create for 110 has
+  // not landed, so the old base -- the attached element's clock -- made every
+  // committed +10 land on 110 again.
+  const player = {
+    controlSeek: {targetMs: 110_000, executed: false},
+    pendingMediaChange: {reason: "seek"},
+    _seekPending: null,
+  };
+  const pending = seekBaseHarness(player, 100, 7200);
+  assert.equal(pending.base(), 110,
+    "three separately committed +10 taps must reach 130, not 110 three times");
+
+  // A destination the attachment executed is where the picture is going, so
+  // the element's own clock is the honest base again once it lands.
+  player.controlSeek.executed = true;
+  assert.equal(seekBaseHarness(player, 100, 7200).base(), 100);
+
+  // And a destination with no replacement behind it says nothing at all:
+  // `controlSeek` outlives the element, and `play()` carries it into a
+  // successor with executed:false, so a replay from zero would otherwise
+  // freeze the scrubber at the old destination forever.
+  player.controlSeek = {targetMs: 174_000, executed: false};
+  player.pendingMediaChange = null;
+  assert.equal(seekBaseHarness(player, 0, 7200).destination(), null);
+  assert.equal(seekBaseHarness(player, 0, 7200).base(), 0);
+
+  // An uncommitted UI pending target still wins: that is the coalescing
+  // window, and it is newer than anything committed.
+  player.pendingMediaChange = {reason: "seek"};
+  player._seekPending = 42;
+  assert.equal(seekBaseHarness(player, 0, 7200).base(), 42);
+
+  // Multipart audiobooks address the scrubber globally and `controlSeek`
+  // locally; mixing the two would be worse than leaving them alone.
+  assert.equal(
+    seekBaseHarness(
+      {controlSeek: {targetMs: 110_000, executed: false},
+       pendingMediaChange: {reason: "seek"}, bookParts: [{id: 1}], _seekPending: null},
+      100, 7200,
+    ).destination(),
+    null,
+  );
+});
+
+function recipeHarness(player) {
+  return new Function(
+    "PLAYER", "selectedAudioIndex", "transcodeHeight", "qualityForce",
+    [
+      source("playbackChangeRecipeKey"),
+      source("playbackChangeAlreadyInFlight"),
+      "return {key:playbackChangeRecipeKey, inFlight:playbackChangeAlreadyInFlight};",
+    ].join("\n"),
+  )(player, () => 0, () => null, () => "auto");
+}
+
+test("an identical in-flight request is suppressed and a changed one is not", () => {
+  const player = {fileId: 7, method: "remux", copyHls: true, curSub: -1, burnedSub: null,
+    autoHeight: null, requestHdr10: false, preserveDolbyVision: false, aoffset: 0};
+  const recipe = recipeHarness(player);
+  const change = {method: "remux", copyHls: true, reason: "seek", height: null,
+    forceReopen: false, previousSessionId: "s1", recoveryCause: "unknown"};
+
+  player.inFlightChangeKey = recipe.key(player, 110, change);
+  assert.equal(recipe.inFlight(player, 110, change), true,
+    "the same command arriving twice is one command");
+
+  assert.equal(recipe.inFlight(player, 120, change), false,
+    "a different destination is a different request");
+
+  // The whole point of keying the recipe and not the position: a track change
+  // at the same second must still execute.
+  const other = Object.assign({}, change);
+  assert.equal(
+    recipe.inFlight(
+      Object.assign({}, player, {curSub: 3, inFlightChangeKey: player.inFlightChangeKey}),
+      110, other),
+    false,
+    "a subtitle switch at the same second is not the seek already in flight");
+
+  // And the key describes the request, not the player: a rung switch in
+  // flight must not look like a plain seek on the incumbent recipe.
+  assert.notEqual(
+    recipe.key(player, 110, Object.assign({}, change, {height: 720})),
+    recipe.key(player, 110, change),
+  );
+  assert.notEqual(
+    recipe.key(player, 110, Object.assign({}, change, {forceReopen: true})),
+    recipe.key(player, 110, change),
+  );
+
+  // Nothing in flight suppresses nothing.
+  player.inFlightChangeKey = null;
+  assert.equal(recipe.inFlight(player, 110, change), false);
+});
+
+test("the last two seconds of a title still deduplicate", () => {
+  // `nudge` clamps to the runtime and `seekTo` clamps to runtime - 2, so a
+  // guard that compared the raw argument would build a key from 7200 while
+  // the in-flight execution was keyed on 7198 -- and every tap at the end of
+  // a film would open another create for a byte-identical recipe.
+  const player = {fileId: 7, method: "remux", copyHls: true, curSub: -1, burnedSub: null,
+    autoHeight: null, requestHdr10: false, preserveDolbyVision: false, aoffset: 0};
+  const recipe = recipeHarness(player);
+  const change = {method: "remux", copyHls: true, reason: "seek", height: null,
+    forceReopen: false, previousSessionId: "s1", recoveryCause: "unknown"};
+  player.inFlightChangeKey = recipe.key(player, 7198, change);
+  assert.equal(recipe.inFlight(player, 7198, change), true,
+    "the guard has to run on the clamped target the execution was keyed on");
+});
