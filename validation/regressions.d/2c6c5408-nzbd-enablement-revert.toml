@@ -1,0 +1,22 @@
+version = 1
+
+[[coverage]]
+commits = ["2c6c5408"]
+reason = """
+A revert, and the ledger row it landed on `main` without.
+
+PR #373 added an advisory nzbd BitTorrent enablement card to the Plurx
+Developer tab; PR #374 took it back out, restoring the card list, the
+settings-sections fixture and the changelog entry to what they were before.
+It changes no executable behaviour of its own — it removes a card and the
+test rows that described it, leaving the panel exactly as it stood two
+commits earlier.
+
+`history.py` reads the subject as corrective (`keep`) and the diff as
+touching runtime (`crates/`, via the web tree the shell now lives in), so it
+demands a mapping. Nothing in the repository supplied one, which left
+`history-check` red for every branch cut after it rather than only for the
+one that introduced it. Filed from the subtitle reliability branch because
+that is where it was found; it belongs to neither.
+"""
+ignore = true
