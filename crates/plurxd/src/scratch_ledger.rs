@@ -909,7 +909,11 @@ impl ScratchPermit {
 
 impl std::fmt::Debug for ScratchPermit {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "ScratchPermit({}, {} bytes)", self.key, self.bytes)
+        write!(
+            formatter,
+            "ScratchPermit({}, {} bytes)",
+            self.key, self.bytes
+        )
     }
 }
 
@@ -1043,7 +1047,9 @@ mod tests {
         let ledger = ScratchLedger::new();
         let permit = ledger.reserve(R, CAP).expect("admission");
         ledger.bind_session(permit.key(), "s1", 1);
-        let provisional = ledger.reserve(R, CAP).expect("a genuinely provisional start");
+        let provisional = ledger
+            .reserve(R, CAP)
+            .expect("a genuinely provisional start");
         let before = ledger.snapshot();
         assert_eq!(before.producing, R);
         assert_eq!(before.provisional, R);
@@ -1051,7 +1057,11 @@ mod tests {
 
         ledger.begin_retirement(permit.key());
         let during = ledger.snapshot();
-        assert_eq!(during.total, 2 * R, "retirement moves a category, not bytes");
+        assert_eq!(
+            during.total,
+            2 * R,
+            "retirement moves a category, not bytes"
+        );
         assert_eq!(during.retiring, R);
         assert_eq!(
             during.provisional, R,
@@ -1075,10 +1085,7 @@ mod tests {
         );
         assert!(!ledger.commit_quiescent_measurement(key, generation, 1024));
         assert_eq!(ledger.charge_of(key), Some(R));
-        assert_eq!(
-            ledger.conservative_reason(key),
-            Some("writers_outstanding")
-        );
+        assert_eq!(ledger.conservative_reason(key), Some("writers_outstanding"));
 
         drop(writer);
         let settled = ledger.inventory_generation(key).expect("generation");
@@ -1434,11 +1441,7 @@ mod tests {
             ledger.observe_used(key, 128 * 1024 * 1024);
             ledger.begin_retirement(key);
             let generation = ledger.inventory_generation(key).expect("generation");
-            assert!(ledger.commit_quiescent_measurement(
-                key,
-                generation,
-                128 * 1024 * 1024
-            ));
+            assert!(ledger.commit_quiescent_measurement(key, generation, 128 * 1024 * 1024));
             retired.push(permit);
         }
         let incumbent = ledger.reserve(R, CAP).expect("incumbent");

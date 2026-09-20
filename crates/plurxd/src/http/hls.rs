@@ -3889,9 +3889,10 @@ pub(crate) fn session_start_error_status_for_test(file_id: i64, error: String) -
 /// transport at all and reads as conservative, which is the whole point: a
 /// mixed-version cluster shortens nothing it cannot account for.
 fn exact_release_class(route: &MediaSessionRoute) -> crate::transcode::ReleaseClass {
-    let transport = serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(&route.recipe_json)
-        .ok()
-        .and_then(|recipe| recipe.request.transport);
+    let transport =
+        serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(&route.recipe_json)
+            .ok()
+            .and_then(|recipe| recipe.request.transport);
     crate::transcode::ReleaseClass::from_transport(transport.as_deref())
 }
 

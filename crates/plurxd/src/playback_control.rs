@@ -25479,7 +25479,10 @@ mod tests {
                 .expect("the incumbent is reporting");
         }
         assert_eq!(
-            actor.snapshot_at(started + Duration::from_secs(1)).startup.phase,
+            actor
+                .snapshot_at(started + Duration::from_secs(1))
+                .startup
+                .phase,
             RollingStartupPhase::AwaitingPresentation,
             "a foreign destination resets the baseline on every exchange, so \
              presentation is never established however long the picture runs"

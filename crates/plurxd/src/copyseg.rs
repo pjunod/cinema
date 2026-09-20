@@ -219,8 +219,7 @@ impl WriteGrants {
         self.ledger.authorize_write(
             self.key,
             i64::try_from(bytes).unwrap_or(i64::MAX),
-            self.configured
-                .load(std::sync::atomic::Ordering::Relaxed),
+            self.configured.load(std::sync::atomic::Ordering::Relaxed),
             self.headroom,
         )
     }
@@ -2044,7 +2043,16 @@ mod tests {
         let dir = crate::test_tempdir().expect("tempdir");
         let path = dir.path().to_path_buf();
         std::fs::remove_dir_all(&path).expect("remove fixture session directory");
-        let outcome = run(&feed[..], path, "test", brisk(), &plain().0, plain().1, None).await;
+        let outcome = run(
+            &feed[..],
+            path,
+            "test",
+            brisk(),
+            &plain().0,
+            plain().1,
+            None,
+        )
+        .await;
         assert!(
             matches!(outcome, Outcome::ReaderFailed { .. }),
             "a directory that never existed masqueraded as teardown: {outcome:?}"
@@ -2057,7 +2065,16 @@ mod tests {
         let parent = crate::test_tempdir().expect("tempdir");
         let path = parent.path().join("not-a-directory");
         std::fs::write(&path, b"fixture").expect("write fixture file");
-        let outcome = run(&feed[..], path, "test", brisk(), &plain().0, plain().1, None).await;
+        let outcome = run(
+            &feed[..],
+            path,
+            "test",
+            brisk(),
+            &plain().0,
+            plain().1,
+            None,
+        )
+        .await;
         let Outcome::ReaderFailed { reason, .. } = outcome else {
             panic!("a non-directory scratch path became cancellation: {outcome:?}");
         };

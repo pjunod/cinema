@@ -1455,9 +1455,8 @@ enum RollingScratchSizing {
 /// the larger one, and a session sized below its effective gate can never
 /// publish anything for a client to drain.
 fn rolling_startup_bytes(bitrate_bits_per_second: Option<f64>, playback_rate: f64) -> i64 {
-    let gate_ms = rolling_initial_runway_ms(playback_rate).max(
-        i64::from(plurx_core::transcode::COPY_PUBLISH_GATE_SECS).saturating_mul(1_000),
-    );
+    let gate_ms = rolling_initial_runway_ms(playback_rate)
+        .max(i64::from(plurx_core::transcode::COPY_PUBLISH_GATE_SECS).saturating_mul(1_000));
     // One complete segment beyond the gate: the gate is measured in published
     // media, and the segment that crosses it is written in full first.
     let startup_ms = gate_ms.saturating_add(
@@ -21893,7 +21892,10 @@ impl TranscodeManager {
         // Direct and transcoded output keeps the whole per-session ceiling:
         // FFmpeg's `-f hls` writes pass no such boundary, and a measurement
         // taken afterwards can only discover an overrun, never prevent one.
-        let copy_bitrate = file.bitrate.filter(|rate| *rate > 0).map(|rate| rate as f64);
+        let copy_bitrate = file
+            .bitrate
+            .filter(|rate| *rate > 0)
+            .map(|rate| rate as f64);
         let scratch_envelope = rolling_scratch_envelope(copy_bitrate, 1.0);
         let scratch_reservation = self
             .reserve_rolling_scratch(RollingScratchSizing::Startup(rolling_startup_bytes(
@@ -34871,7 +34873,9 @@ pub(crate) mod tests {
         let file = tokio::fs::File::create(sparse.path().join("seg00001.m4s"))
             .await
             .expect("sparse segment");
-        file.set_len(4 * 1024 * 1024).await.expect("apparent length");
+        file.set_len(4 * 1024 * 1024)
+            .await
+            .expect("apparent length");
         drop(file);
         let sparse_session = test_session(sparse.path().to_path_buf());
         assert_eq!(
