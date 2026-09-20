@@ -665,9 +665,7 @@ async fn held_source_video_packet_bounds(
         )
         .await
         .map_err(|error| packet_probe_failure(error, context.stream_index, output_bytes))?;
-        output_bytes = output_bytes
-            .checked_add(u64::try_from(tail.len()).unwrap_or(u64::MAX))
-            .unwrap_or(u64::MAX);
+        output_bytes = output_bytes.saturating_add(u64::try_from(tail.len()).unwrap_or(u64::MAX));
         if output_bytes > PACKET_PROBE_AGGREGATE_MAX_BYTES {
             return Err(packet_probe_failure(
                 crate::ffmpeg::HeldPacketProbeError::OutputLimit,

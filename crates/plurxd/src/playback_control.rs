@@ -25299,7 +25299,7 @@ mod tests {
         // A source-only retry keeps the original deadline but cannot stitch
         // its first position sample to the predecessor attempt.
         assert_eq!(
-            actor.begin_producer_attempt_at(started + Duration::from_millis(30)),
+            actor.begin_producer_attempt_at(started + Duration::from_millis(250)),
             Ok(2)
         );
         let mut successor_first = first.clone();
@@ -25307,7 +25307,7 @@ mod tests {
         successor_first.position_ms = 10_300;
         let successor_first = actor
             .control_at(
-                started + Duration::from_millis(40),
+                started + Duration::from_millis(300),
                 owned_control(&successor_first),
             )
             .expect("successor's first rendering observation");
@@ -25322,7 +25322,7 @@ mod tests {
         successor_progress.position_ms = 10_600;
         let presented = actor
             .control_at(
-                started + Duration::from_millis(50),
+                started + Duration::from_millis(600),
                 owned_control(&successor_progress),
             )
             .expect("successor's advancing rendering observation");
@@ -25356,7 +25356,7 @@ mod tests {
         seek.seek_target_ms = Some(90_000);
         seek.render_state = RenderState::Seeking;
         let seeking = actor
-            .control_at(started + Duration::from_millis(20), owned_control(&seek))
+            .control_at(started + Duration::from_millis(300), owned_control(&seek))
             .expect("seek observation");
         assert_eq!(
             seeking.lease.startup.phase,
@@ -25368,7 +25368,10 @@ mod tests {
         settled.sequence = 3;
         settled.position_ms = 90_000;
         let settled = actor
-            .control_at(started + Duration::from_millis(30), owned_control(&settled))
+            .control_at(
+                started + Duration::from_millis(600),
+                owned_control(&settled),
+            )
             .expect("first settled post-seek observation");
         assert_eq!(
             settled.lease.startup.phase,
@@ -25377,7 +25380,7 @@ mod tests {
         );
         assert_eq!(
             settled.lease.startup.remaining,
-            Some(ROLLING_PRESENTATION_STARTUP_BUDGET - Duration::from_millis(30)),
+            Some(ROLLING_PRESENTATION_STARTUP_BUDGET - Duration::from_millis(600)),
             "a seek resets only the position baseline, not the deadline"
         );
 
@@ -25386,7 +25389,7 @@ mod tests {
         progress.position_ms = 90_300;
         let presented = actor
             .control_at(
-                started + Duration::from_millis(40),
+                started + Duration::from_millis(900),
                 owned_control(&progress),
             )
             .expect("post-seek presentation progress");

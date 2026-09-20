@@ -275,7 +275,7 @@ function paintActivityBody(d,recording=[],dvrState={loaded:true,error:null,next:
   }).join("");
   m.innerHTML=`<div class="dvr-page-head"><div><h1>Activity</h1><p class="sub">What’s playing, recording and happening on your server.</p></div></div>
     <h2 class="section">Happening now · Watching</h2>
-    ${missing.length?`<div class="clrefusal" role="status"><b>Activity is incomplete</b> ${esc(missing.map(node=>activityNodeFailureText(node,nodeNames)).join("; "))}. Viewers on these nodes may be missing.</div>`:""}
+    ${missing.length?`<div class="clrefusal" role="status" aria-live="polite"><b>Activity is incomplete</b> ${esc(missing.map(node=>activityNodeFailureText(node,nodeNames)).join("; "))}. Streams on those nodes may be missing.</div>`:""}
     ${activityWatchingHtml(dels,d.live_tv,nodeNames,sessionsById,open)}
     ${dvrActivityRows(recording,nodeNames,dvrState)}
     ${d.analysis?`<h2 class="section">Content analysis</h2>${analysisSummaryCard(d.analysis,"activity")}${analysisLiveProgress(d.analysis,nodeNames)}`:""}

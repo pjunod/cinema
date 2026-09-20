@@ -1626,7 +1626,6 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
 /// Byte budgets release at half because they are hard disk bounds. Media-time
 /// pacing is intentionally absent: [`evaluate_flow`] derives it from staged
 /// inventory and the immutable publication clock.
-
 fn ahead_hold(
     ahead: Ahead,
     global_live_bytes: i64,
@@ -32804,7 +32803,29 @@ pub(crate) mod tests {
                 .served
                 .as_ref()
                 .map(|snapshot| (snapshot.revision, snapshot.last_segment)),
-            Some((2, 3))
+            Some((1, 2)),
+            "the wall clock cannot publish less media than the active-rate batch"
+        );
+
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[16.0, 16.0, 16.0, 6.0, 10.0], false),
+        )
+        .await
+        .expect("complete staged batch");
+        session
+            .publication_cycle("schedule-test")
+            .await
+            .expect("rate-sized publication");
+        assert_eq!(
+            session
+                .publication
+                .lock()
+                .await
+                .served
+                .as_ref()
+                .map(|snapshot| (snapshot.revision, snapshot.last_segment)),
+            Some((2, 4))
         );
     }
 

@@ -257,8 +257,8 @@ test("Activity names missing cluster nodes and attributes delivered rows", () =>
 
   const painter = shippedSource("paintActivityBody");
   assert.match(painter, /role="status" aria-live="polite"/);
-  assert.match(painter, /de\.node_id/);
-  assert.match(painter, /<th>Node<\/th>/);
+  assert.match(shippedSource("activityWatchingHtml"), /de\.node_id/);
+  assert.match(shippedSource("activityWatchingHtml"), /Serving node/);
   assert.match(painter, /Streams on those nodes may be missing/);
 });
 
@@ -272,7 +272,11 @@ test("Activity detail request guard executes one current request and releases", 
   const api = (url) => new Promise((resolve, reject) => requests.push({ url, resolve, reject }));
   const harness = new Function(
     "document", "location", "api", "paintActivityBody", "esc", "setPagePhase", "setPageFailure",
-    `let PAGE_RENDER_GENERATION=1,ACTIVITY_DETAIL_BUSY=0;
+    `let PAGE_RENDER_GENERATION=1,ACTIVITY_DETAIL_BUSY=0,ACTIVITY_SNAPSHOT=null;
+     const ACTIVITY_DVR={rows:[],next:null,loaded:false,error:null};
+     const DVR_PAGE={pendingId:null,selectedId:null,closedByUser:false};
+     function dvrSetOverview(){} function loadDvrRecent(){} function selectDvrDetail(){}
+     const matchMedia=()=>({matches:false});
      ${shippedSource("renderActivityBody")};
      return {renderActivityBody,busy:()=>ACTIVITY_DETAIL_BUSY,
        navigate:(hash)=>{location.hash=hash;PAGE_RENDER_GENERATION++;},generation:()=>PAGE_RENDER_GENERATION};`,
@@ -284,14 +288,11 @@ test("Activity detail request guard executes one current request and releases", 
 
   const first = harness.renderActivityBody();
   const overlap = harness.renderActivityBody();
-  // One wave, not two: the running captures ride beside the detail read
-  // because `/activity/detail` carries no DVR section and the page's Stop
-  // needs a recording id the activity list does not have.
-  assert.deepEqual(requests.map((request) => request.url),
-    ["/activity/detail", "/dvr/recordings?state=recording"]);
+  // One authoritative read: `/activity/detail` carries the bounded DVR
+  // projection the page needs, including the recording ids used by Stop.
+  assert.deepEqual(requests.map((request) => request.url), ["/activity/detail"]);
   assert.equal(harness.busy(), 1);
   assert.deepEqual(phases, [], "Activity content waits for its delayed detail response");
-  requests[1].resolve([]);
   requests[0].resolve({ marker: "current" });
   await Promise.all([first, overlap]);
   assert.deepEqual(painted, [{ marker: "current" }]);
@@ -302,10 +303,9 @@ test("Activity detail request guard executes one current request and releases", 
   assert.equal(harness.busy(), 0);
 
   const stale = harness.renderActivityBody();
-  assert.equal(requests.length, 4);
+  assert.equal(requests.length, 2);
   harness.navigate("#/settings");
-  requests[3].resolve([]);
-  requests[2].resolve({ marker: "stale" });
+  requests[1].resolve({ marker: "stale" });
   await stale;
   assert.deepEqual(painted, [{ marker: "current" }]);
   assert.equal(harness.busy(), 0);
@@ -313,7 +313,7 @@ test("Activity detail request guard executes one current request and releases", 
   harness.navigate("#/activity");
   document.visibilityState = "hidden";
   await harness.renderActivityBody(harness.generation());
-  assert.equal(requests.length, 4);
+  assert.equal(requests.length, 2);
 });
 
 test("Activity keeps its last successful body on poll failures and never paints a 401", async () => {
@@ -334,6 +334,11 @@ test("Activity keeps its last successful body on poll failures and never paints 
   const harness = new Function(
     "document", "location", "api", "paintActivityBody", "esc", "setPagePhase", "setPageFailure",
     `let PAGE_RENDER_GENERATION=1,ACTIVITY_DETAIL_BUSY=0,ACTIVITY_SNAPSHOT={marker:"old"};
+     const DVR_SHARED={error:null}; const ACTIVITY_DVR={rows:[],next:null,loaded:false,error:null};
+     const DVR_PAGE={pendingId:null,selectedId:null,closedByUser:false};
+     function dvrPaintGlobal(){} function paintDvrHost(){} function dvrSetOverview(){}
+     function loadDvrRecent(){} function selectDvrDetail(){}
+     const matchMedia=()=>({matches:false});
      ${shippedSource("renderActivityBody")};
      return {renderActivityBody,clearSnapshot:()=>{ACTIVITY_SNAPSHOT=null;}};`,
   )(
@@ -341,9 +346,8 @@ test("Activity keeps its last successful body on poll failures and never paints 
     String, (_, generation, phase) => phases.push({ generation, phase }), () => {},
   );
   const failed = harness.renderActivityBody();
-  // The recordings read rides beside the detail one and swallows its own
-  // failure: a DVR that will not answer must not cost the page its streams.
-  requests[1].reject(new Error("cluster timeout"));
+  // The consolidated detail read fails as one page snapshot, so the previous
+  // successful body remains visible while the next poll can recover it.
   requests[0].reject(new Error("cluster timeout"));
   await failed;
   assert.equal(main.innerHTML, "last successful body");
@@ -353,8 +357,7 @@ test("Activity keeps its last successful body on poll failures and never paints 
   phases.length = 0; stale = null; harness.clearSnapshot();
   const unauthorized = harness.renderActivityBody();
   const error = new Error("unauthorized"); error.status = 401;
-  requests[3].reject(error);
-  requests[2].reject(error);
+  requests[1].reject(error);
   await unauthorized;
   assert.equal(stale, null);
   assert.deepEqual(phases, [], "logout owns the 401 transition; Activity commits nothing");
@@ -717,13 +720,15 @@ test("Live TV issues exactly two authoritative reads, and the guide never gates 
   // DVR's three answers together behind it. The marks a cell wears are never
   // polled, so this is the whole cost of them — once per guide load, and
   // again only when somebody presses something.
-  assert.deepEqual(reads, [
+  assert.deepEqual(reads.slice(0, 3), [
     "/live-tv/channels",
     "/live-tv/guide",
     "/dvr/status",
-    "/dvr/schedule?days=14&cancelled=1",
-    "/dvr/reminders",
-  ], "the page reads the lineup, the guide, and the DVR's three answers — nothing else");
+  ]);
+  assert.match(reads[3], /^\/dvr\/schedule\?from=\d+&to=\d+&limit=100$/);
+  assert.equal(reads[4], "/dvr/reminders");
+  assert.equal(reads.length, 5,
+    "the page reads the lineup, the guide, and the DVR's three answers — nothing else");
 });
 
 test("Live TV docks on leaving the route instead of tearing the stream down", () => {
@@ -787,6 +792,9 @@ test("Activity stale loads cannot install the page timer", async () => {
   const activityHarness = new Function(
     "location", "layoutChrome", "renderActivityBody", "setPageTimer", "setPagePhase", "paintActivityBody",
     `let PAGE_RENDER_GENERATION=0,ACTIVITY_SNAPSHOT=null;
+     const ACTIVITY_DVR={rows:[]};
+     const DVR_PAGE={selectedId:null,detailBusy:false,selected:null};
+     function selectDvrDetail(){} function scheduleDvrHistoryRefresh(){}
      ${shippedTopLevelSource("viewActivity")};
      return {viewActivity,navigate:(hash)=>{location.hash=hash;PAGE_RENDER_GENERATION++;}};`,
   )(
@@ -816,6 +824,9 @@ test("Activity paints its cached body before a slow current refresh", async () =
   const harness=new Function(
     "location","layoutChrome","renderActivityBody","setPageTimer","setPagePhase","paintActivityBody",
     `let PAGE_RENDER_GENERATION=1,ACTIVITY_SNAPSHOT={marker:"cached"};
+     const ACTIVITY_DVR={rows:[]};
+     const DVR_PAGE={selectedId:null,detailBusy:false,selected:null};
+     function selectDvrDetail(){} function scheduleDvrHistoryRefresh(){}
      ${shippedTopLevelSource("viewActivity")}; return {viewActivity};`,
   )(
     location,()=>{},()=>new Promise(resolve=>{release=resolve;}),
@@ -1345,6 +1356,7 @@ test("Analysis workspace uses server pages and separates expected outcomes", () 
      ${shippedSource("analysisAction")}
      ${shippedSource("analysisCanRetry")}
      ${shippedSource("analysisPageUrl")}
+     ${shippedSource("analysisAttentionGroups")}
      ${shippedSource("paintAnalysis")}
      return {
        paint:(snapshot)=>{ANALYSIS_SNAPSHOT=snapshot;paintAnalysis(snapshot);},
@@ -1561,6 +1573,7 @@ test("Analysis repaint restores row-link and disclosure focus with stable keys",
      ${shippedSource("analysisAttemptHistoryHtml")}
      ${shippedSource("analysisAction")}
      ${shippedSource("analysisCanRetry")}
+     ${shippedSource("analysisAttentionGroups")}
      ${shippedSource("paintAnalysis")}
      return (snapshot)=>{ANALYSIS_SNAPSHOT=snapshot;paintAnalysis(snapshot);};`,
   )(document,String,()=>"just now",value=>`${value} B`);
@@ -1607,7 +1620,7 @@ test("Settings drops a node-local scan error superseded by replicated success", 
     "currentScanStatus", "esc", "fmtAgo",
     `${shippedSource("statusText")}; return statusText;`,
   )(currentScanStatus, (value) => String(value), () => "now");
-  assert.equal(statusText(failed, 101), "idle");
+  assert.equal(statusText(failed, 101), "Last scan now · result unavailable");
   assert.match(statusText(failed, 99), /error: replicated store operation timed out/);
   assert.match(shippedSource("libRow"),
     /statusText\(status\[l\.id\],l\.last_scan_at\)/,
@@ -1783,8 +1796,11 @@ test("local sign-out clears every protected page cache before rendering auth", (
        SETTINGS_DATA={secret:true},SETTINGS_LOADED=new Set(["settings"]),SETTINGS_LOADS=new Map([["settings",{}]]),
        LOGS_RUN={},CLUSTER_LOGS_RUN={},CLUSTER_LOADED=true,CLUSTER_LEAVING=true,
        CLUSTER_TOKEN={token:"secret"},CLUSTER_REFUSAL={message:"secret"},ACT_TIMER=2,rendered=0,
-       DVR_REMINDER_TIMER=3,DVR_DUE=[{id:"secret"}],
+       DVR_REMINDER_TIMER=3,DVR_DUE=[{id:"secret"}],AUTH_NOTICE="old",
        LIBRARY_CHANNEL_DRAFT={secret:true},LIBRARY_CHANNEL_TUNING=true;
+     const ACTIVITY_DVR={rows:[{secret:true}],next:"secret",loaded:true,error:"secret",loading:true,
+       recent:[{secret:true}],attention:[{secret:true}],recentAt:1,recentError:"secret"};
+     const DVR_PAGE={selectedId:"secret",selected:{secret:true},events:[{secret:true}],pendingId:"secret",historyTimer:4};
      function forgetJoinToken(){CLUSTER_TOKEN=null;CLUSTER_REFUSAL=null;}
      // The library-channel wizard keeps an unsaved draft in sessionStorage and
      // a tune fence pointed at a channel. Both outlive a sign-out unless
@@ -1970,6 +1986,7 @@ test("A failed row lists the code every charged attempt ended with", () => {
      ${shippedSource("analysisAttemptHistoryHtml")}
      ${shippedSource("analysisAction")}
      ${shippedSource("analysisCanRetry")}
+     ${shippedSource("analysisAttentionGroups")}
      ${shippedSource("paintAnalysis")}
      return (snapshot)=>{ANALYSIS_SNAPSHOT=snapshot;paintAnalysis(snapshot);};`,
   )(document,String,()=>"just now",value=>`${value} B`);
@@ -2009,7 +2026,7 @@ test("Each queue verdict gets its own sentence before the counts", () => {
     ["dead",/is not producing/],
     ["degraded",/is struggling/],
     ["healthy",/is producing/],
-    ["idle",/is idle/],
+    ["idle",/No index completions reported/],
   ]){
     const html=line({health:{...base,verdict,claimed_24h:25,ready_24h:verdict==="dead"?0:5}});
     assert.match(html,pattern,verdict);

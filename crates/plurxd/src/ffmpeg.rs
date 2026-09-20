@@ -497,7 +497,7 @@ pub(crate) async fn held_source_packet_probe_json(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
 
-    let (mut child, child_job) =
+    let (mut child, _child_job) =
         crate::process_control::spawn_job_owned(&mut command).map_err(|error| {
             HeldPacketProbeError::Process(format!("spawning packet probe: {error}"))
         })?;
@@ -532,8 +532,6 @@ pub(crate) async fn held_source_packet_probe_json(
         let _ = child.start_kill();
         let _ = tokio::time::timeout(Duration::from_secs(1), child.wait()).await;
     }
-    drop(child_job);
-
     #[cfg(windows)]
     {
         if plurx_core::fs_secure::std_file_identity(source).map_err(|error| {

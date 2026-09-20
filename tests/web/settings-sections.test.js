@@ -220,7 +220,8 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   // Protocol and quality switching have separate cards. Streaming must not
   // write either field: a card that saves a field it does not show can turn
   // something back on that an operator deliberately turned off.
-  const streaming = ["prr", "pabr", "phr", "phb", "pha", "pvod", "pvlr", "pvws", "pvmb", "pvbg", "serr"];
+  const streaming = ["prr", "pabr", "phr", "phb", "pha", "pvod", "pvws", "pvmb", "pvbg", "serr"];
+  const liveRecovery = ["dvlr", "dvlrerr"];
   const developer = ["pcpv1", "dverr"];
   const prepared = ["pqh", "pqherr", "pqhstate"];
   // `vdcard` is read too: this handler replaces its own card rather than
@@ -232,6 +233,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   return Promise.all([
     run("savePlaybackDefaults", defaults)({ disabled: false }),
     run("saveStreaming", streaming)({ disabled: false }),
+    run("saveLiveHlsRecoveryDeveloper", liveRecovery)({ disabled: false }),
     run("saveDeveloper", developer)({ disabled: false }),
     run("savePreparedQuality", prepared)({ disabled: false }),
     run("saveVerifiedDecode", verifiedDecode)({ disabled: false }),
@@ -241,9 +243,13 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     assert.deepEqual(Object.keys(writes.saveStreaming.body).sort(), [
       "hls_ahead_max_secs", "hls_burst_secs", "hls_readrate", "playback_auto_abr",
       "stream_readrate", "vod_block_budget_secs", "vod_blocked_get_cap",
-      "vod_live_recovery", "vod_materialize_budget_secs", "vod_presentation",
+      "vod_materialize_budget_secs", "vod_presentation",
       "vod_working_set_bytes",
     ]);
+    assert.deepEqual(
+      Object.keys(writes.saveLiveHlsRecoveryDeveloper.body),
+      ["vod_live_recovery"],
+    );
     assert.deepEqual(Object.keys(writes.saveDeveloper.body).sort(), ["playback_control_protocol_v1"]);
     assert.deepEqual(Object.keys(writes.savePreparedQuality.body), ["prepared_quality_handoff"]);
     // Its own card, its own field. The verified-decode request renames cached
@@ -345,6 +351,7 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
       shippedSource("webHlsStartupRecoveryCard"),
       shippedSource("hevcSampleEntryAdmissionCard"),
       shippedSource("contentAnalysisEnableCard"),
+      shippedSource("liveHlsRecoveryCard"),
       shippedSource("sourceProbeCompatibilityCard"),
       shippedSource("nzbdBittorrentEnableCard"),
       shippedSource("directedChangeDeveloperRows"),
@@ -381,6 +388,7 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
     playback_control_protocol_v1: true,
     prepared_quality_handoff: true,
     automatic_decoder_recovery: true,
+    vod_live_recovery: true,
     live_tv_guide_source: "hdhomerun",
     live_tv_guide_hours: 24,
     dvr_enabled: false,
@@ -393,13 +401,14 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
     dvr_webhook_url: "",
   };
   const html = panels.developerPanel(settings, readiness);
-  for (const id of ["pqh", "pcpv1", "pdp", "dhqa", "adr", "dvrenabled"])
+  for (const id of ["pqh", "pcpv1", "pdp", "dhqa", "adr", "dvlr", "dvrenabled"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   assert.doesNotMatch(html, /HDHomeRun Live TV|CARDHEAD:Programme guide/);
   for (const route of ["livetv", "playback", "cluster"])
     assert.ok(html.includes(`href="#/settings/${route}"`), `${route} has a destination link`);
   assert.match(html, /FOOT:saveDeveloper/);
   assert.match(html, /FOOT:savePreparedQuality/);
+  assert.match(html, /FOOT:saveLiveHlsRecoveryDeveloper/);
   assert.doesNotMatch(html, /Typeless sliding HLS|FOOT:saveExperimental/);
   assert.match(html, /Explicit server and browser enablement with advisory safety evidence/);
   // The readiness card is rendered by Developer, not merely declared: a card
