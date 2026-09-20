@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["04a7727a"]
+points = ["core.media", "cluster.auth", "server.api", "library.catalog", "metadata.enrichment"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+reason = "The dedicated series-hint write accepts only a positive TMDB ID for a show in the resolved library, applies only while the column is absent, reports equal repeats idempotently, and returns the known conflicting ID without overwriting it. SQLite performs classification in the fenced transaction; Hiqlite uses a conditional consensus write and consistent outcome read, with the lease predecessor renewed atomically beside fenced mutations. Backend-neutral contracts cover absent/equal/conflict, invalid IDs, wrong kind/library, a concurrent metadata writer, valid fencing, stale-token refusal, and all three voters. Daemon and HTTP regressions prove episode IDs never become show IDs, repeated files deduplicate by show, queued same-path waiters preserve first-hint order, nonpositive input is rejected, and a conflict remains playable while appearing in the bounded scan report and correlated log."

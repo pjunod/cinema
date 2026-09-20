@@ -1,6 +1,6 @@
 # Scan identity status — build, review and promotion ledger
 
-**Status:** M2 implementation complete; task PR preparation in progress · **Executes:**
+**Status:** M2 committed; task PR preparation in progress · **Executes:**
 [SCAN-IDENTITY-IMPLEMENTATION.md](SCAN-IDENTITY-IMPLEMENTATION.md) ·
 **Started:** 2026-09-19 · **Updated:** 2026-09-19
 
@@ -31,7 +31,7 @@ silently describing the wrong toolchain.
 |---|---|---|---|
 | M0 base, compiler and failure fixtures | `effort/scan-identity` | complete | Pinned compiler, clean-base compile and three failing/one passing pre-fix probes recorded below. |
 | M1 ownership and directory lookup | `codex/scan-identity-ownership` | merged by PR #379 at `2cbea369` | Core, daemon, SQLite and three-voter Hiqlite focused contracts passed. Current workflow intentionally allocates no CI jobs for task PRs into an effort. |
-| M2 guarded series hints | `codex/scan-identity-hints` | implementation complete | Atomic SQLite/Hiqlite outcomes, fenced stale-lease refusal and daemon import/report behavior pass; task PR remains. |
+| M2 guarded series hints | `codex/scan-identity-hints` | committed at `04a7727a` | Atomic SQLite/Hiqlite outcomes, fenced stale-lease refusal and daemon import/report behavior pass; task PR remains. |
 | M3 bounded repair | `codex/scan-identity-repair` | not started | Preview, reference inventory, atomic apply and retry behavior required. |
 | Final adversarial review | `effort/scan-identity` into `main` | not started | One review after the complete candidate is frozen. |
 | Main fast lane and merge | final effort PR | not started | Exact-tree green lane and receipt required before merge. |
@@ -50,11 +50,11 @@ silently describing the wrong toolchain.
 | 2026-09-19 | `1ac7f00b` | `rustup run 1.97.1 cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract scan_identity_directory_contract -- --test-threads=1` | three-voter Hiqlite: 1 passed; 162 filtered out |
 | 2026-09-19 | `1ac7f00b` | `rustup run 1.97.1 cargo check --locked -p plurx-core -p plurxd --all-targets` | passed in 21s after the final M1 edit |
 | 2026-09-19 | `1ac7f00b` | `rustup run 1.97.1 cargo clippy --locked -p plurx-core -p plurxd --all-targets -- -D warnings` | blocked by unchanged pre-existing `http/hls.rs:27556` Boolean assertion lint; M1 paths compile cleanly |
-| 2026-09-19 | M2 working tree on `2cbea369` | `rustup run 1.97.1 cargo test --locked -p plurx-core --test store_contract scan_identity_series_hint_contract` | SQLite: 1 passed; 117 filtered out |
-| 2026-09-19 | M2 working tree on `2cbea369` | `rustup run 1.97.1 cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract scan_identity_series_hint_contract -- --test-threads=1` | three-voter Hiqlite: 1 passed; 163 filtered out |
-| 2026-09-19 | M2 working tree on `2cbea369` | `rustup run 1.97.1 cargo test --locked -p plurxd --bin plurxd scan_identity_hint_` | 4 passed; 2,341 filtered out |
-| 2026-09-19 | M2 working tree on `2cbea369` | `rustup run 1.97.1 cargo check --locked -p plurx-core -p plurxd --all-targets` | passed in 13s after the final M2 edit |
-| 2026-09-19 | M2 working tree on `2cbea369` | `rustup run 1.97.1 cargo clippy --locked -p plurx-core -p plurxd --all-targets -- -D warnings` | same unchanged pre-existing `http/hls.rs:27556` Boolean assertion lint; M2 paths compile cleanly |
+| 2026-09-19 | `04a7727a` | `rustup run 1.97.1 cargo test --locked -p plurx-core --test store_contract scan_identity_series_hint_contract` | SQLite: 1 passed; 117 filtered out |
+| 2026-09-19 | `04a7727a` | `rustup run 1.97.1 cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract scan_identity_series_hint_contract -- --test-threads=1` | three-voter Hiqlite: 1 passed; 163 filtered out |
+| 2026-09-19 | `04a7727a` | `rustup run 1.97.1 cargo test --locked -p plurxd --bin plurxd scan_identity_hint_` | 4 passed; 2,341 filtered out |
+| 2026-09-19 | `04a7727a` | `rustup run 1.97.1 cargo check --locked -p plurx-core -p plurxd --all-targets` | passed in 13s after the final M2 edit |
+| 2026-09-19 | `04a7727a` | `rustup run 1.97.1 cargo clippy --locked -p plurx-core -p plurxd --all-targets -- -D warnings` | same unchanged pre-existing `http/hls.rs:27556` Boolean assertion lint; M2 paths compile cleanly |
 
 Only the milestone's named focused regressions have run. Broader affected
 tests remain deferred to the frozen final candidate. The all-target Clippy
