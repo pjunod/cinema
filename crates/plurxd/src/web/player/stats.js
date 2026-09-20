@@ -524,12 +524,21 @@ function closePlayer(options={}){
   // Hand the encoder back now rather than letting the idle reaper find it a
   // minute later. An AirPlay target fetching this same session keeps it alive
   // by fetching; a browser that has closed the player is not going to.
-  if(PLAYER && PLAYER.sessionId){ releaseSession(PLAYER.sessionId); PLAYER.sessionId=null; }
+  // Destroy before releasing, as every other release site does. Both
+  // statements are in one synchronous turn so nothing could observe the old
+  // order, but a client that declares the hls.js release class is claiming
+  // destroy-before-DELETE at *every* one of its release sites, and a claim
+  // that happens to be true by scheduling is not one worth making.
+  const closingSessionId=PLAYER&&PLAYER.sessionId;
+  if(PLAYER&&PLAYER.hls) teardownHls();
+  if(PLAYER) PLAYER.sessionId=null;
+  if(closingSessionId) releaseSession(closingSessionId);
   // Disarm the pending seek as well as clearing it: a skip's self-commit is a
   // timer, and PLAYER survives the close, so an armed one would have fired
   // seekTo on a player the viewer had already left.
   if(PLAYER){ PLAYER.aoffset=0; PLAYER._seekDragging=false; PLAYER.controlSeek=null;
     PLAYER.wantsPlayback=false; PLAYER.pendingOpenAttempt=null; PLAYER.pendingMediaChange=null;
+    PLAYER.inFlightChangeKey=null;
     cancelPendingSeek(); }
   // Same reason, same scope: the track choice was this playback's, and this
   // playback is over. PLAYER survives the close, so leaving `preplay` set would

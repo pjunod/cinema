@@ -1122,7 +1122,13 @@ function requestPlaybackMediaChange(p,change){
 async function executePlaybackMediaChange(p,change){
   const v=document.getElementById("video");
   if(!v||PLAYER!==p||p.pendingMediaChange!==change) return false;
+  let changeKey=null;
   const pos=positionForPlaybackIntent(v,p), audio=selectedAudioIndex(p), subtitle=p.curSub;
+  // What this execution *is*, recorded before its create opens so an
+  // identical command arriving while it is open can be suppressed instead of
+  // superseding it. Cleared on every exit below, the refusal path included,
+  // so an explicit Retry is never mistaken for the attempt it retries.
+  changeKey=playbackChangeRecipeKey(p,pos,change);
   const {live:streamIsCurrent}=streamGeneration();
   const live=()=>streamIsCurrent()&&p.pendingMediaChange===change;
   const preparation=beginPlaybackPreparation(live);
@@ -1139,6 +1145,11 @@ async function executePlaybackMediaChange(p,change){
   raisePlaybackSurface("client_preparing",{
     title:"Preparing the stream…",detail:"your place and selections are saved"});
   try{
+    // Set inside the `try` whose `finally` clears it: a throw between here
+    // and there would otherwise leave the key set with nothing to clear it,
+    // and every identical seek on this player would be silently swallowed
+    // for the rest of the playback.
+    p.inFlightChangeKey=changeKey;
     if(method==='transcode'){
       // The same door as the copy-HLS branch below. In a pending change this
       // wrapper is a passthrough — `playbackCreateRetryContext()` answers
@@ -1203,8 +1214,17 @@ async function executePlaybackMediaChange(p,change){
         title:"Playback could not reconnect.",detail:e.message,actions:["retry"]});
       toast(e.message);
     }
+    // The refused destination is detached from the incumbent at this instant.
+    // Say so now rather than letting the server's startup actor learn it on
+    // the next scheduled exchange: the snapshot it gets carries the
+    // incumbent's own presentation with no foreign target in it, which is
+    // what stops a refusal from expiring a healthy stream.
+    notifyPlaybackControl();
     return false;
-  }finally{preparation.finish();}
+  }finally{
+    preparation.finish();
+    if(p.inFlightChangeKey===changeKey) p.inFlightChangeKey=null;
+  }
 }
 // Open (or re-open) a copy-video HLS session for the current file and attach it
 // as native HLS. The video stream is the server's untouched original; only the

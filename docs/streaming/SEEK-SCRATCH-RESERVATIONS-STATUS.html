@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Seek scratch reservations status</title>
+<style>body{font:16px system-ui;max-width:920px;margin:48px auto;padding:0 24px;color:#17212b;background:#f6f8fa}h1{font-size:30px}h2{font-size:20px;margin-top:36px}table{width:100%;border-collapse:collapse;background:white}td,th{text-align:left;padding:12px;border-bottom:1px solid #ddd;vertical-align:top}code{font-size:13px}pre{background:#fff;padding:16px;overflow-x:auto;border:1px solid #ddd;font-size:13px;white-space:pre-wrap}.note{padding:16px;background:#e8efff}.done{color:#136c34;font-weight:600}.wip{color:#8a5400;font-weight:600}.todo{color:#6b7280;font-weight:600}a{color:#174da1}</style>
+<h1>Seek scratch reservations</h1><p>Updated: 2026-09-20</p>
+<p class="note">Repeated seeks refused playback with a 500, and then the healthy incumbent was reaped thirty seconds later.
+Executing R1–R6 of the <a href="SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md">approved RCA</a> as one combined promotion
+(units A, B and C on one effort branch). <b>No deployment has been performed.</b></p>
+<p>Branch: <code>effort/seek-scratch</code> · Base: <code>a1414368</code> · Compiler: <code>1.97.1</code> · Build host: <code>nuc3</code> ·
+<a href="../evidence/seek-scratch-reservations-receipt-2026-09-20.md">Implementation receipt</a></p>
+
+<h2>Units</h2>
+<table><tr><th>Work</th><th>State</th></tr>
+<tr><td><b>A1</b> one authoritative ledger</td><td class="done">Built. <code>crates/plurxd/src/scratch_ledger.rs</code> replaces the two-registry fold and the subtraction-derived "provisional" term. One charge per incarnation; admission, growth, conversion and release linearize on one short lock; registry membership is not part of the charge.</td></tr>
+<tr><td><b>A2</b> writer-completion barrier</td><td class="done">Built. The copy reader registers before it is spawned and its guard lives inside the worker, so retirement cannot observe zero writers for a reader that is about to exist. A stalled writer keeps the conservative charge and records why.</td></tr>
+<tr><td><b>A3</b> cleanup and reader pins</td><td class="done">Built. The scanner reports complete / absent / incomplete; cleanup releases the namespace charge once, whether or not a status reader still holds the session; an accepted read pins its exact object for the life of the body.</td></tr>
+<tr><td><b>A4</b> 503 classification</td><td class="done">Built. The real refusal carries the retryable-capacity class with charged / requested / configured bytes, asserted through the real HTTP mapper.</td></tr>
+<tr><td><b>A5</b> desired intent vs attached execution</td><td class="done">Built. Relative seeks count from the desired destination (110 · 120 · 130, not 110 three times), an identical in-flight create is suppressed before the generation moves, and the scrubber follows the destination.</td></tr>
+<tr><td><b>A6</b> incumbent survival</td><td class="done">Built. An unexecuted destination is no longer reported as the incumbent's seek; the shipped snapshots are replayed through the real startup actor and it survives past sixty seconds.</td></tr>
+<tr><td><b>B</b> shorter same-viewer release grace</td><td class="done">Built. Create-time <code>transport</code> metadata in the durable recipe; the exact DELETE shortens one eligible retired promise to one segment target, once, non-renewing. Apple, native, unknown and legacy keep the original grace.</td></tr>
+<tr><td><b>C</b> smaller growing reservations</td><td class="wip">Built for the native copy writer, where every object passes a grant before it exists. Direct/transcoded FFmpeg stays conservative on purpose — see the limit below.</td></tr>
+</table>
+
+<h2>The limit this ships with</h2>
+<p><b>Transcoded output still reserves the whole per-session ceiling.</b> FFmpeg's <code>-f hls</code> writes its own
+segment and playlist files, and there is no Rust hook before those writes; a measurement taken afterwards can only
+discover an overrun. Three candidate mechanisms were weighed — an owned output boundary (a substantial media-pipeline
+change), a hard writable quota (<code>RLIMIT_FSIZE</code> is per file; <code>ffmpeg -fs</code> counts cumulative muxed
+bytes and would truncate a long film; project quotas need privileged provisioning), and an enforced envelope (the
+timers are cadences, not proven maxima) — and none passed. The incident path and the more-than-three-producers case are
+both the copy path, so the repair reaches them; this is named rather than hidden, on the Developer tab too.</p>
+
+<h2>Evidence</h2>
+<table><tr><th>Check</th><th>Result</th></tr>
+<tr><td><code>cargo test -p plurxd --bin plurxd scratch_charge_</code></td><td class="done">24 passed</td></tr>
+<tr><td><code>cargo test -p plurxd --bin plurxd seek_scratch_</code></td><td class="done">5 passed</td></tr>
+<tr><td><code>cargo test -p plurxd --bin plurxd mkv_hls</code></td><td class="done">16 passed</td></tr>
+<tr><td><code>cargo fmt --all -- --check</code> · <code>cargo check --all-targets</code></td><td class="done">clean at the pinned 1.97.1</td></tr>
+<tr><td><code>node --test tests/playback/seek-control.test.js</code></td><td class="done">8 passed, each new case mutation-checked</td></tr>
+<tr><td>Web suites (settings sections, player DOM, input contract, surface contract, themes, layout)</td><td class="done">pass</td></tr>
+<tr><td>Already red at <code>a1414368</code></td><td class="todo">Two <code>copyseg</code> cases, one Android assertion in <code>web-policy</code>, one in <code>web-control</code>, the Playwright startup check, and <code>failed_retention_garbage_unlink_cannot_reexpose_a_served_path</code>, which <b>hangs</b> at the base too. Each confirmed by running the same command against a pristine base extraction; none caused here.</td></tr>
+<tr><td><code>tests/ui-structure.golden</code></td><td class="todo">Known drift from the new Developer card. Needs a booted <code>plurxd</code> plus Playwright, which this session has neither of. Not in the fast lane.</td></tr>
+<tr><td>Adversarial review</td><td class="done">Three reviewers, one per unit boundary. Twenty-four findings: twenty-one changed the code, three recorded as accepted limitations. The disposition table is in the receipt.</td></tr>
+<tr><td>Fast lane · merge</td><td class="wip">Review fixes pushed; running the fast lane on PR #389.</td></tr>
+<tr><td>Physical acceptance</td><td class="todo">Needs the devices — prompt below</td></tr>
+</table>
+
+<h2>For the session that has the hardware</h2>
+<p>Two things this session cannot do. Paste either to a session with device and node access.</p>
+<pre>Regenerate the plurx UI structural golden on branch effort/seek-scratch.
+
+  git fetch &amp;&amp; git checkout effort/seek-scratch
+  scripts/ui-baseline --self-host --update
+  git diff --stat tests/ui-structure.golden
+
+The Developer settings page gained one advisory card ("Seek scratch
+accounting"), so settings-developer rows are expected to move and nothing
+else should. If any other layout moves, stop and report which.
+Commit only tests/ui-structure.golden, with the message
+"test(ui): regenerate the structural golden for the scratch advisory card".</pre>
+<pre>Physically accept the plurx seek-scratch repair on branch effort/seek-scratch,
+deployed to one node only.
+
+1. Safari, forced rolling HLS, a long 4K copy. Tap +10 rapidly: one execution,
+   one +30 target. Then tap at one-second intervals during a slow create:
+   desired targets must advance 110, 120, 130 and the picture must keep
+   playing at 100 s throughout.
+2. Force a real refusal (drop playback.hls_scratch_max_bytes until a create
+   is refused). Expect HTTP 503, a retryable notice beside the picture, the
+   incumbent still playing more than 30 s later, and Try again using the
+   latest target. Confirm the server log line carries charged / requested /
+   configured bytes.
+3. Start four low-bitrate copy sessions under the unchanged 8 GiB cap. All
+   four must start and present.
+4. Close a web (hls.js) stream and watch its scratch directory disappear
+   about 16 s later; close a Safari-native or Apple TV stream and confirm it
+   keeps the original grace.
+
+Record for each: desired and presented positions, transport, writer, actual
+bitrate, tap cadence, the cap, producer/retained/pinned charges, unresolved
+creates, cleanup timing, and whether the incumbent survived. Do not mark
+anything accepted from disk inspection after playback has ended.</pre>
+
+<p><a href="SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md">RCA and fix</a> ·
+<a href="SEEK-SCRATCH-RESERVATIONS-IMPLEMENTATION.md">Implementation handoff</a> ·
+<a href="../evidence/seek-scratch-reservations-receipt-2026-09-20.md">Receipt</a> ·
+<a href="../README.md">Documentation index</a></p></html>

@@ -47,6 +47,28 @@ function preferNativeHls(video){
     hlsJsSupported:hlsJsSupported()
   })==='native';
 }
+// The transport this session will actually be attached with, named at create
+// so the server knows how this client tears the stream down.
+//
+// It is the same `PlaybackPolicy.hlsTransport` decision `preferNativeHls`
+// makes at attach, given the same inputs — a guess from the user agent would
+// be worth nothing, and a disagreement between the two would leave a session
+// eligible for a short retired promise that its real teardown does not earn.
+// `hevcCopy` has to be passed in because `streamIsHevc` reads `PLAYER.copyHls`,
+// which a first copy open has not set yet.
+//
+// Returns null when the answer cannot be decided here. An absent field is the
+// conservative class on the server, which is the right answer for "unknown".
+function plannedHlsTransport(hevcCopy){
+  try{
+    const video=document.getElementById("video");
+    if(!video) return null;
+    return PlaybackPolicy.hlsTransport({
+      nativeHls:useNativeHls(video), hevcCopy:!!hevcCopy,
+      hlsJsSupported:hlsJsSupported()
+    })==='native'?"native":"hlsjs";
+  }catch(e){ return null; }
+}
 // The last refusal the server explained.
 //
 // hls.js consumes the HTTP response and hands its ERROR event only the status

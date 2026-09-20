@@ -1347,14 +1347,178 @@ struct AheadLimits {
 /// init object, temporary segment and playlist rewrite.
 const ROLLING_SCRATCH_IN_FLIGHT_BYTES: i64 = 64 * 1024 * 1024;
 
-struct RollingScratchReservation {
-    total: Arc<AtomicI64>,
-    bytes: i64,
+/// How long retirement waits for registered scratch writers to prove they can
+/// no longer write. A writer that outlives this keeps the conservative
+/// producer charge and says so; the timeout is not settlement.
+const ROLLING_SCRATCH_WRITER_SETTLE: Duration = Duration::from_secs(30);
+
+/// How often the conversion is retried while a measurement keeps failing or a
+/// writer keeps running. Bounded work on a detached owner, never on the
+/// admission path.
+const ROLLING_SCRATCH_CONVERSION_RETRY: Duration = Duration::from_secs(5);
+
+/// How many times the conversion is retried before it is left to cleanup.
+const ROLLING_SCRATCH_CONVERSION_ATTEMPTS: u32 = 24;
+
+/// What a directory measurement is worth to the ledger.
+///
+/// The scanner preserves the previous charge on a read or stat failure, which
+/// is right and also indistinguishable from "measured that much" at the call
+/// site. Retirement has to tell the two apart before it collapses a
+/// reservation, so the scanner says which one happened.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScratchMeasurement {
+    /// Every entry was enumerated and stat'd. This is a final inventory.
+    Complete(i64),
+    /// The directory is gone. Nothing is left to charge for.
+    Absent,
+    /// Enumeration or stat failed part-way. The previous charge stands.
+    Incomplete,
+    /// A cache-backed session owns no scratch directory.
+    NotScratch,
 }
 
-impl Drop for RollingScratchReservation {
-    fn drop(&mut self) {
-        self.total.fetch_sub(self.bytes, AcqRel);
+/// Never admit less than this, whatever the sizing arithmetic says: an init
+/// object, one temporary segment and a playlist rewrite have to fit before a
+/// grant boundary can do anything useful.
+const ROLLING_SCRATCH_MIN_GRANT_BYTES: i64 = 64 * 1024 * 1024;
+
+/// The startup allowance for a source whose output rate is not known.
+///
+/// A bootstrap, not a safety proof and not a floor on what the session will
+/// need: an unknown-rate 80 Mb/s source has to obtain further grants before
+/// it consumes them, and the write boundary is what makes that true.
+const ROLLING_SCRATCH_UNKNOWN_RATE_BYTES: i64 = 256 * 1024 * 1024;
+
+/// How far ahead of the measured bytes a producing session is authorized.
+///
+/// This is the `envelope` in `charge = actual + envelope`, re-granted on each
+/// flow evaluation. It has to cover everything the producer can materialize
+/// between one evaluation and the next taking effect: the paced input, the
+/// remaining uncontrolled initial burst, and the writes already issued when a
+/// suspension lands.
+///
+/// For the native copy writer this is a convenience, not the bound — every
+/// object passes an exact grant at `copyseg::publish_file`, so an
+/// under-estimated envelope makes the writer wait rather than overrun. For
+/// direct FFmpeg output there is no such boundary, and the envelope is a
+/// measurement-derived allowance rather than an enforced one. That asymmetry
+/// is why only the copy path is admitted with a reduced startup reservation.
+const ROLLING_SCRATCH_ENVELOPE_SAFETY: f64 = 5.0;
+
+/// How far above a title's *average* bitrate its opening is sized.
+///
+/// `MediaFile::bitrate` is ffprobe's `format.bit_rate` — the whole container
+/// averaged over the whole title, all tracks included. A UHD remux's first
+/// reel commonly runs at two to three times that. This is the multiplier on
+/// the startup allowance only; steady-state growth is governed by the write
+/// boundary, which does not need to guess.
+const ROLLING_SCRATCH_STARTUP_PEAK_FACTOR: f64 = 3.0;
+
+/// The evaluation cadence the envelope is sized against.
+///
+/// Honest about what it is: a *sizing* input, not an enforced deadline. The
+/// publication clock refreshes the measurement every
+/// [`ROLLING_PUBLICATION_POLL`], and the flow worker re-grants on each client
+/// segment fetch and on the [`FLOW_CONTROL_REPAIR_INTERVAL`] repair pass —
+/// but neither is a proven maximum gap. The envelope is therefore an
+/// allowance derived from measurement, and the thing that actually bounds the
+/// copy writer is the exact grant at `copyseg::publish_file`, which no
+/// timing assumption can undercut.
+const ROLLING_SCRATCH_EVALUATION_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How much future capacity a start admits before it is allowed to make
+/// bytes.
+///
+/// The historical answer was always the whole per-session ceiling, which is
+/// why three rolling producers exhausted an 8 GiB budget no matter how little
+/// they actually wrote. A writer whose every write passes a grant boundary
+/// can start small and grow instead; one whose writes cannot be intercepted
+/// still has to reserve the ceiling, because nothing else bounds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RollingScratchSizing {
+    /// The configured per-session ceiling plus one in-flight envelope.
+    SessionCeiling,
+    /// A startup allowance covering every enabled publish gate plus one
+    /// complete segment, plus the enforcement envelope. Grows under an
+    /// enforced write boundary; never exceeds the ceiling.
+    Startup(i64),
+}
+
+/// The output bytes a rolling producer can publish before any client can
+/// drain it, plus the enforcement envelope.
+///
+/// The gate is not one number. The copy writer withholds its playlist for
+/// `COPY_PUBLISH_GATE_SECS`, and the rolling publication clock refuses the
+/// first served playlist until `ROLLING_INITIAL_RUNWAY_MS` — 48 s at 1x, and
+/// scaled with the playback rate. Sizing only the writer's own gate misses
+/// the larger one, and a session sized below its effective gate can never
+/// publish anything for a client to drain.
+fn rolling_startup_bytes(bitrate_bits_per_second: Option<f64>, playback_rate: f64) -> i64 {
+    let gate_ms = rolling_initial_runway_ms(playback_rate)
+        .max(i64::from(plurx_core::transcode::COPY_PUBLISH_GATE_SECS).saturating_mul(1_000));
+    // One complete segment beyond the gate: the gate is measured in published
+    // media, and the segment that crosses it is written in full first.
+    let startup_ms = gate_ms.saturating_add(
+        i64::from(plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS).saturating_mul(1_000),
+    );
+    let Some(bitrate) = bitrate_bits_per_second.filter(|rate| rate.is_finite() && *rate > 0.0)
+    else {
+        return ROLLING_SCRATCH_UNKNOWN_RATE_BYTES;
+    };
+    // The stored figure is the container's *average* over the whole title,
+    // every track included. An opening reel routinely runs at two or three
+    // times it, and under-sizing the startup allowance is the one case that
+    // cannot be recovered by growing — a session that cannot publish a first
+    // playlist has no client to drain it and nothing to wait for. Pay for
+    // the peak here; the exact write boundary is what stops the cost running
+    // away afterwards.
+    let media_bytes =
+        (bitrate / 8.0) * (startup_ms as f64 / 1_000.0) * ROLLING_SCRATCH_STARTUP_PEAK_FACTOR;
+    let envelope = rolling_scratch_envelope(Some(bitrate), playback_rate) as f64;
+    let total = media_bytes + envelope;
+    if total.is_finite() && total > 0.0 {
+        total.min(i64::MAX as f64) as i64
+    } else {
+        ROLLING_SCRATCH_UNKNOWN_RATE_BYTES
+    }
+}
+
+/// How far a producer may run past its measured bytes before the next
+/// evaluation can hold it.
+fn rolling_scratch_envelope(bitrate_bits_per_second: Option<f64>, playback_rate: f64) -> i64 {
+    let Some(bitrate) = bitrate_bits_per_second.filter(|rate| rate.is_finite() && *rate > 0.0)
+    else {
+        return ROLLING_SCRATCH_UNKNOWN_RATE_BYTES;
+    };
+    let seconds = ROLLING_SCRATCH_EVALUATION_INTERVAL.as_secs_f64()
+        * playback_rate.clamp(0.25, 4.0)
+        * ROLLING_SCRATCH_ENVELOPE_SAFETY;
+    let bytes = (bitrate / 8.0) * seconds;
+    let bounded = bytes.max(ROLLING_SCRATCH_MIN_GRANT_BYTES as f64);
+    if bounded.is_finite() {
+        bounded.min(ROLLING_SCRATCH_UNKNOWN_RATE_BYTES as f64) as i64
+    } else {
+        ROLLING_SCRATCH_UNKNOWN_RATE_BYTES
+    }
+}
+
+impl RollingScratchSizing {
+    fn ceiling(limits: AheadLimits) -> i64 {
+        let session_ceiling = if limits.max_bytes > 0 {
+            limits.max_bytes
+        } else {
+            limits.global_max_bytes
+        };
+        session_ceiling.saturating_add(ROLLING_SCRATCH_IN_FLIGHT_BYTES)
+    }
+
+    fn grant_bytes(self, limits: AheadLimits) -> i64 {
+        let full = Self::ceiling(limits);
+        match self {
+            Self::SessionCeiling => full,
+            Self::Startup(bytes) => bytes.clamp(ROLLING_SCRATCH_MIN_GRANT_BYTES.min(full), full),
+        }
     }
 }
 
@@ -1399,6 +1563,10 @@ struct FlowInputs<'a> {
     global_ahead_bytes: i64,
     limits: AheadLimits,
     currently_suspended: bool,
+    /// `Some(grant)` when this session has materialized everything its ledger
+    /// entry authorizes and the budget refused to raise it. The producer stays
+    /// held until a re-grant succeeds.
+    scratch_grant_exhausted: Option<i64>,
 }
 
 fn rolling_playback_rate(demand: Option<&crate::playback_control::PlaybackDemandSnapshot>) -> f64 {
@@ -1479,21 +1647,24 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
         limits,
         currently_suspended,
         startup_protected,
+        scratch_grant_exhausted,
     } = inputs;
     let publication_target_seconds =
         (rolling_publication_batch_ms(rolling_playback_rate(demand)) + 999) / 1_000;
     if lease_mode == crate::playback_control::RollingLeaseMode::Legacy {
-        let hard_hold = physical_ahead.and_then(|ahead| {
-            ahead_hold(
-                ahead,
-                global_live_bytes,
-                global_ahead_bytes,
-                AheadLimits {
-                    max_secs: 0,
-                    ..limits
-                },
-                currently_suspended,
-            )
+        let hard_hold = scratch_grant_hold(scratch_grant_exhausted).or_else(|| {
+            physical_ahead.and_then(|ahead| {
+                ahead_hold(
+                    ahead,
+                    global_live_bytes,
+                    global_ahead_bytes,
+                    AheadLimits {
+                        max_secs: 0,
+                        ..limits
+                    },
+                    currently_suspended,
+                )
+            })
         });
         return FlowEvaluation {
             hold: hard_hold.or_else(|| {
@@ -1589,17 +1760,19 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
             seconds: 0,
             bytes: 0,
         }));
-    let hard_hold = ahead_for_limits.and_then(|ahead| {
-        ahead_hold(
-            ahead,
-            global_live_bytes,
-            global_ahead_bytes,
-            AheadLimits {
-                max_secs: 0,
-                ..limits
-            },
-            currently_suspended,
-        )
+    let hard_hold = scratch_grant_hold(scratch_grant_exhausted).or_else(|| {
+        ahead_for_limits.and_then(|ahead| {
+            ahead_hold(
+                ahead,
+                global_live_bytes,
+                global_ahead_bytes,
+                AheadLimits {
+                    max_secs: 0,
+                    ..limits
+                },
+                currently_suspended,
+            )
+        })
     });
     let hold = hard_hold.or_else(|| {
         (!starting)
@@ -1626,6 +1799,21 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
 /// Byte budgets release at half because they are hard disk bounds. Media-time
 /// pacing is intentionally absent: [`evaluate_flow`] derives it from staged
 /// inventory and the immutable publication clock.
+/// A producer that has materialized everything its ledger entry authorizes
+/// must stop until the budget re-grants.
+///
+/// Deliberately **not** folded into [`ahead_hold`]: that one is reached
+/// through `physical_ahead.and_then(...)`, and `physical_ahead` is `None`
+/// for exactly the session this is about — a copy producer inside its
+/// publish gate has an empty segment index. A capacity hold that evaporates
+/// whenever there is nothing published yet is no hold at all.
+fn scratch_grant_hold(scratch_grant: Option<i64>) -> Option<AheadHold> {
+    scratch_grant.map(|release_value| AheadHold {
+        reason: AheadHoldReason::Global,
+        release_value,
+    })
+}
+
 fn ahead_hold(
     ahead: Ahead,
     global_live_bytes: i64,
@@ -3416,6 +3604,8 @@ fn spawn_rolling_scratch_cleanup_owner(
         return;
     }
     let dir = session.dir.clone();
+    begin_rolling_scratch_release(session);
+    let owned = Arc::clone(session);
     tokio::spawn(async move {
         #[cfg(test)]
         if let Some(pause) = pause {
@@ -3434,6 +3624,9 @@ fn spawn_rolling_scratch_cleanup_owner(
             .await;
             match cleanup {
                 Ok(Ok(())) => {
+                    owned.live_bytes.store(0, Release);
+                    owned.retention_garbage_bytes.store(0, Release);
+                    settle_rolling_scratch_release(&owned);
                     tracing::debug!(
                         session = %session_log_id(&session_id),
                         path = %dir.display(),
@@ -3461,6 +3654,7 @@ fn spawn_rolling_scratch_cleanup_owner(
                 tokio::time::sleep(ROLLING_SCRATCH_CLEANUP_RETRY).await;
             }
         }
+        hold_rolling_scratch_charge(&owned, "cleanup_exhausted");
         tracing::error!(
             session = %session_log_id(&session_id),
             path = %dir.display(),
@@ -3476,7 +3670,28 @@ fn spawn_retired_presentation_cleanup_owner(
     retired: RetiredPresentation,
 ) {
     tokio::spawn(async move {
-        tokio::time::sleep_until(tokio::time::Instant::from_std(retired.serve_until)).await;
+        // Sleep on the shared promise, not on a value captured at spawn: an
+        // exact same-viewer release can pull it in while this task waits, and
+        // a deadline nobody can wake is a deadline that never moves. The
+        // promise can only shorten, so re-reading it is monotone and the loop
+        // terminates.
+        loop {
+            let until = retired
+                .session
+                .retired_release
+                .deadline()
+                .unwrap_or(retired.serve_until);
+            // Register before the re-read, or a shorten between them is a
+            // lost wakeup.
+            let woken = retired.session.retired_release.wake.notified();
+            if Instant::now() >= until {
+                break;
+            }
+            tokio::select! {
+                () = tokio::time::sleep_until(tokio::time::Instant::from_std(until)) => {}
+                () = woken => {}
+            }
+        }
         if retired
             .session
             .scratch_cleanup_started
@@ -3485,6 +3700,7 @@ fn spawn_retired_presentation_cleanup_owner(
         {
             return;
         }
+        begin_rolling_scratch_release(&retired.session);
         #[cfg(test)]
         let cleanup_pause = retired
             .session
@@ -3500,6 +3716,14 @@ fn spawn_retired_presentation_cleanup_owner(
         let mut attempt = 0_u64;
         loop {
             attempt = attempt.saturating_add(1);
+            // Exactness governs the *map entry*, not the directory: `dir` is
+            // this incarnation's own `w-{uuid}` and is shared with nothing.
+            // A session id can be reused, so the map row can be overwritten
+            // by a successor while this owner is still retrying a failing
+            // unlink -- and returning here would abandon a charged ledger
+            // entry whose last `Arc<Session>` is about to drop, leaving bytes
+            // charged for the life of the process with nobody able to
+            // release them. Clean our own directory either way.
             let exact = retired_presentations
                 .lock()
                 .await
@@ -3508,9 +3732,6 @@ fn spawn_retired_presentation_cleanup_owner(
                     current.producer_attempt == retired.producer_attempt
                         && Arc::ptr_eq(&current.session, &retired.session)
                 });
-            if !exact {
-                return;
-            }
             let cleanup = tokio::time::timeout(ROLLING_SCRATCH_CLEANUP_ATTEMPT, async {
                 clear_session_dir(&retired.session.dir).await?;
                 match tokio::fs::remove_dir_all(&retired.session.dir).await {
@@ -3527,20 +3748,158 @@ fn spawn_retired_presentation_cleanup_owner(
                         && Arc::ptr_eq(&current.session, &retired.session)
                 }) {
                     presentations.remove(&session_id);
-                    retired.session.live_bytes.store(0, Release);
-                    retired.session.retention_garbage_bytes.store(0, Release);
                 }
+                retired.session.live_bytes.store(0, Release);
+                retired.session.retention_garbage_bytes.store(0, Release);
+                drop(presentations);
+                // The names are gone. Anything an accepted read still holds
+                // open keeps its own charge; the rest is released once, and
+                // a duplicate completion finds nothing left to subtract.
+                settle_rolling_scratch_release(&retired.session);
                 return;
             }
+            hold_rolling_scratch_charge(&retired.session, "unlink_failed");
             tracing::warn!(
                 session = %session_log_id(&session_id),
                 path = %retired.session.dir.display(),
                 attempt,
+                superseded = !exact,
                 "retired rolling object cleanup failed; promises remain charged for retry"
             );
             tokio::time::sleep(ROLLING_SCRATCH_CLEANUP_RETRY).await;
         }
     });
+}
+
+/// Convert this incarnation's producer reservation into its measured retained
+/// inventory, once nothing can write into the directory any more.
+///
+/// Returns false when the conversion must be retried: a writer is still
+/// registered, or the directory walk did not complete. Both keep the
+/// conservative producer charge — a timeout is not evidence that capacity
+/// became free, and a partial scan is not an inventory.
+async fn convert_rolling_scratch_charge(session: &Session) -> bool {
+    let Some(permit) = session.scratch.as_ref() else {
+        return true;
+    };
+    let ledger = permit.ledger();
+    let key = permit.key();
+    if !ledger.writers_settled(key) {
+        ledger.note_conservative(key, "writer_outstanding");
+        return false;
+    }
+    // Taken before the walk and rechecked at commit: a writer that registers
+    // and finishes while the directory is being enumerated moves this, and
+    // the measurement it raced is refused rather than believed.
+    let Some(generation) = ledger.inventory_generation(key) else {
+        return true;
+    };
+    match session.measure_scratch_bytes().await {
+        ScratchMeasurement::Complete(bytes) => {
+            session.live_bytes.store(bytes, Release);
+            ledger.commit_quiescent_measurement(key, generation, bytes)
+        }
+        ScratchMeasurement::Absent => {
+            session.live_bytes.store(0, Release);
+            ledger.commit_quiescent_measurement(key, generation, 0)
+        }
+        ScratchMeasurement::NotScratch => true,
+        ScratchMeasurement::Incomplete => {
+            ledger.note_conservative(key, "measurement_incomplete");
+            false
+        }
+    }
+}
+
+/// Retry the conversion on a detached owner. Bounded: cleanup releases the
+/// entry outright when it proves the names are gone, so this exists only to
+/// shed unused future capacity sooner than that.
+fn spawn_rolling_scratch_conversion_owner(session_id: String, session: Arc<Session>) {
+    tokio::spawn(async move {
+        for attempt in 1..=ROLLING_SCRATCH_CONVERSION_ATTEMPTS {
+            tokio::time::sleep(ROLLING_SCRATCH_CONVERSION_RETRY).await;
+            let Some(key) = session.scratch_key() else {
+                return;
+            };
+            let Some(permit) = session.scratch.as_ref() else {
+                return;
+            };
+            if permit.ledger().lifecycle_of(key).is_none() {
+                return;
+            }
+            if convert_rolling_scratch_charge(&session).await {
+                tracing::debug!(
+                    session = %session_log_id(&session_id),
+                    attempt,
+                    "retired rolling scratch reservation converted to measured inventory"
+                );
+                return;
+            }
+        }
+        tracing::warn!(
+            session = %session_log_id(&session_id),
+            attempts = ROLLING_SCRATCH_CONVERSION_ATTEMPTS,
+            reason = ?session
+                .scratch
+                .as_ref()
+                .and_then(|permit| permit.ledger().conservative_reason(permit.key())),
+            "retired rolling scratch kept its conservative charge; cleanup still owns it"
+        );
+    });
+}
+
+/// Fence new writers, wait for the registered ones, then convert.
+///
+/// Called with no registry or lifecycle lock held, and never on the admission
+/// path: the wait is for a process's worker, not for a budget.
+async fn settle_rolling_scratch_charge(session_id: &str, session: &Arc<Session>) {
+    let Some(key) = session.scratch_key() else {
+        return;
+    };
+    let Some(permit) = session.scratch.as_ref() else {
+        return;
+    };
+    let ledger = Arc::clone(permit.ledger());
+    let Some(barrier) = ledger.begin_retirement(key) else {
+        return;
+    };
+    let deadline = tokio::time::Instant::now() + ROLLING_SCRATCH_WRITER_SETTLE;
+    if !barrier.settle(&ledger, key, deadline).await {
+        ledger.note_conservative(key, "writer_stalled");
+        tracing::warn!(
+            session = %session_log_id(session_id),
+            budget_ms = ROLLING_SCRATCH_WRITER_SETTLE.as_millis(),
+            "a scratch writer outlived retirement settlement; the producer charge stands"
+        );
+        spawn_rolling_scratch_conversion_owner(session_id.to_owned(), Arc::clone(session));
+        return;
+    }
+    if !convert_rolling_scratch_charge(session).await {
+        spawn_rolling_scratch_conversion_owner(session_id.to_owned(), Arc::clone(session));
+    }
+}
+
+/// Cleanup has taken the directory. Bytes stay charged until deletion is
+/// proven; only the category changes.
+fn begin_rolling_scratch_release(session: &Session) {
+    if let Some(permit) = session.scratch.as_ref() {
+        permit.ledger().begin_release(permit.key());
+    }
+}
+
+/// Every name is gone. Objects an accepted read still holds open move to
+/// reader-pin ownership; everything else stops being charged, exactly once,
+/// whether or not an unrelated status reader still holds this session.
+fn settle_rolling_scratch_release(session: &Session) {
+    if let Some(permit) = session.scratch.as_ref() {
+        permit.ledger().account_unlink_all(permit.key());
+    }
+}
+
+fn hold_rolling_scratch_charge(session: &Session, reason: &'static str) {
+    if let Some(permit) = session.scratch.as_ref() {
+        permit.ledger().note_conservative(permit.key(), reason);
+    }
 }
 
 /// Finish one rolling Session only after its exact supervised child is known
@@ -3779,6 +4138,14 @@ async fn own_rolling_retirement(
         };
         match cleanup {
             Ok(()) => {
+                // The child is reaped, but a copy reader may still be
+                // draining its pipe. Fence new writers, wait for the ones
+                // already registered, then measure once and convert the
+                // producer reservation into the measured retained inventory
+                // — all of it outside every registry and lifecycle lock, and
+                // all of it before this session enters the retired registry
+                // carrying a charge it no longer needs.
+                settle_rolling_scratch_charge(&session_id, &session).await;
                 // Keep the exact retired Arc discoverable until process death
                 // and admission release are both facts. Adoption may rename it
                 // during actor settlement, so remove by pointer at the end.
@@ -4653,6 +5020,7 @@ async fn publish_copy_reader_outcome(
     }
 }
 
+#[allow(clippy::too_many_arguments)] // one copy producer's worth of identity
 fn spawn_copy_reader_owner(
     session: Arc<Session>,
     stdout: tokio::process::ChildStdout,
@@ -4669,6 +5037,7 @@ fn spawn_copy_reader_owner(
     // did not get, which reads as wrong on sight.
     source: plurx_core::domain::MediaFile,
     video: plurx_core::transcode::CopyVideoOptions,
+    grants: Option<crate::copyseg::WriteGrants>,
 ) {
     tokio::spawn(async move {
         // The outer owner retains the pipe until the actor has accepted the
@@ -4681,7 +5050,44 @@ fn spawn_copy_reader_owner(
         let stdout = Arc::new(Mutex::new(stdout));
         let reader_stdout = Arc::clone(&stdout);
         let worker_sid = sid.clone();
+        // The completion barrier is installed *before* the worker is spawned
+        // and moved into it, so there is no instant in which retirement can
+        // observe no writer for a reader that is about to exist. Registration
+        // after the spawn was the race: ffmpeg's confirmed reap is necessary
+        // and insufficient, because this task drains the pipe and writes the
+        // last segment and playlist on its own schedule. In the incident its
+        // completion log followed the retirement-settled log.
+        //
+        // It belongs to the worker and not to this outer owner: the actor may
+        // reject a late classification as `SessionEnded`, and that rejection
+        // says nothing about whether the worker has stopped writing.
+        let writer = match session.scratch.as_ref() {
+            Some(permit) => match permit.ledger().register_writer(permit.key()) {
+                Some(writer) => Some(writer),
+                None => {
+                    // Retirement fenced this allocation before the worker was
+                    // polled. `None` means "do not start writing", and
+                    // starting anyway would put bytes into a directory whose
+                    // final inventory has already been measured and committed.
+                    tracing::debug!(
+                        session = %session_log_id(&sid),
+                        producer_attempt,
+                        "copy reader refused: this incarnation was retired before it could write"
+                    );
+                    publish_copy_reader_outcome(
+                        &session,
+                        &sid,
+                        producer_attempt,
+                        copyseg::Outcome::Cancelled(Default::default()),
+                    )
+                    .await;
+                    return;
+                }
+            },
+            None => None,
+        };
         let worker = tokio::spawn(async move {
+            let _writer = writer;
             let mut stdout = reader_stdout.lock_owned().await;
             copyseg::run(
                 &mut *stdout,
@@ -4690,6 +5096,7 @@ fn spawn_copy_reader_owner(
                 copyseg::Limits::default(),
                 &source,
                 video,
+                grants,
             )
             .await
         });
@@ -6301,10 +6708,19 @@ struct Session {
     /// the cap it produced was not a bound: several healthy sessions could
     /// exceed the documented ceiling by their whole retention windows.
     live_bytes: Arc<AtomicI64>,
-    /// Admission charged before the producer starts.  The permit stays with
-    /// the exact session through retirement and is released only when its
-    /// final scratch owner disappears.
-    scratch_reservation: std::sync::Mutex<Option<RollingScratchReservation>>,
+    /// Admission charged before the producer starts. The permit names this
+    /// exact incarnation's entry in the scratch ledger and stays with it from
+    /// provisional start through retirement; dropping it is a backstop, not
+    /// the event that returns capacity. Cleanup releases the entry once the
+    /// names are gone and every accepted read has closed.
+    scratch: Option<crate::scratch_ledger::ScratchPermit>,
+    /// The retired object promise, shared with the cleanup owner so an exact
+    /// same-viewer release can pull it in once and wake the sleeper.
+    retired_release: Arc<RetiredRelease>,
+    /// How far past its measured bytes this producer stays authorized between
+    /// flow evaluations. Zero for a session admitted with its whole ceiling,
+    /// which has nothing to grow into.
+    scratch_envelope: i64,
     /// Bytes renamed out of served segment paths but not yet physically
     /// unlinked. Hidden garbage still consumes the same scratch budget.
     retention_garbage_bytes: Arc<AtomicI64>,
@@ -6563,31 +6979,85 @@ fn ahead_of(index: &SegmentIndex, fetched_end_ms: i64) -> Option<Ahead> {
 }
 
 impl Session {
-    async fn refresh_scratch_bytes(&self) {
+    /// Measure everything this session has in its scratch directory, and say
+    /// whether the measurement is complete.
+    ///
+    /// Session scratch is one flat directory: `init.mp4`, `index.m3u8`, the
+    /// segment objects, their `*.tmp` staging names and the
+    /// `.plurx-retention-*` renames are all regular files at its top level.
+    /// Nothing writes a subdirectory here, and nothing writes a symlink —
+    /// `DirEntry::metadata` does not traverse one, so `is_file()` is false
+    /// for a link and it is skipped rather than charged for its target. That
+    /// undercounts a thing this directory never contains; it is recorded
+    /// because a reader deserves to know which way the scanner is wrong.
+    ///
+    /// The sum is `metadata.len()` — apparent length in this namespace, not
+    /// `st_blocks` and not a claim about physical reclamation.
+    ///
+    /// A read or stat failure keeps the previous charge, because a transient
+    /// metadata error must never make capacity reappear. The caller is told
+    /// which happened: retirement may only collapse a reservation onto a
+    /// `Complete` inventory.
+    async fn measure_scratch_bytes(&self) -> ScratchMeasurement {
         if self.cached {
-            return;
+            return ScratchMeasurement::NotScratch;
         }
-        let Ok(mut entries) = tokio::fs::read_dir(&self.dir).await else {
-            // Preserve the last known charge on an unreadable directory.  A
-            // transient metadata failure must never make capacity reappear.
-            return;
+        let mut entries = match tokio::fs::read_dir(&self.dir).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return ScratchMeasurement::Absent;
+            }
+            Err(_) => return ScratchMeasurement::Incomplete,
         };
         let mut bytes = 0_i64;
         loop {
             let entry = match entries.next_entry().await {
                 Ok(Some(entry)) => entry,
                 Ok(None) => break,
-                Err(_) => return,
+                Err(_) => return ScratchMeasurement::Incomplete,
             };
             let metadata = match entry.metadata().await {
                 Ok(metadata) => metadata,
-                Err(_) => return,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return ScratchMeasurement::Incomplete,
             };
             if metadata.is_file() {
                 bytes = bytes.saturating_add(i64::try_from(metadata.len()).unwrap_or(i64::MAX));
             }
         }
-        self.live_bytes.store(bytes, Release);
+        ScratchMeasurement::Complete(bytes)
+    }
+
+    /// The periodic sample. It publishes a measurement to the cached figure
+    /// and to the ledger, and it can only be an observation: while a producer
+    /// runs, a scan that happens to find few bytes is not evidence that the
+    /// future capacity it was admitted with is no longer needed.
+    async fn refresh_scratch_bytes(&self) -> ScratchMeasurement {
+        let measurement = self.measure_scratch_bytes().await;
+        match measurement {
+            ScratchMeasurement::Complete(bytes) => {
+                self.live_bytes.store(bytes, Release);
+                self.observe_scratch_bytes(bytes);
+            }
+            ScratchMeasurement::Absent => {
+                self.live_bytes.store(0, Release);
+                self.observe_scratch_bytes(0);
+            }
+            ScratchMeasurement::Incomplete | ScratchMeasurement::NotScratch => {}
+        }
+        measurement
+    }
+
+    fn scratch_key(&self) -> Option<crate::scratch_ledger::ScratchKey> {
+        self.scratch
+            .as_ref()
+            .map(crate::scratch_ledger::ScratchPermit::key)
+    }
+
+    fn observe_scratch_bytes(&self, bytes: i64) {
+        if let Some(permit) = self.scratch.as_ref() {
+            permit.ledger().observe_used(permit.key(), bytes);
+        }
     }
 
     fn ensure_publication_worker(self: &Arc<Self>, session_id: &str) {
@@ -6623,7 +7093,7 @@ impl Session {
     }
 
     async fn publication_cycle(&self, session_id: &str) -> Result<(), String> {
-        self.refresh_scratch_bytes().await;
+        let _ = self.refresh_scratch_bytes().await;
         if self.replacing_child.load(Acquire) {
             return Ok(());
         }
@@ -6913,7 +7383,69 @@ impl Session {
             }
         }
         segments.revision = segments.revision.wrapping_add(1);
+        // An eligible viewer released this session before it finished
+        // retiring. Fold that in here rather than racing the cleanup owner's
+        // sleep: the promise is published once, already shortened.
+        let serve_until = match self.retired_release.released() {
+            Some((released_at, allowance)) => serve_until.min(
+                released_at
+                    .checked_add(allowance)
+                    .unwrap_or(serve_until)
+                    .max(now),
+            ),
+            None => serve_until,
+        };
+        self.retired_release.publish(serve_until);
         serve_until
+    }
+
+    /// Record one accepted exact-incarnation release.
+    ///
+    /// Returns the shortened deadline when this release actually moved it.
+    /// Non-renewing by construction: the first accepted release wins, a
+    /// duplicate DELETE finds the latch taken, and the deadline can only move
+    /// in. A conservative class records nothing at all.
+    fn accept_exact_release(&self, now: Instant, class: ReleaseClass) -> Option<Instant> {
+        let allowance = class.allowance()?;
+        if !self.retired_release.accept_release(now, allowance) {
+            return None;
+        }
+        let deadline = now.checked_add(allowance)?;
+        // Already retired: pull the published promise in and wake cleanup.
+        // Not yet retired: `prepare_retired_object_promise` reads the
+        // recorded release time above when it publishes.
+        self.retired_release.shorten_to(deadline)
+    }
+
+    /// Bring every per-object grace deadline in with the promise.
+    ///
+    /// Without this the cleanup owner deletes at the shortened deadline while
+    /// the segment index still advertises the old one, so a read admitted in
+    /// between opens a file that is already gone and answers a bare miss
+    /// instead of the retired/gone answer the contract specifies. Reads
+    /// already accepted are untouched: they hold an open descriptor and a
+    /// ledger pin, and neither is a deadline.
+    async fn shorten_object_grace(&self, deadline: Instant) {
+        let mut segments = self.segments.lock().await;
+        let mut moved = false;
+        for segment in &mut segments.segs {
+            if let SegmentVisibility::Grace {
+                removed_at,
+                serve_until,
+            } = segment.visibility
+            {
+                if serve_until > deadline {
+                    segment.visibility = SegmentVisibility::Grace {
+                        removed_at,
+                        serve_until: deadline,
+                    };
+                    moved = true;
+                }
+            }
+        }
+        if moved {
+            segments.revision = segments.revision.wrapping_add(1);
+        }
     }
 
     /// The identity a reservation against the recovery ledger is keyed by,
@@ -7771,7 +8303,7 @@ impl Session {
     /// so slow storage cannot block stop/replacement/control while an old
     /// playlist still cannot enter its successor's compatibility index.
     async fn refresh_segments(&self) {
-        self.refresh_scratch_bytes().await;
+        let _ = self.refresh_scratch_bytes().await;
         // Actor admission deliberately precedes predecessor teardown. During
         // that interval the current attempt already names the successor while
         // the directory can still contain predecessor bytes. Never prepare an
@@ -8142,6 +8674,7 @@ async fn session_info(
             global_ahead_bytes,
             limits,
             currently_suspended: suspended,
+            scratch_grant_exhausted: None,
         })
     });
     let active_hold = if suspended {
@@ -8262,11 +8795,9 @@ async fn session_info(
         advertised_bytes,
         grace_bytes,
         reserved_bytes: s
-            .scratch_reservation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .scratch
             .as_ref()
-            .map(|permit| permit.bytes)
+            .map(crate::scratch_ledger::ScratchPermit::admitted_bytes)
             .filter(|bytes| *bytes > 0),
         live_bytes: s.live_bytes.load(Acquire),
         control_demand,
@@ -8648,6 +9179,40 @@ pub(crate) struct MediaResponseAuthorization {
     kind: &'static str,
     object_name: Option<String>,
     rolling_generation_metadata_fingerprint: Option<String>,
+    /// Keeps this exact object's bytes charged while the body streams, even
+    /// after cleanup removes its name. A directory scan cannot see an
+    /// unlinked-but-open file; the filesystem still owes the space. Dropping
+    /// the authorization — at EOF, on cancellation, on a transport error —
+    /// settles the pin exactly once.
+    scratch_pin: Option<crate::scratch_ledger::ScratchPin>,
+}
+
+impl MediaResponseAuthorization {
+    /// Charge the exact object this response opened to its session's ledger
+    /// entry for the lifetime of the body. Concurrent range readers of the
+    /// same object share one charge.
+    ///
+    /// An unrelated `Arc<Session>` held by a status reader is not a pin and
+    /// never was; only an accepted read is.
+    pub(crate) fn pin_scratch_object(&mut self, bytes: u64) {
+        if self.scratch_pin.is_some() {
+            return;
+        }
+        let MediaResponseOwnerKind::Rolling { session, .. } = &self.owner.0 else {
+            return;
+        };
+        let Some(name) = self.object_name.as_deref() else {
+            return;
+        };
+        let Some(permit) = session.scratch.as_ref() else {
+            return;
+        };
+        self.scratch_pin = permit.ledger().acquire_pin(
+            permit.key(),
+            name,
+            i64::try_from(bytes).unwrap_or(i64::MAX),
+        );
+    }
 }
 
 /// Prepare a concrete, non-reentrant first-media transfer before asking the
@@ -10238,6 +10803,174 @@ pub struct SessionRequest {
     /// the server's own cap; `None` takes the server default. VOD only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub block_budget_secs: Option<f64>,
+    /// How this client will play and tear down the stream — `"hlsjs"`,
+    /// `"native"`, or absent.
+    ///
+    /// Retention-relevant request semantics, carried in the durable recipe so
+    /// a remote owner, a replay and an owner takeover all read the same class
+    /// as the create did. Deliberately **not** part of the intent
+    /// fingerprint: an added field there would change every existing
+    /// fingerprint and make a mixed-version cluster disagree about request
+    /// identity, and the durable recipe already answers "what class is this
+    /// exact session" without that cost.
+    ///
+    /// Absent, unknown, or anything but the audited hls.js contract reads as
+    /// [`ReleaseClass::Conservative`]. Omitted when absent so an old node's
+    /// recipe and a new node's recipe for the same request are byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
+}
+
+/// How long a retired presentation is kept readable after the exact viewer
+/// releases it.
+///
+/// This is a *release* class, not a capability label. It says what is known
+/// about one client's teardown ordering and retry tail, and nothing else. A
+/// class is admitted to the short window only when the client's own release
+/// site has been audited to destroy its player before it sends the DELETE.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReleaseClass {
+    /// Nothing is known, or what is known does not bound the retry tail:
+    /// native HLS, AirPlay, Apple, a legacy client that sends no transport,
+    /// an unrecognized value, or a session whose transport could still fall
+    /// back. Original grace.
+    #[default]
+    Conservative,
+    /// hls.js on the web player. `retirePlaybackPredecessor` destroys the
+    /// instance before `releaseSession` sends the DELETE
+    /// (`decode-margin.js:399-408`), and a destroyed instance issues no
+    /// further requests, so its promise can end one segment target after the
+    /// release rather than one whole advertised playlist later.
+    HlsJs,
+}
+
+/// One session segment target. The allowance for a class whose teardown is
+/// known: enough for a request already in flight when the DELETE was sent,
+/// and no more. The 20 s server `SEGMENT_WAIT` is a server-side blocking
+/// budget, not a client retry allowance, and is deliberately not used here.
+pub(crate) const EXACT_RELEASE_ALLOWANCE: Duration =
+    Duration::from_secs(plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS as u64);
+
+impl ReleaseClass {
+    /// Map the create-time transport metadata to a class.
+    ///
+    /// Everything that is not exactly the audited hls.js contract is
+    /// conservative — an omitted field, an unknown string, a native
+    /// transport. Missing information never shortens a promise.
+    pub(crate) fn from_transport(transport: Option<&str>) -> Self {
+        match transport {
+            Some("hlsjs") => Self::HlsJs,
+            _ => Self::Conservative,
+        }
+    }
+
+    fn allowance(self) -> Option<Duration> {
+        match self {
+            Self::Conservative => None,
+            Self::HlsJs => Some(EXACT_RELEASE_ALLOWANCE),
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Conservative => "conservative",
+            Self::HlsJs => "hlsjs",
+        }
+    }
+}
+
+/// True for a transport string this build is willing to store.
+///
+/// Bounded and lower-case-ascii so an arbitrary client string cannot become
+/// a metric label or a log injection. An unrecognized but well-formed value
+/// is accepted and read as [`ReleaseClass::Conservative`]; a malformed one is
+/// refused at the door with every other invalid field.
+pub(crate) fn session_transport_is_valid(transport: &str) -> bool {
+    (1..=32).contains(&transport.len())
+        && transport
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
+}
+
+/// The retired object promise, shared between the session and its cleanup
+/// owner so an exact same-viewer release can shorten it — once.
+struct RetiredRelease {
+    /// The promise the retirement computed, and the only value cleanup
+    /// sleeps on. `None` until retirement sets it.
+    serve_until: std::sync::Mutex<Option<Instant>>,
+    /// The accepted release: when it arrived and what its class allows. Held
+    /// for the case where the release lands before retirement finishes, so
+    /// `prepare_retired_object_promise` can publish an already-short promise
+    /// rather than racing the cleanup owner's sleep.
+    released: std::sync::Mutex<Option<(Instant, Duration)>>,
+    /// First writer wins. A duplicate DELETE cannot extend, renew or
+    /// re-shorten the deadline.
+    shortened: AtomicBool,
+    /// Wakes the cleanup owner when the deadline moves in.
+    wake: tokio::sync::Notify,
+}
+
+impl RetiredRelease {
+    fn new() -> Self {
+        Self {
+            serve_until: std::sync::Mutex::new(None),
+            released: std::sync::Mutex::new(None),
+            shortened: AtomicBool::new(false),
+            wake: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn deadline(&self) -> Option<Instant> {
+        *self
+            .serve_until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn publish(&self, serve_until: Instant) {
+        *self
+            .serve_until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(serve_until);
+    }
+
+    /// Record an accepted release. Returns true only for the first one, so a
+    /// duplicate DELETE can neither extend nor re-shorten the deadline.
+    fn accept_release(&self, at: Instant, allowance: Duration) -> bool {
+        if self.shortened.swap(true, AcqRel) {
+            return false;
+        }
+        *self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((at, allowance));
+        true
+    }
+
+    fn released(&self) -> Option<(Instant, Duration)> {
+        *self
+            .released
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Pull the published deadline in, never out. Returns the new value when
+    /// it actually moved.
+    fn shorten_to(&self, deadline: Instant) -> Option<Instant> {
+        let mut serve_until = self
+            .serve_until
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let current = (*serve_until)?;
+        if deadline >= current {
+            return None;
+        }
+        *serve_until = Some(deadline);
+        drop(serve_until);
+        self.wake.notify_waiters();
+        Some(deadline)
+    }
 }
 
 /// The two presentations a session can be created under (plan §2.7).
@@ -12666,11 +13399,15 @@ pub struct TranscodeManager {
     /// Even outside publication, odd while the two sample atomics change.
     /// Readers accept bytes only when both generation reads match.
     scratch_sample_generation: AtomicU64,
-    /// Serializes scratch reservations with the exact live/retired byte
-    /// projection.  Producers claim here before spawning, so concurrent starts
-    /// cannot each observe the same remaining capacity.
-    scratch_reservation_gate: Mutex<()>,
-    scratch_reserved_bytes: Arc<AtomicI64>,
+    /// One authoritative charge per rolling scratch incarnation. Admission,
+    /// growth, retirement conversion and release all linearize here, so a
+    /// session moving between the live and retired registries can no longer
+    /// be counted twice — registry membership is not part of the charge.
+    scratch_ledger: Arc<crate::scratch_ledger::ScratchLedger>,
+    /// The configured global ceiling, published for the writers that have to
+    /// consult it outside an `async` settings read — the native copy writer
+    /// asks it before every object it publishes.
+    scratch_cap: Arc<AtomicI64>,
     /// Shared with cache housekeeping. A row can say bytes exist, but only
     /// this registry can say an HTTP session on this node is using them now.
     cache_readers: crate::cachekeep::ActiveCacheReaders,
@@ -13018,8 +13755,8 @@ impl TranscodeManager {
             scratch_bytes_free: AtomicI64::new(0),
             scratch_sampled_at_unix_ms: AtomicI64::new(0),
             scratch_sample_generation: AtomicU64::new(0),
-            scratch_reservation_gate: Mutex::new(()),
-            scratch_reserved_bytes: Arc::new(AtomicI64::new(0)),
+            scratch_ledger: crate::scratch_ledger::ScratchLedger::new(),
+            scratch_cap: Arc::new(AtomicI64::new(HLS_SCRATCH_MAX_BYTES_DEFAULT)),
             cache_readers: crate::cachekeep::ActiveCacheReaders::default(),
             cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -15732,7 +16469,9 @@ impl TranscodeManager {
             segments: Mutex::new(SegmentIndex::default()),
             ahead_bytes: AtomicI64::new(0),
             live_bytes: Arc::new(AtomicI64::new(0)),
-            scratch_reservation: std::sync::Mutex::new(None),
+            scratch: None,
+            retired_release: Arc::new(RetiredRelease::new()),
+            scratch_envelope: 0,
             retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
             retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             retention_cleanup_active: Arc::new(AtomicBool::new(false)),
@@ -20450,7 +21189,9 @@ impl TranscodeManager {
         }
         let hw_slot = admission.hw_slot;
         let sw_permit = admission.sw_permit;
-        let scratch_reservation = self.reserve_rolling_scratch().await?;
+        let scratch_reservation = self
+            .reserve_rolling_scratch(RollingScratchSizing::SessionCeiling)
+            .await?;
 
         let session_id = takeover
             .as_ref()
@@ -20881,7 +21622,9 @@ impl TranscodeManager {
             segments: Mutex::new(SegmentIndex::default()),
             ahead_bytes: AtomicI64::new(0),
             live_bytes: Arc::new(AtomicI64::new(0)),
-            scratch_reservation: std::sync::Mutex::new(Some(scratch_reservation)),
+            scratch: Some(scratch_reservation.bound_to(&session_id, 0)),
+            retired_release: Arc::new(RetiredRelease::new()),
+            scratch_envelope: 0,
             retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
             retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             retention_cleanup_active: Arc::new(AtomicBool::new(false)),
@@ -21138,7 +21881,28 @@ impl TranscodeManager {
             .flatten()
             .map(|i| i.title)
             .unwrap_or_else(|| "(unknown)".to_owned());
-        let scratch_reservation = self.reserve_rolling_scratch().await?;
+        // The copy writer is the one producer whose every object passes a
+        // Rust grant boundary before it exists, so it is the one that may
+        // start small and grow. Sizing covers the *effective* startup gate —
+        // the rolling publication clock's runway, not just the copy writer's
+        // own 12 s — plus one complete segment, plus the envelope, because a
+        // session that cannot reach a published playlist has no client to
+        // drain it and nothing to wait for.
+        //
+        // Direct and transcoded output keeps the whole per-session ceiling:
+        // FFmpeg's `-f hls` writes pass no such boundary, and a measurement
+        // taken afterwards can only discover an overrun, never prevent one.
+        let copy_bitrate = file
+            .bitrate
+            .filter(|rate| *rate > 0)
+            .map(|rate| rate as f64);
+        let scratch_envelope = rolling_scratch_envelope(copy_bitrate, 1.0);
+        let scratch_reservation = self
+            .reserve_rolling_scratch(RollingScratchSizing::Startup(rolling_startup_bytes(
+                copy_bitrate,
+                1.0,
+            )))
+            .await?;
 
         let session_id = takeover
             .as_ref()
@@ -21435,7 +22199,9 @@ impl TranscodeManager {
             segments: Mutex::new(SegmentIndex::default()),
             ahead_bytes: AtomicI64::new(0),
             live_bytes: Arc::new(AtomicI64::new(0)),
-            scratch_reservation: std::sync::Mutex::new(Some(scratch_reservation)),
+            scratch: Some(scratch_reservation.bound_to(&session_id, 0)),
+            retired_release: Arc::new(RetiredRelease::new()),
+            scratch_envelope,
             retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
             retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             retention_cleanup_active: Arc::new(AtomicBool::new(false)),
@@ -21562,6 +22328,18 @@ impl TranscodeManager {
             None
         };
         if let Some(stdout) = pipe_stdout {
+            // Every object this writer publishes is authorized before it
+            // exists. That is what makes the smaller admission above safe: an
+            // under-estimated envelope makes the writer wait for the budget
+            // rather than overrun it.
+            let grants = session.scratch.as_ref().map(|permit| {
+                crate::copyseg::WriteGrants::new(
+                    Arc::clone(permit.ledger()),
+                    permit.key(),
+                    Arc::clone(&self.scratch_cap),
+                    scratch_envelope,
+                )
+            });
             spawn_copy_reader_owner(
                 Arc::clone(&session),
                 stdout,
@@ -21570,6 +22348,7 @@ impl TranscodeManager {
                 generation,
                 file.clone(),
                 video_options,
+                grants,
             );
         }
         tracing::info!(
@@ -23465,6 +24244,7 @@ impl TranscodeManager {
                         kind: publication.kind,
                         object_name: publication.object_name,
                         rolling_generation_metadata_fingerprint: None,
+                        scratch_pin: None,
                     });
                 }
                 return Err(MediaResponsePublicationRejection::OwnerGone);
@@ -23484,6 +24264,7 @@ impl TranscodeManager {
                     kind: publication.kind,
                     object_name: publication.object_name,
                     rolling_generation_metadata_fingerprint: None,
+                    scratch_pin: None,
                 });
             }
             // Keep all actor-managed publication calls for this Session
@@ -23756,6 +24537,7 @@ impl TranscodeManager {
                 kind: publication.kind,
                 object_name: publication.object_name,
                 rolling_generation_metadata_fingerprint,
+                scratch_pin: None,
             });
         }
 
@@ -23805,6 +24587,7 @@ impl TranscodeManager {
             kind: publication.kind,
             object_name: publication.object_name,
             rolling_generation_metadata_fingerprint: None,
+            scratch_pin: None,
         })
     }
 
@@ -25632,6 +26415,7 @@ impl TranscodeManager {
         limits: AheadLimits,
         global_live_bytes: i64,
         global_ahead_bytes: i64,
+        scratch_grant_exhausted: Option<i64>,
     ) {
         // Control acceptance, expiry, retirement, child replacement, and
         // producer signals all cross this gate. The actor remains the state
@@ -25672,6 +26456,7 @@ impl TranscodeManager {
             global_ahead_bytes,
             limits,
             currently_suspended: suspended,
+            scratch_grant_exhausted,
         });
         let hold = evaluation.hold;
         let want_suspend = hold.is_some();
@@ -25880,6 +26665,7 @@ impl TranscodeManager {
         // Two refreshers racing both read the same rows; last write wins and
         // they agree to within the TTL anyway.
         *self.cached_limits.write().expect("limits lock") = Some((Instant::now(), limits));
+        self.scratch_cap.store(limits.global_max_bytes, Relaxed);
         limits
     }
 
@@ -25887,33 +26673,112 @@ impl TranscodeManager {
     /// create bytes.  This is deliberately an admission decision rather than
     /// a later flow-control observation: the latter cannot make a disk ceiling
     /// hard when several starts race through an empty pre-playlist directory.
-    async fn reserve_rolling_scratch(&self) -> Result<RollingScratchReservation, String> {
-        let _gate = self.scratch_reservation_gate.lock().await;
+    async fn reserve_rolling_scratch(
+        &self,
+        initial: RollingScratchSizing,
+    ) -> Result<crate::scratch_ledger::ScratchPermit, String> {
         let limits = self.ahead_limits().await;
-        if limits.global_max_bytes <= 0 {
-            return Ok(RollingScratchReservation {
-                total: Arc::clone(&self.scratch_reserved_bytes),
-                bytes: 0,
-            });
+        // The ledger's own critical section is the linearization point, so
+        // there is no separate admission gate to hold across this settings
+        // read: two starts racing an empty directory still cannot both spend
+        // the same remaining capacity.
+        let grant = initial.grant_bytes(limits);
+        self.scratch_ledger
+            .reserve(grant, limits.global_max_bytes)
+            .map_err(|refusal| {
+                // Classified, so `session_start_error` answers 503 rather
+                // than an anonymous 500. The figures are the operator's only
+                // way to tell a full budget from a stuck cleanup.
+                tracing::warn!(
+                    charged = refusal.charged,
+                    requested = refusal.requested,
+                    configured = refusal.configured,
+                    holders = ?self.scratch_ledger.describe(6),
+                    "refusing a rolling start: scratch budget is full"
+                );
+                capacity_error(refusal.to_string())
+            })
+    }
+
+    /// The scratch charge every admission is compared against, and the
+    /// categories that explain it.
+    pub(crate) fn scratch_snapshot(&self) -> crate::scratch_ledger::ScratchSnapshot {
+        self.scratch_ledger.snapshot()
+    }
+
+    pub(crate) fn scratch_holders(&self, limit: usize) -> Vec<String> {
+        self.scratch_ledger.describe(limit)
+    }
+
+    /// One accepted exact-incarnation release, from the capability-authenticated
+    /// DELETE the client already sends.
+    ///
+    /// `session_id` is the credential and the identity at once: it names one
+    /// process-local incarnation in one of the two registries, so a stale or
+    /// unknown id finds nothing and another viewer's release cannot reach
+    /// this entry. The class comes from the durable recipe the coordinator
+    /// resolved, which is what makes a remote owner, a replay and an owner
+    /// takeover all read the same answer as the create.
+    ///
+    /// Returns the shortened deadline only when this release actually moved
+    /// it. Everything else — a conservative class, a duplicate DELETE, an
+    /// unknown session — is a no-op, and says so by returning `None`.
+    pub(crate) async fn accept_exact_session_release(
+        &self,
+        session_id: &str,
+        class: ReleaseClass,
+    ) -> Option<Instant> {
+        if class.allowance().is_none() {
+            return None;
         }
-        let session_ceiling = if limits.max_bytes > 0 {
-            limits.max_bytes
-        } else {
-            limits.global_max_bytes
+        let session = {
+            let live = self.sessions.lock().await;
+            match live.get(session_id) {
+                Some(session) => Arc::clone(session),
+                None => {
+                    drop(live);
+                    let retired = self.retired_presentations.lock().await;
+                    Arc::clone(&retired.get(session_id)?.session)
+                }
+            }
         };
-        let requested = session_ceiling.saturating_add(ROLLING_SCRATCH_IN_FLIGHT_BYTES);
-        let (charged, _) = self.global_flow_bytes().await;
-        if charged.saturating_add(requested) > limits.global_max_bytes {
-            return Err(format!(
-                "rolling scratch capacity unavailable: {} bytes charged, {} requested, {} configured",
-                charged, requested, limits.global_max_bytes
-            ));
+        if session.cached {
+            return None;
         }
-        self.scratch_reserved_bytes.fetch_add(requested, AcqRel);
-        Ok(RollingScratchReservation {
-            total: Arc::clone(&self.scratch_reserved_bytes),
-            bytes: requested,
-        })
+        let shortened = session.accept_exact_release(Instant::now(), class);
+        if let Some(deadline) = shortened {
+            // Everything that decides whether a read is admitted moves with
+            // the promise, or cleanup would outrun the serve gate.
+            session.shorten_object_grace(deadline).await;
+            let mut retired = self.retired_presentations.lock().await;
+            if let Some(entry) = retired.get_mut(session_id) {
+                if Arc::ptr_eq(&entry.session, &session) && entry.serve_until > deadline {
+                    entry.serve_until = deadline;
+                }
+            }
+        }
+        tracing::debug!(
+            session = %session_log_id(session_id),
+            class = class.label(),
+            shortened = shortened.is_some(),
+            "exact same-viewer release recorded against the retired promise"
+        );
+        shortened
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn retired_promise_for_test(&self, session_id: &str) -> Option<Instant> {
+        self.retired_presentations
+            .lock()
+            .await
+            .get(session_id)
+            .and_then(|retired| {
+                retired
+                    .session
+                    .retired_release
+                    .deadline()
+                    .or(Some(retired.serve_until))
+            })
     }
 
     /// Forget the snapshot, so the next evaluation reads the settings. For
@@ -25998,51 +26863,29 @@ impl TranscodeManager {
     /// global hold may release. The distinction is load-bearing: each
     /// session's retained history is real scratch but cannot fall until its
     /// client frontier moves beyond [`RETENTION_SECS`].
+    /// TOTAL bytes come from the ledger in one consistent read — one charge
+    /// per incarnation, whichever registry currently holds it, including the
+    /// starts that are in neither yet. The previous implementation folded the
+    /// two registries under two separate locks and then inferred provisional
+    /// usage by subtraction, so a session retiring between the folds was
+    /// charged twice and its reservation subtracted twice; the zero clamp
+    /// that hid the negative result also hid genuinely provisional starts.
+    ///
+    /// Drainable AHEAD bytes are still a live-registry question and are
+    /// deliberately computed separately: retained history is real scratch
+    /// that cannot fall until the client frontier moves past
+    /// [`RETENTION_SECS`], so it belongs to the budget and not to pacing.
     async fn global_flow_bytes(&self) -> (i64, i64) {
-        let live = self.sessions.lock().await.values().fold(
-            (0_i64, 0_i64, 0_i64),
-            |(live, ahead, reserved), session| {
-                let reservation = session
-                    .scratch_reservation
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                    .map_or(0, |permit| permit.bytes);
-                (
-                    live.saturating_add(session.live_bytes.load(Relaxed).max(reservation)),
-                    ahead + session.ahead_bytes.load(Relaxed),
-                    reserved.saturating_add(reservation),
-                )
-            },
-        );
-        let retired = self.retired_presentations.lock().await.values().fold(
-            (0_i64, 0_i64),
-            |(total, reserved), retired| {
-                let reservation = retired
-                    .session
-                    .scratch_reservation
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .as_ref()
-                    .map_or(0, |permit| permit.bytes);
-                (
-                    total.saturating_add(retired.session.live_bytes.load(Relaxed).max(reservation)),
-                    reserved.saturating_add(reservation),
-                )
-            },
-        );
-        // A start owns its permit before it can enter either registry.  Add
-        // only that provisional portion; registered reservations are already
-        // represented by max(actual, reserved) above.
-        let provisional = self
-            .scratch_reserved_bytes
-            .load(Relaxed)
-            .saturating_sub(live.2.saturating_add(retired.1))
-            .max(0);
-        (
-            live.0.saturating_add(retired.0).saturating_add(provisional),
-            live.1,
-        )
+        let charged = self.scratch_ledger.snapshot().total;
+        let ahead = self
+            .sessions
+            .lock()
+            .await
+            .values()
+            .fold(0_i64, |ahead, session| {
+                ahead.saturating_add(session.ahead_bytes.load(Relaxed))
+            });
+        (charged, ahead)
     }
 
     /// Ensure this rolling incarnation has exactly one detached consumer for
@@ -26101,9 +26944,44 @@ impl TranscodeManager {
     async fn flow_control(&self, session: &Session, session_id: &str) {
         session.refresh_segments().await;
         let limits = self.ahead_limits().await;
+        // Growth, before the hold decision that depends on it. The ledger
+        // entry is re-authorized to `measured + envelope`, so a session that
+        // has pruned its retention gives capacity back and one that is
+        // producing keeps a bounded allowance ahead of the disk.
+        let scratch_grant_exhausted = self.regrant_rolling_scratch(session, limits);
         let (global_live, global_ahead) = self.global_flow_bytes().await;
-        self.apply_ahead_window(session, session_id, limits, global_live, global_ahead)
-            .await;
+        self.apply_ahead_window(
+            session,
+            session_id,
+            limits,
+            global_live,
+            global_ahead,
+            scratch_grant_exhausted,
+        )
+        .await;
+    }
+
+    /// Re-authorize one producing session, and say whether it must stay held.
+    ///
+    /// `Some(grant)` means the budget refused to raise this entry and the
+    /// producer has already materialized everything it is authorized to. A
+    /// denied grant is a hold, never permission to write into space nobody
+    /// accounted for.
+    fn regrant_rolling_scratch(&self, session: &Session, limits: AheadLimits) -> Option<i64> {
+        let permit = session.scratch.as_ref()?;
+        if session.scratch_envelope <= 0 {
+            // Admitted with the whole per-session ceiling: there is nothing to
+            // grow into and nothing to re-grant.
+            return None;
+        }
+        let ledger = permit.ledger();
+        let key = permit.key();
+        if ledger.regrant(key, session.scratch_envelope, limits.global_max_bytes) {
+            return None;
+        }
+        ledger
+            .grant_exhausted(key)
+            .then(|| ledger.grant_of(key).unwrap_or(0))
     }
 
     /// Background loop: kill and remove sessions idle beyond the timeout,
@@ -26191,8 +27069,16 @@ impl TranscodeManager {
             }
             let (global_live, global_ahead) = self.global_flow_bytes().await;
             for (id, session) in &live {
-                self.apply_ahead_window(session, id, limits, global_live, global_ahead)
-                    .await;
+                let scratch_grant_exhausted = self.regrant_rolling_scratch(session, limits);
+                self.apply_ahead_window(
+                    session,
+                    id,
+                    limits,
+                    global_live,
+                    global_ahead,
+                    scratch_grant_exhausted,
+                )
+                .await;
             }
         }
     }
@@ -26343,6 +27229,12 @@ fn ensure_retention_cleanup(session: &Session) {
     let active = Arc::clone(&session.retention_cleanup_active);
     let garbage_bytes = Arc::clone(&session.retention_garbage_bytes);
     let live_bytes = Arc::clone(&session.live_bytes);
+    // The ledger entry outlives this Session's registry membership, so the
+    // detached worker carries the key rather than a reference to the session.
+    let scratch = session
+        .scratch
+        .as_ref()
+        .map(|permit| (Arc::clone(permit.ledger()), permit.key()));
     tokio::spawn(async move {
         #[cfg(test)]
         if let Some(pause) = &cleanup_pause {
@@ -26401,7 +27293,11 @@ fn ensure_retention_cleanup(session: &Session) {
             {
                 let bytes = queued.remove(position).1;
                 garbage_bytes.store(garbage_bytes.load(Relaxed).saturating_sub(bytes), Release);
-                live_bytes.store(live_bytes.load(Relaxed).saturating_sub(bytes), Release);
+                let live = live_bytes.load(Relaxed).saturating_sub(bytes);
+                live_bytes.store(live, Release);
+                if let Some((ledger, key)) = scratch.as_ref() {
+                    ledger.observe_used(*key, live);
+                }
             }
         }
         active.store(false, Release);
@@ -26556,9 +27452,13 @@ async fn gc_expired_segments(session: &Session) {
             .store(garbage_bytes, Release);
         // Rename changes served ownership, not disk use. Keep every handed-off
         // byte charged until detached cleanup confirms the path is absent.
-        session
-            .live_bytes
-            .store(index.total_bytes().saturating_add(garbage_bytes), Relaxed);
+        let live = index.total_bytes().saturating_add(garbage_bytes);
+        session.live_bytes.store(live, Relaxed);
+        // And say so in the ledger in the same breath. The periodic walk
+        // would find these files anyway -- they are regular files in the same
+        // flat directory -- but "anyway" is up to a poll interval away, and
+        // the global cap is compared against the ledger on every admission.
+        session.observe_scratch_bytes(live);
     }
     drop(index);
     drop(producer_transition);
@@ -27551,7 +28451,9 @@ fn test_session_with_control(
         segments: Mutex::new(SegmentIndex::default()),
         ahead_bytes: AtomicI64::new(0),
         live_bytes: Arc::new(AtomicI64::new(0)),
-        scratch_reservation: std::sync::Mutex::new(None),
+        scratch: None,
+        retired_release: Arc::new(RetiredRelease::new()),
+        scratch_envelope: 0,
         retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
         retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
         retention_cleanup_active: Arc::new(AtomicBool::new(false)),
@@ -29088,6 +29990,7 @@ pub(crate) mod tests {
             hdr10: false,
             presentation: Default::default(),
             block_budget_secs: None,
+            transport: None,
         };
         let cap = |manager: &Arc<TranscodeManager>, req: &SessionRequest| {
             let manager = Arc::clone(manager);
@@ -29918,6 +30821,7 @@ pub(crate) mod tests {
             hdr10: false,
             presentation: Default::default(),
             block_budget_secs: None,
+            transport: None,
         };
         let hdr10 = SessionRequest {
             hdr10: true,
@@ -29978,6 +30882,7 @@ pub(crate) mod tests {
             hdr10: false,
             presentation: Default::default(),
             block_budget_secs: None,
+            transport: None,
             previous_session_id: None,
             reopen_reason: None,
         };
@@ -33666,10 +34571,317 @@ pub(crate) mod tests {
             .await
             .expect("global ceiling");
 
-        let first = mgr.reserve_rolling_scratch().await.expect("first permit");
-        assert!(mgr.reserve_rolling_scratch().await.is_err());
+        let first = mgr
+            .reserve_rolling_scratch(RollingScratchSizing::SessionCeiling)
+            .await
+            .expect("first permit");
+        assert!(mgr
+            .reserve_rolling_scratch(RollingScratchSizing::SessionCeiling)
+            .await
+            .is_err());
         drop(first);
-        assert!(mgr.reserve_rolling_scratch().await.is_ok());
+        assert!(mgr
+            .reserve_rolling_scratch(RollingScratchSizing::SessionCeiling)
+            .await
+            .is_ok());
+    }
+
+    /// Missing information never shortens a promise.
+    #[test]
+    fn scratch_charge_only_the_audited_transport_earns_a_shorter_promise() {
+        assert_eq!(
+            ReleaseClass::from_transport(Some("hlsjs")),
+            ReleaseClass::HlsJs
+        );
+        for conservative in [
+            None,
+            Some("native"),
+            Some("airplay"),
+            Some("hls"),
+            Some("hlsjs2"),
+            Some(""),
+        ] {
+            assert_eq!(
+                ReleaseClass::from_transport(conservative),
+                ReleaseClass::Conservative,
+                "{conservative:?} is not the audited teardown contract"
+            );
+        }
+        assert_eq!(
+            EXACT_RELEASE_ALLOWANCE.as_secs(),
+            u64::from(plurx_core::transcode::ROLLING_PRESENTATION_TARGET_SECS),
+            "the allowance is one session segment target, not the server's blocking budget"
+        );
+
+        assert!(session_transport_is_valid("hlsjs"));
+        assert!(session_transport_is_valid("native"));
+        assert!(!session_transport_is_valid(""));
+        assert!(!session_transport_is_valid("HLSJS"), "labels stay bounded");
+        assert!(!session_transport_is_valid("hls js"));
+        assert!(!session_transport_is_valid(&"x".repeat(33)));
+    }
+
+    /// One accepted release moves the promise in, once. A duplicate DELETE
+    /// cannot extend it, renew it, or shorten it a second time.
+    #[test]
+    fn scratch_charge_an_exact_release_shortens_one_promise_and_never_renews_it() {
+        let now = Instant::now();
+        let release = RetiredRelease::new();
+        let original = now + Duration::from_secs(360);
+        release.publish(original);
+
+        assert!(release.accept_release(now, EXACT_RELEASE_ALLOWANCE));
+        let shortened = release
+            .shorten_to(now + EXACT_RELEASE_ALLOWANCE)
+            .expect("the first release moves the deadline");
+        assert_eq!(release.deadline(), Some(shortened));
+        assert!(shortened < original);
+
+        // A duplicate DELETE arrives a minute later.
+        let later = now + Duration::from_secs(60);
+        assert!(
+            !release.accept_release(later, EXACT_RELEASE_ALLOWANCE),
+            "the latch is taken; a second release is a no-op"
+        );
+        assert_eq!(
+            release.shorten_to(later + EXACT_RELEASE_ALLOWANCE),
+            None,
+            "a later deadline is not a shortening"
+        );
+        assert_eq!(release.deadline(), Some(shortened));
+    }
+
+    #[tokio::test]
+    async fn scratch_charge_a_stale_or_unknown_release_reaches_no_promise() {
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            Arc::clone(&store),
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        assert_eq!(
+            mgr.accept_exact_session_release("never-existed", ReleaseClass::HlsJs)
+                .await,
+            None,
+            "an unknown session id names no incarnation"
+        );
+
+        let dir = crate::test_tempdir().expect("scratch");
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        mgr.register_session_for_test("live-one", Arc::clone(&session))
+            .await;
+        assert_eq!(
+            mgr.accept_exact_session_release("live-one", ReleaseClass::Conservative)
+                .await,
+            None,
+            "a class with no allowance records nothing at all"
+        );
+        assert_eq!(
+            session.retired_release.released(),
+            None,
+            "and leaves the latch untaken for a later eligible release"
+        );
+    }
+
+    /// The startup allowance has to cover the gate that actually holds the
+    /// first playlist back, or a session admitted under it can never publish
+    /// anything for a client to drain.
+    #[test]
+    fn scratch_charge_startup_sizing_covers_the_effective_publish_gate() {
+        // 48 s of rolling runway at 1x, plus one 16 s segment, at 8 Mb/s.
+        let bytes = rolling_startup_bytes(Some(8_000_000.0), 1.0);
+        let media = 64 * 8_000_000 / 8;
+        assert!(
+            bytes > media,
+            "sizing must exceed the {media} bytes of startup media: {bytes}"
+        );
+        assert!(
+            bytes
+                > i64::from(plurx_core::transcode::COPY_PUBLISH_GATE_SECS)
+                    .saturating_mul(8_000_000 / 8),
+            "the copy writer's own 12 s gate is not the effective one"
+        );
+        // Scaling with playback rate moves the runway with it.
+        assert!(rolling_startup_bytes(Some(8_000_000.0), 2.0) > bytes);
+        // An unknown rate gets the bootstrap, which is explicitly not a bound.
+        assert_eq!(
+            rolling_startup_bytes(None, 1.0),
+            ROLLING_SCRATCH_UNKNOWN_RATE_BYTES
+        );
+        assert_eq!(
+            rolling_scratch_envelope(None, 1.0),
+            ROLLING_SCRATCH_UNKNOWN_RATE_BYTES
+        );
+        // Nothing smaller than one in-flight object is ever admitted.
+        let limits = AheadLimits {
+            max_secs: 180,
+            max_bytes: HLS_AHEAD_MAX_BYTES_DEFAULT,
+            global_max_bytes: HLS_SCRATCH_MAX_BYTES_DEFAULT,
+        };
+        assert_eq!(
+            RollingScratchSizing::Startup(1).grant_bytes(limits),
+            ROLLING_SCRATCH_MIN_GRANT_BYTES
+        );
+        // And nothing larger than the ceiling the whole-reservation path uses.
+        assert_eq!(
+            RollingScratchSizing::Startup(i64::MAX).grant_bytes(limits),
+            RollingScratchSizing::SessionCeiling.grant_bytes(limits)
+        );
+    }
+
+    /// A real refusal, from the real admission path, through the real HTTP
+    /// mapper. Constructing an already-prefixed string and asserting the
+    /// mapper answers 503 would pass on the broken build too: the defect was
+    /// that `reserve_rolling_scratch` returned a bare `String` that carried
+    /// no class at all, so `session_start_error` fell through to an anonymous
+    /// 500 and the browser treated a full scratch budget as a corrupt movie.
+    #[tokio::test]
+    async fn scratch_charge_real_refusal_answers_503_through_the_http_mapper() {
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            Arc::clone(&store),
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let per_session = 100_i64;
+        let reservation = per_session + ROLLING_SCRATCH_IN_FLIGHT_BYTES;
+        store
+            .put_setting(keys::HLS_AHEAD_MAX_BYTES, &per_session.to_string())
+            .await
+            .expect("per-session ceiling");
+        store
+            .put_setting(keys::HLS_SCRATCH_MAX_BYTES, &reservation.to_string())
+            .await
+            .expect("global ceiling");
+
+        let _admitted = mgr
+            .reserve_rolling_scratch(RollingScratchSizing::SessionCeiling)
+            .await
+            .expect("the budget admits exactly one");
+        let refusal = mgr
+            .reserve_rolling_scratch(RollingScratchSizing::SessionCeiling)
+            .await
+            .expect_err("a full budget refuses the next start");
+
+        assert!(
+            is_retryable_capacity_error(&refusal),
+            "a full scratch budget is temporary contention, not a server fault: {refusal}"
+        );
+        assert!(
+            refusal.contains(&reservation.to_string()),
+            "the operator needs the figures to tell a full budget from a stuck cleanup: {refusal}"
+        );
+        assert_eq!(
+            crate::http::hls::session_start_error_status_for_test(7, refusal),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    /// Real retained inventory, not reservations, is what the budget sums.
+    ///
+    /// One playback plus three successive replacements is the incident: at
+    /// the default 2 GiB + 64 MiB reservation the fourth could never be
+    /// admitted, whatever was actually on the disk. Here the first three
+    /// retire with a small measured inventory and the fourth fits.
+    #[tokio::test]
+    async fn scratch_charge_a_fourth_replacement_fits_when_the_retained_bytes_fit() {
+        use plurx_core::store::SqliteStore;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            Arc::clone(&store),
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        // The shipped defaults: a 2 GiB per-session ceiling under an 8 GiB
+        // budget, which admits exactly three full reservations.
+        let ceiling = HLS_AHEAD_MAX_BYTES_DEFAULT + ROLLING_SCRATCH_IN_FLIGHT_BYTES;
+        assert!(HLS_SCRATCH_MAX_BYTES_DEFAULT / ceiling == 3);
+
+        let mut retired = Vec::new();
+        for _ in 0..3 {
+            let permit = mgr
+                .reserve_rolling_scratch(RollingScratchSizing::SessionCeiling)
+                .await
+                .expect("a replacement admits");
+            let key = permit.key();
+            let ledger = permit.ledger();
+            // Real transitions: fence the writers, then convert on a
+            // completed measurement. No permit is dropped to make room.
+            ledger.begin_retirement(key);
+            let generation = ledger.inventory_generation(key).expect("generation");
+            assert!(ledger.commit_quiescent_measurement(key, generation, 128 * 1024 * 1024));
+            retired.push(permit);
+        }
+        let (charged, _) = mgr.global_flow_bytes().await;
+        assert_eq!(charged, 3 * 128 * 1024 * 1024);
+        let fourth = mgr
+            .reserve_rolling_scratch(RollingScratchSizing::SessionCeiling)
+            .await;
+        assert!(
+            fourth.is_ok(),
+            "384 MiB of retained media must not exhaust an 8 GiB budget"
+        );
+        let keys: Vec<_> = retired.iter().map(|permit| permit.key()).collect();
+        drop((fourth, retired));
+        assert_eq!(
+            mgr.scratch_snapshot().total,
+            3 * 128 * 1024 * 1024,
+            "dropping the owner is not proof that a file disappeared; the bytes stay charged"
+        );
+        for key in keys {
+            // What cleanup does once it has proved the names are gone.
+            mgr.scratch_ledger.account_unlink_all(key);
+        }
+        assert_eq!(mgr.scratch_snapshot().total, 0);
+        assert_eq!(mgr.scratch_snapshot().entries, 0);
+    }
+
+    /// A partial scan is not an inventory. The scanner preserves the previous
+    /// charge on a stat failure, which is right and also indistinguishable at
+    /// the call site from "measured that much" — so it reports which happened
+    /// and the conversion refuses to collapse a reservation onto a guess.
+    #[tokio::test]
+    async fn scratch_charge_an_incomplete_measurement_keeps_the_conservative_charge() {
+        let dir = crate::test_tempdir().expect("scratch");
+        tokio::fs::write(dir.path().join("init.mp4"), vec![0_u8; 17])
+            .await
+            .expect("init");
+        let session = test_session(dir.path().to_path_buf());
+        assert_eq!(
+            session.measure_scratch_bytes().await,
+            ScratchMeasurement::Complete(17)
+        );
+
+        let missing = test_session(dir.path().join("gone-with-the-session"));
+        assert_eq!(
+            missing.measure_scratch_bytes().await,
+            ScratchMeasurement::Absent,
+            "a removed directory owes nothing; that is not the same as a failed read"
+        );
+
+        // A sparse fixture: the scanner sums apparent length, so the charge
+        // is the promise the namespace makes and not its allocated blocks.
+        let sparse = crate::test_tempdir().expect("sparse");
+        let file = tokio::fs::File::create(sparse.path().join("seg00001.m4s"))
+            .await
+            .expect("sparse segment");
+        file.set_len(4 * 1024 * 1024)
+            .await
+            .expect("apparent length");
+        drop(file);
+        let sparse_session = test_session(sparse.path().to_path_buf());
+        assert_eq!(
+            sparse_session.measure_scratch_bytes().await,
+            ScratchMeasurement::Complete(4 * 1024 * 1024)
+        );
     }
 
     #[tokio::test]
@@ -33682,7 +34894,7 @@ pub(crate) mod tests {
             .await
             .expect("temporary segment");
         let session = test_session(dir.path().to_path_buf());
-        session.refresh_scratch_bytes().await;
+        let _ = session.refresh_scratch_bytes().await;
         assert_eq!(session.live_bytes.load(Acquire), 46);
     }
 
@@ -33812,6 +35024,7 @@ pub(crate) mod tests {
                     global_max_bytes: 0,
                 },
                 currently_suspended: true,
+                scratch_grant_exhausted: None,
                 startup_protected: false,
             })
         };
@@ -33880,6 +35093,7 @@ pub(crate) mod tests {
                 global_ahead_bytes: 1_000,
                 limits,
                 currently_suspended,
+                scratch_grant_exhausted: None,
             })
         };
         let held = flow(false);
@@ -33963,6 +35177,7 @@ pub(crate) mod tests {
             global_ahead_bytes: 1_000,
             limits,
             currently_suspended: false,
+            scratch_grant_exhausted: None,
         });
         assert_eq!(loaded_flow.production_target_seconds, Some(52));
         assert_eq!(
@@ -34009,6 +35224,7 @@ pub(crate) mod tests {
             global_ahead_bytes: 1_000,
             limits,
             currently_suspended: true,
+            scratch_grant_exhausted: None,
         });
         assert_eq!(supply_pending.production_target_seconds, Some(30));
         assert_eq!(
@@ -34070,6 +35286,7 @@ pub(crate) mod tests {
             global_ahead_bytes: 1_000,
             limits,
             currently_suspended: false,
+            scratch_grant_exhausted: None,
         });
         assert_eq!(active.policy, "explicit_demand");
         assert_eq!(active.production_ahead_seconds, Some(60));
@@ -34097,6 +35314,7 @@ pub(crate) mod tests {
             global_ahead_bytes: 1_000,
             limits,
             currently_suspended: false,
+            scratch_grant_exhausted: None,
         });
         assert_eq!(
             faster.production_target_seconds,
@@ -34123,6 +35341,7 @@ pub(crate) mod tests {
             global_ahead_bytes: 1_000,
             limits,
             currently_suspended: false,
+            scratch_grant_exhausted: None,
         });
         assert_eq!(
             capacity.hold.map(|hold| hold.reason),
@@ -34151,6 +35370,7 @@ pub(crate) mod tests {
                 global_max_bytes: 8_000,
             },
             currently_suspended: false,
+            scratch_grant_exhausted: None,
         });
         assert_eq!(unbounded_time.production_target_seconds, None);
         assert_eq!(
@@ -34202,6 +35422,7 @@ pub(crate) mod tests {
                 global_ahead_bytes: 0,
                 limits,
                 currently_suspended: false,
+                scratch_grant_exhausted: None,
             })
         };
         let starting_with_ahead = |demand: &crate::playback_control::PlaybackDemandSnapshot,
@@ -34223,6 +35444,7 @@ pub(crate) mod tests {
                 global_ahead_bytes: 0,
                 limits,
                 currently_suspended,
+                scratch_grant_exhausted: None,
             })
         };
 
@@ -34307,6 +35529,7 @@ pub(crate) mod tests {
             global_ahead_bytes: 0,
             limits,
             currently_suspended: false,
+            scratch_grant_exhausted: None,
         });
         assert_eq!(
             over_disk.hold.map(|hold| hold.reason),
@@ -34328,6 +35551,7 @@ pub(crate) mod tests {
             global_ahead_bytes: 0,
             limits,
             currently_suspended: false,
+            scratch_grant_exhausted: None,
         });
         assert_eq!(
             retried.hold.map(|hold| hold.reason),
@@ -34350,6 +35574,7 @@ pub(crate) mod tests {
             global_ahead_bytes: 9_000,
             limits,
             currently_suspended: false,
+            scratch_grant_exhausted: None,
         });
         assert_eq!(
             full_disk.hold.map(|hold| hold.reason),
@@ -34401,6 +35626,7 @@ pub(crate) mod tests {
             global_ahead_bytes: 0,
             limits,
             currently_suspended: false,
+            scratch_grant_exhausted: None,
         });
         assert_eq!(seeking.production_ahead_seconds, Some(65));
         assert_eq!(seeking.production_target_seconds, Some(16));
@@ -35110,6 +36336,7 @@ pub(crate) mod tests {
             hdr10: false,
             presentation: Default::default(),
             block_budget_secs: None,
+            transport: None,
         }
     }
 
@@ -36609,6 +37836,7 @@ pub(crate) mod tests {
             },
             0,
             0,
+            None,
         )
         .await;
 
@@ -36953,7 +38181,26 @@ pub(crate) mod tests {
 
         let dir = crate::test_tempdir().expect("tempdir");
         seeded_session_dir(dir.path(), 40, 4.0).await;
-        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        // Built against the manager's own ledger, because the global cap is
+        // the ledger now: a fixture with no admission contributes nothing,
+        // and this test exists to prove failed physical deletion stays inside
+        // the cap.
+        let ledger_store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = TranscodeManager::new(
+            ledger_store,
+            dir.path().join("manager-work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let mut fixture = test_session(dir.path().to_path_buf());
+        fixture.scratch = Some(
+            manager
+                .scratch_ledger
+                .reserve(0, HLS_SCRATCH_MAX_BYTES_DEFAULT)
+                .expect("fixture admission")
+                .bound_to("failed-garbage", 0),
+        );
+        let session = Arc::new(fixture);
         session.refresh_segments().await;
         session.fetched_end_ms.store(300_000, Relaxed);
         let pause = Arc::new(tokio::sync::Barrier::new(2));
@@ -37006,13 +38253,6 @@ pub(crate) mod tests {
             session.live_bytes.load(Acquire),
             retained_bytes + charged_garbage,
             "failed physical deletion remains included in the hard scratch cap"
-        );
-        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let manager = TranscodeManager::new(
-            store,
-            dir.path().join("manager-work"),
-            EncoderCaps::default(),
-            Pipeline::Cpu,
         );
         manager
             .sessions
@@ -37664,6 +38904,7 @@ pub(crate) mod tests {
                 },
                 0,
                 0,
+                None,
             )
             .await;
             assert!(session.suspended.load(Relaxed), "held again");
@@ -39151,7 +40392,9 @@ pub(crate) mod tests {
             segments: Mutex::new(SegmentIndex::default()),
             ahead_bytes: AtomicI64::new(0),
             live_bytes: Arc::new(AtomicI64::new(0)),
-            scratch_reservation: std::sync::Mutex::new(None),
+            scratch: None,
+            retired_release: Arc::new(RetiredRelease::new()),
+            scratch_envelope: 0,
             retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
             retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
             retention_cleanup_active: Arc::new(AtomicBool::new(false)),
@@ -43474,6 +44717,7 @@ pub(crate) mod tests {
             hdr10: false,
             presentation: Default::default(),
             block_budget_secs: None,
+            transport: None,
         };
 
         // The idempotency identity is `intent_fingerprint`, so that is what
@@ -43616,6 +44860,7 @@ pub(crate) mod tests {
             hdr10: false,
             presentation: Default::default(),
             block_budget_secs: None,
+            transport: None,
         };
         let supersession_user = serde_json::json!(["username", "paul"]).to_string();
 
@@ -43689,6 +44934,7 @@ pub(crate) mod tests {
             hdr10: false,
             presentation: Default::default(),
             block_budget_secs: None,
+            transport: None,
         };
         assert!(mgr.create_session(&request, "paul").await.is_err());
 
@@ -43740,6 +44986,7 @@ pub(crate) mod tests {
             hdr10: false,
             presentation: Default::default(),
             block_budget_secs: None,
+            transport: None,
         };
         let previous = mgr
             .create_session(&original, "paul")

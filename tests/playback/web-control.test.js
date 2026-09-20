@@ -113,6 +113,9 @@ function fullOpenHarness() {
     shippedSource("beginPlaybackControlSeek"), shippedSource("rememberPlaybackSelection"),
     shippedSource("noSegments"), shippedSource("copyHlsMseOk"),
     shippedSource("playbackInitialRoute"), shippedSource("restartPendingPlaybackOpen"),
+    shippedSource("unexecutedPlaybackDestinationSec"),
+    shippedSource("playbackChangeRecipeKey"),
+    shippedSource("playbackChangeAlreadyInFlight"),
     shippedSource("requestPlaybackMediaChange"),shippedSource("executePlaybackMediaChange"),
     shippedSource("streamGeneration"),shippedSource("transcodeOpts"),shippedSource("transcodeHeight"),shippedSource("sessionHeight"),
     shippedSource("startCopyHls"),
@@ -778,11 +781,23 @@ async function main() {
   assert.equal(seeking.render_state,"seeking");
   assert.equal(seeking.seek_target_ms,20_000);
   video.seeking=false; player._seekPreview=null;
-  player.controlSeek={sequence:7,targetMs:45_000};
+  // A destination an attachment has begun executing is this presentation's
+  // own seek, and survives after the preview state is cleared.
+  player.controlSeek={sequence:7,targetMs:45_000,executed:true};
   const committedSeek=adapter.playbackControlSnapshot(video,player);
   assert.equal(committedSeek.position_ms,15_000, "the current playhead stays current");
+  assert.equal(committedSeek.render_state,"seeking");
   assert.equal(committedSeek.seek_target_ms,45_000,
     "a committed destination survives after preview state is cleared");
+  // A destination no attachment has executed belongs to a replacement that is
+  // still being created, or was refused. Reporting it here is what reset the
+  // server's startup baseline and reaped a playing incumbent at 30 s.
+  player.controlSeek={sequence:8,targetMs:45_000,executed:false};
+  const desiredOnly=adapter.playbackControlSnapshot(video,player);
+  assert.equal(desiredOnly.render_state,"rendering",
+    "the incumbent reports the picture it is showing, not a destination it is not seeking to");
+  assert.equal(desiredOnly.seek_target_ms,null);
+  assert.equal(desiredOnly.position_ms,15_000);
   player.controlSeek=null;
   let presentationNow=0;
   const seekIntentAdapter=new Function("performance",[
@@ -1016,6 +1031,11 @@ async function main() {
       "function clientLog(){} function playbackContext(){return {};} function renderPlayerInfo(){}",
       "function clearPlaybackControlWaiters(){} function notifyPlaybackControl(){} function endWait(){}",
       "function cancelPendingSeek(){}",
+      // Every execution records what it is, so an identical command arriving
+      // while its create is open can be suppressed instead of superseding it.
+      shippedSource("unexecutedPlaybackDestinationSec"),
+      shippedSource("playbackChangeRecipeKey"),
+      shippedSource("playbackChangeAlreadyInFlight"),
       "function play(id,title,position){calls.push({kind:'play',position});}",
       "function newAttempt(){} function teardownHls(){} function resetMediaSource(){}",
       "function clearSubs(){} function pbSyncSubIcon(){} function setLoading(){} function armStall(){}",

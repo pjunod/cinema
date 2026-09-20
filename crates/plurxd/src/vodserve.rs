@@ -8520,6 +8520,7 @@ mod tests {
             hdr10: false,
             presentation: Default::default(),
             block_budget_secs: None,
+            transport: None,
         }
     }
 

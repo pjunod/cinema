@@ -1,0 +1,183 @@
+{
+  "_": [
+    "Control snapshots the shipped web client produces, recorded so both sides",
+    "of the R1 contract are tested against the same bytes.",
+    "",
+    "tests/playback/seek-control.test.js drives the real",
+    "`playbackControlSnapshot` out of crates/plurxd/src/web/player/session.js",
+    "and asserts it still emits exactly these. The Rust regression",
+    "`seek_scratch_incumbent_survives_a_pending_replacement` feeds them to the",
+    "real startup actor. Neither side can drift without the other failing.",
+    "",
+    "The protocol envelope (protocol/generation/control_epoch/sequence/",
+    "client_instance_id/supported_actions) is added by makeRequest and by the",
+    "Rust test; only the snapshot itself is recorded here.",
+    "",
+    "`incumbent_poisoned_*` is what the client used to send: it is not",
+    "produced by any current code path, and it is here so the server",
+    "regression can show the pre-repair shape reaching startup_expired at the",
+    "same cadence the repaired shape survives."
+  ],
+  "incumbent_while_replacement_pending": {
+    "demand": "active",
+    "position_ms": 100000,
+    "buffered_from_ms": 98000,
+    "buffered_through_ms": 130000,
+    "playback_rate": 1,
+    "render_state": "rendering",
+    "seek_target_ms": null,
+    "observed_download_bps": null,
+    "selection": {
+      "quality": {"mode": "auto"},
+      "audio_track": 0,
+      "subtitle": {"mode": "off", "track": null},
+      "audio_offset_ms": 0,
+      "codec": "auto",
+      "dynamic_range": "auto"
+    },
+    "capabilities": {
+      "platform": "web",
+      "max_height": 1080,
+      "codecs": ["h264"],
+      "dynamic_ranges": ["sdr"],
+      "dual_player_preparation": false
+    },
+    "observation": {"decoder_state": "ready"},
+    "acknowledgement": null
+  },
+  "incumbent_after_250ms_of_progress": {
+    "demand": "active",
+    "position_ms": 100300,
+    "buffered_from_ms": 98000,
+    "buffered_through_ms": 130000,
+    "playback_rate": 1,
+    "render_state": "rendering",
+    "seek_target_ms": null,
+    "observed_download_bps": null,
+    "selection": {
+      "quality": {"mode": "auto"},
+      "audio_track": 0,
+      "subtitle": {"mode": "off", "track": null},
+      "audio_offset_ms": 0,
+      "codec": "auto",
+      "dynamic_range": "auto"
+    },
+    "capabilities": {
+      "platform": "web",
+      "max_height": 1080,
+      "codecs": ["h264"],
+      "dynamic_ranges": ["sdr"],
+      "dual_player_preparation": false
+    },
+    "observation": {"decoder_state": "ready"},
+    "acknowledgement": null
+  },
+  "attached_local_seek_in_progress": {
+    "demand": "active",
+    "position_ms": 100000,
+    "buffered_from_ms": 98000,
+    "buffered_through_ms": 130000,
+    "playback_rate": 1,
+    "render_state": "seeking",
+    "seek_target_ms": 130000,
+    "observed_download_bps": null,
+    "selection": {
+      "quality": {"mode": "auto"},
+      "audio_track": 0,
+      "subtitle": {"mode": "off", "track": null},
+      "audio_offset_ms": 0,
+      "codec": "auto",
+      "dynamic_range": "auto"
+    },
+    "capabilities": {
+      "platform": "web",
+      "max_height": 1080,
+      "codecs": ["h264"],
+      "dynamic_ranges": ["sdr"],
+      "dual_player_preparation": false
+    },
+    "observation": {"decoder_state": "ready"},
+    "acknowledgement": null
+  },
+  "incumbent_poisoned_by_a_refused_destination": {
+    "demand": "active",
+    "position_ms": 100000,
+    "buffered_from_ms": 98000,
+    "buffered_through_ms": 130000,
+    "playback_rate": 1,
+    "render_state": "seeking",
+    "seek_target_ms": 174000,
+    "observed_download_bps": null,
+    "selection": {
+      "quality": {"mode": "auto"},
+      "audio_track": 0,
+      "subtitle": {"mode": "off", "track": null},
+      "audio_offset_ms": 0,
+      "codec": "auto",
+      "dynamic_range": "auto"
+    },
+    "capabilities": {
+      "platform": "web",
+      "max_height": 1080,
+      "codecs": ["h264"],
+      "dynamic_ranges": ["sdr"],
+      "dual_player_preparation": false
+    },
+    "observation": {"decoder_state": "ready"},
+    "acknowledgement": null
+  },
+  "incumbent_poisoned_after_250ms_of_progress": {
+    "demand": "active",
+    "position_ms": 100300,
+    "buffered_from_ms": 98000,
+    "buffered_through_ms": 130000,
+    "playback_rate": 1,
+    "render_state": "seeking",
+    "seek_target_ms": 174000,
+    "observed_download_bps": null,
+    "selection": {
+      "quality": {"mode": "auto"},
+      "audio_track": 0,
+      "subtitle": {"mode": "off", "track": null},
+      "audio_offset_ms": 0,
+      "codec": "auto",
+      "dynamic_range": "auto"
+    },
+    "capabilities": {
+      "platform": "web",
+      "max_height": 1080,
+      "codecs": ["h264"],
+      "dynamic_ranges": ["sdr"],
+      "dual_player_preparation": false
+    },
+    "observation": {"decoder_state": "ready"},
+    "acknowledgement": null
+  },
+  "genuinely_unpresented_start": {
+    "demand": "active",
+    "position_ms": 0,
+    "buffered_from_ms": null,
+    "buffered_through_ms": 0,
+    "playback_rate": 1,
+    "render_state": "starting",
+    "seek_target_ms": null,
+    "observed_download_bps": null,
+    "selection": {
+      "quality": {"mode": "auto"},
+      "audio_track": 0,
+      "subtitle": {"mode": "off", "track": null},
+      "audio_offset_ms": 0,
+      "codec": "auto",
+      "dynamic_range": "auto"
+    },
+    "capabilities": {
+      "platform": "web",
+      "max_height": 1080,
+      "codecs": ["h264"],
+      "dynamic_ranges": ["sdr"],
+      "dual_player_preparation": false
+    },
+    "observation": {"decoder_state": "unknown"},
+    "acknowledgement": null
+  }
+}
