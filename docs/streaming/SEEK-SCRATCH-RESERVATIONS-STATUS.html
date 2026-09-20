@@ -32,16 +32,16 @@ both the copy path, so the repair reaches them; this is named rather than hidden
 
 <h2>Evidence</h2>
 <table><tr><th>Check</th><th>Result</th></tr>
-<tr><td><code>cargo test -p plurxd --bin plurxd scratch_charge_</code></td><td class="done">23 passed</td></tr>
-<tr><td><code>cargo test -p plurxd --bin plurxd seek_scratch_</code></td><td class="done">4 passed</td></tr>
+<tr><td><code>cargo test -p plurxd --bin plurxd scratch_charge_</code></td><td class="done">24 passed</td></tr>
+<tr><td><code>cargo test -p plurxd --bin plurxd seek_scratch_</code></td><td class="done">5 passed</td></tr>
 <tr><td><code>cargo test -p plurxd --bin plurxd mkv_hls</code></td><td class="done">16 passed</td></tr>
 <tr><td><code>cargo fmt --all -- --check</code> · <code>cargo check --all-targets</code></td><td class="done">clean at the pinned 1.97.1</td></tr>
-<tr><td><code>node --test tests/playback/seek-control.test.js</code></td><td class="done">5 passed</td></tr>
+<tr><td><code>node --test tests/playback/seek-control.test.js</code></td><td class="done">8 passed, each new case mutation-checked</td></tr>
 <tr><td>Web suites (settings sections, player DOM, input contract, surface contract, themes, layout)</td><td class="done">pass</td></tr>
-<tr><td>Three suites already red at <code>a1414368</code></td><td class="todo">Two <code>copyseg</code> cases, one Android assertion in <code>web-policy</code>, one in <code>web-control</code>, and the Playwright startup check. Confirmed identical against a pristine base extraction; not caused here.</td></tr>
+<tr><td>Already red at <code>a1414368</code></td><td class="todo">Two <code>copyseg</code> cases, one Android assertion in <code>web-policy</code>, one in <code>web-control</code>, the Playwright startup check, and <code>failed_retention_garbage_unlink_cannot_reexpose_a_served_path</code>, which <b>hangs</b> at the base too. Each confirmed by running the same command against a pristine base extraction; none caused here.</td></tr>
 <tr><td><code>tests/ui-structure.golden</code></td><td class="todo">Known drift from the new Developer card. Needs a booted <code>plurxd</code> plus Playwright, which this session has neither of. Not in the fast lane.</td></tr>
-<tr><td>Adversarial review</td><td class="todo">At the PR, before the fast lane</td></tr>
-<tr><td>Fast lane · merge</td><td class="todo">After the review findings are addressed</td></tr>
+<tr><td>Adversarial review</td><td class="done">Three reviewers, one per unit boundary. Twenty-four findings: twenty-one changed the code, three recorded as accepted limitations. The disposition table is in the receipt.</td></tr>
+<tr><td>Fast lane · merge</td><td class="wip">Review fixes pushed; running the fast lane on PR #389.</td></tr>
 <tr><td>Physical acceptance</td><td class="todo">Needs the devices — prompt below</td></tr>
 </table>
 
