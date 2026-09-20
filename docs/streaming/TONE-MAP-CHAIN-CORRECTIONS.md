@@ -4,6 +4,8 @@
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Read the review's §3.1 row Q3, the assessment's Q3 and F-stream-3 rows
 ([ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md)),
 and the module header of
@@ -467,3 +469,17 @@ served it.
 3. Whether the `desat=0` choice should be revisited alongside the gamut
    order: it is deliberately out of scope; note it if the M2 stills show
    hue shifts that gamut-before-curve does not remove.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

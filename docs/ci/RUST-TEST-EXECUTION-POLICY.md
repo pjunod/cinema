@@ -5,6 +5,8 @@ F-hist-7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Companion to [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (the
 ruling this document asks Paul to revisit), [VALIDATION.md](../VALIDATION.md)
 (how paths select evidence) and
@@ -445,3 +447,17 @@ trigger — and M3–M6 still land.
 4. **Node version pin.** The fast lane uses 22; local machines run 26. M5
    decides which is asserted; running both in preflight doubles a
    40-second step and is acceptable if the ordering bug is real.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

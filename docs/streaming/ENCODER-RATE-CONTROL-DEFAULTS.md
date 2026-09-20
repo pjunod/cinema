@@ -4,6 +4,8 @@
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Read the review's §3.1 row Q1 and the assessment's Q1 / F-stream-1 rows
 ([ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md))
 first, then §4 of
@@ -348,3 +350,17 @@ actually serve sessions; the doc row matches.
    (they become caps, not targets): no — unchanged caps keep
    `Rung.peak_kbps` and every advertised BANDWIDTH honest (see
    [HONEST-MASTER-PLAYLIST.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)).
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

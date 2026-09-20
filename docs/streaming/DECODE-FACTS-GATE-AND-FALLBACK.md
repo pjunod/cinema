@@ -7,6 +7,8 @@ complete probe identity stays in the key; the final source check is not
 sampled) as its guardrail · **Written:** 2026-09-20 against `main` @
 `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Companion to [VOD-ENCODING.md](VOD-ENCODING.md) (immutable VOD preparation
 is the main caller), [DECODER-EFFORT-HANDOFF.md](DECODER-EFFORT-HANDOFF.md)
 (where the descriptor-bound fact model came from) and
@@ -509,3 +511,17 @@ between the two rounds.
    `source_binding()` and refusing `CatalogRow` — the type's doc says
    some must; none do. Not this plan's change, but the fact is recorded
    here for the owner of the immutable-VOD contract.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

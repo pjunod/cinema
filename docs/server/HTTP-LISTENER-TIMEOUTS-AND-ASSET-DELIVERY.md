@@ -6,6 +6,8 @@
 [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md))
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Read §2 first — it quotes the listener, the router layers and the asset
 handlers as they are, with the one hyper fact the whole item rests on. Then
 build §5 in order: M1 (listener + handler deadlines), M2 (compressed and
@@ -581,3 +583,17 @@ Report exact text of any error; do not retry more than once.
    picks `same-origin` for the reason in §3.3; if any client-side
    diagnostic turns out to read `document.referrer` cross-origin, this is
    the one line to revisit.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

@@ -5,6 +5,8 @@ F-build-11 / F-build-13 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Companion to [OPERATIONS.md](../OPERATIONS.md) (how the fleet is run) and
 [RUST-TEST-EXECUTION-POLICY.md](RUST-TEST-EXECUTION-POLICY.md) (which lane
 the ffmpeg change in §3.4 lands in). Read review §4.6 and §0's release
@@ -492,3 +494,17 @@ the whole procedure. Profile changes roll back by the `sha-` image tag.
 5. **`epub_facts` vs `parse_epub`.** Two EPUB parsers exist (metadata facts
    and the reader's publication model); whether both get a target depends
    on the first one's cost.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

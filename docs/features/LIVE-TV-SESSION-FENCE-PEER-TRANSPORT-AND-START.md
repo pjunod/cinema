@@ -5,6 +5,8 @@ L6 / F-ltv-6 and L9 / F-ltv-11, F-ltv-12, F-ltv-14 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Against:** `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Read the review's §3.4 rows L2, L3, L6 and L9 first, then the assessment rows
 L2, L3, L6, L9 and F-ltv-2/3/6/11/12/14 plus correction 9 and correction 13
 in [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md)
@@ -721,3 +723,17 @@ from the web client: the toast must say "restarted", not "expired".
    auth revocation, cluster operations, fragment index) are the same
    pattern; several already hold a transport for their lifetime. A
    follow-up census, not this plan.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

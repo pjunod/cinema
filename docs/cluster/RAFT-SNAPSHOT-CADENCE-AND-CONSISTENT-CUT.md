@@ -4,6 +4,8 @@
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Read §2 first: it is the exact writer sequence the assessment's correction 4
 protects, and every design line in §3 is derived from it. Work M0 before
 anything else — the review's "≥8 s stall self-fences every lease" is a model
@@ -377,3 +379,17 @@ identical. M3's deferral is observable only under low space.
    does not run `wal_checkpoint(TRUNCATE)` on a timer that would now log a
    busy error during copies (grep `wal_checkpoint` in the vendor tree at
    build time).
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

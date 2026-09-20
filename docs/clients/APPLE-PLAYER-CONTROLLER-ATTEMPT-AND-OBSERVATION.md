@@ -5,6 +5,8 @@ F-apple-3, F-apple-4, F-apple-6, F-apple-7, F-apple-9, F-apple-10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Companion to
 [APPLE-DISPLAY-CRITERIA-AND-AUDIO-SESSION.md](APPLE-DISPLAY-CRITERIA-AND-AUDIO-SESSION.md)
 (A1/A2 — land those first; the review's A3 row says "do after A1/A2" and
@@ -476,3 +478,17 @@ after each `apple-build-bump`; rollback is the previous build number.
    (which A2 deliberately keeps off on tvOS) is answered by the §6 Apple TV
    prompt; if not, the answer is to register `MPRemoteCommandCenter`
    targets only, not to activate the session.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

@@ -6,6 +6,8 @@ F-android-14 / F-android-15 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Companion to
 [ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET.md](ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET.md)
 (the load control M7's builder takes by role) and
@@ -578,3 +580,17 @@ release note says so.
    detail should also reach the server's telemetry table (bounded columns)
    or stay in the client log is a telemetry-schema decision outside this
    plan.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

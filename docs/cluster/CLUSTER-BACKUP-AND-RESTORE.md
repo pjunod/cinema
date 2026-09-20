@@ -5,6 +5,8 @@ F-build-ops-codehealth-2 (the brief's "F-build-2") from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Read [OPERATIONS.md](../OPERATIONS.md) "Rolling back a deploy" first (it is
 the gap this closes), then §2 here for what the tree already gives you, then
 execute §5 one milestone per draft PR under the fast lane. The deliverable is
@@ -460,3 +462,17 @@ schema changes are introduced (`restore_generation` is a settings row).
    A "merge the survivor's newer writes" path is deliberately not proposed;
    confirm that is acceptable, since the alternative is a per-table conflict
    design.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

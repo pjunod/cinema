@@ -5,6 +5,8 @@ F-web-11, F-web-12, F-web-13, F-web-15 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Companion to [WEB-SHELL-LAYOUT.md](WEB-SHELL-LAYOUT.md) (the served-order
 rules this plan builds on and must not weaken) and
 [WEB-PLAYER-RECOVERY-AND-LOCAL-SEEK.md](WEB-PLAYER-RECOVERY-AND-LOCAL-SEEK.md)
@@ -503,3 +505,17 @@ exactly twice.
    *cadence* of unchanged-position remux beats is not known. The 5.7 PR
    greps `crates/` for consumers of the progress route's timing and lists
    them in the PR body before merging.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

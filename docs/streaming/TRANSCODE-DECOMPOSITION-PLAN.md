@@ -6,6 +6,8 @@ F-core-10, F-sc-12, F-hist-13, F-build-ops-codehealth-3 and -14 from
 (§5.3 "this quarter", size L) · **Written:** 2026-09-20 against `main` @
 `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Companion to [WEB-SHELL-LAYOUT.md](../clients/WEB-SHELL-LAYOUT.md) and
 [WEB-SHELL-SPLIT-PLAN.md](../clients/WEB-SHELL-SPLIT-PLAN.md) (the one split
 this repo has done with a byte-identity proof, PR #371; this plan copies its
@@ -686,3 +688,17 @@ still pass; `cargo test --release -p plurxd <owner>_shipped_shape` green;
    first PR answers it, and the split of the M8 PRs follows the answer.
 4. Whether Paul wants the §3.6 registry evaluation written at all this
    quarter, or the duplication documented as intentional now.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

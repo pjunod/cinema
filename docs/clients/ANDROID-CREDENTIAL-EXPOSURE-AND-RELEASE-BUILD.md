@@ -5,6 +5,8 @@ F-android-6 / F-android-7 / F-android-8 / F-android-12 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Companion to [SECURITY.md](../SECURITY.md) (the credential model this plan
 narrows), [PUBLISHING.md](../PUBLISHING.md) §5 (the signing gap it closes)
 and [CLIENT-DEPLOY-PROMPT.md](CLIENT-DEPLOY-PROMPT.md) (the deploy path that
@@ -510,3 +512,17 @@ his Mac. M10 follows.
 5. **Play App Signing.** PUBLISHING.md recommends enrolling; sideload-only
    deployment does not need it, but the upload key generated in M7 should
    be the one enrolled later so the fleet and Play share a lineage.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

@@ -5,6 +5,8 @@
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Companion to [PLAYBACK.md](../PLAYBACK.md) (how a segment reaches a client)
 and [STREAMING-RELIABILITY-IMPLEMENTATION.md](STREAMING-RELIABILITY-IMPLEMENTATION.md)
 (the delivery accounting the HLS pump exists to keep honest). Read §2.2 in
@@ -303,3 +305,17 @@ lab4 with HLS p99 not worse than M1's.
 4. Whether tokio runtime metrics (`tokio_unstable`) are compiled in decides
    whether blocking-pool hops can be counted directly or only inferred from
    thread count. Check `RUSTFLAGS` in the Dockerfile before the M1 run.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

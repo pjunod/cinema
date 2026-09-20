@@ -4,6 +4,8 @@
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Companion to [WEB-SHELL-LAYOUT.md](WEB-SHELL-LAYOUT.md) (which file holds
 what) and [PLAYBACK-SURFACE-CONTRACT.md](PLAYBACK-SURFACE-CONTRACT.md) (who may
 stop the player and when a surface may be raised) — this is *what changes in
@@ -586,3 +588,17 @@ reload: report which banner appears at 5 s and at 20 s and its exact text.
    (`asset-layout.test.js`) or WEB-SHELL-LAYOUT §1.2 is read as "one head
    row by rule", the alternative is first *body* row before the sidecars,
    which loses sidecar coverage. Flag in the 5.3 PR; the plan prefers head.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

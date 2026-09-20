@@ -5,6 +5,8 @@ audit from S3's row in
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Read §2 for the two loops as they are, then §3 for the four changes, each
 of which keeps the property the assessment insists on: the local check is a
 hint and the replicated claim stays atomic. Execute §5 in order; M0 is the
@@ -325,3 +327,17 @@ redeploy.
 3. Whether a settings-write `Notify` should be a general facility (C15's
    telemetry loop and the Live TV owner reads want the same thing) or stay
    local to these two loops; this plan keeps it local.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

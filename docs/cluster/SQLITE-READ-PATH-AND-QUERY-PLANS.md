@@ -5,6 +5,8 @@ F-sc-8 (as corrected in §0 of the review), F-sc-14 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Read §2 first: it carries the actual SQL and the connection helpers as they
 stand, because every decision below is "run this statement through `EXPLAIN
 QUERY PLAN` on a representative database and act on what it says", and a
@@ -627,3 +629,17 @@ refusal, so M5 is deployed last and alone.
 4. If the Resolution sort's correlated `MAX(f.height)` shows up in M0 as
    the slowest page, a materialized `items.max_height` maintained by the
    scan is a schema change beyond this plan's scope; flag, do not build.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

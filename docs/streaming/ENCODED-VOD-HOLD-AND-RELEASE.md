@@ -5,6 +5,8 @@ half), assessment correction 5, §5.1 item 8 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Companion to [VOD-ENCODING.md](VOD-ENCODING.md) ("Capacity belongs to a
 process, not a rendition" is the section this plan must not contradict) and
 [VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md) (§2.4 is the ahead-window
@@ -477,3 +479,17 @@ no `T`-state ffmpeg older than `SESSION_IDLE_TTL` with no reader; no
    enough on paper; the M3 PR must list every `wait_for_slot` caller's
    deadline (`transcode.rs:19473`, `:20118`, `vodencode.rs:128`) and, if
    any is under 2 s, the poll drops to 250 ms (`ADMISSION_POLL`).
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

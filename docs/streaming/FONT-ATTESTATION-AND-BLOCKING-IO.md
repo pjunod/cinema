@@ -5,6 +5,8 @@ correction 6, §5.1 item 7 and §5.2 "frozen font environment per recipe" from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Companion to [VOD-ENCODING.md](VOD-ENCODING.md) — its paragraph "Text burn
 also fingerprints active Fontconfig rules and every discoverable font
 object … Any dependency or font replacement in the running daemon withdraws
@@ -395,3 +397,17 @@ GPT prompt for the fleet check after deploy:
    digest is removed when no rendition references it) or to a count/age
    cap? Proposed: reference counting via the rendition registry, with a
    startup sweep as the backstop.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

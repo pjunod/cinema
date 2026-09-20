@@ -6,6 +6,8 @@ M–L) from
 §0, §3.1, §5.3 and the assessment's correction 2 · **Written:** 2026-09-20
 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Companion to [VOD-ENCODING.md](VOD-ENCODING.md) (the no-reorder decision this
 document proposes to revisit, §"Timing decisions" item 5) and
 [SEGMENTER-PLAN.md](SEGMENTER-PLAN.md) §4.2 (the cut-cleanliness rule the
@@ -562,3 +564,17 @@ running renditions keep theirs until they end. No migration either way.
 4. Whether the gain at the fleet's actual bitrates (Q1's rate-control
    work may move them) justifies carrying the reorder recipe per family.
    M1 decides with M0's table in hand.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

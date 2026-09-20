@@ -7,6 +7,8 @@ from
 [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md))
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Read §2 first: it quotes the walk, the per-file stat, the two provider
 clients and the join request as they are, and states what the job lease
 does and does not do when one of them hangs. Then build §5 in order — M1
@@ -535,3 +537,17 @@ stop, paste the last 50 lines of journalctl -u plurxd, and do not restart.
    the handlers refuse a repeat, the fix belongs to the cluster
    membership plan, and M3 ships with the ambiguous error pointing at
    "start a new join" instead.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

@@ -6,6 +6,8 @@
 [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md))
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 Read §2 first — it explains the two-phase revocation fence in the words of
 the code that implements it, because the first draft of the review tried to
 remove it and the assessment refused. Then build §5: M1 (bounded admission
@@ -484,3 +486,17 @@ Report anything that did not match, with the time of day for log lookup.
    short-lived file grant lands before or after the web client stops
    sending `?token=` on JSON routes decides which client PR goes first;
    this plan only requires that the metric exist before any refusal.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

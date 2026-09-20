@@ -5,6 +5,8 @@ closed-captions half of Q9 / L7 / F-ltv-8 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Against:** `main` @ `88a3957a`
 
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
 This is a design document first and a plan second: the assessment's verdict
 on L4 is "keep opportunity; design separately", and its list of what the
 design must define (slow-consumer eviction, bounded per-viewer queues,
@@ -570,3 +572,17 @@ x264 and QSV as proven:
    FFmpeg path; a broadcast capture proves the service ids the fleet
    actually sees. M3 wants both; if only one can be had, the synthesised
    one gates the code and the capture gates the advertising.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |
