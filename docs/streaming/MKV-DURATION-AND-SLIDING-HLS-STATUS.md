@@ -23,7 +23,7 @@ operator decision.
 | W2b publication clock | qualified | Publication, playback-rate pacing, typed capacity, pause, fetch-stopped, replacement, and EOF cases pass | Preserve actor-owned publication timing |
 | W3 object promises | qualified | Rolling-session retention and object-promise regressions pass, including grace ownership and hard-cap accounting | Preserve immutable served snapshots |
 | W4 diagnostics/clients | qualified for affected surfaces | Rust serialization/reservation tests, the full web lane, Android build/JVM/lint, Apple compilation, and the three changed Apple tests pass. Developer enablement remains advisory | Broad Apple-suite failures stay with the separate unit-failure batching process |
-| W5 review/qualification | PR #377 open; promotion gate pending | The single adversarial review's four findings are fixed. Candidate `063a638d` passes the affected fast lane; `328d6c92` integrates current `main`, claims Apple build 172 and Android versionCode 109, and passes exact-tree compile/static policy | Wait for the current PR head's promotion gate, then merge |
+| W5 review/qualification | PR #377 open; promotion gate pending | The single adversarial review's four findings are fixed. Candidate `063a638d` passes the affected fast lane; `d8496f5f` integrates current `main`, claims Apple build 172 and Android versionCode 109, passes exact-tree compile/static policy, and updates every reviewed ownership count exposed by hosted preflight | Wait for the current PR head's promotion gate, then merge |
 
 ## Working decisions — defaults remain visible
 
@@ -71,6 +71,7 @@ operator decision.
 | 2026-09-19 | `e0b68578` | `scripts/js-check`, changed-from `validation.mobile_versions`, `validation.apple_build --merge-target origin/main`, and `git diff --check` | passed; Apple build 171 and Android versionCode 108 exceed the current merge target and all generated Apple claims agree |
 | 2026-09-19 | current `0f1e5e43` reconciliation | pinned `cargo fmt --check`, `cargo check -p plurxd --all-targets --locked`, `cargo clippy -p plurxd --all-targets --locked -- -D warnings`, and `scripts/js-check` | passed after the second main sync; no behavioral suite was reopened |
 | 2026-09-19 | `328d6c92` | `make history-check`, `make validation-lint`, changed-from `validation.mobile_versions`, `validation.apple_build --merge-target origin/main`, and `git diff --check` | passed: 2,064 corrective commits audited, 27 points / 34 checks / 2,010 files catalogued, Apple build 172 and Android versionCode 109 valid |
+| 2026-09-19 | `d8496f5f` | hosted `fast policy and contract preflight`, then `python3 -m unittest tests.validation.test_rolling_producer_ownership_inventory` after correction | hosted run found 18 stale owner/task/timer/process counts; every delta was traced to the bounded packet probe, publication clock, retired-object cleanup, or immutable segment promise, documented in the ledger, and the focused 7-test inventory passed |
 
 The affected behavioral lane is complete. No zero-match command is counted as
 acceptance; the first combined Apple command matched two tests because one
