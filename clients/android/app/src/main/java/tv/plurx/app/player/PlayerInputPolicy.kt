@@ -48,12 +48,29 @@ internal enum class PlayerInputOutcome(val contractName: String) {
     MenuFocus("menu_focus"),
     Hide("hide"),
     Exit("exit"),
+    ReturnBrowser("return_browser"),
     ToggleChrome("toggle_chrome"),
     Ignore("ignore"),
 }
 
 /** Pure transcription of tests/playback/player-input-contract.json. */
+internal enum class PlayerPresentation(val contractName: String) { Browser("browser"), Fullscreen("fullscreen") }
+internal enum class PlayerChromePlacement(val contractName: String) { Overlay("overlay"), Inline("inline") }
+
 internal object PlayerInputPolicy {
+    fun routeWatch(surface: PlayerInputSurface, state: PlayerInputState, input: PlayerContractInput,
+                   presentation: PlayerPresentation, chrome: PlayerChromePlacement): PlayerInputOutcome {
+        if (input == PlayerContractInput.Idle && chrome == PlayerChromePlacement.Inline) return PlayerInputOutcome.Ignore
+        if (input == PlayerContractInput.Back && state !in listOf(PlayerInputState.Scrub, PlayerInputState.Menu, PlayerInputState.Info)) {
+            if (presentation == PlayerPresentation.Browser) return PlayerInputOutcome.Exit
+            return if (state in listOf(PlayerInputState.Transport, PlayerInputState.Timeline)) PlayerInputOutcome.Hide else PlayerInputOutcome.ReturnBrowser
+        }
+        return route(surface, state, input)
+    }
+
+    fun resolveWatch(outcome: PlayerInputOutcome, browserMounted: Boolean): PlayerInputOutcome =
+        if (outcome == PlayerInputOutcome.ReturnBrowser && !browserMounted) PlayerInputOutcome.Exit else outcome
+
     fun route(
         surface: PlayerInputSurface,
         state: PlayerInputState,

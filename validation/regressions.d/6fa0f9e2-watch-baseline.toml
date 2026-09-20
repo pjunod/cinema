@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["6fa0f9e28"]
+points = ["web.experience", "playback.pipeline", "android.client"]
+checks = ["web-static", "rust-gate", "android-jvm"]
+reason = "Current-main player asset loading threw on a stray f before a subtitle comment; the served-order loader now passes. Three Android subtitle policy tests now supply their intended HDR10 delivery range and the focused SubtitlePolicyTest passes. The Rust create-guard regression uses assert! for its Boolean verdict, passes its focused test, and passes pinned Rust 1.97.1 workspace Clippy with warnings denied."

@@ -89,6 +89,8 @@ private struct PlayerInputContractFixture: Decodable {
     // strategy rewrites dictionary KEYS too, so the routing table's inputs
     // arrive as `playPause`/`skipBack`/`tapSurface` and no longer match the
     // contract's raw values — which is the whole point of this fixture.
+    struct Watch: Decodable { let routing: [String: [String: [String: [String: [String: String]]]]] }
+    let watch: Watch
     let routing: [String: [String: [String: String]]]
     let steps: Steps
     let timings: Timings
@@ -118,6 +120,7 @@ private struct PlayerInputContractFixture: Decodable {
     }
 
     enum CodingKeys: String, CodingKey {
+        case watch
         case routing
         case steps
         case timings
@@ -2816,6 +2819,24 @@ final class AppleClientTests: XCTestCase {
                         expected,
                         "\(surfaceName)/\(stateName)/\(inputName)"
                     )
+                }
+            }
+        }
+    }
+
+    func testWatchPresentationRoutingMatchesSharedContract() throws {
+        let fixture = try playerInputContractFixture()
+        for presentation in PlayerPresentation.allCases {
+            for chrome in PlayerChromePlacement.allCases {
+                for surface in PlayerInputSurface.allCases {
+                    for state in PlayerInputState.allCases {
+                        for input in PlayerContractInput.allCases {
+                            let expected = try XCTUnwrap(fixture.watch.routing[presentation.rawValue]?[chrome.rawValue]?[surface.rawValue]?[state.rawValue]?[input.rawValue])
+                            let actual = PlayerInputRouting.routeWatch(surface: surface, state: state, input: input, presentation: presentation, chrome: chrome)
+                            XCTAssertEqual(actual.rawValue, expected)
+                            XCTAssertEqual(PlayerInputRouting.resolveWatch(actual, browserMounted: false).rawValue, expected == "return_browser" ? "exit" : expected)
+                        }
+                    }
                 }
             }
         }

@@ -274,8 +274,9 @@ let AUTOPLAY=null;
 // player resolves it later regardless of which layout drew the page, so it is
 // data, not presentation, and a layout that forgot to do it would break
 // playback rather than just look different.
-async function loadItem(id){
+async function loadItem(id,isCurrent=()=>true){
   const [d, libs]=await Promise.all([api(`/items/${id}`), libsCached()]);
+  if(!isCurrent())return null;
   const it=d.item;
   // A pre-play track choice belongs to the item it was made on. Arriving at
   // another one starts from the server's defaults again — the alternative is a
@@ -591,11 +592,13 @@ function chapterList(p){
   }
   return rows.length?`<div class="chapters"><h2 class="section">Chapters</h2><div class="row" style="align-items:flex-start">${rows.join('')}</div></div>`:'';
 }
-async function viewItem(id){
+async function viewItem(id,isCurrent=()=>true){
   const generation=PAGE_RENDER_GENERATION;
   layoutChrome("home",`<div class="empty">Loading…</div>`);
-  const page=await loadItem(id);
-  if(generation!==PAGE_RENDER_GENERATION||location.hash!==`#/item/${id}`)return;
+  const page=await loadItem(id,()=>isCurrent()&&generation===PAGE_RENDER_GENERATION&&location.hash===`#/item/${id}`);
+  if(!page)return;
+  if(!isCurrent()||generation!==PAGE_RENDER_GENERATION||location.hash!==`#/item/${id}`)return;
+  WATCH_ITEM_PAGE=page;
   document.getElementById("main").innerHTML=layoutView("item",page);
   DV_FILE_PAGE_FILES=page.files||[];
   hydrateDvFileActions(DV_FILE_PAGE_FILES).then(active=>{

@@ -46,13 +46,32 @@ enum PlayerInputOutcome: String, CaseIterable {
     case menuFocus = "menu_focus"
     case hide
     case exit
+    case returnBrowser = "return_browser"
     case toggleChrome = "toggle_chrome"
     case ignore
 }
 
 /// Pure transcription of `tests/playback/player-input-contract.json`.
 /// Platform events never enter this file; adapters map them to the enums above.
+enum PlayerPresentation: String, CaseIterable { case browser, fullscreen }
+enum PlayerChromePlacement: String, CaseIterable { case overlay, inline }
+
 enum PlayerInputRouting {
+    static func routeWatch(surface: PlayerInputSurface, state: PlayerInputState,
+                           input: PlayerContractInput, presentation: PlayerPresentation,
+                           chrome: PlayerChromePlacement) -> PlayerInputOutcome {
+        if input == .idle && chrome == .inline { return .ignore }
+        if input == .back && ![.scrub, .menu, .info].contains(state) {
+            if presentation == .browser { return .exit }
+            return [.transport, .timeline].contains(state) ? .hide : .returnBrowser
+        }
+        return route(surface: surface, state: state, input: input)
+    }
+
+    static func resolveWatch(_ outcome: PlayerInputOutcome, browserMounted: Bool) -> PlayerInputOutcome {
+        outcome == .returnBrowser && !browserMounted ? .exit : outcome
+    }
+
     static func route(
         surface: PlayerInputSurface,
         state: PlayerInputState,
