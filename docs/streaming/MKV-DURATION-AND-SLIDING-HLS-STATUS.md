@@ -23,7 +23,7 @@ operator decision.
 | W2b publication clock | qualified | Publication, playback-rate pacing, typed capacity, pause, fetch-stopped, replacement, and EOF cases pass | Preserve actor-owned publication timing |
 | W3 object promises | qualified | Rolling-session retention and object-promise regressions pass, including grace ownership and hard-cap accounting | Preserve immutable served snapshots |
 | W4 diagnostics/clients | qualified for affected surfaces | Rust serialization/reservation tests, the full web lane, Android build/JVM/lint, Apple compilation, and the three changed Apple tests pass. Developer enablement remains advisory | Broad Apple-suite failures stay with the separate unit-failure batching process |
-| W5 review/qualification | qualified; promotion pending | The single adversarial review's four findings are fixed. Candidate `063a638d` passes the affected fast lane; current `main` is integrated | Open the consolidated PR, wait for the promotion gate, then merge |
+| W5 review/qualification | PR #377 open; promotion gate pending | The single adversarial review's four findings are fixed. Candidate `063a638d` passes the affected fast lane; current `main` is integrated | Wait for the current PR head's promotion gate, then merge |
 
 ## Working decisions — defaults remain visible
 
@@ -74,9 +74,9 @@ selector was stale, and the corrected selector was then run separately.
 
 ## Promotion state — candidate is ready for its gate
 
-The consolidated Forgejo pull request, hosted promotion receipt, merge,
-deployment, physical-device acceptance, and production exact-identity requeue
-are outstanding. This candidate authorizes only PR promotion and merge; it does
-not authorize deployment or production mutation. The implementation is not an
+Forgejo PR #377 is open. Its hosted promotion receipt, merge, deployment,
+physical-device acceptance, and production exact-identity requeue are
+outstanding. This candidate authorizes only PR promotion and merge; it does not
+authorize deployment or production mutation. The implementation is not an
 incident fix until the forced rolling route and the exact-identity immutable
 route both pass their physical acceptance boundaries.
