@@ -2178,3 +2178,13 @@ source = "clients/apple/Sources/PlaybackControlReporter.swift"
 source_anchor = "let retryableTransport = status == 408 || status == nil"
 test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
 test_anchor = "func testPauseGraceExpiryStopsWithoutReopeningOrRetrying()"
+
+# The preflight correction touched the Android README's live version claim;
+# the document sweep checks that claim against the actual release input.
+[[fixes]]
+id = "android.watch-preflight-build-claim"
+commits = ["3d0599779"]
+source = "clients/android/README.md"
+source_anchor = "Status: **v0.3.0**, build"
+test = "tests/operations/test_mobile_build_claims.py"
+test_anchor = "def test_repository_build_claims_match_release_inputs(self):"
