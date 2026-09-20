@@ -6061,6 +6061,20 @@ final class AppleClientTests: XCTestCase {
             {
                 "id": "session-17",
                 "progress_idle_ms": 11000,
+                "startup_state": "presented",
+                "presentation_progress_seen": true,
+                "produced_end_ms": 141000,
+                "served_end_ms": 125000,
+                "staged_bytes": 4096,
+                "playlist_target_ms": 16000,
+                "served_revision": 9,
+                "next_publication_in_ms": 4000,
+                "pause_grace_remaining_ms": 178000,
+                "retirement_reason": null,
+                "advertised_bytes": 7340032,
+                "grace_bytes": 1048576,
+                "reserved_bytes": 16777216,
+                "live_bytes": 8388608,
                 "published_end_ms": 125000,
                 "fetched_end_ms": 121000,
                 "fetched_segment": 60,
@@ -6077,6 +6091,20 @@ final class AppleClientTests: XCTestCase {
         )
 
         XCTAssertEqual(status.progressIdleMs, 11_000)
+        XCTAssertEqual(status.startupState, "presented")
+        XCTAssertEqual(status.presentationProgressSeen, true)
+        XCTAssertEqual(status.producedEndMs, 141_000)
+        XCTAssertEqual(status.servedEndMs, 125_000)
+        XCTAssertEqual(status.stagedBytes, 4_096)
+        XCTAssertEqual(status.playlistTargetMs, 16_000)
+        XCTAssertEqual(status.servedRevision, 9)
+        XCTAssertEqual(status.nextPublicationInMs, 4_000)
+        XCTAssertEqual(status.pauseGraceRemainingMs, 178_000)
+        XCTAssertNil(status.retirementReason)
+        XCTAssertEqual(status.advertisedBytes, 7_340_032)
+        XCTAssertEqual(status.graceBytes, 1_048_576)
+        XCTAssertEqual(status.reservedBytes, 16_777_216)
+        XCTAssertEqual(status.liveBytes, 8_388_608)
         XCTAssertEqual(status.publishedEndMs, 125_000)
         XCTAssertEqual(status.fetchedEndMs, 121_000)
         XCTAssertEqual(status.fetchedSegment, 60)

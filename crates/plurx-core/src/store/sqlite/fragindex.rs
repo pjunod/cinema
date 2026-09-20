@@ -62,6 +62,7 @@ impl FragmentIndexStore for SqliteStore {
         reason: &str,
         rows: u32,
         diagnostic: &crate::content_analysis::IndexDiagnostic,
+        max_attempts: u32,
     ) -> Result<FragmentIndexOutcome, StoreError> {
         let source = source.clone();
         let reason = reason.to_owned();
@@ -78,6 +79,7 @@ impl FragmentIndexStore for SqliteStore {
                 rows,
                 &diagnostic,
                 now_ms,
+                max_attempts,
             )
         })
         .await

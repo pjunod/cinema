@@ -3343,6 +3343,13 @@ pub struct CutPolicy {
     pub max_bytes: usize,
     /// Secondary ceiling in ticks, for sources whose bytes never pile up.
     pub max_ticks: u64,
+    /// Optional strict bound for an unplanned rolling presentation.
+    ///
+    /// This is deliberately absent from persisted immutable plans: their
+    /// boundaries and covering target were already decided together. A live
+    /// segmenter uses it to prove a fixed advertised target before any media
+    /// can be exposed.
+    pub strict_max_ticks: Option<u64>,
 }
 
 impl CutPolicy {
@@ -3360,7 +3367,14 @@ impl CutPolicy {
             first_floor_ticks: first_floor_seconds.min(floor_seconds) as u64 * ts,
             max_bytes,
             max_ticks: max_seconds as u64 * ts,
+            strict_max_ticks: None,
         }
+    }
+
+    /// Add the strict bound used by an unplanned rolling presentation.
+    pub fn with_strict_max_seconds(mut self, strict_max_seconds: u32, timescale: u32) -> Self {
+        self.strict_max_ticks = Some(strict_max_seconds as u64 * timescale.max(1) as u64);
+        self
     }
 
     /// Should the fragments accumulated so far be published *before* the
@@ -4253,6 +4267,20 @@ impl Segmenter {
         class: CutClass,
     ) -> Result<Option<CutReason>, Fmp4Error> {
         let Some(plan) = self.boundaries.as_ref() else {
+            if let Some(strict) = self.policy.strict_max_ticks {
+                let incoming = fragment.video_duration(&self.init);
+                if incoming > strict {
+                    return Err(Fmp4Error::Unsupported(format!(
+                        "one video fragment runs {:.3}s, longer than the fixed {:.3}s rolling HLS target",
+                        incoming as f64 / self.video_timescale as f64,
+                        strict as f64 / self.video_timescale as f64,
+                    )));
+                }
+                if !self.pending.is_empty() && self.pending_ticks.saturating_add(incoming) > strict
+                {
+                    return Ok(Some(CutReason::TimeCeiling));
+                }
+            }
             return Ok(self.policy.cut_before(
                 self.pending_ticks,
                 self.pending_bytes,
@@ -4335,6 +4363,14 @@ impl Segmenter {
         for (offset, fragments) in chunks.iter().enumerate() {
             let index = self.next_index + offset as u64;
             let seconds = self.seconds_for(fragments, CutReason::EndOfStream);
+            if let Some(strict_ticks) = self.policy.strict_max_ticks {
+                let strict_seconds = strict_ticks as f64 / self.video_timescale as f64;
+                if !seconds.is_finite() || seconds <= 0.0 || seconds > strict_seconds {
+                    return Err(Fmp4Error::Unsupported(format!(
+                        "final segment {index} has a truthful EXTINF of {seconds:.6}s, outside the fixed {strict_seconds:.3}s rolling HLS target"
+                    )));
+                }
+            }
             let segment = merge(fragments, &self.init, index as u32 + 1)?;
             published.push(Published {
                 index,
@@ -4369,7 +4405,9 @@ impl Segmenter {
 
         for track in &self.init.tracks {
             let ceiling = scale_ticks(
-                self.policy.max_ticks,
+                self.policy
+                    .strict_max_ticks
+                    .unwrap_or(self.policy.max_ticks),
                 self.video_timescale,
                 track.timescale.max(1),
             )
@@ -4656,20 +4694,11 @@ impl Segmenter {
 
 /// The playlist header, rewritten with the playlist on every segment.
 ///
-/// **`TARGETDURATION` is `ceil` of the longest segment published so far, and
-/// it only ever grows.** SEGMENTER-PLAN §3 said to declare the duration
-/// ceiling (15) up front instead, so the tag could never decrease. The
-/// reasoning was right and the consequence was not: on a live EVENT playlist
-/// this tag *is* the client's reload interval (RFC 8216 §6.3.4), so declaring
-/// 15 told Safari to wait fifteen seconds between playlist fetches. It loaded
-/// a playlist holding one 9.2-second segment, played it out, and then sat with
-/// nothing to play for the remaining 5.8 seconds — measured at 5631 ms, once
-/// per film, always at the same position, on a server that was 55 seconds
-/// ahead the whole time.
-///
-/// ffmpeg's HLS muxer grows this tag, which is why the path never had the
-/// problem before. Growing is what a live playlist needs; the invariant that
-/// matters is that it never *shrinks*, and this never does.
+/// The caller supplies a covering target that was fixed before the first
+/// response. Rolling writers must enforce that bound before publishing every
+/// segment; immutable VOD supplies the covering target from its completed
+/// plan. A served target must never grow under a client that already holds an
+/// earlier snapshot.
 ///
 /// No `#EXT-X-INDEPENDENT-SEGMENTS`. With clean cuts the claim would actually
 /// be true for most segments — but a ceiling cut makes it a lie again, and a
@@ -6634,6 +6663,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_strict_rolling_target_cuts_before_the_crossing_fragment() {
+        let feed = pipe("open-gop");
+        let (init, fragments, _) = read_all(&feed);
+        let timescale = init.video().expect("video").timescale;
+        let first_ticks = fragments[0].video_duration(&init);
+        let second_ticks = fragments[1].video_duration(&init);
+        let strict_ticks = first_ticks.saturating_add(second_ticks);
+        let strict_seconds =
+            u32::try_from(strict_ticks.div_ceil(u64::from(timescale))).expect("fixture duration");
+        let policy = CutPolicy::new(60, 60, usize::MAX, 60, timescale)
+            .with_strict_max_seconds(strict_seconds, timescale);
+        let strict = policy.strict_max_ticks.expect("strict target");
+        let mut segmenter = Segmenter::new(init, policy);
+
+        let mut crossing = None;
+        for fragment in fragments {
+            if segmenter.pending_ticks > 0
+                && segmenter
+                    .pending_ticks
+                    .saturating_add(fragment.video_duration(&segmenter.init))
+                    > strict
+            {
+                crossing = segmenter.push(fragment).expect("strict cut");
+                break;
+            }
+            assert!(segmenter
+                .push(fragment)
+                .expect("pending fragment")
+                .is_none());
+        }
+        let published = crossing.expect("a crossing fragment flushed the pending run");
+        assert_eq!(published.reason, CutReason::TimeCeiling);
+        assert!(published.seconds <= f64::from(strict_seconds));
+        assert!(
+            published.seconds < 60.0,
+            "the strict presentation bound must override the ordinary floor"
+        );
+    }
+
+    #[test]
+    fn a_fragment_larger_than_the_strict_rolling_target_is_typed_unsupported() {
+        let feed = pipe("open-gop");
+        let (init, mut fragments, _) = read_all(&feed);
+        let timescale = init.video().expect("video").timescale;
+        let policy =
+            CutPolicy::new(6, 2, usize::MAX, 15, timescale).with_strict_max_seconds(1, timescale);
+        let mut segmenter = Segmenter::new(init, policy);
+
+        let error = segmenter
+            .push(fragments.remove(0))
+            .expect_err("the first fixture fragment is longer than one second");
+        assert!(matches!(error, Fmp4Error::Unsupported(_)), "{error:?}");
+        assert_eq!(segmenter.counts().segments, 0);
+    }
+
     // -----------------------------------------------------------------------
     // two generations, one film timeline
     // -----------------------------------------------------------------------
@@ -8098,7 +8183,6 @@ mod tests {
         let mut tail = frags[0].clone();
         let wanted_video_ticks = tail.video_duration(&init) + 45 * video.timescale.max(1) as u64;
 
-        let maximum_audio_sample_seconds;
         {
             let audio_fragment = tail
                 .tracks
@@ -8106,13 +8190,6 @@ mod tests {
                 .find(|track| track.track_id == audio.id)
                 .expect("audio fragment");
             let source_runs = audio_fragment.runs.clone();
-            maximum_audio_sample_seconds = source_runs
-                .iter()
-                .flat_map(|run| run.samples.iter())
-                .map(|sample| sample.duration)
-                .max()
-                .expect("audio sample") as f64
-                / audio.timescale.max(1) as f64;
             while audio_fragment.duration() * video.timescale.max(1) as u64
                 <= wanted_video_ticks * audio.timescale.max(1) as u64
             {
@@ -8135,7 +8212,9 @@ mod tests {
         );
 
         let max_seconds = 15;
-        let policy = CutPolicy::new(6, 2, usize::MAX, max_seconds, video.timescale);
+        let strict_seconds = 16;
+        let policy = CutPolicy::new(6, 2, usize::MAX, max_seconds, video.timescale)
+            .with_strict_max_seconds(strict_seconds, video.timescale);
         let mut seg = Segmenter::new(init, policy);
         assert!(seg.push(tail).expect("push").is_none());
         let published = seg.finish().expect("finish");
@@ -8157,13 +8236,13 @@ mod tests {
             .map(|item| item.seconds)
             .fold(0.0f64, f64::max);
         assert!(
-            longest <= max_seconds as f64 + maximum_audio_sample_seconds + 1e-6,
+            longest <= strict_seconds as f64,
             "a split final segment still declared {longest:.6}s"
         );
         assert_eq!(
             longest.ceil(),
-            16.0,
-            "the trailing-audio shape raised TARGETDURATION above one sample of rounding"
+            f64::from(strict_seconds),
+            "the trailing-audio shape did not use the strict rolling bound"
         );
         let claimed: f64 = published.iter().map(|item| item.seconds).sum();
         assert!(

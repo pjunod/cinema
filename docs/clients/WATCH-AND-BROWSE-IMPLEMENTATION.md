@@ -1,7 +1,7 @@
 # Watch and browse — implementation and acceptance record
 
 **Status:** open · **Design:** Fable v4 document approval, 2026-09-19 ·
-**Implementation base:** `0f1e5e43a5726817d7a2d83add06ecbb40a6942f` ·
+**Initial implementation base:** `0f1e5e43a5726817d7a2d83add06ecbb40a6942f` ·
 **Effort:** `effort/watch-and-browse` ·
 **Review:** [PR #383](http://192.168.4.7:3000/noirr/plurx/pulls/383), unmerged
 
@@ -35,6 +35,15 @@ small corrections preserve the subtitle behavior and have separate evidence.
 The Rust 1.97.1 compiler loop was established before source changes.
 The final containment check also found two pre-existing fractional grids
 (Activity and playback stats) without a zero floor; both now use minmax(0,1fr).
+
+Merge-readiness follow-up: current main `15324dd9a52367e09b5fe18e34b666866738f25e`
+was integrated into the task candidate. Its Rust workspace and both Apple
+clients compile; Android compile/routing/subtitle tests and fine/coarse watch
+browser acceptance pass again. Apple build is now 173 and Android versionCode
+110. The first hosted effort run (2303) failed on the regression ledger.
+The ledger anchors and manual-dispatch scope are corrected; the complete
+web gate and a fresh hosted effort result are still pending. Earlier focused
+evidence below is not a substitute for that remaining gate.
 
 ## 2. Task ownership and integration
 
@@ -174,7 +183,7 @@ Use the affected compile and version requirements of the current effort gate.
 | Apple shared routing and watch matrix | 2 focused tests passed on iPhone 17 Pro simulator |
 | Android shared routing/subtitle fixtures and debug build | Passed locally |
 | Chromium fine/coarse browser acceptance | Passed locally in both contexts: 11 widths, 20 compact/wide cycles, browser fullscreen return, stale loads, accepted/failed episodes, Play next, final save ordering, chapters and slotless exit |
-| General page-read-budget test | Existing Activity markup expectation fails on base; unrelated Activity behavior is not changed by this task |
+| General page-read-budget test | Initial base failed; current-main integration carries its fixes. Complete web gate still pending |
 | Real server/media, Chrome and Safari | Pending |
 | Physical remote focus and native owner/layer continuity | Pending; native layout gate remains closed |
 | Effort/Main gates and qualification receipt | Pending on PR #383; no release or deployment claim |

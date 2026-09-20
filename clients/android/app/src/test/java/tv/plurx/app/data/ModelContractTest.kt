@@ -455,7 +455,14 @@ class ModelContractTest {
               "id": "session-7", "target_height": 1080, "encoder": "videotoolbox",
               "recent_speed": 1.18, "ahead_seconds": 14, "ahead_bytes": 7340032,
               "delivered_bps": 12400000, "suspended": false, "suspend_count": 2,
-              "playlist_shape": "sliding", "last_request": "segment-41.ts"
+              "playlist_shape": "sliding", "last_request": "segment-41.ts",
+              "startup_state": "presented", "presentation_progress_seen": true,
+              "produced_end_ms": 141000, "served_end_ms": 125000,
+              "staged_bytes": 4096, "playlist_target_ms": 16000,
+              "served_revision": 9, "next_publication_in_ms": 4000,
+              "pause_grace_remaining_ms": 178000,
+              "advertised_bytes": 7340032, "grace_bytes": 1048576,
+              "reserved_bytes": 16777216, "live_bytes": 8388608
             }""".trimIndent(),
         )
 
@@ -465,6 +472,19 @@ class ModelContractTest {
         assertEquals(1.18, status.recent_speed!!, 0.001)
         assertEquals(12_400_000L, status.delivered_bps)
         assertEquals("sliding", status.playlist_shape)
+        assertEquals("presented", status.startup_state)
+        assertTrue(status.presentation_progress_seen!!)
+        assertEquals(141_000L, status.produced_end_ms)
+        assertEquals(125_000L, status.served_end_ms)
+        assertEquals(4_096L, status.staged_bytes)
+        assertEquals(16_000L, status.playlist_target_ms)
+        assertEquals(9L, status.served_revision)
+        assertEquals(4_000L, status.next_publication_in_ms)
+        assertEquals(178_000L, status.pause_grace_remaining_ms)
+        assertEquals(7_340_032L, status.advertised_bytes)
+        assertEquals(1_048_576L, status.grace_bytes)
+        assertEquals(16_777_216L, status.reserved_bytes)
+        assertEquals(8_388_608L, status.live_bytes)
         assertFalse(status.suspended!!)
     }
 

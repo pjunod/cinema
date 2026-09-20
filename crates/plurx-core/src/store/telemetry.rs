@@ -660,6 +660,7 @@ impl NodeLocalTelemetry {
         rows: u32,
         diagnostic: crate::content_analysis::IndexDiagnostic,
         now_ms: i64,
+        max_attempts: u32,
     ) -> Result<crate::segplan::FragmentIndexOutcome, StoreError> {
         self.with_conn(move |conn| {
             crate::store::fragindex::record_typed_outcome(
@@ -672,6 +673,7 @@ impl NodeLocalTelemetry {
                 rows,
                 &diagnostic,
                 now_ms,
+                max_attempts,
             )
         })
         .await
