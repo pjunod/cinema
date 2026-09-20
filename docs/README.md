@@ -427,6 +427,9 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
+| [ARCHITECTURE-REVIEW-2026-09-20.md](reviews/ARCHITECTURE-REVIEW-2026-09-20.md) | The end-to-end architecture review of 2026-09-20, revision 3 (adversarial assessment applied, Astra's independent review merged) — ranked findings for performance, stability, video quality and design, ten verified do-first items, and the sequencing. | open |
+| [ARCHITECTURE-REVIEW-2026-09-20-APPENDIX.md](reviews/ARCHITECTURE-REVIEW-2026-09-20-APPENDIX.md) | The nine full area reports behind that review, unrevised, with every finding's quoted evidence and each area's "already good" list; the main document wins where they disagree. | open |
+| [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md) | Checks all 82 consolidated entries and 128 appendix findings against the source, with corrections, per-finding verdicts and evidence limits; revision 2 of the review applies its dispositions. | done |
 | [SECURITY-ASSESSMENT-2026-09-13.md](reviews/SECURITY-ASSESSMENT-2026-09-13.md) | Which trust boundaries need work across the server, cluster, clients, media supply chain, and delivery process. | open |
 | [WEEKLY-ARCHITECTURE-SECURITY-IMPLEMENTATION.md](reviews/WEEKLY-ARCHITECTURE-SECURITY-IMPLEMENTATION.md) | Bounded implementation handoff for the September architecture, security, recovery, and playback findings. | open |
 

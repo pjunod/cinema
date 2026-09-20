@@ -1,8 +1,85 @@
 # Status — what the agent is working on and where it stands
 
-**Updated:** 2026-09-19 · Kept current by the working agent in the same
+**Updated:** 2026-09-20 · Kept current by the working agent in the same
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
+
+## Architecture review, revision 3 — Astra's review merged
+
+**[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
+revised in place again.** Astra's independent review was written against the
+first draft; revision 3 keeps revision 2's corrected remedies and merges
+everything Astra added that the first draft had not found, each re-verified in
+the tree: an unbounded, unkillable scan probe (`scan/probe.rs:190-215`, C12);
+decode-fact lookups that hash three executable-sized inputs under a one-permit
+gate before consulting the cache and fall back to catalogue facts on any error
+(C13); item-detail badges that unpack whole fragment indexes and `stat` every
+media path with no deadline (C14); telemetry that spawns a task and a
+consistent settings read per event with no bounded queue (C15); DVR fan-out
+that writes sinks sequentially with the lock outside the timeout (L10); HDR10
+HEVC output limited to software and QSV by design (Q12); no native adaptive
+quality and dormant stall-ticket plumbing (§3.8); and two policy tests red on
+`main` — `web-policy.test.js:6007` (a stale call count) and
+`web-control.test.js:3164` under Node 22 — both reproduced here (§4.8).
+Astra's interlace experiment was re-run on this container's ffmpeg 6.1.1 with
+identical counts: the current CPU chain emits 90/90 combed frames tagged
+progressive. The seek-scratch reservation finding (C16) is a tracking item
+for the existing repair. §9 records what was run and what was not. No code
+changed.
+
+## Architecture review, revision 2 — after the adversarial assessment
+
+**[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
+revised in place; the assessment that drove it is
+[ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md)
+(210 dispositions, every appendix finding covered).** The assessment's verdict
+on the first draft — a useful defect inventory, unsafe as a direct
+implementation handoff — was right: several remedies removed the condition
+that made the existing code safe. Revision 2 withdraws or rewrites them, each
+re-checked in the tree: B-frames via `negative_cts_offsets` (refused by
+`vodgen.rs:399`'s landing check — a timeline design item now); copying the
+cache-only admin proof onto ordinary auth and replacing the two-phase logout
+with a best-effort delete (both weaken acknowledged revocation); the encoded-VOD
+SIGSTOP without a stopped→release transition on `Admissions::live_is_waiting`
+(a stopped producer yields `Step::Nothing`, so a later viewer would wait
+forever); a 60 s TTL on font attestation (re-enumeration exists to catch font
+additions under an immutable recipe); heartbeat-derived clock skew (10 s
+heartbeats cannot see a 2 s offset) and any clock evaluated inside replicated
+SQL; the `NOT EXISTS` search predicate (reproduced to hide renamed titles); a
+nonexistent `-hls_start_time_offset`; a self-contradicting release profile;
+and Media3's nonexistent `STRATEGY_ALWAYS`. Claims narrowed: the compile-only
+fast lane is Paul's 09-10 ruling, not drift — the finding is that the batch
+process it assumes has no input; "every audio transcode" → every full video
+transcode; rollback artefacts exist as `sha-` image tags, semantic tags do
+not; the CI selector run for real gives 3/16 hiqlite and 7/24 SQLite modules
+out of scope, not 7/20; the 51 "unindexed" docs are exempted by policy. The
+ten do-first items all survive on their code facts; §5 now splits the ones
+that were two changes and defers the ones that became design questions.
+§0 of the review lists every disposition. No code changed.
+
+## End-to-end architecture review — ten verified do-first items, ranked
+
+**[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
+(the verdict) and its
+[appendix](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-APPENDIX.md) (nine area
+reports, ~120 findings with `file:line`).** Nine parallel reviews of `main` @
+`a1414368` covering the streaming pipeline, server core, store/cluster, Live
+TV, the three clients, build/CI/ops, and the month's git history; every P0/P1
+re-verified against the tree before it was written down. The four system-level
+findings: the merge gate has run no Rust test since `3cd127e2` (2026-09-10)
+and nothing is scheduled after; the hot paths run unsized defaults (4 KiB media
+bodies through a blocking-pool hop per chunk, no listener timeouts, encoded-VOD
+respawning ffmpeg every control beat, `fc-list` per segment on text burns,
+1-pass ABR with `-bf 0`, stereo-only audio, no deinterlacer); the cluster pays
+consensus for reads and heartbeats that do not need it and has no backup; and
+four files hold 65k product lines at 50–75 % fix density. One live regression
+is still on `main`: `process_control::output_job_owned` never pipes the child's
+output (`2e3a3bb5`, 2026-09-13), so `dovi_probe_output` always fails — every
+Dolby Vision Profile 5 transcode has been refused since the 09-14 deploy — and
+`probe_media_origin` always falls back. §5 of the review sequences the work:
+twelve small PRs this week, the encoder-defaults set and cluster backup this
+month, the `transcode.rs`/`hls.rs`/`vodserve.rs` decomposition this quarter.
+Nothing in the tree was changed by this PR.
 
 ## The web app is a tree, and the bytes are the same ones
 
