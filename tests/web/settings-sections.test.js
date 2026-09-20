@@ -335,8 +335,6 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
       // #309's sibling problem, twice over: a card or fragment `developerPanel`
       // calls has to be composed here or the panel throws on the name and this
       // whole gate reports one failure instead of checking anything.
-      shippedSource("directedChangeDeveloperRows"),
-      shippedSource("contentAnalysisEnableCard"),
       shippedSource("subtitleNotReadyCard"),
       shippedSource("liveTvGuideCard"), shippedConst("DEV_READINESS_LABEL"),
       shippedSource("devReadinessRow"), shippedSource("devReadinessPill"),
@@ -350,9 +348,11 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
       shippedSource("windowsServerCard"),
       shippedSource("webHlsStartupRecoveryCard"),
       shippedSource("hevcSampleEntryAdmissionCard"),
+      shippedSource("contentAnalysisEnableCard"),
       shippedSource("sourceProbeCompatibilityCard"),
       // `directedChangeDeveloperRows` reads the live player and returns ""
       // when there is none, which is exactly the state a settings page is in.
+      shippedSource("directedChangeDeveloperRows"),
       "const SETTINGS_DATA=null,ME=null,PLAYER=null;",
       shippedSource("uiEnableAdvisory"),
       shippedSource("developerPanel"),
@@ -417,13 +417,16 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
   assert.match(html, /Final-send loader interception/);
   assert.match(html, /Recovery is enabled for every hls\.js attachment/);
   assert.match(html, /CARDHEAD:HEVC sample-entry admission\|/);
+  assert.doesNotMatch(html, /nzbd BitTorrent|enable-bittorrent|nzbdBittorrentEnableCard/,
+    "Plurx does not render or own nzbd BitTorrent enablement");
   // Source verification is always on and has no switch; the card exists to say
   // what is and is not known about it, which is the only honest thing a
   // compatibility rule can offer an operator.
   assert.match(html, /CARDHEAD:Source probe compatibility\|/);
   assert.match(html, /Derived Atmos profile omissions/);
-  // Renamed by 5409b567, which replaced the "not built" row with the one
-  // that says how a held source was actually compared.
+  assert.match(html, /Scan provenance/);
+  // The row 5409b567 put in place of "Typed source verification", which this
+  // case asserted on long after it was renamed.
   assert.match(html, /Compared media facts/);
   assert.match(html, /Nothing on this card enables, disables, hides or overrides playback admission/);
   assert.match(html, /No feature flag is used/);
