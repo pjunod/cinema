@@ -185,7 +185,12 @@ pattern = "tokio::spawn\\("
 # +2 are the rolling publication-clock task and retired-object cleanup task.
 # Each holds the session it owns; the first exits on retirement/failure and the
 # second begins only at the fixed serve-until boundary and owns bounded retry.
-expected_occurrences = 83
+# The seek-scratch ledger adds the retired scratch conversion owner: after
+# retirement it retries the quiescent measurement on a bounded schedule and
+# converts the conservative reservation to measured bytes exactly once, then
+# exits. It carries the ledger key rather than the session, so it cannot keep a
+# retired session alive.
+expected_occurrences = 84
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
 
@@ -225,7 +230,11 @@ pattern = "tokio::time::sleep\\("
 # +3 are bounded rolling waits: retired-object cleanup retry, publication-clock
 # cadence, and segment availability polling under the request deadline. None
 # elects recovery or extends its already-owned deadline.
-expected_occurrences = 43
+# The seek-scratch ledger adds the conversion owner's fixed 5 s retry interval
+# (capped at 24 attempts) and the copy writer's grant-wait poll; the retired
+# cleanup owner's plain `sleep_until` became a shortenable select, so the net
+# count moves by one.
+expected_occurrences = 44
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -923,7 +932,9 @@ pattern = "publication_ready_at_ms"
 # second incarnation of the same playback, which is the route whose activation
 # runs the supersession cancel. It asks for the same sentinel every other
 # activation fixture asks for and moves no shipped fence.
-expected_occurrences = 88
+# +1: the retired promise the seek-scratch release path shortens is read
+# alongside the publication-ready fence when the exact DELETE lands.
+expected_occurrences = 89
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
@@ -1084,7 +1095,9 @@ pattern = "terminal_reason"
 # references and one browse DTO initializer. These expose or assert the
 # existing terminal cause; none writes a new durable cause.
 # +1 browse reporting reads the terminal reason for a failed analysis badge.
-expected_occurrences = 32
+# +1: the capacity refusal carries a durable terminal reason of its own, so a
+# 503 is distinguishable from an anonymous producer fault.
+expected_occurrences = 33
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -1553,7 +1566,9 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # itself spawns nothing — the wait polls an extraction somebody else started.
 # +2 are the rolling publication-clock and retired-object cleanup tasks,
 # reviewed under `all-detached-tokio-tasks` above.
-expected_occurrences = 522
+# +2 with the seek-scratch ledger: the retired scratch conversion owner and the
+# copy reader whose writer guard is now registered before the spawn.
+expected_occurrences = 524
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1962,7 +1977,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # fixed retirement grace and cleanup attempt/retry, publication cadence, and
 # request-bounded retired/live segment resolution. All inherit or own finite
 # deadlines; none is a replacement election.
-expected_occurrences = 805
+# +4 with the seek-scratch ledger: the conversion retry interval, the copy
+# writer's grant-wait poll, the writer-settle barrier's bounded wait, and the
+# retired cleanup owner's shortenable deadline.
+expected_occurrences = 809
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2298,7 +2316,9 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # task or a timer, and the segment handler's own ownership is unchanged.
 # +3 are `status()` reads on startup/terminal state enums for diagnostics; they
 # are ordinary in-process methods and launch no child.
-expected_occurrences = 318
+# +1: the 503 classification is asserted through the real HTTP mapper, which
+# reads the response `.status()`.
+expected_occurrences = 319
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
