@@ -248,6 +248,49 @@ pub fn window_anchor_seconds(position_seconds: i64, window_seconds: i64) -> i64 
     (position_seconds.max(0) / window) * window
 }
 
+/// Whether the whole-track extraction is going to answer this playback.
+///
+/// The midpoint rule below exists because a window past the midpoint reads
+/// the same bytes the whole-track warm is reading, and publishes a disposable
+/// result for them. That reasoning holds exactly as long as the whole-track
+/// warm is alive and making progress. When it has failed, or has been running
+/// longer than the window it is being compared against, "the whole track will
+/// answer instead" stops being true — and then declining the window means the
+/// second half of the file has no subtitles at all, for good.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WholeTrackProgress {
+    /// Ready, absent, or warming. The midpoint rule's reason still holds, so
+    /// past-midpoint windows stay declined.
+    Healthy,
+    /// The last attempt failed and its memo still stands. There is nothing
+    /// left for a past-midpoint window to be redundant with.
+    Stalled,
+}
+
+/// How the whole-track sidecar for one track is doing, for the past-midpoint
+/// rule. Observation only, like [`sidecar_state`]: it starts nothing.
+///
+/// Only a remembered failure counts as stalled. "Warming for longer than I
+/// expected" deliberately does not, and the reason is that no clock here has
+/// any relationship to how long the extraction takes: a subtitle-only pass
+/// over a 40 GB remux on a network mount can legitimately run for minutes,
+/// and calling that stalled would start a second full-source scan against the
+/// same mount to publish a disposable result the healthy warm is about to
+/// supersede — the exact waste the midpoint rule exists to refuse.
+///
+/// A genuinely wedged extraction is not left forever either: `ensure_vtt_at`
+/// bounds it at [`EXTRACTION_TIMEOUT`], and the timeout writes the memo that
+/// this function reads.
+pub async fn whole_track_progress(dir: &Path, file: &MediaFile, index: i64) -> WholeTrackProgress {
+    if remembered_failure(&vtt_path(dir, file, index))
+        .await
+        .is_some()
+    {
+        return WholeTrackProgress::Stalled;
+    }
+    WholeTrackProgress::Healthy
+}
+
 /// Whether extracting a window is cheaper than extracting the whole track.
 ///
 /// Measured, not assumed. A subtitle-only extraction reads the container from
@@ -263,18 +306,55 @@ pub fn window_anchor_seconds(position_seconds: i64, window_seconds: i64) -> i64 
 /// This is also why the bridge is at its best exactly where it is needed: the
 /// defect it exists to fix is that the *first* minutes of a large file play
 /// with no subtitles, and that is the 7% case.
+///
+/// `whole_track` is what makes the midpoint rule conditional rather than
+/// absolute — see [`WholeTrackProgress`].
 pub fn windowing_is_worthwhile(
     anchor_seconds: i64,
     duration_seconds: i64,
     window_seconds: i64,
+    whole_track: WholeTrackProgress,
 ) -> bool {
     let window = bounded_window_seconds(window_seconds);
     // A file barely longer than one window has no head to bridge: the window
     // would extract effectively the whole track, concurrently with the
     // whole-track warm doing the identical scan, and publish the loser under a
     // disposable key. Require enough runtime that a window is a fraction of it.
-    duration_seconds > window.saturating_mul(2)
-        && anchor_seconds.max(0).saturating_mul(2) < duration_seconds
+    //
+    // This first clause is unconditional. It is about the window being
+    // pointless in itself, not about the whole track being better.
+    if duration_seconds <= window.saturating_mul(2) {
+        return false;
+    }
+    anchor_seconds.max(0).saturating_mul(2) < duration_seconds
+        || whole_track == WholeTrackProgress::Stalled
+}
+
+/// Whether an extraction for exactly this window span is already running,
+/// for anybody.
+///
+/// The cross-session dedup registries are the honest answer to "is these
+/// bytes' producer alive right now": `warmups` holds the key from the moment
+/// a flight is claimed, `extractions` from the moment the producer enlists.
+/// Observation only — this starts nothing.
+pub async fn window_flight_is_live(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    anchor_seconds: i64,
+    window_seconds: i64,
+) -> bool {
+    let cached = vtt_window_path(dir, file, index, anchor_seconds, window_seconds);
+    // Two statements, `extractions` first, and neither guard is alive when the
+    // other lock is taken. Both matter. `||` keeps its left temporary alive to
+    // the end of the statement, so a single expression would hold the first
+    // guard across the second `await`; and every other site in this file locks
+    // `extractions` before `warmups` (`sidecar_state`, `sidecar_state_for_demand`).
+    // A single warmups-first site is a lock-order inversion, and with two async
+    // mutexes that have no timeout the result is both global registries wedged
+    // for the life of the process.
+    let extracting = extractions().lock().await.contains_key(&cached);
+    extracting || warmups().lock().await.contains(&cached)
 }
 
 fn vtt_window_name(
@@ -825,6 +905,20 @@ pub async fn sidecar_state_for_demand(
         return SidecarState::Failed;
     }
     SidecarState::Absent
+}
+
+/// How much longer this track's failure memo stands, when one does.
+///
+/// The memo is what stops a player re-launching a full-source read every six
+/// seconds against a track that has just failed, so it is also the honest
+/// `Retry-After`: it says when this server will next be willing to try, which
+/// is the only moment a retry could do anything. Observation only.
+pub async fn failure_memo_remaining(dir: &Path, file: &MediaFile, index: i64) -> Option<Duration> {
+    let cached = vtt_path(dir, file, index);
+    let memos = negative_memos().lock().await;
+    let memo = memos.get(&cached)?;
+    memo.expires_at
+        .checked_duration_since(tokio::time::Instant::now())
 }
 
 /// Read a warm sidecar without launching extraction. Used by AVPlayer's
@@ -1452,7 +1546,12 @@ where
     // would become a filename with a minus in it and an `-ss -500`, and the
     // safety should not live only in the caller.
     let anchor_seconds = anchor_seconds.max(0);
-    if !windowing_is_worthwhile(anchor_seconds, duration_seconds, window_seconds) {
+    if !windowing_is_worthwhile(
+        anchor_seconds,
+        duration_seconds,
+        window_seconds,
+        whole_track_progress(dir, file, index).await,
+    ) {
         return false;
     }
     let cached = vtt_window_path(dir, file, index, anchor_seconds, window_seconds);
@@ -1581,6 +1680,30 @@ pub(crate) fn owned_window_for_test(session: &str) -> Option<(i64, i64, Option<u
         .live
         .get(session)
         .map(|live| (live.anchor_seconds, live.window_seconds, live.sequence))
+}
+
+/// Memo a whole-track extraction failure, as a real one would.
+///
+/// The HTTP boundary fixture substitutes the *producer*, not the registries,
+/// so a test that wants the "this track has already failed" state has to
+/// reach the same memo the production failure path writes — otherwise it is
+/// asserting on a state the server can never actually be in.
+#[cfg(test)]
+pub(crate) async fn remember_whole_track_failure_for_test(
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    why: &str,
+    ttl: Duration,
+) {
+    remember_failure(&vtt_path(dir, file, index), why, ttl).await;
+}
+
+/// Drop the memo a test wrote, so it cannot outlive its own fixture in the
+/// process-global registry.
+#[cfg(test)]
+pub(crate) async fn forget_whole_track_failure_for_test(dir: &Path, file: &MediaFile, index: i64) {
+    forget_failure(&vtt_path(dir, file, index)).await;
 }
 
 /// Lift the post-release fence so a test can reuse a session id it just ended.
@@ -1906,30 +2029,46 @@ mod tests {
     /// result instead of a disposable one.
     #[test]
     fn a_window_is_declined_once_it_costs_what_the_whole_track_costs() {
+        const HEALTHY: super::WholeTrackProgress = super::WholeTrackProgress::Healthy;
         let hour = 3_600;
         let w = super::WINDOW_SECONDS_DEFAULT;
-        assert!(super::windowing_is_worthwhile(0, hour, w));
-        assert!(super::windowing_is_worthwhile(600, hour, w));
-        assert!(super::windowing_is_worthwhile(1_799, hour, w));
+        assert!(super::windowing_is_worthwhile(0, hour, w, HEALTHY));
+        assert!(super::windowing_is_worthwhile(600, hour, w, HEALTHY));
+        assert!(super::windowing_is_worthwhile(1_799, hour, w, HEALTHY));
         // The midpoint is where the measured cost reaches the whole track's
         // neighbourhood; at and past it, decline.
-        assert!(!super::windowing_is_worthwhile(1_800, hour, w));
-        assert!(!super::windowing_is_worthwhile(3_000, hour, w));
-        assert!(!super::windowing_is_worthwhile(3_600, hour, w));
+        assert!(!super::windowing_is_worthwhile(1_800, hour, w, HEALTHY));
+        assert!(!super::windowing_is_worthwhile(3_000, hour, w, HEALTHY));
+        assert!(!super::windowing_is_worthwhile(3_600, hour, w, HEALTHY));
         // A duration we do not know is not a duration of zero: there is no
         // midpoint to compare against, so there is no saving to claim.
-        assert!(!super::windowing_is_worthwhile(0, 0, w));
-        assert!(!super::windowing_is_worthwhile(10, -1, w));
+        assert!(!super::windowing_is_worthwhile(0, 0, w, HEALTHY));
+        assert!(!super::windowing_is_worthwhile(10, -1, w, HEALTHY));
         // A file barely longer than one window has no head to bridge — the
         // window would extract the whole track alongside the warm doing the
         // same scan, and publish the loser under a disposable key.
-        assert!(!super::windowing_is_worthwhile(0, w, w));
-        assert!(!super::windowing_is_worthwhile(0, w * 2, w));
-        assert!(super::windowing_is_worthwhile(0, w * 2 + 1, w));
+        assert!(!super::windowing_is_worthwhile(0, w, w, HEALTHY));
+        assert!(!super::windowing_is_worthwhile(0, w * 2, w, HEALTHY));
+        assert!(super::windowing_is_worthwhile(0, w * 2 + 1, w, HEALTHY));
         // A position before the file is a client bug. It is clamped rather
         // than trusted, in both the grid and the warmer, so neither a negative
         // filename nor a negative `-ss` can be produced.
         assert_eq!(super::window_anchor_seconds(-500, w), 0);
+
+        // The midpoint rule's reason is that the whole-track warm reads the
+        // same bytes and publishes the authoritative answer. When that warm
+        // has failed, or has been grinding for longer than the window it is
+        // being compared against, there is nothing left to be redundant with
+        // — and declining means the back half of the film never gets
+        // subtitles at all.
+        let stalled = super::WholeTrackProgress::Stalled;
+        assert!(super::windowing_is_worthwhile(1_800, hour, w, stalled));
+        assert!(super::windowing_is_worthwhile(3_000, hour, w, stalled));
+        // The other clause is not about the whole track and stays absolute: a
+        // file barely longer than one window has no head to bridge however
+        // the whole-track warm is doing.
+        assert!(!super::windowing_is_worthwhile(0, w * 2, w, stalled));
+        assert!(!super::windowing_is_worthwhile(0, 0, w, stalled));
     }
 
     /// The base of a windowed extraction depends on the ffmpeg build, and the
@@ -2081,6 +2220,66 @@ mod tests {
             probed: true,
             dolby_vision: Default::default(),
         }
+    }
+
+    /// The midpoint rule declines a window because the whole-track warm reads
+    /// the same bytes and publishes the authoritative answer instead. That
+    /// reason is about the warm being alive: once it has failed there is
+    /// nothing left to be redundant with, and declining meant the back half
+    /// of the film had no subtitles for good.
+    ///
+    /// Driven through `warm_vtt_window_with`, which is where the rule is
+    /// actually consulted — the HTTP boundary only forwards the anchor.
+    #[tokio::test]
+    async fn a_failed_whole_track_lets_a_window_past_the_midpoint_start() {
+        let dir = tempfile::tempdir().expect("cache dir");
+        let mut file = media_file(dir.path().join("past-midpoint.mkv"));
+        // An hour, so the midpoint is well clear of the window span below.
+        file.duration_ms = Some(3_600_000);
+        let session = &format!("past-midpoint-{}", uuid::Uuid::new_v4());
+        let anchor = 3_000; // past 1,800 s
+        let window = 200;
+
+        let never = |_tmp: PathBuf, _f: MediaFile, _i: i64, _a: i64, _w: i64| async move {
+            std::future::pending::<()>().await;
+            Ok(())
+        };
+
+        assert!(
+            !warm_vtt_window_with(session, None, dir.path(), &file, 0, anchor, window, never).await,
+            "a healthy whole-track warm keeps the midpoint rule"
+        );
+        assert_eq!(
+            peak_window_flights_for_test(session),
+            0,
+            "and starts nothing at all"
+        );
+
+        remember_whole_track_failure_for_test(
+            dir.path(),
+            &file,
+            0,
+            "the source could not be read",
+            Duration::from_secs(90),
+        )
+        .await;
+
+        assert!(
+            warm_vtt_window_with(session, None, dir.path(), &file, 0, anchor, window, never).await,
+            "a dead whole-track warm is not a reason to leave the second half blank"
+        );
+        // The flight is owned the moment `warm_vtt_window_with` returns true;
+        // the producer itself starts one poll later, which is what this yield
+        // is for. The count is the contract — one per playback, never two.
+        tokio::task::yield_now().await;
+        assert_eq!(
+            peak_window_flights_for_test(session),
+            1,
+            "and it is still one flight per playback"
+        );
+
+        release_session_window(session).await;
+        forget_failure(&vtt_path(dir.path(), &file, 0)).await;
     }
 
     #[test]

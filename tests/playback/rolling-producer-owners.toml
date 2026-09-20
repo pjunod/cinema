@@ -1519,7 +1519,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # same staging call and then replaces the pending claim with a second ask rather
 # than setting the cancelled flag. Same shape: joined inside the test, owns
 # nothing shipped.
-expected_occurrences = 519
+# 519 -> 520 for the subtitle publication-wait regression: one `tokio::spawn`
+# confined to `a_subtitle_segment_waits_out_a_live_window_and_no_longer`, which
+# parks the second segment request so the fixture producer can be released
+# underneath it. Its join handle is awaited inside the test under a bounded
+# `timeout`, and it owns no shipped producer, process or timer. The feature
+# itself spawns nothing — the wait polls an extraction somebody else started.
+expected_occurrences = 520
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1916,7 +1922,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +4: ATSC audio replay tests bound helper media commands, live publication,
 # and producer completion, and poll scratch every 25 ms within that bound.
 # These test-only waits own no production recovery or replacement policy.
-expected_occurrences = 793
+# +4 for the subtitle segment publication wait. Two are shipped and bounded by
+# construction: the `Instant::now()` + `SUBTITLE_SEGMENT_PUBLICATION_WAIT`
+# give-up point and the `SUBTITLE_SEGMENT_PUBLICATION_RESERVE` subtraction that
+# keeps the rest of the response lifecycle its own budget — the poll loop reads
+# under a `timeout_at` and cannot outlive either. Two are test-only: the settle
+# sleep and the elapsed-time reading in the two publication-wait regressions.
+# No new detached producer, and nothing here waits on work it did not find
+# already running.
+expected_occurrences = 797
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2236,7 +2250,12 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # test, one over every `web::WEB_ASSETS` row and one on the unknown-asset 404.
 # Both are `Response::status()` on an in-process `oneshot`; nothing is
 # launched and nothing is owned.
-expected_occurrences = 307
+# +6 for the subtitle reliability arc's `.status()` reads: four in the new
+# segment regressions (`response.status()` on the cold, waited, refused and
+# default-off answers) and two in the HDR burn-guard HTTP rows. Every one is a
+# read of an in-process `axum` response; none constructs a command, a child, a
+# task or a timer, and the segment handler's own ownership is unchanged.
+expected_occurrences = 313
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

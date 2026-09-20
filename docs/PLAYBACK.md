@@ -99,10 +99,11 @@ one.
 | `server.apple-high-tier-master` | High-tier Apple HLS playlist envelope | HDR HEVC High-tier sessions without native text renditions serve their media playlist directly, avoiding AVPlayer's multivariant eligibility rejection without changing video samples. | High/Main-tier, HDR/SDR, and subtitle-gate Rust matrix |
 | `server.apple-high-tier-init` | High-tier Apple HLS initialization record | The generated initialization segment clears only its HEVC High-tier declaration for the same narrowly gated HDR sessions, allowing VideoToolbox to inspect otherwise decodable picture data. | Synthetic High-tier `hvcC` Rust regression |
 | `server.segmented-remux` | Progressive vs segmented remux hint | Every probed remux prefers segments. Average bitrate and storage speed cannot predict a transient path gap, while progressive fMP4 has only about 2.2 s of browser runway. The browser must still prove MSE accepts the exact codec pair; **Original · one stream** remains an explicit veto. | Eligibility units in `playback/mod.rs`; browser policy matrix |
-| `server.track-selection` | Initial audio/subtitle | Item detail exposes the cold-start result from one shared language policy: original-language anime, configured languages, subtitle Auto/Always/Off, then container defaults. A request-local `/decision` choice overrides it without changing settings. | Track-policy Rust matrix plus selection-aware HTTP regressions |
-| `server.subtitle-classification` | Sidecar vs rendition vs burn | Bitmap has no text route. SRT/SubRip/WebVTT may become native HLS renditions. Other text, including ASS and `mov_text`, can be extracted but not advertised as a native rendition, so session selection burns it. | Classifier Rust unit |
-| `server.hdr-subtitle-burn-guard` | Old-client burn request on HDR | Session creation independently refuses `subtitle_burn` for a probed DV, HDR10, or HLG source with a machine-readable 422 before playback accounting or encoder creation. A client whose selected plan already delivers SDR may send `subtitle_burn_sdr: true`; this keeps a forced bitmap track on an existing tone-map without authorizing an HDR-to-SDR downgrade. SDR and unprobed sources retain burn support. | Rust HTTP refusal/acknowledgement contract plus helper matrix |
+| `server.track-selection` | Initial audio/subtitle | Item detail exposes the cold-start result from one shared language policy: original-language anime, configured languages, subtitle Auto/Always/Off, then container defaults. Every subtitle candidate in every one of those rules must also be **deliverable as a default** before the policy proposes it: native text always, PGS while the overlay is enabled, a *forced* bitmap track only when the base delivery is already SDR. A candidate that fails is skipped and the rule keeps looking; it is not a veto that collapses the whole selection to nothing. ASS/SSA and `mov_text` are never a default, though they stay selectable by hand. Selection was codec-blind before, and the web client applies the server's default about 400 ms after open, so a `default`-flagged PGS track on an HDR remux became the pick and the viewer was told a subtitle nobody chose required an SDR burn — native clients vetoed the same pick silently and showed nothing. The transcode manager's implicit pick runs the same predicate, which is what stopped a dual-audio anime HDR file with a default English PGS track from being tone-mapped and burned with no client choice at all. A request-local `/decision` choice overrides all of it without changing settings. | Track-policy Rust matrix plus selection-aware HTTP regressions |
+| `server.subtitle-classification` | Which codec can take which route | Bitmap has no text route. SRT/SubRip/WebVTT may become native HLS renditions. Other text, including ASS and `mov_text`, can be extracted as a sidecar but never advertised as a native rendition, so session selection burns it. The routes themselves — and the order they are decided in — are defined once, under [Subtitles](#subtitles--three-independent-delivery-questions), and answered on the wire as `selection.subtitle_route` so no client rebuilds them out of `text`/`native`/`overlay`. | Classifier Rust unit plus the four-route `/decision` unit |
+| `server.hdr-subtitle-burn-guard` | Burn that would spend the delivered grade | One predicate answers it everywhere: does the burn discard the dynamic range the plan would deliver *without* it? It is asked against that no-burn grade rather than the source `hdr` column, so an HDR title transcoding only for a height cap — which really does deliver HDR10 — is refused too; the old "only a transcode is exempt" carve-out has been wrong since the M4 HDR10 rung existed. `/decision`, session creation, and the M6 preparation candidate all ask it after the plan is resolved, which is the first guard the preparation path has ever had. A refusal is the same machine-readable 422 `hdr_subtitle_burn_refused`, raised before playback accounting or encoder creation. HDR delivered by copy, remux, or direct refuses; an HDR source transcoding at HDR10 refuses; an HDR source the base plan has already tone-mapped allows, because the grade is spent before the burn arrives; SDR allows by any method. `subtitle_burn_sdr` stays on the wire for old clients and is logged, but nothing consults it — the server computes the delivered grade itself rather than trusting a client's claim about it. | Rust HTTP refusal contract plus the four-row guard matrix |
 | `server.pgs-overlay` | PGS capability and artifact delivery | Only a PGS track receives additive `overlay: "pgs-v1"`, and only while the default-off gate is enabled. Authenticated cold manifests return preparation without blocking playback; warm manifests and content-addressed PNGs are published atomically. This does not choose or change video transport. | Auth/type/cache HTTP contract plus parser/cache Rust units |
+| `server.subtitle-segment-not-ready` | A subtitle segment whose cues do not exist yet | A segment whose window extraction for this exact span is *already running* is polled every 100 ms for up to 1.5 s and serves the real slice if it lands. An extraction that has not started is still never awaited: AVPlayer gives a subtitle segment about two seconds and blocks the muxed video for all of it, so waiting on work nobody began costs the picture. Everything else answers a valid empty `WEBVTT` body. `playback.subtitle_not_ready_503` (off by default) changes only the *failed* case — a track whose whole-track sidecar extraction has failed answers `503` with `Retry-After` taken from the negative memo's own remaining seconds, instead of an empty segment the player caches and never asks about again. A track that is merely warming keeps the empty segment, because "not yet" and "not going to" are different answers. Past-midpoint windowing, normally refused so the file is not scanned twice, is admitted once that warm has failed or has been running longer than twice the window span; the midpoint rule only earns its refusal while the warm is healthy. | Segment-wait, negative-memo refusal, and windowing-eligibility Rust units |
 | `server.session-kind` | Copy HLS vs transcode HLS | `SessionKind::Copy` preserves video and optionally converts audio/strips DV; `Transcode` runs the video recipe. A matching completed cache entry bypasses the encoder but does not change the logical kind. | Transcode-manager lifecycle unit |
 | `server.live-playlist-window` | Writer history vs client window | A rolling writer keeps its full EVENT history internally. Every served rolling view is typeless with `EXT-X-START:TIME-OFFSET=0` from its first response; retention advances the sequence and visible window without changing the playlist type. Inconsistent writer/retention snapshots are retried within the existing request budget. Completed cached VOD stays whole. | Rust retention/serving integration + shape-stability and inconsistent-snapshot tests; updated physical playback pending |
 | `server.auto-rung` | Auto output height | Software follows the source up to 720p. Proven hardware preserves a known SDR source up to 2160p; HDR and unknown geometry stay at the separately-probed 1080p ceiling. A node-local network prior may step that choice down, but absence of a prior is not evidence for a resolution loss. Every route clamps to the source and never upscales. | Encoder-aware Rust matrix plus the 4K AV1 SDR regression |
@@ -391,7 +392,8 @@ response then adds:
   "audio_index": 1,
   "subtitle_index": 3,
   "subtitle_requires_burn_in": true,
-  "subtitle_burn_in_blocked_by_hdr": false
+  "subtitle_burn_in_blocked_by_hdr": false,
+  "subtitle_route": "burn"
 }
 ```
 
@@ -414,24 +416,44 @@ selection equal to the container default keeps direct play, and a request that
 sends no `audio=` at all keeps its previous verdict byte-for-byte, including
 the case where the *policy* default differs from the container default.
 
+`/decision` answers in a fixed order, because the subtitle question cannot be
+asked before its answer is known: audio, then the base verdict, then that
+plan's `delivered_dynamic_range` — the grade with no burn in it — and only then
+the subtitle. The policy default is chosen with the same deliverability
+predicate the cold-start policy uses, so a non-forced bitmap track is never
+returned as the default one and the web client no longer auto-applies one.
+
 An audio-only request may echo the policy-default subtitle
 in `selection`, but only an explicit `subtitle=` choice can let that subtitle
 change delivery. On SDR, selecting a bitmap subtitle with no enabled PGS
 overlay changes the plan to transcode and names the burn-in reason.
-The established HDR guard follows the picture the base decision will actually
-deliver, not merely the source label. While that delivery is HDR it reports both
-`subtitle_requires_burn_in: true` and
-`subtitle_burn_in_blocked_by_hdr: true`, but keeps the HDR delivery unchanged,
+The HDR guard then asks one question about that no-burn grade: would burning
+discard it?
+
+| Base delivery | Verdict |
+|---|---|
+| HDR by copy, remux, or direct | refuse |
+| HDR source transcoding and still delivering HDR10 | refuse |
+| HDR source the base plan already tone-mapped | allow — the grade was spent before the burn arrived |
+| SDR source, any method | allow |
+
+A refusal reports both `subtitle_requires_burn_in: true` and
+`subtitle_burn_in_blocked_by_hdr: true` and keeps the HDR delivery unchanged,
 because a caller choice is not permission to replace Dolby Vision/HDR with SDR.
-If another incompatibility already made the plan SDR, the blocked field is
-false and the burn-in reason is added normally. The native session body then
-acknowledges that established grade with `subtitle_burn_sdr: true`; the session
-endpoint accepts that acknowledgement while continuing to reject an HDR-source
-burn from an old or unguarded client.
+When the plan already delivers SDR the blocked field is false and the burn-in
+reason is added normally. A native session body may still send
+`subtitle_burn_sdr: true`; the session endpoint accepts and logs it but does not
+consult it, since the server computes the delivered grade itself.
 Text sidecars and an enabled `pgs-v1` overlay report both fields as false. For
 native HLS, clients still consult each track's `native` flag: ASS/SSA and
 `mov_text` are extractable text but require a burn rather than a native
 rendition, so this bitmap-specific field does not classify them.
+
+`subtitle_route` names which of the four routes — `native`, `overlay`,
+`sidecar`, or `burn` — will *produce* the cues, and is absent when nothing is
+selected. It is additive, so a client that does not read it behaves exactly as
+before. The routes themselves are defined once, under
+[Subtitles](#subtitles--three-independent-delivery-questions).
 
 Selections live only for that request. Omitting both parameters uses the same
 policy path as before and omits `selection`, preserving the previous response
@@ -533,6 +555,23 @@ The practical rule for a client: **gate a session-mode subtitle pick on
 `native`, use `text` for the sidecar, and recognize only overlay protocol
 values the client implements.** An absent or unknown `overlay` value is
 unsupported, not a preparation state. VobSub and XSUB remain burn-only.
+
+Those flags say what a track *could* be. For the track actually selected,
+`/decision` collapses them into one answer, `selection.subtitle_route`, and
+these four values are the whole set. The server decides them in this order, so
+a track that qualifies for two takes the earlier one:
+
+| `subtitle_route` | Chosen when | Where the cues come from |
+|---|---|---|
+| `overlay` | the PGS overlay is enabled and serving this track | authenticated manifest plus immutable PNGs, composited by the client over untouched video |
+| `native` | the codec survives conversion to WebVTT | an HLS rendition the player selects itself |
+| `sidecar` | the track is text but cannot be a rendition — ASS/SSA, `mov_text` | `GET /files/{id}/subs/{i}.vtt`, and only ever as a manual pick, since these are not eligible as a default |
+| `burn` | nothing above applies | drawn into the frames by the transcode, subject to the HDR guard above |
+
+The field says how the cues are *produced*, not which transport carries them: a
+`native` rendition and a `burn` both ride the same HLS session. Clients may
+adopt it later; today it only adds a name for a decision they already
+reconstruct from `text`, `native`, and `overlay`.
 
 A burn the server's ffmpeg build cannot run is refused when the session is
 opened, naming the missing filter — see [Burn-in is preflighted against the

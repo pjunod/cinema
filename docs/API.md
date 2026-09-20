@@ -900,7 +900,24 @@ request still echoes the effective policy subtitle but does not burn it.
 `selection.subtitle_requires_burn_in` marks a bitmap track with no enabled
 overlay route, and `selection.subtitle_burn_in_blocked_by_hdr` marks the case
 where the HDR guard refused the burn rather than silently replacing HDR or DV
-with SDR.
+with SDR. The guard compares against what the plan delivers *without* the burn,
+so a transcode verdict is not an exemption.
+
+`selection.subtitle_route` is additive and names how the selected track's cues
+are produced: `"overlay"` when the PGS overlay is serving it, `"native"` when
+the codec can be an HLS WebVTT rendition, `"sidecar"` for text that cannot be a
+rendition (ASS/SSA, `mov_text` — a manual pick only), and `"burn"` otherwise.
+It is absent when no subtitle is selected, and it says nothing about which
+transport carries the result. Older clients ignore it.
+
+The server's own default is filtered by deliverability, and it surfaces in the
+top-level `subtitles[]` array — `default: true` marks the track the server
+chose, and the web client applies it automatically 400 ms after open. A
+non-forced bitmap track is never marked that way on an HDR delivery, and never
+at all while the PGS overlay is off, because the only way to show it would be
+a burn the HDR guard then refuses. It stays perfectly selectable by hand, and
+`selection` (present only when `audio=` or `subtitle=` was sent) reports the
+honest verdict for that manual pick.
 
 On a subtitle track, `text` and `native` are different claims: `text` means a
 WebVTT sidecar can be extracted, and is true for every non-bitmap codec;
@@ -1124,8 +1141,10 @@ rest, in the groups that matter:
   `preserve_dolby_vision`, `hdr10`.
 - **Tracks** — `audio`, `subtitle` (an initially selected native rendition,
   HLS metadata only), `native_subtitles`, `subtitle_burn`,
-  `subtitle_burn_sdr`, `audio_offset_ms` (±15 000, never written back to the
-  file).
+  `subtitle_burn_sdr` (**accepted and logged, never consulted** — the server
+  decides the burn from the plan's own delivered range, so an old client's
+  claim about the grade cannot authorize anything),
+  `audio_offset_ms` (±15 000, never written back to the file).
 - **Position** — `start` in seconds, negatives clamped to 0.
 - **Evidence** — `caps` (the same v2 document), `overrides`, `presentation`
   (only `"vod"`), `block_budget_secs`, `intent` (the viewer's ask as an
@@ -1172,7 +1191,7 @@ The response carries `session_id`, `playlist_url`, `duration_ms`,
 | 409 | — | `request_id` was already used for a different session intent |
 | 410 | `live_presentation_removed` | `presentation` is anything but `"vod"` |
 | 410 | `media_session_ended` | the idempotent session was already released |
-| 422 | `hdr_subtitle_burn_refused` | a burn on a known-HDR source without `subtitle_burn_sdr: true` |
+| 422 | `hdr_subtitle_burn_refused` | the resolved plan delivers HDR without the burn, so burning would discard that grade. Judged after `resolve_plan`, against the no-burn delivered range — not against the source `hdr` column, and not exempted by a transcode verdict. The M6 preparation candidate is refused the same way |
 | 503 | `media_session_starting` | an identical request is still starting |
 | 503 | `media_session_handoff_pending` | the predecessor owner has not finished handoff |
 | 503 | `media_session_superseded` / `playback_target_superseded` | the client has since settled on a later destination |

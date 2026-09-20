@@ -5483,6 +5483,7 @@ mod tests {
                 "content_analysis_repair",
                 "live_hls_recovery",
                 "pgs_overlay",
+                "subtitle_not_ready_503",
                 "dolby_vision_convert",
                 "source_probe_comparison"
             ],
@@ -5912,11 +5913,13 @@ mod tests {
         let (_, settings) = call(&app, get("/api/v1/settings", Some(&admin))).await;
         assert_eq!(settings["pgs_overlay"], serde_json::json!(false));
         assert_eq!(settings["dolby_vision_convert"], serde_json::json!(true));
+        assert_eq!(settings["subtitle_not_ready_503"], serde_json::json!(false));
         assert!(!state
             .pgs_overlay_enabled()
             .await
             .expect("read the overlay switch"));
         assert!(state.transcode.dv_convert_enabled().await);
+        assert!(!state.subtitle_not_ready_503().await);
 
         // Both keys set on every row, because a leftover from the previous
         // one would make this pass by accident.
@@ -5931,6 +5934,17 @@ mod tests {
             state
                 .store
                 .put_setting(plurx_core::store::keys::PGS_OVERLAY, overlay_value)
+                .await
+                .expect("store a hand-written value");
+            // The subtitle refusal is read in the same three places and takes
+            // the same default-off spelling, so it rides the same rows rather
+            // than getting a census of its own.
+            state
+                .store
+                .put_setting(
+                    plurx_core::store::keys::SUBTITLE_NOT_READY_503,
+                    overlay_value,
+                )
                 .await
                 .expect("store a hand-written value");
             state
@@ -5960,6 +5974,9 @@ mod tests {
                     settings["dolby_vision_convert"].clone(),
                     reported("pgs_overlay"),
                     reported("dolby_vision_convert"),
+                    state.subtitle_not_ready_503().await,
+                    settings["subtitle_not_ready_503"].clone(),
+                    reported("subtitle_not_ready_503"),
                 ),
                 (
                     overlay,
@@ -5968,6 +5985,9 @@ mod tests {
                     serde_json::json!(convert),
                     serde_json::json!(overlay),
                     serde_json::json!(convert),
+                    overlay,
+                    serde_json::json!(overlay),
+                    serde_json::json!(overlay),
                 ),
                 "{stored}: the server, the settings page and the readiness route must \
                  not disagree about one stored string"
@@ -13770,6 +13790,9 @@ mod tests {
         );
         assert_eq!(preflight["reasons"], json!([]), "{preflight}");
 
+        // The HDR delivery: a copy of the source, which is what the preflight
+        // above says this client is getting. There is no encode to burn into,
+        // so keeping the grade and honouring the request are exclusive.
         let (status, body) = call(
             &app,
             post(
@@ -13777,8 +13800,9 @@ mod tests {
                 Some(&admin),
                 json!({
                     "playback_id": "old-client-hdr-burn",
-                    "height": 64,
-                    "subtitle_burn": 2
+                    "subtitle_burn": 2,
+                    "copy": true,
+                    "preserve_dolby_vision": true
                 }),
             ),
         )
@@ -13789,6 +13813,53 @@ mod tests {
         assert_eq!(
             body["error"],
             "That subtitle requires an SDR burn-in. HDR playback was kept unchanged."
+        );
+
+        // The row the old predicate got wrong, and the reason its
+        // `method != Transcode` exemption is gone: a client that negotiates
+        // the HDR10 rung really is being delivered HDR10, so a burn into it
+        // drops the grade and must refuse just as a copy does.
+        let (status, negotiated) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{file}/hls/sessions"),
+                Some(&admin),
+                json!({
+                    "playback_id": "hdr10-transcode-burn",
+                    "height": 2160,
+                    "subtitle_burn": 2,
+                    "hdr10": true
+                }),
+            ),
+        )
+        .await;
+        assert!(
+            status == StatusCode::UNPROCESSABLE_ENTITY
+                || negotiated["code"] == "hdr_subtitle_burn_refused",
+            "an HDR10 transcode is an HDR delivery: {status} {negotiated}"
+        );
+
+        // And the population the old guard over-refused: a client asking for
+        // a transcode at a height, with no HDR10 negotiated. That body
+        // delivers SDR with or without the burn — the transcode spent the
+        // grade, not the subtitle — so refusing it took away the viewer's
+        // subtitles without giving them back any dynamic range.
+        let (status, plain_transcode) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{file}/hls/sessions"),
+                Some(&admin),
+                json!({
+                    "playback_id": "sdr-transcode-burn",
+                    "height": 64,
+                    "subtitle_burn": 2
+                }),
+            ),
+        )
+        .await;
+        assert_ne!(
+            plain_transcode["code"], "hdr_subtitle_burn_refused",
+            "a transcode that was never going to deliver HDR loses none to a burn:              {status} {plain_transcode}"
         );
 
         // TCL 9445X / Bad Boys for Life's route: the display advertises
@@ -13818,6 +13889,11 @@ mod tests {
             "{sdr_preflight}"
         );
 
+        // No `subtitle_burn_sdr` on this body, deliberately. The whole point
+        // of the one guard is that the session's own grade decides: the web
+        // client never sent that acknowledgement, and requiring it is what
+        // refused every web burn on an HDR source. Reaching the rescan
+        // refusal means this request got *past* the HDR guard.
         let (status, accepted) = call(
             &app,
             post(
@@ -13826,14 +13902,184 @@ mod tests {
                 json!({
                     "playback_id": "tcl-existing-sdr-burn",
                     "height": 64,
-                    "subtitle_burn": 2,
-                    "subtitle_burn_sdr": true
+                    "subtitle_burn": 2
                 }),
             ),
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{accepted}");
         assert_eq!(accepted["code"], "vod_source_rescan_required", "{accepted}");
+
+        // And the acknowledgement no longer buys anything in the other
+        // direction either: a client that sends `true` on a delivery that
+        // really would lose its HDR is still refused. It is logged and
+        // ignored, not consulted.
+        let (status, still_refused) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{file}/hls/sessions"),
+                Some(&admin),
+                json!({
+                    "playback_id": "old-client-asserting-sdr",
+                    "height": 64,
+                    "subtitle_burn": 2,
+                    "copy": true,
+                    "preserve_dolby_vision": true,
+                    "subtitle_burn_sdr": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{still_refused}");
+        assert_eq!(
+            still_refused["code"], "hdr_subtitle_burn_refused",
+            "a client's word about the grade is not evidence about the grade: {still_refused}"
+        );
+    }
+
+    /// The reported defect, end to end: a Blu-ray remux whose English PGS
+    /// track carries the container's `default` flag, with an English SRT
+    /// beside it, on an HDR delivery.
+    ///
+    /// The web client auto-applies whichever track `/decision` marks
+    /// `default: true`, 400 ms after open. When that was the PGS track the
+    /// viewer got "That subtitle requires an SDR burn-in. HDR playback was
+    /// kept unchanged." for a choice nobody made, and the native clients
+    /// vetoed it silently and showed nothing. So the assertion that matters is
+    /// about the DTO array the client reads, not about the policy helper.
+    #[tokio::test]
+    async fn decision_never_defaults_a_burn_only_subtitle_on_an_hdr_delivery() {
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let s = seed_content(&state).await;
+
+        let dir = crate::test_temp_path(format!("plurx-hdr-default-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("dir");
+        let path = dir.join("Harbor.Lights.2019.UHD.BluRay.REMUX.mkv");
+        std::fs::write(&path, b"\x00\x00\x00\x18ftypmp42 placeholder").expect("write");
+        let probe = plurx_core::domain::ProbeResult {
+            duration_ms: Some(600_000),
+            container: Some("mkv".into()),
+            video_codec: Some("hevc".into()),
+            width: Some(3840),
+            height: Some(2160),
+            bit_depth: Some(10),
+            hdr: Some("hdr10".into()),
+            hdr_format: Some("hdr10".into()),
+            audio_streams: vec![plurx_core::domain::AudioStream {
+                index: 0,
+                codec: "eac3".into(),
+                channels: Some(6),
+                language: Some("eng".into()),
+                default: true,
+                ..Default::default()
+            }],
+            subtitle_streams: vec![
+                // The container's own default, and undeliverable here.
+                plurx_core::domain::SubtitleStream {
+                    index: 0,
+                    codec: "hdmv_pgs_subtitle".into(),
+                    language: Some("eng".into()),
+                    default: true,
+                    ..Default::default()
+                },
+                plurx_core::domain::SubtitleStream {
+                    index: 1,
+                    codec: "subrip".into(),
+                    language: Some("eng".into()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let file = state
+            .store
+            .upsert_file(s.movie, &path.to_string_lossy(), 99, 1, &probe)
+            .await
+            .expect("file");
+
+        // `Always`, so the policy is obliged to choose something: "it picked
+        // nothing" must not be the reason this passes.
+        state
+            .store
+            .put_setting(plurx_core::store::keys::SUB_MODE, "always")
+            .await
+            .expect("subtitle mode");
+
+        let (status, body) = call(
+            &app,
+            get(
+                &format!(
+                    "/api/v1/files/{file}/decision?vcodec=hevc&acodec=eac3&container=mkv&hdr=1"
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["delivered_dynamic_range"], "hdr10", "{body}");
+
+        let defaults: Vec<(i64, &str, bool)> = body["subtitles"]
+            .as_array()
+            .expect("subtitles")
+            .iter()
+            .map(|track| {
+                (
+                    track["index"].as_i64().expect("index"),
+                    track["codec"].as_str().expect("codec"),
+                    track["default"].as_bool().expect("default"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            defaults,
+            vec![(0, "hdmv_pgs_subtitle", false), (1, "subrip", true)],
+            "the text track beside the bitmap default is the one a viewer can see: {body}"
+        );
+
+        // The manual pick still gets the honest answer — this is a refusal the
+        // viewer asked for, and the notice belongs to them.
+        let (status, picked) = call(
+            &app,
+            get(
+                &format!(
+                    "/api/v1/files/{file}/decision?vcodec=hevc&acodec=eac3&container=mkv&hdr=1&subtitle=0"
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{picked}");
+        assert_eq!(picked["selection"]["subtitle_index"], 0, "{picked}");
+        assert_eq!(
+            picked["selection"]["subtitle_requires_burn_in"], true,
+            "{picked}"
+        );
+        assert_eq!(
+            picked["selection"]["subtitle_burn_in_blocked_by_hdr"], true,
+            "{picked}"
+        );
+        assert_eq!(picked["selection"]["subtitle_route"], "burn", "{picked}");
+
+        // And on an SDR display the same file defaults the same way — the
+        // bitmap track is still not something a client can render, so the
+        // eligibility rule is about deliverability, not only about HDR.
+        let (status, sdr) = call(
+            &app,
+            get(
+                &format!(
+                    "/api/v1/files/{file}/decision?vcodec=hevc&acodec=eac3&container=mkv&hdr=0&subtitle=1"
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{sdr}");
+        assert_eq!(sdr["selection"]["subtitle_route"], "native", "{sdr}");
+        assert_eq!(
+            sdr["selection"]["subtitle_burn_in_blocked_by_hdr"], false,
+            "{sdr}"
+        );
     }
 
     /// `/decision` used to promise more than the server would accept: a

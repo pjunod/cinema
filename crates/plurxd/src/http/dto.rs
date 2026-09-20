@@ -8,7 +8,8 @@ use plurx_core::domain::{
 };
 use plurx_core::mediafacts::MediaFacts;
 use plurx_core::tracks::{
-    lang_matches, prefers_original_audio, select_tracks, LangPrefs, TrackSelection,
+    deliverable_as_default, lang_matches, prefers_original_audio, select_tracks_with, LangPrefs,
+    TrackSelection,
 };
 use serde::{Deserialize, Serialize};
 
@@ -462,7 +463,24 @@ fn playback_defaults(
     subtitles: &[SubtitleStream],
     prefs: &LangPrefs,
 ) -> PlaybackDefaultsDto {
-    let selected = select_tracks(audio, subtitles, prefers_original_audio(audio), prefs);
+    // Item detail has no plan to judge against — nobody has asked how this
+    // file would be delivered yet — so the HDR term is omitted and a forced
+    // bitmap track stays eligible. `/decision` is what the clients act on,
+    // and it refines this with the base grade it actually computed.
+    //
+    // The overlay is reported as *off*, and not because this surface knows it
+    // is: `FileDto::from_media_file` has no access to the setting, and the
+    // conservative answer is the right one either way. With the overlay off,
+    // claiming a non-forced PGS track as the default is the M1 defect on this
+    // surface. With it on, `/decision` offers the track anyway, so nothing is
+    // lost by not announcing it a step early.
+    let selected = select_tracks_with(
+        audio,
+        subtitles,
+        prefers_original_audio(audio),
+        prefs,
+        |track| deliverable_as_default(&track.codec, track.forced, false, false),
+    );
     defaults_from_selection(audio, subtitles, prefs, selected)
 }
 

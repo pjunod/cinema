@@ -160,6 +160,18 @@ async function saveVerifiedDecode(btn){
     if(card) card.outerHTML=verifiedDecodeCard(saved);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
+async function saveSubtitleNotReady(btn){
+  const err=document.getElementById("sub503err"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    const saved=await api("/settings",{method:"PUT",body:{
+      subtitle_not_ready_503:document.getElementById("sub503").checked}});
+    cacheSettings(saved);
+    toast("Subtitle refusal setting saved"); if(btn) setCardSaved(btn);
+    const card=document.getElementById("sub503card");
+    if(card) card.outerHTML=subtitleNotReadyCard(saved,DEVELOPER_READINESS);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
 async function saveAutomaticDecoderRecovery(btn){
   const err=document.getElementById("adrerr"); err.textContent="";
   if(btn) btn.disabled=true;

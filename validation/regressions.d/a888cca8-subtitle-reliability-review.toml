@@ -1,0 +1,35 @@
+version = 1
+
+[[coverage]]
+commits = ["a888cca8"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+The adversarial review's findings on the subtitle reliability server arc, each
+with the regression that would have caught it.
+
+The anime burn regression (`deliverable_as_default` handed to the one caller
+whose job is to burn, so a dual-audio ASS release selected Japanese audio and
+no subtitles) is pinned by
+`the_implicit_anime_burn_survives_ass_and_stops_at_an_hdr_delivery` in
+crates/plurxd/src/transcode.rs, which asserts both halves: the ASS track is
+still burned on an SDR base, and an implicit burn is refused on an HDR one
+while an explicit override is not.
+
+The reported defect itself — a default-flagged PGS track on an HDR remux
+reaching the client as `default: true`, which the web player auto-applies 400
+ms after open — is pinned end to end by
+`decision_never_defaults_a_burn_only_subtitle_on_an_hdr_delivery` in
+crates/plurxd/src/http/mod.rs, on the DTO array the client actually reads.
+
+The create guard's four rows, including the HDR10-negotiated transcode this
+branch's first draft did not cover, are in
+`hls_create_refuses_hdr_downgrades_and_preserves_an_existing_sdr_plan`.
+
+The lock-order inversion and the 503's race with the warm above it are
+structural rather than assertable from a single test: both are fixed by
+construction (two statements with no guard held across an await; the sidecar
+state read before the warm that would corrupt it), and the segment behaviour
+around them is covered by the three publication-wait and refusal regressions
+in crates/plurxd/src/http/hls.rs.
+"""

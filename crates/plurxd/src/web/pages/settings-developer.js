@@ -41,7 +41,13 @@ function devReq(readiness,itemId,reqId,title,detail){
     <p class="devcheck-evidence" data-devev="${esc(key)}">${esc(devReadinessEvidence(found,readiness))}</p>
   </div>`;
 }
+// The last readiness document this page received, so a card that re-renders
+// itself after its own save can redraw its advisory rows instead of dropping
+// them back to "checking…". Set on both the success and the failure path, so
+// "unavailable" survives a save too.
+let DEVELOPER_READINESS=null;
 function applyDeveloperReadiness(readiness){
+  DEVELOPER_READINESS=readiness;
   document.querySelectorAll("[data-devstat]").forEach(node=>{
     const [itemId,reqId]=String(node.getAttribute("data-devstat")).split(":");
     node.innerHTML=devReadinessPill(devReadinessRow(readiness,itemId,reqId),readiness);
@@ -369,6 +375,7 @@ function developerPanel(settings,readiness){
       <div class="setsection" id="enable-hevc-sample-entry"><h2>HEVC sample-entry admission</h2><p>Always-on packaging admission with advisory deployment and evidence status.</p></div>${hevcSampleEntryAdmissionCard()}
       <div class="setsection" id="enable-source-probe"><h2>Source verification</h2><p>Always-on probe-compatibility rules with advisory provenance and diagnostics status.</p></div>${sourceProbeCompatibilityCard(readiness)}
       <div class="setsection"><h2>Compatibility</h2><p>Native server and protocol controls for compatible playback clients.</p></div>${windowsServerCard(settings,readiness)}${protocol}
+      <div class="setsection" id="enable-subtitle-refusal"><h2>Subtitle delivery</h2><p>Explicit enablement for refusing a subtitle segment this server cannot produce, with advisory per-engine observations.</p></div>${subtitleNotReadyCard(settings,readiness)}
       <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}<div class="card"><h2>Search and classification</h2><p>Local text search, channel rules and automatic metadata labels are always available. Add optional search by meaning using an embedded model.</p>${devReq(readiness,"embedded_semantic_search","runtime","Embedded CPU runtime","Included in ordinary builds; no inference service is required.")}${devReq(readiness,"embedded_semantic_search","model","Verified model loaded","Enable to download approximately 91 MB once per node.")}${devReq(readiness,"embedded_semantic_search","index","Local semantic index","Indexing uses additional CPU and memory.")}<p class="hint">These observations are advisory. You can enable or disable semantic search at any time.</p><button class="ghost" onclick="showSearchSettings()">Enable and search settings</button></div>`;
 }
 // Automatic decode recovery.
@@ -376,6 +383,35 @@ function developerPanel(settings,readiness){
 // Direct opt-in with advisory evidence. The retained diagnostic-contract
 // coverage still tells an operator how much confidence to place in the
 // decision, but it never disables or overrides the switch.
+// Refusing a subtitle segment whose extraction failed.
+//
+// A not-ready subtitle segment is answered with a valid but empty WebVTT
+// body. While the sidecar is warming that is true. Once the extraction has
+// failed it is a lie, and players keep the bytes in memory whatever
+// `no-store` says — so the viewer is left with a track that is selected,
+// silent, and never going to fill in.
+//
+// The switch is the enable path and the rows below never gate it. They are
+// all `unobservable` on purpose: whether an engine keeps playing video
+// through a subtitle 503 is a measurement on an Apple TV, an Android device
+// and a browser, not something this server can read about itself.
+function subtitleNotReadyCard(s,readiness){
+  const enabled=!!s.subtitle_not_ready_503;
+  const state=enabled
+    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
+    : `<span class="pill">disabled</span>`;
+  return setCard(`${cardHead("Refuse a subtitle segment that failed","Answer 503 with Retry-After when a subtitle track's extraction has failed, instead of an empty subtitle segment the player keeps.",state)}
+      ${togRow("sub503",`Refuse instead of serving an empty subtitle segment <span class="pill warn">experimental</span>`,`Applies immediately to new segment requests. This checkbox is authoritative: an unobserved engine never turns it back off.`,enabled)}
+      <div class="hint"><b>This checkbox is the enable path.</b> The observations below are advisory only. Only a <i>failed</i> extraction is refused; a track that is still warming keeps its empty segment and the client's readiness retry, because "not yet" and "not going to" are different answers.</div>
+      <details class="setdetails" open><summary>What to confirm before enabling</summary><div class="setdetails-body">
+      ${devReq(readiness,"subtitle_not_ready_503","avplayer_survives_subtitle_refusal","AVPlayer keeps the picture","Apple TV and iPad. AVPlayer allows a subtitle segment about two seconds and blocks the muxed video while it waits, so this is the refusal with a picture riding on it. Play a title whose subtitle extraction fails and confirm the video continues.")}
+      ${devReq(readiness,"subtitle_not_ready_503","media3_survives_subtitle_refusal","Media3 keeps the picture","Android. Confirm a refused subtitle rendition surfaces as a text-track problem and not a fatal source error that stops playback.")}
+      ${devReq(readiness,"subtitle_not_ready_503","hlsjs_survives_subtitle_refusal","hls.js keeps the picture","Any browser. Confirm the bundled hls.js treats a 503 with Retry-After on a subtitle rendition as recoverable rather than escalating to a fatal network error.")}
+      <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice. These are device measurements; this server cannot take them for you, which is why all three read "not observable" rather than showing a tick nobody earned.</p>
+      </div></details>
+      <div class="err" id="sub503err" role="alert"></div>
+      ${setCardFoot("saveSubtitleNotReady")}`,{id:"sub503card"});
+}
 function decodeRecoveryCard(s){
   const q=s.decoder_health_qualification||{};
   // FFmpeg's strings again — a build banner and decoder names.

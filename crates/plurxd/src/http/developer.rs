@@ -190,6 +190,12 @@ pub(crate) async fn readiness(
             content_analysis_repair(&state, content_analysis_on).await,
             live_hls_recovery(live_recovery_on),
             pgs_overlay(overlay_on),
+            subtitle_not_ready_503(plurx_core::store::stored_switch(
+                settings
+                    .get(plurx_core::store::keys::SUBTITLE_NOT_READY_503)
+                    .map(String::as_str),
+                false,
+            )),
             dolby_vision_convert(convert_on),
             source_probe_comparison().await,
         ],
@@ -1032,6 +1038,62 @@ fn prepared_quality_handoff(enabled: bool) -> DeveloperEnableItem {
         enabled: Some(enabled),
         setting: Some("prepared_quality_handoff"),
         requirements,
+    }
+}
+
+/// Refusing a subtitle segment whose sidecar has failed, instead of serving a
+/// syntactically valid empty track.
+///
+/// Every row is an engine observation, and not one of them is consulted by
+/// the settings write. The honest answer for all three is `Unobservable`
+/// today, and saying so is the point: the measurement is *"does this engine
+/// keep playing video through a subtitle 503"*, which is a fact about
+/// AVPlayer, Media3 and hls.js running on real devices, not a fact a server
+/// process can read off itself. An operator who has run the physical
+/// verification may turn this on over three grey rows.
+fn subtitle_not_ready_503(enabled: bool) -> DeveloperEnableItem {
+    let engine = |id: &'static str, title: &'static str, detail: String| DeveloperRequirement {
+        id,
+        title,
+        status: RequirementStatus::Unobservable,
+        evidence: detail,
+    };
+
+    DeveloperEnableItem {
+        id: "subtitle_not_ready_503",
+        title: "Refuse a subtitle segment whose extraction failed",
+        enabled: Some(enabled),
+        setting: Some("subtitle_not_ready_503"),
+        requirements: vec![
+            engine(
+                "avplayer_survives_subtitle_refusal",
+                "AVPlayer keeps the picture through a subtitle 503",
+                "AVPlayer allows a subtitle segment roughly two seconds and blocks the muxed \
+                 video while it waits, so a refusal on that request is the one with a picture \
+                 riding on it. Whether it drops the legible selection and plays on, or stalls \
+                 the video, is a measurement on an Apple TV and an iPad — not something this \
+                 process can read. Off until it is taken."
+                    .to_owned(),
+            ),
+            engine(
+                "media3_survives_subtitle_refusal",
+                "Media3 keeps the picture through a subtitle 503",
+                "ExoPlayer's HLS text renderer may surface a 4xx/5xx on a subtitle rendition as \
+                 a fatal source error rather than a text-track error. The distinction decides \
+                 whether an Android viewer loses their subtitles or their film, and it is a \
+                 measurement on a device."
+                    .to_owned(),
+            ),
+            engine(
+                "hlsjs_survives_subtitle_refusal",
+                "hls.js keeps the picture through a subtitle 503",
+                "hls.js retries subtitle fragments on its own schedule and escalates to a fatal \
+                 network error after its retry budget. Whether the bundled 1.6.16 build treats a \
+                 503 with `Retry-After` on a subtitle rendition as recoverable is a browser \
+                 measurement."
+                    .to_owned(),
+            ),
+        ],
     }
 }
 

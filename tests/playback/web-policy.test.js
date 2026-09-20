@@ -2685,6 +2685,45 @@ test("HDR subtitle burns keep the current delivery instead", () => {
   );
 });
 
+// The server-side half of this arc stopped sending a non-forced bitmap track
+// as `default: true`, so the auto-apply below stops firing for one. The client
+// veto stays anyway: an older server can still send one, and the viewer who
+// gets a full SDR transcode 400 ms after opening an HDR remux did not ask for
+// it. This pins the shape of the guard the shipped player runs.
+test("a bitmap default is never auto-applied, whatever the server sent", () => {
+  const source = shippedSource("subNeedsBurn");
+  assert.match(
+    source,
+    /s\.text\s*===\s*false/,
+    "the client's burn test reads the wire's `text` flag",
+  );
+  const subNeedsBurn = new Function(
+    [source, "return subNeedsBurn;"].join("\n"),
+  )();
+
+  // What the server now sends for a Blu-ray remux: the PGS track is no longer
+  // the default, the text track beside it is.
+  const pgs = { index: 0, codec: "hdmv_pgs_subtitle", text: false, native: false, default: false };
+  const srt = { index: 1, codec: "subrip", text: true, native: true, default: true };
+  assert.equal([pgs, srt].find((s) => s.default).index, 1);
+
+  // And what an older server can still send. On an HDR delivery the burn is
+  // refused rather than performed, so the auto-apply cannot silently replace
+  // the picture.
+  assert.equal(subNeedsBurn(pgs), true);
+  assert.equal(subNeedsBurn(srt), false);
+  assert.equal(
+    policy.subtitleBurnAction({
+      requiresBurn: subNeedsBurn(pgs),
+      deliveredRange: "hdr10",
+    }),
+    "keep_hdr",
+  );
+  // ASS carries text, so this client hands it to a <track> rather than
+  // burning it — which is why the server now says `subtitle_route` out loud.
+  assert.equal(subNeedsBurn({ codec: "ass", text: true, native: false }), false);
+});
+
 test("directional seeks use horizontal steps only", () => {
   assert.equal(policy.seekDeltaSeconds("ArrowLeft"), -10);
   assert.equal(policy.seekDeltaSeconds("ArrowRight"), 10);
