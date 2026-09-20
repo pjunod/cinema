@@ -172,6 +172,17 @@ impl ScanReport {
             ));
         }
     }
+
+    /// Add a bounded problem after the filesystem pass has already sealed its
+    /// report. Targeted-scan integrations use this for post-placement hints;
+    /// rebuilding the summary keeps the same cap as scanner-originated notes.
+    pub fn add_problem(&mut self, problem: String) {
+        if self.suppressed > 0 {
+            self.problems.pop();
+        }
+        self.note(problem);
+        self.seal_problems();
+    }
 }
 
 /// What a re-probe pass did. Its own type rather than a [`ScanReport`] because

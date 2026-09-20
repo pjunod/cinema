@@ -63,10 +63,10 @@ use plurx_core::store::{
     ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
     DvConversionMode, DvConversionState, DvRecoveryGuardState, LibraryStore, MediaStore,
     NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
-    QueueDvConversionOutcome, ReconcileOutcome, RootFingerprintStatus, SqliteStore, Store,
-    ANALYSIS_LIFECYCLE_METRICS, ANALYSIS_METRIC_COMPONENTS, ANALYSIS_METRIC_PRIORITIES,
-    ANALYSIS_METRIC_STATES, ANALYSIS_METRIC_TRIGGERS, DV_CONVERSION_LEDGER_READ_MAX,
-    DV_RECOVERY_GUARD_READ_MAX,
+    QueueDvConversionOutcome, ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome,
+    SqliteStore, Store, ANALYSIS_LIFECYCLE_METRICS, ANALYSIS_METRIC_COMPONENTS,
+    ANALYSIS_METRIC_PRIORITIES, ANALYSIS_METRIC_STATES, ANALYSIS_METRIC_TRIGGERS,
+    DV_CONVERSION_LEDGER_READ_MAX, DV_RECOVERY_GUARD_READ_MAX,
 };
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::{
@@ -22959,6 +22959,188 @@ async fn scan_identity_directory_contract() {
             vec![movie],
             "{backend}: a contradictory filename cannot lend collection-folder ownership"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn scan_identity_series_hint_contract() {
+    for_each_backend(|store, backend| async move {
+        let shows = store
+            .create_library(&NewLibrary {
+                name: "Series Hint Shows".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![PathBuf::from("/contract/hints")],
+                anime: false,
+            })
+            .await
+            .expect("shows library");
+        let other = store
+            .create_library(&NewLibrary {
+                name: "Other Series Hints".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![PathBuf::from("/contract/other-hints")],
+                anime: false,
+            })
+            .await
+            .expect("other library");
+        let show = store
+            .insert_item(&NewItem {
+                library_id: shows.id,
+                kind: ItemKind::Show,
+                parent_id: None,
+                title: "Hint Target".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("show");
+        let movie = store
+            .insert_item(&NewItem {
+                library_id: shows.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Wrong Kind".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("movie");
+
+        assert!(store.apply_series_tmdb_hint(shows.id, show, 0).await.is_err());
+        assert_eq!(
+            store
+                .apply_series_tmdb_hint(other.id, show, 41)
+                .await
+                .expect("wrong library"),
+            SeriesHintOutcome::MissingOrWrongKind
+        );
+        assert_eq!(
+            store
+                .apply_series_tmdb_hint(shows.id, movie, 41)
+                .await
+                .expect("wrong kind"),
+            SeriesHintOutcome::MissingOrWrongKind
+        );
+        assert_eq!(
+            store
+                .apply_series_tmdb_hint(shows.id, show, 41)
+                .await
+                .expect("first hint"),
+            SeriesHintOutcome::Applied
+        );
+        assert_eq!(
+            store
+                .apply_series_tmdb_hint(shows.id, show, 41)
+                .await
+                .expect("equal hint"),
+            SeriesHintOutcome::AlreadyEqual
+        );
+        assert_eq!(
+            store
+                .apply_series_tmdb_hint(shows.id, show, 99)
+                .await
+                .expect("conflicting hint"),
+            SeriesHintOutcome::Conflict {
+                current_tmdb_id: 41
+            }
+        );
+
+        let racing_show = store
+            .insert_item(&NewItem {
+                library_id: shows.id,
+                kind: ItemKind::Show,
+                parent_id: None,
+                title: "Concurrent Hint Target".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("racing show");
+        let hint_store = Arc::clone(&store);
+        let metadata_store = Arc::clone(&store);
+        let metadata_patch = MetadataPatch {
+            tmdb_id: Some(66),
+            ..Default::default()
+        };
+        let (hint, metadata) = tokio::join!(
+            hint_store.apply_series_tmdb_hint(shows.id, racing_show, 55),
+            metadata_store.apply_metadata(racing_show, &metadata_patch)
+        );
+        let hint = hint.expect("concurrent hint");
+        metadata.expect("concurrent metadata");
+        assert!(matches!(
+            hint,
+            SeriesHintOutcome::Applied
+                | SeriesHintOutcome::Conflict {
+                    current_tmdb_id: 66
+                }
+        ));
+        assert_eq!(
+            store
+                .get_item(racing_show)
+                .await
+                .expect("racing show read")
+                .expect("racing show")
+                .tmdb_id,
+            Some(66),
+            "{backend}: normal metadata and the conditional hint serialize without a stale overwrite"
+        );
+
+        let fenced_show = store
+            .insert_item(&NewItem {
+                library_id: shows.id,
+                kind: ItemKind::Show,
+                parent_id: None,
+                title: "Fenced Hint Target".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("fenced show");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let lease = acquired(
+            store
+                .acquire_lease("scan:library:series-hint", "node-a", now, now + 90_000)
+                .await
+                .expect("acquire hint lease"),
+            backend,
+        );
+        let replacement = publication_successor(&lease);
+        assert_eq!(
+            store
+                .apply_series_tmdb_hint_fenced(
+                    shows.id,
+                    fenced_show,
+                    77,
+                    &lease,
+                    &replacement,
+                )
+                .await
+                .expect("fenced hint"),
+            SeriesHintOutcome::Applied
+        );
+        let stale_replacement = publication_successor(&lease);
+        assert!(matches!(
+            store
+                .apply_series_tmdb_hint_fenced(
+                    shows.id,
+                    fenced_show,
+                    88,
+                    &lease,
+                    &stale_replacement,
+                )
+                .await,
+            Err(StoreError::FenceRejected { .. })
+        ));
     })
     .await;
 }

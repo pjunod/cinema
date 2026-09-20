@@ -654,7 +654,12 @@ applications to keep in sync.
 `path` must be absolute, because the caller and plurx may not share a working
 directory. `hint` is advisory — the library's own kind decides how a file is
 parsed, and the hint only picks which item an id applies to. `series` exists
-because an episode's own tmdb id does not identify its series.
+because an episode's own tmdb id does not identify its series. `series.tmdb`
+must be positive and is applied only after the episode has been placed and its
+show root resolved. An unset show accepts the first hint; the same value is
+idempotent; a different known value is kept and the successful scan's
+`report.problems` names the show and both IDs. Item-level `ids.tmdb` is never
+used as a fallback show ID for an episode or season request.
 `correlation_id` is echoed and logged, so one grep reconstructs a transfer
 across every application it passed through.
 
@@ -672,12 +677,15 @@ matching is the one 422 in the API, and its body names every configured root:
 |---|---|
 | 200 `{"status":"scanned", …, "report", "items"}` | Ran synchronously to completion — a real filesystem walk and ffprobe work happened inline on the request |
 | 202 `{"status":"queued", "request_id", …}` | The library was busy. **Queued, never dropped** — importing a season fires one request per episode within seconds, and dropping N−1 would leave the season half-indexed. Duplicates by path collapse |
-| 400 | Relative path, or invalid `book` fields |
+| 400 | Relative path, nonpositive `series.tmdb`, or invalid `book` fields |
 | 422 | Path under no library root |
 
 The id hints ride *on* the queued request so the drained job applies them
 later; an endpoint that applied them itself would drop them for every request
-that arrived while a scan was running. Every call increments the integration
+that arrived while a scan was running. Repeated files in one request apply a
+series hint once per resolved show. A series-ID conflict does not fail or roll
+back playable placement; it is a bounded diagnostic and never overwrites the
+known provider ID. Every call increments the integration
 notification counter *before* path resolution, so a request rejected for a
 path-mapping mistake still proves the caller reached plurx with a working key.
 

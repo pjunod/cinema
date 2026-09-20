@@ -13,7 +13,7 @@ use crate::error::StoreError;
 use crate::store::dv_conversion::validate_recovery_guard_identity;
 use crate::store::{
     ArtworkRepairFence, DvRecoveryGuardState, FencedPublicationStore, ReconcileOutcome,
-    RootFingerprintStatus,
+    RootFingerprintStatus, SeriesHintOutcome,
 };
 
 #[async_trait]
@@ -150,6 +150,20 @@ impl FencedPublicationStore for SqliteStore {
         let patch = patch.clone();
         self.with_fenced_conn(lease, replacement, move |conn| {
             apply_metadata(conn, item_id, &patch)
+        })
+        .await
+    }
+
+    async fn apply_series_tmdb_hint_fenced(
+        &self,
+        library_id: i64,
+        show_id: i64,
+        tmdb_id: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<SeriesHintOutcome, StoreError> {
+        self.with_fenced_conn(lease, replacement, move |conn| {
+            super::media::apply_series_tmdb_hint(conn, library_id, show_id, tmdb_id)
         })
         .await
     }

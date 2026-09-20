@@ -19,7 +19,7 @@ use crate::error::StoreError;
 use crate::store::dv_conversion::validate_recovery_guard_identity;
 use crate::store::{
     ArtworkRepairFence, DvRecoveryGuardState, FencedPublicationStore, ReconcileOutcome,
-    RootFingerprintStatus,
+    RootFingerprintStatus, SeriesHintOutcome,
 };
 
 const ATOMIC_PUBLICATION_TTL_MS: i64 = 90_000;
@@ -468,6 +468,53 @@ impl FencedPublicationStore for HiqliteAuthStore {
         )
         .await?;
         Ok(())
+    }
+
+    async fn apply_series_tmdb_hint_fenced(
+        &self,
+        library_id: i64,
+        show_id: i64,
+        tmdb_id: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<SeriesHintOutcome, StoreError> {
+        if tmdb_id <= 0 {
+            return Err(StoreError::Task(
+                "series TMDB hint must be a positive integer".to_owned(),
+            ));
+        }
+        let now = self.now()?;
+        let results = self
+            .atomic_publication(
+                lease,
+                replacement,
+                vec![(
+                    "UPDATE items SET tmdb_id = $1, updated_at = $2
+                     WHERE id = $3 AND library_id = $4 AND kind = 'show'
+                       AND tmdb_id IS NULL AND EXISTS (
+                         SELECT 1 FROM job_leases
+                         WHERE resource = $5 AND owner_node_id = $6
+                           AND fence = $7 AND revision = $8 AND expires_at_ms = $9)"
+                        .to_owned(),
+                    params!(
+                        tmdb_id,
+                        now,
+                        show_id,
+                        library_id,
+                        lease.resource.as_str(),
+                        lease.owner_node_id.as_str(),
+                        lease_i64("fence", lease.fence)?,
+                        lease_i64("revision", lease.revision)?,
+                        lease.expires_at_unix_ms
+                    ),
+                )],
+            )
+            .await?;
+        if results.first().copied() == Some(1) {
+            return Ok(SeriesHintOutcome::Applied);
+        }
+        self.current_series_hint_outcome(library_id, show_id, tmdb_id)
+            .await
     }
 
     async fn apply_metadata_if_artwork_repair_current_fenced(

@@ -18,8 +18,50 @@ use crate::mediafacts::{FactsRow, MediaFacts};
 use crate::store::{
     directory_matches_movie_path, directory_matches_show_path, directory_path_bounds,
     normalized_directory, ArtworkInventoryItem, ArtworkRepairFence, MediaStore,
-    MissingVideoCodecTag, ReconcileOutcome, RootFingerprintStatus, TOP_LEVEL_ITEM_PREDICATE,
+    MissingVideoCodecTag, ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome,
+    TOP_LEVEL_ITEM_PREDICATE,
 };
+
+pub(super) fn apply_series_tmdb_hint(
+    conn: &rusqlite::Connection,
+    library_id: i64,
+    show_id: i64,
+    tmdb_id: i64,
+) -> Result<SeriesHintOutcome, StoreError> {
+    if tmdb_id <= 0 {
+        return Err(StoreError::Task(
+            "series TMDB hint must be a positive integer".to_owned(),
+        ));
+    }
+    let changed = conn.execute(
+        "UPDATE items SET tmdb_id = ?1, updated_at = unixepoch()
+         WHERE id = ?2 AND library_id = ?3 AND kind = 'show' AND tmdb_id IS NULL",
+        params![tmdb_id, show_id, library_id],
+    )?;
+    if changed == 1 {
+        return Ok(SeriesHintOutcome::Applied);
+    }
+    let current = conn
+        .query_row(
+            "SELECT tmdb_id FROM items
+             WHERE id = ?1 AND library_id = ?2 AND kind = 'show'",
+            params![show_id, library_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()?;
+    Ok(match current {
+        Some(Some(current_tmdb_id)) if current_tmdb_id == tmdb_id => {
+            SeriesHintOutcome::AlreadyEqual
+        }
+        Some(Some(current_tmdb_id)) => SeriesHintOutcome::Conflict { current_tmdb_id },
+        Some(None) => {
+            return Err(StoreError::Database(
+                "series TMDB hint matched an unset show but changed no row".to_owned(),
+            ))
+        }
+        None => SeriesHintOutcome::MissingOrWrongKind,
+    })
+}
 
 /// Build an FTS5 MATCH expression from free text: quoted tokens, prefix
 /// matching on the last one. Returns `None` for queries with no tokens.
@@ -688,6 +730,16 @@ impl MediaStore for SqliteStore {
             Ok(items)
         })
         .await
+    }
+
+    async fn apply_series_tmdb_hint(
+        &self,
+        library_id: i64,
+        show_id: i64,
+        tmdb_id: i64,
+    ) -> Result<SeriesHintOutcome, StoreError> {
+        self.with_conn(move |conn| apply_series_tmdb_hint(conn, library_id, show_id, tmdb_id))
+            .await
     }
 
     async fn apply_metadata(&self, item_id: i64, patch: &MetadataPatch) -> Result<(), StoreError> {
