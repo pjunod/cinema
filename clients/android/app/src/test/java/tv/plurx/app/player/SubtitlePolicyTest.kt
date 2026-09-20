@@ -1,5 +1,6 @@
 package tv.plurx.app.player
 
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
@@ -10,6 +11,7 @@ import org.junit.Test
 import tv.plurx.app.data.ClientInfo
 import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.DisplayCaps
+import tv.plurx.app.data.Delivery
 import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.ReopenReason
 import tv.plurx.app.data.SubTrack
@@ -52,6 +54,102 @@ class SubtitlePolicyTest {
         SubTrack(index = index, codec = "ass", language = language, default = default, text = true, native = false)
 
     // ---- routing -----------------------------------------------------------
+
+    @Test
+    fun androidDvDeliveryChoosesOneTransportForEveryPlanAndSubtitleRoute() {
+        data class Case(
+            val mode: String,
+            val requiresHls: Boolean,
+            val subtitles: SubtitleDelivery,
+            val expected: PlaybackMediaTransport,
+        )
+
+        listOf(
+            Case("direct", false, SubtitleDelivery.Plan, PlaybackMediaTransport.Direct),
+            Case("remux", false, SubtitleDelivery.Plan, PlaybackMediaTransport.ProgressiveRemux),
+            Case("remux", true, SubtitleDelivery.Plan, PlaybackMediaTransport.HlsCopy),
+            Case("remux", true, SubtitleDelivery.BitmapOverlay, PlaybackMediaTransport.HlsCopy),
+            Case("remux", false, SubtitleDelivery.NativeSession, PlaybackMediaTransport.HlsCopy),
+            Case("remux", true, SubtitleDelivery.Burn, PlaybackMediaTransport.HlsTranscode),
+            Case("transcode", false, SubtitleDelivery.Plan, PlaybackMediaTransport.HlsTranscode),
+        ).forEach { case ->
+            assertEquals(
+                case.toString(),
+                case.expected,
+                desiredPlaybackTransport(case.mode, case.requiresHls, case.subtitles),
+            )
+        }
+    }
+
+    @Test
+    fun androidDvDeliveryOmittedWireRequirementKeepsProgressiveCompatibility() {
+        val delivery = Json.decodeFromString<Delivery>("""{"mode":"remux"}""")
+        assertFalse(delivery.requires_hls)
+        assertEquals(
+            PlaybackMediaTransport.ProgressiveRemux,
+            desiredPlaybackTransport(delivery.mode, delivery.requires_hls, SubtitleDelivery.Plan),
+        )
+    }
+
+    @Test
+    fun androidDvDeliveryRequiredHlsSurvivesStartSeekTracksAndRecoveryBodies() {
+        val base = PlaybackMediaRecipe(
+            quality = PlaybackQuality.Auto,
+            mode = "remux",
+            requiresHls = true,
+            audioIndex = 0,
+            subtitleIndex = null,
+            subtitleDelivery = SubtitleDelivery.Plan,
+            audioOffsetMs = 0,
+        )
+        val cases = listOf(
+            base,
+            base.copy(audioIndex = 2, audioOffsetMs = 250),
+            base.copy(subtitleIndex = 4, subtitleDelivery = SubtitleDelivery.NativeSession),
+            base.copy(subtitleIndex = null, subtitleDelivery = SubtitleDelivery.Plan),
+        )
+
+        cases.forEachIndexed { index, recipe ->
+            val body = playbackSessionBody(
+                playbackId = "pb",
+                requestId = "rq-$index",
+                startSeconds = index * 30.0,
+                recipe = recipe,
+                aac = true,
+                preserveDolbyVision = true,
+                sourceHeight = 2160,
+                previousSessionId = "previous".takeIf { index == cases.lastIndex },
+                reopenReason = ReopenReason.Stall.takeIf { index == cases.lastIndex },
+                controlSequence = index.toLong(),
+            )
+            assertEquals(true, body.copy)
+            assertEquals(true, body.aac)
+            assertEquals(true, body.preserve_dolby_vision)
+            assertEquals(index * 30.0, body.start)
+            assertEquals(recipe.audioIndex?.toInt(), body.audio)
+            assertEquals(recipe.audioOffsetMs.takeIf { it != 0L }, body.audio_offset_ms)
+            assertEquals(index.toLong(), body.control_sequence)
+            if (recipe.subtitleDelivery == SubtitleDelivery.NativeSession) {
+                assertEquals(true, body.native_subtitles)
+                assertEquals(recipe.subtitleIndex?.toInt(), body.subtitle)
+            } else {
+                assertNull(body.native_subtitles)
+                assertNull(body.subtitle)
+            }
+        }
+    }
+
+    @Test
+    fun androidDvDeliveryPreparedSuccessorAdoptsItsActualHlsTransport() {
+        assertEquals(
+            PreparedTransportAdoption(PlaybackMediaTransport.HlsCopy, "remux", true),
+            preparedTransportAdoption("source"),
+        )
+        assertEquals(
+            PreparedTransportAdoption(PlaybackMediaTransport.HlsTranscode, "transcode", false),
+            preparedTransportAdoption("server_selected"),
+        )
+    }
 
     @Test
     fun offReturnsToThePlanAndOnlyLeavingABurnReopens() {
@@ -534,6 +632,7 @@ class SubtitlePolicyTest {
             caps = decisionCaps,
             requestHDR10 = sessionHDR10Request(
                 decisionMode = "transcode",
+                deliveredDynamicRange = "hdr10",
                 compatibilityTranscode = false,
                 delivery = SubtitleDelivery.Plan,
             ),
@@ -552,6 +651,7 @@ class SubtitlePolicyTest {
         for (mode in listOf("direct", "remux")) {
             val requestHDR10 = sessionHDR10Request(
                 decisionMode = mode,
+                deliveredDynamicRange = "hdr10",
                 compatibilityTranscode = true,
                 delivery = SubtitleDelivery.Plan,
             )
@@ -571,6 +671,7 @@ class SubtitlePolicyTest {
         assertFalse(
             sessionHDR10Request(
                 decisionMode = "transcode",
+                deliveredDynamicRange = "hdr10",
                 compatibilityTranscode = false,
                 delivery = SubtitleDelivery.Burn,
             ),

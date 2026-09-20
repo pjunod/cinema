@@ -2073,11 +2073,18 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # a 30-second timeout with kill-on-drop; no new production child owner.
 # +1 is the selected-video packet ffprobe, held behind the existing bounded
 # process helper and explicitly reaped on completion, timeout, and error.
-expected_occurrences = 122
+# +1 is the Android-DV mux regression's test-only FFmpeg command. It copies a
+# short generated HEVC fixture to a temporary MP4, is collected synchronously
+# with `.output()`, owns no rolling producer, and cannot ship in the server.
+expected_occurrences = 123
 
 [[module_structures]]
 id = "process-capable-launch-method"
 pattern = "\\.(?:spawn|output|status)\\s*\\("
+# +2 for the Android-DV boundary regressions: one test-only finite FFmpeg
+# `.output()` described by the command-construction entry, plus one Axum
+# `Response::status()` assertion. Only the former launches a child, and it is
+# synchronously collected before its temporary fixture is dropped.
 # Four new MembershipManager::status calls are direct replicated-state reads,
 # not process launches or rolling-producer owners. Keep them visible in the
 # module-wide sentinel so any later process-capable shape still needs review.
@@ -2291,7 +2298,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # task or a timer, and the segment handler's own ownership is unchanged.
 # +3 are `status()` reads on startup/terminal state enums for diagnostics; they
 # are ordinary in-process methods and launch no child.
-expected_occurrences = 316
+expected_occurrences = 318
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

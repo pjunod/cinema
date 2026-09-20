@@ -1,0 +1,13 @@
+version = 1
+
+[[coverage]]
+commits = ["a20c04b1"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = """
+The retained `android_dv_delivery` Rust regressions exercise the correction's
+request-scoped conversion availability, HLS-required decision boundary,
+progressive compatible-base narrowing, native P5/P8 sample-entry and muxer
+arguments, complete generated init/fragment Dolby Vision records and RPUs,
+and converted VOD identity. Both Rust gates compile and execute those tests.
+"""
