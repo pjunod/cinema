@@ -1,8 +1,9 @@
 # Architecture review — where plurx stands after the month, and what to change
 
-**Status:** revision 2, after adversarial assessment · **Reviewed:** `main` @
-`a1414368` (2026-09-20 04:24 UTC) · **Written:** 2026-09-20 · **Revised:**
-2026-09-20 · **Scope:** server, store/cluster, streaming pipeline, Live TV,
+**Status:** revision 3 — Fable's revision 2 consolidated with Astra's review ·
+**Reviewed:** `main` @ `a1414368` (2026-09-20 04:24 UTC) · **Written:**
+2026-09-20 · **Revised:** 2026-09-20 (rev 2 after the adversarial
+assessment; rev 3 merging Astra's independent review) · **Scope:** server, store/cluster, streaming pipeline, Live TV,
 web/Apple/Android clients, build/CI/ops, and the last month's history
 (≈3,900 non-merge commits since 2026-08-20 — 3,860 or 3,906 depending on
 whether the window boundary is local midnight or UTC; history back to
@@ -16,10 +17,16 @@ CONFIRMED. The nine full reports (128 findings with quoted code, plus each
 area's "already good" list and open questions) are in the companion
 appendix; this document is the consolidated verdict, ranked.
 
-**Revision 2** folds in an adversarial assessment of the whole review
-(`ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md`, 210 dispositions). §0 lists what changed and why. The appendix is unrevised raw
-material; where it and this document disagree, this document wins, and where
-the assessment amends a remedy the amended remedy is the one to build.
+**Revision 2** folded in an adversarial assessment of the whole review
+(`ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md`, 210 dispositions).
+**Revision 3** merges Astra's independent review, which was written against
+the first draft and adds ten findings this review had not made (Q12,
+C12–C16, L10, §3.8, §4.8, §4.9) plus a reproduction of the interlace defect
+and two stale tests it found red on `main`; every Astra addition was
+re-verified in the tree and, where it was an experiment, re-run here. Where
+Astra's copy still carried a first-draft remedy the assessment withdrew, the
+revision-2 remedy stands and §0 says so. The appendix is unrevised raw
+material; where it and this document disagree, this document wins.
 
 How to read the ranking: **P0** = data loss / outage / security · **P1** =
 user-visible stall, quality regression, or resource leak · **P2** = real
@@ -185,6 +192,56 @@ accepted.
   up full-suite failures, and nothing produces them. That is the finding.
 - "Keep" verdicts on the ten do-first items are otherwise unchanged; the
   assessment confirmed the code facts for each.
+
+**Added from Astra's review (revision 3), each re-checked in the tree:**
+
+- **C12** — the ordinary scan probe (`scan/probe.rs:190-215`) is a bare
+  `Command::output().await` with no deadline, output bound or `kill_on_drop`;
+  a hung ffprobe stalls a library scan and dropping the future does not kill
+  the child. Confirmed. P1.
+- **C13** — every decode-fact lookup takes one global semaphore and hashes
+  three executable-sized inputs before checking its cache, and
+  `resolve_held_movie_plan` falls back to catalogue facts on *any* error
+  including identity changes. Confirmed mechanism; latency unmeasured. P2.
+- **C14** — item-detail badges call `fragment_index(...).is_some()`, which
+  unpacks every row of the index per video identity, and the same handler
+  `stat`s every media path sequentially with no deadline. Confirmed. P2.
+- **C15** — telemetry spawns a task per event, reads settings (a consistent
+  read on hiqlite) inside it, then does an individual insert; no bounded
+  queue. Confirmed. P2.
+- **C16** — retired rolling sessions keep their 2 GiB + 64 MiB scratch
+  reservation; already owned by the seek-scratch RCA/implementation plan
+  (untracked in the checkout as of this writing). Tracking item only.
+- **L10** — DVR fan-out writes sinks sequentially with the sink lock outside
+  the 30 s write timeout, so one slow destination stalls the shared tuner and
+  sibling recordings. Confirmed. P2.
+- **Q12** — `Encoder::video_codec_for` gives HDR10 HEVC output only to
+  software and QSV; NVENC/VAAPI/VideoToolbox have no HDR10 path. A
+  qualification boundary, not a bug; a P2 to widen with measurement.
+- **§3.8** — the browser has an evidence-aware adaptive controller; the
+  native clients have none, and the legacy stall-ticket plumbing is dormant
+  (Apple's `stallReopenIntent(wedge:)` has no call site). Confirmed. P2, L.
+- **§4.8** — `node tests/playback/web-policy.test.js` is red on `main`
+  (stale call-count assertion at line 6007); `web-control.test.js` is also
+  red under Node 22.22.2 at line 3164. Both reproduced here.
+- **§4.9** — an ownership map (contract → admission → producer attempt →
+  published object → client attachment) as the frame for the decomposition.
+- **Interlace reproduction** — Astra's fixture: the current CPU chain emits
+  90/90 combed frames tagged progressive; with `bwdif=send_field`, 176/180
+  progressive at 59.94. Re-run here on ffmpeg 6.1.1 with identical counts.
+- **Amendments Astra made that stand:** §2.3's backup scope (secrets,
+  media-root remapping, DVR schedules, isolated restore first, measured
+  RPO/RTO, one-node and majority-loss cases); §2.8's note that
+  `LibraryChannels.swift:855,901` uses SwiftUI `VideoPlayer` and must be
+  assessed separately, and that a staged successor must not change the
+  display before it is visible; Q4's note that the raw catalogue probe JSON
+  already retains `field_order`, so no blanket rescan is needed.
+- **Astra's copy superseded by revision 2 (do not build from it):** Q2
+  B-frames via `negative_cts_offsets`; S1's auth cache; S9 heartbeat-derived
+  skew; S7's `NOT EXISTS`; L9's `-hls_start_time_offset`; §2.9's
+  `STRATEGY_ALWAYS`; the release profile; §2.6 without the stopped→release
+  transition; §2.7's timer TTL. (Astra's own C7 rewrite already agrees with
+  the assessment.)
 
 **Net effect on the sequence (§5):** the week-one list loses nothing but
 splits three items (buffers vs. acks; listener vs. gzip vs. CSP; font I/O vs.
@@ -356,7 +413,13 @@ re-creates a single voter with a new cluster identity and fences the old
 one; an integrity check on the artefact; a nightly leader-singleton schedule
 through the existing job lease; `plurx_backup_last_success_seconds` on
 `/metrics`; and a restore drill in `container-smoke`. A raft snapshot is not
-this — it is not portable across cluster identities.
+this — it is not portable across cluster identities. Astra's scope additions,
+adopted: the artefact must cover secrets and the credential key, schema
+version, cluster/node identity, media-root remapping, watch and reading
+state, DVR schedules and integrations, and say which derived caches are
+rebuilt rather than restored; restore to an isolated instance first; measure
+RPO and RTO with realistic data; test both the one-node and the majority-loss
+case. Do not improvise a force-new-cluster command around copied raft files.
 
 ### 2.4 Media bodies stream in 4 KiB chunks through a blocking-pool hop per chunk (P1, S)
 
@@ -479,7 +542,12 @@ it; nothing depends on it. The SDR/60 consequence above is the expected
 behaviour given the API contract, not an observation: verify on the bedroom
 Apple TV in Apple's default "4K SDR + Match Content" output mode by reading
 the TV's actual HDMI mode before, during and after playback — that is the
-GPT test (§8).
+GPT test (§8). Two further points from Astra: `LibraryChannels.swift:855,901`
+uses SwiftUI `VideoPlayer`, whose framework-managed display behaviour is
+different and must be assessed on its own; and criteria must bind to the
+*committed visible* asset — a staged prepared successor must not change the
+display mode before it becomes visible. Verify 23.976/24/25/50/59.94 and
+SDR/HDR/DV across replacement and exit, not just first play.
 
 ### 2.9 Android: no refresh-rate matching, and a byte budget that starves 4K on TV heaps (P1, S–M)
 
@@ -540,7 +608,7 @@ finding text; only the evidence anchor and the decision are repeated here.
 | Q1 | Default rate control is 1-pass ABR on every encoder family; the swept QVBR/CRF mode is opt-in | `encoder.rs:106-110` `RateMode { #[default] Bitrate, Quality }`; `transcode.rs:12552-12562`; `bitrate_for_height` never consults `file.bitrate` | Bitrate is a deliberate qualified-fallback policy, not an oversight — so change it with evidence: compare CRF/QVBR against ABR on representative content per encoder family, make `Quality` the default only for families that pass (x264, and QSV already swept at 22), keep the HDR10 grade's separately qualified policy and the VBV bounds. Do **not** cap `maxrate` at 1.2 × source bitrate universally: a low-bitrate HEVC/AV1 source re-encoded to H.264 legitimately needs more |
 | Q2 | Encoded VOD disables B-frames (`-bf 0`) on every encoder — **by design**, and the design is enforced | `vod.rs:270-275`; `vodgen.rs:399` rejects any sample with nonzero CTO in the landing check; VOD-ENCODING.md | A flag change is refused by the validator and is withdrawn (§0). Enabling reorder is a timeline-contract change: composition offsets in the frame grid, init identity, leading pictures at random access, and restart splices all need production decode proofs. Efficiency gain is real in general but unmeasured here. Design item, M–L |
 | Q3 | CPU tone-map: no explicit `peak`, primaries converted after the curve, 8-bit output without dither | `mod.rs:1040-1056` | LIKELY, not confirmed: FFmpeg's `tonemap` reads MaxCLL/mastering side data when no `peak=` is given, so the defect only bites when the hardware download strips it — test that first (§8). Then: store MaxCLL/max-luminance at scan and emit `peak=` in `npl` units; `zscale=p=bt709` before `tonemap`; `dither=error_diffusion`; a 1,000-nit default is a policy assumption to be stated as such. Do not blindly substitute `bt2390` across different filters |
-| Q4 | No deinterlacer on the file path; scanner does not record `field_order` | only `live_tv.rs:6135` has `bwdif`; `decode_facts.rs:3343` list lacks `field_order` | Capture `field_order` (it can be `unknown` or wrong — treat `!= progressive` as a hint, verify with `idet` on a sample); `bwdif` before `scale`, choosing frame vs field output deliberately because field output doubles the cadence and changes grid, bitrate and frame-rate metadata; `vpp_qsv=deinterlace=2` / `deinterlace_vaapi` on hardware graphs after qualification |
+| Q4 | No deinterlacer on the file path; the normalised scan fields and the decode-fact probe omit `field_order` (the raw catalogue probe JSON retains it, so no blanket rescan is needed); **reproduced** — see §3.1.1 | only `live_tv.rs:6135` has `bwdif`; `scan/probe.rs:279`; `decode_facts.rs:3343` list lacks `field_order` | Capture `field_order` (it can be `unknown` or wrong — treat `!= progressive` as a hint, verify with `idet` on a sample); `bwdif` before `scale`, choosing frame vs field output deliberately because field output doubles the cadence and changes grid, bitrate and frame-rate metadata; `vpp_qsv=deinterlace=2` / `deinterlace_vaapi` on hardware graphs after qualification |
 | Q5 | Every **full video** transcode is stereo AAC 160 k with no downmix matrix; no EAC3/AC3 exists although ARCHITECTURE §3 promises it. Copy-video audio conversion already keeps 5.1 at 320 k and encoded VOD already sets `-ar 48000` (`vod.rs:266`), so the rolling path is the one without a sample-rate floor | `TranscodeOptions::default` `mod.rs:895-913`; `hls_args_inner` `:1661-1666` | Carry the profile's max channels/codec into `TranscodeOptions` and into the recipe identity, muxing and manifests; `eac3 640k` when claimed, else `aac -ac 6 320k`; `-ar 48000` on the rolling path; an explicit stereo downmix matrix chosen for the source channel order and verified for dialogue level and clipping — the appendix's pan string is illustrative, not a drop-in |
 | Q6 | NVENC leaves profile/AQ/lookahead to encoder defaults and is never zero-copy (no CUDA graph); VideoToolbox similar | `encoder.rs:436-444` (does not force `main`; leaves it to the driver); no CUDA pipeline in `pipeline.rs` | `-profile:v high -bf 3 -b_ref_mode middle -spatial-aq 1 -temporal-aq 1 -rc-lookahead 20`; `Pipeline::Cuda` behind the boot probe. Only matters if an NVENC node exists — open question |
 | Q7 | Master playlist advertises the *source* BANDWIDTH/RESOLUTION for transcodes and omits CODECS on SDR variants | `hls.rs:12413-12461` | RFC 8216 §4.3.4.2 says peak of the variant; AVPlayer filters on it and the Apple panel reads it for its network tone. Emit the resolved output geometry, the exact codec/sample-entry string for the output (not a hard-coded `avc1.640028`), and a peak BANDWIDTH that counts video `maxrate` + audio + container overhead. The recorded "SDR masters without CODECS" hardware ruling must be re-qualified, not overwritten. The Apple-panel consequence is to be reproduced |
@@ -548,9 +616,67 @@ finding text; only the evidence anchor and the decision are repeated here.
 | Q9 | Live TV: encode bitrate uses source fps while `bwdif=send_field` doubles it — 1080i sports get half the bits; captions dropped on VAAPI, no `CLOSED-CAPTIONS` rendition | `live_tv.rs:6110-6135`; `:5992` `-sn -dn` | Compute output fps in the planner with rational arithmetic and keep the bandwidth caps. Captions: `-sn -dn` does not itself prove A/53 SEI is dropped — audit preservation through each decode/filter/encode path with a real captioned fixture, add `-sei +a53_cc` on VAAPI if it is missing, keep the documented VideoToolbox `-a53cc 0` workaround until re-proven, and only then advertise `CLOSED-CAPTIONS` with correct service ids — a phantom track is worse than none |
 | Q10 | Web: `enableWorker:false` (main-thread TS demux); a single fatal media error skips hls.js's recovery ladder and permanently downgrades to transcode; capability probe asserts H.264 with no ceiling | `player.js:560`, `prepared-replacement.js:275`; `player.js:756-795` (no `recoverMediaError` call anywhere) | Delete the two lines after exercising worker start/fallback in the vendored build with the custom loader (the build already falls back inline on worker failure). Recovery: one `recoverMediaError()` per attach for media fatals that are not incompatible-codec errors, **inside** the existing attempt fences and shared retry budget — the fatal path currently reports failure before rescue, so recovery must move ahead of that report, not after it; `swapAudioCodec()` only for audio-append faults |
 | Q11 | Apple claims no `flac`/PCM so lossless audio is re-encoded; Android under-claims Vorbis, probes 30 fps only, never states HEVC Main10 | `Caps.swift:142`; `CapsPolicy.kt:260-284`, `Caps.kt:157` | Prove each container/transport/profile tuple on a device before claiming it; a fixture asserting the new string is not decoder evidence. Drop the DTS-HD-on-tvOS speculation from the Apple list until a receiver chain proves it |
+| Q12 (Astra) | Output codec is coupled to dynamic range: `video_codec_for` gives HDR10 HEVC Main10 only to software and QSV; NVENC, VAAPI and VideoToolbox have no HDR10 output path. A deliberate qualification boundary (the comment records the measurement), not a defect | `encoder.rs:239-252` | P2: qualify one more fleet-relevant codec/GPU graph end to end — decode, filters, subtitle composition, metadata, delivery, cache identity — with the existing `scripts/bench` corpus plus an HDR reference evaluation (VMAF alone cannot certify highlights or DV conversion). Keep H.264 as the compatibility choice; AV1 later, fleet-driven |
 
 The clients' *policy* layers and the copy/remux path are in good shape (see
-§6). The gap is entirely in the encode arguments and the master playlist.
+§6). The gaps are in the encode arguments, the master playlist, and — per
+Astra — the media facts the contract is resolved from; argv edits alone do
+not complete Q4, Q5 or Q12.
+
+#### 3.1.1 Q4 — the interlace defect, reproduced
+
+Live TV deinterlaces with `bwdif` (`live_tv.rs:6135`); finite playback's
+filter construction (`transcode/mod.rs:981`) scales and colour-processes with
+no deinterlace decision; the scanner's normalised video fields
+(`scan/probe.rs:279`) omit field order although the raw probe JSON keeps it;
+the decode-fact model has no interlace policy. DVR records broadcast MPEG-TS
+unchanged, so the same programme takes different paths live and saved.
+
+Astra's experiment, re-run here on ffmpeg 6.1.1 with identical results: a
+3 s top-field-first MPEG-2 fixture at 29.97 through the current CPU SDR
+`scale,format` + x264 chain produces H.264 *tagged progressive* that `idet`
+classifies as 90 TFF / 0 progressive; the same source with
+`bwdif=mode=send_field:parity=auto:deint=interlaced` first produces 59.94 fps
+and 4 TFF / 176 progressive. `idet` is a heuristic, not a quality score, and
+this is the filter chain, not the whole HTTP pipeline — but it is a
+reproducible fixture. Commands are in §9.
+
+Change: carry field order / scan type into the resolved media contract (the
+bound probe's `-show_entries`, its schema, digest and cache identity, and the
+selected-stream handling move together); choose frame-rate vs field-rate
+output deliberately, because field-rate doubles the cadence and changes the
+grid, bitrate and frame-rate metadata (Q9's Live TV bitrate bug is this
+mistake already shipped); never deinterlace progressive material or treat
+telecine as interlace. Acceptance: 480i/576i/1080i fixtures, moving sport and
+text, progressive controls, mis-flagged and telecined sources, inspected on
+output frames, on the shipped ffmpeg and each enabled GPU graph.
+
+#### 3.1.2 Q5 — resolve audio independently of video
+
+`options_for_tone_map` (`transcode.rs:14576`) leaves audio at its defaults
+(`mod.rs:895`: 2 ch / 160 k) and the finite HLS encoder (`mod.rs:1655`)
+selects AAC unconditionally, so a resolution change or subtitle burn downmixes
+audio that was compatible. Direct and copy/remux paths are separate and not
+accused. Change: copy a compatible selected stream; otherwise encode to a
+negotiated codec/layout; downmix only when the route requires it or the viewer
+asks; capability means container and actual sink, not the client's codec
+name; carry the decision through output contracts, ladder totals, playlist
+`CODECS`/`CHANNELS`, cache identity, offline packaging and prepared handoffs;
+audio-offset correction may still force an encode. Acceptance: a video-only
+quality change with AAC 5.1 and with compatible AC-3/E-AC-3, checking
+channels, language, A/V sync and receiver output before and after, plus the
+stereo/Bluetooth fallback.
+
+#### 3.1.3 Q12 — widen the codec/GPU qualification deliberately
+
+Quality-controlled SDR encoding exists; QSV has a recorded calibration, the
+other families' defaults are candidates in the source comments. Make codec,
+bit depth, dynamic range and rate control explicit, compatible dimensions of
+the output contract; start with one commonly used fleet GPU and HEVC SDR/HDR
+where it measures a benefit; publish source, delivered and rendered facts
+separately. Acceptance: delivered quality per byte, realtime headroom, GPU/CPU
+load and power on the target host across grain, animation, dark gradients,
+sport, HDR10, HLG, DV variants and burns.
 
 ### 3.2 Store and cluster — consensus where none is needed, nothing local
 
@@ -583,6 +709,68 @@ The clients' *policy* layers and the copy/remux path are in good shape (see
 | C9 | P2 | 1 s route-cache TTL ⇒ ≥1 consistent read/s per active HLS session behind one global `tokio::Mutex<HashMap>` | `media_sessions.rs:107, 1485` | Measure hold/wait time and query counts first; the mutex is not held across the Store call. Any longer positive TTL must be proven against release, replacement and fencing, which change authority immediately rather than at lease expiry; shard the map separately |
 | C10 | P3 | No HTTP RED metrics, no request ids, access log at DEBUG, no JSON log format, ANSI escapes into journald, no panic hook (task panics never reach `logbuf`) | `http/mod.rs:629-638`; `main.rs:1542-1560` | `MatchedPath` counter+histogram middleware, `SetRequestIdLayer`, `with_ansi(is_terminal())`, `PLURX_LOG_FORMAT=json`, panic hook → `tracing::error!` |
 | C11 | P3 | Direct play carries no `ETag`/`Last-Modified`/`Cache-Control` and treats `If-Range` as a full 200, contrary to ARCHITECTURE §3 | `stream.rs:2828-2832, 2941-2968` | Add strong validators (an id/size/mtime tuple is not strong under in-place replacement — use the held-file identity) and honour `If-Range`; the current full-200 on an unvalidated `If-Range` is conservative, not wrong. A validator match never bypasses authorisation or the source-identity check |
+| C12 (Astra) | P1 | The ordinary scan probe is `Command::output().await` with no deadline, no output bound and no `kill_on_drop`; scanning is sequential, so one hung ffprobe stalls the library, and dropping the future on lease loss (`state.rs:4371`) does not kill the child | `scan/probe.rs:190-215` | Share the existing bounded probe primitive (`ffmpeg.rs::bounded_command_output_with_limits`, 5 s / 16 MiB, piped, `kill_on_drop`) with `plurx-core` instead of adding another spawn pattern; establish reap completion before releasing admission; typed transient/permanent failure and continue to the next file. Fix §2.1's helper first. Acceptance: a sleeping probe, an output-flooding probe and a lease loss each leave no child behind — §3.3.1 |
+| C13 (Astra) | P2 | Every decode-fact lookup takes one global semaphore (`probe_gate`, permits = 1) and `validate_current` hashes the held executable, the immutable snapshot and the path object in full (up to 512 MiB each) *before* the cache is consulted; the whole request shares a 2 s budget and `resolve_held_movie_plan` falls back to catalogue facts on **any** error, including `ProbeChanged`/`SourceChanged`, at debug level — contention changes fact provenance, not just latency | `decode_facts.rs:26, 464, 2887-2931`; `transcode.rs:14070` | Instrument gate wait, identity validation, source observation, hit and collection separately; amortise validation of the attested immutable image per generation while keeping tamper checks on mutable objects (never mtime-only); classify fallback reasons and stop treating identity changes like timeouts. Measure before optimising — §3.3.2 |
+| C14 (Astra) | P2 | Item detail decides an index badge with `fragment_index(...).is_some()`, which loads and unpacks every packed row (≈98 KB for a 4,100-fragment index) per video identity; the same handler `tokio::fs::metadata`s every media path sequentially with no application deadline, so a slow NAS holds up metadata already in the database | `http/browse.rs:394, 432`; `store/fragindex.rs:374` | A batched index-status projection (identity-valid presence, outcome, summary) that never materialises the index and never turns corrupt rows into a ready badge; filesystem availability as a bounded cached observation with available/unavailable/unknown and a timestamp; the authoritative open stays at playback — §3.3.3 |
+| C15 (Astra) | P2 | `emit_with_network` spawns a task per event, reads settings inside it (a consistent read on hiqlite), then does an individual insert on the serialised node-local writer; no bounded queue, and the event-derived counters live inside the raw-retention branch, so disabling retention disables the metrics | `telemetry.rs:336-360` | Bounded channel + supervised batching writer; cached effective settings; counters independent of raw retention; explicit coalesce/drop policy with room reserved for terminal outcomes and a shutdown drain; keep it node-local — §3.3.4 |
+| C16 (Astra; owned elsewhere) | P1, already planned | Each rolling producer reserves the per-session ceiling + 64 MiB (2 GiB + 64 MiB at defaults) and `global_flow_bytes` charges `max(actual, reservation)` for live **and retired** presentations, so three reservations fill an 8 GiB cap regardless of bytes on disk; the refusal is a plain string where `session_start_error` expects the capacity classification | `transcode.rs:25890, 26001`; `hls.rs:3858` | Tracking item only: the seek-scratch RCA and implementation plan own this (both still untracked in the checkout at review time). Release future capacity only after all writers settle; keep retained objects and reader pins as separate obligations; classify the refusal; never recover space by deleting advertised segments (RFC 8216 §6.2.2) — §3.3.5 |
+
+
+#### 3.3.1 C12 — bound and supervise scan probes
+
+`scan/probe.rs:190-215` calls `Command::output().await` — no wall deadline,
+no bounded pipe collection, no `kill_on_drop`. Tokio documents that a dropped
+`Child` is not killed by default, so a timeout wrapped around `output()` is
+not enough either. The decoder-fact probe next door is carefully supervised;
+this one is not, and it is the one that runs over the whole library. Change:
+route through the existing bounded primitive, minimal environment, kill and
+reap on cancellation, admission held until cleanup finishes, typed failure,
+scan continues. A blocked filesystem syscall needs bounded admission too;
+cancelling its waiter does not cancel the OS call. Acceptance in the table.
+
+#### 3.3.2 C13 — decoder-fact hashing and fallback provenance
+
+Applies to speculative/offline production and immutable VOD preparation when
+a probe identity is available; rolling start uses catalogue facts, so this is
+not every play. What is confirmed is the mechanism: a warm hit still hashes
+three executable-sized inputs under a process-wide gate, and the fallback
+path does not distinguish "timed out" from "the source changed". Downstream
+labels the fallback `CatalogRow`, so this alone does not prove wrong output
+or a bypass of later fences. The earlier remediation ledger's A03 reserved
+this optimisation for measurement; this pins the exact cost and
+serialisation point. Acceptance: concurrent warm and cold starts with the
+production static binary; p50/p95 gate wait and first-frame time; binary
+replacement, same-size mutation, cancellation and source-change tests still
+pass.
+
+#### 3.3.3 C14 — detail reads and storage availability
+
+Artwork and list batching already improved; this is the remaining detail
+path. Acceptance: query instrumentation shows no bulk index payload for a
+badge; detail stays responsive with an unavailable mount, a large audiobook
+and several video identities; a stale availability observation never
+authorises opening an invalid source.
+
+#### 3.3.4 C15 — telemetry backpressure
+
+Client ingest limits do not bound the internal lifecycle producers; under slow
+storage, outstanding telemetry tasks grow and compete with fragment-index work
+on the same serialised store. Source-confirmed risk, not a measured leak.
+Acceptance: inject a slow/failed writer during playback; queue depth and
+memory stay bounded, playback stays responsive, drops are counted;
+retention, shutdown and network-prior opt-ins remain independent.
+
+#### 3.3.5 C16 — scratch reservations stay with the existing repair
+
+Disposition: already addressed by an approved repair plan
+(`SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md`,
+`SEEK-SCRATCH-RESERVATIONS-IMPLEMENTATION.md`, September 20 headers; not yet
+on `main`). This is a tracking item, not new scope. The mechanism is
+confirmed in the tree; the media1 incident it describes was not independently
+reproduced here. Acceptance belongs to that effort: repeated seeks and
+overlapping viewers under the unchanged 8 GiB cap, cancelled starts, open
+segment readers, failed cleanup, true ENOSPC; a refused destination must
+leave the incumbent playing; bytes and reservations counted separately.
 
 ### 3.4 Live TV and channels
 
@@ -597,6 +785,7 @@ The clients' *policy* layers and the copy/remux path are in good shape (see
 | L7 | P2 | Bitrate/captions | §3.1 Q9 | — |
 | L8 | P2 | `live_tv.rs` is nine modules in one 468 KB file; three parallel HLS playlist parsers in the tree | `transcode.rs:1107`, `renditiondir.rs:162`, `live_tv.rs:6487` | Mechanical split under `live_tv/`; one `hls_playlist` parser in `plurx-core` |
 | L9 | P3 | A session whose scratch cleanup fails is never retired and counts toward the tombstone cap that refuses all starts; producer polls scratch every 250 ms with `read_dir` + per-file metadata; no `EXT-X-PROGRAM-DATE-TIME`; misleading "capability expired" after owner restart | `live_tv.rs:5071-5080, 6362-6477, 4784-4786` | Cleanup can fail because the child exit was not confirmed as well as because the directory would not delete — retire from *capacity* accounting while keeping a retry owner for reaping and scratch removal. One bounded blocking scan instead of per-file async stats, keeping the size/regular-file/deletion-lag checks (a playlist-mtime gate misses growing temp files). `+program_date_time` is a capability, not a stall fix. After an owner restart the lookup cannot distinguish restart from expiry — say "unavailable, press Watch" unless a persisted incarnation proves restart |
+| L10 (Astra) | P2 | `pump_tuner_fanout` writes DVR sinks sequentially; each write may wait the full 30 s tuner timeout and the sink mutex is acquired outside that timeout, so one slow destination stalls the shared tuner reader and every sibling recording | `live_tv/dvr.rs:1914-1990` | Keep one tuner transport; give each sink an owned writer and a small bounded byte queue over shared immutable buffers; a destination that cannot keep up fails or rolls its own attempt; define overflow and cancellation before adding concurrency; keep generation fencing and distinct attempt files. Acceptance: two overlapping recordings, one injected slow writer — the healthy sink continues, the failing one records its gap, queues stay bounded, stop/failover waits for writers to settle |
 
 The 1 s uniform-cadence fix and the persisted guide are correct — the two
 documented Live TV incidents were fixed at the root, not the symptom.
@@ -638,6 +827,32 @@ documented Live TV incidents were fixed at the root, not the symptom.
 | D5 | P2 | "Open in…" hands the account bearer to arbitrary apps via `?token=`; bearer in plaintext DataStore included in cloud backup | `DetailScreen.kt:486-491`; `Session.kt:118-123`; `SettingsStore.kt:14,39,142`; manifest `allowBackup="true"` | Server-minted short-lived file grant; exclude `datastore/` from backup (one line) |
 | D6 | P2 | One OkHttp dispatcher (5/host) shared by Coil and Retrofit — `/decision` queues behind 24 posters; whole-library download with per-page main-thread re-sort; `Controller.kt` (4,293 lines) never instantiated by any test; sideload path builds `assembleDebug` (no R8, `run-as` exposes the token, no Baseline Profile) | `Net.kt:23-38`; `AppViewModel.kt:674-681`; `Makefile:1713-1751` | Four independent tasks: a separate dispatcher for Coil (trace the contention first; the 5/host limit is for async calls only, and image concurrency above the server's eight-permit gate just moves the queue); sort off-main and preserve merged order across libraries (pages are clamped to 200 server-side); a `PlayerPort` boundary with focused controller tests; release signing + Baseline Profile with the deployed variant measured |
 | D7 | P3 | `Application.onCreate` does two `runBlocking(IO)` reads for offline books TV never uses; 2 s session-status poll for the life of every session regardless of panel | `OfflineDownloads.kt:113-141`; `Controller.kt:2225-2256` | Move the offline-media recovery off the main thread while keeping process-wide readiness for pending transfers (it is offline media, not only books, and TV is not proven to never use it); the status poll is capability-scoped, not account-authenticated — back it off only with a replacement detection bound after auditing its other readers |
+
+---
+
+### 3.8 Native adaptive quality — the browser has a policy, the native clients have none (Astra; P2, L)
+
+The browser has an enabled-by-setting, evidence-aware adaptive controller
+(`player/stall-diagnosis.js:369`) over a pure rung policy
+(`playback-policy.js:299`). No Swift or Kotlin source consumes
+`playback_auto_abr` or runs an equivalent throughput/runway loop. The legacy
+stall-ticket plumbing for requesting a lower rung is dormant: Apple's
+`stallReopenIntent(wedge:)` (`PlayerController.swift:5683`) has no call site,
+and Android's reopen payload leaves `previousSessionId`/`reopenReason` at
+their `null` defaults (`SubtitlePolicy.kt:363-389`) — confirmed. Android's
+`onStall` (`Controller.kt:1837`) correctly refuses to treat every stationary
+presentation as bandwidth evidence; keep that. Change: share policy fixtures
+and evidence semantics across platforms over each player's real
+measurements; distinguish constrained delivery, producer capacity, decoder
+failure, deliberate hold and denied authority; use the prepared handoff for
+healthy changes and bounded recovery when the incumbent is already stalled;
+hysteresis, a switch budget, safe upward recovery; honour Original, manual
+quality, paused state and HDR fidelity. A single-rendition manifest does not
+become a multi-rung service because AVPlayer or Media3 supports ABR.
+Acceptance: the same shaped-network trace on browser, Apple TV/iPhone and
+Android TV/phone, comparing stalled seconds, switches, first-frame gaps,
+quality regained and unexpected SDR transitions. Not enabled on a pure policy
+test alone.
 
 ---
 
@@ -843,6 +1058,65 @@ doc quotes. (S)
 
 ---
 
+### 4.8 Two policy tests are red on `main`, and one of them is a stale call count (Astra; reproduced)
+
+`node tests/playback/web-policy.test.js` prints 137 PASS lines and fails at
+`web-policy.test.js:6007`, which expects two literal
+`behindLiveWindow.attached()` calls in Android; there is now one, inside
+`attachRecipe` (`Controller.kt:373`), which the prepared commit
+(`Controller.kt:3565`) calls. The source-count assertion is stale; it does
+**not** show that Android lost its recovery-budget reset. Reproduced here.
+`node tests/playback/web-control.test.js` also fails here under Node
+22.22.2 at `:3164` (`true !== false`); Astra's Mac run on Node 26.8.1
+passed, so this one is ordering/timing under that runtime — investigate
+before calling the suite green, and do not "fix" it by widening a timeout.
+Both are the same lesson as §2.2: nothing runs these on merge. Change:
+replace the call count with a behaviour test (spend a recovery, attach a
+prepared successor, exactly one new recovery allowed); keep inventory tests
+for discovery and ownership but state their limits — they establish neither
+frame continuity, interlace handling, receiver output nor cancellation
+cleanup.
+
+### 4.9 Make resource and presentation ownership reviewable (Astra)
+
+The target is unchanged — one deployable server — with smaller interfaces
+between owners that already exist:
+
+```text
+ catalog + source facts + device/route capabilities
+                       |
+                       v
+              resolved media contract
+     video / audio / subtitles / transport / identity
+                       |
+                       v
+        admission ---- producer attempt owner
+                           |
+                           v
+                 published-object owner
+                 visibility / grace / pins
+                           |
+                           v
+                 client attachment owner
+                prepared -> visible -> retired
+
+ telemetry <- bounded observations from each owner
+ durable state <- authoritative mutations, not per-frame events
+```
+
+A producer stopping, a playlist retiring, a reader closing and a player
+showing its first frame are four different events; treating one as proof of
+another is the pattern behind §2.6, C16, L9 and several of the month's
+lifecycle fixes. This is the frame for the §4.1 decomposition: extract along
+these ownership boundaries, preserve the current fences and receipts, and do
+not introduce a second controller. For performance decisions record p50/p95/
+p99 first-frame time, seek-to-moving-picture, stalled seconds per hour,
+failed starts per attempt, replacement failure rate, admission wait,
+actual vs reserved scratch and bytes per watched minute, segmented by
+client/transport/codec/grade/hardware with bounded labels and no content
+identifiers. The telemetry exists; this turns it into comparable release
+evidence.
+
 ## 5. Sequencing — what I would do, in order
 
 Revision 2 splits the items the assessment showed were really two or three
@@ -882,6 +1156,10 @@ question out of the week list. Nothing below depends on a withdrawn remedy.
 13. Live TV: full-guide view for the DVR scheduler with a day-13 test (L1);
     one `PeerTransport` in `AppState` (L3 part 1).
 14. ARCHITECTURE.md rewrite with the DVR reversal recorded (§4.7).
+15. **(Astra)** Bounded ordinary scan probes through the existing primitive
+    (C12); replace the stale `web-policy.test.js:6007` call-count assertion
+    with the behaviour test and diagnose `web-control.test.js:3164` under
+    Node 22 (§4.8). C16 stays with the seek-scratch effort.
 
 Deferred from the first draft's week list: `bounded_replica_reads=true` by
 default (consistency-policy change with per-route coverage → §5.2); Android
@@ -909,7 +1187,12 @@ part 2). Android `Display.Mode` matching, background/foreground-service
 model, shared player builder (§2.9, D2, D4). Web local seek within the
 retained published range for rolling HLS (W3) and `tsc --checkJs` ratcheted
 from a baseline (W8). Apple `Attempt` snapshot with per-scope comparison and
-one item observer (A3, A4). Live TV shared transport per channel with
+one item observer (A3, A4). **(Astra)** Detail-path index summary and bounded
+availability (C14); telemetry backpressure and cached settings (C15); DVR
+sink isolation (L10); measure C13's gate wait and fallback provenance before
+touching parser identity; audio resolved independently of video (Q5,
+§3.1.2) and field order in the media contract (Q4, §3.1.1) are part of the
+encoder-by-invariant series. Live TV shared transport per channel with
 slow-consumer eviction (L4); warm-start cache extended to full plan inputs
 (L6). Process: PR-level regression field with tree binding designed before
 receipts are retired; text-contract pruning one test at a time (§4.4).
@@ -924,7 +1207,9 @@ functions with their contractual orderings preserved; the classified
 test-seam migration (§4.2); the hiqlite fork decision (§4.3); the
 "Replicated-ephemeral" tier corrected in the architecture now and designed,
 if at all, later (S8); a clock-skew guard built on a real measurement (S9);
-B-frames as a VOD timeline change (Q2). And one rule for every future effort,
+B-frames as a VOD timeline change (Q2); native adaptive quality (§3.8) and
+the next codec/GPU qualification (Q12) as measured, fleet-driven work. And
+one rule for every future effort,
 which would have shortened five of this month's six fleet incidents: **the
 exit criterion adds a counter read off `/metrics` on the fleet** — with its
 event, bounded labels, expected-demand denominator, observation interval and
@@ -1067,9 +1352,73 @@ would settle it, not just the question.
   client logs should show `unsupported_build_error` with the "did not prove
   … changes pixels" text. Existence of P5 titles alone is not impact. (§2.1.)
 
+## 9. Verification record for the revision-3 additions
+
+What was run, and what was not. No Rust, Swift or Kotlin was changed; no
+compiler, broad runtime suite, device playback, load test, VMAF run or
+restore drill was performed for this document.
+
+| Check | Result |
+|---|---|
+| Tree | `main` @ `a1414368` for every code citation; documents landed at `0afefd92` (rev 1), `ef37b7cc` (rev 2), and this revision — no runtime change in between |
+| Astra's C12 | `scan/probe.rs:200-213` `.output()` with no `kill_on_drop`/timeout on that call (the supervised one at `:129-144` is the reporter probe) — confirmed |
+| Astra's C13 | `decode_facts.rs:26` 512 MiB image bound, `:464 validate_current`, `:2887-2931` `probe_gate` of 1 permit acquired before cache — confirmed |
+| Astra's C14 | `browse.rs:394` sequential `tokio::fs::metadata`, `:432` `fragment_index(...).is_some()` per identity — confirmed |
+| Astra's C15 | `telemetry.rs:336-352` `tokio::spawn` per event with `get_setting` inside — confirmed |
+| Astra's L10 | `dvr.rs:1914-1990` sequential `for sink in sinks`, `sink.file.lock().await` outside the `timeout(TUNER_READ_TIMEOUT, write_all)` — confirmed |
+| Astra's Q12 | `encoder.rs:239-252` `video_codec_for`: HDR10 → `libx265`/`hevc_qsv`, `None` for NVENC/VAAPI/VideoToolbox — confirmed |
+| Astra's §2.8 note | `LibraryChannels.swift:855, 901` `VideoPlayer(player:)` — confirmed |
+| Astra's §3.8 | `stallReopenIntent(wedge:)` defined at `PlayerController.swift:5683`, no call site; Android `previousSessionId`/`reopenReason` default `null` in `SubtitlePolicy.kt:363-389` — confirmed / LIKELY (callers not exhaustively read) |
+| `node tests/playback/web-policy.test.js` | 137 PASS then `strictEqual` expected 2 at `:6007` — **red on `main`**, reproduced |
+| `node tests/playback/web-control.test.js` | fails at `:3164` (`true !== false`) under Node 22.22.2 here; Astra: passes on Mac Node 26.8.1 — runtime-dependent, red here |
+| Interlace fixture (§3.1.1) | Re-run on ffmpeg 6.1.1 (Astra: 9.0.1): current chain → `field_order=progressive`, 30000/1001, idet 90 TFF / 0 progressive; with `bwdif=send_field` → 60000/1001, idet 4 TFF / 176 progressive — identical counts |
+| Seek-scratch documents (C16) | `docs/streaming/SEEK-SCRATCH-RESERVATIONS-*.md` present only as untracked files in the checkout; not on `main` |
+
+**Interlace reproduction** (generated media only; the filter chain, not the
+server):
+
+```bash
+mkdir -p /tmp/plurx-audit-media
+ffmpeg -hide_banner -nostdin -y \
+  -f lavfi -i 'testsrc2=size=640x480:rate=60000/1001:duration=3' \
+  -vf 'tinterlace=mode=interleave_top,setfield=tff' \
+  -c:v mpeg2video -flags +ilme+ildct -q:v 2 -an \
+  /tmp/plurx-audit-media/interlaced.ts
+
+ffmpeg -hide_banner -nostdin -y -i /tmp/plurx-audit-media/interlaced.ts \
+  -vf "scale=-2:'min(720,ih)',format=yuv420p" \
+  -c:v libx264 -preset veryfast -profile:v high \
+  -b:v 4000k -maxrate 6000k -bufsize 8000k -an \
+  /tmp/plurx-audit-media/current.mp4
+
+ffmpeg -hide_banner -nostdin -y -i /tmp/plurx-audit-media/interlaced.ts \
+  -vf "bwdif=mode=send_field:parity=auto:deint=interlaced,scale=-2:'min(720,ih)',format=yuv420p" \
+  -c:v libx264 -preset veryfast -profile:v high \
+  -b:v 4000k -maxrate 6000k -bufsize 8000k -an \
+  /tmp/plurx-audit-media/deinterlaced.mp4
+
+for f in current deinterlaced; do
+  ffprobe -v error -select_streams v:0 \
+    -show_entries stream=field_order,avg_frame_rate -of csv=p=0 \
+    /tmp/plurx-audit-media/$f.mp4
+  ffmpeg -hide_banner -nostdin -i /tmp/plurx-audit-media/$f.mp4 \
+    -vf idet -an -f null - 2>&1 | grep 'Multi frame' | tail -1   # read the FINAL summary
+done
+```
+
+The counts establish a regression fixture; they do not establish subjective
+quality, a performance budget, or the right policy for mis-flagged or
+telecined sources.
+
+---
+
 *Companions: `ARCHITECTURE-REVIEW-2026-09-20-APPENDIX.md` — the nine full
 area reports, unrevised, with every finding, quoted evidence, per-area
-"already good" lists, fix-density tables and open questions; and the
-adversarial assessment (`ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md`) whose
-dispositions revision 2 applies. Where the appendix and
+"already good" lists, fix-density tables and open questions; the adversarial
+assessment (`ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md`) whose
+dispositions revision 2 applies; and Astra's independent review, whose
+additions revision 3 merges in full — every finding, subsection, acceptance
+criterion and experiment it added appears above under its id, so it is not
+reproduced as a separate file; its own copies of the first-draft remedies are
+superseded by this document. Where the appendix and
 this document disagree, this document wins.*
