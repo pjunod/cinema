@@ -1404,7 +1404,7 @@ mod tests {
 
     use super::*;
     use crate::domain::{ItemEdit, ItemSort, NewLibrary};
-    use crate::store::{LibraryStore, MediaStore, SqliteStore};
+    use crate::store::{LibraryStore, MediaStore, SqliteStore, UserStore, WatchStore};
 
     async fn write_fake_video(dir: &Path, rel: &str) -> PathBuf {
         let path = dir.join(rel);
@@ -1434,6 +1434,38 @@ mod tests {
             })
             .await
             .expect("lib")
+    }
+
+    async fn show_library(store: &SqliteStore, dir: &Path) -> Library {
+        store
+            .create_library(&NewLibrary {
+                name: "Shows".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![dir.to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("show library")
+    }
+
+    async fn only_show(store: &SqliteStore, library_id: i64) -> Item {
+        let page = store
+            .list_top_items(library_id, ItemSort::Title, 0, 10)
+            .await
+            .expect("shows");
+        assert_eq!(page.total, 1, "expected one show: {:?}", page.items);
+        page.items.into_iter().next().expect("show")
+    }
+
+    async fn only_episode(store: &SqliteStore, show_id: i64) -> Item {
+        let seasons = store.get_item_children(show_id).await.expect("seasons");
+        assert_eq!(seasons.len(), 1, "expected one season: {seasons:?}");
+        let episodes = store
+            .get_item_children(seasons[0].id)
+            .await
+            .expect("episodes");
+        assert_eq!(episodes.len(), 1, "expected one episode: {episodes:?}");
+        episodes.into_iter().next().expect("episode")
     }
 
     #[tokio::test]
@@ -2483,6 +2515,194 @@ mod tests {
             vec!["trailer.mkv".to_owned()],
             "a group names some of its files, or there is nothing to act on"
         );
+    }
+
+    #[tokio::test]
+    async fn scan_identity_new_season_keeps_directory_owner_after_show_rename() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("tmp");
+        write_fake_video(
+            dir.path(),
+            "Harbor Lights/Season 1/Harbor Lights S01E01.mkv",
+        )
+        .await;
+        let library = show_library(&store, dir.path()).await;
+        scan_library(&store, &library).await.expect("initial scan");
+        let original = only_show(&store, library.id).await;
+        store
+            .update_item_fields(
+                original.id,
+                &ItemEdit {
+                    title: Some("Harbor Lights (US)".into()),
+                    ..ItemEdit::default()
+                },
+            )
+            .await
+            .expect("rename");
+
+        let new_path = write_fake_video(
+            dir.path(),
+            "Harbor Lights/Season 5/Harbor Lights S05E01.mkv",
+        )
+        .await;
+        let targeted = scan_path(&store, &library, &new_path)
+            .await
+            .expect("targeted scan");
+
+        assert_eq!(targeted.report.added, 1);
+        assert_eq!(targeted.items.len(), 1);
+        let survivor = only_show(&store, library.id).await;
+        assert_eq!(survivor.id, original.id);
+        let seasons = store.get_item_children(survivor.id).await.expect("seasons");
+        assert_eq!(
+            seasons
+                .iter()
+                .map(|season| season.season_number)
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(5)]
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_identity_second_version_keeps_episode_after_punctuation_rename() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("tmp");
+        write_fake_video(
+            dir.path(),
+            "City Watch/Season 2/City Watch S02E03 source.mkv",
+        )
+        .await;
+        let library = show_library(&store, dir.path()).await;
+        scan_library(&store, &library).await.expect("initial scan");
+        let show = only_show(&store, library.id).await;
+        let episode = only_episode(&store, show.id).await;
+        store
+            .update_item_fields(
+                show.id,
+                &ItemEdit {
+                    title: Some("City-Watch".into()),
+                    ..ItemEdit::default()
+                },
+            )
+            .await
+            .expect("rename");
+
+        let alternate = write_fake_video(
+            dir.path(),
+            "City Watch/Season 2/City Watch S02E03 alternate.mkv",
+        )
+        .await;
+        scan_path(&store, &library, &alternate)
+            .await
+            .expect("targeted scan");
+
+        assert_eq!(only_show(&store, library.id).await.id, show.id);
+        let files = store.files_for_item(episode.id).await.expect("versions");
+        assert_eq!(files.len(), 2, "both versions remain attached");
+        assert!(files.iter().all(|file| file.item_id == episode.id));
+    }
+
+    #[tokio::test]
+    async fn scan_identity_changed_file_preserves_ids_and_complete_watch_state() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = write_fake_video(
+            dir.path(),
+            "Night Shift/Season 1/Night Shift S01E04.mkv",
+        )
+        .await;
+        let library = show_library(&store, dir.path()).await;
+        scan_library(&store, &library).await.expect("initial scan");
+        let show = only_show(&store, library.id).await;
+        let episode = only_episode(&store, show.id).await;
+        let (file_id, stored_path) = store
+            .library_file_paths(library.id)
+            .await
+            .expect("file inventory")[0]
+            .clone();
+        let file = store.get_file(file_id).await.expect("file lookup").expect("file");
+        let source = std::fs::metadata(&stored_path).expect("source metadata");
+        store
+            .upsert_file(
+                episode.id,
+                &stored_path.to_string_lossy(),
+                source.len() as i64,
+                file.mtime,
+                &ProbeResult {
+                    raw_json: Some("{}".into()),
+                    ..ProbeResult::default()
+                },
+            )
+            .await
+            .expect("mark initial probe successful");
+        let user = store
+            .create_user("scan-identity-viewer", "hash", false)
+            .await
+            .expect("user");
+        let before = store
+            .put_progress_at(user.id, episode.id, 42_000, Some(100_000), Some(1))
+            .await
+            .expect("watch state");
+        store
+            .update_item_fields(
+                show.id,
+                &ItemEdit {
+                    title: Some("Night Shift: After Dark".into()),
+                    ..ItemEdit::default()
+                },
+            )
+            .await
+            .expect("rename");
+        std::fs::write(&path, b"not really video, but repacked").expect("rewrite");
+
+        let report = scan_library(&store, &library).await.expect("full rescan");
+        assert_eq!(report.pruned_items, 0);
+        let after_file = store
+            .get_file(file_id)
+            .await
+            .expect("file lookup")
+            .expect("file");
+        assert_eq!(after_file.id, file.id);
+        assert_eq!(after_file.item_id, episode.id);
+        assert_eq!(only_show(&store, library.id).await.id, show.id);
+        assert_eq!(
+            store
+                .watch_state(user.id, episode.id)
+                .await
+                .expect("watch lookup"),
+            Some(before)
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_identity_changed_file_control_keeps_ids_without_metadata_rename() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = write_fake_video(
+            dir.path(),
+            "Quiet Harbor/Season 1/Quiet Harbor S01E01.mkv",
+        )
+        .await;
+        let library = show_library(&store, dir.path()).await;
+        scan_library(&store, &library).await.expect("initial scan");
+        let show = only_show(&store, library.id).await;
+        let episode = only_episode(&store, show.id).await;
+        let file_id = store
+            .library_file_paths(library.id)
+            .await
+            .expect("file inventory")[0]
+            .0;
+        let file = store.get_file(file_id).await.expect("file lookup").expect("file");
+        std::fs::write(&path, b"not really video, but changed").expect("rewrite");
+
+        scan_library(&store, &library).await.expect("full rescan");
+        let after = store
+            .get_file(file_id)
+            .await
+            .expect("file lookup")
+            .expect("file");
+        assert_eq!((after.id, after.item_id), (file.id, episode.id));
+        assert_eq!(only_show(&store, library.id).await.id, show.id);
     }
 
     /// THE BUG THIS GUARDS: a show whose files carry no `S01E02` skips EVERY
