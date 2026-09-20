@@ -2,7 +2,8 @@
 
 **Status:** open · **Design:** Fable v4 document approval, 2026-09-19 ·
 **Implementation base:** `0f1e5e43a5726817d7a2d83add06ecbb40a6942f` ·
-**Effort:** `effort/watch-and-browse`
+**Effort:** `effort/watch-and-browse` ·
+**Review:** [PR #383](http://192.168.4.7:3000/noirr/plurx/pulls/383), unmerged
 
 Companion to [PLAYER-INPUT-CONTRACT.md](PLAYER-INPUT-CONTRACT.md) (what inputs
 mean), [WEB-SHELL-LAYOUT.md](WEB-SHELL-LAYOUT.md) (served source order), and
@@ -176,7 +177,7 @@ Use the affected compile and version requirements of the current effort gate.
 | General page-read-budget test | Existing Activity markup expectation fails on base; unrelated Activity behavior is not changed by this task |
 | Real server/media, Chrome and Safari | Pending |
 | Physical remote focus and native owner/layer continuity | Pending; native layout gate remains closed |
-| Effort/Main gates and qualification receipt | Pending; no release or deployment claim |
+| Effort/Main gates and qualification receipt | Pending on PR #383; no release or deployment claim |
 
 Real-media acceptance must cover a movie and series, playing and paused,
 loading/failure, audio/subtitles/quality changes, and at least twenty repeated
