@@ -48,9 +48,9 @@ class PlaybackRecipeOwnershipTest {
         )
         assertTrue(owner.needsMediaReplacement(pending))
         assertEquals(
+            "a prepared successor is not incumbent state before commit",
             PlaybackMediaTransport.HlsCopy,
             owner.attachedTransport,
-            "a prepared successor is not incumbent state before commit",
         )
 
         val adoption = preparedTransportAdoption("server_selected")
@@ -59,9 +59,9 @@ class PlaybackRecipeOwnershipTest {
 
         owner.attach(incumbent, PlaybackMediaTransport.HlsCopy)
         assertEquals(
+            "rollback restores the predecessor's actual transport",
             PlaybackMediaTransport.HlsCopy,
             owner.attachedTransport,
-            "rollback restores the predecessor's actual transport",
         )
     }
 

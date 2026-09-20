@@ -1,7 +1,7 @@
 # Android Dolby Vision — bounded delivery repair
 
-**Status:** building on `codex/android-dv-delivery` · **Base:** `0f1e5e43` ·
-**Updated:** 2026-09-20 UTC · **Executes:** the Fable-reviewed
+**Status:** implementation complete; promotion candidate · **Base:** `0f1e5e43` ·
+**Updated:** 2026-09-20 UTC · **Delivery PR:** `#381` · **Executes:** the Fable-reviewed
 [root cause and proposed fix](ANDROID-DV-CONVERSION-RCA-AND-FIX.md).
 
 Progress: server and Android implementation are complete; pinned Rust 1.97.1
@@ -13,7 +13,9 @@ conversion by request transport, marks converted remuxes as HLS-required,
 re-decides concrete progressive requests, and uses structured source facts
 plus preserved-DV muxer strictness. Android build 109 retains the selected
 transport through initial play, seek, reopen, track changes, recovery,
-failover and prepared handoff. The one final focused test pass has not run yet.
+failover and prepared handoff. The final focused pass is green: 5 Rust
+delivery regressions, 4 documentation-index tests, the Android JVM suite,
+debug APK assembly, Android lint, and the affected static validation fences.
 
 Build one correction to the server/Android delivery contract: send Profile 7
 conversion through the existing HLS converter, retain that transport through
@@ -432,3 +434,21 @@ passes, and the controlled Lenovo run verifies converted and native DV
 delivery. If hardware access is unavailable, state that device acceptance
 is pending without calling it proved or creating a software gate. Keep any
 unrelated discovery separate and close this work once its contract is met.
+
+### Implementation result
+
+- Delivery candidate: Forgejo PR `#381`, Android build `109`, based on
+  `0f1e5e43`; the single adversarial review's five findings are addressed.
+- Rust 1.97.1: formatting, all-target `check`, denied-warning Clippy, and five
+  `android_dv_delivery` server regressions pass. The mux regression parses a
+  complete generated init segment and media fragment rather than only argv.
+- Android: `testDebugUnitTest`, `:app:assembleDebug`, and `:app:lintDebug`
+  pass. The lifecycle regressions cover request-body fidelity and prepared
+  transport adoption in addition to ordinary routing policy.
+- Repository validation: four documentation-index tests, catalog lint,
+  player-input fence, playback-surface fence, mobile-version validation, and
+  diff whitespace validation pass.
+- Remaining acceptance: the controlled Lenovo `TB322FC` run is hardware
+  pending. No device claim or panel-output claim is inferred from fixture,
+  container, or compiler evidence, and this pending evidence does not gate
+  the setting or runtime behavior.

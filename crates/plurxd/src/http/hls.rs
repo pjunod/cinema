@@ -27550,9 +27550,8 @@ mod tests {
             file.hdr = Some(hdr.into());
             // Row 1: an HDR copy has no encode to burn into, so keeping the
             // grade and honouring the request are genuinely exclusive.
-            assert_eq!(
+            assert!(
                 verdict(&copy, &file, OutputGrade::Sdr).1,
-                true,
                 "{hdr}: an HDR copy must refuse"
             );
             // Row 2: the one the old predicate got wrong. Since the M4 rung a
