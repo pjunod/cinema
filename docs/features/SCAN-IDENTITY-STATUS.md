@@ -1,6 +1,6 @@
 # Scan identity status — build, review and promotion ledger
 
-**Status:** adversarial review addressed; final fast lane next · **Executes:**
+**Status:** adversarial review addressed; final fast lane running · **Executes:**
 [SCAN-IDENTITY-IMPLEMENTATION.md](SCAN-IDENTITY-IMPLEMENTATION.md) ·
 **Started:** 2026-09-19 · **Updated:** 2026-09-19
 
@@ -34,7 +34,7 @@ silently describing the wrong toolchain.
 | M2 guarded series hints | `codex/scan-identity-hints` | merged by PR #380 at `54a65e93` | Atomic SQLite/Hiqlite outcomes, fenced stale-lease refusal and daemon import/report behavior passed. Current workflow intentionally allocates no CI jobs for task PRs into an effort. |
 | M3 bounded repair | `codex/scan-identity-repair` | merged by PR #384 at `86cf04b4` | Deterministic planner, bounded admin cache/API, SQLite/Hiqlite fenced apply and retry recognition pass focused core, daemon, SQLite, three-voter and documentation contracts. |
 | Final adversarial review | `effort/scan-identity` into `main` | complete; findings addressed | The one requested pass found descendant-membership, retry-proof, source-evidence, root-overlap, anime, blocker-scope, snapshot-coherence and coverage gaps. Corrections are summarized below. Its postcondition-index allegation was disproved by Hiqlite's observable-output contract and the three-voter run; the existing `statements.len()` index is correct after the postcondition is pushed. |
-| Main fast lane and merge | final effort PR | not started | Exact-tree green lane and receipt required before merge. |
+| Main fast lane and merge | final effort PR #385 | running | Exact-tree green lane and receipt required before merge. |
 | Production catalogue repair | separate operator action | not authorized | Fresh deployed preview and explicit authorization required. |
 
 ## Evidence — commands identify the exact tree they describe
@@ -115,5 +115,5 @@ silently repaired as unrelated work.
 
 ## Next action
 
-Commit and push the review corrections, mark PR #385 ready, then require its
-exact-head Main promotion gate and qualification receipt before merge.
+Require PR #385's exact-head Main promotion gate and qualification receipt,
+then merge without changing the candidate tree.
