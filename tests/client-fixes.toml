@@ -2150,3 +2150,21 @@ source = "crates/plurxd/src/web/player/directed-change.js"
 source_anchor = "async function applyReadySubtitleSidecar(player,index){"
 test = "tests/playback/web-control.test.js"
 test_anchor = "retryReadyNativeSubtitle"
+
+# The baseline repair also restores served-asset loading and the pinned Rust
+# lint; the client correction is anchored to the intended HDR10 fixture.
+[[fixes]]
+id = "android.watch-baseline-hdr10-fixture"
+commits = ["6fa0f9e28"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SubtitlePolicy.kt"
+source_anchor = "deliveredDynamicRange: String?"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest.kt"
+test_anchor = "fun compatibilityRescueAndBurnNeverRepeatTheReplacedHdr10Plan()"
+
+[[fixes]]
+id = "web.watch-fullscreen-cleanup-ownership"
+commits = ["cff2321c3"]
+source = "crates/plurxd/src/web/player/watch-presentation.js"
+source_anchor = "if(element&&!ownFullscreen)return;"
+test = "tests/web/watch-and-browse.browser.cjs"
+test_anchor = "assert.equal(await page.evaluate(()=>document.fullscreenElement===document.getElementById('app')),true);"
