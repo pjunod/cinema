@@ -534,6 +534,7 @@ class SubtitlePolicyTest {
             caps = decisionCaps,
             requestHDR10 = sessionHDR10Request(
                 decisionMode = "transcode",
+                deliveredDynamicRange = "hdr10",
                 compatibilityTranscode = false,
                 delivery = SubtitleDelivery.Plan,
             ),
@@ -552,6 +553,7 @@ class SubtitlePolicyTest {
         for (mode in listOf("direct", "remux")) {
             val requestHDR10 = sessionHDR10Request(
                 decisionMode = mode,
+                deliveredDynamicRange = "hdr10",
                 compatibilityTranscode = true,
                 delivery = SubtitleDelivery.Plan,
             )
@@ -571,6 +573,7 @@ class SubtitlePolicyTest {
         assertFalse(
             sessionHDR10Request(
                 decisionMode = "transcode",
+                deliveredDynamicRange = "hdr10",
                 compatibilityTranscode = false,
                 delivery = SubtitleDelivery.Burn,
             ),
