@@ -681,6 +681,38 @@ data class ControlDelivery(
 
 internal object SubtitleReadinessDecision {
     fun meansReady(value: String?): Boolean = value == "ready"
+
+    /**
+     * The server has given up on this track, rather than not having got to it
+     * yet. "warming" and absence both mean "not yet", and a client that waits
+     * through them is right to; `unavailable` is a memoised extraction failure
+     * and waiting through that is how a viewer sits in front of a selected,
+     * silent subtitle for the rest of the film.
+     */
+    fun meansUnavailable(value: String?): Boolean = value == "unavailable"
+}
+
+/**
+ * One notice per run of `unavailable`, not one per exchange.
+ *
+ * The reporter exchanges every couple of seconds, so a bare equality test
+ * would put a banner on screen on a cadence. The viewer needs to be told
+ * once, and told again only if the track recovers and fails afresh.
+ */
+internal class SubtitleUnavailableNoticeState {
+    private var told = false
+
+    @Synchronized
+    fun record(value: String?): Boolean {
+        val unavailable = SubtitleReadinessDecision.meansUnavailable(value)
+        if (!unavailable) {
+            told = false
+            return false
+        }
+        if (told) return false
+        told = true
+        return true
+    }
 }
 
 internal class SubtitleReadinessRetryState {

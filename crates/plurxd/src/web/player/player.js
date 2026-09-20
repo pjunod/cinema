@@ -613,6 +613,20 @@ function attachHls(video, playlistUrl, startAt){
       if(observesCurrent()) startup.manifestState='loaded';
     });
     resetPlaybackTransportEvents(video);
+    // A subtitle chosen before the rendition list arrived is dropped on the
+    // floor: `hls.subtitleTrack = n` with no tracks yet sets nothing, and
+    // nothing re-applies it. That is one of the ways a viewer selects a
+    // subtitle, sees no error, and gets no cues — and it is most likely on
+    // the pre-play selection, which is applied at the moment the session
+    // opens. Re-apply on the edge where the list becomes real.
+    if(Hls.Events.SUBTITLE_TRACKS_UPDATED) hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED,()=>{
+      if(!observesCurrent()) return;
+      const p=attachedPlayer;
+      if(!p||p.burnedSub!=null||!(p.curSub>=0)) return;
+      const ordinal=nativeHlsSubtitleOrdinal(p,p.curSub);
+      if(ordinal<0) return;
+      try{ if(hls.subtitleTrack!==ordinal) hls.subtitleTrack=ordinal; }catch(err){}
+    });
     hls.on(Hls.Events.MANIFEST_PARSED,()=>{
       if(observesCurrent()) startup.manifestState='parsed';
       // A newer native seek still belongs to this attachment. It must not

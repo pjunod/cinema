@@ -296,13 +296,38 @@ function nativeHlsSubtitleOrdinal(player,index){
 }
 // Re-selecting a subtitle rendition asks the HLS engine for the current
 // segment again. Video stays attached throughout; this is subtitle I/O only.
+f// Put the cues on screen once the server says the track is ready, without
+// touching the video.
+//
+// The obvious move — re-select the rendition so hls.js fetches the segment
+// again — does not work, and that is measured rather than assumed. Against
+// the bundled hls.js 1.6.16, `subtitleTrack = -1` then back, the same wrapped
+// in `subtitleDisplay` off/on, a bounce through a sibling rendition, a purge
+// of the fragment tracker, and a reselect with a nudge seek all leave the
+// cue count at zero and produce exactly ONE request for the segment. hls.js
+// does not re-request a subtitle fragment it has already processed, and the
+// minified build exposes no stream controller to reach past it. So the empty
+// `WEBVTT` body the server published while the sidecar was warming is what
+// that rendition shows for the rest of the session.
+//
+// What does work — 0 cues to 1 in the same harness, with the session id, the
+// video element and the segment count all unchanged — is to stop asking hls.js
+// and read the whole-track sidecar instead. By the time readiness says
+// `ready` that sidecar is exactly what exists, and `/files/{id}/subs/{i}.vtt`
+// is a route this player already uses for offset sessions. The rendition is
+// switched off so its empty track cannot sit on top of the cues.
 function retryReadyNativeSubtitle(player){
   if(!player||player.burnedSub!=null||player.curSub==null||player.curSub<0) return false;
   const ordinal=nativeHlsSubtitleOrdinal(player,player.curSub);
   if(ordinal<0) return false;
   if(player.hls){
-    player.hls.subtitleTrack=-1;
-    player.hls.subtitleTrack=ordinal;
+    try{ player.hls.subtitleTrack=-1; }catch(err){}
+    // Re-entering `setSub` would be the wrong move: it would take the
+    // rendition path again and land on the same cached empty fragment. Force
+    // the sidecar branch by clearing the marker `setSub` reads, then let it
+    // rebuild the script cue list at the session's own offset.
+    player._subOff=null;
+    applyReadySubtitleSidecar(player,player.curSub);
     return true;
   }
   if(!player.sessionId) return false;
@@ -312,6 +337,36 @@ function retryReadyNativeSubtitle(player){
   track.mode="disabled";
   track.mode="showing";
   return true;
+}
+// Fetch the whole-track sidecar and hand its cues to the one script text
+// track this player reuses. Shifted by the session's media origin for the
+// same reason `setSub` shifts it: a transcode's timeline starts at its own
+// offset, and sidecar cue times are absolute source time.
+async function applyReadySubtitleSidecar(player,index){
+  const video=document.getElementById("video");
+  if(!video) return;
+  const off=player.offset||0;
+  let text;
+  try{
+    const r=await fetch(subUrl(index));
+    if(!r.ok) throw new Error("HTTP "+r.status);
+    text=await r.text();
+  }catch(err){ return; }              // still warming, or gone: leave it alone
+  if(PLAYER!==player||player.curSub!==index||(player.offset||0)!==off) return;
+  if(!video._vsubs) video._vsubs=video.addTextTrack("subtitles","Subtitles");
+  const track=video._vsubs;
+  if(track.mode==="disabled") track.mode="hidden";
+  try{ while(track.cues&&track.cues.length) track.removeCue(track.cues[0]); }catch(err){}
+  const Cue=window.VTTCue||window.TextTrackCue;
+  let added=0;
+  for(const c of vttParse(text)){
+    const en=c.end-off;
+    if(en<=0) continue;
+    try{ track.addCue(new Cue(Math.max(0,c.start-off),en,c.text)); added++; }catch(err){}
+  }
+  if(!added) return;                  // nothing to show; do not claim otherwise
+  track.mode="showing";
+  player._subOff=off;
 }
 function startPlaybackControl(v,p,bootstrap){
   stopPlaybackControl(p);

@@ -150,10 +150,23 @@ function adoptPlaybackMediaElement(p,v){
   clearInterval(p.progressTimer);
   p.progressTimer=setInterval(()=>playbackProgressTick(v,p),500);
   // The subtitle selection is element state — a `<track>`, a script cue list,
-  // or an hls.js rendition index — and none of it followed the switch. Clearing
-  // the applied-offset marker is what makes the transport tick re-apply
-  // `p.curSub` to the element that now owns the picture.
-  p._subOff=null;
+  // or an hls.js rendition index — and none of it followed the switch, so it
+  // has to be re-applied to the element that now owns the picture.
+  //
+  // This used to clear `p._subOff` and call `pbTick()`, with a comment saying
+  // that was what triggered the re-apply. It is the exact opposite: the tick's
+  // guard requires `_subOff != null`, so nulling it is the one value that makes
+  // the guard fail, and the `pbTick()` on the next line then short-circuited.
+  // After any element swap — a prepared-replacement commit — a text subtitle
+  // silently disappeared and never came back, because this tick is the only
+  // path that re-applies one.
+  //
+  // Re-apply directly instead of routing it through a marker the tick reads
+  // for a different purpose. `setSub` is idempotent for the current index and
+  // sets `_subOff` itself, so the tick's own "the offset moved, re-shift the
+  // cues" job keeps working afterwards.
+  if(p.curSub>=0) setSub(p.curSub);
+  else p._subOff=null;
   pbTick(); pbSyncPlayIcon();
 }
 // The retired element leaves the page.
