@@ -177,6 +177,66 @@ fn hevc_promotion_failure(
 /// the ahead-window suspend and the GC all read the playlist — and nothing
 /// can be served from them, because a client only learns names from the
 /// playlist too.
+/// Authorizes bytes before this writer puts them on the disk.
+///
+/// The whole point of the native copy path, for accounting purposes, is that
+/// Rust holds the complete slice before it writes it. That makes an exact
+/// grant possible here and only here: FFmpeg's own `-f hls` output has no
+/// such boundary, and a measurement taken afterwards can only discover an
+/// overrun, never prevent one.
+///
+/// `authorize` is called with the exact length of the next temporary file,
+/// before it is created. A refusal is backpressure on this writer — not on
+/// the child process, whose pipe this task would otherwise keep draining and
+/// writing while the child sits suspended.
+pub struct WriteGrants {
+    ledger: std::sync::Arc<crate::scratch_ledger::ScratchLedger>,
+    key: crate::scratch_ledger::ScratchKey,
+    /// The configured global ceiling, re-read by the holder so an admin
+    /// change takes effect without restarting the session.
+    configured: std::sync::Arc<std::sync::atomic::AtomicI64>,
+    /// Granted alongside each slice so a session that is writing steadily is
+    /// not renegotiating the budget on every segment.
+    headroom: i64,
+}
+
+impl WriteGrants {
+    pub fn new(
+        ledger: std::sync::Arc<crate::scratch_ledger::ScratchLedger>,
+        key: crate::scratch_ledger::ScratchKey,
+        configured: std::sync::Arc<std::sync::atomic::AtomicI64>,
+        headroom: i64,
+    ) -> Self {
+        Self {
+            ledger,
+            key,
+            configured,
+            headroom,
+        }
+    }
+
+    fn authorize(&self, bytes: usize) -> bool {
+        self.ledger.authorize_write(
+            self.key,
+            i64::try_from(bytes).unwrap_or(i64::MAX),
+            self.configured
+                .load(std::sync::atomic::Ordering::Relaxed),
+            self.headroom,
+        )
+    }
+}
+
+/// How long a writer waits for the budget before it gives up.
+///
+/// Waiting is right: the global budget frees as other sessions retire and as
+/// retention prunes, and holding a completed slice in memory for a few
+/// seconds is far better than failing a playing stream. Waiting *forever* is
+/// not: a cap too small to publish a first playlist would leave a session
+/// held for a client that has nothing to drain. So the wait is bounded and
+/// its expiry is a classified failure, never a silent stall.
+const GRANT_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
+const GRANT_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
 struct SessionDir {
     dir: PathBuf,
     /// The `#EXTINF`/URI pairs, without the immutable header.
@@ -191,10 +251,19 @@ struct SessionDir {
     /// The playlist is on disk — the moment a player could be holding this
     /// timeline, and so the moment the legacy fallback stops being safe.
     started: bool,
+    /// Authorizes every byte this writer creates, when the session was
+    /// admitted with a growing reservation. `None` keeps the historical
+    /// behaviour for a session that reserved its whole ceiling up front.
+    grants: Option<WriteGrants>,
 }
 
 impl SessionDir {
-    fn new(dir: PathBuf, gate_secs: u32, target_duration: u32) -> SessionDir {
+    fn new(
+        dir: PathBuf,
+        gate_secs: u32,
+        target_duration: u32,
+        grants: Option<WriteGrants>,
+    ) -> SessionDir {
         SessionDir {
             dir,
             entries: String::new(),
@@ -202,6 +271,7 @@ impl SessionDir {
             gate_secs,
             target_duration: target_duration.max(1),
             started: false,
+            grants,
         }
     }
 
@@ -216,10 +286,61 @@ impl SessionDir {
 
     /// tmp + rename, the semantics the whole daemon assumes: a segment or a
     /// playlist is either absent or complete, never partial.
+    ///
+    /// Every byte this session materializes passes through here — the init
+    /// object, each media segment, and each playlist rewrite — so this is the
+    /// exact boundary at which a grant can precede a write rather than
+    /// discover one. The temporary file and the final name overlap during the
+    /// rename, and a playlist rewrite overlaps its predecessor, so the grant
+    /// asks for the slice twice over rather than pretending the rename is
+    /// free.
     async fn publish_file(&self, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+        self.authorize_write(name, bytes.len().saturating_mul(2))
+            .await?;
         let tmp = self.dir.join(format!("{name}.tmp"));
         tokio::fs::write(&tmp, bytes).await?;
         tokio::fs::rename(&tmp, self.dir.join(name)).await
+    }
+
+    /// Wait until the budget authorizes this write, the session goes away, or
+    /// the bounded wait expires.
+    async fn authorize_write(&self, name: &str, bytes: usize) -> std::io::Result<()> {
+        let Some(grants) = self.grants.as_ref() else {
+            return Ok(());
+        };
+        if grants.authorize(bytes) {
+            return Ok(());
+        }
+        let deadline = std::time::Instant::now() + GRANT_WAIT_BUDGET;
+        let mut waited = std::time::Duration::ZERO;
+        loop {
+            if std::time::Instant::now() >= deadline {
+                return Err(std::io::Error::other(format!(
+                    "rolling scratch capacity unavailable: {name} needs {bytes} bytes and the \
+                     global budget did not free any in {}s",
+                    GRANT_WAIT_BUDGET.as_secs()
+                )));
+            }
+            tokio::time::sleep(GRANT_WAIT_POLL).await;
+            waited += GRANT_WAIT_POLL;
+            // Teardown removed the directory under us: this is the session
+            // ending, and the caller already treats that as cancellation.
+            if session_directory_gone(&self.dir).await {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "the copy session directory was removed while waiting for scratch capacity",
+                ));
+            }
+            if grants.authorize(bytes) {
+                tracing::debug!(
+                    object = name,
+                    bytes,
+                    waited_ms = waited.as_millis(),
+                    "copy writer resumed after the scratch budget authorized its next object"
+                );
+                return Ok(());
+            }
+        }
     }
 
     async fn write_init(&mut self, init: &Init) -> std::io::Result<()> {
@@ -340,6 +461,9 @@ pub async fn run<R: AsyncRead + Unpin>(
     // the answer is finally observed rather than trusted.
     source: &MediaFile,
     video: plurx_core::transcode::CopyVideoOptions,
+    // Authorizes each object before it is written, for a session admitted
+    // with a growing reservation. `None` is the historical behaviour.
+    grants: Option<WriteGrants>,
 ) -> Outcome {
     let strip_dolby_vision_record = video.leaves_a_stale_dolby_vision_record(source);
     match tokio::fs::metadata(&dir).await {
@@ -358,7 +482,7 @@ pub async fn run<R: AsyncRead + Unpin>(
         }
     }
     let mut reader = FragmentReader::new();
-    let mut out = SessionDir::new(dir, limits.publish_gate_secs, limits.target_seconds);
+    let mut out = SessionDir::new(dir, limits.publish_gate_secs, limits.target_seconds, grants);
     // Hold the initialization segment until the first video sample arrives.
     // ffmpeg may put HDR10's static SEIs only in that sample; Apple needs the
     // same records in hvcC before it will accept a PQ HLS variant.
@@ -922,7 +1046,7 @@ mod tests {
 
     #[test]
     fn rolling_session_header_is_fixed_before_any_segment() {
-        let session = SessionDir::new(PathBuf::from("unused"), 12, 16);
+        let session = SessionDir::new(PathBuf::from("unused"), 12, 16, None);
         let first = session.playlist(false);
         let later = session.playlist(true);
         assert!(first.contains("#EXT-X-TARGETDURATION:16\n"), "{first}");
@@ -932,7 +1056,7 @@ mod tests {
     #[tokio::test]
     async fn rolling_session_refuses_an_oversized_extinf_before_writing_bytes() {
         let directory = crate::test_tempdir().expect("session directory");
-        let mut session = SessionDir::new(directory.path().to_path_buf(), 0, 16);
+        let mut session = SessionDir::new(directory.path().to_path_buf(), 0, 16, None);
         let published = Published {
             index: 0,
             segment: fmp4::Segment {
@@ -963,6 +1087,7 @@ mod tests {
             limits,
             &plain().0,
             plain().1,
+            None,
         )
         .await;
         (dir, outcome)
@@ -1110,6 +1235,7 @@ mod tests {
                     brisk(),
                     &source,
                     video,
+                    None,
                 )
                 .await;
                 assert!(
@@ -1160,6 +1286,7 @@ mod tests {
             brisk(),
             &source,
             video,
+            None,
         )
         .await;
         assert!(
@@ -1230,6 +1357,7 @@ mod tests {
             brisk(),
             &plain().0,
             plain().1,
+            None,
         )
         .await;
         assert!(
@@ -1379,6 +1507,7 @@ mod tests {
             brisk(),
             &plain().0,
             plain().1,
+            None,
         )
         .await;
         let Outcome::InvalidHevcConfiguration(reason) = outcome else {
@@ -1400,6 +1529,7 @@ mod tests {
             brisk(),
             &plain().0,
             plain().1,
+            None,
         )
         .await;
         let Outcome::Unsupported(reason) = outcome else {
@@ -1581,6 +1711,7 @@ mod tests {
             brisk(),
             &plain().0,
             plain().1,
+            None,
         )
         .await;
         let Outcome::ReaderFailed { counts, .. } = outcome else {
@@ -1619,6 +1750,7 @@ mod tests {
             limits,
             &plain().0,
             plain().1,
+            None,
         )
         .await;
         let Outcome::ReaderFailed { counts, .. } = outcome else {
@@ -1655,6 +1787,7 @@ mod tests {
             limits,
             &plain().0,
             plain().1,
+            None,
         )
         .await;
         let Outcome::ReaderFailed { counts, .. } = outcome else {
@@ -1740,6 +1873,7 @@ mod tests {
             brisk(),
             &plain().0,
             plain().1,
+            None,
         )
         .await;
         assert!(
@@ -1798,6 +1932,7 @@ mod tests {
             brisk(),
             &plain().0,
             plain().1,
+            None,
         )
         .await;
         match outcome {
@@ -1821,6 +1956,7 @@ mod tests {
             brisk(),
             &plain().0,
             plain().1,
+            None,
         )
         .await;
         assert!(
@@ -1839,6 +1975,7 @@ mod tests {
             brisk(),
             &plain().0,
             plain().1,
+            None,
         )
         .await;
         let Outcome::ReaderFailed { reason, counts } = outcome else {
@@ -1854,7 +1991,7 @@ mod tests {
         let dir = crate::test_tempdir().expect("tempdir");
         let path = dir.path().to_path_buf();
         std::fs::remove_dir_all(&path).expect("remove fixture session directory");
-        let outcome = run(&feed[..], path, "test", brisk(), &plain().0, plain().1).await;
+        let outcome = run(&feed[..], path, "test", brisk(), &plain().0, plain().1, None).await;
         assert!(
             matches!(outcome, Outcome::ReaderFailed { .. }),
             "a directory that never existed masqueraded as teardown: {outcome:?}"
@@ -1867,7 +2004,7 @@ mod tests {
         let parent = crate::test_tempdir().expect("tempdir");
         let path = parent.path().join("not-a-directory");
         std::fs::write(&path, b"fixture").expect("write fixture file");
-        let outcome = run(&feed[..], path, "test", brisk(), &plain().0, plain().1).await;
+        let outcome = run(&feed[..], path, "test", brisk(), &plain().0, plain().1, None).await;
         let Outcome::ReaderFailed { reason, .. } = outcome else {
             panic!("a non-directory scratch path became cancellation: {outcome:?}");
         };
@@ -1886,6 +2023,7 @@ mod tests {
             brisk(),
             &plain().0,
             plain().1,
+            None,
         )
         .await;
         assert!(
@@ -1911,6 +2049,7 @@ mod tests {
             brisk(),
             &plain().0,
             plain().1,
+            None,
         )
         .await;
         assert_eq!(outcome, whole_outcome);
@@ -1988,6 +2127,7 @@ mod tests {
             limits,
             &plain().0,
             plain().1,
+            None,
         )
         .await;
         let _ = child.wait().await;
