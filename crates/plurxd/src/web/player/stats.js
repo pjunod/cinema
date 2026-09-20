@@ -478,15 +478,20 @@ async function reportProgress(fileId, ended, attachedOwner){
   if(!ITEM_FOR_FILE[fileId]) return;
   try{ await api(`/items/${ITEM_FOR_FILE[fileId]}/progress`,{method:"POST",body:{position_ms:ended?(durMs||posMs):posMs,duration_ms:durMs}}); }catch(e){}
 }
-function closePlayer(){
+function closePlayer(options={}){
+  if(WATCH_CLOSE_PROMISE)return WATCH_CLOSE_PROMISE;
+  const closingWatch=watchDetach();
+  const closingGeneration=WATCH_GENERATION;
+  const closingRoute=location.hash;
+  let settleClose;
+  const closingPromise=new Promise(resolve=>{settleClose=resolve;});
+  WATCH_CLOSE_PROMISE=closingPromise;
   // Fence a full play() still awaiting its decision/session. PLAYER identity
   // alone cannot do that because close intentionally keeps the object around.
   PLAY_OPEN_GATE.invalidate();
   const progressPlayer=play.pendingIntent?play.pendingIntent.predecessor:
     play.failedPreparation?play.failedPreparation.predecessor:(PLAYER?.mediaPredecessor||PLAYER);
-  if(progressPlayer?.fileId){
-    reportProgress(progressPlayer.fileId,false,progressPlayer);
-  }
+  const finalProgress=progressPlayer?.fileId?reportProgress(progressPlayer.fileId,false,progressPlayer):Promise.resolve();
   if(PLAYER&&PLAYER.libraryChannel&&!PLAYER.libraryChannelReplacing){
     LIBRARY_CHANNEL_RETURN={channelId:PLAYER.libraryChannel.channel_id};
     LIBRARY_CHANNEL_TUNE.stop();
@@ -556,10 +561,15 @@ function closePlayer(){
       (opener&&opener.isConnected?opener:null)||document.getElementById("main");
     if(target&&target.focus) target.focus({preventScroll:true});
   };
-  if(location.hash.startsWith("#/item/")) {
-    const id=location.hash.split("/")[2];
-    setTimeout(()=>{ Promise.resolve(viewItem(id)).catch(()=>{}).finally(restoreFocus); },100);
-  } else setTimeout(restoreFocus,0);
+  const current=()=>WATCH_CLOSE_PROMISE===closingPromise&&WATCH_GENERATION===closingGeneration&&!WATCH&&location.hash===closingRoute;
+  Promise.resolve(finalProgress).then(async()=>{
+    if(options.routeLeave||!current())return;
+    const id=closingWatch?(closingWatch.accepted||(closingWatch.page?exactWireId(closingWatch.page.item):null)):
+      (location.hash.startsWith("#/item/")?location.hash.split("/")[2]:null);
+    if(id){await viewItem(id,current);if(current())restoreFocus();}
+    else if(current())restoreFocus();
+  }).catch(()=>{}).finally(settleClose);
+  return closingPromise;
 }
 // Keyboard while the player is open: 'i' toggles stats, Esc closes (unless the
 // native fullscreen is up — then Esc belongs to the browser's exit-fullscreen).
@@ -660,6 +670,7 @@ function applyPlayerOutcome(outcome,ctx={}){
       if(active&&active!==document.body&&player&&player.contains(active)&&active.blur) active.blur();
       return true;
     }
+    case "return_browser": watchReturnBrowser(); return true;
     case "exit": closePlayer(); return true;
     case "toggle_chrome": {
       const player=document.getElementById("player");
@@ -691,6 +702,7 @@ let PLAYER_REPEAT_COUNT=0;
 function handlePlayerKeydown(e){
   if(!document.getElementById("modal").classList.contains("open")) return;
   if(e.key==="Escape"&&isFullscreenAnywhere()) return;
+  if(WATCH&&WATCH.mode!=="full"&&!document.getElementById("player").contains(e.target))return;
   if(e.ctrlKey||e.metaKey||e.altKey) return;
   if(/^(INPUT|TEXTAREA|SELECT)$/.test((e.target&&e.target.tagName)||"")) return;
   const state=playerInputState();
@@ -698,7 +710,7 @@ function handlePlayerKeydown(e){
   if(input==null){ playerHotkey(e,state); return; }
   if(PLAYER_REPEAT_KEY!==e.key){ PLAYER_REPEAT_KEY=e.key; PLAYER_REPEAT_COUNT=0; }
   else if(e.repeat) PLAYER_REPEAT_COUNT+=1;
-  const outcome=PlaybackPolicy.routeInput(playerInputSurface(),state,input);
+  const outcome=watchRouteInput(state,input);
   const consumed=applyPlayerOutcome(outcome,{repeat:e.repeat,repeatCount:PLAYER_REPEAT_COUNT,
     direction:input,key:e.key});
   if(consumed) e.preventDefault();

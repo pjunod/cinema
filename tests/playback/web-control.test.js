@@ -41,6 +41,9 @@ function shippedConst(name) {
 function surfaceSeam() {
   return [
     "const raised=[],surfaceEvents=[],surfaceStops=[];",
+    // This owner harness exercises legacy slotless opens; watch presentation
+    // is independently exercised with the shipped browser and media element.
+    "const WATCH=null; let WATCH_GENERATION=0,WATCH_CLOSE_PROMISE=null; function watchPrepare(){WATCH_CLOSE_PROMISE=null;return null;} function watchAccept(){} function watchMarkChapter(){} function watchDetach(){WATCH_GENERATION++;return null;}",
     "const PLAYBACK_SURFACE={state:{faults:[],presenting:false},surface:null,history:[]};",
     "function playbackSurfaceStep(event){surfaceEvents.push(event);return null;}",
     "function raisePlaybackSurface(source,fault,options){raised.push({source,fault:fault||{},options:options||null});return null;}",
@@ -297,11 +300,12 @@ async function main() {
     assert.equal(subtitleReadinessRetryTransition(isolated,delivery),false,
       "non-ready readiness never directs a retry");
   }
-  const retryReadyNativeSubtitle=new Function([
+  const readySidecarReads=[];
+  const retryReadyNativeSubtitle=new Function("applyReadySubtitleSidecar",[
     shippedSource("nativeHlsSubtitleOrdinal"),
     shippedSource("retryReadyNativeSubtitle"),
     "return retryReadyNativeSubtitle;",
-  ].join("\n"))();
+  ].join("\n"))((player,index)=>readySidecarReads.push({player,index}));
   const subtitleTrackWrites=[];
   const hls={};
   Object.defineProperty(hls,"subtitleTrack",{
@@ -329,8 +333,10 @@ async function main() {
       &&retryReadyNativeSubtitle(nativePlayer)) retries++;
   }
   assert.equal(retries,1,"one readiness edge performs one directed retry");
-  assert.deepEqual(subtitleTrackWrites,[-1,1],
-    "the retry toggles only the selected native rendition on the same HLS object");
+  assert.deepEqual(subtitleTrackWrites,[-1],
+    "the retry disables the cached empty HLS rendition");
+  assert.deepEqual(readySidecarReads,[{player:nativePlayer,index:7}],
+    "the readiness edge requests the selected sidecar on the same player");
   assert.equal(nativePlayer.sessionId,"same-video-session",
     "subtitle retry does not replace the video session");
   assert.equal(retryReadyNativeSubtitle(Object.assign({},nativePlayer,{curSub:3})),false,

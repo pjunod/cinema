@@ -481,6 +481,12 @@ data class Delivery(
     val sessions_url: String? = null, // POST target for an HLS session
     val aac: Boolean = false, // remux over HLS: re-encode the audio
     /**
+     * Remux only: the selected operation exists only in the copy-HLS
+     * producer. Omitted by older servers, where progressive remux remains the
+     * compatible default.
+     */
+    val requires_hls: Boolean = false,
+    /**
      * Remux only: keep Dolby Vision signaling through the copy. Carried on a
      * copy session create so a subtitle selection can't quietly cost the
      * stream its DV layer — the server decided this, the client repeats it.

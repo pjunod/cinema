@@ -86,6 +86,16 @@ function renderBlock(contract) {
     }
   }
   out.push("");
+  out.push("**Watch presentation** — " + contract.watch.notes);
+  for (const [presentation, chromes] of Object.entries(contract.watch.routing)) {
+    for (const [chrome, surfaces] of Object.entries(chromes)) {
+      out.push("", `| ${presentation} / ${chrome} | surface | back | idle |`, "|---|---|---|---|");
+      for (const [surface, states] of Object.entries(surfaces)) {
+        for (const [state, row] of Object.entries(states)) out.push(`| ${state} | ${surface} | ${row.back} | ${row.idle} |`);
+      }
+    }
+  }
+  out.push("", "All other inputs retain the finite routing cells above.", "");
   out.push(END);
   return out.join("\n");
 }
@@ -256,6 +266,7 @@ function renderEmbedBlock(contract) {
   return [
     EMBED_BEGIN,
     `  const INPUT_ROUTING = ${JSON.stringify(contract.routing)};`,
+    `  const WATCH_INPUT_ROUTING = ${JSON.stringify(contract.watch.routing)};`,
     `  const CONTRACT_TIMINGS = ${JSON.stringify(contract.timings)};`,
     `  const CONTRACT_STEPS = ${JSON.stringify(contract.steps)};`,
     EMBED_END,

@@ -930,11 +930,17 @@ verdict for the same hardware.
 - `{"mode":"remux", "url":"…/stream.mp4[?audio=N]",
   "sessions_url":"…/hls/sessions", "aac":<bool>,
   "preserve_dolby_vision":<bool>, "requires_hls":true?}` — the same bytes in
-  two envelopes. A
+  two envelopes except when the plan requests Profile 7 → 8.1 conversion,
+  which the existing HLS copy producer performs and the progressive producer
+  cannot. A
   player needing HLS transport POSTs `sessions_url` with `copy: true` and
   this `aac` instead of fetching `url`. `requires_hls` is omitted when false;
   when true the progressive URL is not an executable alternative for this
-  caps snapshot, including on cold-index fallback.
+  caps snapshot, including on cold-index fallback. An explicit v2 document
+  that omits HLS cannot receive a conversion plan; the server chooses the
+  compatible HDR base or another honest fallback instead. A legacy query has
+  no exhaustive transport claim, so it retains conversion eligibility and
+  receives `requires_hls: true` when conversion is selected.
 - `{"mode":"transcode","sessions_url":"…"}` — POST it *omitting* `height`:
   Auto is the server's choice, because the rung depends on which encoder wins
   and only the create response knows that.
@@ -984,7 +990,12 @@ unmounted, moved, or renamed"*); 400 for an unknown track index or an
 unrecognized capabilities-document version. Typed **409
 `unsupported_hevc_delivery`** means the actual progressive copy output was not
 admitted and the document did not claim HLS; session create performs the same
-check before durable session admission.
+check before durable session admission. A concrete `stream.mp4` request
+re-decides with conversion unavailable. It therefore serves a compatible
+HDR10 base for a stale Profile 7 conversion URL instead of emitting
+unconverted dual-layer DV or rejecting only because HLS was required. It
+returns typed **409 `unsupported_progressive_delivery`** only when that
+concrete progressive producer genuinely cannot make compatible media.
 
 ### 7.3 How to read the decision
 
@@ -1076,8 +1087,13 @@ the requested `start` is used and a warning is logged.
 
 The remux is `-c:v copy` with
 `-movflags frag_keyframe+empty_moov+default_base_moof+delay_moov` and
-`-avoid_negative_ts make_zero`. HEVC copies are tagged `hvc1`, because an
-`hev1`-tagged MKV copy plays audio-only or black in Safari.
+`-avoid_negative_ts make_zero`. Ordinary HEVC copies are tagged `hvc1`,
+because an `hev1`-tagged MKV copy plays audio-only or black in Safari. A
+preserved native-DV copy instead derives `dvh1`/`dvhe` from the structured
+source facts used by admission and passes `-strict unofficial`, retaining the
+Dolby Vision configuration record rather than relabelling those bytes as
+ordinary HEVC. Profile 7 conversion never runs here: the concrete request is
+narrowed to a truthful compatible base as described in §7.2.
 
 ### 8.3 `GET /stream/{id}/status`
 

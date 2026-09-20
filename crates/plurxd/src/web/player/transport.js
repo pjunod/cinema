@@ -222,6 +222,7 @@ function settlePlaybackControlSeek(v,p,presentedMediaTime,presentedFrameSequence
   return true;
 }
 function pbTick(){
+  watchMarkChapter();
   if(!PLAYER) return;
   const v=document.getElementById("video");
   const tot=pbTotalSec();
@@ -378,10 +379,11 @@ function exitPresentationModes(){
 }
 function toggleFullscreen(){ const p=document.getElementById("player"), v=document.getElementById("video");
   try{
-    if(isFullscreenAnywhere()){ exitFullscreenAnywhere(); return; }
-    if(p&&p.requestFullscreen) p.requestFullscreen();
+    if(isFullscreenAnywhere()){ if(WATCH)WATCH.fullOpener="pbfs"; exitFullscreenAnywhere(); return; }
+    watchBeforeFullscreen();
+    if(p&&p.requestFullscreen){const request=p.requestFullscreen();if(request?.catch)request.catch(()=>watchFullscreenChanged());}
     else if(p&&p.webkitRequestFullscreen) p.webkitRequestFullscreen();
-    else if(v&&v.webkitEnterFullscreen) v.webkitEnterFullscreen();   // iOS iPhone: video-only fullscreen
+    else if(v&&v.webkitEnterFullscreen){v.addEventListener("webkitbeginfullscreen",watchFullscreenChanged,{once:true});v.addEventListener("webkitendfullscreen",watchFullscreenChanged,{once:true});v.webkitEnterFullscreen();}   // iOS iPhone: video-only fullscreen
   }catch(e){}
 }
 // Drag the scrubber (pointer events cover mouse + touch). Dragging previews the
@@ -594,7 +596,7 @@ function wirePlayerMedia(v){
   v.addEventListener("click",()=>{
     if(PLAYER&&PLAYER._menuDismissedByPointer){ PLAYER._menuDismissedByPointer=false; return; }
     if(ptrKind==="touch"&&ptrWoke){ playerActivity(); return; }
-    applyPlayerOutcome(PlaybackPolicy.routeInput(playerInputSurface(),playerInputState(),"tap_surface"),{direction:"tap_surface",repeatCount:0});
+    applyPlayerOutcome(watchRouteInput(playerInputState(),"tap_surface"),{direction:"tap_surface",repeatCount:0});
   });
   v.addEventListener("dblclick",e=>{ e.preventDefault(); toggleFullscreen(); });
   // Custom transport: keep the scrubber, times, buffered bar, and play icon in

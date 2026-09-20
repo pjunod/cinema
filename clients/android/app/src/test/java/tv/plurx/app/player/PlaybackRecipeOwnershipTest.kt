@@ -20,6 +20,52 @@ class PlaybackRecipeOwnershipTest {
     )
 
     @Test
+    fun androidDvDeliveryTracksTheAttachedTransportAndRequirementAsMediaIdentity() {
+        val owner = PlaybackRecipeOwnership()
+        val progressive = owner.request(original.copy(mode = "remux"))
+        owner.attach(progressive, PlaybackMediaTransport.HlsCopy)
+        assertEquals(PlaybackMediaTransport.HlsCopy, owner.attachedTransport)
+
+        val requiredHls = owner.request(original.copy(mode = "remux", requiresHls = true))
+        assertTrue(owner.needsMediaReplacement(requiredHls))
+        owner.attach(requiredHls)
+        assertEquals(PlaybackMediaTransport.HlsCopy, owner.attachedTransport)
+    }
+
+    @Test
+    fun androidDvDeliveryPreparedHandoffKeepsIncumbentUntilCommitAndRestoresOnRollback() {
+        val owner = PlaybackRecipeOwnership()
+        val incumbent = owner.request(original.copy(mode = "remux", requiresHls = true))
+        owner.attach(incumbent)
+        assertEquals(PlaybackMediaTransport.HlsCopy, owner.attachedTransport)
+
+        val pending = owner.request(
+            original.copy(
+                mode = "transcode",
+                audioIndex = 2,
+                subtitleDelivery = SubtitleDelivery.NativeSession,
+            ),
+        )
+        assertTrue(owner.needsMediaReplacement(pending))
+        assertEquals(
+            "a prepared successor is not incumbent state before commit",
+            PlaybackMediaTransport.HlsCopy,
+            owner.attachedTransport,
+        )
+
+        val adoption = preparedTransportAdoption("server_selected")
+        owner.attach(pending, adoption.transport)
+        assertEquals(PlaybackMediaTransport.HlsTranscode, owner.attachedTransport)
+
+        owner.attach(incumbent, PlaybackMediaTransport.HlsCopy)
+        assertEquals(
+            "rollback restores the predecessor's actual transport",
+            PlaybackMediaTransport.HlsCopy,
+            owner.attachedTransport,
+        )
+    }
+
+    @Test
     fun seekAfterUnpublishedAudioOffsetOrBurnCarriesTheWholeMediaRecipe() = runBlocking {
         for (wanted in listOf(
             original.copy(audioIndex = 2),

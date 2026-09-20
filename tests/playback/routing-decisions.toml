@@ -57,6 +57,20 @@ test = "crates/plurx-core/src/playback/mod.rs"
 test_anchor = "a_blanket_dolby_vision_claim_is_not_a_claim_about_dual_layer"
 
 [[decisions]]
+id = "server.dolby-vision-convert-transport"
+source = "crates/plurxd/src/http/stream.rs"
+source_anchor = "fn render_caps_with_conversion_transport("
+test = "crates/plurxd/src/http/mod.rs"
+test_anchor = "android_dv_delivery_http_boundaries_bind_conversion_to_hls_and_narrow_progressive"
+
+[[decisions]]
+id = "android.required-hls-remux"
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SubtitlePolicy.kt"
+source_anchor = "internal fun desiredPlaybackTransport("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest.kt"
+test_anchor = "androidDvDeliveryChoosesOneTransportForEveryPlanAndSubtitleRoute"
+
+[[decisions]]
 id = "server.manual-quality"
 source = "crates/plurx-core/src/playback/mod.rs"
 source_anchor = "pub fn decide_forced("

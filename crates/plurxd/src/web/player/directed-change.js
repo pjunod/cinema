@@ -296,7 +296,7 @@ function nativeHlsSubtitleOrdinal(player,index){
 }
 // Re-selecting a subtitle rendition asks the HLS engine for the current
 // segment again. Video stays attached throughout; this is subtitle I/O only.
-f// Put the cues on screen once the server says the track is ready, without
+// Put the cues on screen once the server says the track is ready, without
 // touching the video.
 //
 // The obvious move — re-select the rendition so hls.js fetches the segment

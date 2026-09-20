@@ -160,6 +160,7 @@ private data class Plan(
     override val fileId: Long,
     override val playUrl: String,
     override val mode: String,
+    override val requiresHls: Boolean,
     override val sourceHeight: Int?,
     override val aac: Boolean,
     override val preserveDolbyVision: Boolean,
@@ -240,6 +241,7 @@ private suspend fun loadPlan(
             fileId = fileId,
             playUrl = Session.url(decision.delivery?.url ?: decision.play_url),
             mode = mode,
+            requiresHls = decision.delivery?.requires_hls ?: false,
             // The decision's own reading of the source: the number every height
             // promise is made of. The item's file row is the fallback for a
             // server too old to send `source`.
@@ -1052,7 +1054,7 @@ private fun PlayerContent(
                 focusAfterComposition = null
                 true
             }
-            PlayerInputOutcome.Exit -> {
+            PlayerInputOutcome.Exit, PlayerInputOutcome.ReturnBrowser -> {
                 onExit()
                 true
             }

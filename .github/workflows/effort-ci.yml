@@ -32,11 +32,11 @@ jobs:
           fetch-depth: 0
       - name: Select affected compile surfaces
         id: scope
-        env:
-          VALIDATION_BASE: ${{ github.sha }}
+        # Manual dispatch has no PR base. Compare no synthetic HEAD-to-HEAD
+        # diff: the resolver must conservatively enable every compile surface.
         run: >-
           python3 -m validation.ci_scope
-          --event pull_request --base "$VALIDATION_BASE" >> "$GITHUB_OUTPUT"
+          --event workflow_dispatch >> "$GITHUB_OUTPUT"
       - name: Resolve the fail-safe execution rollout mode
         id: execution_mode
         env:

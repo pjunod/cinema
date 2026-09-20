@@ -18,6 +18,28 @@ class PlayerInputPolicyTest {
         .let { Json.parseToJsonElement(it).jsonObject }
 
     @Test
+    fun everyWatchPresentationCellMatches() {
+        val routing = fixture.getValue("watch").jsonObject.getValue("routing").jsonObject
+        PlayerPresentation.entries.forEach { presentation ->
+            PlayerChromePlacement.entries.forEach { chrome ->
+                PlayerInputSurface.entries.forEach { surface ->
+                    PlayerInputState.entries.forEach { state ->
+                        PlayerContractInput.entries.forEach { input ->
+                            val expected = routing.getValue(presentation.contractName).jsonObject
+                                .getValue(chrome.contractName).jsonObject.getValue(surface.contractName).jsonObject
+                                .getValue(state.contractName).jsonObject.getValue(input.contractName).jsonPrimitive.content
+                            val actual = PlayerInputPolicy.routeWatch(surface, state, input, presentation, chrome)
+                            assertEquals(expected, actual.contractName)
+                            assertEquals(if (expected == "return_browser") "exit" else expected,
+                                PlayerInputPolicy.resolveWatch(actual, false).contractName)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     fun everySharedRoutingCellMatches() {
         val routing = fixture.getValue("routing").jsonObject
         PlayerInputSurface.entries.forEach { surface ->

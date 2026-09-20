@@ -2799,7 +2799,8 @@ test("the shipped player adapter applies state precedence and preview-then-commi
     "pbTick", "seekTo", "togglePlay", "closeMenu", "closePlayer", "coarsePointer",
     "setTimeout", "clearTimeout",
     [
-      "let PLAYER_REPEAT_KEY=null; let PLAYER_REPEAT_COUNT=0; let NUDGE_T=null;",
+      "let PLAYER_REPEAT_KEY=null; let PLAYER_REPEAT_COUNT=0; let NUDGE_T=null; const WATCH=null;",
+      shippedSource("watchRouteInput"),
       "const PLAYER_SEEK_GESTURE=PlaybackPolicy.createHeldKeyCommitter({"+
         "delayMs:PlaybackPolicy.contractTiming('desktop_hotkey_coalesce_ms'),"+
         "commit:owner=>{if(PLAYER===owner)commitPendingSeek();},"+
@@ -2913,12 +2914,12 @@ test("the shipped player adapter applies state precedence and preview-then-commi
   adapter.handlePlayerKeydown(key("f", { ctrlKey: true }));
   assert.equal(calls.fullscreen, 0);
 
-  // A coarse pointer follows the touch table on the same page: arrows are
-  // ignored there, where the desktop table seeks.
+  // Coarse pointer changes target size, never the web input surface.
   surface = "touch";
-  assert.equal(adapter.playerInputSurface(), "touch");
+  assert.equal(adapter.playerInputSurface(), "desktop");
   adapter.handlePlayerKeydown(key("ArrowRight"));
-  assert.equal(player._seekPending, null);
+  assert.equal(player._seekPending, 30);
+  player._seekPending=null;
   surface = "desktop";
 
   // `failed` is the presenter's answer now, not a class four call sites set:
@@ -4774,6 +4775,7 @@ function carryHarness(player) {
       shippedSource("playbackTransportEvents"),
       shippedSource("resetPlaybackTransportEvents"),shippedSource("resetMediaSource"),
       shippedSource("rememberPlaybackTransportIntent"),
+      "let WATCH=null,WATCH_CLOSE_PROMISE=null,WATCH_GENERATION=0; function watchDetach(){return null;}",
       shippedSource("closePlayer"),
       shippedSource("beginPlaybackPreparation"),"function play(){}",
       shippedSource("retirePlaybackPredecessor"),

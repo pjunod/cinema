@@ -18,17 +18,14 @@ function playerActivity(){
   PLAYER.idleTimer=setTimeout(function idle(){
     const v=document.getElementById("video");
     const outcome=(v&&!v.paused&&!v.ended)
-      ? PlaybackPolicy.routeInput(playerInputSurface(),playerInputState(),"idle")
+      ? watchRouteInput(playerInputState(),"idle")
       : "ignore";
     if(outcome==="ignore"){ PLAYER.idleTimer=setTimeout(idle,4000); return; }
     applyPlayerOutcome(outcome,{direction:"idle"});
   },4000);
 }
-// A pointer that can hover is a desktop; a coarse one follows the touch
-// table, on the same page. `tap_surface` and the scrub gestures are the two
-// places where the tables disagree, and an iPad opening the desktop page used
-// to get the desktop answer for both.
-function playerInputSurface(){ return coarsePointer()?"touch":"desktop"; }
+// Web input stays desktop at every width and pointer capability.
+function playerInputSurface(){ return "desktop"; }
 // One pending position, however it was started: arrows and J/L set
 // `_seekPending`, a pointer drag sets `_seekPreview`. Either one means the
 // bar is showing a time the film is not at yet.
@@ -67,6 +64,7 @@ function playerInputState(){
 // the choice sticks per browser.
 function playerInfoOn(){ try{ return localStorage.getItem("plurx_playerinfo")!=="0"; }catch(e){ return true; } }
 function togglePlayerInfo(){
+  if(WATCH&&WATCH.mode!=="full"){watchShowTitleInfo();return;}
   const on=!playerInfoOn();
   try{ localStorage.setItem("plurx_playerinfo", on?"1":"0"); }catch(e){}
   renderPlayerInfo(); playerActivity();
@@ -76,7 +74,7 @@ function renderPlayerInfo(){
   const c=document.getElementById("pinfo"); if(!c) return;
   const b=document.getElementById("pbinfo"); if(b) b.classList.toggle("on", playerInfoOn());
   const m=(PLAYER&&PLAYER.meta)||null;
-  if(!m || !playerInfoOn()){ c.innerHTML=""; return; }
+  if((WATCH&&WATCH.mode!=="full")||!m || !playerInfoOn()){ c.innerHTML=""; return; }
   // An episode reads "Show · S02E05 · Episode title"; a movie is just its title.
   const se=(m.season!=null&&m.episode!=null)
     ? `S${String(m.season).padStart(2,"0")}E${String(m.episode).padStart(2,"0")}` : "";

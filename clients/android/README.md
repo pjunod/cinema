@@ -20,8 +20,12 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.3.0**, build `109` — native viewer parity across phone, foldable,
-> and TV. Build 103 restores the original Home cards, media shelves, library
+> Status: **v0.3.0**, build `111` — native viewer parity across phone, foldable,
+> and TV. Build 110 executes a server-required copy-HLS remux on initial play,
+> seek, reopen, track change, recovery and prepared handoff, so Profile 7 → 8.1
+> conversion never falls back into the progressive copy path that cannot run
+> it. Older servers omit the requirement and retain progressive behavior.
+> Build 103 restores the original Home cards, media shelves, library
 > grouping and TV focus navigation while retaining all item and player improvements.
 > Build 102 introduces a quieter library Home and an open Media section
 > with quality/container badges and collapsed searchable track lists.
