@@ -1,0 +1,521 @@
+# Web type checking and player decomposition — a ratcheted `tsc` over one global scope, then `play()` and `attachHls()` cut at their seams
+
+**Status:** ready for review · **Executes:** W8 / F-web-10 and W9 /
+F-web-11, F-web-12, F-web-13, F-web-15 from
+[ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
+· **Written:** 2026-09-20 against `main` @ `88a3957a`
+
+**Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
+
+Companion to [WEB-SHELL-LAYOUT.md](WEB-SHELL-LAYOUT.md) (the served-order
+rules this plan builds on and must not weaken) and
+[WEB-PLAYER-RECOVERY-AND-LOCAL-SEEK.md](WEB-PLAYER-RECOVERY-AND-LOCAL-SEEK.md)
+(the behaviour changes in the same files — land those first or after, never
+interleaved with the decomposition PRs).
+
+Read first: the W8 and W9 rows in the review (§3.5), then the assessment's
+W8, W9, F-web-10, F-web-11, F-web-12, F-web-13 and F-web-15 rows in
+[ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md),
+then WEB-SHELL-LAYOUT.md §1 and §3. Work milestone by milestone (§5); one
+draft PR each into `main` under the fast lane.
+
+The standing instruction: **if a step seems to require a bundler, ES
+modules, `import`/`export` in a served row, moving a sidecar, or deleting
+one of the three ordering gates (`asset-order`, `asset-load`,
+`asset-layout`), stop and flag it.** The type checker is added *beside* the
+script model, not instead of it. Line numbers are from `88a3957a`; re-verify
+by function name.
+
+**Correction to the review:** W8's "only `node --check`" undersells the
+gates: `tests/web/asset-order.test.js` parses every row with a vendored
+acorn and refuses forward references, duplicates and a missing
+`"use strict"`, and `asset-load.test.js` executes all rows in a `vm`
+(WEB-SHELL-LAYOUT §1.1). The assessment already said so; this plan keeps all
+three and adds two checkers that answer a different question (shape, not
+order). W9's "repaints the whole page" was withdrawn in revision 2; the
+per-batch *item region* rebuild (`library-grids.js:151`) is what stands.
+
+---
+
+## 1. Objective
+
+1. **W8.** A merge-blocking `tsc --noEmit --allowJs --checkJs` over the
+   served rows as one global-scope program, plus ESLint `no-undef`
+   configured for that script model, both **ratcheted from a committed
+   baseline** so day one blocks new diagnostics and not the existing ones;
+   one JSDoc `@typedef Player`; the three ordering gates unchanged.
+2. **W8 (second half).** `play()` (`decode-tiers.js:606-1085`, 479 lines)
+   and `attachHls()` (`player.js:499-876`, 378 lines) split into named
+   functions at the comment seams they already draw, byte-identical in
+   behaviour, proven by the existing tests plus the checker from (1).
+3. **W9.** Five small, separately-evidenced fixes: append-only library
+   batches where order ownership permits; `decoding="async"` and a `?w=`
+   poster variant; the paused progress heartbeat suppressed only after its
+   readers are traced; MediaSession and TV back-key codes with feature
+   detection; one shared reduced-motion rule before the two per-layout
+   overrides go.
+
+Done means: `make web-check` runs `scripts/web-types` green against a
+baseline that only shrinks; `play()` and `attachHls()` are each under 120
+lines of orchestration; and each W9 item has landed with its own test.
+
+---
+
+## 2. Contract today
+
+Copied from `main` @ `88a3957a`; **re-verify at build time**.
+
+### 2.1 The script model and its gates
+
+- Sixty-one rows in `<body>` (`core/app.js` … `router.js`) plus one
+  `<head>` row (`core/theme.js`), served in the order of `WEB_ASSETS` in
+  [`http/web.rs`](../../crates/plurxd/src/http/web.rs) and mirrored by
+  `index.html`. Plain `<script src>`; one global scope; hoisting per file
+  (WEB-SHELL-LAYOUT §1.1).
+- Seven sidecars (`cluster-panel.js`, `playback-policy.js`,
+  `playback-control.js`, `live-tv.js`, `library-channels.js`, `reader.js`,
+  `offline-reader.js`) plus `hls.min.js` are UMD-shaped:
+  `if (typeof module === "object" && module.exports) module.exports = policy;`
+  (`playback-policy.js:3`) and a `window.Plurx…` global. Body rows alias
+  them: `const PlaybackPolicy = window.PlurxPlaybackPolicy;`
+  (`core/app.js:2`). They are `require()`d by forty-odd tests and bundled
+  into both native clients by relative path (WEB-SHELL-LAYOUT §4).
+- Gates today: `scripts/js-check` (`node --check` per served row, skipping
+  `hls.min.js`), `tests/web/asset-order.test.js` (acorn:
+  `missingPrologue`, `duplicates`, `forwardRefs`), `tests/web/asset-load.test.js`
+  (vm load), `tests/web/asset-layout.test.js` (doc ↔ shell). All run from
+  `make web-check` (`Makefile:1419-1453`) and `web-static` in
+  `validation/points.toml:129`.
+- The repo has **no `package.json` and no `node_modules`**; acorn 8.18.0
+  is vendored at `tests/vendor/acorn.js` and
+  [`THIRD-PARTY-NOTICES.md`](../../THIRD-PARTY-NOTICES.md) §7 records that
+  adding either "to run one test is a worse trade than 245 KB". CI's node
+  job uses `setup-node` with Node 22 (`main-fast-lane.yml:97`).
+- `tests/web/asset-graph.js` already computes, per row, the top-level
+  declarations and the load-time references — the exact input an ESLint
+  `globals` list needs.
+
+### 2.2 `PLAYER`
+
+```js
+let PLAYER={fileId:null,timer:null,offset:0,hls:null,knownDur:0,durMs:0,
+  markers:[],source:null,started:false,idleTimer:null,autoskip:false,
+  deliveredRange:null,deliveredDvProfile:null,waitTimer:null,bookOffset:0,
+  bookDuration:0,bookParts:null,_seekPreview:null,_seekPending:null,
+  _lastFocusedControl:"pbplay",_opener:null,_openerClick:null};     // player.js:7
+```
+
+The literal that replaces it per playback is at `decode-tiers.js:833-903`
+with **94** named fields; other rows add fields by assignment
+(`hlsRetryUsed`, `triedFallback`, `abr`, `controlSeek`, `mediaAttachment`,
+`hlsStartup`, `_levelAt`, `_hlsEvt`, …). No declaration names the shape.
+
+### 2.3 The two functions and their seams
+
+`play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttempt,
+retryIntent)` — [`decode-tiers.js:606-1085`](../../crates/plurxd/src/web/player/decode-tiers.js).
+The seams, by the comment that opens each:
+
+| Lines | Seam (existing comment) | Becomes |
+|---|---|---|
+| 608-688 | Live TV release · `PLAY_OPEN_GATE.begin` · predecessor · `beginPlaybackPreparation` · `failPreparation` | `beginPlayAttempt(...)` → `{openAttempt, predecessor, preparation, failPreparation, openIsCurrent}` |
+| 689-733 | "Consume both one-shot inputs before the first await" · selection · focus capture · `watchPrepare` · `clickedAt` | `capturePlayInputs(...)` → frozen object |
+| 735-740 | modal open when not already open | stays inline (6 lines) |
+| 741-796 | "The selection travels WITH the decision" · `askDecision` · learned decode-limit reroute | `decideForPlay(...)` → `{decision, retestDecodeLimit, learnedLimitView}` |
+| 797-832 | `startSec`/ladder/prior/`autoStartHeight` · "Keep the real outgoing decoder until preparation succeeds" · `prePlayApplication` | `preparePlayOutgoing(...)` |
+| 833-903 | `PLAYER={…}` | `buildPlayer(...)` → the literal, typed `Player` |
+| 904-942 | `openIsAttached` · HDR degraded notice · DOM toggles · "Server-chosen default subtitle" | `presentPlayerChrome(...)` |
+| 943-969 | `useNativeHls` · `playbackInitialRoute` · library-channel override · pre-burn · `unsupported_hevc_delivery` | `choosePlayRoute(...)` → `initialRoute` |
+| 970-1059 | `if(initialRoute==='transcode_hls'){…}` and the copy/remux/direct branches | `attachPlayRoute(initialRoute, ...)` |
+| 1060-1085 | "A pre-play TEXT subtitle, applied to the stream that just attached" · "Once, per playback" capability log | `finishPlayAttach(...)` |
+
+`attachHls(video, playlistUrl, startAt)` —
+[`player.js:499-876`](../../crates/plurxd/src/web/player/player.js):
+
+| Lines | Seam | Becomes |
+|---|---|---|
+| 499-519 | intent capture · `teardownHls` · `beginPlaybackMediaAttachment` · `clearStreamFailure` · `hlsRetryUsed=0` | `beginHlsAttachment(video)` |
+| 520-557 | buffer targets · the `startup` episode literal · `observesCurrent` | `hlsStartupEpisode(...)` |
+| 558-608 | `new Hls({…})` · bandwidth seed · `loadSource`/`attachMedia` | `constructHls(startup, tgt, video)` |
+| 609-705 | `MANIFEST_*`, `SUBTITLE_TRACKS_UPDATED`, `BUFFER_FLUSHING`, `FRAG_CHANGED`, `LEVEL_LOADED`, `FRAG_LOADED`, `BUFFER_APPENDED` | `wireHlsObservers(hls, startup, video)` |
+| 706-864 | `hls.on(Hls.Events.ERROR, …)` | `onHlsError(hls, startup, video)` returning the handler |
+| 865-876 | native HLS branch | `attachNativeHls(video, playlistUrl, startAt, attachment)` |
+
+The closures share `attachedPlayer`, `attachment`, `startup`, `hls`,
+`video`, `observesCurrent`; the split passes them explicitly through
+`startup` (which already holds `player`, `attachment`, `hls`) so no new
+shared mutable lives outside it.
+
+### 2.4 The W9 sites
+
+| Item | Where | Today |
+|---|---|---|
+| Library batches | [`layouts/library-grids.js:100-165`](../../crates/plurxd/src/web/layouts/library-grids.js) | `draw()` rebuilds `#libbody` (`body.innerHTML=layoutRegion("library","items",m)`) per 200-item batch; `o.resort` re-sorts the merged set for a category; `LIB_FILTER`/`LIB_SCOPE`/`LIB_FIND` filter before paging; `LIB_PAGE=200` (`:15`) |
+| Poster images | `core/cards.js` `artHtml` | no `decoding="async"`, no width variant; `C6` (server) owns `?size=` derivatives |
+| Paused heartbeat | [`player/decode-margin.js:517-521`](../../crates/plurxd/src/web/player/decode-margin.js) | `p.timer` every `AUTO_DEFAULTS.sampleMs` (5 s) calls `reportProgress(p.fileId)` regardless of `v.paused`; `reportProgress` (`stats.js:463`) POSTs `/items/{id}/progress`; the server route ([`http/watch.rs:69-75`](../../crates/plurxd/src/http/watch.rs)) says "This beat is also the heartbeat for a direct play (`crate::delivery`)… a viewer who paused with the rest of the film already buffered makes no further range requests, and without this would drop off the activity page" |
+| Media keys / TV back | [`player/stats.js:586-598`](../../crates/plurxd/src/web/player/stats.js) `playerContractInput` — the `player-input-adapter` fence region | `Escape` → `back`; no `MediaPlayPause`/`MediaTrackNext` keys; no `navigator.mediaSession`; no TV back key codes (Tizen 10009, webOS 461, Fire TV/Android TV `GoBack`/keyCode 4) |
+| Reduced motion | [`app.css:147-148`](../../crates/plurxd/src/web/app.css) `.poster{…transition:transform .12s,border-color .12s…} .poster:hover{transform:translateY(-3px)…}`; overrides at `:2174-2177` (catalog) and `:3076-3079` (theater) each set `transition:none` **and** `transform:none` | the base rule animates unconditionally; two layouts opt out; classic does not |
+
+---
+
+## 3. Change
+
+### 3.1 The tooling decision — where `tsc` and `eslint` come from
+
+The repo's stance (§2.1) is no root `package.json`. The plan keeps the root
+clean and adds **`tools/web-types/package.json` + `package-lock.json`**
+pinning `typescript` and `eslint` by exact version, with
+`tools/web-types/node_modules/` git-ignored. `scripts/web-types` runs
+`npm ci --prefix tools/web-types` when `node_modules` is absent, then the
+checkers. Reason for not vendoring: `typescript/lib/tsc.js` alone is ~9 MB
+against acorn's 245 KB, which is the trade the notice refused. Reason for
+a subdirectory: nothing at the root starts treating the repo as an npm
+project. CI: the node job already has `setup-node`; add the `npm ci` step
+with the lockfile cached by hash. **This is the one decision Paul should
+confirm before 5.1 starts** (§7.1).
+
+### 3.2 `jsconfig.json`, generated from the shell
+
+`crates/plurxd/src/web/jsconfig.json` is **generated** by
+`scripts/web-jsconfig` from `tests/web/shell-source.js`'s `rows` (head row,
+then body rows, in served order) and checked by a test that regenerates and
+diffs, so the file list cannot drift from `WEB_ASSETS`:
+
+```json
+{
+  "compilerOptions": {
+    "allowJs": true, "checkJs": true, "noEmit": true,
+    "target": "es2022", "lib": ["dom", "dom.iterable", "es2022"],
+    "moduleDetection": "legacy", "module": "none",
+    "strict": false, "noImplicitAny": false, "skipLibCheck": true,
+    "types": []
+  },
+  "files": ["types/globals.d.ts", "core/theme.js", "core/app.js", "core/api.js", "…", "router.js"]
+}
+```
+
+`moduleDetection: "legacy"` is what makes a file with no `import`/`export`
+a *script* whose top-level declarations are global — the runtime truth
+(W8 row: "TypeScript models scripts as one global scope"). The sidecars and
+`hls.min.js` are **not** in `files`: each is a UMD module TypeScript would
+classify as CommonJS, hiding its global. Instead
+`crates/plurxd/src/web/types/globals.d.ts` (hand-written, ~40 lines)
+declares `Hls`, `PlurxPlaybackPolicy`, `PlurxPlaybackControl`,
+`PlurxReaderCore`, `PlurxLibraryChannels`, `PlurxClusterPanel`,
+`PlurxLiveTv` as `any`-typed globals, and the `webkit`/`CinemaNative`
+bridges. A file list does **not** enforce runtime order (assessment W8);
+`asset-order` still does.
+
+### 3.3 The baseline ratchet
+
+`scripts/web-types` (python3, like `js-check`):
+
+1. Runs `tsc -p crates/plurxd/src/web/jsconfig.json --pretty false`.
+2. Normalises each diagnostic to a key `path<TAB>TS<code>` (line and column
+   stripped — line numbers move on every edit and a line-keyed baseline
+   would churn) and counts keys.
+3. Compares with `tests/web/tsc-baseline.tsv` (`path\tcode\tcount`, sorted).
+   **Fails** if any key's count rose or a new key appeared; prints the new
+   diagnostics with their real lines. **Passes** otherwise, and if any count
+   fell prints `web-types: baseline can shrink by N — run scripts/web-types
+   --update`.
+4. `--update` rewrites the baseline **only downward**. Raising a count needs
+   `--accept-increase "<reason>"`, which writes the reason into a
+   `# accepted 2026-09-2x: <reason>` comment line so the PR diff shows it.
+
+Same mechanism for ESLint (`tests/web/eslint-baseline.tsv`, key
+`path\t<rule>`), which is expected to start empty: `asset-order`'s
+`forwardRefs`/`duplicates` already catch what `no-undef` catches at load;
+`no-undef` adds the *call-time* references (a function body naming a global
+that exists nowhere), which no gate covers today.
+
+`eslint.config.js` (flat config, in `tools/web-types/`):
+`sourceType: "script"`, `ecmaVersion: 2022`, `globals`: browser set + the
+union of every row's top-level declarations, **generated** into
+`tools/web-types/shell-globals.json` by `scripts/web-jsconfig` from
+`asset-graph.js`'s declarations (the assessment's "no-implicit-globals
+conflicts with the intentional script model unless configured" — we do
+not enable it; we feed the script model's globals in). Rules: `no-undef:
+error` only. Nothing stylistic.
+
+A few source edits will be needed (W8 row: "no source edits was
+optimistic"): `// @ts-nocheck` at the top of a row is allowed **only** for
+`layouts/theater.js`, `layouts/catalog.js` and `pages/settings-panels.js`
+if their template-string-heavy bodies produce more than 200 diagnostics
+each, and each such line carries a `// TODO(web-types): remove` with the
+count. JSDoc `@param` edits are allowed anywhere they reduce the baseline.
+
+### 3.4 `@typedef Player`
+
+At the top of `player/player.js`, above `let PLAYER`:
+
+```js
+/**
+ * The one playback object. Replaced per title by `buildPlayer()`
+ * (decode-tiers.js) and mutated in place by reopens; `null` fields are
+ * "not yet", absent fields are a bug the checker now reports.
+ * @typedef {Object} Player
+ * @property {number|null} fileId
+ * @property {number} offset          film position of media-time zero, seconds
+ * @property {import("hls.js")|null} hls   — typed `any` via globals.d.ts
+ * @property {number} hlsRetryUsed
+ * @property {boolean} triedFallback
+ * @property {PlaybackAttachment|null} mediaAttachment
+ * @property {HlsStartup|null} hlsStartup
+ * …one line per field of the decode-tiers.js:833 literal (94) plus the
+ * assigned-elsewhere set found by `grep -o "PLAYER\.[a-zA-Z_]*=" player/*.js`
+ */
+/** @type {Player|null} */
+let PLAYER={…};
+```
+
+Every field named, with a short comment where the name does not say the
+unit. The typedef lands with the first baseline: it will *raise* the count
+of property diagnostics in rows that misspell a field, which is the point,
+and the first baseline commit accepts them with `--accept-increase
+"initial Player typedef"`.
+
+### 3.5 The decomposition
+
+Two PRs, one per function, after 5.1-5.3 are merged so the checker sees
+the moved code. Rules that make this a move and not a rewrite:
+
+- Each new function is a `function` declaration in the **same row** as the
+  original (`decode-tiers.js`, `player.js`) so no `WEB_ASSETS` row changes
+  and `asset-order` is unaffected.
+- The original becomes orchestration: a sequence of calls with the
+  `openIsCurrent()`/`openIsAttached()`/`observesCurrent()` guards kept at
+  the exact statement positions they occupy today. A guard that used to be
+  between two statements of the same block stays between the two calls
+  that now hold those statements.
+- No closure is turned into a parameter it did not already read. The
+  shared-state object is `startup` for `attachHls` and a new frozen
+  `attempt` object for `play()` holding what §2.3's first two seams
+  produce.
+- Proof: `make web-check` green, the CDP browser checks green, and
+  `scripts/web-types` reporting the baseline **unchanged or lower** —
+  the split must not add a diagnostic.
+
+### 3.6 W9 — five small fixes, each with its guardrail
+
+1. **Append batches only where order is owned** (F-web-11). In `draw()`,
+   when `!o.resort && LIB_FILTER==="all" && !LIB_SCOPE && !LIB_FIND.trim()
+   && LIB_PER==="all"`, a new batch's cards are appended to the existing
+   `#libbody` grid instead of rebuilding it; every other combination keeps
+   the rebuild, because a later batch of a *category* (multi-library, each
+   share sorted alone) may belong before existing cards, and a filter or
+   page slice changes which items are visible. The alpha rail and count
+   still redraw. Generation guard (`LIB_LOAD!==gen`) and focus retention
+   unchanged.
+2. **`decoding="async"` and a width variant** on `artHtml` posters. The
+   `?w=` parameter is only emitted once the server's C6 derivative route
+   exists; until then the attribute lands alone. Reason: a query the server
+   ignores is a cache-key change for nothing.
+3. **Paused heartbeat** (F-web-12). *Not* suppressed in this plan. The
+   trace in §2.4 shows the beat is the direct-play liveness signal for the
+   Activity page and `crate::delivery`. The change that is safe now:
+   `reportProgress` skips the POST when `v.paused` **and** the position has
+   not changed since the last accepted beat **and** the method is not
+   `direct_play`; and `pausePlaybackInternally`/`togglePlay` send one
+   explicit beat on the pause edge. Direct play keeps beating. A full
+   suppression needs a separate liveness message the server does not have.
+4. **MediaSession and TV back codes** (F-web-13). In the
+   `player-input-adapter` region: `if("mediaSession" in navigator)` set
+   `setActionHandler` for `play`, `pause` (distinct — never `togglePlay`
+   for an idempotent command), `seekbackward`, `seekforward`, `nexttrack`
+   (autoplay-next only when enabled); `setPositionState` from the existing
+   500 ms tick, not a new timer. Back codes: `playerContractInput` maps
+   keyCode `10009` (Tizen), `461` (webOS) and key `GoBack`/`BrowserBack`
+   to `back` beside `Escape`. No Remote Playback / Chromecast claim.
+5. **Reduced motion** (F-web-15). Add one shared rule in the base
+   stylesheet: `@media (prefers-reduced-motion: reduce){.poster{transition:none}
+   .poster:hover{transform:none}}` immediately after `:148`; **then**, in
+   the same PR, delete the catalog (`:2174-2177`) and theater
+   (`:3076-3079`) overrides. Order matters: the shared rule must cover
+   both `transform` and `transition` before the per-layout rules go, or
+   the hover motion returns in those layouts.
+
+---
+
+## 4. Guardrails (non-goals)
+
+- **No bundler, no ESM, no `import`/`export` in a served row** (W8 row,
+  WEB-SHELL-LAYOUT §3). `moduleDetection: "legacy"` keeps the checker on
+  the script model; a row that gains an `export` becomes a module and
+  breaks every other row that names it.
+- **The three ordering gates stay** (assessment W8, F-web-10). A file list
+  is not a load order; `asset-order` proves the order, `asset-load` runs
+  it, `asset-layout` documents it. `scripts/web-types` is a fourth check,
+  not a replacement for any.
+- **Baseline first, blocking second** (assessment W8: "establish an
+  actionable typing baseline before making all existing diagnostics
+  merge-blocking"). Day one blocks *new* keys and *increases* only.
+- **`@ts-nocheck` is a listed exception with a count, never a habit.**
+  Three rows may carry it (§3.3); a fourth is a review question.
+- **The typedef exposes shape errors; it does not prove
+  generation/lifetime correctness** (F-web-10). Ownership races still need
+  the behaviour tests in `web-policy.test.js`; this plan adds none of those
+  and claims none.
+- **The decomposition is a move.** No guard reordered, no closure widened,
+  no new shared mutable outside `startup`/`attempt`, same row, baseline not
+  raised. If a seam needs a behaviour change to cut cleanly, cut elsewhere.
+- **Do not suppress the direct-play heartbeat** (F-web-12). It is the
+  liveness signal; §3.6 item 3 says exactly what is skipped and when.
+- **Appending is conditional on order ownership** (F-web-11). Categories,
+  filters, scopes, finds and page slices keep the rebuild.
+- **MediaSession with feature detection; play and pause are separate
+  handlers; no Chromecast claim** (F-web-13).
+- **Shared reduced-motion rule lands before the overrides are deleted**
+  (F-web-15), in one PR so no commit ships the regression.
+- **Do not move a sidecar or add one to `jsconfig.json`** — Xcode and
+  Gradle inputs (WEB-SHELL-LAYOUT §4).
+- **No settings key, no metric, no recipe identity change.** Everything
+  here is tooling and client presentation.
+
+---
+
+## 5. Milestones
+
+Fast-lane lifecycle per PR as in
+[DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md).
+
+### 5.1 Tooling in place: `tools/web-types`, generated `jsconfig`, `globals.d.ts`
+
+`tools/web-types/package.json` + lockfile (exact versions);
+`scripts/web-jsconfig` (writes `jsconfig.json` and `shell-globals.json`
+from `shell-source.js` + `asset-graph.js`); `types/globals.d.ts`;
+`tests/web/jsconfig-generated.test.js` (regenerate, diff, fail on drift);
+THIRD-PARTY-NOTICES §7 gains one sentence saying dev-only npm tooling lives
+under `tools/web-types/` and is not redistributed.
+
+**Acceptance:** `scripts/web-jsconfig --check` exits 0;
+`node tests/web/jsconfig-generated.test.js` passes; `npx --prefix
+tools/web-types tsc -p crates/plurxd/src/web/jsconfig.json --noEmit | wc -l`
+prints a number (the raw baseline size, recorded in the PR body).
+
+### 5.2 `scripts/web-types` with the ratchet, wired into `make web-check` and CI
+
+The script of §3.3, both baselines committed, `Makefile` `web-check` gains
+`@scripts/web-types`, `main-fast-lane.yml`'s node job gains `npm ci
+--prefix tools/web-types` (lockfile-hash cache) and `scripts/web-types`,
+`validation/points.toml` `web.experience.paths` gains `tools/web-types/**`
+and `tests/web/*-baseline.tsv`.
+
+**Acceptance:** `scripts/web-types` exits 0 on `main`; introducing one
+deliberate `undefinedFn()` call in `core/cards.js` makes it exit 1 naming
+`core/cards.js` and the line; `scripts/web-types --update` after removing
+that call refuses to write (nothing shrank) with exit 0.
+
+### 5.3 `@typedef Player` and the first shrink
+
+The typedef of §3.4; `--accept-increase "initial Player typedef"`; then at
+least one row's diagnostics reduced by JSDoc `@param` edits chosen from the
+baseline's largest keys, to prove the ratchet moves.
+
+**Acceptance:** `grep -c "@property" crates/plurxd/src/web/player/player.js`
+≥ 94; `scripts/web-types` exits 0 and the baseline diff in the PR shows the
+`player.js`/`decode-tiers.js` rows changed and at least one other row's
+count lower.
+
+### 5.4 Split `attachHls()` at its six seams
+
+§2.3's second table. Same row, same guards, `startup` carries the shared
+state.
+
+**Acceptance:** `attachHls` is ≤ 60 lines; `make web-check` green;
+`scripts/web-hls-startup-browser-check` green; `scripts/web-types` baseline
+not raised (the script prints `unchanged` or `shrank`).
+
+### 5.5 Split `play()` at its ten seams
+
+§2.3's first table, with the frozen `attempt` object.
+
+**Acceptance:** `play` is ≤ 120 lines; `make web-check` green;
+`scripts/subtitle-readiness-browser-check` green (it exercises pre-play
+selection through `play()`); baseline not raised.
+
+### 5.6 W9 items 1, 2 and 5 (grid append, poster attributes, reduced motion)
+
+Three commits, one PR.
+
+**Acceptance:** `node tests/web/calm-library.test.js` gains a case
+asserting a second batch on a single-library, unfiltered, `per=all` view
+appends (card count grows, first card's node identity unchanged) and a
+category view rebuilds; `grep -c 'prefers-reduced-motion: reduce' app.css`
+is one fewer than today (two overrides gone, one shared rule added);
+`scripts/ui-baseline` golden unchanged except the poster attribute.
+
+### 5.7 W9 items 3 and 4 (heartbeat edge, MediaSession and back codes)
+
+**Acceptance:** `node tests/web/player-dom.test.js` gains cases: paused
+remux with unchanged position → no POST; paused direct play → POST; pause
+edge → exactly one POST; keyCode 10009/461 and `GoBack` → `back`; a stub
+`navigator.mediaSession` receives `play` and `pause` as separate handlers.
+`scripts/player-input-fence` still passes (the new key reads are inside the
+`player-input-adapter` region).
+
+---
+
+## 6. Verification and rollout
+
+- Per PR: `make web-check` (now including `scripts/web-types`), the two CDP
+  browser checks, and for 5.6/5.7 `make ui-check` where Playwright is
+  available (`web-layout` point, skip-if-missing).
+- The two red tests the review found (§4.8: `web-policy.test.js:6007`,
+  `web-control.test.js:3164` under Node 22) must be fixed by the review's
+  own item (§5.1 15) before 5.2 can call `make web-check` green; do not
+  widen a timeout to get there.
+- CI cost: `tsc` over ~1.3 MB of JS is 10-20 s warm on the lab runners;
+  `npm ci` with a cached lockfile is under 10 s. Record both in the 5.2 PR.
+- Rollout: server deploy carries the web app; nothing native changes. The
+  W9 poster attribute and CSS are visible immediately; rollback is a
+  revert.
+
+GPT prompt for the television check that no Node test covers:
+
+```
+On the LG TV's browser and on the Fire TV Silk browser, open
+http://10.42.0.10:8080, sign in, play "Night Tide", and press the remote's
+Back button once. Report whether the player closed (expected) or the
+browser navigated away (defect), and which key the page logged under
+Settings → Developer → input trace. Then with the film playing, press the
+remote's play/pause key twice and report whether the play state toggled
+exactly twice.
+```
+
+---
+
+## 7. Open questions
+
+1. **`tools/web-types/package.json` vs a vendored `tsc`.** The plan
+   proposes the scoped npm directory (§3.1). If Paul prefers no npm
+   anywhere, the alternative is vendoring `typescript/lib/tsc.js` (~9 MB)
+   and `eslint`'s far larger tree, which the plan recommends against.
+2. **Baseline key granularity.** `path + code` is drift-proof but coarse:
+   fixing one TS2339 and introducing another in the same file nets to
+   zero. The alternative (`path + code + message text`) catches that and
+   churns when a renamed identifier changes the text. The plan starts
+   coarse and can tighten per file once the counts are small.
+3. **Should `@ts-check` per file replace project-wide `checkJs`** once the
+   baseline is under ~50 keys? Per-file opt-in makes the remaining rows
+   explicit. Decide at 5.3 from the numbers.
+4. **The heartbeat's other readers** — Trakt scrobbling and the watched
+   coalescer read the same POST. §3.6 item 3 keeps every beat that changes
+   position and every direct-play beat; a reader that depends on the
+   *cadence* of unchanged-position remux beats is not known. The 5.7 PR
+   greps `crates/` for consumers of the progress route's timing and lists
+   them in the PR body before merging.
+
+---
+
+## Execution log
+
+Executing sessions append one row per milestone PR (see the
+[work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
+claim protocol). **Model** is the runtime's exact model identifier;
+**Session** is the session id or URL; the same two values are commit
+trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+
+| Date | Model | Session | Milestone | PR | Outcome / evidence |
+|---|---|---|---|---|---|
+| | | | | | |

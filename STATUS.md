@@ -4,6 +4,37 @@
 commit as the work it describes; a stale entry here is a bug. Newest effort
 first.
 
+## Implementation plans for the architecture review, and one work board for every vendor
+
+**34 handoff plans** under `docs/{streaming,server,cluster,features,clients,ci}/`
+(index rows in [docs/README.md](docs/README.md)), one per finding or per
+shared mechanism, each executing named ids of
+[the review](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md) with the
+adversarial assessment's dispositions as guardrails, the current code copied
+into a contract section, and a runnable acceptance check per milestone.
+Twelve planned documents are **not yet written** (their writers were cut off
+by a usage limit) and are listed on the board with "writing the document" as
+their first milestone: HONEST-MASTER-PLAYLIST, CODEC-AND-GPU-QUALIFICATION,
+CLOCK-SKEW-GUARD-DESIGN, STORE-CONTRACT-COVERAGE-AND-PLACEHOLDER-VALIDATION,
+HIQLITE-FORK-AND-DEPENDENCY-CLEANUP, DETAIL-READS-AND-STORAGE-AVAILABILITY,
+TELEMETRY-BACKPRESSURE, PLEX-FACADE-PAGING, OBSERVABILITY-BASELINE,
+NATIVE-ADAPTIVE-QUALITY-DESIGN, LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS,
+ARCHITECTURE-DOC-RECONCILIATION.
+
+**[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md)
+is the only shared status.** The plans will be executed by Claude, GPT and
+OpenRouter sessions concurrently, so the board defines the claim protocol in
+vendor-neutral terms: a claim is a draft PR that edits the row (the push is
+the atomic step), every row and every commit carries the exact **model
+identifier** and **session id** (`Agent-Model:` / `Agent-Session:` trailers),
+statuses are a fixed vocabulary, stale rows are reclaimable after seven days
+with a note, and every plan ends with an **Execution log** table the
+executing session fills per milestone. Writers' corrections to the review
+found while reading the code are recorded at the top of each plan (for
+example: `live_tv.rs:7403` already pipes stderr; `bounded_process::output` is
+the better primitive for scan probes than the one the review named; the guide
+is cloned three times per DVR tick, not two). Astra reviews the plans next.
+
 ## Architecture review, revision 3 — Astra's review merged
 
 **[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md)

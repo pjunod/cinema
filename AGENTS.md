@@ -11,7 +11,7 @@ below.
 question each one answers, and whether it is live, open, built, or done. Read
 it instead of listing the directory — the root holds the eighteen maintained
 reference documents, and everything else lives in the folder for the work it
-describes (`playback-control/`, `streaming/`, `cluster/`, `clients/`,
+describes (`playback-control/`, `streaming/`, `server/`, `cluster/`, `clients/`,
 `performance/`, `ci/`, `features/`, `reviews/`, `archive/`).
 
 A document you add or move belongs in the subject folder for its work and

@@ -178,6 +178,18 @@ conversion, decoder selection, and the stall/stutter investigations.
 
 | File | Answers | |
 |---|---|---|
+| [PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md](streaming/PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md) | Implementation plan from the 2026-09-20 architecture review: why DV Profile 5 was refused and the media-origin probe went dead after the Windows refactor; the fix to `output_job_owned` with a portable child test, the full caller audit, and a bounded, killable library scan probe. | open |
+| [MEDIA-BODY-BUFFERS.md](streaming/MEDIA-BODY-BUFFERS.md) | Implementation plan from the 2026-09-20 architecture review: the four 4 KiB `ReaderStream` sites, the exact HLS pump acknowledgement contract, a measurement protocol, and the later ack-batching change. | open |
+| [ENCODED-VOD-HOLD-AND-RELEASE.md](streaming/ENCODED-VOD-HOLD-AND-RELEASE.md) | Implementation plan from the 2026-09-20 architecture review: SIGSTOP instead of SIGKILL for encoded producers past the ahead horizon, a low-water mark, and the stopped→release transition driven by `Admissions::live_is_waiting`, proven in pure scheduler tests first. | open |
+| [FONT-ATTESTATION-AND-BLOCKING-IO.md](streaming/FONT-ATTESTATION-AND-BLOCKING-IO.md) | Implementation plan from the 2026-09-20 architecture review: moving the font/engine `stat` loops off the runtime, then freezing a burn recipe's fontconfig environment so per-segment `fc-list` becomes unnecessary because the inputs cannot change. | open |
+| [FFMPEG-SPAWN-UNIFICATION.md](streaming/FFMPEG-SPAWN-UNIFICATION.md) | Implementation plan from the 2026-09-20 architecture review: one producer spawn path for rolling HLS, VOD and progressive remux and one strict progress-line classifier, with the accidental differences closed by tests. | open |
+| [ENCODER-RATE-CONTROL-DEFAULTS.md](streaming/ENCODER-RATE-CONTROL-DEFAULTS.md) | Implementation plan from the 2026-09-20 architecture review: per-encoder-family CRF/QVBR vs ABR evidence with the bench harness before any default flips; HDR10's separate policy and VBV bounds kept. | open |
+| [TONE-MAP-CHAIN-CORRECTIONS.md](streaming/TONE-MAP-CHAIN-CORRECTIONS.md) | Implementation plan from the 2026-09-20 architecture review: the hardware-download metadata test first, then MaxCLL at scan, explicit `peak=`, gamut before curve, and dither, with an image-comparison protocol. | open |
+| [INTERLACE-IN-THE-MEDIA-CONTRACT.md](streaming/INTERLACE-IN-THE-MEDIA-CONTRACT.md) | Implementation plan from the 2026-09-20 architecture review: field order carried into the media contract, deinterlace before scale with a deliberate frame/field policy, the Live TV field-rate bitrate fix, and the reproduced fixture as acceptance. | open |
+| [AUDIO-RESOLVED-INDEPENDENTLY.md](streaming/AUDIO-RESOLVED-INDEPENDENTLY.md) | Implementation plan from the 2026-09-20 architecture review: audio negotiated separately from video so a resolution change or burn no longer downmixes compatible multichannel audio, carried through recipe identity, manifests and handoffs. | open |
+| [VOD-BFRAMES-TIMELINE-DESIGN.md](streaming/VOD-BFRAMES-TIMELINE-DESIGN.md) | Implementation plan from the 2026-09-20 architecture review: what enabling B-frames in encoded VOD would change in the frame-grid contract and its validator, the options, and the proof obligations — a design, not a flag. | open |
+| [DECODE-FACTS-GATE-AND-FALLBACK.md](streaming/DECODE-FACTS-GATE-AND-FALLBACK.md) | Implementation plan from the 2026-09-20 architecture review: instrumenting the decode-fact gate, amortising immutable-image validation without losing tamper checks, and classifying fallback reasons. | open |
+| [TRANSCODE-DECOMPOSITION-PLAN.md](streaming/TRANSCODE-DECOMPOSITION-PLAN.md) | Implementation plan from the 2026-09-20 architecture review: the behaviour-preserving extraction of `transcode.rs`, `hls.rs` and `vodserve.rs` along ownership boundaries, the test-seam census, and the separate registry-unification evaluation. | open |
 | [ATSC3-AUDIO-STARTUP-RCA-AND-FIX.md](streaming/ATSC3-AUDIO-STARTUP-RCA-AND-FIX.md) | Why immersive AC-4 and delayed AC-3 broke live starts, what the fixes preserve, and why the 103.1 capture cannot initialize its decoder. | open |
 | [ATSC 3.0 live audio repair status](streaming/ATSC3-AUDIO-STARTUP-STATUS.html) | Implementation, single adversarial review, final fast lane, merge and outstanding live acceptance. | open |
 | [SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md](streaming/SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md) | Why repeated seeks refuse playback and then reap the incumbent: retired streams retain a producer's whole reservation, and a refused destination poisons the incumbent's control snapshot. | open |
@@ -260,6 +272,11 @@ failures.
 
 | File | Answers | |
 |---|---|---|
+| [CLUSTER-BACKUP-AND-RESTORE.md](cluster/CLUSTER-BACKUP-AND-RESTORE.md) | Implementation plan from the 2026-09-20 architecture review: a portable, verifiable backup of an activated cluster and a restore procedure that resets identity and fences the old cluster, with RPO/RTO measured and drills for one-node and majority loss. | open |
+| [RAFT-SNAPSHOT-CADENCE-AND-CONSISTENT-CUT.md](cluster/RAFT-SNAPSHOT-CADENCE-AND-CONSISTENT-CUT.md) | Implementation plan from the 2026-09-20 architecture review: measuring snapshot build time first, sizing the log threshold and storage floor from it, and the single-logical-cut requirement for any off-writer snapshot. | open |
+| [REPLICATED-WRITE-RATE-HYGIENE.md](cluster/REPLICATED-WRITE-RATE-HYGIENE.md) | Implementation plan from the 2026-09-20 architecture review: stopping the watched-outbox's unconditional 1 Hz raft write on every voter and the takeover loop's idle consistent reads while keeping the atomic replicated claim. | open |
+| [BOUNDED-REPLICA-READS-ROLLOUT.md](cluster/BOUNDED-REPLICA-READS-ROLLOUT.md) | Implementation plan from the 2026-09-20 architecture review: flipping `bounded_replica_reads` as a consistency-policy change with per-route coverage, fewer consistent reads per request, and no ordinary-auth cache. | open |
+| [SQLITE-READ-PATH-AND-QUERY-PLANS.md](cluster/SQLITE-READ-PATH-AND-QUERY-PLANS.md) | Implementation plan from the 2026-09-20 architecture review: moving genuinely read-only store methods off the writer mutex, splitting `user_for_token`, `EXPLAIN QUERY PLAN`-justified indexes, keyset pagination, and the corrected search predicate. | open |
 | [CLUSTERING-PLAN.md](cluster/CLUSTERING-PLAN.md) | From one plurxd node to Phase 4, milestone by milestone. | open |
 | [CLUSTERING-PLAN-REVIEW.md](cluster/CLUSTERING-PLAN-REVIEW.md) | The right first slice, on top of eight contracts that did not hold. | done |
 | [PHASE3-SPIKE.md](cluster/PHASE3-SPIKE.md) | The decision gate: two HA risks spiked, one answer. | done |
@@ -290,6 +307,14 @@ player obeys, subtitles and overlays, layouts and themes.
 
 | File | Answers | |
 |---|---|---|
+| [WEB-PLAYER-RECOVERY-AND-LOCAL-SEEK.md](clients/WEB-PLAYER-RECOVERY-AND-LOCAL-SEEK.md) | Implementation plan from the 2026-09-20 architecture review: hls.js worker on, `recoverMediaError` inside the existing attempt fences, a global error reporter with redaction, and local seeking for rolling HLS within the retained published range. | open |
+| [WEB-TYPE-CHECKING-AND-PLAYER-DECOMPOSITION.md](clients/WEB-TYPE-CHECKING-AND-PLAYER-DECOMPOSITION.md) | Implementation plan from the 2026-09-20 architecture review: `tsc --checkJs` ratcheted from a baseline over the served script order, then splitting `play()` and `attachHls()` along their seams, plus the small W9 fixes each with its guardrail. | open |
+| [APPLE-DISPLAY-CRITERIA-AND-AUDIO-SESSION.md](clients/APPLE-DISPLAY-CRITERIA-AND-AUDIO-SESSION.md) | Implementation plan from the 2026-09-20 architecture review: asset-derived display criteria through the active window on tvOS, interruption and route-change ownership in all three players, and the device tests that prove either. | open |
+| [APPLE-PLAYER-CONTROLLER-ATTEMPT-AND-OBSERVATION.md](clients/APPLE-PLAYER-CONTROLLER-ATTEMPT-AND-OBSERVATION.md) | Implementation plan from the 2026-09-20 architecture review: an immutable per-continuation `Attempt` snapshot that keeps the nine epochs' scopes, one typed item-event observer for all three stacks, poll-to-KVO conversions that keep their deadlines, and staged strict concurrency. | open |
+| [NATIVE-LIBRARY-PAGING.md](clients/NATIVE-LIBRARY-PAGING.md) | Implementation plan from the 2026-09-20 architecture review: paging large libraries on demand on Apple and Android while preserving merged multi-library order and defined search behaviour for unloaded titles. | open |
+| [ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET.md](clients/ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET.md) | Implementation plan from the 2026-09-20 architecture review: `Display.Mode` selection on TV (Media3 has no ALWAYS strategy), and sizing the playback byte budget from measured heap classes rather than a fixed floor. | open |
+| [ANDROID-LIFECYCLE-PLAYER-BUILDER-AND-ERROR-CLASSIFICATION.md](clients/ANDROID-LIFECYCLE-PLAYER-BUILDER-AND-ERROR-CLASSIFICATION.md) | Implementation plan from the 2026-09-20 architecture review: background pause and audio foreground service as one contract, one player builder with role overrides, live-window recovery, audio-sink error classification, and status-gated node failover. | open |
+| [ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md](clients/ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md) | Implementation plan from the 2026-09-20 architecture review: a scoped short-lived grant instead of the account bearer for external players, the DataStore excluded from both backup rule files, dispatcher separation after a trace, and shipping the release variant. | open |
 | [WATCH-AND-BROWSE-IMPLEMENTATION.md](clients/WATCH-AND-BROWSE-IMPLEMENTATION.md) | Approved movie/episode watch browser, retained web host, task ownership, tests and pending native/real-media gates. | open |
 | [APPLE-CLIENT-PARITY.md](clients/APPLE-CLIENT-PARITY.md) | What the Apple client has, what it lacks, and which build proved it. | live |
 | [ANDROID-CLIENT-PARITY.md](clients/ANDROID-CLIENT-PARITY.md) | The same, for Android. | live |
@@ -340,6 +365,18 @@ player obeys, subtitles and overlays, layouts and themes.
 
 ---
 
+## server/ — the HTTP layer, scanning, images, auth and observability
+
+The daemon's request path and its background workers, as distinct from what
+is streamed (`streaming/`) and what is replicated (`cluster/`).
+
+| File | Answers | |
+|---|---|---|
+| [HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY.md](server/HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY.md) | Implementation plan from the 2026-09-20 architecture review: header-read and per-group handler deadlines the listener lacks, precompressed web assets with correct negotiation, hashed `hls.min.js` and sidecars, and the security headers — as three PRs. | open |
+| [SCAN-AND-ENRICHMENT-HYGIENE.md](server/SCAN-AND-ENRICHMENT-HYGIENE.md) | Implementation plan from the 2026-09-20 architecture review: a bounded blocking walker for the scanner and real deadlines on the TMDB/AniList clients and the join request. | open |
+| [IMAGE-SERVING-AND-DERIVATIVES.md](server/IMAGE-SERVING-AND-DERIVATIVES.md) | Implementation plan from the 2026-09-20 architecture review: verified digests instead of per-request hashing, separate local-read and peer-fetch permits, `ETag`s, and size variants added without reverting `original` backdrops. | open |
+| [AUTH-HARDENING.md](server/AUTH-HARDENING.md) | Implementation plan from the 2026-09-20 architecture review: bounded logout admission that keeps the two-phase revocation fence, a lockout-resistant login throttle, and token expiry as a product decision with its client consequences. | open |
+
 ## performance/ — where the seconds go
 
 Two rounds of performance work, each with its plan, review, and response.
@@ -362,6 +399,8 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
+| [RUST-TEST-EXECUTION-POLICY.md](ci/RUST-TEST-EXECUTION-POLICY.md) | Implementation plan from the 2026-09-20 architecture review: the three ways to put Rust test execution back on an automatic trigger with their measured costs, recorded as Paul's decision; and the two policy tests red on `main` today. | open |
+| [SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md](ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md) | Implementation plan from the 2026-09-20 architecture review: systemd and Compose limits each with its validation step, child priorities and OOM adjustment, CI on the shipped ffmpeg 8, the corrected release profile, and parser fuzz targets. | open |
 | [RIPWIRE-PILOT.md](ci/RIPWIRE-PILOT.md) | Measured query cost, source/fixture omissions, and completed opt-in adoption verdict. | open |
 | [RIPWIRE.md](ci/RIPWIRE.md) | Explicit setup, bounded navigation, output meanings, and coverage limits. | live |
 | [RIPWIRE-STATUS.md](ci/RIPWIRE-STATUS.md) | Ripwire implementation, measured evidence, decisions, and promotion progress. | open |
@@ -383,6 +422,9 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
+| [DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION.md](features/DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION.md) | Implementation plan from the 2026-09-20 architecture review: why a series rule missed an airing ten days out and why one slow recording disk stalls the shared tuner; the scheduler's full-guide view and per-sink owned writers behind bounded queues. | open |
+| [LIVE-TV-SESSION-FENCE-PEER-TRANSPORT-AND-START.md](features/LIVE-TV-SESSION-FENCE-PEER-TRANSPORT-AND-START.md) | Implementation plan from the 2026-09-20 architecture review: one graced settings observation per node instead of a consistent read per session per second, one shared `PeerTransport`, warm start without the serial prefix wait, and a retry owner for failed cleanup. | open |
+| [LIVE-TV-SHARED-TRANSPORT.md](features/LIVE-TV-SHARED-TRANSPORT.md) | Implementation plan from the 2026-09-20 architecture review: how three viewers on one channel come to cost one tuner — a `(device, channel)` transport fanning to bounded consumers — and why `CLOSED-CAPTIONS` is advertised only per graph proven with a captioned fixture. | open |
 | [SHOW-IDENTITY-SPLIT-RCA-AND-FIX.md](features/SHOW-IDENTITY-SPLIT-RCA-AND-FIX.md) | Why reference show S split and changed files can lose watch state; Fable-reviewed directory lookup proposal, movie coverage, hint correction and catalogue repair. | open |
 | [SCAN-IDENTITY-IMPLEMENTATION.md](features/SCAN-IDENTITY-IMPLEMENTATION.md) | Sol's three-PR build contract for scan ownership, directory matching, guarded series hints and atomic catalogue repair, with backend tests and release acceptance. | open |
 | [SCAN-IDENTITY-STATUS.md](features/SCAN-IDENTITY-STATUS.md) | Live base, branch, milestone, evidence, review and promotion ledger for the scan-identity effort. | open |
@@ -430,6 +472,7 @@ Two rounds of performance work, each with its plan, review, and response.
 | [ARCHITECTURE-REVIEW-2026-09-20.md](reviews/ARCHITECTURE-REVIEW-2026-09-20.md) | The end-to-end architecture review of 2026-09-20, revision 3 (adversarial assessment applied, Astra's independent review merged) — ranked findings for performance, stability, video quality and design, ten verified do-first items, and the sequencing. | open |
 | [ARCHITECTURE-REVIEW-2026-09-20-APPENDIX.md](reviews/ARCHITECTURE-REVIEW-2026-09-20-APPENDIX.md) | The nine full area reports behind that review, unrevised, with every finding's quoted evidence and each area's "already good" list; the main document wins where they disagree. | open |
 | [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md) | Checks all 82 consolidated entries and 128 appendix findings against the source, with corrections, per-finding verdicts and evidence limits; revision 2 of the review applies its dispositions. | done |
+| [ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md](reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) | The single shared status for every implementation plan from the review, across Claude, GPT and OpenRouter sessions — the claim protocol, the model/session identity rules, and one row per plan. | live |
 | [SECURITY-ASSESSMENT-2026-09-13.md](reviews/SECURITY-ASSESSMENT-2026-09-13.md) | Which trust boundaries need work across the server, cluster, clients, media supply chain, and delivery process. | open |
 | [WEEKLY-ARCHITECTURE-SECURITY-IMPLEMENTATION.md](reviews/WEEKLY-ARCHITECTURE-SECURITY-IMPLEMENTATION.md) | Bounded implementation handoff for the September architecture, security, recovery, and playback findings. | open |
 
