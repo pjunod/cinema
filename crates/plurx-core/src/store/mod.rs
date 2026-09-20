@@ -28,6 +28,15 @@ mod telemetry;
 mod timeline_annotations;
 
 mod publication;
+mod scan_identity_repair;
+pub use scan_identity_repair::{
+    plan_identity_repair, IdentityRepairBlocker, IdentityRepairCounts, IdentityRepairFile,
+    IdentityRepairFileMove, IdentityRepairItem, IdentityRepairItemMove, IdentityRepairOutcome,
+    IdentityRepairPlan, IdentityRepairSnapshot, IdentityRepairWatch, IdentityRepairWatchConflict,
+    IdentityRepairWatchCopy, IDENTITY_REPAIR_EPISODES_MAX, IDENTITY_REPAIR_FILES_MAX,
+    IDENTITY_REPAIR_PLAN_BYTES_MAX, IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX,
+    IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX,
+};
 
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite;
@@ -2452,6 +2461,14 @@ pub trait DvrStore: Send + Sync + 'static {
 
 #[async_trait]
 pub trait MediaStore: Send + Sync + 'static {
+    /// One bounded catalogue snapshot for deterministic duplicate-show repair.
+    /// Implementations must return complete rows or an explicit size error;
+    /// they must never silently truncate.
+    async fn identity_repair_snapshot(
+        &self,
+        library_id: i64,
+        show_ids: &[i64],
+    ) -> Result<IdentityRepairSnapshot, StoreError>;
     /// The item carrying these external ids, across every library.
     ///
     /// For resolving something another application named. Matching on ids and
@@ -3951,6 +3968,15 @@ pub trait CoordinationStore: Send + Sync + 'static {
 /// transaction as the mutation.
 #[async_trait]
 pub trait FencedPublicationStore: Send + Sync + 'static {
+    /// Apply exactly the server-generated repair plan while the library scan
+    /// lease and the preview preimage are both current.
+    async fn apply_identity_repair_fenced(
+        &self,
+        snapshot: &IdentityRepairSnapshot,
+        plan: &IdentityRepairPlan,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<IdentityRepairOutcome, StoreError>;
     async fn put_setting_fenced(
         &self,
         key: &str,
