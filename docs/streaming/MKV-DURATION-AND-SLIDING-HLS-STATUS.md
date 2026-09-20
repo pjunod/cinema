@@ -1,7 +1,7 @@
 # MKV duration and sliding HLS — implementation status
 
-**Status:** qualified candidate; promotion pending · **Updated:** 2026-09-19 EDT ·
-**Branch:** `effort/mkv-duration-sliding-hls` · **Base:** `0f1e5e43`
+**Status:** merged; deployment and physical acceptance pending ·
+**Updated:** 2026-09-19 EDT · **Main:** `0cad9b86`
 
 Companion to the
 [reviewed RCA](MKV-DURATION-AND-APPLE-SLIDING-HLS-RCA-AND-FIX.md) and
@@ -23,7 +23,7 @@ operator decision.
 | W2b publication clock | qualified | Publication, playback-rate pacing, typed capacity, pause, fetch-stopped, replacement, and EOF cases pass | Preserve actor-owned publication timing |
 | W3 object promises | qualified | Rolling-session retention and object-promise regressions pass, including grace ownership and hard-cap accounting | Preserve immutable served snapshots |
 | W4 diagnostics/clients | qualified for affected surfaces | Rust serialization/reservation tests, the full web lane, Android build/JVM/lint, Apple compilation, and the three changed Apple tests pass. Developer enablement remains advisory | Broad Apple-suite failures stay with the separate unit-failure batching process |
-| W5 review/qualification | PR #377 open; promotion gate pending | The single adversarial review's four findings are fixed. Candidate `063a638d` passes the affected fast lane; `d8496f5f` integrates current `main`, claims Apple build 172 and Android versionCode 109, passes exact-tree compile/static policy, and updates every reviewed ownership count exposed by hosted preflight | Wait for the current PR head's promotion gate, then merge |
+| W5 review/qualification | complete in source | The single adversarial review's four findings are fixed. PR #377's `3fd1210c` candidate passed every Main promotion gate child and merged as `0cad9b86` | Keep deployment, requeue, and physical acceptance separate |
 
 ## Working decisions — defaults remain visible
 
@@ -72,16 +72,16 @@ operator decision.
 | 2026-09-19 | current `0f1e5e43` reconciliation | pinned `cargo fmt --check`, `cargo check -p plurxd --all-targets --locked`, `cargo clippy -p plurxd --all-targets --locked -- -D warnings`, and `scripts/js-check` | passed after the second main sync; no behavioral suite was reopened |
 | 2026-09-19 | `328d6c92` | `make history-check`, `make validation-lint`, changed-from `validation.mobile_versions`, `validation.apple_build --merge-target origin/main`, and `git diff --check` | passed: 2,064 corrective commits audited, 27 points / 34 checks / 2,010 files catalogued, Apple build 172 and Android versionCode 109 valid |
 | 2026-09-19 | `d8496f5f` | hosted `fast policy and contract preflight`, then `python3 -m unittest tests.validation.test_rolling_producer_ownership_inventory` after correction | hosted run found 18 stale owner/task/timer/process counts; every delta was traced to the bounded packet probe, publication clock, retired-object cleanup, or immutable segment promise, documented in the ledger, and the focused 7-test inventory passed |
+| 2026-09-19 | `3fd1210c` | Forgejo `Main promotion gate` | passed: validation scope 9 s · mobile version 8 s · policy/contract preflight 1m 42s · Rust 1m 36s · web 7 s · Apple 47 s · Android 4m 55s · Windows 16m 23s |
 
 The affected behavioral lane is complete. No zero-match command is counted as
 acceptance; the first combined Apple command matched two tests because one
 selector was stale, and the corrected selector was then run separately.
 
-## Promotion state — candidate is ready for its gate
+## Promotion state — source is merged, operations remain separate
 
-Forgejo PR #377 is open. Its hosted promotion receipt, merge, deployment,
-physical-device acceptance, and production exact-identity requeue are
-outstanding. This candidate authorizes only PR promotion and merge; it does not
-authorize deployment or production mutation. The implementation is not an
-incident fix until the forced rolling route and the exact-identity immutable
-route both pass their physical acceptance boundaries.
+Forgejo PR #377 merged into `main` as `0cad9b86`. No deployment, production
+exact-identity requeue, or physical-device acceptance was performed. The
+implementation is source-complete, but it is not an incident fix until the
+forced rolling route and the exact-identity immutable route both pass their
+physical acceptance boundaries.
