@@ -837,6 +837,8 @@ test("analysis controls are first-class settings separate from playback mode con
   // Playback saves per card: the player defaults and the streaming tuning are
   // two writes with two buttons, and neither carries an analysis field.
   const save = shippedSource("saveStreaming");
+  const liveRecovery = shippedSource("liveHlsRecoveryCard");
+  const saveLiveRecovery = shippedSource("saveLiveHlsRecoveryDeveloper");
   const saveDefaults = shippedSource("savePlaybackDefaults");
   const analysisPanel = shippedSource("analysisSettingsPanel");
   assert.match(saveDefaults, /default_audio_lang:/);
@@ -848,21 +850,23 @@ test("analysis controls are first-class settings separate from playback mode con
   assert.doesNotMatch(saveDefaults, /vod_index_mins:/);
   const saveAnalysis = shippedSource("saveAnalysisSettings");
   assert.match(panel, /togRow\("pvod"/);
-  assert.match(panel, /togRow\("pvlr"/);
+  assert.doesNotMatch(panel, /togRow\("pvlr"|togRow\("dvlr"/);
+  assert.match(liveRecovery, /togRow\("dvlr"/);
   assert.doesNotMatch(panel, /"pvi"/);
   assert.match(analysisPanel, /id="an-every"/);
   assert.match(analysisPanel, /togRow\("an-enabled"/);
   assert.match(panel, /id="pvws"/);
   assert.match(panel, /id="pvmb"/);
   assert.match(save, /vod_presentation:/);
-  assert.match(save, /vod_live_recovery:/);
+  assert.doesNotMatch(save, /vod_live_recovery:/);
+  assert.match(saveLiveRecovery, /vod_live_recovery:/);
   assert.doesNotMatch(save, /vod_index_mins:/);
   assert.match(saveAnalysis, /vod_index_mins:/);
   assert.match(saveAnalysis, /vod_index_cluster_cache:/);
   assert.match(save, /vod_materialize_budget_secs:/);
   assert.match(save, /vod_block_budget_secs:"8"/);
   assert.match(panel, /VOD HLS/);
-  assert.match(panel, /Live HLS/);
+  assert.match(liveRecovery, /Live HLS/);
 });
 
 test("analysis settings render the numeric retry policy returned by the API", () => {
@@ -2795,7 +2799,8 @@ test("the shipped player adapter applies state precedence and preview-then-commi
     "pbTick", "seekTo", "togglePlay", "closeMenu", "closePlayer", "coarsePointer",
     "setTimeout", "clearTimeout",
     [
-      "let PLAYER_REPEAT_KEY=null; let PLAYER_REPEAT_COUNT=0; let NUDGE_T=null;",
+      "let PLAYER_REPEAT_KEY=null; let PLAYER_REPEAT_COUNT=0; let NUDGE_T=null; const WATCH=null;",
+      shippedSource("watchRouteInput"),
       "const PLAYER_SEEK_GESTURE=PlaybackPolicy.createHeldKeyCommitter({"+
         "delayMs:PlaybackPolicy.contractTiming('desktop_hotkey_coalesce_ms'),"+
         "commit:owner=>{if(PLAYER===owner)commitPendingSeek();},"+
@@ -2909,12 +2914,12 @@ test("the shipped player adapter applies state precedence and preview-then-commi
   adapter.handlePlayerKeydown(key("f", { ctrlKey: true }));
   assert.equal(calls.fullscreen, 0);
 
-  // A coarse pointer follows the touch table on the same page: arrows are
-  // ignored there, where the desktop table seeks.
+  // Coarse pointer changes target size, never the web input surface.
   surface = "touch";
-  assert.equal(adapter.playerInputSurface(), "touch");
+  assert.equal(adapter.playerInputSurface(), "desktop");
   adapter.handlePlayerKeydown(key("ArrowRight"));
-  assert.equal(player._seekPending, null);
+  assert.equal(player._seekPending, 30);
+  player._seekPending=null;
   surface = "desktop";
 
   // `failed` is the presenter's answer now, not a class four call sites set:
@@ -4396,7 +4401,7 @@ test("the detail screen names the supported HLS mode before playback", () => {
   const pending = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "pending" });
   assert.match(pending, /<span class="mode-chip live">Live HLS fallback<\/span>/);
   assert.match(pending, /while VOD analysis is pending/);
-  assert.match(pending, /when live recovery is enabled in Playback settings/);
+  assert.match(pending, /when live recovery is enabled in Developer settings/);
   const unsupported = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "unsupported" });
   assert.match(unsupported, /cannot use the VOD indexer/);
   assert.match(unsupported, /Live HLS requires live recovery to be enabled/);
@@ -4770,6 +4775,7 @@ function carryHarness(player) {
       shippedSource("playbackTransportEvents"),
       shippedSource("resetPlaybackTransportEvents"),shippedSource("resetMediaSource"),
       shippedSource("rememberPlaybackTransportIntent"),
+      "let WATCH=null,WATCH_CLOSE_PROMISE=null,WATCH_GENERATION=0; function watchDetach(){return null;}",
       shippedSource("closePlayer"),
       shippedSource("beginPlaybackPreparation"),"function play(){}",
       shippedSource("retirePlaybackPredecessor"),

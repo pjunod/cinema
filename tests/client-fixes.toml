@@ -2150,3 +2150,41 @@ source = "crates/plurxd/src/web/player/directed-change.js"
 source_anchor = "async function applyReadySubtitleSidecar(player,index){"
 test = "tests/playback/web-control.test.js"
 test_anchor = "retryReadyNativeSubtitle"
+
+# The baseline repair also restores served-asset loading and the pinned Rust
+# lint; the client correction is anchored to the intended HDR10 fixture.
+[[fixes]]
+id = "android.watch-baseline-hdr10-fixture"
+commits = ["6fa0f9e28"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SubtitlePolicy.kt"
+source_anchor = "deliveredDynamicRange: String?"
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest.kt"
+test_anchor = "fun compatibilityRescueAndBurnNeverRepeatTheReplacedHdr10Plan()"
+
+[[fixes]]
+id = "web.watch-fullscreen-cleanup-ownership"
+commits = ["cff2321c3"]
+source = "crates/plurxd/src/web/player/watch-presentation.js"
+source_anchor = "if(element&&!ownFullscreen)return;"
+test = "tests/web/watch-and-browse.browser.cjs"
+test_anchor = "assert.equal(await page.evaluate(()=>document.fullscreenElement===document.getElementById('app')),true);"
+[[fixes]]
+# A typed 410 pause expiry is terminal. The reporter's closed retry predicate
+# is the production boundary shared by this exact Apple regression and its
+# Android sibling added by the same corrective commit.
+id = "clients.pause-grace-expiry-is-terminal"
+commits = ["626ba0e4"]
+source = "clients/apple/Sources/PlaybackControlReporter.swift"
+source_anchor = "let retryableTransport = status == 408 || status == nil"
+test = "clients/apple/Tests/PlaybackControlReporterTests.swift"
+test_anchor = "func testPauseGraceExpiryStopsWithoutReopeningOrRetrying()"
+
+# The preflight correction touched the Android README's live version claim;
+# the document sweep checks that claim against the actual release input.
+[[fixes]]
+id = "android.watch-preflight-build-claim"
+commits = ["3d0599779"]
+source = "clients/android/README.md"
+source_anchor = "Status: **v0.3.0**, build"
+test = "tests/operations/test_mobile_build_claims.py"
+test_anchor = "def test_repository_build_claims_match_release_inputs(self) -> None:"

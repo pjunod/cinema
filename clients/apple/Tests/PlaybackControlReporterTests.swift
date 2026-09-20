@@ -1078,6 +1078,20 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertEqual(harness.requests.count, 1)
     }
 
+    func testPauseGraceExpiryStopsWithoutReopeningOrRetrying() async throws {
+        let harness = Harness()
+        harness.enqueue([.failure(ControlTransportError(
+            status: 410, code: "pause_grace_expired"
+        ))])
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        assertAsyncResult(await harness.awaitExchanges(1))
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let stopped = await reporter.stopped
+        XCTAssertTrue(stopped)
+        XCTAssertEqual(harness.requests.count, 1)
+    }
+
     func testARetryHonoursTheServersRetryAfter() async throws {
         let harness = Harness()
         harness.enqueue([

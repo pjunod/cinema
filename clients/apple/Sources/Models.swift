@@ -881,6 +881,26 @@ struct PlaybackSessionStatus: Codable {
     var recentSpeed: Double?
     var outTimeMs: Int?
     var progressIdleMs: Int?
+    var startupState: String?
+    var startupRemainingMs: Int?
+    var presentationProgressSeen: Bool?
+    var producedEndMs: Int?
+    var servedEndMs: Int?
+    var stagedBytes: Int?
+    var playlistTargetMs: Int?
+    var servedRevision: Int?
+    var lastSegmentAdvancedIdleMs: Int?
+    var nextPublicationInMs: Int?
+    var publicationDeadlineRemainingMs: Int?
+    var maintenanceState: String?
+    var rateEstimateSource: String?
+    var estimateActiveSpeed: Double?
+    var pauseGraceRemainingMs: Int?
+    var retirementReason: String?
+    var advertisedBytes: Int?
+    var graceBytes: Int?
+    var reservedBytes: Int?
+    var liveBytes: Int?
     var publishedEndMs: Int?
     var fetchedEndMs: Int?
     var fetchedSegment: Int?

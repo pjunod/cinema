@@ -353,3 +353,27 @@ test("the served web policy embeds the surface fixture verbatim", () => {
   assert.deepEqual(webPolicy.SURFACE_CLASSES, surface.classes);
   assert.deepEqual(webPolicy.SURFACE_SOURCES, surface.sources);
 });
+
+// Every presentation × chrome × surface × state × input, including native
+// no-browser fallback. Layout must never choose an input surface by width.
+test("watch routing and unmounted fallback match every shared cell", () => {
+  assert.deepEqual(webPolicy.WATCH_INPUT_ROUTING, contract.watch.routing);
+  for (const [presentation, chromes] of Object.entries(contract.watch.routing))
+    for (const [chrome, surfaces] of Object.entries(chromes))
+      for (const [surface, states] of Object.entries(surfaces))
+        for (const [state, row] of Object.entries(states)) {
+          assert.deepEqual(Object.keys(row), contract.inputs);
+          for (const [input, expected] of Object.entries(row)) {
+            assert.ok(expected in contract.outcomes);
+            const actual = webPolicy.routeWatchInput(surface, state, input, presentation, chrome);
+            assert.equal(actual, expected);
+            assert.equal(webPolicy.resolveWatchOutcome(actual, true), expected);
+            assert.equal(webPolicy.resolveWatchOutcome(actual, false), expected === "return_browser" ? "exit" : expected);
+          }
+        }
+  for (const chrome of ["inline", "overlay"]) {
+    assert.equal(webPolicy.routeWatchInput("desktop", "failed", "back", "browser", chrome), "ignore");
+    assert.equal(webPolicy.routeWatchInput("desktop", "menu", "back", "browser", chrome), "close_menu");
+    assert.equal(webPolicy.routeWatchInput("ten-foot", "hidden", "left", "fullscreen", chrome), "reveal");
+  }
+});

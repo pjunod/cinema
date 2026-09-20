@@ -55,6 +55,7 @@ function setPageTimer(fn,ms,generation=PAGE_RENDER_GENERATION){
 }
 async function render(){
   const generation=++PAGE_RENDER_GENERATION;
+  if(WATCH)closePlayer({routeLeave:true});
   if(!TOKEN||!ME) return boot();
   clearInterval(PAGE_TIMER); PAGE_TIMER=null;
   if(!ACT_TIMER) ACT_TIMER=setInterval(pollActivity,4000);

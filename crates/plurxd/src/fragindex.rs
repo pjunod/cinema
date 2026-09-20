@@ -29,7 +29,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use plurx_core::content_analysis::{
-    CompletionProvenance, IndexDiagnostic, IndexFailureCode, VideoCompletionExpectation,
+    CompletionCoverage, CompletionProvenance, IndexDiagnostic, IndexFailureCode,
+    VideoCompletionExpectation,
 };
 use plurx_core::domain::MediaFile;
 use plurx_core::fmp4::{self, FragmentReader, Init, PromotionInputs, TrackKind, Unit};
@@ -49,6 +50,11 @@ type SourceFd = i32;
 /// fast copy is not a syscall storm, small enough that the reader parks in one
 /// `read` rather than holding a large buffer.
 const READ_CHUNK: usize = 256 * 1024;
+const PACKET_PROBE_WALL_BUDGET: Duration = Duration::from_secs(30);
+const PACKET_PROBE_HEAD_PACKETS: u32 = 256;
+const PACKET_PROBE_ATTEMPT_MAX_BYTES: u64 = 1024 * 1024;
+const PACKET_PROBE_AGGREGATE_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const PACKET_PROBE_TAIL_OFFSETS_SECS: [i64; 3] = [128, 512, 2_048];
 
 type IndexProgress = dyn Fn(u64, i64, usize) + Send + Sync;
 type SharedIndexProgress = Arc<IndexProgress>;
@@ -103,6 +109,69 @@ impl IndexFailure {
 enum CompletionExpectationError {
     Unsupported(String),
     Unverified(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PacketProbeContext {
+    stream_index: u32,
+    time_base: (u64, u64),
+    seek_hint_seconds: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PacketTimelineBounds {
+    origin_ticks: i128,
+    end_ticks: i128,
+    packet_count: u64,
+    output_bytes: u64,
+}
+
+impl PacketTimelineBounds {
+    fn expectation(
+        self,
+        context: PacketProbeContext,
+        source_object_version: &str,
+    ) -> Result<VideoCompletionExpectation, CompletionExpectationError> {
+        let span_ticks = self
+            .end_ticks
+            .checked_sub(self.origin_ticks)
+            .ok_or_else(|| {
+                CompletionExpectationError::Unverified(
+                    "packet timeline span overflowed during normalization".to_owned(),
+                )
+            })?;
+        if span_ticks <= 0 {
+            return Err(CompletionExpectationError::Unverified(
+                "packet timeline has no positive selected-video span".to_owned(),
+            ));
+        }
+        let numerator = span_ticks
+            .checked_mul(i128::from(context.time_base.0))
+            .and_then(|value| u128::try_from(value).ok())
+            .ok_or_else(|| {
+                CompletionExpectationError::Unverified(
+                    "packet timeline numerator overflowed".to_owned(),
+                )
+            })?;
+        let Some((duration_num, duration_den)) =
+            reduce_rational(numerator, u128::from(context.time_base.1))
+        else {
+            return Err(CompletionExpectationError::Unverified(
+                "packet timeline could not be reduced safely".to_owned(),
+            ));
+        };
+        let expectation = VideoCompletionExpectation {
+            stream_index: context.stream_index,
+            duration_num,
+            duration_den,
+            provenance: CompletionProvenance::PacketTimeline,
+            source_object_version: source_object_version.to_owned(),
+        };
+        expectation
+            .validate()
+            .map_err(|reason| CompletionExpectationError::Unverified(reason.to_owned()))?;
+        Ok(expectation)
+    }
 }
 
 fn parse_positive_decimal(value: &str) -> Option<(u64, u64)> {
@@ -283,7 +352,6 @@ fn completion_expectation_from_probe(
             .and_then(parse_matroska_duration)
         {
             candidates.push((value, CompletionProvenance::MatroskaDurationTag));
-            break;
         }
     }
     let Some(&(selected, provenance)) = candidates.first() else {
@@ -293,8 +361,13 @@ fn completion_expectation_from_probe(
     };
     if candidates
         .iter()
-        .skip(1)
-        .any(|(candidate, _)| rational_diff_exceeds_two_seconds(selected, *candidate))
+        .enumerate()
+        .any(|(left_index, (left, _))| {
+            candidates
+                .iter()
+                .skip(left_index + 1)
+                .any(|(right, _)| rational_diff_exceeds_two_seconds(*left, *right))
+        })
     {
         return Err(CompletionExpectationError::Unverified(
             "the selected video's duration metadata conflicts by more than 2000 ms".to_owned(),
@@ -311,6 +384,333 @@ fn completion_expectation_from_probe(
         .validate()
         .map_err(|reason| CompletionExpectationError::Unverified(reason.to_owned()))?;
     Ok(expectation)
+}
+
+fn packet_probe_context_from_metadata(
+    raw: &str,
+) -> Result<PacketProbeContext, CompletionExpectationError> {
+    let document: serde_json::Value = serde_json::from_str(raw).map_err(|error| {
+        CompletionExpectationError::Unverified(format!("invalid ffprobe JSON: {error}"))
+    })?;
+    let stream = document
+        .get("streams")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|streams| {
+            streams.iter().find(|stream| {
+                stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
+            })
+        })
+        .ok_or_else(|| {
+            CompletionExpectationError::Unsupported(
+                "the index map selects no video stream".to_owned(),
+            )
+        })?;
+    if stream
+        .pointer("/disposition/attached_pic")
+        .and_then(serde_json::Value::as_i64)
+        == Some(1)
+    {
+        return Err(CompletionExpectationError::Unsupported(
+            "the index map selects an attached picture".to_owned(),
+        ));
+    }
+    let stream_index = stream
+        .get("index")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| {
+            CompletionExpectationError::Unverified(
+                "the selected video has no valid absolute stream index".to_owned(),
+            )
+        })?;
+    let time_base = stream
+        .get("time_base")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_time_base)
+        .ok_or_else(|| {
+            CompletionExpectationError::Unverified(
+                "the selected video has no usable packet time base".to_owned(),
+            )
+        })?;
+    let seek_hint = document
+        .pointer("/format/duration")
+        .and_then(serde_json::Value::as_str)
+        .and_then(parse_positive_decimal)
+        .and_then(|(numerator, denominator)| numerator.checked_div(denominator))
+        .and_then(|seconds| i64::try_from(seconds).ok())
+        .filter(|seconds| *seconds > 0)
+        .ok_or_else(|| {
+            CompletionExpectationError::Unverified(
+                "packet fallback has no usable format seek hint".to_owned(),
+            )
+        })?;
+    Ok(PacketProbeContext {
+        stream_index,
+        time_base,
+        seek_hint_seconds: seek_hint,
+    })
+}
+
+fn packet_integer(value: Option<&serde_json::Value>) -> Option<i128> {
+    let value = value?;
+    if let Some(value) = value.as_i64() {
+        return Some(i128::from(value));
+    }
+    if let Some(value) = value.as_u64() {
+        return Some(i128::from(value));
+    }
+    value.as_str()?.parse::<i128>().ok()
+}
+
+fn packet_document(raw: &[u8]) -> Result<serde_json::Value, CompletionExpectationError> {
+    let document: serde_json::Value = serde_json::from_slice(raw).map_err(|error| {
+        CompletionExpectationError::Unverified(format!("invalid packet probe JSON: {error}"))
+    })?;
+    if document
+        .get("packets")
+        .and_then(serde_json::Value::as_array)
+        .is_none()
+    {
+        return Err(CompletionExpectationError::Unverified(
+            "packet probe did not return a packet array".to_owned(),
+        ));
+    }
+    Ok(document)
+}
+
+fn head_packet_origin(
+    raw: &[u8],
+    stream_index: u32,
+) -> Result<(i128, u64), CompletionExpectationError> {
+    let document = packet_document(raw)?;
+    let packets = document
+        .get("packets")
+        .and_then(serde_json::Value::as_array)
+        .expect("packet_document checked the array");
+    let mut origin: Option<i128> = None;
+    let mut count = 0_u64;
+    for packet in packets {
+        let packet_stream = packet_integer(packet.get("stream_index"));
+        if packet_stream != Some(i128::from(stream_index)) {
+            continue;
+        }
+        let pts = packet_integer(packet.get("pts")).ok_or_else(|| {
+            CompletionExpectationError::Unverified(
+                "a selected-video prefix packet has no usable PTS".to_owned(),
+            )
+        })?;
+        origin = Some(origin.map_or(pts, |current| current.min(pts)));
+        count = count.saturating_add(1);
+    }
+    let origin = origin.ok_or_else(|| {
+        CompletionExpectationError::Unverified(
+            "the bounded packet prefix contains no selected-video packet".to_owned(),
+        )
+    })?;
+    Ok((origin, count))
+}
+
+fn tail_packet_end(
+    raw: &[u8],
+    stream_index: u32,
+) -> Result<Option<(i128, i128, u64)>, CompletionExpectationError> {
+    let document = packet_document(raw)?;
+    let packets = document
+        .get("packets")
+        .and_then(serde_json::Value::as_array)
+        .expect("packet_document checked the array");
+    let mut minimum: Option<i128> = None;
+    let mut maximum_end: Option<i128> = None;
+    let mut count = 0_u64;
+    for packet in packets {
+        let packet_stream = packet_integer(packet.get("stream_index"));
+        if packet_stream != Some(i128::from(stream_index)) {
+            continue;
+        }
+        let pts = packet_integer(packet.get("pts")).ok_or_else(|| {
+            CompletionExpectationError::Unverified(
+                "a selected-video EOF packet has no usable PTS".to_owned(),
+            )
+        })?;
+        let duration = packet_integer(packet.get("duration"))
+            .filter(|duration| *duration > 0)
+            .ok_or_else(|| {
+                CompletionExpectationError::Unverified(
+                    "a selected-video EOF packet has no positive duration".to_owned(),
+                )
+            })?;
+        let end = pts.checked_add(duration).ok_or_else(|| {
+            CompletionExpectationError::Unverified(
+                "selected-video packet end overflowed".to_owned(),
+            )
+        })?;
+        minimum = Some(minimum.map_or(pts, |current| current.min(pts)));
+        maximum_end = Some(maximum_end.map_or(end, |current| current.max(end)));
+        count = count.saturating_add(1);
+    }
+    Ok(minimum
+        .zip(maximum_end)
+        .map(|(minimum, maximum)| (minimum, maximum, count)))
+}
+
+fn packet_probe_failure(
+    error: crate::ffmpeg::HeldPacketProbeError,
+    stream_index: u32,
+    output_bytes: u64,
+) -> IndexFailure {
+    let (code, transient) = match error {
+        crate::ffmpeg::HeldPacketProbeError::Timeout => (IndexFailureCode::IndexProbeTimeout, true),
+        crate::ffmpeg::HeldPacketProbeError::OutputLimit => {
+            (IndexFailureCode::IndexCompletionUnverified, false)
+        }
+        crate::ffmpeg::HeldPacketProbeError::Source(_) => (IndexFailureCode::IndexSourceIo, true),
+        crate::ffmpeg::HeldPacketProbeError::Process(_) => {
+            (IndexFailureCode::IndexProcessFailed, false)
+        }
+    };
+    let mut failure = IndexFailure::new(code, error.reason(), 0).transient(transient);
+    failure.diagnostic.selected_stream = Some(stream_index);
+    failure.diagnostic.output_bytes = Some(output_bytes);
+    failure
+}
+
+async fn packet_probe_attempt(
+    source: &std::fs::File,
+    request: crate::ffmpeg::HeldPacketProbeRequest,
+    timeout: Duration,
+) -> Result<Vec<u8>, crate::ffmpeg::HeldPacketProbeError> {
+    let mut view = source;
+    view.seek(SeekFrom::Start(0)).map_err(|error| {
+        crate::ffmpeg::HeldPacketProbeError::Source(format!(
+            "positioning held source before packet probe: {error}"
+        ))
+    })?;
+    let result = crate::ffmpeg::held_source_packet_probe_json(
+        source,
+        request,
+        timeout,
+        PACKET_PROBE_ATTEMPT_MAX_BYTES,
+    )
+    .await;
+    let reset = view.seek(SeekFrom::Start(0));
+    match (result, reset) {
+        (_, Err(error)) => Err(crate::ffmpeg::HeldPacketProbeError::Source(format!(
+            "resetting held source after packet probe: {error}"
+        ))),
+        (result, Ok(_)) => result,
+    }
+}
+
+async fn held_source_video_packet_bounds(
+    source: &std::fs::File,
+    context: PacketProbeContext,
+    budget: Duration,
+) -> Result<PacketTimelineBounds, IndexFailure> {
+    if budget.is_zero() {
+        return Err(IndexFailure::new(
+            IndexFailureCode::IndexBudgetExceeded,
+            "no whole-index budget remains for packet fallback",
+            0,
+        ));
+    }
+    let started = Instant::now();
+    let wall_budget = budget.min(PACKET_PROBE_WALL_BUDGET);
+    let remaining = || wall_budget.saturating_sub(started.elapsed());
+    let head = packet_probe_attempt(
+        source,
+        crate::ffmpeg::HeldPacketProbeRequest {
+            stream_index: context.stream_index,
+            start_seconds: None,
+            packet_limit: Some(PACKET_PROBE_HEAD_PACKETS),
+        },
+        remaining(),
+    )
+    .await
+    .map_err(|error| packet_probe_failure(error, context.stream_index, 0))?;
+    let mut output_bytes = u64::try_from(head.len()).unwrap_or(u64::MAX);
+    let (origin_ticks, head_packets) =
+        head_packet_origin(&head, context.stream_index).map_err(|error| {
+            let (CompletionExpectationError::Unverified(reason)
+            | CompletionExpectationError::Unsupported(reason)) = error;
+            let mut failure =
+                IndexFailure::new(IndexFailureCode::IndexCompletionUnverified, reason, 0);
+            failure.diagnostic.selected_stream = Some(context.stream_index);
+            failure.diagnostic.output_bytes = Some(output_bytes);
+            failure
+        })?;
+
+    let mut starts = Vec::new();
+    for offset in PACKET_PROBE_TAIL_OFFSETS_SECS {
+        let start = context.seek_hint_seconds.saturating_sub(offset).max(0);
+        if starts.last().copied() != Some(start) {
+            starts.push(start);
+        }
+    }
+    for start_seconds in starts.into_iter().take(3) {
+        if remaining().is_zero() {
+            return Err(packet_probe_failure(
+                crate::ffmpeg::HeldPacketProbeError::Timeout,
+                context.stream_index,
+                output_bytes,
+            ));
+        }
+        let tail = packet_probe_attempt(
+            source,
+            crate::ffmpeg::HeldPacketProbeRequest {
+                stream_index: context.stream_index,
+                start_seconds: Some(start_seconds),
+                packet_limit: None,
+            },
+            remaining(),
+        )
+        .await
+        .map_err(|error| packet_probe_failure(error, context.stream_index, output_bytes))?;
+        output_bytes = output_bytes.saturating_add(u64::try_from(tail.len()).unwrap_or(u64::MAX));
+        if output_bytes > PACKET_PROBE_AGGREGATE_MAX_BYTES {
+            return Err(packet_probe_failure(
+                crate::ffmpeg::HeldPacketProbeError::OutputLimit,
+                context.stream_index,
+                output_bytes,
+            ));
+        }
+        let Some((tail_minimum, end_ticks, tail_packets)) =
+            tail_packet_end(&tail, context.stream_index).map_err(|error| {
+                let (CompletionExpectationError::Unverified(reason)
+                | CompletionExpectationError::Unsupported(reason)) = error;
+                let mut failure =
+                    IndexFailure::new(IndexFailureCode::IndexCompletionUnverified, reason, 0);
+                failure.diagnostic.selected_stream = Some(context.stream_index);
+                failure.diagnostic.output_bytes = Some(output_bytes);
+                failure
+            })?
+        else {
+            continue;
+        };
+        if tail_minimum < origin_ticks {
+            let mut failure = IndexFailure::new(
+                IndexFailureCode::IndexCompletionUnverified,
+                "packet seek exposed a timestamp before the bounded prefix origin",
+                0,
+            );
+            failure.diagnostic.selected_stream = Some(context.stream_index);
+            failure.diagnostic.output_bytes = Some(output_bytes);
+            return Err(failure);
+        }
+        return Ok(PacketTimelineBounds {
+            origin_ticks,
+            end_ticks,
+            packet_count: head_packets.saturating_add(tail_packets),
+            output_bytes,
+        });
+    }
+    let mut failure = IndexFailure::new(
+        IndexFailureCode::IndexCompletionUnverified,
+        "bounded packet seeks did not prove a selected-video EOF endpoint",
+        0,
+    );
+    failure.diagnostic.selected_stream = Some(context.stream_index);
+    failure.diagnostic.output_bytes = Some(output_bytes);
+    Err(failure)
 }
 
 /// Read one index pipe to exhaustion.
@@ -607,9 +1007,9 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                 rows.len(),
             )));
         }
-        match expectation.covers(covered, timescale) {
-            Ok(true) => {}
-            Ok(false) => {
+        match expectation.coverage(covered, timescale) {
+            Ok(CompletionCoverage::Complete) => {}
+            Ok(CompletionCoverage::Short) => {
                 let mut failure = IndexFailure::new(
                     IndexFailureCode::IndexVideoShortfall,
                     format!(
@@ -619,7 +1019,30 @@ async fn index_stream_with_progress<R: AsyncRead + Unpin>(
                     rows.len(),
                 );
                 failure.diagnostic.selected_stream = Some(expectation.stream_index);
-                failure.diagnostic.expectation_provenance = Some(expectation.provenance);
+                failure.diagnostic.expectation_provenance =
+                    Some(expectation.provenance.as_str().to_owned());
+                failure.diagnostic.covered_ms = i64::try_from(
+                    u128::from(covered)
+                        .saturating_mul(1_000)
+                        .checked_div(u128::from(timescale.max(1)))
+                        .unwrap_or_default(),
+                )
+                .ok();
+                failure.diagnostic.expected_ms = expectation.duration_ms_floor();
+                return IndexOutcome::Failed(Box::new(failure));
+            }
+            Ok(CompletionCoverage::Excess) => {
+                let mut failure = IndexFailure::new(
+                    IndexFailureCode::IndexCompletionUnverified,
+                    format!(
+                        "covered {covered} ticks beyond the selected-video packet expectation {}/{} seconds",
+                        expectation.duration_num, expectation.duration_den
+                    ),
+                    rows.len(),
+                );
+                failure.diagnostic.selected_stream = Some(expectation.stream_index);
+                failure.diagnostic.expectation_provenance =
+                    Some(expectation.provenance.as_str().to_owned());
                 failure.diagnostic.covered_ms = i64::try_from(
                     u128::from(covered)
                         .saturating_mul(1_000)
@@ -1000,17 +1423,45 @@ async fn probe_completion_expectation_inner(
         )
         .transient(timeout)
     })?;
-    let expectation = completion_expectation_from_probe(&raw, source_object_version).map_err(
-        |error| match error {
-            CompletionExpectationError::Unsupported(reason) => {
-                IndexFailure::new(IndexFailureCode::Unsupported, reason, 0)
-            }
-            CompletionExpectationError::Unverified(reason) => {
-                IndexFailure::new(IndexFailureCode::IndexCompletionUnverified, reason, 0)
-            }
-        },
-    )?;
-    Ok(expectation)
+    match completion_expectation_from_probe(&raw, source_object_version) {
+        Ok(expectation) => Ok(expectation),
+        Err(CompletionExpectationError::Unsupported(reason)) => {
+            Err(IndexFailure::new(IndexFailureCode::Unsupported, reason, 0))
+        }
+        Err(CompletionExpectationError::Unverified(metadata_reason)) => {
+            let context =
+                packet_probe_context_from_metadata(&raw).map_err(|error| match error {
+                    CompletionExpectationError::Unsupported(reason) => {
+                        IndexFailure::new(IndexFailureCode::Unsupported, reason, 0)
+                    }
+                    CompletionExpectationError::Unverified(reason) => IndexFailure::new(
+                        IndexFailureCode::IndexCompletionUnverified,
+                        format!("{metadata_reason}; {reason}"),
+                        0,
+                    ),
+                })?;
+            let bounds = held_source_video_packet_bounds(
+                source,
+                context,
+                budget.saturating_sub(started.elapsed()),
+            )
+            .await?;
+            bounds
+                .expectation(context, source_object_version)
+                .map_err(|error| {
+                    let (CompletionExpectationError::Unverified(reason)
+                    | CompletionExpectationError::Unsupported(reason)) = error;
+                    let mut failure = IndexFailure::new(
+                        IndexFailureCode::IndexCompletionUnverified,
+                        format!("{metadata_reason}; {reason}"),
+                        0,
+                    );
+                    failure.diagnostic.selected_stream = Some(context.stream_index);
+                    failure.diagnostic.output_bytes = Some(bounds.output_bytes);
+                    failure
+                })
+        }
+    }
 }
 
 /// Build a file's index by running the index pipe.
@@ -1400,7 +1851,8 @@ async fn build_with_args(
         failure.diagnostic.expected_ms = expectation.duration_ms_floor();
         failure.diagnostic.container_ms = file.duration_ms;
         failure.diagnostic.selected_stream = Some(expectation.stream_index);
-        failure.diagnostic.expectation_provenance = Some(expectation.provenance);
+        failure.diagnostic.expectation_provenance =
+            Some(expectation.provenance.as_str().to_owned());
         failure.diagnostic.elapsed_ms =
             Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX));
         failure.diagnostic.budget_ms = Some(u64::try_from(budget.as_millis()).unwrap_or(u64::MAX));
@@ -1507,6 +1959,100 @@ mod tests {
             completion_expectation_from_probe(&raw, "held-v1"),
             Err(CompletionExpectationError::Unverified(_))
         ));
+    }
+
+    #[test]
+    fn mkv_hls_duration_conflict_compares_the_full_candidate_range() {
+        let raw = serde_json::json!({
+            "streams": [{
+                "index": 2,
+                "codec_type": "video",
+                "duration_ts": 240,
+                "time_base": "1/24",
+                "duration": "8.500",
+                "tags": {"DURATION": "00:00:11.500"}
+            }]
+        })
+        .to_string();
+        assert!(matches!(
+            completion_expectation_from_probe(&raw, "held-v1"),
+            Err(CompletionExpectationError::Unverified(_))
+        ));
+    }
+
+    #[test]
+    fn mkv_hls_duration_packet_bounds_use_signed_pts_and_maximum_packet_end() {
+        let head = serde_json::json!({
+            "packets": [
+                {"stream_index": 3, "pts": "-48", "duration": "24"},
+                {"stream_index": 3, "pts": "0", "duration": "24"}
+            ]
+        })
+        .to_string();
+        let tail = serde_json::json!({
+            "packets": [
+                {"stream_index": 3, "pts": "240", "duration": "24"},
+                {"stream_index": 3, "pts": "216", "duration": "24"},
+                {"stream_index": 3, "pts": "192", "duration": "24"}
+            ]
+        })
+        .to_string();
+        let (origin, count) = head_packet_origin(head.as_bytes(), 3).expect("head bounds");
+        assert_eq!((origin, count), (-48, 2));
+        let (minimum, end, count) = tail_packet_end(tail.as_bytes(), 3)
+            .expect("tail bounds")
+            .expect("selected packets");
+        assert_eq!(minimum, 192);
+        assert_eq!(end, 264, "the last JSON row need not have the maximum PTS");
+        assert_eq!(count, 3);
+
+        let expectation = PacketTimelineBounds {
+            origin_ticks: origin,
+            end_ticks: end,
+            packet_count: 5,
+            output_bytes: u64::try_from(head.len() + tail.len()).expect("fixture bytes"),
+        }
+        .expectation(
+            PacketProbeContext {
+                stream_index: 3,
+                time_base: (1, 24),
+                seek_hint_seconds: 11,
+            },
+            "held-v1",
+        )
+        .expect("signed span");
+        assert_eq!(expectation.provenance, CompletionProvenance::PacketTimeline);
+        assert_eq!(expectation.duration_num, 13);
+        assert_eq!(expectation.duration_den, 1);
+    }
+
+    #[test]
+    fn mkv_hls_duration_tail_requires_every_selected_packet_duration() {
+        let tail = serde_json::json!({
+            "packets": [
+                {"stream_index": 3, "pts": "240", "duration": "24"},
+                {"stream_index": 3, "pts": "264"}
+            ]
+        })
+        .to_string();
+        assert!(matches!(
+            tail_packet_end(tail.as_bytes(), 3),
+            Err(CompletionExpectationError::Unverified(_))
+        ));
+    }
+
+    #[test]
+    fn mkv_hls_duration_valid_pts_does_not_require_dts() {
+        let tail = serde_json::json!({
+            "packets": [
+                {"stream_index": 3, "pts": "240", "duration": "24"}
+            ]
+        })
+        .to_string();
+        assert_eq!(
+            tail_packet_end(tail.as_bytes(), 3).expect("valid PTS-only packet"),
+            Some((240, 264, 1))
+        );
     }
 
     #[test]

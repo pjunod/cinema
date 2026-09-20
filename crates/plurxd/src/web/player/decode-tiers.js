@@ -604,6 +604,7 @@ function qualityLabel(){
 }
 
 async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttempt, retryIntent){
+  WATCH_CLOSE_PROMISE=null;
   // Live TV holds a physical tuner and, since the dock, keeps holding it on
   // every other route. Starting a film used to be the moment it was released
   // (the route change stopped it); now the dock survives, so two pictures
@@ -724,6 +725,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   const playerLastFocused=(PLAYER&&PLAYER._lastFocusedControl)||"pbplay";
   if(PLAYER){ PLAYER._opener=playerOpener; PLAYER._openerClick=playerOpenerClick; }
   wirePlayer();
+  const watchTicket=watchPrepare(fileId,meta);
   // Stamp the click, not the decision: time-to-first-frame is what the person
   // waiting actually experiences, and it includes every server round trip
   // this function is about to make.
@@ -731,7 +733,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   document.getElementById("playTitle").textContent=title;
   modal.classList.add("open");
   if(!playerWasOpen){
-    const app=document.getElementById("app"); if(app) app.inert=true;
+    const app=document.getElementById("app"); if(app) app.inert=!WATCH;
     const initial=document.getElementById("pbplay"); if(initial) initial.focus({preventScroll:true});
   }
   raisePlaybackSurface("client_preparing",{context:"start",
@@ -1057,6 +1059,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
 
   if(!openIsAttached()) return;
   openedPlayer.pendingOpenAttempt=null;
+  watchAccept(watchTicket,openedPlayer);
   samplePlaybackPresentationClock(video,openedPlayer);
   notifyPlaybackControl();
   preparation.finish();

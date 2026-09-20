@@ -30,7 +30,7 @@ use plurx_core::fmp4::{self, Init};
 use plurx_core::fmp4::{FragmentReader, Published, SegmentCounts, Segmenter, TrackKind, Unit};
 use plurx_core::transcode::{
     COPY_FIRST_SEGMENT_SECONDS, COPY_PUBLISH_GATE_SECS, COPY_SEGMENT_MAX_BYTES,
-    COPY_SEGMENT_MAX_SECS, COPY_SEGMENT_SECONDS,
+    COPY_SEGMENT_MAX_SECS, COPY_SEGMENT_SECONDS, ROLLING_PRESENTATION_TARGET_SECS,
 };
 use tokio::io::{AsyncRead, AsyncReadExt};
 
@@ -67,6 +67,8 @@ pub struct Limits {
     pub first_floor_seconds: u32,
     pub max_bytes: usize,
     pub max_seconds: u32,
+    /// Fixed covering target advertised before the first rolling response.
+    pub target_seconds: u32,
     /// Hold `index.m3u8` until this many seconds of media exist, so playback
     /// starts behind a cushion instead of at the live edge — the whole story
     /// is on [`plurx_core::transcode::COPY_PUBLISH_GATE_SECS`]. Seconds, not
@@ -83,6 +85,7 @@ impl Default for Limits {
             first_floor_seconds: COPY_FIRST_SEGMENT_SECONDS,
             max_bytes: COPY_SEGMENT_MAX_BYTES,
             max_seconds: COPY_SEGMENT_MAX_SECS,
+            target_seconds: ROLLING_PRESENTATION_TARGET_SECS,
             publish_gate_secs: COPY_PUBLISH_GATE_SECS,
         }
     }
@@ -176,16 +179,14 @@ fn hevc_promotion_failure(
 /// playlist too.
 struct SessionDir {
     dir: PathBuf,
-    /// The `#EXTINF`/URI pairs, without the header. The header is regenerated
-    /// on every write because `TARGETDURATION` grows with the longest segment
-    /// published so far.
+    /// The `#EXTINF`/URI pairs, without the immutable header.
     entries: String,
     /// Media written so far, summed from every published segment's real
     /// duration — what the publish gate measures.
     published_secs: f64,
     /// Withhold `index.m3u8` until this many seconds of media exist.
     gate_secs: u32,
-    /// `ceil` of the longest `EXTINF` so far. Never decreases.
+    /// Fixed before the first response and enforced on every segment.
     target_duration: u32,
     /// The playlist is on disk — the moment a player could be holding this
     /// timeline, and so the moment the legacy fallback stops being safe.
@@ -193,19 +194,19 @@ struct SessionDir {
 }
 
 impl SessionDir {
-    fn new(dir: PathBuf, gate_secs: u32) -> SessionDir {
+    fn new(dir: PathBuf, gate_secs: u32, target_duration: u32) -> SessionDir {
         SessionDir {
             dir,
             entries: String::new(),
             published_secs: 0.0,
             gate_secs,
-            target_duration: 0,
+            target_duration: target_duration.max(1),
             started: false,
         }
     }
 
     fn playlist(&self, end: bool) -> String {
-        let mut out = fmp4::playlist_header(self.target_duration.max(1));
+        let mut out = fmp4::playlist_header(self.target_duration);
         out.push_str(&self.entries);
         if end {
             out.push_str("#EXT-X-ENDLIST\n");
@@ -230,18 +231,23 @@ impl SessionDir {
         Ok(())
     }
 
-    async fn write_segment(&mut self, published: &Published) -> std::io::Result<()> {
+    async fn write_segment(&mut self, published: &Published) -> Result<(), PublishError> {
+        if !published.seconds.is_finite()
+            || published.seconds <= 0.0
+            || published.seconds > f64::from(self.target_duration)
+        {
+            return Err(PublishError::Contract(format!(
+                "segment {} has a truthful EXTINF of {:.6}s, outside the fixed {}s rolling HLS target",
+                published.name(),
+                published.seconds,
+                self.target_duration,
+            )));
+        }
         let name = published.name();
         self.publish_file(&name, &published.segment.bytes).await?;
         self.entries
             .push_str(&fmp4::playlist_entry(published.seconds, &name));
         self.published_secs += published.seconds;
-        // Grows, never shrinks. A client that read a smaller number and then
-        // met a longer segment would be entitled to complain; one that read a
-        // number far larger than any real segment waits that long between
-        // playlist fetches, which is the stall this replaced.
-        let need = published.seconds.ceil().max(1.0) as u32;
-        self.target_duration = self.target_duration.max(need);
         // The publish gate. The segment is on disk; whether the world learns
         // of it is a separate decision, taken once: until `gate_secs` of
         // media exist there is no playlist at all, and the first one a player
@@ -251,7 +257,9 @@ impl SessionDir {
         }
         self.started = true;
         let text = self.playlist(false);
-        self.publish_file("index.m3u8", text.as_bytes()).await
+        self.publish_file("index.m3u8", text.as_bytes())
+            .await
+            .map_err(PublishError::Io)
     }
 
     async fn write_endlist(&mut self) -> std::io::Result<()> {
@@ -265,6 +273,27 @@ impl SessionDir {
         self.started = true;
         let text = self.playlist(true);
         self.publish_file("index.m3u8", text.as_bytes()).await
+    }
+}
+
+#[derive(Debug)]
+enum PublishError {
+    Io(std::io::Error),
+    Contract(String),
+}
+
+impl std::fmt::Display for PublishError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => error.fmt(formatter),
+            Self::Contract(reason) => formatter.write_str(reason),
+        }
+    }
+}
+
+impl From<std::io::Error> for PublishError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
     }
 }
 
@@ -329,7 +358,7 @@ pub async fn run<R: AsyncRead + Unpin>(
         }
     }
     let mut reader = FragmentReader::new();
-    let mut out = SessionDir::new(dir, limits.publish_gate_secs);
+    let mut out = SessionDir::new(dir, limits.publish_gate_secs, limits.target_seconds);
     // Hold the initialization segment until the first video sample arrives.
     // ffmpeg may put HDR10's static SEIs only in that sample; Apple needs the
     // same records in hvcC before it will accept a PQ HLS variant.
@@ -485,7 +514,8 @@ pub async fn run<R: AsyncRead + Unpin>(
                         limits.max_bytes,
                         limits.max_seconds,
                         video_timescale,
-                    );
+                    )
+                    .with_strict_max_seconds(limits.target_seconds, video_timescale);
                     pending_init = Some((init, policy));
                 }
                 Unit::Fragment(mut fragment) => {
@@ -611,6 +641,9 @@ pub async fn run<R: AsyncRead + Unpin>(
                     match seg.push(fragment) {
                         Ok(Some(published)) => {
                             if let Err(e) = out.write_segment(&published).await {
+                                if let PublishError::Contract(reason) = e {
+                                    return Outcome::Unsupported(reason);
+                                }
                                 return if session_directory_gone(&out.dir).await {
                                     tracing::debug!(
                                         session = %crate::transcode::session_log_id(session_id),
@@ -726,6 +759,9 @@ async fn finish(
             Ok(published) => {
                 for segment in published {
                     if let Err(e) = out.write_segment(&segment).await {
+                        if let PublishError::Contract(reason) = e {
+                            return Outcome::Unsupported(reason);
+                        }
                         if session_directory_gone(&out.dir).await {
                             tracing::debug!(
                                 session = %crate::transcode::session_log_id(session_id),
@@ -879,8 +915,42 @@ mod tests {
             first_floor_seconds: 1,
             max_bytes: 48_000_000,
             max_seconds: 15,
+            target_seconds: 16,
             publish_gate_secs: 0,
         }
+    }
+
+    #[test]
+    fn rolling_session_header_is_fixed_before_any_segment() {
+        let session = SessionDir::new(PathBuf::from("unused"), 12, 16);
+        let first = session.playlist(false);
+        let later = session.playlist(true);
+        assert!(first.contains("#EXT-X-TARGETDURATION:16\n"), "{first}");
+        assert!(later.contains("#EXT-X-TARGETDURATION:16\n"), "{later}");
+    }
+
+    #[tokio::test]
+    async fn rolling_session_refuses_an_oversized_extinf_before_writing_bytes() {
+        let directory = crate::test_tempdir().expect("session directory");
+        let mut session = SessionDir::new(directory.path().to_path_buf(), 0, 16);
+        let published = Published {
+            index: 0,
+            segment: fmp4::Segment {
+                bytes: vec![1, 2, 3],
+                stats: fmp4::MergeStats::default(),
+                video_ticks: 1,
+            },
+            reason: CutReason::TimeCeiling,
+            seconds: 16.000_001,
+        };
+
+        let error = session
+            .write_segment(&published)
+            .await
+            .expect_err("oversized segment");
+        assert!(matches!(error, PublishError::Contract(_)));
+        assert!(!directory.path().join(published.name()).exists());
+        assert!(!directory.path().join("index.m3u8").exists());
     }
 
     async fn session(kind: &str, limits: Limits) -> (tempfile::TempDir, Outcome) {
@@ -1379,6 +1449,7 @@ mod tests {
             first_floor_seconds: 1,
             max_bytes: 300_000,
             max_seconds: 15,
+            target_seconds: 16,
             publish_gate_secs: 0,
         };
         let (dir, outcome) = session("open-gop", limits).await;
@@ -1907,6 +1978,7 @@ mod tests {
             first_floor_seconds: 1,
             max_bytes: 48_000_000,
             max_seconds: 15,
+            target_seconds: 16,
             publish_gate_secs: 0,
         };
         let outcome = run(

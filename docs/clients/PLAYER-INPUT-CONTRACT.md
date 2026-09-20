@@ -106,6 +106,106 @@ _Generated from [`tests/playback/player-input-contract.json`](../../tests/playba
 | `info` | `ignore` | `ignore` | `ignore` | `ignore` | `activate` | `close_info` | `toggle_play` | `ignore` | `ignore` | `close_info` | `ignore` |
 | `failed` | `ignore` | `ignore` | `ignore` | `ignore` | `activate` | `exit` | `ignore` | `ignore` | `ignore` | `ignore` | `ignore` |
 
+**Watch presentation** — Presentation is independent of input surface. Web remains desktop at every width. Inline chrome ignores idle; overlay chrome retains the paused, failed, scrub and panel exclusions. Unmounted return_browser resolves to exit. Legacy native route() remains in force until retained-owner layout acceptance.
+
+| browser / overlay | surface | back | idle |
+|---|---|---|---|
+| hidden | ten-foot | exit | ignore |
+| transport | ten-foot | exit | hide |
+| timeline | ten-foot | exit | hide |
+| scrub | ten-foot | cancel | ignore |
+| menu | ten-foot | close_menu | ignore |
+| info | ten-foot | close_info | ignore |
+| failed | ten-foot | exit | ignore |
+| hidden | desktop | ignore | ignore |
+| transport | desktop | ignore | hide |
+| timeline | desktop | ignore | hide |
+| scrub | desktop | cancel | ignore |
+| menu | desktop | close_menu | ignore |
+| info | desktop | close_info | ignore |
+| failed | desktop | ignore | ignore |
+| hidden | touch | exit | ignore |
+| transport | touch | exit | hide |
+| timeline | touch | exit | hide |
+| scrub | touch | cancel | ignore |
+| menu | touch | close_menu | ignore |
+| info | touch | close_info | ignore |
+| failed | touch | exit | ignore |
+
+| browser / inline | surface | back | idle |
+|---|---|---|---|
+| hidden | ten-foot | exit | ignore |
+| transport | ten-foot | exit | ignore |
+| timeline | ten-foot | exit | ignore |
+| scrub | ten-foot | cancel | ignore |
+| menu | ten-foot | close_menu | ignore |
+| info | ten-foot | close_info | ignore |
+| failed | ten-foot | exit | ignore |
+| hidden | desktop | ignore | ignore |
+| transport | desktop | ignore | ignore |
+| timeline | desktop | ignore | ignore |
+| scrub | desktop | cancel | ignore |
+| menu | desktop | close_menu | ignore |
+| info | desktop | close_info | ignore |
+| failed | desktop | ignore | ignore |
+| hidden | touch | exit | ignore |
+| transport | touch | exit | ignore |
+| timeline | touch | exit | ignore |
+| scrub | touch | cancel | ignore |
+| menu | touch | close_menu | ignore |
+| info | touch | close_info | ignore |
+| failed | touch | exit | ignore |
+
+| fullscreen / overlay | surface | back | idle |
+|---|---|---|---|
+| hidden | ten-foot | return_browser | ignore |
+| transport | ten-foot | hide | hide |
+| timeline | ten-foot | hide | hide |
+| scrub | ten-foot | cancel | ignore |
+| menu | ten-foot | close_menu | ignore |
+| info | ten-foot | close_info | ignore |
+| failed | ten-foot | return_browser | ignore |
+| hidden | desktop | return_browser | ignore |
+| transport | desktop | return_browser | hide |
+| timeline | desktop | return_browser | hide |
+| scrub | desktop | cancel | ignore |
+| menu | desktop | close_menu | ignore |
+| info | desktop | close_info | ignore |
+| failed | desktop | return_browser | ignore |
+| hidden | touch | return_browser | ignore |
+| transport | touch | hide | hide |
+| timeline | touch | hide | hide |
+| scrub | touch | cancel | ignore |
+| menu | touch | close_menu | ignore |
+| info | touch | close_info | ignore |
+| failed | touch | return_browser | ignore |
+
+| fullscreen / inline | surface | back | idle |
+|---|---|---|---|
+| hidden | ten-foot | return_browser | ignore |
+| transport | ten-foot | hide | ignore |
+| timeline | ten-foot | hide | ignore |
+| scrub | ten-foot | cancel | ignore |
+| menu | ten-foot | close_menu | ignore |
+| info | ten-foot | close_info | ignore |
+| failed | ten-foot | return_browser | ignore |
+| hidden | desktop | return_browser | ignore |
+| transport | desktop | return_browser | ignore |
+| timeline | desktop | return_browser | ignore |
+| scrub | desktop | cancel | ignore |
+| menu | desktop | close_menu | ignore |
+| info | desktop | close_info | ignore |
+| failed | desktop | return_browser | ignore |
+| hidden | touch | return_browser | ignore |
+| transport | touch | hide | ignore |
+| timeline | touch | hide | ignore |
+| scrub | touch | cancel | ignore |
+| menu | touch | close_menu | ignore |
+| info | touch | close_info | ignore |
+| failed | touch | return_browser | ignore |
+
+All other inputs retain the finite routing cells above.
+
 <!-- contract:routing:end -->
 
 ### 2.1 What the outcomes mean
@@ -136,55 +236,32 @@ _Generated from [`tests/playback/player-input-contract.json`](../../tests/playba
 | `exit` | Leave the player. |
 | `toggle_chrome` | Touch: hide chrome if visible, else reveal. |
 | `ignore` | Nothing happens; focus does not move. |
+| `return_browser` | Restore the retained watch browser without stopping playback; resolve to exit when no browser is mounted. |
 
 <!-- contract:outcomes:end -->
 
 ### 2.2 Precedence of `back`
 
-`back` (Menu · BACK · Escape — a key, never the ✕) resolves by state, so it
-is never ambiguous which thing closes:
+For watch-and-browse, the generated watch table above adds presentation
+(`browser` or `fullscreen`) and chrome placement (`overlay` or `inline`).
+The seven interaction states remain unchanged. Web uses `desktop` at every
+width, including coarse-pointer devices; resizing never changes input surface.
 
-```
- scrub?  ── yes ──▶ cancel (stay on the timeline)
-   │ no
- menu?   ── yes ──▶ close_menu (focus → opener)
-   │ no
- info?   ── yes ──▶ close_info (focus → info button)
-   │ no
- chrome visible?  ── yes ──▶ ten-foot/touch: hide · desktop: exit
-   │ no
-   ▼
-  exit
-```
+Back first cancels scrub, closes a menu, or closes playback info. At a browser
+root, including failure, desktop ignores it and touch/ten-foot exit. In
+fullscreen, hidden and failed return to the browser; visible transport/timeline
+return on desktop and hide on touch/ten-foot. `return_browser` preserves media
+and restores the mounted browser. Without a mounted browser it means `exit`.
+Legacy native players retain their original routing until owner acceptance;
+their adapters explicitly resolve the new outcome to exit.
 
-Desktop exits instead of hiding because a pointer user has no Menu-hide
-idiom and the chrome hides itself; a keyboard user who wants the chrome
-gone waits 4 s. A failed player exits on the first `back` on every surface
-— today tvOS needs two.
+Inline web chrome ignores idle so below-picture content cannot collapse.
+Overlay idle keeps the existing playing-only timer and scrub/panel/failure
+exclusions. Escape outside the player belongs to the page. Browser-API
+fullscreen consumes Escape before the adapter; fullscreenchange performs the
+return. Such unreachable key cells need browser evidence, not fabricated key
+coverage. The Close button always cleans up the active interaction then exits.
 
-**The ✕ is `close`, not `back`.** The iOS ✕, the Android phone's back arrow
-and the web's `✕ Close` are the `close` control of the `bar` row, and a
-button whose only purpose is to leave cannot share a table with a key that
-hides. Routed through `back`, the iOS ✕ answered `hide` in `transport` — the
-state it is tapped from — `close_info` in `info` and `cancel` in `scrub`, and
-exited in no state a viewer could reach it in, so the only way out of a film
-was to force-quit the app (Paul, 2026-09-03). `close_control` in the fixture
-gives it its own rows: close whatever is open, then `exit`, in every state.
-
-```
- scrub → cancel, exit · menu → close_menu, exit · info → close_info, exit
- hidden · transport · timeline · failed → exit
-```
-
-Each native reducer transcribes it (`PlayerInputRouting.closeSteps`,
-`PlayerInputPolicy.closeSteps`), each client suite checks the transcription
-against the fixture, and each suite pins its call site: the iOS ✕ and the
-failure view's Close run `closePlayer()`, the Android arrow walks
-`closeSteps`, and neither manufactures a `back` press. The `menu` and `info`
-rows say what `close` does when it is reached; a client's own modal may
-take the tap first — on iOS the info panel's backdrop lies over the ✕, so
-that tap is `info × tap_surface` (`close_info`) and the ✕ exits on the next
-one, and Android composes no arrow while a panel is open.
 
 ---
 
@@ -214,7 +291,7 @@ _Generated from [`tests/playback/player-input-contract.json`](../../tests/playba
 | `bar` | `airplay` · `close` | `desktop` · `touch` | all | A corner strip over the picture, not a row in the chrome: every client that has a Close puts it there — top-trailing on the web, top-leading on iOS and on Android, where a television cannot focus it at all. `close` is last here for the same reason it was last in the transport row: the control that ends the session is the one you should not land on by accident. Nothing here is a horizontal neighbour of a transport button. `close` when touch and desktop only — a ten-foot player exits with `back` · `airplay` when web, and only while the browser reports an AirPlay target |
 | `marker` | `skip_marker` | all | all | Present only while a skip-intro/credits marker is active. Sits above the timeline row, right-aligned. Reachable by `up` from the timeline; never a horizontal neighbour of anything. |
 | `timeline` | `time_elapsed` · `timeline` · `time_total` | all | `timeline` | Its own full-width row. The timeline is never a horizontal neighbour of a button — Left/Right on it belong to scrubbing, so a button beside it would be unreachable without a seek. |
-| `transport` | `skip_back` · `play_pause` · `skip_forward` · spacer · `audio` · `subtitles` · `quality` · `settings` · `info` · `title_info` · `pip` · `fullscreen` | all | all | One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged. `surface_placement` names the one control a surface renders somewhere else: the web puts `info` in the `bar` row, where its ✕ already lives, and the native clients keep it here. `audio` when more than one audio track · `subtitles` when at least one subtitle track · `quality` when server ladder has rungs · `pip` when platform reports picture-in-picture possible (never tvOS) · `title_info` when web only — the native clients put title and synopsis on the detail screen · `fullscreen` when web only — a native player is already full screen `desktop` renders `info` at position 0 of the `bar` row |
+| `transport` | `skip_back` · `play_pause` · `skip_forward` · spacer · `audio` · `subtitles` · `quality` · `settings` · `info` · `title_info` · `pip` · `larger` · `fullscreen` | all | all | One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged. `surface_placement` names the one control a surface renders somewhere else: the web puts `info` in the `bar` row, where its ✕ already lives, and the native clients keep it here. Narrow web also splits after spacer, without changing its desktop surface placement. `audio` when more than one audio track · `subtitles` when at least one subtitle track · `quality` when server ladder has rungs · `pip` when platform reports picture-in-picture possible (never tvOS) · `title_info` when web only, wide watch or fullscreen; compact has an always-on side panel · `fullscreen` when web only — a native player is already full screen · `larger` when web only, non-narrow watch browser; absent from the DOM on narrow web `desktop` renders `info` at position 0 of the `bar` row |
 
 **`settings` holds:** `autoplay_next` · `auto_skip` · `audio_sync` · `playback_speed_reserved`.
 

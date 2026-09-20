@@ -3668,7 +3668,7 @@ test("a learner can be removed from a cluster too small to lose a voter", () => 
     /node-b is the current leader and can only leave from its own screen/);
 });
 
-test("the two components stay in their own columns, and the rail with the cluster", () => {
+test("the two components stay in their own columns, with operations above the board", () => {
   // The layout is the deliverable here: asserting the headings exist would
   // pass with every card back in one flow, which is what this replaced.
   const ui = sandbox();
@@ -3688,9 +3688,13 @@ test("the two components stay in their own columns, and the rail with the cluste
   assert.doesNotMatch(left, /id="cluster-node-list"/);
   assert.match(right, /<h3>Cluster nodes<\/h3>/);
   assert.match(right, /id="cluster-node-list"/);
-  // The restart verdict names one of these machines, so it sits under them.
-  assert.match(right, /id="cluster-operations"/);
+  // The fleet-wide operations verdict spans both components above the board;
+  // it does not get buried in either component column.
+  assert.match(html, /id="cluster-operations"/);
+  assert.ok(html.indexOf('id="cluster-operations"') < html.indexOf('class="cluster-board'),
+    "cluster operations precede the two-column component board");
   assert.doesNotMatch(left, /id="cluster-operations"/);
+  assert.doesNotMatch(right, /id="cluster-operations"/);
   // One election dialog, once: the recovery panel ships its own.
   assert.equal((html.match(/id="clelection"/g) || []).length, 1);
   const recovering = status("high_availability", [

@@ -94,6 +94,7 @@
           "info",
           "title_info",
           "pip",
+          "larger",
           "fullscreen"
         ],
         "conditional": {
@@ -101,10 +102,11 @@
           "subtitles": "at least one subtitle track",
           "quality": "server ladder has rungs",
           "pip": "platform reports picture-in-picture possible (never tvOS)",
-          "title_info": "web only \u2014 the native clients put title and synopsis on the detail screen",
-          "fullscreen": "web only \u2014 a native player is already full screen"
+          "title_info": "web only, wide watch or fullscreen; compact has an always-on side panel",
+          "fullscreen": "web only \u2014 a native player is already full screen",
+          "larger": "web only, non-narrow watch browser; absent from the DOM on narrow web"
         },
-        "notes": "One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged. `surface_placement` names the one control a surface renders somewhere else: the web puts `info` in the `bar` row, where its \u2715 already lives, and the native clients keep it here.",
+        "notes": "One row on ten-foot and on wide touch/desktop. Narrow touch splits it after `spacer` into a transport line and an options line; order within each line is unchanged. `surface_placement` names the one control a surface renders somewhere else: the web puts `info` in the `bar` row, where its \u2715 already lives, and the native clients keep it here. Narrow web also splits after spacer, without changing its desktop surface placement.",
         "surface_placement": {
           "info": {
             "desktop": {
@@ -167,7 +169,8 @@
     "hide": "Hide chrome; remember the focused control; focus the surface.",
     "exit": "Leave the player.",
     "toggle_chrome": "Touch: hide chrome if visible, else reveal.",
-    "ignore": "Nothing happens; focus does not move."
+    "ignore": "Nothing happens; focus does not move.",
+    "return_browser": "Restore the retained watch browser without stopping playback; resolve to exit when no browser is mounted."
   },
   "routing": {
     "ten-foot": {
@@ -546,7 +549,7 @@
         "guide_poll_after_next_refresh_s: poll this long after the owner's next_refresh_at, so the client asks once the answer exists rather than just before it does.",
         "retire_liveness_probe_ms: how long a pressing web document waits for a sibling tab to claim a hint before treating it as an orphan. It decides what to RETIRE, never whether to start.",
         "retire_orphan_after_keepalives: a hint touched more recently than this many 5 s keepalives is held by something alive; leave it.",
-        "start_replay_attempts: how many times the lease re-sends a start that got no answer, with the same request id. One — the owner joins the replay to the same session.",
+        "start_replay_attempts: how many times the lease re-sends a start that got no answer, with the same request id. One \u2014 the owner joins the replay to the same session.",
         "guide_poll_ceiling_s: never wait longer than this between guide polls, whatever next_refresh_at says. A far-future answer must not park the grid for hours."
       ]
     },
@@ -593,20 +596,48 @@
           "idle": "ignore"
         },
         "temporary_guide": {
-          "left": "focus_cell", "right": "focus_cell", "up": "focus_cell", "down": "focus_cell",
-          "select": "activate", "back": "close_panel", "play_pause": "toggle_play", "tap_surface": "ignore", "idle": "ignore"
+          "left": "focus_cell",
+          "right": "focus_cell",
+          "up": "focus_cell",
+          "down": "focus_cell",
+          "select": "activate",
+          "back": "close_panel",
+          "play_pause": "toggle_play",
+          "tap_surface": "ignore",
+          "idle": "ignore"
         },
         "menu": {
-          "left": "focus_panel", "right": "focus_panel", "up": "focus_panel", "down": "focus_panel",
-          "select": "activate", "back": "close_panel", "play_pause": "toggle_play", "tap_surface": "ignore", "idle": "ignore"
+          "left": "focus_panel",
+          "right": "focus_panel",
+          "up": "focus_panel",
+          "down": "focus_panel",
+          "select": "activate",
+          "back": "close_panel",
+          "play_pause": "toggle_play",
+          "tap_surface": "ignore",
+          "idle": "ignore"
         },
         "programme_details": {
-          "left": "focus_panel", "right": "focus_panel", "up": "focus_panel", "down": "focus_panel",
-          "select": "activate", "back": "close_panel", "play_pause": "toggle_play", "tap_surface": "ignore", "idle": "ignore"
+          "left": "focus_panel",
+          "right": "focus_panel",
+          "up": "focus_panel",
+          "down": "focus_panel",
+          "select": "activate",
+          "back": "close_panel",
+          "play_pause": "toggle_play",
+          "tap_surface": "ignore",
+          "idle": "ignore"
         },
         "stream_info": {
-          "left": "focus_panel", "right": "focus_panel", "up": "focus_panel", "down": "focus_panel",
-          "select": "activate", "back": "close_panel", "play_pause": "toggle_play", "tap_surface": "ignore", "idle": "ignore"
+          "left": "focus_panel",
+          "right": "focus_panel",
+          "up": "focus_panel",
+          "down": "focus_panel",
+          "select": "activate",
+          "back": "close_panel",
+          "play_pause": "toggle_play",
+          "tap_surface": "ignore",
+          "idle": "ignore"
         }
       },
       "desktop": {
@@ -644,20 +675,48 @@
           "idle": "ignore"
         },
         "temporary_guide": {
-          "left": "focus_cell", "right": "focus_cell", "up": "focus_cell", "down": "focus_cell",
-          "select": "activate", "back": "close_panel", "play_pause": "toggle_play", "tap_surface": "ignore", "idle": "ignore"
+          "left": "focus_cell",
+          "right": "focus_cell",
+          "up": "focus_cell",
+          "down": "focus_cell",
+          "select": "activate",
+          "back": "close_panel",
+          "play_pause": "toggle_play",
+          "tap_surface": "ignore",
+          "idle": "ignore"
         },
         "menu": {
-          "left": "delegate", "right": "delegate", "up": "delegate", "down": "delegate",
-          "select": "delegate", "back": "close_panel", "play_pause": "toggle_play", "tap_surface": "ignore", "idle": "ignore"
+          "left": "delegate",
+          "right": "delegate",
+          "up": "delegate",
+          "down": "delegate",
+          "select": "delegate",
+          "back": "close_panel",
+          "play_pause": "toggle_play",
+          "tap_surface": "ignore",
+          "idle": "ignore"
         },
         "programme_details": {
-          "left": "delegate", "right": "delegate", "up": "delegate", "down": "delegate",
-          "select": "delegate", "back": "close_panel", "play_pause": "toggle_play", "tap_surface": "ignore", "idle": "ignore"
+          "left": "delegate",
+          "right": "delegate",
+          "up": "delegate",
+          "down": "delegate",
+          "select": "delegate",
+          "back": "close_panel",
+          "play_pause": "toggle_play",
+          "tap_surface": "ignore",
+          "idle": "ignore"
         },
         "stream_info": {
-          "left": "delegate", "right": "delegate", "up": "delegate", "down": "delegate",
-          "select": "delegate", "back": "close_panel", "play_pause": "toggle_play", "tap_surface": "ignore", "idle": "ignore"
+          "left": "delegate",
+          "right": "delegate",
+          "up": "delegate",
+          "down": "delegate",
+          "select": "delegate",
+          "back": "close_panel",
+          "play_pause": "toggle_play",
+          "tap_surface": "ignore",
+          "idle": "ignore"
         }
       },
       "touch": {
@@ -695,20 +754,48 @@
           "idle": "ignore"
         },
         "temporary_guide": {
-          "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore",
-          "select": "activate", "back": "close_panel", "play_pause": "ignore", "tap_surface": "ignore", "idle": "ignore"
+          "left": "ignore",
+          "right": "ignore",
+          "up": "ignore",
+          "down": "ignore",
+          "select": "activate",
+          "back": "close_panel",
+          "play_pause": "ignore",
+          "tap_surface": "ignore",
+          "idle": "ignore"
         },
         "menu": {
-          "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore",
-          "select": "activate", "back": "close_panel", "play_pause": "ignore", "tap_surface": "close_panel", "idle": "ignore"
+          "left": "ignore",
+          "right": "ignore",
+          "up": "ignore",
+          "down": "ignore",
+          "select": "activate",
+          "back": "close_panel",
+          "play_pause": "ignore",
+          "tap_surface": "close_panel",
+          "idle": "ignore"
         },
         "programme_details": {
-          "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore",
-          "select": "activate", "back": "close_panel", "play_pause": "ignore", "tap_surface": "close_panel", "idle": "ignore"
+          "left": "ignore",
+          "right": "ignore",
+          "up": "ignore",
+          "down": "ignore",
+          "select": "activate",
+          "back": "close_panel",
+          "play_pause": "ignore",
+          "tap_surface": "close_panel",
+          "idle": "ignore"
         },
         "stream_info": {
-          "left": "ignore", "right": "ignore", "up": "ignore", "down": "ignore",
-          "select": "activate", "back": "close_panel", "play_pause": "ignore", "tap_surface": "close_panel", "idle": "ignore"
+          "left": "ignore",
+          "right": "ignore",
+          "up": "ignore",
+          "down": "ignore",
+          "select": "activate",
+          "back": "close_panel",
+          "play_pause": "ignore",
+          "tap_surface": "close_panel",
+          "idle": "ignore"
         }
       }
     },
@@ -726,7 +813,7 @@
   "surface_notes": {
     "desktop": [
       "`left`/`right` outside the timeline are the coalesced \u00b110 s hotkeys (`timings.desktop_hotkey_coalesce_ms`); `up`/`down` are no longer seeks.",
-      "`back` is Escape. With chrome visible it exits rather than hides: a pointer user has no Menu-hide idiom and the chrome hides itself. Precedence is scrub \u2192 menu \u2192 info \u2192 exit, so Escape with a menu open closes the menu, not the player.",
+      "Escape inside a watch browser closes a menu/info panel or cancels scrub; at the browser root, including failure, it does nothing. Outside the player it belongs to the page. Browser-API fullscreen consumes Escape before the adapter and restores the browser through fullscreenchange.",
       "`select` on the timeline is Enter or Space with the timeline focused. `tap_surface` is a pointer click on the video.",
       "Tab leaves the timeline; leaving while a preview is pending is a `cancel`.",
       "Touch on the desktop page (a tablet browser) follows the `touch` table for `tap_surface` and pointer scrubbing."
@@ -742,5 +829,1138 @@
       "`skip_back`/`skip_forward` are MEDIA_REWIND / MEDIA_FAST_FORWARD (Android TV) \u2014 the Siri Remote has none, so tvOS has no producer for them.",
       "`idle` fires only while playing (`timings.hidden_only_while_playing`) and only in the states that list `hide`. A paused film keeps its chrome."
     ]
+  },
+  "watch": {
+    "notes": "Presentation is independent of input surface. Web remains desktop at every width. Inline chrome ignores idle; overlay chrome retains the paused, failed, scrub and panel exclusions. Unmounted return_browser resolves to exit. Legacy native route() remains in force until retained-owner layout acceptance.",
+    "routing": {
+      "browser": {
+        "overlay": {
+          "ten-foot": {
+            "hidden": {
+              "left": "reveal",
+              "right": "reveal",
+              "up": "reveal",
+              "down": "reveal",
+              "select": "reveal",
+              "back": "exit",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "reveal",
+              "idle": "ignore"
+            },
+            "transport": {
+              "left": "focus_row",
+              "right": "focus_row",
+              "up": "focus_row",
+              "down": "focus_row",
+              "select": "activate",
+              "back": "exit",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "ignore",
+              "idle": "hide"
+            },
+            "timeline": {
+              "left": "preview",
+              "right": "preview",
+              "up": "focus_marker_or_ignore",
+              "down": "focus_transport",
+              "select": "toggle_play",
+              "back": "exit",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "ignore",
+              "idle": "hide"
+            },
+            "scrub": {
+              "left": "preview",
+              "right": "preview",
+              "up": "cancel_then_focus_marker_or_ignore",
+              "down": "cancel_then_focus_transport",
+              "select": "commit",
+              "back": "cancel",
+              "play_pause": "commit_then_toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            },
+            "menu": {
+              "left": "menu_focus",
+              "right": "menu_focus",
+              "up": "menu_focus",
+              "down": "menu_focus",
+              "select": "activate",
+              "back": "close_menu",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_menu",
+              "idle": "ignore"
+            },
+            "info": {
+              "left": "menu_focus",
+              "right": "menu_focus",
+              "up": "menu_focus",
+              "down": "menu_focus",
+              "select": "activate",
+              "back": "close_info",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_info",
+              "idle": "ignore"
+            },
+            "failed": {
+              "left": "focus_row",
+              "right": "focus_row",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "exit",
+              "play_pause": "ignore",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            }
+          },
+          "desktop": {
+            "hidden": {
+              "left": "skip",
+              "right": "skip",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "ignore",
+              "back": "ignore",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_play",
+              "idle": "ignore"
+            },
+            "transport": {
+              "left": "skip",
+              "right": "skip",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "ignore",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_play",
+              "idle": "hide"
+            },
+            "timeline": {
+              "left": "preview",
+              "right": "preview",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "toggle_play",
+              "back": "ignore",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_play",
+              "idle": "hide"
+            },
+            "scrub": {
+              "left": "preview",
+              "right": "preview",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "commit",
+              "back": "cancel",
+              "play_pause": "commit_then_toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            },
+            "menu": {
+              "left": "menu_focus",
+              "right": "menu_focus",
+              "up": "menu_focus",
+              "down": "menu_focus",
+              "select": "activate",
+              "back": "close_menu",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_menu",
+              "idle": "ignore"
+            },
+            "info": {
+              "left": "menu_focus",
+              "right": "menu_focus",
+              "up": "menu_focus",
+              "down": "menu_focus",
+              "select": "activate",
+              "back": "close_info",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_info",
+              "idle": "ignore"
+            },
+            "failed": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "ignore",
+              "play_pause": "ignore",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            }
+          },
+          "touch": {
+            "hidden": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "ignore",
+              "back": "exit",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_chrome",
+              "idle": "ignore"
+            },
+            "transport": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "exit",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_chrome",
+              "idle": "hide"
+            },
+            "timeline": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "ignore",
+              "back": "exit",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_chrome",
+              "idle": "hide"
+            },
+            "scrub": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "commit",
+              "back": "cancel",
+              "play_pause": "commit_then_toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            },
+            "menu": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "close_menu",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_menu",
+              "idle": "ignore"
+            },
+            "info": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "close_info",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_info",
+              "idle": "ignore"
+            },
+            "failed": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "exit",
+              "play_pause": "ignore",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            }
+          }
+        },
+        "inline": {
+          "ten-foot": {
+            "hidden": {
+              "left": "reveal",
+              "right": "reveal",
+              "up": "reveal",
+              "down": "reveal",
+              "select": "reveal",
+              "back": "exit",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "reveal",
+              "idle": "ignore"
+            },
+            "transport": {
+              "left": "focus_row",
+              "right": "focus_row",
+              "up": "focus_row",
+              "down": "focus_row",
+              "select": "activate",
+              "back": "exit",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            },
+            "timeline": {
+              "left": "preview",
+              "right": "preview",
+              "up": "focus_marker_or_ignore",
+              "down": "focus_transport",
+              "select": "toggle_play",
+              "back": "exit",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            },
+            "scrub": {
+              "left": "preview",
+              "right": "preview",
+              "up": "cancel_then_focus_marker_or_ignore",
+              "down": "cancel_then_focus_transport",
+              "select": "commit",
+              "back": "cancel",
+              "play_pause": "commit_then_toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            },
+            "menu": {
+              "left": "menu_focus",
+              "right": "menu_focus",
+              "up": "menu_focus",
+              "down": "menu_focus",
+              "select": "activate",
+              "back": "close_menu",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_menu",
+              "idle": "ignore"
+            },
+            "info": {
+              "left": "menu_focus",
+              "right": "menu_focus",
+              "up": "menu_focus",
+              "down": "menu_focus",
+              "select": "activate",
+              "back": "close_info",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_info",
+              "idle": "ignore"
+            },
+            "failed": {
+              "left": "focus_row",
+              "right": "focus_row",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "exit",
+              "play_pause": "ignore",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            }
+          },
+          "desktop": {
+            "hidden": {
+              "left": "skip",
+              "right": "skip",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "ignore",
+              "back": "ignore",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_play",
+              "idle": "ignore"
+            },
+            "transport": {
+              "left": "skip",
+              "right": "skip",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "ignore",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_play",
+              "idle": "ignore"
+            },
+            "timeline": {
+              "left": "preview",
+              "right": "preview",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "toggle_play",
+              "back": "ignore",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_play",
+              "idle": "ignore"
+            },
+            "scrub": {
+              "left": "preview",
+              "right": "preview",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "commit",
+              "back": "cancel",
+              "play_pause": "commit_then_toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            },
+            "menu": {
+              "left": "menu_focus",
+              "right": "menu_focus",
+              "up": "menu_focus",
+              "down": "menu_focus",
+              "select": "activate",
+              "back": "close_menu",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_menu",
+              "idle": "ignore"
+            },
+            "info": {
+              "left": "menu_focus",
+              "right": "menu_focus",
+              "up": "menu_focus",
+              "down": "menu_focus",
+              "select": "activate",
+              "back": "close_info",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_info",
+              "idle": "ignore"
+            },
+            "failed": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "ignore",
+              "play_pause": "ignore",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            }
+          },
+          "touch": {
+            "hidden": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "ignore",
+              "back": "exit",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_chrome",
+              "idle": "ignore"
+            },
+            "transport": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "exit",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_chrome",
+              "idle": "ignore"
+            },
+            "timeline": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "ignore",
+              "back": "exit",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_chrome",
+              "idle": "ignore"
+            },
+            "scrub": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "commit",
+              "back": "cancel",
+              "play_pause": "commit_then_toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            },
+            "menu": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "close_menu",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_menu",
+              "idle": "ignore"
+            },
+            "info": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "close_info",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_info",
+              "idle": "ignore"
+            },
+            "failed": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "exit",
+              "play_pause": "ignore",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            }
+          }
+        }
+      },
+      "fullscreen": {
+        "overlay": {
+          "ten-foot": {
+            "hidden": {
+              "left": "reveal",
+              "right": "reveal",
+              "up": "reveal",
+              "down": "reveal",
+              "select": "reveal",
+              "back": "return_browser",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "reveal",
+              "idle": "ignore"
+            },
+            "transport": {
+              "left": "focus_row",
+              "right": "focus_row",
+              "up": "focus_row",
+              "down": "focus_row",
+              "select": "activate",
+              "back": "hide",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "ignore",
+              "idle": "hide"
+            },
+            "timeline": {
+              "left": "preview",
+              "right": "preview",
+              "up": "focus_marker_or_ignore",
+              "down": "focus_transport",
+              "select": "toggle_play",
+              "back": "hide",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "ignore",
+              "idle": "hide"
+            },
+            "scrub": {
+              "left": "preview",
+              "right": "preview",
+              "up": "cancel_then_focus_marker_or_ignore",
+              "down": "cancel_then_focus_transport",
+              "select": "commit",
+              "back": "cancel",
+              "play_pause": "commit_then_toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            },
+            "menu": {
+              "left": "menu_focus",
+              "right": "menu_focus",
+              "up": "menu_focus",
+              "down": "menu_focus",
+              "select": "activate",
+              "back": "close_menu",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_menu",
+              "idle": "ignore"
+            },
+            "info": {
+              "left": "menu_focus",
+              "right": "menu_focus",
+              "up": "menu_focus",
+              "down": "menu_focus",
+              "select": "activate",
+              "back": "close_info",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_info",
+              "idle": "ignore"
+            },
+            "failed": {
+              "left": "focus_row",
+              "right": "focus_row",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "return_browser",
+              "play_pause": "ignore",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            }
+          },
+          "desktop": {
+            "hidden": {
+              "left": "skip",
+              "right": "skip",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "ignore",
+              "back": "return_browser",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_play",
+              "idle": "ignore"
+            },
+            "transport": {
+              "left": "skip",
+              "right": "skip",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "return_browser",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_play",
+              "idle": "hide"
+            },
+            "timeline": {
+              "left": "preview",
+              "right": "preview",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "toggle_play",
+              "back": "return_browser",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_play",
+              "idle": "hide"
+            },
+            "scrub": {
+              "left": "preview",
+              "right": "preview",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "commit",
+              "back": "cancel",
+              "play_pause": "commit_then_toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            },
+            "menu": {
+              "left": "menu_focus",
+              "right": "menu_focus",
+              "up": "menu_focus",
+              "down": "menu_focus",
+              "select": "activate",
+              "back": "close_menu",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_menu",
+              "idle": "ignore"
+            },
+            "info": {
+              "left": "menu_focus",
+              "right": "menu_focus",
+              "up": "menu_focus",
+              "down": "menu_focus",
+              "select": "activate",
+              "back": "close_info",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_info",
+              "idle": "ignore"
+            },
+            "failed": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "return_browser",
+              "play_pause": "ignore",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            }
+          },
+          "touch": {
+            "hidden": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "ignore",
+              "back": "return_browser",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_chrome",
+              "idle": "ignore"
+            },
+            "transport": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "hide",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_chrome",
+              "idle": "hide"
+            },
+            "timeline": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "ignore",
+              "back": "hide",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_chrome",
+              "idle": "hide"
+            },
+            "scrub": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "commit",
+              "back": "cancel",
+              "play_pause": "commit_then_toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            },
+            "menu": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "close_menu",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_menu",
+              "idle": "ignore"
+            },
+            "info": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "close_info",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_info",
+              "idle": "ignore"
+            },
+            "failed": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "return_browser",
+              "play_pause": "ignore",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            }
+          }
+        },
+        "inline": {
+          "ten-foot": {
+            "hidden": {
+              "left": "reveal",
+              "right": "reveal",
+              "up": "reveal",
+              "down": "reveal",
+              "select": "reveal",
+              "back": "return_browser",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "reveal",
+              "idle": "ignore"
+            },
+            "transport": {
+              "left": "focus_row",
+              "right": "focus_row",
+              "up": "focus_row",
+              "down": "focus_row",
+              "select": "activate",
+              "back": "hide",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            },
+            "timeline": {
+              "left": "preview",
+              "right": "preview",
+              "up": "focus_marker_or_ignore",
+              "down": "focus_transport",
+              "select": "toggle_play",
+              "back": "hide",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            },
+            "scrub": {
+              "left": "preview",
+              "right": "preview",
+              "up": "cancel_then_focus_marker_or_ignore",
+              "down": "cancel_then_focus_transport",
+              "select": "commit",
+              "back": "cancel",
+              "play_pause": "commit_then_toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            },
+            "menu": {
+              "left": "menu_focus",
+              "right": "menu_focus",
+              "up": "menu_focus",
+              "down": "menu_focus",
+              "select": "activate",
+              "back": "close_menu",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_menu",
+              "idle": "ignore"
+            },
+            "info": {
+              "left": "menu_focus",
+              "right": "menu_focus",
+              "up": "menu_focus",
+              "down": "menu_focus",
+              "select": "activate",
+              "back": "close_info",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_info",
+              "idle": "ignore"
+            },
+            "failed": {
+              "left": "focus_row",
+              "right": "focus_row",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "return_browser",
+              "play_pause": "ignore",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            }
+          },
+          "desktop": {
+            "hidden": {
+              "left": "skip",
+              "right": "skip",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "ignore",
+              "back": "return_browser",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_play",
+              "idle": "ignore"
+            },
+            "transport": {
+              "left": "skip",
+              "right": "skip",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "return_browser",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_play",
+              "idle": "ignore"
+            },
+            "timeline": {
+              "left": "preview",
+              "right": "preview",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "toggle_play",
+              "back": "return_browser",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_play",
+              "idle": "ignore"
+            },
+            "scrub": {
+              "left": "preview",
+              "right": "preview",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "commit",
+              "back": "cancel",
+              "play_pause": "commit_then_toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            },
+            "menu": {
+              "left": "menu_focus",
+              "right": "menu_focus",
+              "up": "menu_focus",
+              "down": "menu_focus",
+              "select": "activate",
+              "back": "close_menu",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_menu",
+              "idle": "ignore"
+            },
+            "info": {
+              "left": "menu_focus",
+              "right": "menu_focus",
+              "up": "menu_focus",
+              "down": "menu_focus",
+              "select": "activate",
+              "back": "close_info",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_info",
+              "idle": "ignore"
+            },
+            "failed": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "return_browser",
+              "play_pause": "ignore",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            }
+          },
+          "touch": {
+            "hidden": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "ignore",
+              "back": "return_browser",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_chrome",
+              "idle": "ignore"
+            },
+            "transport": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "hide",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_chrome",
+              "idle": "ignore"
+            },
+            "timeline": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "ignore",
+              "back": "hide",
+              "play_pause": "toggle_play",
+              "skip_back": "skip",
+              "skip_forward": "skip",
+              "tap_surface": "toggle_chrome",
+              "idle": "ignore"
+            },
+            "scrub": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "commit",
+              "back": "cancel",
+              "play_pause": "commit_then_toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            },
+            "menu": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "close_menu",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_menu",
+              "idle": "ignore"
+            },
+            "info": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "close_info",
+              "play_pause": "toggle_play",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "close_info",
+              "idle": "ignore"
+            },
+            "failed": {
+              "left": "ignore",
+              "right": "ignore",
+              "up": "ignore",
+              "down": "ignore",
+              "select": "activate",
+              "back": "return_browser",
+              "play_pause": "ignore",
+              "skip_back": "ignore",
+              "skip_forward": "ignore",
+              "tap_surface": "ignore",
+              "idle": "ignore"
+            }
+          }
+        }
+      }
+    }
   }
 }

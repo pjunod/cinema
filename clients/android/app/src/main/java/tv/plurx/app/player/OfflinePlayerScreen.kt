@@ -174,7 +174,7 @@ fun OfflinePlayerScreen(downloadId: String, onExit: () -> Unit) {
                 focusAfterComposition = null
                 true
             }
-            PlayerInputOutcome.Exit -> {
+            PlayerInputOutcome.Exit, PlayerInputOutcome.ReturnBrowser -> {
                 onExit()
                 true
             }

@@ -1438,7 +1438,7 @@ struct PlayerView: View {
         case .hide:
             hideControls()
             return true
-        case .exit:
+        case .exit, .returnBrowser:
             finishPlayback()
             return true
         case .toggleChrome:
