@@ -620,7 +620,13 @@ test_anchor = "aPlanSessionCarriesNoSubtitleFieldsAtAll"
 id = "android.sdr-subtitle-burn-acknowledgement"
 commits = ["71edaf7c"]
 source = "clients/android/app/src/main/java/tv/plurx/app/player/SubtitlePolicy.kt"
-source_anchor = "subtitle_burn_sdr = true.takeIf {"
+# The computation this row anchored is gone. The server now decides whether a
+# burn would cost the delivered grade by asking what the session would deliver
+# *without* it, so a client's assertion about that grade is not consulted and
+# is no longer made. What survives is the property the fix was really about —
+# a plan session carries no subtitle fields it has no business asserting — and
+# `subtitleSessionBody` is where that stays true.
+source_anchor = "internal fun subtitleSessionBody("
 test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest.kt"
 test_anchor = "autoBurnSendsQualityAutoTrue"
 
@@ -2122,3 +2128,25 @@ source = "clients/apple/Sources/DetailView.swift"
 source_anchor = "static func presentation(kind: String, compact: Bool) -> Presentation"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "func testTVPlayableDetailUsesOneCinematicViewportAndUsefulMetadata()"
+
+# One commit carries the three client halves of the subtitle arc, and the
+# ledger takes one anchor per commit. This is the defect the commit is named
+# for; the other two are anchored by their own tests in the same change —
+# Apple's prepared-successor reconcile at
+# `successor.appliesMediaSelectionCriteriaAutomatically = false`, and
+# Android's `planMode == "direct"` arm ahead of the rendition question.
+[[fixes]]
+id = "apple.readiness-retry-fires-for-an-in-place-selection"
+commits = ["1c7914ad"]
+source = "clients/apple/Sources/PlayerController.swift"
+source_anchor = "private func retryNativeSubtitleAfterReadiness() {"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testPresentationRecoveryAndSubtitleReadinessKeepTheirExactOwners"
+
+[[fixes]]
+id = "web.readiness-edge-reads-the-sidecar-hls-js-will-not-refetch"
+commits = ["b35af434"]
+source = "crates/plurxd/src/web/player/directed-change.js"
+source_anchor = "async function applyReadySubtitleSidecar(player,index){"
+test = "tests/playback/web-control.test.js"
+test_anchor = "retryReadyNativeSubtitle"
