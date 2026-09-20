@@ -59,6 +59,7 @@ const BORROWED = [
   "analysisCanRetry",
   "analysisDiagnosticText",
   "copyAnalysisDetails",
+  "analysisAttentionGroups",
   "paintAnalysis",
 ];
 
@@ -240,8 +241,7 @@ test("analysis rows render their stored priority and trigger", () => {
   const html = paint(
     snapshot({ filtered_total: 2, rows: [background, foreground] }),
   );
-  assert.match(html, /Priority Normal · Trigger Background/);
-  assert.match(html, /Priority Foreground · Trigger Foreground/);
+  assert.match(html, /<b>Priority<\/b><span>Normal<\/span><b>Trigger<\/b><span>Background<\/span>/);
   assert.match(html, /<b>Priority<\/b><span>Foreground<\/span>/);
   assert.match(html, /<b>Trigger<\/b><span>Foreground<\/span>/);
   assert.doesNotMatch(html, /Operator request/);

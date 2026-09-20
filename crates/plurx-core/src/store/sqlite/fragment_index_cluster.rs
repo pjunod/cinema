@@ -1390,7 +1390,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                            AND request.target_node_id = job.target_node_id
                            AND request.video_identity <> ''
                          ORDER BY request.updated_at_ms DESC, request.request_id DESC LIMIT 1), ''),
-                        COALESCE(job.last_error_code, ''),
+                        CASE WHEN (CASE WHEN json_valid(job.index_diagnostic_json)
+                                        THEN json_extract(job.index_diagnostic_json, '$.code')
+                                        ELSE '' END) = 'index_completion_unverified'
+                             THEN 'index_completion_unverified'
+                             ELSE COALESCE(job.last_error_code, '') END,
                         COALESCE((SELECT repair.successor_request_id
                           FROM analysis_index_repairs repair
                          WHERE repair.repair_revision = 'video-completion-v1'
@@ -1410,7 +1414,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                             AND request.target_node_id = job.target_node_id
                             AND request.video_identity <> '')
                    FROM cluster_fragment_index_jobs job
-                  WHERE job.state = 'failed' AND job.last_error_code = 'truncated'
+                  WHERE job.state = 'failed'
+                    AND (job.last_error_code IN ('truncated','index_completion_unverified')
+                      OR (CASE WHEN json_valid(job.index_diagnostic_json)
+                               THEN json_extract(job.index_diagnostic_json, '$.code')
+                               ELSE '' END) = 'index_completion_unverified')
                     AND (job.cache_key || '|' || job.target_node_id) > ?1
                   ORDER BY job.cache_key, job.target_node_id LIMIT ?2",
             )?;
@@ -1508,7 +1516,11 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 "SELECT EXISTS(SELECT 1 FROM cluster_fragment_index_jobs job
                   JOIN files ON files.id = job.file_id
                  WHERE job.cache_key = ?1 AND job.target_node_id = ?2
-                   AND job.state = 'failed' AND job.last_error_code = 'truncated'
+                   AND job.state = 'failed'
+                   AND (job.last_error_code IN ('truncated','index_completion_unverified')
+                     OR (CASE WHEN json_valid(job.index_diagnostic_json)
+                              THEN json_extract(job.index_diagnostic_json, '$.code')
+                              ELSE '' END) = 'index_completion_unverified')
                    AND job.fence = ?3 AND job.updated_at_ms = ?4
                    AND job.file_id = ?5 AND job.source_size = ?6 AND job.source_mtime = ?7
                    AND job.source_sha256 = ?8 AND job.pipeline_sha256 = ?9
@@ -3869,6 +3881,23 @@ mod tests {
                     ],
                 )?;
                 conn.execute(
+                    "INSERT INTO cluster_fragment_index_jobs
+                      (cache_key, file_id, source_size, source_mtime, source_sha256,
+                       pipeline_sha256, target_node_id, state, fence, attempts,
+                       not_before_ms, last_error_code, index_diagnostic_json,
+                       created_at_ms, updated_at_ms)
+                     VALUES ('malformed-diagnostic-decoy', ?1, ?2, ?3, ?4, ?5, 'node-c',
+                             'failed', 4, 5, 9223372036854775807, 'attempt_limit',
+                             '{not-json', 1, 50)",
+                    params![
+                        seeded.file_id,
+                        seeded.source_size,
+                        seeded.source_mtime,
+                        seeded.source_sha256,
+                        seeded.pipeline_sha256,
+                    ],
+                )?;
+                conn.execute(
                     "INSERT INTO cluster_fragment_index_artifacts
                       (cache_key, file_id, source_size, source_mtime, source_sha256,
                        pipeline_sha256, blob_sha256, bytes, built_by_node_id, built_at_ms)
@@ -5257,20 +5286,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_analysis_repair_is_exact_and_idempotent() {
+    async fn mkv_hls_terminal_completion_repair_is_exact_and_idempotent() {
         let store = SqliteStore::open_in_memory().expect("store");
         seed_files(&store).await;
         let predecessor = job(1, 10, 1);
         let seeded = predecessor.clone();
+        let diagnostic = crate::content_analysis::IndexDiagnostic {
+            version: 1,
+            code: crate::content_analysis::IndexFailureCode::IndexCompletionUnverified
+                .as_str()
+                .to_owned(),
+            retryable: false,
+            claim_fence: 4,
+            attempt: 5,
+            recorded_at_ms: 50,
+            ..Default::default()
+        }
+        .encode_bounded()
+        .expect("bounded terminal diagnostic")
+        .replace("\"code\":", "\"code\" : ");
         store
             .with_conn(move |conn| {
                 conn.execute(
                     "INSERT INTO cluster_fragment_index_jobs
                       (cache_key, file_id, source_size, source_mtime, source_sha256,
                        pipeline_sha256, target_node_id, state, fence, attempts,
-                       not_before_ms, last_error_code, created_at_ms, updated_at_ms)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'failed', 4, 1,
-                             50, 'truncated', 1, 50)",
+                       not_before_ms, last_error_code, index_diagnostic_json,
+                       created_at_ms, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'failed', 4, 5,
+                             9223372036854775807, 'attempt_limit', ?8, 1, 50)",
                     params![
                         seeded.cache_key,
                         seeded.file_id,
@@ -5279,6 +5323,25 @@ mod tests {
                         seeded.source_sha256,
                         seeded.pipeline_sha256,
                         seeded.target_node_id,
+                        diagnostic,
+                    ],
+                )?;
+                conn.execute(
+                    "INSERT INTO cluster_fragment_index_jobs
+                      (cache_key, file_id, source_size, source_mtime, source_sha256,
+                       pipeline_sha256, target_node_id, state, fence, attempts,
+                       not_before_ms, last_error_code, index_diagnostic_json,
+                       created_at_ms, updated_at_ms)
+                     VALUES ('nested-code-decoy', ?1, ?2, ?3, ?4, ?5, 'node-b',
+                             'failed', 4, 5, 9223372036854775807, 'attempt_limit',
+                             '{\"version\":1,\"code\":\"index_process_failed\",\"stderr_tail\":[\"{\\\"code\\\":\\\"index_completion_unverified\\\"}\"]}',
+                             1, 50)",
+                    params![
+                        seeded.file_id,
+                        seeded.source_size,
+                        seeded.source_mtime,
+                        seeded.source_sha256,
+                        seeded.pipeline_sha256,
                     ],
                 )?;
                 conn.execute(
@@ -5312,6 +5375,7 @@ mod tests {
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].eligibility, "eligible");
         assert_eq!(candidates[0].video_identity, "video-a");
+        assert_eq!(candidates[0].cause, "index_completion_unverified");
         let first = store
             .apply_analysis_index_repair(&candidates[0], "repair-one", 100)
             .await

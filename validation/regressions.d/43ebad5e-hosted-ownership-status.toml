@@ -1,0 +1,10 @@
+version = 1
+
+[[coverage]]
+commits = ["43ebad5e"]
+reason = """
+Status-only checkpoint. It records the hosted ownership-inventory failure and
+the focused passing rerun after the reviewed counts were updated; it changes no
+runtime, client, deployment, validation, or user-facing product behavior.
+"""
+ignore = true

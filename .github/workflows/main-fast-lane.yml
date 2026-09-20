@@ -56,7 +56,9 @@ jobs:
     needs: scope
     if: needs.scope.outputs.mobile_version == 'true'
     runs-on: [self-hosted, Linux, X64, lab, general]
-    timeout-minutes: 3
+    # Full-history auditing plus the static contract suites can cross three
+    # minutes on a busy self-hosted runner even when every check is healthy.
+    timeout-minutes: 5
     steps:
       - uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:

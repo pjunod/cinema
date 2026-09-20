@@ -482,7 +482,6 @@ function playbackPanel(settings){
       ${setCardFoot("savePlaybackDefaults")}`);
   const streaming=setCard(`${cardHead("Streaming","Server delivery · Changes apply to new sessions. Existing playback keeps its current settings.",active)}
       ${togRow("pvod","VOD HLS — a fixed, seekable timeline","Preferred. Needs the file's analysis index; schedules and queue health are in Analysis.",settings.vod_presentation)}
-      ${togRow("pvlr","Fall back to Live HLS when a VOD prerequisite is missing","The growing recovery stream. Off means a title without an index refuses to start.",settings.vod_live_recovery)}
       ${togRow("pabr","Adjust Auto quality while playing","Off keeps the server's first Auto choice and the full manual quality menu, but makes no client-side rung changes or supply-stall restart. Enable it to let Auto respond to changing playback conditions.",settings.playback_auto_abr)}
       <div class="setfields">
         <div><label for="pvws">VOD working set</label><select id="pvws" style="min-width:190px">${presetOpts([[String(2*1024**3),"2 GB"],[String(4*1024**3),"4 GB"],[String(8*1024**3),"8 GB — recommended"],[String(16*1024**3),"16 GB"],[String(32*1024**3),"32 GB"]],vodWorking)}</select></div>

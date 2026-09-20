@@ -47,7 +47,6 @@ async function saveStreaming(btn){
       hls_burst_secs:document.getElementById("phb").value,
       hls_ahead_max_secs:document.getElementById("pha").value,
       vod_presentation:document.getElementById("pvod").checked,
-      vod_live_recovery:document.getElementById("pvlr").checked,
       vod_working_set_bytes:document.getElementById("pvws").value,
       vod_block_budget_secs:"8",
       vod_materialize_budget_secs:document.getElementById("pvmb").value,
@@ -63,6 +62,15 @@ async function saveDeveloper(btn){
     cacheSettings(await api("/settings",{method:"PUT",body:{
       playback_control_protocol_v1:document.getElementById("pcpv1").checked}}));
     toast("Developer settings saved"); if(btn) setCardSaved(btn);
+  }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
+}
+async function saveLiveHlsRecoveryDeveloper(btn){
+  const err=document.getElementById("dvlrerr"); err.textContent="";
+  if(btn) btn.disabled=true;
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
+      vod_live_recovery:document.getElementById("dvlr").checked}}));
+    toast("Live HLS recovery setting saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
 async function saveContentAnalysisDeveloper(btn){
@@ -282,4 +290,3 @@ async function saveTraktKeys(){
 async function traktLink(){ try{ cacheTrakt(await api("/trakt/link",{method:"POST"})); paintTrakt(); }catch(e){ toast(e.message); } }
 async function traktUnlink(){ try{ cacheTrakt(await api("/trakt/link",{method:"DELETE"})); paintTrakt(); toast("Trakt disconnected"); }catch(e){ toast(e.message); } }
 async function traktSyncNow(){ try{ cacheTrakt(await api("/trakt/sync",{method:"POST"})); paintTrakt(); toast("Sync started"); }catch(e){ toast(e.message); } }
-

@@ -563,9 +563,11 @@ function attachHls(video, playlistUrl, startAt){
       ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
       ...(StockLoader?{loader:createHlsStartupLoader(StockLoader,startup)}:{}),
       manifestLoadPolicy:PlaybackPolicy.HLS_STARTUP.manifest_load_policy,
-      // Every HLS session is VOD. The old growing-playlist path is not an
-      // alternate response, so every fragment fetch uses the measured VOD
-      // materialization contract from its first request.
+      // HLS may be immutable VOD or the bounded sliding recovery presentation.
+      // Both use the same finite fragment retry budget: rolling publication
+      // advertises only completed objects and keeps removed URLs readable
+      // through Grace, so an unbounded client retry would hide a real terminal
+      // retirement rather than make a late object safer.
       fragLoadPolicy:vodClientContract().fragLoadPolicy,
       // Told before the first fragment loads, not seeked afterwards. Seeking
       // after attach downloads the opening of the film and throws it away —
@@ -872,4 +874,3 @@ function attachHls(video, playlistUrl, startAt){
     applyPlaybackTransportIntent(video,attachedPlayer);
   }
 }
-
