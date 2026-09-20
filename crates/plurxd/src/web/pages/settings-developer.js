@@ -229,7 +229,7 @@ function uiEnableAdvisory(){
   const browser=typeof CSS!=='undefined'&&CSS.supports('display','grid')&&typeof fetch==='function';
   const libs=SETTINGS_DATA&&SETTINGS_DATA.libs;
   const row=(title,state,detail)=>`<div><strong>${esc(title)} · ${esc(state)}</strong><small>${esc(detail)}</small></div>`;
-  return `<section class="card" id="ui-enable"><h2>Enable</h2><p>The updated search and activity layouts are enabled in this build. They need no rollout flag.</p><div class="enable-advisory">${row('Browser support',browser?'Met':'Not confirmed','Responsive layout and API support. This observation is advisory.')}${row('Signed-in account',ME?'Met':'Not confirmed','Watch state and recording visibility use the signed-in account.')}${row('Library data',Array.isArray(libs)?libs.length?'Available':'No libraries configured':'Not loaded','Readable files and accurate metadata make continuation and preview useful. Missing data is shown in context.')}${row('Playback and recording','Your saved choices','Use the controls below to enable recovery, recording, channel playback or quality handoff. Readiness results never override your choice.')}</div><p class="hint">Advisory only: unmet or unknown checks do not hide features or disable enable switches. Existing authorization, file availability and operational safety rules still apply.</p><nav class="watch-browse" aria-label="Enable controls"><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-live-hls')?.scrollIntoView({behavior:'smooth',block:'start'})">Live HLS ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-analysis')?.scrollIntoView({behavior:'smooth',block:'start'})">Content analysis ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-recording')?.scrollIntoView({behavior:'smooth',block:'start'})">Recording ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-channels')?.scrollIntoView({behavior:'smooth',block:'start'})">Library channels ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-quality')?.scrollIntoView({behavior:'smooth',block:'start'})">Quality handoff ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-hevc-sample-entry')?.scrollIntoView({behavior:'smooth',block:'start'})">HEVC admission ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-source-probe')?.scrollIntoView({behavior:'smooth',block:'start'})">Source verification ↓</a></nav></section>`;
+  return `<section class="card" id="ui-enable"><h2>Enable</h2><p>The updated search and activity layouts are enabled in this build. They need no rollout flag.</p><div class="enable-advisory">${row('Browser support',browser?'Met':'Not confirmed','Responsive layout and API support. This observation is advisory.')}${row('Signed-in account',ME?'Met':'Not confirmed','Watch state and recording visibility use the signed-in account.')}${row('Library data',Array.isArray(libs)?libs.length?'Available':'No libraries configured':'Not loaded','Readable files and accurate metadata make continuation and preview useful. Missing data is shown in context.')}${row('Playback and recording','Your saved choices','Use the controls below to enable recovery, recording, channel playback or quality handoff. Readiness results never override your choice.')}</div><p class="hint">Advisory only: unmet or unknown checks do not hide features or disable enable switches. Existing authorization, file availability and operational safety rules still apply.</p><nav class="watch-browse" aria-label="Enable controls"><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-live-hls')?.scrollIntoView({behavior:'smooth',block:'start'})">Live HLS ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-analysis')?.scrollIntoView({behavior:'smooth',block:'start'})">Content analysis ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-recording')?.scrollIntoView({behavior:'smooth',block:'start'})">Recording ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-channels')?.scrollIntoView({behavior:'smooth',block:'start'})">Library channels ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-quality')?.scrollIntoView({behavior:'smooth',block:'start'})">Quality handoff ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-hevc-sample-entry')?.scrollIntoView({behavior:'smooth',block:'start'})">HEVC admission ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-source-probe')?.scrollIntoView({behavior:'smooth',block:'start'})">Source verification ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-seek-scratch')?.scrollIntoView({behavior:'smooth',block:'start'})">Seek scratch ↓</a></nav></section>`;
 }
 // Source verification compatibility.
 //
@@ -352,6 +352,51 @@ function liveHlsRecoveryCard(settings,readiness){
       <p class="devcheck-note">Advisory only. Unmet, unavailable or unobservable rows do not gate this switch. Authorization, exact object ownership and scratch limits still protect each request.</p>
       </div></details><div class="err" id="dvlrerr" role="alert"></div>${setCardFoot("saveLiveHlsRecoveryDeveloper")}`);
 }
+// Scratch accounting and the two behaviours it unlocked.
+//
+// Nothing on this card is a switch, and that is deliberate: the repair is in
+// the accounting, and a half-accounted server is not a safer server. The rows
+// say what each behaviour needs to be safe and whether this build and this
+// browser meet it, so an operator can tell a full budget from a stuck cleanup
+// and can see exactly which producer path grew a real write boundary and
+// which one did not.
+function seekScratchReservationsCard(){
+  let transport=null;
+  try{
+    const video=document.getElementById("video");
+    transport=(typeof plannedHlsTransport==="function"&&video)?plannedHlsTransport(false):null;
+  }catch(e){}
+  const shortGrace=transport==="hlsjs";
+  return setCard(`${cardHead("Seek scratch accounting",
+      "One charge per stream, released when its bytes are gone. What repeated seeks are allowed to cost.",
+      `<span class="pill ok">automatic</span>`)}
+      <div class="hint">No switch here. Every row is an observation about this build or this browser; none of them enables, disables or hides anything, and none of them changes what the server charges.</div>
+      <details class="setdetails" open><summary>Requirements and readiness</summary><div class="setdetails-body">
+      <h3 class="devcheck-group">Accounting</h3>
+      ${devStaticReq("One charge per stream","met",
+        "Admission, growth, retirement and release all settle in one ledger, so a stream moving between the live and retired registries is counted once. The figures behind a refusal &mdash; charged, requested, configured &mdash; are in the server log beside it.","ok")}
+      ${devStaticReq("Writers settle before capacity is returned","met",
+        "The copy reader registers before it is spawned, so retirement waits for the segment it is still writing instead of measuring around it. A writer that outlives the wait keeps the whole producer charge and says why.","ok")}
+      ${devStaticReq("A full budget is a temporary refusal","met",
+        "Exhausted scratch answers 503 with a retryable notice beside the picture. The stream you are watching keeps playing, and the destination you asked for is kept for Try again.","ok")}
+      <h3 class="devcheck-group">Shorter retention after you close a stream</h3>
+      ${devStaticReq("This browser's transport",transport===null?"unknown":transport==="hlsjs"?"hls.js":"native HLS",
+        "The web player destroys its hls.js instance before it releases the session, so the server may drop that stream's retired objects one segment later instead of a whole playlist later. Native HLS has no bounded retry tail and keeps the original promise. Read while a player is open; otherwise unknown.",
+        shortGrace?"ok":"")}
+      ${devStaticReq("Apple and unknown clients","original grace",
+        "Apple releases the session before it replaces the item, so the old item still exists while the release runs, and no finite AVFoundation retry bound has been established. Those sessions keep the full promise &mdash; missing information never shortens one.","")}
+      ${devStaticReq("Reads already in flight","protected",
+        "A response that has already been accepted keeps its object open and charged until it finishes, whatever the deadline says. A new read after the deadline gets the ordinary gone answer.","ok")}
+      <h3 class="devcheck-group">More than three streams at once</h3>
+      ${devStaticReq("Copy and remux output","enforced write boundary",
+        "Every object the native copy writer publishes &mdash; the initialization segment, each media segment, each playlist rewrite &mdash; is authorized before it exists, so these sessions start with a startup allowance and grow under a real bound instead of reserving the whole per-session ceiling up front.","ok")}
+      ${devStaticReq("Transcoded output","conservative, by design",
+        "FFmpeg writes its own HLS output, and this build has no way to authorize those writes before they land &mdash; a measurement taken afterwards can only discover an overrun. Transcoded sessions therefore still reserve the whole per-session ceiling. This is the known limit of the repair, not an oversight.","warn")}
+      ${devStaticReq("Windows","conservative, unproved",
+        "The port's process suspension is implemented, but no native runtime receipt exists for growth enforcement, so Windows keeps the conservative reservation.","")}
+      <p class="devcheck-note">Advisory only. Capacity, authorization and retention rules are unchanged by anything on this card; the global scratch ceiling is still the one on <a href="#/settings/playback">Playback</a>.</p>
+      </div></details>`);
+}
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
     <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner and guide</span></a>
@@ -388,6 +433,7 @@ function developerPanel(settings,readiness){
       <div class="setsection" id="enable-channels"><h2>Library channels</h2><p>Explicit playback enablement with advisory deployment facts.</p></div>${libraryChannels}
       <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Explicit server and browser enablement with advisory safety evidence.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection"><h2>Playback surface contract</h2><p>Advisory verification status for the one fault contract every client renders. Nothing here is a switch.</p></div>${playbackSurfaceReadinessCard()}
+      <div class="setsection" id="enable-seek-scratch"><h2>Seek scratch accounting</h2><p>Always-on scratch accounting with advisory evidence about which producer paths grew a real write boundary.</p></div>${seekScratchReservationsCard()}
       <div class="setsection"><h2>Web HLS startup recovery</h2><p>Always-on manifest recovery with advisory browser and server readiness.</p></div>${webHlsStartupRecoveryCard()}
       <div class="setsection" id="enable-hevc-sample-entry"><h2>HEVC sample-entry admission</h2><p>Always-on packaging admission with advisory deployment and evidence status.</p></div>${hevcSampleEntryAdmissionCard()}
       <div class="setsection" id="enable-source-probe"><h2>Source verification</h2><p>Always-on probe-compatibility rules with advisory provenance and diagnostics status.</p></div>${sourceProbeCompatibilityCard(readiness)}
