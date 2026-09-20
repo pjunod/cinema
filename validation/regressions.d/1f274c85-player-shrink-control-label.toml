@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["1f274c85"]
-points = ["web.experience"]
-checks = ["web-static", "web-layout"]
-reason = "Inherited, not introduced here: PR #387 renamed the player's shrink control from Browse to Smaller and landed without the coverage row a corrective runtime commit owes, so `history-check` — a blocking fast-lane job — has been red on `main` since. Recorded now because the seek-scratch effort cannot merge through a lane that is already failing, and deleting the requirement would be worse than answering it. The change is one label string in `watch-presentation.js`; the control's own contract is what pins it. `tests/web/player-dom.test.js` walks the shipped player markup and requires the shrink control to exist with its accessible name, and `tests/web/layout-containment.test.js` requires the presentation modes it switches between to keep their containment, so a rename that dropped the control or its label fails under `web-static`, and one that changed what the control does fails under `web-layout`. No behaviour changed, which is why no new regression was written for it; what was missing was the row saying which existing ones answer it."
