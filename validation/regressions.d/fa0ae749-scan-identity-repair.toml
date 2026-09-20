@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["fa0ae749"]
+points = ["core.media", "cluster.auth", "server.api", "library.catalog", "metadata.enrichment", "api.contract"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "api-wire"]
+reason = "The admin-only scan identity repair API accepts strict decimal identifiers, derives a deterministic bounded preview from one authoritative snapshot, fingerprints the full preimage plus watch conflicts, caches at most eight plans and 2 MiB for fifteen minutes on the previewing node, and never feature-gates availability. Apply acquires the library scan lease, refuses blocked, stale, altered, wrong-admin, wrong-node, expired, and unacknowledged plans, preserves file IDs and overlapping episode ownership, retains an existing survivor watch row while copying only absent state, and retires emptied duplicate rows. SQLite validates and mutates in one fenced transaction; Hiqlite binds every mutation and postcondition to the atomic lease-renewal output. Backend-neutral contracts prove overlap consolidation, watch-conflict acknowledgment, exact idempotent retry, stale-preimage refusal, and three-voter parity; planner, daemon route, API documentation, docs index, formatting, and pinned all-target compilation checks also pass."
