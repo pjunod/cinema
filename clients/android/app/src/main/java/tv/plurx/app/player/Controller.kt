@@ -1966,6 +1966,7 @@ class Controller(
                         audioOffsetMs = recipe.recipe.audioOffsetMs,
                         quality = recipe.recipe.quality,
                         sourceHeight = plan.sourceHeight,
+                        deliveredDynamicRange = deliveredRange,
                     ),
                     caps = decisionCaps,
                     requestHDR10 = sessionHDR10Request(
@@ -2074,6 +2075,7 @@ class Controller(
             audioOffsetMs = recipe.audioOffsetMs,
             quality = recipe.quality,
             sourceHeight = plan.sourceHeight,
+            deliveredDynamicRange = deliveredRange,
         ),
         caps = decisionCaps,
         requestHDR10 = sessionHDR10Request(
@@ -2380,9 +2382,6 @@ class Controller(
                 bootstrap = bootstrap,
                 observe = ::playbackControlObservation,
                 onSubtitleReady = ::retryNativeSubtitleAfterReadiness,
-            onSubtitleUnavailable = {
-                raiseDegradedNotice(SUBTITLE_UNAVAILABLE_NOTICE)
-            },
                 onPrepare = ::onPrepareAction,
                 onAcknowledged = ::acknowledgementDelivered,
                 onGaveUp = ::controlReportingGaveUp,
@@ -2442,18 +2441,6 @@ class Controller(
      * Media3 may keep the first empty `no-store` subtitle segment. Disable and
      * re-apply only the text override when control reports the demanded window
      * ready; the media item and video producer stay attached throughout.
-     *
-     * The disable and the re-arm are one operation, and the old shape could
-     * perform only the first half. It disabled the text renderer, then
-     * re-armed inside a coroutine behind four predicates — and any of them
-     * failing left text disabled with nothing scheduled to turn it back on.
-     * The viewer's answer to "the subtitle you selected is ready now" was
-     * their subtitles switching off for good.
-     *
-     * So the disable moved inside the guard: either both halves run, or
-     * neither does. A predicate that no longer holds means a newer intent
-     * owns the selection, and that intent's own [applyTextSelection] is the
-     * right thing to leave in charge.
      */
     private fun retryNativeSubtitleAfterReadiness() {
         val index = selectedSubtitle ?: return
@@ -2462,23 +2449,22 @@ class Controller(
         val claim = playbackControlBootstrapFence.snapshot(session)
         val intentGeneration = playbackIntent.generation()
         if (!playbackControlBootstrapFence.isCurrent(claim, sessionId)) return
+        textSelectionArmed = false
+        player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
+            .clearOverridesOfType(C.TRACK_TYPE_TEXT)
+            .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
+            .build()
         scope.launch {
-            if (
-                !playbackControlBootstrapFence.isCurrent(claim, sessionId) ||
-                playbackIntent.generation() != intentGeneration ||
-                selectedSubtitle != index ||
-                subtitleDelivery != SubtitleDelivery.NativeSession
-            ) {
-                return@launch
-            }
-            textSelectionArmed = false
-            player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                .clearOverridesOfType(C.TRACK_TYPE_TEXT)
-                .setTrackTypeDisabled(C.TRACK_TYPE_TEXT, true)
-                .build()
             kotlinx.coroutines.yield()
-            textSelectionArmed = true
-            applyTextSelection()
+            if (
+                playbackControlBootstrapFence.isCurrent(claim, sessionId) &&
+                playbackIntent.generation() == intentGeneration &&
+                selectedSubtitle == index &&
+                subtitleDelivery == SubtitleDelivery.NativeSession
+            ) {
+                textSelectionArmed = true
+                applyTextSelection()
+            }
         }
     }
 

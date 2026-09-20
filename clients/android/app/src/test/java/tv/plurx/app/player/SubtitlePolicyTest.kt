@@ -104,33 +104,15 @@ class SubtitlePolicyTest {
     }
 
     @Test
-    fun aBitmapTrackBurnsEverywhereAndStyledTextOnlyOffDirectPlay() {
+    fun bitmapAndStyledTracksBurnInEveryMode() {
         for (mode in listOf("direct", "remux", "transcode")) {
-            // A picture is a picture on every route. Media3 does not draw PGS
-            // or VobSub out of the container, so direct play is no exception.
             assertEquals(
                 "burn expected for a bitmap track on $mode",
                 SubtitleDelivery.Burn,
                 subtitleRoute(pgs(2), mode, SubtitleDelivery.Plan).delivery,
             )
-        }
-        // Styled text is not. On direct play the demuxer already has the
-        // track and the player can render it, so it stays in the plan — this
-        // case used to pay a full re-encode for cues the container was
-        // carrying, because the route asked "can this be a rendition" before
-        // it asked "is there a container to read it from".
-        assertEquals(
-            "an embedded ASS track on direct play rides the plan's own stream",
-            SubtitleDelivery.Plan,
-            subtitleRoute(ass(4), "direct", SubtitleDelivery.Plan).delivery,
-        )
-        assertFalse(
-            "and costs no new session",
-            subtitleRoute(ass(4), "direct", SubtitleDelivery.Plan).reopen,
-        )
-        // Off direct play there is no container to read from and no rendition
-        // the master can publish, so the burn is what is left.
-        for (mode in listOf("remux", "transcode")) {
+            // ASS carries text and still cannot be a rendition: routing on
+            // `text` here is what earns a 400 and then a fallback burn.
             assertEquals(
                 "burn expected for a styled track on $mode",
                 SubtitleDelivery.Burn,
@@ -534,6 +516,7 @@ class SubtitlePolicyTest {
             caps = decisionCaps,
             requestHDR10 = sessionHDR10Request(
                 decisionMode = "transcode",
+                deliveredDynamicRange = "hdr10",
                 compatibilityTranscode = false,
                 delivery = SubtitleDelivery.Plan,
             ),
@@ -552,6 +535,7 @@ class SubtitlePolicyTest {
         for (mode in listOf("direct", "remux")) {
             val requestHDR10 = sessionHDR10Request(
                 decisionMode = mode,
+                deliveredDynamicRange = "hdr10",
                 compatibilityTranscode = true,
                 delivery = SubtitleDelivery.Plan,
             )
@@ -571,6 +555,7 @@ class SubtitlePolicyTest {
         assertFalse(
             sessionHDR10Request(
                 decisionMode = "transcode",
+                deliveredDynamicRange = "hdr10",
                 compatibilityTranscode = false,
                 delivery = SubtitleDelivery.Burn,
             ),
@@ -598,15 +583,15 @@ class SubtitlePolicyTest {
             copyableVideo = false, aac = false, preserveDolbyVision = false,
             audioIndex = 0, audioOffsetMs = 0,
             quality = PlaybackQuality.Auto, sourceHeight = 2160,
+            deliveredDynamicRange = "sdr",
         )
         assertEquals(true, body.quality_auto)
         assertNull("an existing transcode keeps the server's Auto rung", body.height)
-        // The acknowledgement is gone from the wire on this side. The server
-        // computes the grade the session would deliver without the burn and
-        // decides for itself; a client's claim about that grade was never
-        // evidence about it, and requiring one is what refused every web burn
-        // on an HDR source.
-        assertNull("the client no longer asserts the delivered grade", body.subtitle_burn_sdr)
+        assertEquals(
+            "the forced PGS track does not downgrade an already-SDR plan",
+            true,
+            body.subtitle_burn_sdr,
+        )
     }
 
     @Test
@@ -620,7 +605,7 @@ class SubtitlePolicyTest {
         )
         assertEquals(2160, body.height)
         assertEquals(true, body.quality_auto)
-        assertNull("and never did on this path either", body.subtitle_burn_sdr)
+        assertNull("an unacknowledged HDR delivery stays protected", body.subtitle_burn_sdr)
     }
 
     @Test
@@ -700,6 +685,7 @@ class SubtitlePolicyTest {
             copyableVideo = true, aac = false, preserveDolbyVision = false,
             audioIndex = 2, audioOffsetMs = 125,
             quality = PlaybackQuality.Auto, sourceHeight = 2160,
+            deliveredDynamicRange = "sdr",
         )
 
         assertNull(body.previous_session_id)

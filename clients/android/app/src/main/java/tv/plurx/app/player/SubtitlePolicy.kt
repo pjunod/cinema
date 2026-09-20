@@ -56,15 +56,6 @@ internal val SubtitleDelivery.usesPlanTransport: Boolean
  */
 internal data class SubtitleRoute(val delivery: SubtitleDelivery, val reopen: Boolean)
 
-/**
- * The server tried to extract this track and failed, and its memo still
- * stands. Said plainly rather than left as silence: "warming" is a wait, this
- * is not, and the difference is the whole reason the server reports them
- * separately.
- */
-internal const val SUBTITLE_UNAVAILABLE_NOTICE =
-    "That subtitle could not be prepared. Playback was kept unchanged."
-
 internal const val HDR_SUBTITLE_NOTICE =
     "That subtitle requires an SDR burn-in. HDR playback was kept unchanged."
 
@@ -137,24 +128,13 @@ internal fun subtitleRoute(
         // A recognized overlay is an application layer. It never enters a
         // video session and therefore never changes the current video bytes.
         track.isPgsOverlay -> SubtitleDelivery.BitmapOverlay
-        // A picture, not text. There is nothing to hand a renderer on any
-        // route, so this is the one class that burns even on direct play:
-        // Media3 does not draw PGS or VobSub out of the container reliably.
-        !track.text -> SubtitleDelivery.Burn
-        // Direct play already has the tracks — they are in the file the player
-        // is reading, and the demuxer has surfaced them. Opening a session for
-        // them would trade an untouched stream for a segmented one to show
-        // cues the player already has.
-        //
-        // This is tested BEFORE the rendition question, and the order is the
-        // fix: asking `!isNativeHls` first sent an embedded ASS or `mov_text`
-        // track on direct play to a full re-encode, for cues the container was
-        // already carrying. CLIENTS-REMEDIATION-PLAN.md §5.4 says it stays in
-        // the plan, and it now does.
-        planMode == "direct" -> SubtitleDelivery.Plan
-        // Off direct play there is no container to read from, and styled text
-        // has no rendition the master can publish. A burn is what is left.
+        // The only thing that justifies re-encoding the picture: a track with
+        // no text the client could be handed instead.
         !track.isNativeHls -> SubtitleDelivery.Burn
+        // Direct play already has the tracks — they are in the file the player
+        // is reading. Opening a session for them would trade an untouched
+        // stream for a segmented one to show cues the demuxer already found.
+        planMode == "direct" -> SubtitleDelivery.Plan
         // Remux and transcode: the same session the plan would have opened
         // anyway, plus the rendition flags.
         else -> SubtitleDelivery.NativeSession
@@ -307,6 +287,7 @@ internal fun subtitleSessionBody(
     audioOffsetMs: Long,
     quality: PlaybackQuality,
     sourceHeight: Int?,
+    deliveredDynamicRange: String? = null,
     previousSessionId: String? = null,
     reopenReason: ReopenReason? = null,
     controlSequence: Long? = null,
@@ -327,6 +308,9 @@ internal fun subtitleSessionBody(
         start = startSeconds,
         audio = audioIndex?.toInt(),
         subtitle_burn = subtitleIndex?.toInt().takeIf { delivery == SubtitleDelivery.Burn },
+        subtitle_burn_sdr = true.takeIf {
+            delivery == SubtitleDelivery.Burn && deliveredDynamicRange == "sdr"
+        },
         native_subtitles = true.takeIf { native },
         subtitle = subtitleIndex?.toInt().takeIf { native },
         audio_offset_ms = audioOffsetMs.takeIf { it != 0L },
