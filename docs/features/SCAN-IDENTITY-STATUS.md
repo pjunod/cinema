@@ -1,6 +1,6 @@
 # Scan identity status — build, review and promotion ledger
 
-**Status:** M0 in progress · **Executes:**
+**Status:** M1 committed; task PR preparation in progress · **Executes:**
 [SCAN-IDENTITY-IMPLEMENTATION.md](SCAN-IDENTITY-IMPLEMENTATION.md) ·
 **Started:** 2026-09-19 · **Updated:** 2026-09-19
 
@@ -10,7 +10,7 @@ Companion to the
 what exists, what has been proved, and what can safely happen next. It does
 not authorize a production catalogue repair.
 
-## Current position — isolated base and compiler are established
+## Current position — ownership prevention is built on both stores
 
 | Field | Value |
 |---|---|
@@ -29,8 +29,8 @@ silently describing the wrong toolchain.
 
 | Milestone | Branch | State | Evidence |
 |---|---|---|---|
-| M0 base, compiler and failure fixtures | `effort/scan-identity` | in progress | Pinned compiler and clean-base compile recorded below. |
-| M1 ownership and directory lookup | `codex/scan-identity-ownership` | not started | Scanner and backend contracts required. |
+| M0 base, compiler and failure fixtures | `effort/scan-identity` | complete | Pinned compiler, clean-base compile and three failing/one passing pre-fix probes recorded below. |
+| M1 ownership and directory lookup | `codex/scan-identity-ownership` | committed at `1ac7f00b` | Core, daemon, SQLite and three-voter Hiqlite focused contracts pass; task PR and effort gate remain. |
 | M2 guarded series hints | `codex/scan-identity-hints` | not started | Atomic SQLite/Hiqlite outcomes and queued-import behavior required. |
 | M3 bounded repair | `codex/scan-identity-repair` | not started | Preview, reference inventory, atomic apply and retry behavior required. |
 | Final adversarial review | `effort/scan-identity` into `main` | not started | One review after the complete candidate is frozen. |
@@ -43,10 +43,18 @@ silently describing the wrong toolchain.
 |---|---|---|---|
 | 2026-09-19 | `535f95d228b1393033b09d497964079e4740e8ad` | `rustup run 1.97.1 rustc --version` | `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
 | 2026-09-19 | `535f95d228b1393033b09d497964079e4740e8ad` | `rustup run 1.97.1 cargo check --locked -p plurx-core -p plurxd --all-targets` | passed in 1m 25s |
+| 2026-09-19 | `0e1a3bfb` against pre-fix implementation | `rustup run 1.97.1 cargo test --locked -p plurx-core --lib scan_identity_` | expected reproduction: 3 failed (renamed new season, renamed second version, changed-file watch preservation); 1 no-rename control passed |
+| 2026-09-19 | `1ac7f00b` | `rustup run 1.97.1 cargo test --locked -p plurx-core --lib scan_identity_` | 11 passed; 839 filtered out |
+| 2026-09-19 | `1ac7f00b` | `rustup run 1.97.1 cargo test --locked -p plurxd --bin plurxd scan_identity_` | 1 passed; 2,340 filtered out |
+| 2026-09-19 | `1ac7f00b` | `rustup run 1.97.1 cargo test --locked -p plurx-core --test store_contract scan_identity_directory_contract` | SQLite: 1 passed; 116 filtered out |
+| 2026-09-19 | `1ac7f00b` | `rustup run 1.97.1 cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract scan_identity_directory_contract -- --test-threads=1` | three-voter Hiqlite: 1 passed; 162 filtered out |
+| 2026-09-19 | `1ac7f00b` | `rustup run 1.97.1 cargo check --locked -p plurx-core -p plurxd --all-targets` | passed in 21s after the final M1 edit |
+| 2026-09-19 | `1ac7f00b` | `rustup run 1.97.1 cargo clippy --locked -p plurx-core -p plurxd --all-targets -- -D warnings` | blocked by unchanged pre-existing `http/hls.rs:27556` Boolean assertion lint; M1 paths compile cleanly |
 
-No unit or integration suite has run yet. The repository contributor policy
-requires one smallest focused regression for each task PR; broader affected
-tests remain deferred to the frozen final candidate.
+Only the milestone's named focused regressions have run. Broader affected
+tests remain deferred to the frozen final candidate. The all-target Clippy
+failure is outside this branch's diff and is recorded rather than hidden or
+silently repaired as unrelated work.
 
 ## Decisions and limits — record assumptions instead of hiding them
 
@@ -65,6 +73,5 @@ tests remain deferred to the frozen final candidate.
 
 ## Next action
 
-Commit the M0 documents and failure fixtures, capture the old behavior, then
-start M1 from the effort branch. Update this page in the same commit whenever
-a milestone, review, test result or PR state changes.
+Open the task PR into `effort/scan-identity` and wait for its effort gate. After
+the effort gate passes, merge it and start M2 from the updated effort branch.

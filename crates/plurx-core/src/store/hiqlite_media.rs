@@ -9,8 +9,10 @@ use hiqlite::Row;
 
 use super::hiqlite::{database_error, validate_sql, HiqliteAuthStore, TimedClient};
 use super::{
-    ArtworkInventoryItem, ArtworkRepairFence, MediaStore, MissingVideoCodecTag, ReconcileOutcome,
-    RootFingerprintStatus, WatchStore, TOP_LEVEL_ITEM_PREDICATE,
+    directory_matches_movie_path, directory_matches_show_path, directory_path_bounds,
+    normalized_directory, ArtworkInventoryItem, ArtworkRepairFence, MediaStore,
+    MissingVideoCodecTag, ReconcileOutcome, RootFingerprintStatus, WatchStore,
+    TOP_LEVEL_ITEM_PREDICATE,
 };
 use crate::domain::DolbyVisionFacts;
 use crate::domain::{
@@ -70,6 +72,22 @@ struct ItemRow {
 struct ItemTitleRow {
     item_id: i64,
     title: String,
+}
+
+struct DirectoryItemRow {
+    evidence_path: String,
+    owns_season: bool,
+    item: ItemRow,
+}
+
+impl From<&mut Row<'_>> for DirectoryItemRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            evidence_path: row.get("evidence_path"),
+            owns_season: row.get::<i64>("owns_season") != 0,
+            item: ItemRow::from(&mut *row),
+        }
+    }
 }
 
 impl From<&mut Row<'_>> for ItemTitleRow {
@@ -1113,6 +1131,39 @@ impl MediaStore for HiqliteAuthStore {
         )
     }
 
+    async fn find_movies_by_directory(
+        &self,
+        library_id: i64,
+        directory: &str,
+    ) -> Result<Vec<Item>, StoreError> {
+        let directory = normalized_directory(directory)?;
+        let (lower, upper) = directory_path_bounds(directory)?;
+        let item_columns = item_cols("movie");
+        let rows = self
+            .client()
+            .query_consistent_map::<DirectoryItemRow, _>(
+                format!(
+                    "SELECT f.path AS evidence_path, 0 AS owns_season, {item_columns} \
+                     FROM files f INDEXED BY sqlite_autoindex_files_1 \
+                     JOIN items movie ON movie.id = f.item_id AND movie.kind = 'movie' \
+                     WHERE f.path >= $1 AND f.path < $2 AND movie.library_id = $3"
+                ),
+                params!(lower, upper, library_id),
+            )
+            .await
+            .map_err(database_error)?;
+        let mut candidates = HashMap::<i64, Item>::new();
+        for row in rows {
+            if directory_matches_movie_path(&row.evidence_path, directory) {
+                let item = Item::try_from(row.item)?;
+                candidates.entry(item.id).or_insert(item);
+            }
+        }
+        let mut candidates = candidates.into_values().collect::<Vec<_>>();
+        candidates.sort_by_key(|item| (item.added_at, item.id));
+        Ok(candidates)
+    }
+
     async fn find_book(
         &self,
         library_id: i64,
@@ -1160,6 +1211,58 @@ impl MediaStore for HiqliteAuthStore {
                 .await
                 .map_err(database_error)?,
         )
+    }
+
+    async fn find_shows_by_directory(
+        &self,
+        library_id: i64,
+        directory: &str,
+        season_number: i32,
+    ) -> Result<Vec<Item>, StoreError> {
+        let directory = normalized_directory(directory)?;
+        let (lower, upper) = directory_path_bounds(directory)?;
+        let item_columns = item_cols("show");
+        let rows = self
+            .client()
+            .query_consistent_map::<DirectoryItemRow, _>(
+                format!(
+                    "WITH bounds AS (SELECT $1 AS lower_path, $2 AS upper_path, \
+                                            $3 AS library_id, $4 AS season_number) \
+                     SELECT f.path AS evidence_path, \
+                            CASE WHEN EXISTS(SELECT 1 FROM items owned \
+                                             WHERE owned.parent_id = show.id \
+                                               AND owned.kind = 'season' \
+                                               AND owned.library_id = bounds.library_id \
+                                               AND owned.season_number = bounds.season_number) \
+                                 THEN 1 ELSE 0 END AS owns_season, \
+                            {item_columns} \
+                     FROM bounds \
+                     JOIN files f INDEXED BY sqlite_autoindex_files_1 \
+                       ON f.path >= bounds.lower_path AND f.path < bounds.upper_path \
+                     JOIN items episode ON episode.id = f.item_id AND episode.kind = 'episode' \
+                     JOIN items season ON season.id = episode.parent_id AND season.kind = 'season' \
+                     JOIN items show ON show.id = season.parent_id AND show.kind = 'show' \
+                     WHERE episode.library_id = bounds.library_id \
+                       AND season.library_id = bounds.library_id \
+                       AND show.library_id = bounds.library_id"
+                ),
+                params!(lower, upper, library_id, season_number),
+            )
+            .await
+            .map_err(database_error)?;
+        let mut candidates = HashMap::<i64, (Item, bool)>::new();
+        for row in rows {
+            if directory_matches_show_path(&row.evidence_path, directory) {
+                let item = Item::try_from(row.item)?;
+                candidates
+                    .entry(item.id)
+                    .and_modify(|(_, owns)| *owns |= row.owns_season)
+                    .or_insert((item, row.owns_season));
+            }
+        }
+        let mut candidates = candidates.into_values().collect::<Vec<_>>();
+        candidates.sort_by_key(|(item, owns)| (!*owns, item.added_at, item.id));
+        Ok(candidates.into_iter().map(|(item, _)| item).collect())
     }
 
     async fn find_season(

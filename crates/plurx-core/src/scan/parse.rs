@@ -101,6 +101,9 @@ static SEE_CRAMMED: LazyLock<Regex> =
 pub struct ParsedMovie {
     pub title: String,
     pub year: Option<i32>,
+    /// Canonical directory identity when the file is directly beneath a
+    /// `Title (YYYY)` directory and its own name does not contradict it.
+    pub source_directory: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -110,6 +113,9 @@ pub struct ParsedEpisode {
     pub season: i32,
     pub episode: i32,
     pub episode_title: Option<String>,
+    /// Canonical show directory for the direct `Show/Season N/file` layout.
+    /// Release folders and flat layouts deliberately have no directory lane.
+    pub source_directory: Option<std::path::PathBuf>,
 }
 
 /// A book work derived from its shelf path. Text and audio formats use the
@@ -295,16 +301,49 @@ pub fn parse_movie(path: &Path) -> ParsedMovie {
         stem
     };
 
+    let parent_identity = extract_year(parent).and_then(|(parent_year, at)| {
+        // Directory identity is deliberately narrower than title parsing: a
+        // parent must carry an explicit parenthesized year. A collection
+        // folder or an undated title keeps the legacy title/year fallback.
+        if !YEAR_PAREN.is_match(parent) {
+            return None;
+        }
+        let parent_title = title_before_cruft(&parent[..at]);
+        if parent_title.is_empty() {
+            return None;
+        }
+        let (file_title, file_year) = match extract_year(stem) {
+            Some((year, file_at)) => (title_before_cruft(&stem[..file_at]), Some(year)),
+            None => (title_before_cruft(stem), None),
+        };
+        let title_agrees = file_title.is_empty() || file_title.eq_ignore_ascii_case(&parent_title);
+        let year_agrees = file_year.is_none() || file_year == Some(parent_year);
+        (title_agrees && year_agrees)
+            .then(|| path.parent().map(Path::to_path_buf))
+            .flatten()
+    });
+
     match extract_year(source) {
         Some((year, at)) => ParsedMovie {
             title: title_before_cruft(&source[..at]),
             year: Some(year),
+            source_directory: parent_identity,
         },
         None => ParsedMovie {
             title: title_before_cruft(source),
             year: None,
+            source_directory: parent_identity,
         },
     }
+}
+
+fn show_source_directory(path: &Path) -> Option<std::path::PathBuf> {
+    let season = path.parent()?;
+    let season_name = season.file_name()?.to_str()?;
+    SEASON_DIR
+        .is_match(season_name)
+        .then(|| season.parent().map(Path::to_path_buf))
+        .flatten()
 }
 
 /// A home-video or photo file's identity: what to call it, and the date its
@@ -593,6 +632,7 @@ fn parse_episode_inner(path: &Path, allow_crammed: bool) -> Result<ParsedEpisode
         season,
         episode,
         episode_title,
+        source_directory: show_source_directory(path),
     })
 }
 
@@ -651,6 +691,7 @@ pub fn parse_anime_episode(path: &Path) -> Result<ParsedEpisode, EpisodeSkip> {
         season: 1,
         episode,
         episode_title: None,
+        source_directory: show_source_directory(path),
     })
 }
 
@@ -795,14 +836,16 @@ mod tests {
             movie("/m/The Matrix (1999)/The Matrix (1999).mkv"),
             ParsedMovie {
                 title: "The Matrix".into(),
-                year: Some(1999)
+                year: Some(1999),
+                source_directory: Some(PathBuf::from("/m/The Matrix (1999)")),
             }
         );
         assert_eq!(
             movie("/m/Dune Part Two (2024) [2160p].mkv"),
             ParsedMovie {
                 title: "Dune Part Two".into(),
-                year: Some(2024)
+                year: Some(2024),
+                source_directory: None,
             }
         );
     }
@@ -813,14 +856,16 @@ mod tests {
             movie("/m/Neon.District.2049.2017.1080p.BluRay.x265-GROUP.mkv"),
             ParsedMovie {
                 title: "Neon District 2049".into(),
-                year: Some(2017)
+                year: Some(2017),
+                source_directory: None,
             }
         );
         assert_eq!(
             movie("/m/Ember.1995.REMUX.1080p.mkv"),
             ParsedMovie {
                 title: "Ember".into(),
-                year: Some(1995)
+                year: Some(1995),
+                source_directory: None,
             }
         );
     }
@@ -832,7 +877,8 @@ mod tests {
             movie("/m/HDR Nights (2024)/HDR Nights (2024).mkv"),
             ParsedMovie {
                 title: "HDR Nights".into(),
-                year: Some(2024)
+                year: Some(2024),
+                source_directory: Some(PathBuf::from("/m/HDR Nights (2024)")),
             }
         );
         // Still strips trailing cruft after real words.
@@ -840,7 +886,8 @@ mod tests {
             movie("/m/Vision.2020.1080p.BluRay.x264.mkv"),
             ParsedMovie {
                 title: "Vision".into(),
-                year: Some(2020)
+                year: Some(2020),
+                source_directory: None,
             }
         );
     }
@@ -851,7 +898,8 @@ mod tests {
             movie("/m/Some Home Video.mp4"),
             ParsedMovie {
                 title: "Some Home Video".into(),
-                year: None
+                year: None,
+                source_directory: None,
             }
         );
     }
@@ -866,7 +914,47 @@ mod tests {
                 season: 1,
                 episode: 3,
                 episode_title: Some("In Perpetuity".into()),
+                source_directory: Some(PathBuf::from("/tv/Severance (2022)")),
             })
+        );
+    }
+
+    #[test]
+    fn scan_identity_directory_context_is_direct_and_exact() {
+        let direct =
+            ep("/tv/Harbor_Lights%/Season 5/Harbor Lights S05E01.mkv").expect("direct episode");
+        assert_eq!(
+            direct.source_directory,
+            Some(PathBuf::from("/tv/Harbor_Lights%"))
+        );
+
+        let release = ep("/tv/Harbor Lights/Season 5/Harbor.Lights.S05E01.1080p/episode.mkv")
+            .expect("release-folder episode");
+        assert_eq!(release.source_directory, None);
+
+        let root_named_like_show = ep("/tv/Season 5/Root Show S05E01.mkv").expect("root episode");
+        assert_eq!(
+            root_named_like_show.source_directory,
+            Some(PathBuf::from("/tv")),
+            "the parser reports the shape; the scanner rejects a configured root as identity"
+        );
+
+        assert_eq!(
+            movie("/movies/Original Film (2024)/Original.Film.2160p.mkv").source_directory,
+            Some(PathBuf::from("/movies/Original Film (2024)"))
+        );
+        assert_eq!(
+            movie("/movies/Original Film (2024)/Other.Film.2024.mkv").source_directory,
+            None
+        );
+        assert_eq!(
+            movie("/movies/Original Film (2024)/Original.Film.2023.mkv").source_directory,
+            None
+        );
+        assert_eq!(
+            movie("/movies/Original Film (2024)/Original.Film.US.2024.mkv").source_directory,
+            None,
+            "region qualifiers are not erased to manufacture agreement"
         );
     }
 

@@ -1,6 +1,7 @@
 # Scan identity — prevent split items and preserve watch state
 
-**Status:** revised after Fable's changes-requested review; proposed, not built ·
+**Status:** M1 prevention built and fixture-verified on the effort; M2 hints and
+M3 repair remain unbuilt ·
 **Written:** 2026-09-19 · **Revised:** 2026-09-19 ·
 **Incident:** reference show S, season 5.
 
@@ -8,8 +9,10 @@ Companion to [Integration](../INTEGRATION.md) and the
 [targeted-scan API](../API.md#63-the-targeted-scan-seam). This document owns
 the root causes and revised fix proposal. It incorporates Fable's supplied
 review, replacing the first draft's source-claims schema and backfill with
-lookup through existing file ownership. Implementation and production repair
-have not run. Read §4–§7 as the proposed contract and §8 as review disposition.
+lookup through existing file ownership. M1 now preserves existing-path
+ownership and performs bounded directory lookup on both stores; the guarded
+hint and repair stages have not run, and no production repair is authorized.
+Read §4–§7 as the staged contract and §8 as review disposition.
 
 [Sol's implementation plan](SCAN-IDENTITY-IMPLEMENTATION.md) owns the detailed
 task order, parser rules, store/API interfaces, test commands and release

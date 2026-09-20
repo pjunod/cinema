@@ -815,6 +815,85 @@ pub struct MissingVideoCodecTag {
     pub probe_json: String,
 }
 
+/// Lexical file-path range for a canonical directory, using the separator
+/// already present in the stored representation. The upper bound is the
+/// successor of the trailing separator: `/` becomes `0`, while `\` becomes
+/// `]`. This keeps the lookup indexable without treating SQL LIKE metacharacters
+/// or path case as special.
+pub(crate) fn directory_path_bounds(directory: &str) -> Result<(String, String), StoreError> {
+    let trimmed = normalized_directory(directory)?;
+    let separator = if trimmed.contains('/') { '/' } else { '\\' };
+    let lower = format!("{trimmed}{separator}");
+    let mut upper = trimmed.to_owned();
+    upper.push(match separator {
+        '/' => '0',
+        '\\' => ']',
+        _ => unreachable!("path separator is fixed above"),
+    });
+    Ok((lower, upper))
+}
+
+pub(crate) fn normalized_directory(directory: &str) -> Result<&str, StoreError> {
+    let separator = if directory.contains('/') {
+        '/'
+    } else if directory.contains('\\') {
+        '\\'
+    } else {
+        return Err(StoreError::Database(format!(
+            "invalid canonical directory prefix `{directory}`"
+        )));
+    };
+    // Trim only the stored path's separator. A backslash is a valid POSIX
+    // filename character and must not be silently erased from that identity.
+    let trimmed = directory.trim_end_matches(separator);
+    if trimmed.is_empty() || (!trimmed.contains('/') && !trimmed.contains('\\')) {
+        return Err(StoreError::Database(format!(
+            "invalid canonical directory prefix `{directory}`"
+        )));
+    }
+    Ok(trimmed)
+}
+
+pub(crate) fn directory_matches_show_path(path: &str, directory: &str) -> bool {
+    let path = std::path::Path::new(path);
+    crate::scan::parse::parse_episode(path)
+        .or_else(|_| crate::scan::parse::parse_anime_episode(path))
+        .ok()
+        .and_then(|parsed| parsed.source_directory)
+        .is_some_and(|candidate| candidate.to_string_lossy() == directory)
+}
+
+pub(crate) fn directory_matches_movie_path(path: &str, directory: &str) -> bool {
+    crate::scan::parse::parse_movie(std::path::Path::new(path))
+        .source_directory
+        .is_some_and(|candidate| candidate.to_string_lossy() == directory)
+}
+
+#[cfg(test)]
+mod scan_identity_path_tests {
+    use super::directory_path_bounds;
+
+    #[test]
+    fn scan_identity_directory_bounds_follow_the_stored_separator() {
+        assert_eq!(
+            directory_path_bounds("/media/Show_Name%/ ").expect("posix bounds"),
+            (
+                "/media/Show_Name%/ /".to_owned(),
+                "/media/Show_Name%/ 0".to_owned()
+            )
+        );
+        assert_eq!(
+            directory_path_bounds(r"C:\media\Show_Name%\").expect("windows bounds"),
+            (
+                r"C:\media\Show_Name%\".to_owned(),
+                r"C:\media\Show_Name%]".to_owned()
+            )
+        );
+        assert!(directory_path_bounds("").is_err());
+        assert!(directory_path_bounds("relative").is_err());
+    }
+}
+
 /// One bounded aggregate read for Store-backed Prometheus gauges.
 ///
 /// Keeping this as one Store primitive lets a replicated backend pay for one
@@ -2385,6 +2464,11 @@ pub trait MediaStore: Send + Sync + 'static {
         title: &str,
         year: Option<i32>,
     ) -> Result<Option<Item>, StoreError>;
+    async fn find_movies_by_directory(
+        &self,
+        library_id: i64,
+        directory: &str,
+    ) -> Result<Vec<Item>, StoreError>;
     async fn find_book(
         &self,
         library_id: i64,
@@ -2399,6 +2483,15 @@ pub trait MediaStore: Send + Sync + 'static {
         title: &str,
         year: Option<i32>,
     ) -> Result<Option<Item>, StoreError>;
+    /// Directory candidates ordered with an owner of `season_number` first,
+    /// then by `(added_at, id)`. Carrying the incoming season into this query
+    /// avoids one catalogue round trip per duplicate show.
+    async fn find_shows_by_directory(
+        &self,
+        library_id: i64,
+        directory: &str,
+        season_number: i32,
+    ) -> Result<Vec<Item>, StoreError>;
     async fn find_season(
         &self,
         show_id: i64,

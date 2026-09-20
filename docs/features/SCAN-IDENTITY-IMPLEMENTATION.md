@@ -1,6 +1,7 @@
 # Scan identity — Sol's build contract for ownership, matching and repair
 
-**Status:** ready for implementation; no code built or production repair run ·
+**Status:** M1 ownership prevention built and fixture-verified; M2/M3 open;
+no production repair run ·
 **Executes:** the revised [root-cause and fix proposal](SHOW-IDENTITY-SPLIT-RCA-AND-FIX.md)
 after Fable's changes-requested review · **Written:** 2026-09-19 ·
 **Implementer:** Sol.
@@ -768,8 +769,8 @@ on the effort; add exact SHA/PR/evidence links as they exist:
 
 | Milestone | State at handoff | Required evidence |
 |---|---|---|
-| M0 compiler/base/failures | not started | SHA, Rust 1.97.1, old failures and passing control. |
-| M1 ownership/directory lookup | not started | Scanner plus SQLite/Hiqlite contracts, movie/path cases. |
+| M0 compiler/base/failures | complete | Base `535f95d2`, Rust 1.97.1, three old-behavior failures and passing control. |
+| M1 ownership/directory lookup | implementation complete | Scanner plus SQLite/three-voter Hiqlite contracts, movie/path cases and daemon queue/full-scan case pass; task PR pending. |
 | M2 guarded hints | not started | Both backend CAS behavior and queued import tests. |
 | M3 repair | not started | API/transaction/reference/retry tests and sanitized fixture preview. |
 | Final review/qualification | not started | Adversarial review disposition and exact-candidate gates/receipt. |

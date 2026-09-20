@@ -16,8 +16,9 @@ use crate::domain::{
 use crate::error::StoreError;
 use crate::mediafacts::{FactsRow, MediaFacts};
 use crate::store::{
-    ArtworkInventoryItem, ArtworkRepairFence, MediaStore, MissingVideoCodecTag, ReconcileOutcome,
-    RootFingerprintStatus, TOP_LEVEL_ITEM_PREDICATE,
+    directory_matches_movie_path, directory_matches_show_path, directory_path_bounds,
+    normalized_directory, ArtworkInventoryItem, ArtworkRepairFence, MediaStore,
+    MissingVideoCodecTag, ReconcileOutcome, RootFingerprintStatus, TOP_LEVEL_ITEM_PREDICATE,
 };
 
 /// Build an FTS5 MATCH expression from free text: quoted tokens, prefix
@@ -116,6 +117,38 @@ impl MediaStore for SqliteStore {
         .await
     }
 
+    async fn find_movies_by_directory(
+        &self,
+        library_id: i64,
+        directory: &str,
+    ) -> Result<Vec<Item>, StoreError> {
+        let directory = normalized_directory(directory)?.to_owned();
+        let (lower, upper) = directory_path_bounds(&directory)?;
+        self.with_conn(move |conn| {
+            let item_columns = item_cols("movie");
+            let mut statement = conn.prepare(&format!(
+                "SELECT f.path, {item_columns}
+                 FROM files f INDEXED BY sqlite_autoindex_files_1
+                 JOIN items movie ON movie.id = f.item_id AND movie.kind = 'movie'
+                 WHERE f.path >= ?1 AND f.path < ?2
+                   AND movie.library_id = ?3"
+            ))?;
+            let mut candidates = HashMap::<i64, Item>::new();
+            for row in statement.query_map(params![lower, upper, library_id], |row| {
+                Ok((row.get::<_, String>(0)?, item_from_row(row, 1)?))
+            })? {
+                let (path, item) = row?;
+                if directory_matches_movie_path(&path, &directory) {
+                    candidates.entry(item.id).or_insert(item);
+                }
+            }
+            let mut candidates = candidates.into_values().collect::<Vec<_>>();
+            candidates.sort_by_key(|item| (item.added_at, item.id));
+            Ok(candidates)
+        })
+        .await
+    }
+
     async fn find_book(
         &self,
         library_id: i64,
@@ -168,6 +201,58 @@ impl MediaStore for SqliteStore {
                 ),
                 params![library_id, title, year],
             )?)
+        })
+        .await
+    }
+
+    async fn find_shows_by_directory(
+        &self,
+        library_id: i64,
+        directory: &str,
+        season_number: i32,
+    ) -> Result<Vec<Item>, StoreError> {
+        let directory = normalized_directory(directory)?.to_owned();
+        let (lower, upper) = directory_path_bounds(&directory)?;
+        self.with_conn(move |conn| {
+            let item_columns = item_cols("show");
+            let mut statement = conn.prepare(&format!(
+                "SELECT f.path,
+                        EXISTS(SELECT 1 FROM items owned
+                               WHERE owned.parent_id = show.id
+                                 AND owned.kind = 'season'
+                                 AND owned.library_id = ?3
+                                 AND owned.season_number = ?4),
+                        {item_columns}
+                 FROM files f INDEXED BY sqlite_autoindex_files_1
+                 JOIN items episode ON episode.id = f.item_id AND episode.kind = 'episode'
+                 JOIN items season ON season.id = episode.parent_id AND season.kind = 'season'
+                 JOIN items show ON show.id = season.parent_id AND show.kind = 'show'
+                 WHERE f.path >= ?1 AND f.path < ?2
+                   AND episode.library_id = ?3
+                   AND season.library_id = ?3
+                   AND show.library_id = ?3"
+            ))?;
+            let mut candidates = HashMap::<i64, (Item, bool)>::new();
+            for row in
+                statement.query_map(params![lower, upper, library_id, season_number], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        item_from_row(row, 2)?,
+                    ))
+                })?
+            {
+                let (path, owns_season, item) = row?;
+                if directory_matches_show_path(&path, &directory) {
+                    candidates
+                        .entry(item.id)
+                        .and_modify(|(_, owns)| *owns |= owns_season)
+                        .or_insert((item, owns_season));
+                }
+            }
+            let mut candidates = candidates.into_values().collect::<Vec<_>>();
+            candidates.sort_by_key(|(item, owns)| (!*owns, item.added_at, item.id));
+            Ok(candidates.into_iter().map(|(item, _)| item).collect())
         })
         .await
     }
@@ -1949,6 +2034,43 @@ mod tests {
         NewLibrary, ProbeResult,
     };
     use crate::store::{LibraryStore, MediaStore, SqliteStore};
+
+    #[tokio::test]
+    async fn scan_identity_directory_lookup_uses_the_path_range_index() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        store
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "EXPLAIN QUERY PLAN
+                     SELECT show.id
+                     FROM files f INDEXED BY sqlite_autoindex_files_1
+                     JOIN items episode ON episode.id = f.item_id AND episode.kind = 'episode'
+                     JOIN items season ON season.id = episode.parent_id AND season.kind = 'season'
+                     JOIN items show ON show.id = season.parent_id AND show.kind = 'show'
+                     WHERE f.path >= ?1 AND f.path < ?2
+                       AND episode.library_id = ?3
+                       AND season.library_id = ?3
+                       AND show.library_id = ?3",
+                )?;
+                let details = statement
+                    .query_map(
+                        rusqlite::params!["/media/Show/", "/media/Show0", 1],
+                        |row| row.get::<_, String>(3),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                assert!(
+                    details.iter().any(|detail| {
+                        detail.contains("sqlite_autoindex_files_1")
+                            && detail.contains("path>?")
+                            && detail.contains("path<?")
+                    }),
+                    "query plan must use the bounded path index: {details:?}"
+                );
+                Ok(())
+            })
+            .await
+            .expect("query plan");
+    }
 
     /// One item, two versions: the 2160p Dolby Vision remux and the 720p copy
     /// someone kept for a phone. The block must read as the library actually
