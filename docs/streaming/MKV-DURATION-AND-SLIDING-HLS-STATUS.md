@@ -23,7 +23,7 @@ operator decision.
 | W2b publication clock | qualified | Publication, playback-rate pacing, typed capacity, pause, fetch-stopped, replacement, and EOF cases pass | Preserve actor-owned publication timing |
 | W3 object promises | qualified | Rolling-session retention and object-promise regressions pass, including grace ownership and hard-cap accounting | Preserve immutable served snapshots |
 | W4 diagnostics/clients | qualified for affected surfaces | Rust serialization/reservation tests, the full web lane, Android build/JVM/lint, Apple compilation, and the three changed Apple tests pass. Developer enablement remains advisory | Broad Apple-suite failures stay with the separate unit-failure batching process |
-| W5 review/qualification | PR #377 open; promotion gate pending | The single adversarial review's four findings are fixed. Candidate `063a638d` passes the affected fast lane; current `main` is integrated and the changed mobile release counters are claimed | Compile and policy-check the reconciled tree, then wait for its promotion gate and merge |
+| W5 review/qualification | PR #377 open; promotion gate pending | The single adversarial review's four findings are fixed. Candidate `063a638d` passes the affected fast lane; `e0b68578` integrates current `main`, claims Apple build 171 and Android versionCode 108, and passes exact-tree compile/static policy | Wait for the current PR head's promotion gate, then merge |
 
 ## Working decisions — defaults remain visible
 
@@ -67,6 +67,8 @@ operator decision.
 | 2026-09-19 | `063a638d` | `make apple-test` | 644 ran with 88 broad-suite failures from the current client refactor; retained for the separate unit-failure batching process, not expanded into this feature PR |
 | 2026-09-19 | `063a638d` | `make android` | passed in the pinned Android image; debug APK built |
 | 2026-09-19 | `063a638d` | `make android-test` | passed; JVM unit tests and `lintDebug` green |
+| 2026-09-19 | `e0b68578` | `rustup run 1.97.1 cargo fmt --all -- --check`, `cargo check -p plurxd --all-targets --locked`, and `cargo clippy -p plurxd --all-targets --locked -- -D warnings` | passed on the tree reconciled with `535f95d2`; Clippy first exposed one boolean assertion from the incoming main changes, corrected in `e0b68578`, then passed |
+| 2026-09-19 | `e0b68578` | `scripts/js-check`, changed-from `validation.mobile_versions`, `validation.apple_build --merge-target origin/main`, and `git diff --check` | passed; Apple build 171 and Android versionCode 108 exceed the current merge target and all generated Apple claims agree |
 
 The affected behavioral lane is complete. No zero-match command is counted as
 acceptance; the first combined Apple command matched two tests because one
