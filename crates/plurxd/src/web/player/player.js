@@ -563,9 +563,11 @@ function attachHls(video, playlistUrl, startAt){
       ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
       ...(StockLoader?{loader:createHlsStartupLoader(StockLoader,startup)}:{}),
       manifestLoadPolicy:PlaybackPolicy.HLS_STARTUP.manifest_load_policy,
-      // Every HLS session is VOD. The old growing-playlist path is not an
-      // alternate response, so every fragment fetch uses the measured VOD
-      // materialization contract from its first request.
+      // HLS may be immutable VOD or the bounded sliding recovery presentation.
+      // Both use the same finite fragment retry budget: rolling publication
+      // advertises only completed objects and keeps removed URLs readable
+      // through Grace, so an unbounded client retry would hide a real terminal
+      // retirement rather than make a late object safer.
       fragLoadPolicy:vodClientContract().fragLoadPolicy,
       // Told before the first fragment loads, not seeked afterwards. Seeking
       // after attach downloads the opening of the film and throws it away —
@@ -611,6 +613,20 @@ function attachHls(video, playlistUrl, startAt){
       if(observesCurrent()) startup.manifestState='loaded';
     });
     resetPlaybackTransportEvents(video);
+    // A subtitle chosen before the rendition list arrived is dropped on the
+    // floor: `hls.subtitleTrack = n` with no tracks yet sets nothing, and
+    // nothing re-applies it. That is one of the ways a viewer selects a
+    // subtitle, sees no error, and gets no cues — and it is most likely on
+    // the pre-play selection, which is applied at the moment the session
+    // opens. Re-apply on the edge where the list becomes real.
+    if(Hls.Events.SUBTITLE_TRACKS_UPDATED) hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED,()=>{
+      if(!observesCurrent()) return;
+      const p=attachedPlayer;
+      if(!p||p.burnedSub!=null||!(p.curSub>=0)) return;
+      const ordinal=nativeHlsSubtitleOrdinal(p,p.curSub);
+      if(ordinal<0) return;
+      try{ if(hls.subtitleTrack!==ordinal) hls.subtitleTrack=ordinal; }catch(err){}
+    });
     hls.on(Hls.Events.MANIFEST_PARSED,()=>{
       if(observesCurrent()) startup.manifestState='parsed';
       // A newer native seek still belongs to this attachment. It must not
@@ -858,4 +874,3 @@ function attachHls(video, playlistUrl, startAt){
     applyPlaybackTransportIntent(video,attachedPlayer);
   }
 }
-

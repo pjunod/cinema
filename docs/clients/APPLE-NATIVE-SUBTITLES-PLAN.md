@@ -606,18 +606,22 @@ compliance item). One change per deploy, device-observed, exactly like the
 rest of the ladder. Unit tests prove syntax; only Bedroom proves
 acceptance.
 
-Both rungs are **built and off by default** as of 2026-08-02, each behind an
-environment variable an operator sets per deploy:
-`PLURX_HLS_CLOSED_CAPTIONS_NONE=1` and `PLURX_HLS_FORCED_AUTOSELECT=1`. They
-are read once at startup (`MasterRungs::active`), because a master that
-changed shape between two fetches of the same session would be a worse
-problem than either rung solves. The default-off behavior is pinned by
-`ladder_rungs_are_inert_until_an_operator_lights_them`.
-Enabling both at once forfeits the experiment:
-a master that then plays does not say which change did it. Operator-facing
-description lives in [OPERATIONS.md](../OPERATIONS.md#the-two-hls-master-experiments).
-Being compiled in is not evidence of anything — neither rung has been enabled
-on a node or observed on a device.
+`CLOSED-CAPTIONS=NONE` **stopped being a rung on 2026-09-19** and now ships on
+every variant. None of these variants carries a caption track, so saying so is
+correct authoring rather than a candidate — and the rung had spent weeks off,
+which is not evidence about anything. A silent variant lets AVFoundation and
+ExoPlayer both synthesise a phantom CEA-608 option into the text group, which
+shifts every rendition ordinal beneath it; that is a candidate cause of the
+"selected, nothing shows" reports on both platforms, and it is now closed at
+the source.
+
+`PLURX_HLS_FORCED_AUTOSELECT=1` remains **built and off by default**, read once
+at startup (`MasterRungs::active`), because a master that changed shape between
+two fetches of the same session would be a worse problem than the rung solves.
+Operator-facing description lives in
+[OPERATIONS.md](../OPERATIONS.md#the-hls-master-experiment). Being compiled in
+is not evidence of anything — it has not been enabled on a node or observed on
+a device.
 
 **Acceptance:** the handoff's own bar, verbatim — Bedroom plays file 5615
 from the native master ≥ 60 s, seeks, resumes, no `-12927`, no

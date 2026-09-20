@@ -176,6 +176,15 @@ pub const COPY_FIRST_SEGMENT_SECONDS: u32 = 2;
 /// nothing.
 pub const COPY_SEGMENT_MAX_SECS: u32 = 15;
 
+/// Immutable `EXT-X-TARGETDURATION` for an unfinished rolling presentation.
+///
+/// [`COPY_SEGMENT_MAX_SECS`] remains the preferred place to cut. This is a
+/// separate hard presentation contract: every advertised `EXTINF` must fit it
+/// exactly, including a fragment that crosses the preferred cut and an
+/// audio-only tail at end of stream. Keeping the values separate prevents an
+/// unknown GOP from being treated as if it were the one-second difference.
+pub const ROLLING_PRESENTATION_TARGET_SECS: u32 = 16;
+
 /// Seconds of media that must exist before the first `index.m3u8` is
 /// published.
 ///

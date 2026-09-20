@@ -3145,6 +3145,7 @@ impl crate::store::FragmentIndexStore for HiqliteAuthStore {
         reason: &str,
         rows: u32,
         diagnostic: &crate::content_analysis::IndexDiagnostic,
+        max_attempts: u32,
     ) -> Result<crate::segplan::FragmentIndexOutcome, StoreError> {
         let now_ms = sidecar_unix_ms()?;
         self.telemetry
@@ -3157,6 +3158,7 @@ impl crate::store::FragmentIndexStore for HiqliteAuthStore {
                 rows,
                 diagnostic.clone(),
                 now_ms,
+                max_attempts,
             )
             .await
     }

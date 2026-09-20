@@ -1818,6 +1818,7 @@ struct AnalysisRetryPolicy {
     lease_ms: i64,
     backoff_base_ms: i64,
     backoff_max_ms: i64,
+    max_attempts: u32,
 }
 
 #[derive(Clone)]
@@ -1853,10 +1854,17 @@ impl AnalysisRetryPolicy {
         )
         .saturating_mul(1_000)
         .max(backoff_base_ms);
+        let max_attempts = u32::try_from(plurx_core::store::bounded_analysis_max_attempts(
+            settings
+                .get(keys::ANALYSIS_MAX_ATTEMPTS)
+                .map(String::as_str),
+        ))
+        .unwrap_or(u32::MAX);
         Self {
             lease_ms,
             backoff_base_ms,
             backoff_max_ms,
+            max_attempts,
         }
     }
 
@@ -6417,6 +6425,7 @@ impl JobManager {
         // restart heals it.
         let convert = transcode.dv_convert_enabled().await;
         let runtime_cache = transcode.runtime_cache_dir().to_path_buf();
+        let max_index_attempts = self.analysis_retry_policy().await.max_attempts;
         let libraries = match self.store.list_libraries().await {
             Ok(libraries) => libraries,
             Err(error) => {
@@ -6575,6 +6584,7 @@ impl JobManager {
                                 &failure.reason,
                                 rows,
                                 &failure.diagnostic,
+                                max_index_attempts,
                             )
                             .await
                         {
@@ -7722,6 +7732,7 @@ impl JobManager {
         file: &plurx_core::domain::MediaFile,
         video: plurx_core::transcode::CopyVideoOptions,
         failure: &crate::fragindex::IndexFailure,
+        max_attempts: u32,
     ) {
         let identity = crate::fragindex::identity_for(file, video);
         if let Err(error) = self
@@ -7734,6 +7745,7 @@ impl JobManager {
                 &failure.reason,
                 u32::try_from(failure.rows).unwrap_or(u32::MAX),
                 &failure.diagnostic,
+                max_attempts,
             )
             .await
         {
@@ -8316,8 +8328,13 @@ impl JobManager {
                     reason = %failure.reason,
                     "cluster fragment index failed"
                 );
-                self.record_local_index_failure(&file, video, &failure)
-                    .await;
+                self.record_local_index_failure(
+                    &file,
+                    video,
+                    &failure,
+                    worker.retry_policy.max_attempts,
+                )
+                .await;
                 let retired = retire_heartbeat(stop, heartbeat).await;
                 let now = clock_ms();
                 let code = failure.code.as_str().to_owned();

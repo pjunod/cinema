@@ -59,6 +59,7 @@ const BORROWED = [
   "activityStreamMeters",
   "activityStreamDetails",
   "activityStreamCell",
+  "activityWatchingHtml",
   // Live TV rows are drawn by the same painter and name their owner node
   // through the same roster map, so they are borrowed rather than stubbed.
   "liveTvActivityRows",
@@ -71,6 +72,7 @@ const BORROWED = [
 // asserts, so they are stubs — but `main` is real enough to read back.
 const PRELUDE = `
   let PAINTED = null;
+  let ACTIVITY_VIEWING_ID = null;
   // The painter reads the open disclosures back out of #main before it
   // repaints; a string-backed stand-in has none unless a test plants some.
   const main = { innerHTML: "", openStreams: [], querySelectorAll(){ return main.openStreams.map((key) => ({ dataset: { stream: key } })); } };
@@ -89,7 +91,7 @@ const painter = new Function(
   "return (function(){" +
     PRELUDE +
     BORROWED.map(shippedSource).join("\n") +
-    "\nreturn {paintActivityBody, main, nodeLabel};})()",
+    "\nreturn {paintActivityBody, main, nodeLabel, select:(key)=>{ACTIVITY_VIEWING_ID=key;}};})()",
 )(require("../../crates/plurxd/src/web/live-tv.js"));
 
 const NODE_A = "5deeeebc-8f39-4cb5-8e4a-aa5f912f327f";
@@ -144,7 +146,7 @@ test("the Node cell leads with the machine name and keeps the id under it", () =
   const html = paint(snapshot({ node_hostnames: { [NODE_A]: "lab3" } }));
   assert.match(
     html,
-    /<td><div class="nodename">lab3<\/div><div class="clid">5deeeebc-8f39-4cb5-8e4a-aa5f912f327f<\/div><\/td>/,
+    /<dd><div class="nodename">lab3<\/div><div class="clid">5deeeebc-8f39-4cb5-8e4a-aa5f912f327f<\/div><\/dd>/,
   );
   // The defect this file exists for: the id must not be the whole answer.
   assert.doesNotMatch(html, /<td><span class="clid">5deeeebc/);
@@ -164,24 +166,26 @@ test("a node the roster could not name keeps its id while its neighbours are nam
   d.deliveries.push(
     Object.assign({}, d.deliveries[0], { node_id: NODE_B, file_id: 2, user: "guest" }),
   );
+  painter.select(`delivery:${NODE_B}:7:${d.deliveries[1].started_unix}`);
   const html = paint(d);
-  assert.match(html, /<div class="nodename">lab3<\/div>/);
-  assert.match(html, /<td><span class="clid">9a1c77e2-0000-4000-8000-aa5f912f327f<\/span><\/td>/);
+  assert.match(html, /<span class="clid">9a1c77e2-0000-4000-8000-aa5f912f327f<\/span><\/dd>/);
+  assert.match(html, /data-activity-view="delivery:5deeeebc/,
+    "the named neighbour remains a selectable viewer card");
 });
 
-test("the Node column still appears on ids alone, and disappears without them", () => {
+test("the serving-node detail stays explicit with and without an id", () => {
   const withIds = paint(snapshot());
-  assert.match(withIds, /<th>Node<\/th>/);
+  assert.match(withIds, /<dt>Serving node<\/dt><dd><span class="clid">5deeeebc/);
   const d = snapshot();
   delete d.deliveries[0].node_id;
-  assert.doesNotMatch(paint(d), /<th>Node<\/th>/);
+  painter.select(`delivery::7:${d.deliveries[0].started_unix}`);
+  assert.match(paint(d), /<dt>Serving node<\/dt><dd><span class="clid">Unknown<\/span><\/dd>/);
 });
 
 test("a row with no node id at all is Unknown, not blank and not undefined", () => {
   const d = snapshot({ node_hostnames: { [NODE_A]: "lab3" } });
-  d.deliveries.push(
-    Object.assign({}, d.deliveries[0], { node_id: "", file_id: 3, user: "guest" }),
-  );
+  d.deliveries = [Object.assign({}, d.deliveries[0], { node_id: "", file_id: 3, user: "guest" })];
+  painter.select(`delivery::7:${d.deliveries[0].started_unix}`);
   const html = paint(d);
   assert.match(html, /<span class="clid">Unknown<\/span>/);
   assert.doesNotMatch(html, /undefined/);
@@ -345,7 +349,7 @@ function streaming(sessionOverrides, deliveryOverrides) {
 
 test("an active transcode leads with a state pill, a method line and named meters", () => {
   const html = paint(streaming());
-  assert.match(html, /<td class="stream-cell"><div class="stream-head"><span class="mode-chip live">Live HLS<\/span><span class="stream-state active">Active<\/span><span class="stream-method">Transcode <span class="sub">· 1080p · vaapi<\/span><\/span><\/div>/);
+  assert.match(html, /<div class="stream-head"><span class="mode-chip live">Live HLS<\/span><span class="stream-state active">Active<\/span><span class="stream-method">Transcode <span class="sub">· 1080p · vaapi<\/span><\/span><\/div>/);
   assert.match(html, /<span class="k">Position<\/span><span class="v">28:13<\/span>/);
   assert.match(html, /<div class="stream-meter "><span class="k">Server ahead<\/span><span class="v">61 s<\/span><\/div>/);
   assert.match(html, /<div class="stream-meter good"><span class="k">Demand window<\/span><span class="v">59 s<span class="of">of 73 s<\/span><\/span><span class="stream-bar" aria-hidden="true"><i style="width:81%"><\/i><\/span><\/div>/);
@@ -441,13 +445,12 @@ test("a direct play has a headline and a delivery meter and nothing invented", (
   const html = paint(snapshot({
     deliveries: [{ method: "direct", user: "operator", file_id: 1, item_id: 7, title: "Remux Me", started_unix: Math.floor(Date.now() / 1000) - 60, idle_seconds: 0, delivered_bytes: null, delivered_bps: null }],
   }));
-  assert.match(html, /<td class="stream-cell"><div class="stream-head"><span class="stream-method">Direct play<\/span><\/div><\/td>/);
+  assert.match(html, /<div class="stream-head"><span class="stream-method">Direct play<\/span><\/div>/);
   assert.doesNotMatch(html, /stream-state|stream-meters|stream-diag/);
   const remux = paint(snapshot({
     deliveries: [{ method: "remux", user: "operator", file_id: 1, item_id: 7, title: "Remux Me", started_unix: Math.floor(Date.now() / 1000) - 60, idle_seconds: 44, delivered_bytes: 1_048_576, delivered_bps: 38_200_000 }],
   }));
-  assert.match(remux, /<span class="stream-method">Remux<\/span><\/div><div class="stream-meters"><div class="stream-meter "><span class="k">Delivery rate<\/span><span class="v">38 Mb\/s<span class="of">1.0 MB<\/span><\/span><\/div><\/div><\/td>/);
-  assert.match(remux, /<div>idle 44s<\/div>/);
+  assert.match(remux, /<span class="stream-method">Remux<\/span><\/div><div class="stream-meters"><div class="stream-meter "><span class="k">Delivery rate<\/span><span class="v">38 Mb\/s<span class="of">1.0 MB<\/span><\/span><\/div><\/div>/);
   assert.doesNotMatch(remux, /stream-state|stream-diag/);
 });
 

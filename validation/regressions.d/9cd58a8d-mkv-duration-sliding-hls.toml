@@ -1,0 +1,30 @@
+version = 1
+
+[[coverage]]
+commits = ["9cd58a8d", "c1182fad", "ceb06689", "3224c98d", "f78a0344"]
+points = ["core.media", "playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci", "resource-bounds"]
+reason = """
+The retained MKV/sliding-HLS regressions bind these corrective commits to the
+production contracts they changed. The startup fixtures require two accepted,
+same-attempt Rendering observations with forward progress before spending the
+startup grant, reset evidence across seeks without renewing its deadline, and
+keep the first-playlist deadline one-shot. The diagnostic fixtures preserve a
+bounded future provenance string without granting completion authority and
+record typed outcomes in the telemetry sidecar after resolving retry policy
+outside its transaction. Both durable backends reopen only the exact terminal
+missing-duration JSON identity and keep malformed, nested-code, unrelated, and
+already-ready rows unchanged.
+
+The packet and copy-segmentation fixtures derive a selected-video timeline from
+bounded signed packet evidence, reject incomplete tails, freeze the rolling
+target duration, and refuse a segment even one tick above that ceiling across
+every rolling writer. The publication and object-promise fixtures scale runway
+and batch cadence by playback rate, bound paused and fetch-stopped sessions,
+publish immutable snapshots, retain retired objects through their half-open
+grace, charge the whole scratch directory, serialize reservations before
+spawn, and refuse stale generation operations. Together the named `mkv_hls`
+Rust group plus the focused copyseg/resource-bound cases fail if any of these
+five changes is removed while the current implementation remains compiled by
+both Rust gates.
+"""

@@ -217,7 +217,6 @@ Runbook, with the owner-move procedure: [OPERATIONS.md](OPERATIONS.md).
 | `PLURX_LOG` | `info` | `tracing` filter (e.g. `plurxd=debug`) |
 | `PLURX_SCAN_PRUNE_PERCENT` | `10` | Maximum percentage of known files one scan may delete; `0` disables automatic pruning |
 | `PLURX_CREDENTIAL_KEY_FILE` | `<data_dir>/credentials.key` | Key encrypting the stored Trakt credential — back it up with the database |
-| `PLURX_HLS_CLOSED_CAPTIONS_NONE` | off | Experiment: `CLOSED-CAPTIONS=NONE` on the HLS variant |
 | `PLURX_HLS_FORCED_AUTOSELECT` | off | Experiment: `AUTOSELECT=YES` on forced subtitle renditions |
 | `PLURX_PGS_OVERLAY` | off | **Seeds a setting; no longer a gate.** The switch is Settings → Developer (`subtitles.pgs_overlay`). Not a production rollout until device acceptance |
 
@@ -229,11 +228,11 @@ Settings → Developer:
 | `subtitles.pgs_overlay` | off | Draw PGS bitmaps in the client instead of burning them into the video |
 | `playback.subtitle_not_ready_503` | off | Answer `503` + `Retry-After` for a subtitle segment whose extraction has **failed**, instead of an empty WebVTT body the player keeps. A track that is merely warming is unaffected. Confirm on a device first that AVPlayer, Media3 and hls.js keep playing video through a subtitle refusal — the card's three rows say so and do not gate the switch |
 
-The last two are HLS master experiments, not settings: enable **one per
-deploy**, restart, and watch a real Apple TV — the device is the only thing
+`PLURX_HLS_FORCED_AUTOSELECT` is an HLS master experiment, not a setting:
+enable it, restart, and watch a real Apple TV — the device is the only thing
 that can accept or reject a master, and unit tests have passed for every
-master regression so far. Reasoning and the failure they target are in
-[OPERATIONS.md](OPERATIONS.md#the-two-hls-master-experiments).
+master regression so far. Reasoning and the failure it targets are in
+[OPERATIONS.md](OPERATIONS.md#the-hls-master-experiment).
 
 ## Reference — health & API surfaces
 

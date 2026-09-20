@@ -6040,6 +6040,20 @@ final class AppleClientTests: XCTestCase {
             {
                 "id": "session-17",
                 "progress_idle_ms": 11000,
+                "startup_state": "presented",
+                "presentation_progress_seen": true,
+                "produced_end_ms": 141000,
+                "served_end_ms": 125000,
+                "staged_bytes": 4096,
+                "playlist_target_ms": 16000,
+                "served_revision": 9,
+                "next_publication_in_ms": 4000,
+                "pause_grace_remaining_ms": 178000,
+                "retirement_reason": null,
+                "advertised_bytes": 7340032,
+                "grace_bytes": 1048576,
+                "reserved_bytes": 16777216,
+                "live_bytes": 8388608,
                 "published_end_ms": 125000,
                 "fetched_end_ms": 121000,
                 "fetched_segment": 60,
@@ -6056,6 +6070,20 @@ final class AppleClientTests: XCTestCase {
         )
 
         XCTAssertEqual(status.progressIdleMs, 11_000)
+        XCTAssertEqual(status.startupState, "presented")
+        XCTAssertEqual(status.presentationProgressSeen, true)
+        XCTAssertEqual(status.producedEndMs, 141_000)
+        XCTAssertEqual(status.servedEndMs, 125_000)
+        XCTAssertEqual(status.stagedBytes, 4_096)
+        XCTAssertEqual(status.playlistTargetMs, 16_000)
+        XCTAssertEqual(status.servedRevision, 9)
+        XCTAssertEqual(status.nextPublicationInMs, 4_000)
+        XCTAssertEqual(status.pauseGraceRemainingMs, 178_000)
+        XCTAssertNil(status.retirementReason)
+        XCTAssertEqual(status.advertisedBytes, 7_340_032)
+        XCTAssertEqual(status.graceBytes, 1_048_576)
+        XCTAssertEqual(status.reservedBytes, 16_777_216)
+        XCTAssertEqual(status.liveBytes, 8_388_608)
         XCTAssertEqual(status.publishedEndMs, 125_000)
         XCTAssertEqual(status.fetchedEndMs, 121_000)
         XCTAssertEqual(status.fetchedSegment, 60)
@@ -6574,26 +6602,27 @@ final class AppleClientTests: XCTestCase {
             ),
         ]
         let native = PlayerController.sessionSubtitleFields(
-            selected: 0, tracks: tracks, legacyBurn: false
-        )
+            selected: 0, tracks: tracks)
         XCTAssertEqual(native.native, 0, "the retry re-applies the native selection")
         XCTAssertNil(native.burn, "and never turns it into a burn")
 
         let bitmap = PlayerController.sessionSubtitleFields(
-            selected: 1, tracks: tracks, legacyBurn: false
-        )
+            selected: 1, tracks: tracks)
         XCTAssertEqual(bitmap.burn, 1)
         XCTAssertNil(bitmap.native)
 
-        let legacy = PlayerController.sessionSubtitleFields(
-            selected: 0, tracks: tracks, legacyBurn: true
-        )
-        XCTAssertEqual(legacy.burn, 0, "only a legacy server burns a text track")
-        XCTAssertNil(legacy.native)
+        // There is no legacy arm left. A text track is a rendition on every
+        // server this build can talk to, and the fallback that turned one into
+        // a burn rested on evidence a failed master parse produces too: "this
+        // create response carried no native query and this asset advertised no
+        // subtitle group" meant "old server" only while old servers existed.
+        let again = PlayerController.sessionSubtitleFields(
+            selected: 0, tracks: tracks)
+        XCTAssertEqual(again.native, 0, "a text track is never turned into a burn")
+        XCTAssertNil(again.burn)
 
         let off = PlayerController.sessionSubtitleFields(
-            selected: nil, tracks: tracks, legacyBurn: true
-        )
+            selected: nil, tracks: tracks)
         XCTAssertNil(off.burn)
         XCTAssertNil(off.native)
     }
@@ -6712,64 +6741,11 @@ final class AppleClientTests: XCTestCase {
         // The session that boundary creates carries the native fields, never
         // a burn — that is what makes the one reopen worth paying.
         let fields = PlayerController.sessionSubtitleFields(
-            selected: 0, tracks: tracks, legacyBurn: false
-        )
+            selected: 0, tracks: tracks)
         XCTAssertEqual(fields.native, 0)
         XCTAssertNil(fields.burn)
     }
 
-    @MainActor
-    func testLegacyBurnFallbackIsGatedOnAServerWithoutNativeSubtitles() {
-        // Every combination, because this gate is the guardrail against
-        // sending `subtitle_burn` for a track a current server calls native.
-        XCTAssertTrue(PlayerController.serverIsLegacy(
-            servesNative: false, hasSubtitleOptions: false, isDirect: false
-        ))
-        XCTAssertFalse(
-            PlayerController.serverIsLegacy(
-                servesNative: true, hasSubtitleOptions: false, isDirect: false
-            ),
-            "a server that answered with a native master is never legacy, "
-                + "however the selection failed"
-        )
-        XCTAssertFalse(PlayerController.serverIsLegacy(
-            servesNative: true, hasSubtitleOptions: true, isDirect: false
-        ))
-        XCTAssertFalse(
-            PlayerController.serverIsLegacy(
-                servesNative: false, hasSubtitleOptions: true, isDirect: false
-            ),
-            "renditions exist, so the master is current and the option lookup lost"
-        )
-        XCTAssertFalse(
-            PlayerController.serverIsLegacy(
-                servesNative: false, hasSubtitleOptions: false, isDirect: true
-            ),
-            "direct play has no create response to have judged"
-        )
-        XCTAssertFalse(PlayerController.serverIsLegacy(
-            servesNative: true, hasSubtitleOptions: false, isDirect: true
-        ))
-        XCTAssertFalse(PlayerController.serverIsLegacy(
-            servesNative: false, hasSubtitleOptions: true, isDirect: true
-        ))
-        XCTAssertFalse(PlayerController.serverIsLegacy(
-            servesNative: true, hasSubtitleOptions: true, isDirect: true
-        ))
-
-        XCTAssertTrue(PlayerController.playlistAdvertisesNativeSubtitles(
-            "/api/v1/hls/2f9c/index.m3u8?native=1&subtitle=2"
-        ))
-        XCTAssertTrue(PlayerController.playlistAdvertisesNativeSubtitles(
-            "http://media-box:32400/api/v1/hls/2f9c/index.m3u8?native=1"
-        ))
-        XCTAssertFalse(PlayerController.playlistAdvertisesNativeSubtitles(
-            "/api/v1/hls/2f9c/index.m3u8"
-        ))
-        XCTAssertFalse(PlayerController.playlistAdvertisesNativeSubtitles(
-            "/api/v1/hls/2f9c/index.m3u8?native=0"
-        ))
-    }
 
     @MainActor
     func testNativeSubtitleSwitchingUsesAVPlayerMediaSelectionWithoutAStreamReopen() {
@@ -7506,18 +7482,12 @@ final class AppleClientTests: XCTestCase {
         XCTAssertEqual(json["copy"] as? Bool, true)
     }
 
-    func testSubtitleBurnAcknowledgesOnlyAnAlreadySDRPlan() throws {
-        XCTAssertEqual(
-            PlayerController.subtitleBurnSDRAcknowledgement(2, deliveredRange: "sdr"),
-            true
-        )
-        XCTAssertNil(
-            PlayerController.subtitleBurnSDRAcknowledgement(2, deliveredRange: "hdr10")
-        )
-        XCTAssertNil(
-            PlayerController.subtitleBurnSDRAcknowledgement(nil, deliveredRange: "sdr")
-        )
-
+    /// The field still serialises for a server that reads it, and this build
+    /// no longer computes one. The server decides the grade a session would
+    /// deliver without the burn and judges the burn against that; a client's
+    /// claim about the grade was never evidence, and this client computed its
+    /// claim from the decision's range rather than the session's anyway.
+    func testSubtitleBurnAcknowledgementIsWireOnlyAndNeverComputed() throws {
         let request = CreateSessionRequest(
             playbackId: "player-sdr-burn",
             subtitleBurn: 2,
@@ -10936,9 +10906,7 @@ final class AppleClientTests: XCTestCase {
         ))
         let fields = PlayerController.sessionSubtitleFields(
             selected: 0,
-            tracks: tracks,
-            legacyBurn: true
-        )
+            tracks: tracks)
         XCTAssertNil(fields.burn)
         XCTAssertNil(fields.native)
         XCTAssertEqual(

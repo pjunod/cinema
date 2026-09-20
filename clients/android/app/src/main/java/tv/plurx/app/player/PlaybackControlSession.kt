@@ -393,6 +393,8 @@ class PlaybackControlSession(
         observe: () -> PlayerControlObservation?,
         transport: PlaybackControlTransport = PlaybackControlTransport(Session.origin),
         onSubtitleReady: () -> Unit = {},
+        /** The server has given up on the selected track, not merely not got to it. */
+        onSubtitleUnavailable: () -> Unit = {},
         onPrepare: (ControlAction) -> Unit = {},
         onAcknowledged: (ActionAcknowledgement) -> Unit = {},
         /** The reporter stopped for good. A fact to record, never a surface. */
@@ -420,6 +422,7 @@ class PlaybackControlSession(
         }
         val leaseMs = bootstrap.leaseTimeoutMs
         val subtitleReadiness = SubtitleReadinessRetryState()
+        val subtitleUnavailable = SubtitleUnavailableNoticeState()
         publish()
         val subject = PlaybackControlReporter.create(
             bootstrap = bootstrap,
@@ -455,6 +458,14 @@ class PlaybackControlSession(
                         answerRequestSequence = exchange.request.sequence
                         answerPreparation = exchange.response?.delivery?.preparation
                     }
+                }
+                // A memoised extraction failure is not "warming". Telling the
+                // viewer nothing leaves them watching a track that is selected
+                // and will never fill in.
+                if (exchange.capture.hasSameIntent(latest.get()) &&
+                    subtitleUnavailable.record(exchange.response?.delivery?.subtitleReadiness)
+                ) {
+                    onSubtitleUnavailable()
                 }
                 if (exchange.capture.hasSameIntent(latest.get()) && subtitleReadiness.record(
                         exchange.response?.delivery?.subtitleReadiness, commitReady = false,

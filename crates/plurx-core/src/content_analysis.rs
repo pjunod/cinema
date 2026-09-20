@@ -21,6 +21,18 @@ pub enum CompletionProvenance {
     StreamTicks,
     StreamSeconds,
     MatroskaDurationTag,
+    PacketTimeline,
+}
+
+impl CompletionProvenance {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::StreamTicks => "stream_ticks",
+            Self::StreamSeconds => "stream_seconds",
+            Self::MatroskaDurationTag => "matroska_duration_tag",
+            Self::PacketTimeline => "packet_timeline",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +42,13 @@ pub struct VideoCompletionExpectation {
     pub duration_den: u64,
     pub provenance: CompletionProvenance,
     pub source_object_version: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CompletionCoverage {
+    Complete,
+    Short,
+    Excess,
 }
 
 impl VideoCompletionExpectation {
@@ -64,6 +83,46 @@ impl VideoCompletionExpectation {
             .checked_mul(scale)
             .ok_or("expectation arithmetic overflow")?;
         Ok(left >= right)
+    }
+
+    /// Compare normalized index coverage with the selected-video authority.
+    /// Metadata proves only a lower bound; a packet-derived endpoint is
+    /// symmetric because output beyond that proved EOF is unverified too.
+    pub fn coverage(
+        &self,
+        covered_ticks: u64,
+        scale: u32,
+    ) -> Result<CompletionCoverage, &'static str> {
+        if self.provenance != CompletionProvenance::PacketTimeline {
+            return self.covers(covered_ticks, scale).map(|covers| {
+                if covers {
+                    CompletionCoverage::Complete
+                } else {
+                    CompletionCoverage::Short
+                }
+            });
+        }
+        self.validate()?;
+        if scale == 0 {
+            return Err("index timescale is zero");
+        }
+        let covered = u128::from(covered_ticks)
+            .checked_mul(u128::from(self.duration_den))
+            .ok_or("coverage arithmetic overflow")?;
+        let expected = u128::from(self.duration_num)
+            .checked_mul(u128::from(scale))
+            .ok_or("expectation arithmetic overflow")?;
+        let tolerance = u128::from(scale)
+            .checked_mul(u128::from(self.duration_den))
+            .and_then(|value| value.checked_mul(2))
+            .ok_or("coverage arithmetic overflow")?;
+        if covered.abs_diff(expected) <= tolerance {
+            Ok(CompletionCoverage::Complete)
+        } else if covered < expected {
+            Ok(CompletionCoverage::Short)
+        } else {
+            Ok(CompletionCoverage::Excess)
+        }
     }
 
     pub fn duration_ms_floor(&self) -> Option<i64> {
@@ -131,7 +190,10 @@ pub struct IndexDiagnostic {
     pub claim_fence: i64,
     pub attempt: i64,
     pub selected_stream: Option<u32>,
-    pub expectation_provenance: Option<CompletionProvenance>,
+    /// Informational provenance retained even when a newer writer adds a
+    /// value this reader does not understand. Completion authority continues
+    /// to use the strict [`CompletionProvenance`] enum separately.
+    pub expectation_provenance: Option<String>,
     pub covered_ms: Option<i64>,
     pub expected_ms: Option<i64>,
     pub container_ms: Option<i64>,
@@ -291,6 +353,25 @@ mod tests {
     }
 
     #[test]
+    fn mkv_hls_packet_completion_is_symmetric_at_two_seconds() {
+        let mut packet = expectation(12);
+        packet.provenance = CompletionProvenance::PacketTimeline;
+        assert_eq!(
+            packet.coverage(10_000, 1_000),
+            Ok(CompletionCoverage::Complete)
+        );
+        assert_eq!(
+            packet.coverage(14_000, 1_000),
+            Ok(CompletionCoverage::Complete)
+        );
+        assert_eq!(packet.coverage(9_999, 1_000), Ok(CompletionCoverage::Short));
+        assert_eq!(
+            packet.coverage(14_001, 1_000),
+            Ok(CompletionCoverage::Excess)
+        );
+    }
+
+    #[test]
     fn content_analysis_retry_deadline_is_fixed_and_finite() {
         let first = index_retry_decision(
             IndexFailureCode::IndexBudgetExceeded,
@@ -347,5 +428,35 @@ mod tests {
         assert!(encoded.len() <= MAX_INDEX_DIAGNOSTIC_BYTES);
         let decoded = IndexDiagnostic::decode_bounded(&encoded).expect("decoded diagnostic");
         assert!(!decoded.stderr_tail.is_empty());
+    }
+
+    #[test]
+    fn mkv_hls_diagnostic_keeps_unknown_future_provenance() {
+        let encoded = serde_json::json!({
+            "version": 1,
+            "code": "index_completion_unverified",
+            "retryable": false,
+            "claim_fence": 7,
+            "attempt": 2,
+            "selected_stream": 3,
+            "expectation_provenance": "future_packet_clock_v2",
+            "covered_ms": 10_000,
+            "expected_ms": 12_000,
+            "container_ms": null,
+            "fragment_count": 4,
+            "output_bytes": 512,
+            "elapsed_ms": 30,
+            "budget_ms": 1_000,
+            "exit_category": "unverified",
+            "stderr_tail": [],
+            "recorded_at_ms": 100
+        })
+        .to_string();
+        let decoded = IndexDiagnostic::decode_bounded(&encoded)
+            .expect("an unknown informational provenance does not erase the diagnostic");
+        assert_eq!(
+            decoded.expectation_provenance.as_deref(),
+            Some("future_packet_clock_v2")
+        );
     }
 }

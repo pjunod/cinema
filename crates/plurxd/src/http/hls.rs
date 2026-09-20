@@ -7043,6 +7043,18 @@ async fn control_local_with_settlement_capacity(
                 None,
             );
         }
+        Some(Err(crate::playback_control::ControlStateError::PauseExpired)) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
+            return control_error(
+                StatusCode::GONE,
+                "pause_grace_expired",
+                "the paused rolling presentation reached its finite grace; resume may open one replacement at the saved position",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                None,
+                None,
+            );
+        }
         Some(Err(crate::playback_control::ControlStateError::OwnerTransition)) => {
             crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
             return control_error(
@@ -10361,7 +10373,8 @@ fn playlist_error(session: &str, err: PlaylistError) -> ApiError {
         PlaylistError::StartupTimedOut(_) => StatusCode::SERVICE_UNAVAILABLE,
         PlaylistError::ProducerExited(_)
         | PlaylistError::ProducerEnded(_)
-        | PlaylistError::SessionFailed(_) => StatusCode::BAD_GATEWAY,
+        | PlaylistError::SessionFailed(_)
+        | PlaylistError::InsufficientCapacity(_) => StatusCode::BAD_GATEWAY,
     };
     tracing::warn!(
         session = %crate::transcode::session_log_id(session),
@@ -12215,10 +12228,6 @@ fn unique_subtitle_names(native: &[(usize, &SubtitleStream)]) -> Vec<String> {
 /// build. Once a rung is accepted, delete the flag and make it unconditional.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct MasterRungs {
-    /// `CLOSED-CAPTIONS=NONE` on the variant. Apple's authoring rules ask for
-    /// it, and it also stops AVFoundation synthesising a phantom
-    /// closed-caption option into the `.legible` group.
-    closed_captions_none: bool,
     /// `AUTOSELECT=YES` on forced renditions, which Apple's authoring rules
     /// require and this master currently withholds when two forced tracks
     /// share a language.
@@ -12241,7 +12250,6 @@ impl MasterRungs {
     fn active() -> Self {
         static ACTIVE: std::sync::OnceLock<MasterRungs> = std::sync::OnceLock::new();
         *ACTIVE.get_or_init(|| MasterRungs {
-            closed_captions_none: Self::enabled("PLURX_HLS_CLOSED_CAPTIONS_NONE"),
             forced_autoselect: Self::enabled("PLURX_HLS_FORCED_AUTOSELECT"),
         })
     }
@@ -12451,15 +12459,17 @@ fn master_playlist_with_shape(
             }
         }
     }
-    // Ladder rung: the variant carries no CLOSED-CAPTIONS attribute, and
+    // Unconditional. None of these variants carries a caption track, and
     // Apple's authoring rules say a variant with no captions must say so.
-    // Absent it, AVFoundation is entitled to synthesise a phantom
-    // closed-caption option into the `.legible` group — which shifts every
-    // option ordinal underneath it. Correct HLS authoring, and untested on
-    // the device, which is exactly what a rung is.
-    if rungs.closed_captions_none {
-        out.push_str(",CLOSED-CAPTIONS=NONE");
-    }
+    // Absent the attribute both AVFoundation and ExoPlayer are entitled to
+    // synthesise a phantom CEA-608 option into the text group — which shifts
+    // every option ordinal underneath it, so a client selecting "the first
+    // subtitle rendition" by position gets whatever is now second. That is a
+    // candidate cause of subtitles silently not enabling on both platforms,
+    // and it is correct authoring either way, so it stops being a rung: an
+    // experiment nobody can turn on is not evidence, and this one spent
+    // weeks off.
+    out.push_str(",CLOSED-CAPTIONS=NONE");
     if shape.subtitles && !native.is_empty() {
         out.push_str(",SUBTITLES=\"subs\"");
     }
@@ -25381,7 +25391,7 @@ mod tests {
 
     /// Every playlist refusal, from the session's verdict to the wire.
     ///
-    /// All five used to be `ApiError::NotFound("transcode session")` — one
+    /// These used to be `ApiError::NotFound("transcode session")` — one
     /// anonymous 404 that hls.js escalates to a fatal `levelLoadError`
     /// whatever caused it. The status now separates what the client can do
     /// about it, and the typed body carries the sentence a person reads.
@@ -25413,6 +25423,14 @@ mod tests {
                 StatusCode::BAD_GATEWAY,
                 "session_failed",
                 "never produced any video",
+            ),
+            (
+                PlaylistError::InsufficientCapacity(
+                    "rolling_insufficient_capacity: requested 2.00x".into(),
+                ),
+                StatusCode::BAD_GATEWAY,
+                "rolling_insufficient_capacity",
+                "requested 2.00x",
             ),
             (
                 // The #263 case: still inside the server's own recovery.
@@ -27553,9 +27571,8 @@ mod tests {
             file.hdr = Some(hdr.into());
             // Row 1: an HDR copy has no encode to burn into, so keeping the
             // grade and honouring the request are genuinely exclusive.
-            assert_eq!(
+            assert!(
                 verdict(&copy, &file, OutputGrade::Sdr).1,
-                true,
                 "{hdr}: an HDR copy must refuse"
             );
             // Row 2: the one the old predicate got wrong. Since the M4 rung a
@@ -28403,7 +28420,7 @@ mod tests {
     }
 
     #[test]
-    fn ladder_rungs_are_inert_until_an_operator_lights_them() {
+    fn the_master_says_it_has_no_captions_and_its_one_rung_stays_inert() {
         let file = hls_file(vec![
             sub("subrip", "ita", "Forced", false, true),
             sub("subrip", "ita", "Forced Signs", false, true),
@@ -28413,41 +28430,36 @@ mod tests {
         // tracks share a language, so RFC 8216's uniqueness rule keeps them
         // manually selectable.
         let shipped = master_playlist_with(&file, None, &sdr_context(), MasterRungs::default());
-        assert!(!shipped.contains("CLOSED-CAPTIONS"), "{shipped}");
-        assert_eq!(shipped.matches("AUTOSELECT=NO").count(), 2, "{shipped}");
-        assert!(!shipped.contains("CODECS="), "{shipped}");
-
-        // Rung 1, alone.
-        let captions = master_playlist_with(
-            &file,
-            None,
-            &sdr_context(),
-            MasterRungs {
-                closed_captions_none: true,
-                ..MasterRungs::default()
-            },
-        );
+        // No longer a rung. A variant with no caption track must say so, and
+        // a phantom CEA-608 option in the text group shifts every rendition
+        // ordinal beneath it — which is how a client asking for "the first
+        // subtitle rendition" gets the second one.
         assert!(
-            captions.contains(
+            shipped.contains(
                 "#EXT-X-STREAM-INF:BANDWIDTH=40000000,AVERAGE-BANDWIDTH=40000000,\
                  RESOLUTION=3840x2160,FRAME-RATE=23.976,CLOSED-CAPTIONS=NONE,\
                  SUBTITLES=\"subs\""
             ),
-            "{captions}"
+            "{shipped}"
         );
-        assert_eq!(captions.matches("AUTOSELECT=NO").count(), 2, "{captions}");
+        assert_eq!(shipped.matches("AUTOSELECT=NO").count(), 2, "{shipped}");
+        assert!(!shipped.contains("CODECS="), "{shipped}");
 
-        // Rung 2, alone.
+        // The remaining rung, alone: it changes the renditions and leaves the
+        // variant line's caption attribute exactly where it now always is.
         let forced = master_playlist_with(
             &file,
             None,
             &sdr_context(),
             MasterRungs {
                 forced_autoselect: true,
-                ..MasterRungs::default()
             },
         );
-        assert!(!forced.contains("CLOSED-CAPTIONS"), "{forced}");
+        assert_eq!(
+            forced.matches("CLOSED-CAPTIONS=NONE").count(),
+            1,
+            "{forced}"
+        );
         assert_eq!(forced.matches("AUTOSELECT=YES").count(), 2, "{forced}");
     }
 

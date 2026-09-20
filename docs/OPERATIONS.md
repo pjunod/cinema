@@ -2916,31 +2916,36 @@ membership addresses and token-file paths are intentionally file-only:
 | `PLURX_DISCOVERY_SERVER_URL` | — | `http://127.0.0.1:32400` | Server URL read by `plurxd advertise`; normally only the Compose companion uses it |
 | `PLURX_LOG` | — | `info` | Log filter (`tracing` EnvFilter syntax, e.g. `plurxd=debug`) |
 | `PLURX_CLUSTER_ACTIVATION_FAILPOINT` | — | — | Test-only activation exit: `after-quiescence` · `after-incoming` · `after-marker` · `after-rename`; each exits `86` |
-| `PLURX_HLS_CLOSED_CAPTIONS_NONE` | — | off | **Experiment.** Adds `CLOSED-CAPTIONS=NONE` to the HLS variant. Set `1` to enable |
 | `PLURX_HLS_FORCED_AUTOSELECT` | — | off | **Experiment.** Puts `AUTOSELECT=YES` on forced subtitle renditions. Set `1` to enable |
 | `PLURX_PGS_OVERLAY` | — | off | **Retired as a gate.** The switch is now Settings → Developer → *Serve PGS subtitles as an overlay* (`subtitles.pgs_overlay`). This variable seeds that setting once, on a node that has never been told either way, and does nothing afterwards. Still keep it off until native-client and physical HDR/DV acceptance is complete |
 
-### The two HLS master experiments
+### The HLS master experiment
 
-These two are not tuning knobs, they are a ladder — candidate changes to the
-HLS multivariant playlist, compiled in but inert until you set one, so a rung
-can be tried, watched, and kept or dropped without another build. Both are
-Apple authoring-rules items and both are candidates for the one open failure
-in the Apple native-subtitle work: a physical Apple TV rejecting a copied
-Dolby Vision master with CoreMedia `-12927`
+This is not a tuning knob, it is a rung — a candidate change to the HLS
+multivariant playlist, compiled in but inert until you set it, so it can be
+tried, watched, and kept or dropped without another build. It is an Apple
+authoring-rules item and a candidate for the one open failure in the Apple
+native-subtitle work: a physical Apple TV rejecting a copied Dolby Vision
+master with CoreMedia `-12927`
 ([docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md](clients/APPLE-NATIVE-SUBTITLES-PLAN.md) §5.4).
+
+Its sibling, `PLURX_HLS_CLOSED_CAPTIONS_NONE`, was retired in favour of
+shipping `CLOSED-CAPTIONS=NONE` on every variant unconditionally. None of
+these variants carries a caption track, so saying so is correct authoring
+rather than an experiment — and an unset rung is not evidence about anything.
+A variant that stays silent lets AVFoundation and ExoPlayer both synthesise a
+phantom CEA-608 option into the text group, which shifts every rendition
+ordinal beneath it: a client asking for the first subtitle rendition by
+position gets the second.
 
 | Var | What it adds | Why it might matter |
 |---|---|---|
-| `PLURX_HLS_CLOSED_CAPTIONS_NONE` | `CLOSED-CAPTIONS=NONE` on the variant | Apple's authoring rules ask for it, and it stops AVFoundation synthesising a phantom closed-caption option into the legible group — a phantom option shifts every rendition ordinal |
 | `PLURX_HLS_FORCED_AUTOSELECT` | `AUTOSELECT=YES` on forced renditions | Apple's authoring rules require it on forced renditions; this master withholds it when two forced tracks share a language |
 
-**How to run them: one per deploy, and let the device decide.** Set exactly one
-variable, restart plurxd, and play the affected title on the actual Apple TV.
-Both are read once at startup, because a master that changed shape between two
-fetches of the same session would be a worse problem than either rung solves.
-Never enable both at once — a master that then plays tells you nothing about
-which change did it.
+**How to run it: let the device decide.** Set the variable, restart plurxd, and
+play the affected title on the actual Apple TV. It is read once at startup,
+because a master that changed shape between two fetches of the same session
+would be a worse problem than the rung solves.
 
 **The device is the only oracle here.** Every master regression in this arc so
 far passed the unit tests and failed on physical hardware, and one of them

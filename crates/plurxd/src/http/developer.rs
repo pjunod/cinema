@@ -614,8 +614,8 @@ fn live_hls_recovery(enabled: bool) -> DeveloperEnableItem {
             evidence: format!(
                 "{fallback} session(s) since this process started reached the retained engine \
                  because immutable VOD refused them ({by_reason}). Turning the fallback off \
-                 today would have refused those viewers instead. Settings \u{2192} Playback \
-                 \u{2192} Streaming holds the switch."
+                 today would have refused those viewers instead. Settings \u{2192} Developer \
+                 \u{2192} Sliding Live HLS holds the switch."
             ),
         }
     };
@@ -652,12 +652,27 @@ fn live_hls_recovery(enabled: bool) -> DeveloperEnableItem {
         }
     };
 
+    let rolling_contract = DeveloperRequirement {
+        id: "rolling_contract_built",
+        title: "Bounded sliding publication and object grace are built",
+        status: RequirementStatus::Met,
+        evidence: "This build freezes the rolling target before first response, publishes from an actor-owned clock, retains removed objects through a bounded Grace lifetime, and charges advertised and Grace bytes to the live scratch total. This is build evidence, not device qualification."
+            .to_owned(),
+    };
+    let clients = DeveloperRequirement {
+        id: "rolling_clients_qualified",
+        title: "Physical clients tolerate scheduled sliding updates",
+        status: RequirementStatus::Unobservable,
+        evidence: "Apple native HLS, Media3 and hls.js need physical-client qualification for startup, long playback, pause, resume and retirement. The daemon cannot observe a device test receipt; an absent error is not proof."
+            .to_owned(),
+    };
+
     DeveloperEnableItem {
         id: "live_hls_recovery",
-        title: "Fall back to the retained live-HLS engine",
+        title: "Enable sliding Live HLS recovery",
         enabled: Some(enabled),
         setting: Some("vod_live_recovery"),
-        requirements: vec![coverage, takeover],
+        requirements: vec![rolling_contract, coverage, takeover, clients],
     }
 }
 

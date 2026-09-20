@@ -138,7 +138,6 @@ services:
       # (docs/clients/APPLE-NATIVE-SUBTITLES-PLAN.md §5.4). Enable ONE per deploy and
       # watch a real Apple TV: every master regression in that arc passed the
       # unit tests and failed on the device.
-      # PLURX_HLS_CLOSED_CAPTIONS_NONE: "1"
       # PLURX_HLS_FORCED_AUTOSELECT: "1"
     volumes:
       # The database and everything else that must survive a rebuild. Create
