@@ -524,6 +524,16 @@ async function openSession(fileId, opts, signal=null, requestId=null){
     Number(player.controlReporter&&player.controlReporter.sequence)||0,
     Number(player.controlSequenceFloor)||0);
   if(Number.isFinite(acceptedSequence)&&acceptedSequence>0) body.control_sequence=acceptedSequence;
+  // How this client will play and tear down the stream. The web player
+  // destroys its hls.js instance before it sends the release, so the server
+  // may drop this session's retired objects a segment after the DELETE
+  // instead of a whole advertised playlist later. Native HLS has no bounded
+  // retry tail, so it says so and keeps the original promise.
+  const hevcCopy=!!(opts&&opts.copy)&&["hevc","h265","hevc10"].includes(
+    String((typeof PLAYER!=="undefined"&&PLAYER&&PLAYER.source&&PLAYER.source.video_codec)||"")
+      .toLowerCase());
+  const transport=typeof plannedHlsTransport==="function"?plannedHlsTransport(hevcCopy):null;
+  if(transport) body.transport=transport;
   // A null height is the *absence* of a request, not a request for nothing:
   // sending the key would have the server clamp null to its floor.
   if(body.height==null) delete body.height;

@@ -684,6 +684,18 @@ pub struct CreateSession {
     /// the server ever learns about what the viewer wants, so an ask that
     /// arrives only through control is, there, an ask that never arrives.
     pub intent: Option<plurx_core::playback::MediaIntentEnvelope>,
+    /// How this client will play and tear down the stream.
+    ///
+    /// `"hlsjs"` names the one audited teardown contract: the web player
+    /// destroys its hls.js instance before it sends the release, so its
+    /// retired objects can be dropped a segment after the DELETE instead of
+    /// a whole advertised playlist later. `"native"`, an unrecognized value
+    /// and an absent field all keep the original promise.
+    ///
+    /// The client must send what it actually selected, not a guess from the
+    /// user agent, and must choose the conservative class whenever its
+    /// transport could still fall back within the session.
+    pub transport: Option<String>,
 }
 
 /// Test-only seam that freezes one create after it has recorded its viewer's
@@ -734,6 +746,11 @@ impl CreateSession {
         } else {
             SessionKind::Transcode { height }
         };
+        // Refuse a malformed value rather than storing it; an unrecognized
+        // but well-formed one is kept and simply reads as conservative.
+        let transport = self
+            .transport
+            .filter(|transport| crate::transcode::session_transport_is_valid(transport));
         crate::transcode::SessionRequest {
             file_id,
             playback_id: self.playback_id,
@@ -750,6 +767,7 @@ impl CreateSession {
             hdr10: self.hdr10 == Some(true),
             presentation: crate::transcode::Presentation::Vod,
             block_budget_secs: self.block_budget_secs.filter(|s| s.is_finite() && *s > 0.0),
+            transport,
         }
     }
 }
@@ -3855,6 +3873,28 @@ async fn stop_owned_session_because(
     }
 }
 
+/// The real mapper, reachable from the accounting regressions in
+/// `transcode.rs` so a genuinely returned refusal can be asserted end to end
+/// rather than a hand-built string that already carries the class.
+#[cfg(test)]
+pub(crate) fn session_start_error_status_for_test(file_id: i64, error: String) -> StatusCode {
+    session_start_error(file_id, error).into_response().status()
+}
+
+/// What the durable recipe says about this session's client teardown.
+///
+/// The recipe is the serialized create request, so this is the transport the
+/// client named at create and nothing else — never the user agent, never a
+/// guess from the playlist shape. A recipe an older node wrote carries no
+/// transport at all and reads as conservative, which is the whole point: a
+/// mixed-version cluster shortens nothing it cannot account for.
+fn exact_release_class(route: &MediaSessionRoute) -> crate::transcode::ReleaseClass {
+    let transport = serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(&route.recipe_json)
+        .ok()
+        .and_then(|recipe| recipe.request.transport);
+    crate::transcode::ReleaseClass::from_transport(transport.as_deref())
+}
+
 fn session_start_error(file_id: i64, error: String) -> ApiError {
     if error.contains("already used") {
         return ApiError::Conflict(error);
@@ -4357,6 +4397,31 @@ async fn release_session(
                 .transcode
                 .begin_session_terminal(&session, projected_terminal, projected_reason)
                 .await;
+            // R3. A viewer releasing their own stream is the one event that
+            // tells the server nobody will read its retired objects again —
+            // but only for a client whose teardown ordering has been audited.
+            // The class comes from the durable recipe this coordinator just
+            // resolved, so a remote owner, an idempotent replay and an owner
+            // takeover all read the same answer the create wrote.
+            //
+            // Restricted to a client-initiated release: an admin stop, a
+            // revocation or a supersession is not the viewer saying they are
+            // finished with the bytes.
+            if projected_terminal == crate::vodserve::Terminal::Deleted {
+                let class = exact_release_class(&route);
+                if let Some(deadline) = state
+                    .transcode
+                    .accept_exact_session_release(&session, class)
+                    .await
+                {
+                    tracing::debug!(
+                        session = %crate::transcode::session_log_id(&session),
+                        class = class.label(),
+                        in_ms = deadline.saturating_duration_since(Instant::now()).as_millis(),
+                        "retired object promise shortened by an exact same-viewer release"
+                    );
+                }
+            }
             let Some(durable_release) = state
                 .media_sessions
                 .complete_release_with_route(route.clone())
@@ -4587,6 +4652,7 @@ pub async fn start(
         audio_offset_ms: None,
         presentation: None,
         block_budget_secs: None,
+        transport: None,
     };
     create(
         AuthUser(user),
@@ -8514,6 +8580,7 @@ async fn plan_preparation_candidate(
         overrides: Some(overrides.clone()),
         presentation: Some("vod".to_owned()),
         block_budget_secs: predecessor.request.block_budget_secs,
+        transport: predecessor.request.transport.clone(),
         intent: None,
     };
     let review = review_client_plan_inner(
@@ -14009,6 +14076,12 @@ async fn segment_local_before(
             return Err(error);
         }
     };
+    // The object is open and its length is known. Pin it for the body's
+    // lifetime: cleanup may unlink the name while these bytes are still going
+    // out, and the directory scan that measures scratch cannot see an
+    // unlinked-but-open file.
+    let mut authorization = authorization;
+    authorization.pin_scratch_object(total_len);
     let reader = tokio_util::io::ReaderStream::new(opened.file.take(opened_len));
     let mut delivery = opened.delivery;
     delivery.expect_at_most(opened_len);
@@ -14192,6 +14265,92 @@ fn segment_content_type(name: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    /// The release class comes from the durable recipe, so a remote owner, an
+    /// idempotent replay and an owner takeover all read the answer the create
+    /// wrote — and a recipe an older node wrote, which carries no transport
+    /// at all, reads as conservative.
+    #[test]
+    fn seek_scratch_release_class_comes_from_the_durable_recipe() {
+        use plurx_core::domain::MediaSessionRoute;
+
+        fn route_with(recipe: serde_json::Value) -> MediaSessionRoute {
+            MediaSessionRoute {
+                incarnation_id: "i".to_owned(),
+                session_id: "s".to_owned(),
+                user_id: 1,
+                playback_id: "p".to_owned(),
+                request_fingerprint: "f".to_owned(),
+                owner_node_id: "n".to_owned(),
+                owner_epoch: 1,
+                lease_expires_at_ms: 0,
+                state: "active".to_owned(),
+                recipe_json: recipe.to_string(),
+                response_json: "{}".to_owned(),
+                produced_playable_through_ms: 0,
+                fetched_through_ms: 0,
+                media_origin_ms: 0,
+                media_sequence: 0,
+                discontinuity_sequence: 0,
+                updated_at_ms: 0,
+                recovery_epoch: String::new(),
+                terminal_reason: None,
+                publication_ready_at_ms: 0,
+                drain_deadline_ms: None,
+            }
+        }
+
+        let recipe = |transport: Option<&str>| {
+            let mut request = serde_json::json!({
+                "file_id": 1,
+                "playback_id": "p",
+                "request_id": "i",
+                "control_sequence": serde_json::Value::Null,
+                "automatic": false,
+                "previous_session_id": serde_json::Value::Null,
+                "reopen_reason": serde_json::Value::Null,
+                // `SessionKind` is internally tagged on its own `kind`.
+                "kind": {"kind": "copy", "aac": false, "preserve_dolby_vision": false,
+                         "convert_dolby_vision": false},
+                "start_seconds": 0.0,
+                "audio_index": serde_json::Value::Null,
+                "subtitle_burn": serde_json::Value::Null,
+                "audio_offset_ms": 0,
+                "hdr10": false,
+                "presentation": "vod",
+            });
+            if let Some(transport) = transport {
+                request["transport"] = transport.into();
+            }
+            serde_json::json!({
+                "protocol_version": 1,
+                "incarnation_id": "i",
+                "user_id": 1,
+                "source_size": 1,
+                "source_mtime": 1,
+                "request": request,
+            })
+        };
+
+        assert_eq!(
+            exact_release_class(&route_with(recipe(Some("hlsjs")))),
+            crate::transcode::ReleaseClass::HlsJs
+        );
+        assert_eq!(
+            exact_release_class(&route_with(recipe(Some("native")))),
+            crate::transcode::ReleaseClass::Conservative
+        );
+        assert_eq!(
+            exact_release_class(&route_with(recipe(None))),
+            crate::transcode::ReleaseClass::Conservative,
+            "a recipe from before this field keeps the original promise"
+        );
+        assert_eq!(
+            exact_release_class(&route_with(serde_json::json!({"not": "a recipe"}))),
+            crate::transcode::ReleaseClass::Conservative,
+            "an unreadable recipe shortens nothing"
+        );
+    }
+
     /// A deliberate new play mints a budget; every continuation inherits one.
     ///
     /// The whole decoder-recovery budget rests on this one expression. Mint on
@@ -14974,6 +15133,7 @@ mod tests {
                 hdr10: false,
                 presentation: crate::transcode::Presentation::Vod,
                 block_budget_secs: None,
+                transport: None,
             },
         };
         let start = StartResponse {
@@ -16075,6 +16235,7 @@ mod tests {
                 hdr10: false,
                 presentation: crate::transcode::Presentation::Live,
                 block_budget_secs: None,
+                transport: None,
             },
         };
         let start = StartResponse {
@@ -16310,6 +16471,7 @@ mod tests {
                     hdr10: false,
                     presentation,
                     block_budget_secs: None,
+                    transport: None,
                 },
             };
             let start = StartResponse {
@@ -18879,6 +19041,7 @@ mod tests {
             hdr10: false,
             presentation: crate::transcode::Presentation::Vod,
             block_budget_secs: None,
+            transport: None,
         };
         let predecessor_recipe = RemoteStartRequest {
             protocol_version: crate::media_pool::PROTOCOL_VERSION,
@@ -23139,6 +23302,7 @@ mod tests {
             hdr10: false,
             presentation: crate::transcode::Presentation::Vod,
             block_budget_secs: None,
+            transport: None,
         }
     }
 
@@ -23757,6 +23921,7 @@ mod tests {
             hdr10: false,
             presentation: crate::transcode::Presentation::Live,
             block_budget_secs: None,
+            transport: None,
         };
         let replacement = fixture
             .state
@@ -25940,6 +26105,7 @@ mod tests {
             audio_offset_ms: None,
             presentation: None,
             block_budget_secs: None,
+            transport: None,
         }
     }
 
@@ -27496,6 +27662,7 @@ mod tests {
             audio_offset_ms: Some(20_000),
             presentation: None,
             block_budget_secs: None,
+            transport: None,
             caps: None,
             overrides: None,
         }
@@ -27529,6 +27696,7 @@ mod tests {
             audio_offset_ms: None,
             presentation: None,
             block_budget_secs: None,
+            transport: None,
             caps: None,
             overrides: None,
         }
