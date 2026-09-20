@@ -1128,8 +1128,7 @@ async function executePlaybackMediaChange(p,change){
   // identical command arriving while it is open can be suppressed instead of
   // superseding it. Cleared on every exit below, the refusal path included,
   // so an explicit Retry is never mistaken for the attempt it retries.
-  changeKey=playbackChangeRecipeKey(p,pos);
-  p.inFlightChangeKey=changeKey;
+  changeKey=playbackChangeRecipeKey(p,pos,change);
   const {live:streamIsCurrent}=streamGeneration();
   const live=()=>streamIsCurrent()&&p.pendingMediaChange===change;
   const preparation=beginPlaybackPreparation(live);
@@ -1146,6 +1145,11 @@ async function executePlaybackMediaChange(p,change){
   raisePlaybackSurface("client_preparing",{
     title:"Preparing the stream…",detail:"your place and selections are saved"});
   try{
+    // Set inside the `try` whose `finally` clears it: a throw between here
+    // and there would otherwise leave the key set with nothing to clear it,
+    // and every identical seek on this player would be silently swallowed
+    // for the rest of the playback.
+    p.inFlightChangeKey=changeKey;
     if(method==='transcode'){
       // The same door as the copy-HLS branch below. In a pending change this
       // wrapper is a passthrough — `playbackCreateRetryContext()` answers

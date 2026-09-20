@@ -361,10 +361,20 @@ function liveHlsRecoveryCard(settings,readiness){
 // and can see exactly which producer path grew a real write boundary and
 // which one did not.
 function seekScratchReservationsCard(){
+  // The transport of the session that is actually open, which means asking
+  // with the same `hevcCopy` the create asked with -- it is exactly the bit
+  // that flips Safari's answer, so hardcoding it false would report hls.js
+  // for an HEVC copy session the server has correctly put in the
+  // conservative class. No player open means no session and no class.
   let transport=null;
+  let playing=false;
   try{
-    const video=document.getElementById("video");
-    transport=(typeof plannedHlsTransport==="function"&&video)?plannedHlsTransport(false):null;
+    const p=typeof PLAYER!=="undefined"?PLAYER:null;
+    playing=!!(p&&p.sessionId);
+    if(playing&&typeof plannedHlsTransport==="function"){
+      const codec=String((p.source&&p.source.video_codec)||"").toLowerCase();
+      transport=plannedHlsTransport(!!p.copyHls&&["hevc","h265","hevc10"].includes(codec));
+    }
   }catch(e){}
   const shortGrace=transport==="hlsjs";
   return setCard(`${cardHead("Seek scratch accounting",
@@ -380,8 +390,11 @@ function seekScratchReservationsCard(){
       ${devStaticReq("A full budget is a temporary refusal","met",
         "Exhausted scratch answers 503 with a retryable notice beside the picture. The stream you are watching keeps playing, and the destination you asked for is kept for Try again.","ok")}
       <h3 class="devcheck-group">Shorter retention after you close a stream</h3>
-      ${devStaticReq("This browser's transport",transport===null?"unknown":transport==="hlsjs"?"hls.js":"native HLS",
-        "The web player destroys its hls.js instance before it releases the session, so the server may drop that stream's retired objects one segment later instead of a whole playlist later. Native HLS has no bounded retry tail and keeps the original promise. Read while a player is open; otherwise unknown.",
+      ${devStaticReq("This session's transport",
+        transport===null?"no stream open":transport==="hlsjs"?"hls.js":"native HLS",
+        transport===null
+          ? "This is a property of a stream, not of a browser: it depends on the title's codec as well as on this browser, so there is nothing to report until something is playing. Open a title and come back."
+          : "The web player destroys its hls.js instance before it releases the session, so the server may drop that stream's retired objects one segment later instead of a whole playlist later. Native HLS has no bounded retry tail and keeps the original promise.",
         shortGrace?"ok":"")}
       ${devStaticReq("Apple and unknown clients","original grace",
         "Apple releases the session before it replaces the item, so the old item still exists while the release runs, and no finite AVFoundation retry bound has been established. Those sessions keep the full promise &mdash; missing information never shortens one.","")}

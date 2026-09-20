@@ -32,9 +32,20 @@ function positionForPlaybackIntent(v,p){
 function unexecutedPlaybackDestinationSec(p){
   const pending=p&&p.controlSeek;
   if(!pending||pending.executed) return null;
+  // ONLY while a replacement is actually pending or retained after a refusal.
+  // `controlSeek` outlives the element by design and `play()` carries it into
+  // the successor with `executed:false`, so a destination can survive into a
+  // playback that is nowhere near it -- `replayEnded` restarts at zero with a
+  // 2:54 destination still attached. Without this the scrubber would freeze
+  // at 2:54 and every +10 would count from there. `pendingMediaChange` is the
+  // retained route: set before the create, kept on refusal for Try again,
+  // cleared when a successor attaches.
+  if(!p.pendingMediaChange) return null;
   // Multipart audiobooks address the scrubber globally and the element
-  // locally, and `controlSeek` is in the local timeline. They never take the
-  // replacement route this is about, so leave their arithmetic alone.
+  // locally, and `controlSeek` is in the part-local timeline, so the two
+  // numbers are not comparable. `bookOffset` is that delta, but a book that
+  // needed a replacement would need it applied in three places; the honest
+  // answer for now is to leave their arithmetic exactly as it was.
   if(p.bookParts&&p.bookParts.length) return null;
   const target=Number(pending.targetMs);
   return Number.isFinite(target)?Math.max(0,target/1000):null;
@@ -50,17 +61,29 @@ function pbRelativeSeekBase(){
   const desired=unexecutedPlaybackDestinationSec(me);
   return desired!=null?desired:pbPosSec();
 }
-// The identity of a media change, normalized. Position alone is not it: an
-// audio or subtitle switch at the same second is a different request and must
-// still execute, while the same recipe at the same target already in flight
-// is the same command arriving twice.
-function playbackChangeRecipeKey(p,targetSec){
+// The identity of one media change, normalized: what the create will ask the
+// server for, not what the player currently is.
+//
+// Both halves matter. Position alone is not identity -- an audio or subtitle
+// switch at the same second is a different request and must still execute.
+// And the player's own fields are not identity either: `p.method`,
+// `p.copyHls` and `p.autoHeight` are what the change is about to *replace*,
+// and they are not written until after the create returns, so keying on them
+// would make an in-flight rung switch indistinguishable from a plain seek on
+// the incumbent recipe. `change` carries what is actually going on the wire.
+function playbackChangeRecipeKey(p,targetSec,change){
   if(!p) return null;
+  const c=change||{};
   return JSON.stringify([
     p.fileId,
     Math.max(0,Math.round(Number(targetSec||0)*1000)),
-    p.method||null,
-    !!p.copyHls,
+    c.method===undefined?(p.method||null):(c.method||null),
+    c.copyHls===undefined?!!p.copyHls:!!c.copyHls,
+    c.height==null?null:c.height,
+    !!c.forceReopen,
+    c.previousSessionId||null,
+    c.recoveryCause||null,
+    !!c.automatic,
     typeof selectedAudioIndex==="function"?selectedAudioIndex(p):null,
     p.curSub==null?null:p.curSub,
     p.burnedSub==null?null:p.burnedSub,
@@ -75,9 +98,9 @@ function playbackChangeRecipeKey(p,targetSec){
 // R2. True only for a request identical to one whose create is still open.
 // Checked *before* the intent generation moves, because bumping it first and
 // then noticing the duplicate would cancel the very execution it matched.
-function playbackChangeAlreadyInFlight(p,targetSec){
+function playbackChangeAlreadyInFlight(p,targetSec,change){
   if(!p||!p.inFlightChangeKey) return false;
-  return p.inFlightChangeKey===playbackChangeRecipeKey(p,targetSec);
+  return p.inFlightChangeKey===playbackChangeRecipeKey(p,targetSec,change);
 }
 // Same number, clamped to the runtime, for anything the viewer reads. A remux
 // seek to N starts ffmpeg at the keyframe *at or before* N while we count from
@@ -753,10 +776,6 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
   recoveryEpisode=null){
   const v=document.getElementById("video"); if(!v||!PLAYER) return;
   targetSec=Math.max(0,targetSec);
-  // An identical request whose create is still open is the same command, not
-  // a new one. `forceReopen` is the explicit Retry/stall-restart path and is
-  // always a fresh attempt.
-  if(!forceReopen&&playbackChangeAlreadyInFlight(PLAYER,targetSec)){ playerActivity(); return; }
   const markerEnd=Number(PLAYER._lastMarkerSkipEndMs)||0;
   if(markerEnd && targetSec*1000<markerEnd-1000 && markerNowMs()>=markerEnd-1000){
     clientLog({level:"info",event:"marker_seek_back",detail:"undo",
@@ -783,6 +802,27 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null, vie
       return play(part.id,PLAYER.title,Math.round(local*1000),part.duration_ms||0,m);
     }
     targetSec=local;
+  }
+  // An identical request whose create is still open is the same command, not
+  // a new one. Checked here rather than at the top of the function because
+  // the target has only just finished being clamped to the runtime and
+  // converted out of the audiobook timeline -- the in-flight key was built
+  // from the clamped number, so comparing the raw argument would miss every
+  // duplicate in the last two seconds of a title. `forceReopen` is the
+  // explicit Try again / stall-restart path and is always a fresh attempt.
+  // Built exactly as `requestPlaybackMediaChange` will build it, merge
+  // included: a change inherits the unspecified fields of the one it
+  // supersedes, so a probe that ignored the merge would compare a different
+  // recipe than the one in flight and never match.
+  if(!forceReopen&&playbackChangeAlreadyInFlight(PLAYER,targetSec,
+      Object.assign({},PLAYER.pendingMediaChange||{},{
+        method:PLAYER.method,copyHls:!!PLAYER.copyHls,reason:"seek",
+        height:autoHeightOverride,forceReopen:false,
+        previousSessionId:PLAYER.sessionId,
+        recoveryCause:recoveryEpisode&&recoveryEpisode.kind==="supply"&&autoHeightOverride>0
+          ?"network":"unknown"}))){
+    playerActivity();
+    return;
   }
   // Publish the destination while the old media and reporter still exist.
   // Everything below can detach a source, destroy hls.js, or replace the
