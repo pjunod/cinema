@@ -212,6 +212,14 @@ impl HiqliteAuthStore {
                 .collect::<Vec<_>>(),
         )
         .map_err(database_error)?;
+        let watch_destinations = serde_json::to_string(
+            &plan
+                .watch_copies
+                .iter()
+                .map(|copy| (copy.user_id, copy.destination_item_id))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(database_error)?;
         let count = self
             .client()
             .query_consistent_map::<CountRow, _>(
@@ -223,13 +231,40 @@ impl HiqliteAuthStore {
                          WHERE i.parent_id IS NOT json_extract(m.value,'$[1]')) \
                     AND NOT EXISTS (SELECT 1 FROM json_each($5) m LEFT JOIN files f \
                           ON f.id=json_extract(m.value,'$[0]') \
-                         WHERE f.item_id IS NOT json_extract(m.value,'$[1]'))",
+                         WHERE f.item_id IS NOT json_extract(m.value,'$[1]')) \
+                    AND NOT EXISTS (SELECT 1 FROM json_each($6) c LEFT JOIN watch_state w \
+                          ON w.user_id=json_extract(c.value,'$[0]') AND w.item_id=json_extract(c.value,'$[1]') \
+                         WHERE w.user_id IS NULL) \
+                    AND NOT EXISTS (SELECT 1 FROM items s WHERE s.parent_id=$1 AND s.kind='season' \
+                         GROUP BY s.season_number HAVING s.season_number IS NULL OR COUNT(*)>1) \
+                    AND NOT EXISTS (SELECT 1 FROM items e JOIN items s ON s.id=e.parent_id \
+                         WHERE s.parent_id=$1 AND s.kind='season' AND e.kind='episode' \
+                         GROUP BY e.parent_id,e.episode_number HAVING e.episode_number IS NULL OR COUNT(*)>1) \
+                    AND (SELECT COUNT(*) FROM items WHERE parent_id=$1 AND kind='season')=$7 \
+                    AND (SELECT COUNT(*) FROM items e JOIN items s ON s.id=e.parent_id \
+                         WHERE s.parent_id=$1 AND s.kind='season' AND e.kind='episode')=$8 \
+                    AND (SELECT COUNT(*) FROM files f JOIN items e ON e.id=f.item_id \
+                         JOIN items s ON s.id=e.parent_id WHERE s.parent_id=$1)=$9 \
+                    AND (SELECT COUNT(*) FROM watch_state w JOIN items e ON e.id=w.item_id \
+                         JOIN items s ON s.id=e.parent_id WHERE s.parent_id=$1)=$10 \
+                    AND NOT EXISTS (SELECT 1 FROM library_channels c WHERE EXISTS (SELECT 1 FROM json_each($3) ids WHERE \
+                         EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.include_item_ids') WHERE value=ids.value) OR \
+                         EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.exclude_item_ids') WHERE value=ids.value) OR \
+                         EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.include_show_ids') WHERE value=ids.value) OR \
+                         EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.exclude_show_ids') WHERE value=ids.value))) \
+                    AND NOT EXISTS (SELECT 1 FROM library_channel_session_recipes r WHERE EXISTS (SELECT 1 FROM json_tree(r.recipe_json) j JOIN json_each($3) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))) \
+                    AND NOT EXISTS (SELECT 1 FROM watched_outbox o WHERE EXISTS (SELECT 1 FROM json_tree(o.payload) j JOIN json_each($3) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id')))",
                 params!(
                     survivor,
                     plan.library_id,
                     retired.as_str(),
                     item_moves.as_str(),
-                    file_moves.as_str()
+                    file_moves.as_str(),
+                    watch_destinations.as_str(),
+                    plan.expected_after_counts.seasons as i64,
+                    plan.expected_after_counts.episodes as i64,
+                    plan.expected_after_counts.files as i64,
+                    plan.expected_after_counts.watches as i64
                 ),
             )
             .await
@@ -286,14 +321,9 @@ impl FencedPublicationStore for HiqliteAuthStore {
         let Some(survivor) = plan.survivor_show_id else {
             return Err(StoreError::Task("repair_blocked".to_owned()));
         };
-        let ids_json = serde_json::to_string(
-            &snapshot
-                .items
-                .iter()
-                .map(|item| item.id)
-                .collect::<Vec<_>>(),
-        )
-        .map_err(database_error)?;
+        let show_ids_json =
+            serde_json::to_string(&snapshot.input_show_ids).map_err(database_error)?;
+        let retired_json = serde_json::to_string(&plan.retired_item_ids).map_err(database_error)?;
         let expected_items = serde_json::to_string(
             &snapshot
                 .items
@@ -339,22 +369,27 @@ impl FencedPublicationStore for HiqliteAuthStore {
             .iter()
             .any(|row| row == "artwork_table_present")
         {
-            "AND NOT EXISTS (SELECT 1 FROM cluster_artwork_repairs WHERE item_id IN (SELECT value FROM json_each($3)))"
+            "AND NOT EXISTS (SELECT 1 FROM cluster_artwork_repairs WHERE item_id IN (SELECT value FROM json_each($12)))"
         } else {
             ""
         };
         let guard_sql = format!(
             "UPDATE items SET id = id WHERE id = $1 AND library_id = $2 AND kind = 'show' \
-             AND COALESCE((SELECT json_group_array(row_json) FROM ( \
-                   SELECT json_array({IDENTITY_REPAIR_ITEM_COLS}) AS row_json FROM items \
-                    WHERE id IN (SELECT value FROM json_each($3)) ORDER BY id)), '[]') = $4 \
-             AND COALESCE((SELECT json_group_array(row_json) FROM ( \
-                   SELECT json_array({IDENTITY_REPAIR_FILE_COLS}) AS row_json FROM files \
-                    WHERE item_id IN (SELECT value FROM json_each($3)) ORDER BY id)), '[]') = $5 \
-             AND COALESCE((SELECT json_group_array(row_json) FROM ( \
-                   SELECT json_array(user_id,item_id,position_ms,duration_ms,watched,updated_at) AS row_json \
-                     FROM watch_state WHERE item_id IN (SELECT value FROM json_each($3)) \
-                    ORDER BY item_id,user_id)), '[]') = $6 \
+             AND COALESCE((WITH requested(id) AS (SELECT value FROM json_each($3)), selected(id) AS ( \
+                   SELECT id FROM requested UNION SELECT i.id FROM items i JOIN requested r ON i.parent_id=r.id \
+                   UNION SELECT e.id FROM items e JOIN items s ON s.id=e.parent_id JOIN requested r ON s.parent_id=r.id) \
+                   SELECT json_group_array(row_json) FROM (SELECT json_array({IDENTITY_REPAIR_ITEM_COLS}) AS row_json \
+                   FROM items WHERE id IN (SELECT id FROM selected) ORDER BY id)), '[]') = $4 \
+             AND COALESCE((WITH requested(id) AS (SELECT value FROM json_each($3)), selected(id) AS ( \
+                   SELECT id FROM requested UNION SELECT i.id FROM items i JOIN requested r ON i.parent_id=r.id \
+                   UNION SELECT e.id FROM items e JOIN items s ON s.id=e.parent_id JOIN requested r ON s.parent_id=r.id) \
+                   SELECT json_group_array(row_json) FROM (SELECT json_array({IDENTITY_REPAIR_FILE_COLS}) AS row_json \
+                   FROM files WHERE item_id IN (SELECT id FROM selected) ORDER BY id)), '[]') = $5 \
+             AND COALESCE((WITH requested(id) AS (SELECT value FROM json_each($3)), selected(id) AS ( \
+                   SELECT id FROM requested UNION SELECT i.id FROM items i JOIN requested r ON i.parent_id=r.id \
+                   UNION SELECT e.id FROM items e JOIN items s ON s.id=e.parent_id JOIN requested r ON s.parent_id=r.id) \
+                   SELECT json_group_array(row_json) FROM (SELECT json_array(user_id,item_id,position_ms,duration_ms,watched,updated_at) AS row_json \
+                   FROM watch_state WHERE item_id IN (SELECT id FROM selected) ORDER BY item_id,user_id)), '[]') = $6 \
              AND COALESCE((SELECT json_group_array(show_id) FROM ( \
                    SELECT DISTINCT show.id AS show_id FROM files f INDEXED BY sqlite_autoindex_files_1 \
                    JOIN items episode ON episode.id=f.item_id AND episode.kind='episode' \
@@ -362,38 +397,42 @@ impl FencedPublicationStore for HiqliteAuthStore {
                    JOIN items show ON show.id=season.parent_id AND show.kind='show' \
                   WHERE f.path >= $7 AND f.path < $8 AND show.library_id=$2 \
                   ORDER BY show.id)), '[]') = $9 \
-             AND NOT EXISTS (SELECT 1 FROM reading_state WHERE item_id IN (SELECT value FROM json_each($3))) \
-             AND NOT EXISTS (SELECT 1 FROM scan_reconcile_items WHERE item_id IN (SELECT value FROM json_each($3))) \
-             AND NOT EXISTS (SELECT 1 FROM media_classifications WHERE item_id IN (SELECT value FROM json_each($3)) \
+             AND EXISTS (SELECT 1 FROM libraries WHERE id=$2 AND kind=$10 AND paths=$11) \
+             AND NOT EXISTS (SELECT 1 FROM reading_state WHERE item_id IN (SELECT value FROM json_each($12))) \
+             AND NOT EXISTS (SELECT 1 FROM scan_reconcile_items WHERE item_id IN (SELECT value FROM json_each($12))) \
+             AND NOT EXISTS (SELECT 1 FROM media_classifications WHERE item_id IN (SELECT value FROM json_each($12)) \
                   AND (json_array_length(overrides,'$.include')>0 OR json_array_length(overrides,'$.exclude')>0)) \
-             AND NOT EXISTS (SELECT 1 FROM library_channel_entries WHERE item_id IN (SELECT value FROM json_each($3)) OR show_id IN (SELECT value FROM json_each($3))) \
-             AND NOT EXISTS (SELECT 1 FROM library_channels c WHERE EXISTS (SELECT 1 FROM json_each($3) ids WHERE \
+             AND NOT EXISTS (SELECT 1 FROM library_channel_entries WHERE item_id IN (SELECT value FROM json_each($12)) OR show_id IN (SELECT value FROM json_each($12))) \
+             AND NOT EXISTS (SELECT 1 FROM library_channels c WHERE EXISTS (SELECT 1 FROM json_each($12) ids WHERE \
                   EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.include_item_ids') WHERE value=ids.value) OR \
                   EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.exclude_item_ids') WHERE value=ids.value) OR \
                   EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.include_show_ids') WHERE value=ids.value) OR \
                   EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.exclude_show_ids') WHERE value=ids.value))) \
              AND NOT EXISTS (SELECT 1 FROM media_sessions s WHERE s.state IN ('starting','active') AND ( \
-                  EXISTS (SELECT 1 FROM json_tree(s.recipe_json) j JOIN json_each($3) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id')) OR \
-                  EXISTS (SELECT 1 FROM json_tree(s.response_json) j JOIN json_each($3) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id')))) \
-             AND NOT EXISTS (SELECT 1 FROM library_channel_session_recipes r WHERE EXISTS (SELECT 1 FROM json_tree(r.recipe_json) j JOIN json_each($3) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))) \
-             AND NOT EXISTS (SELECT 1 FROM watched_outbox o WHERE EXISTS (SELECT 1 FROM json_tree(o.payload) j JOIN json_each($3) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))) \
-             AND NOT EXISTS (SELECT 1 FROM dvr_recordings WHERE item_id IN (SELECT value FROM json_each($3))) \
+                  EXISTS (SELECT 1 FROM json_tree(s.recipe_json) j JOIN json_each($12) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id')) OR \
+                  EXISTS (SELECT 1 FROM json_tree(s.response_json) j JOIN json_each($12) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id')))) \
+             AND NOT EXISTS (SELECT 1 FROM library_channel_session_recipes r WHERE EXISTS (SELECT 1 FROM json_tree(r.recipe_json) j JOIN json_each($12) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))) \
+             AND NOT EXISTS (SELECT 1 FROM watched_outbox o WHERE EXISTS (SELECT 1 FROM json_tree(o.payload) j JOIN json_each($12) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))) \
+             AND NOT EXISTS (SELECT 1 FROM dvr_recordings WHERE item_id IN (SELECT value FROM json_each($12))) \
              {artwork_guard} \
-             AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$10 AND owner_node_id=$11 \
-                  AND fence=$12 AND revision=$13 AND expires_at_ms=$14) RETURNING id"
+             AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$13 AND owner_node_id=$14 \
+                  AND fence=$15 AND revision=$16 AND expires_at_ms=$17) RETURNING id"
         );
         let mut statements = vec![(
             guard_sql,
             params!(
                 survivor,
                 plan.library_id,
-                ids_json.as_str(),
+                show_ids_json.as_str(),
                 expected_items.as_str(),
                 expected_files.as_str(),
                 expected_watches.as_str(),
                 lower,
                 upper,
                 expected_owners.as_str(),
+                snapshot.library_kind.as_str(),
+                snapshot.library_paths.as_str(),
+                retired_json.as_str(),
                 lease.resource.as_str(),
                 lease.owner_node_id.as_str(),
                 lease_i64("fence", lease.fence)?,
@@ -508,7 +547,6 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 }
             }
         }
-        let retired_json = serde_json::to_string(&plan.retired_item_ids).map_err(database_error)?;
         let item_moves_json = serde_json::to_string(
             &plan
                 .item_moves
@@ -525,6 +563,14 @@ impl FencedPublicationStore for HiqliteAuthStore {
                 .collect::<Vec<_>>(),
         )
         .map_err(database_error)?;
+        let watch_destinations_json = serde_json::to_string(
+            &plan
+                .watch_copies
+                .iter()
+                .map(|copy| (copy.user_id, copy.destination_item_id))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(database_error)?;
         let mut post_params = params!(
             survivor,
             plan.library_id,
@@ -537,7 +583,12 @@ impl FencedPublicationStore for HiqliteAuthStore {
             lease.owner_node_id.as_str(),
             lease_i64("fence", lease.fence)?,
             lease_i64("revision", lease.revision)?,
-            lease.expires_at_unix_ms
+            lease.expires_at_unix_ms,
+            watch_destinations_json.as_str(),
+            plan.expected_after_counts.seasons as i64,
+            plan.expected_after_counts.episodes as i64,
+            plan.expected_after_counts.files as i64,
+            plan.expected_after_counts.watches as i64
         );
         post_params[5] = Param::StmtOutputNamed(1, "id".into());
         statements.push((
@@ -548,10 +599,34 @@ impl FencedPublicationStore for HiqliteAuthStore {
              AND NOT EXISTS (SELECT 1 FROM json_each($5) m LEFT JOIN files f ON f.id=json_extract(m.value,'$[0]') \
                               WHERE f.item_id IS NOT json_extract(m.value,'$[1]')) \
              AND $6=$7 AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$8 AND owner_node_id=$9 \
-                 AND fence=$10 AND revision=$11 AND expires_at_ms=$12) RETURNING id"
+                 AND fence=$10 AND revision=$11 AND expires_at_ms=$12) \
+             AND NOT EXISTS (SELECT 1 FROM json_each($13) c LEFT JOIN watch_state w \
+                  ON w.user_id=json_extract(c.value,'$[0]') AND w.item_id=json_extract(c.value,'$[1]') \
+                  WHERE w.user_id IS NULL) \
+             AND NOT EXISTS (SELECT 1 FROM items s WHERE s.parent_id=$1 AND s.kind='season' \
+                  GROUP BY s.season_number HAVING s.season_number IS NULL OR COUNT(*)>1) \
+             AND NOT EXISTS (SELECT 1 FROM items e JOIN items s ON s.id=e.parent_id \
+                  WHERE s.parent_id=$1 AND s.kind='season' AND e.kind='episode' \
+                  GROUP BY e.parent_id,e.episode_number HAVING e.episode_number IS NULL OR COUNT(*)>1) \
+             AND (SELECT COUNT(*) FROM items WHERE parent_id=$1 AND kind='season')=$14 \
+             AND (SELECT COUNT(*) FROM items e JOIN items s ON s.id=e.parent_id \
+                  WHERE s.parent_id=$1 AND s.kind='season' AND e.kind='episode')=$15 \
+             AND (SELECT COUNT(*) FROM files f JOIN items e ON e.id=f.item_id JOIN items s ON s.id=e.parent_id WHERE s.parent_id=$1)=$16 \
+             AND (SELECT COUNT(*) FROM watch_state w JOIN items e ON e.id=w.item_id JOIN items s ON s.id=e.parent_id WHERE s.parent_id=$1)=$17 \
+             AND NOT EXISTS (SELECT 1 FROM library_channels c WHERE EXISTS (SELECT 1 FROM json_each($3) ids WHERE \
+                  EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.include_item_ids') WHERE value=ids.value) OR \
+                  EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.exclude_item_ids') WHERE value=ids.value) OR \
+                  EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.include_show_ids') WHERE value=ids.value) OR \
+                  EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.exclude_show_ids') WHERE value=ids.value))) \
+             AND NOT EXISTS (SELECT 1 FROM library_channel_session_recipes r WHERE EXISTS (SELECT 1 FROM json_tree(r.recipe_json) j JOIN json_each($3) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))) \
+             AND NOT EXISTS (SELECT 1 FROM watched_outbox o WHERE EXISTS (SELECT 1 FROM json_tree(o.payload) j JOIN json_each($3) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))) \
+             RETURNING id"
                 .to_owned(),
             post_params,
         ));
+        // The postcondition was just pushed at zero-based mutation index
+        // `len - 1`; renewal is later prepended at index 0, so its transaction
+        // index is the mutation vector's current length.
         let post_transaction_index = statements.len();
         let mut ack_params = params!(
             survivor,

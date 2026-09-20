@@ -216,6 +216,9 @@ impl IdentityRepairCache {
                 "the preview is unknown on this node; create a fresh preview",
             ));
         };
+        if entry.admin_user_id != admin_user_id || entry.library_id != library_id {
+            return Err(ApiError::NotFound("identity repair plan"));
+        }
         if entry.node_id != node_id {
             return Err(ApiError::typed_detail(
                 StatusCode::CONFLICT,
@@ -223,9 +226,6 @@ impl IdentityRepairCache {
                 "the preview must be used on its origin node",
                 json!({ "node_id": entry.node_id }),
             ));
-        }
-        if entry.admin_user_id != admin_user_id || entry.library_id != library_id {
-            return Err(ApiError::NotFound("identity repair plan"));
         }
         if entry.created_at + PLAN_TTL <= tokio::time::Instant::now()
             && entry.status != CachedStatus::Applying
@@ -488,5 +488,54 @@ mod tests {
         ] {
             assert!(parse_show_ids(values).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn scan_identity_plan_cache_is_admin_node_and_expiry_bound() {
+        let cache = IdentityRepairCache::default();
+        let snapshot = IdentityRepairSnapshot {
+            library_id: 9,
+            library_kind: "shows".to_owned(),
+            library_paths: r#"["/media"]"#.to_owned(),
+            input_show_ids: vec![1, 2],
+            items: Vec::new(),
+            files: Vec::new(),
+            watches: Vec::new(),
+            directory_owner_ids: Vec::new(),
+            dependency_rows: Vec::new(),
+            blockers: Vec::new(),
+        };
+        let plan = plan_identity_repair(snapshot.clone()).expect("bounded blocked plan");
+        let entry = cache
+            .insert("node-a", 7, 9, snapshot, plan)
+            .await
+            .expect("cache plan");
+
+        assert!(matches!(
+            cache.get(&entry.plan_id, 8, 9, "node-b").await,
+            Err(ApiError::NotFound("identity repair plan"))
+        ));
+        assert!(matches!(
+            cache.get(&entry.plan_id, 7, 9, "node-b").await,
+            Err(ApiError::TypedDetail {
+                code: "repair_wrong_node",
+                ..
+            })
+        ));
+
+        cache
+            .inner
+            .lock()
+            .await
+            .get_mut(&entry.plan_id)
+            .expect("cached entry")
+            .created_at = tokio::time::Instant::now() - PLAN_TTL;
+        assert!(matches!(
+            cache.get(&entry.plan_id, 7, 9, "node-a").await,
+            Err(ApiError::Typed {
+                code: "repair_plan_expired",
+                ..
+            })
+        ));
     }
 }

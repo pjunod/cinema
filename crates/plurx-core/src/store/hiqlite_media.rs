@@ -190,6 +190,26 @@ impl From<&mut Row<'_>> for IdentityRepairOwnerRow {
     }
 }
 
+struct IdentityRepairCoherenceRow {
+    kind: String,
+    paths: String,
+    items_json: String,
+    files_json: String,
+    watches_json: String,
+}
+
+impl From<&mut Row<'_>> for IdentityRepairCoherenceRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            kind: row.get("kind"),
+            paths: row.get("paths"),
+            items_json: row.get("items_json"),
+            files_json: row.get("files_json"),
+            watches_json: row.get("watches_json"),
+        }
+    }
+}
+
 impl From<&mut Row<'_>> for SeriesHintRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
@@ -1386,6 +1406,21 @@ impl MediaStore for HiqliteAuthStore {
         directory_owner_ids.sort_unstable();
         directory_owner_ids.dedup();
 
+        let retiring_ids = super::plan_identity_repair(IdentityRepairSnapshot {
+            library_id,
+            library_kind: library.kind.clone(),
+            library_paths: library.paths.clone(),
+            input_show_ids: sorted_ids.clone(),
+            items: items.clone(),
+            files: files.clone(),
+            watches: watches.clone(),
+            directory_owner_ids: directory_owner_ids.clone(),
+            dependency_rows: Vec::new(),
+            blockers: Vec::new(),
+        })?
+        .retired_item_ids;
+        let retiring_ids_json = serde_json::to_string(&retiring_ids).map_err(database_error)?;
+
         let mut blockers = Vec::new();
         for (code, sql, detail) in [
             (
@@ -1431,7 +1466,7 @@ impl MediaStore for HiqliteAuthStore {
         ] {
             let count = self
                 .client()
-                .query_consistent_map::<CountRow, _>(sql, params!(item_ids_json.as_str()))
+                .query_consistent_map::<CountRow, _>(sql, params!(retiring_ids_json.as_str()))
                 .await
                 .map_err(database_error)?
                 .first()
@@ -1459,7 +1494,7 @@ impl MediaStore for HiqliteAuthStore {
                 .client()
                 .query_consistent_map::<CountRow, _>(
                     "SELECT COUNT(*) AS count FROM cluster_artwork_repairs WHERE item_id IN (SELECT value FROM json_each($1))",
-                    params!(item_ids_json.as_str()),
+                    params!(retiring_ids_json.as_str()),
                 )
                 .await
                 .map_err(database_error)?
@@ -1482,7 +1517,7 @@ impl MediaStore for HiqliteAuthStore {
                     OR EXISTS (SELECT 1 FROM json_each(c.recipe_json, '$.exclude_item_ids') WHERE value = ids.value) \
                     OR EXISTS (SELECT 1 FROM json_each(c.recipe_json, '$.include_show_ids') WHERE value = ids.value) \
                     OR EXISTS (SELECT 1 FROM json_each(c.recipe_json, '$.exclude_show_ids') WHERE value = ids.value))",
-                params!(item_ids_json.as_str()),
+                params!(retiring_ids_json.as_str()),
             )
             .await
             .map_err(database_error)?
@@ -1494,6 +1529,74 @@ impl MediaStore for HiqliteAuthStore {
                 code: "library_channel_recipe".to_owned(),
                 detail: format!("{recipe_count} channel recipes reference selected items"),
             });
+        }
+        // The planner must not fingerprint a hybrid assembled across Raft
+        // commits. Re-read every mutable core row in one leader query and
+        // accept the assembled preview only when it equals that single SQL
+        // snapshot. Apply independently revalidates dependencies and owners
+        // inside its atomic guard.
+        let expected_items = serde_json::to_string(
+            &items
+                .iter()
+                .map(|item| item.row.clone())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(database_error)?;
+        let expected_files = serde_json::to_string(
+            &files
+                .iter()
+                .map(|file| file.row.clone())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(database_error)?;
+        let expected_watch_rows = watches
+            .iter()
+            .map(|watch| {
+                serde_json::to_string(&(
+                    watch.user_id,
+                    watch.item_id,
+                    watch.position_ms,
+                    watch.duration_ms,
+                    i64::from(watch.watched),
+                    watch.updated_at,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        let expected_watches =
+            serde_json::to_string(&expected_watch_rows).map_err(database_error)?;
+        let coherent = self
+            .client()
+            .query_consistent_map::<IdentityRepairCoherenceRow, _>(
+                format!(
+                    "SELECT $1 AS requested_library_id,l.kind,l.paths, \
+                       COALESCE((WITH requested(id) AS (SELECT value FROM json_each($2)), selected(id) AS ( \
+                         SELECT id FROM requested UNION SELECT i.id FROM items i JOIN requested r ON i.parent_id=r.id \
+                         UNION SELECT e.id FROM items e JOIN items s ON s.id=e.parent_id JOIN requested r ON s.parent_id=r.id) \
+                         SELECT json_group_array(row_json) FROM (SELECT json_array({IDENTITY_REPAIR_ITEM_COLS}) AS row_json \
+                         FROM items WHERE id IN (SELECT id FROM selected) ORDER BY id)), '[]') AS items_json, \
+                       COALESCE((SELECT json_group_array(row_json) FROM (SELECT json_array({IDENTITY_REPAIR_FILE_COLS}) AS row_json \
+                         FROM files WHERE item_id IN (SELECT value FROM json_each($3)) ORDER BY id)), '[]') AS files_json, \
+                       COALESCE((SELECT json_group_array(row_json) FROM (SELECT json_array(user_id,item_id,position_ms,duration_ms,watched,updated_at) AS row_json \
+                         FROM watch_state WHERE item_id IN (SELECT value FROM json_each($3)) ORDER BY item_id,user_id)), '[]') AS watches_json \
+                     FROM libraries l WHERE l.id=$1"
+                ),
+                params!(library_id, ids_json.as_str(), item_ids_json.as_str()),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| StoreError::Task("identity repair library not found".to_owned()))?;
+        if coherent.kind != library.kind
+            || coherent.paths != library.paths
+            || coherent.items_json != expected_items
+            || coherent.files_json != expected_files
+            || coherent.watches_json != expected_watches
+        {
+            return Err(StoreError::Task(
+                "identity repair snapshot changed during preview; retry".to_owned(),
+            ));
         }
         Ok(IdentityRepairSnapshot {
             library_id,

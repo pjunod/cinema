@@ -718,6 +718,78 @@ fn identity_repair_already_applied(
             return Ok(false);
         }
     }
+    for copy in &plan.watch_copies {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM watch_state WHERE user_id=?1 AND item_id=?2)",
+            params![copy.user_id, copy.destination_item_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(false);
+        }
+    }
+    let invalid_numbering: bool = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM items s WHERE s.parent_id=?1 AND s.kind='season'
+            GROUP BY s.season_number HAVING s.season_number IS NULL OR COUNT(*)>1
+           UNION ALL
+           SELECT 1 FROM items e JOIN items s ON s.id=e.parent_id
+            WHERE s.parent_id=?1 AND s.kind='season' AND e.kind='episode'
+            GROUP BY e.parent_id,e.episode_number
+            HAVING e.episode_number IS NULL OR COUNT(*)>1)",
+        params![survivor],
+        |row| row.get(0),
+    )?;
+    if invalid_numbering {
+        return Ok(false);
+    }
+    let actual_counts = conn.query_row(
+        "SELECT
+           (SELECT COUNT(*) FROM items WHERE parent_id=?1 AND kind='season'),
+           (SELECT COUNT(*) FROM items e JOIN items s ON s.id=e.parent_id
+             WHERE s.parent_id=?1 AND s.kind='season' AND e.kind='episode'),
+           (SELECT COUNT(*) FROM files f JOIN items e ON e.id=f.item_id
+             JOIN items s ON s.id=e.parent_id WHERE s.parent_id=?1),
+           (SELECT COUNT(*) FROM watch_state w JOIN items e ON e.id=w.item_id
+             JOIN items s ON s.id=e.parent_id WHERE s.parent_id=?1)",
+        params![survivor],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        },
+    )?;
+    if actual_counts
+        != (
+            plan.expected_after_counts.seasons as i64,
+            plan.expected_after_counts.episodes as i64,
+            plan.expected_after_counts.files as i64,
+            plan.expected_after_counts.watches as i64,
+        )
+    {
+        return Ok(false);
+    }
+    let retired_json = serde_json::to_string(&plan.retired_item_ids)
+        .map_err(|error| StoreError::Task(format!("encode retired item IDs: {error}")))?;
+    let dangling_json_reference: bool = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM library_channels c WHERE EXISTS (SELECT 1 FROM json_each(?1) ids WHERE
+             EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.include_item_ids') WHERE value=ids.value) OR
+             EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.exclude_item_ids') WHERE value=ids.value) OR
+             EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.include_show_ids') WHERE value=ids.value) OR
+             EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.exclude_show_ids') WHERE value=ids.value))
+           UNION ALL SELECT 1 FROM media_sessions s WHERE EXISTS (SELECT 1 FROM json_tree(s.recipe_json) j JOIN json_each(?1) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))
+           UNION ALL SELECT 1 FROM library_channel_session_recipes r WHERE EXISTS (SELECT 1 FROM json_tree(r.recipe_json) j JOIN json_each(?1) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))
+           UNION ALL SELECT 1 FROM watched_outbox o WHERE EXISTS (SELECT 1 FROM json_tree(o.payload) j JOIN json_each(?1) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id')))",
+        params![retired_json],
+        |row| row.get(0),
+    )?;
+    if dangling_json_reference {
+        return Ok(false);
+    }
     Ok(true)
 }
 

@@ -282,6 +282,7 @@ pub fn plan_identity_repair(
     }
 
     let mut source_directories = BTreeSet::new();
+    let mut shows_with_source_evidence = BTreeSet::new();
     for file in &snapshot.files {
         let parsed = crate::scan::parse::parse_episode(std::path::Path::new(&file.path))
             .or_else(|_| crate::scan::parse::parse_anime_episode(std::path::Path::new(&file.path)))
@@ -289,6 +290,14 @@ pub fn plan_identity_repair(
         match parsed.and_then(|value| value.source_directory) {
             Some(directory) => {
                 source_directories.insert(directory.to_string_lossy().into_owned());
+                let show_id = items
+                    .get(&file.item_id)
+                    .and_then(|episode| episode.parent_id)
+                    .and_then(|season_id| items.get(&season_id))
+                    .and_then(|season| season.parent_id);
+                if let Some(show_id) = show_id {
+                    shows_with_source_evidence.insert(show_id);
+                }
             }
             None => blockers.push(blocker(
                 "missing_source_directory",
@@ -305,6 +314,34 @@ pub fn plan_identity_repair(
     let source_directory = (source_directories.len() == 1)
         .then(|| source_directories.into_iter().next())
         .flatten();
+    let missing_evidence = requested
+        .difference(&shows_with_source_evidence)
+        .copied()
+        .collect::<Vec<_>>();
+    if !missing_evidence.is_empty() {
+        blockers.push(blocker(
+            "missing_show_source_evidence",
+            format!("requested shows {missing_evidence:?} have no exact-directory file evidence"),
+        ));
+    }
+    let configured_roots =
+        serde_json::from_str::<Vec<String>>(&snapshot.library_paths).unwrap_or_default();
+    if let Some(directory) = source_directory.as_deref() {
+        let directory = std::path::Path::new(directory);
+        let strictly_below_root = configured_roots.iter().any(|root| {
+            let root = std::path::Path::new(root);
+            directory != root && directory.starts_with(root)
+        });
+        let equals_any_root = configured_roots
+            .iter()
+            .any(|root| directory == std::path::Path::new(root));
+        if configured_roots.is_empty() || equals_any_root || !strictly_below_root {
+            blockers.push(blocker(
+                "invalid_source_directory",
+                "the common source directory must be strictly below a configured library root",
+            ));
+        }
+    }
 
     let before_counts = IdentityRepairCounts {
         shows: shows.len(),
@@ -352,10 +389,11 @@ pub fn plan_identity_repair(
 
         for (number, mut group) in seasons_by_number {
             group.sort_by_key(|season| (season.added_at, season.id));
-            if group
-                .windows(2)
-                .any(|pair| pair[0].parent_id == pair[1].parent_id)
-            {
+            let distinct_season_parents = group
+                .iter()
+                .filter_map(|season| season.parent_id)
+                .collect::<BTreeSet<_>>();
+            if distinct_season_parents.len() != group.len() {
                 blockers.push(blocker(
                     "duplicate_season_number",
                     format!("season {number} is duplicated under one show"),
@@ -396,10 +434,11 @@ pub fn plan_identity_repair(
             }
             for (episode_number, mut episode_group) in episodes_by_number {
                 episode_group.sort_by_key(|episode| (episode.added_at, episode.id));
-                if episode_group
-                    .windows(2)
-                    .any(|pair| pair[0].parent_id == pair[1].parent_id)
-                {
+                let distinct_episode_parents = episode_group
+                    .iter()
+                    .filter_map(|episode| episode.parent_id)
+                    .collect::<BTreeSet<_>>();
+                if distinct_episode_parents.len() != episode_group.len() {
                     blockers.push(blocker(
                         "duplicate_episode_number",
                         format!("episode {episode_number} is duplicated under one season {number}"),

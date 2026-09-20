@@ -171,10 +171,26 @@ pub(super) fn identity_repair_snapshot(
     directory_owner_ids.sort_unstable();
     directory_owner_ids.dedup();
 
+    let retiring_ids = crate::store::plan_identity_repair(IdentityRepairSnapshot {
+        library_id,
+        library_kind: library.0.clone(),
+        library_paths: library.1.clone(),
+        input_show_ids: sorted_ids.clone(),
+        items: items.clone(),
+        files: files.clone(),
+        watches: watches.clone(),
+        directory_owner_ids: directory_owner_ids.clone(),
+        dependency_rows: Vec::new(),
+        blockers: Vec::new(),
+    })?
+    .retired_item_ids;
+    let dependency_ids_json = serde_json::to_string(&retiring_ids)
+        .map_err(|error| StoreError::Task(format!("encode retiring item IDs: {error}")))?;
+
     let mut blockers = Vec::new();
     let reading_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM reading_state WHERE item_id IN (SELECT value FROM json_each(?1))",
-        params![item_ids_json],
+        params![dependency_ids_json],
         |row| row.get(0),
     )?;
     if reading_count != 0 {
@@ -186,7 +202,7 @@ pub(super) fn identity_repair_snapshot(
     let reconcile_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM scan_reconcile_items
           WHERE library_id = ?1 AND item_id IN (SELECT value FROM json_each(?2))",
-        params![library_id, item_ids_json],
+        params![library_id, dependency_ids_json],
         |row| row.get(0),
     )?;
     if reconcile_count != 0 {
@@ -200,7 +216,7 @@ pub(super) fn identity_repair_snapshot(
           WHERE item_id IN (SELECT value FROM json_each(?1))
             AND (json_array_length(overrides, '$.include') > 0
               OR json_array_length(overrides, '$.exclude') > 0)",
-        params![item_ids_json],
+        params![dependency_ids_json],
         |row| row.get(0),
     )?;
     if override_count != 0 {
@@ -219,7 +235,7 @@ pub(super) fn identity_repair_snapshot(
         conn.query_row(
             "SELECT COUNT(*) FROM cluster_artwork_repairs
               WHERE item_id IN (SELECT value FROM json_each(?1))",
-            params![item_ids_json],
+            params![dependency_ids_json],
             |row| row.get(0),
         )?
     } else {
@@ -235,7 +251,7 @@ pub(super) fn identity_repair_snapshot(
         "SELECT COUNT(*) FROM library_channel_entries
           WHERE item_id IN (SELECT value FROM json_each(?1))
              OR show_id IN (SELECT value FROM json_each(?1))",
-        params![item_ids_json],
+        params![dependency_ids_json],
         |row| row.get(0),
     )?;
     if channel_count != 0 {
@@ -252,7 +268,7 @@ pub(super) fn identity_repair_snapshot(
                 OR EXISTS (SELECT 1 FROM json_each(c.recipe_json, '$.exclude_item_ids') WHERE value = ids.value)
                 OR EXISTS (SELECT 1 FROM json_each(c.recipe_json, '$.include_show_ids') WHERE value = ids.value)
                 OR EXISTS (SELECT 1 FROM json_each(c.recipe_json, '$.exclude_show_ids') WHERE value = ids.value))",
-        params![item_ids_json],
+        params![dependency_ids_json],
         |row| row.get(0),
     )?;
     if recipe_count != 0 {
@@ -283,7 +299,7 @@ pub(super) fn identity_repair_snapshot(
             "DVR recordings reference selected items",
         ),
     ] {
-        let count: i64 = conn.query_row(sql, params![item_ids_json], |row| row.get(0))?;
+        let count: i64 = conn.query_row(sql, params![dependency_ids_json], |row| row.get(0))?;
         if count != 0 {
             blockers.push(IdentityRepairBlocker {
                 code: code.to_owned(),

@@ -1,6 +1,6 @@
 # Scan identity status — build, review and promotion ledger
 
-**Status:** complete candidate frozen for final review · **Executes:**
+**Status:** adversarial review addressed; final fast lane next · **Executes:**
 [SCAN-IDENTITY-IMPLEMENTATION.md](SCAN-IDENTITY-IMPLEMENTATION.md) ·
 **Started:** 2026-09-19 · **Updated:** 2026-09-19
 
@@ -33,7 +33,7 @@ silently describing the wrong toolchain.
 | M1 ownership and directory lookup | `codex/scan-identity-ownership` | merged by PR #379 at `2cbea369` | Core, daemon, SQLite and three-voter Hiqlite focused contracts passed. Current workflow intentionally allocates no CI jobs for task PRs into an effort. |
 | M2 guarded series hints | `codex/scan-identity-hints` | merged by PR #380 at `54a65e93` | Atomic SQLite/Hiqlite outcomes, fenced stale-lease refusal and daemon import/report behavior passed. Current workflow intentionally allocates no CI jobs for task PRs into an effort. |
 | M3 bounded repair | `codex/scan-identity-repair` | merged by PR #384 at `86cf04b4` | Deterministic planner, bounded admin cache/API, SQLite/Hiqlite fenced apply and retry recognition pass focused core, daemon, SQLite, three-voter and documentation contracts. |
-| Final adversarial review | `effort/scan-identity` into `main` | not started | One review after the complete candidate is frozen. |
+| Final adversarial review | `effort/scan-identity` into `main` | complete; findings addressed | The one requested pass found descendant-membership, retry-proof, source-evidence, root-overlap, anime, blocker-scope, snapshot-coherence and coverage gaps. Corrections are summarized below. Its postcondition-index allegation was disproved by Hiqlite's observable-output contract and the three-voter run; the existing `statements.len()` index is correct after the postcondition is pushed. |
 | Main fast lane and merge | final effort PR | not started | Exact-tree green lane and receipt required before merge. |
 | Production catalogue repair | separate operator action | not authorized | Fresh deployed preview and explicit authorization required. |
 
@@ -62,11 +62,41 @@ silently describing the wrong toolchain.
 | 2026-09-19 | M3 working tree from `54a65e93` | `rustup run 1.97.1 cargo test --locked -p plurxd --bin plurxd scan_identity_` | 6 passed; 2,340 filtered out |
 | 2026-09-19 | M3 working tree from `54a65e93` | `python3 -m unittest tests.operations.test_docs_index tests.operations.test_api_doc_routes` | 7 passed |
 | 2026-09-19 | M3 working tree from `54a65e93` | `rustup run 1.97.1 cargo check --locked -p plurx-core -p plurxd --all-targets` | passed in 25s after the final M3 edit |
+| 2026-09-19 | review-corrected tree on current `main` | `rustup run 1.97.1 cargo test --locked -p plurx-core --lib scan_identity_` | 12 passed; 845 filtered out |
+| 2026-09-19 | review-corrected tree on current `main` | `rustup run 1.97.1 cargo test --locked -p plurxd --bin plurxd scan_identity_` | 7 passed; 2,360 filtered out |
+| 2026-09-19 | review-corrected tree on current `main` | `rustup run 1.97.1 cargo test --locked -p plurx-core --test store_contract scan_identity_repair_contract` | SQLite: 1 passed; 118 filtered out |
+| 2026-09-19 | review-corrected tree on current `main` | `rustup run 1.97.1 cargo test --locked -p plurx-core --features hiqlite-contract-tests --test store_contract scan_identity_repair_contract` | three-voter Hiqlite: 1 passed; 164 filtered out after exact descendant, coherent-preview and postcondition corrections |
+| 2026-09-19 | review-corrected tree on current `main` | `rustup run 1.97.1 cargo check --locked -p plurx-core -p plurxd --all-targets` | passed with Rust 1.97.1 |
 
 Only the milestone's named focused regressions have run. Broader affected
 tests remain deferred to the frozen final candidate. The all-target Clippy
 failure is outside this branch's diff and is recorded rather than hidden or
 silently repaired as unrelated work.
+
+## Adversarial review disposition — one pass, every safety issue resolved
+
+- Hiqlite apply now derives current descendants from the requested shows and
+  compares exact library, item, file and watch preimages in the atomic guard;
+  a post-preview descendant insertion is a retained cross-backend stale-plan
+  regression.
+- Planner readiness now requires file evidence from every requested show and
+  a common directory strictly below, and unequal to, every configured root.
+  Duplicate numbering uses parent sets rather than adjacency. Recognized anime
+  layouts use the same directory ownership path as ordinary shows.
+- Dependency checks and the apply guard are scoped to the actual retirement
+  set. Hiqlite also verifies the assembled core preview against one aggregate
+  leader query so a cross-commit hybrid is never fingerprinted.
+- Apply and retry postconditions now prove exact counts, unique numbering,
+  required destination watch rows and absence of retired JSON references
+  without rewriting later watch progress. The contract covers an absent watch
+  destination, survivor conflict, exact retry and new-descendant refusal on
+  SQLite and three voters.
+- The plan cache checks admin/library association before returning origin-node
+  detail; retained tests cover strict IDs, admin isolation, wrong-node refusal
+  and expiry. The reviewer-reported postcondition index change was tested and
+  rejected: after renewal is prepended, the already-pushed postcondition is at
+  transaction index `statements.len()`, and `+1` names an out-of-bounds or
+  non-observable statement.
 
 ## Decisions and limits — record assumptions instead of hiding them
 
@@ -85,6 +115,5 @@ silently repaired as unrelated work.
 
 ## Next action
 
-Open the frozen effort candidate against `main`, complete the one adversarial
-review, address its findings, then run the final fast lane and promote the
-exact qualified tree.
+Commit and push the review corrections, mark PR #385 ready, then require its
+exact-head Main promotion gate and qualification receipt before merge.

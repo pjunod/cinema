@@ -1268,23 +1268,30 @@ fn directory_placement(item: Item, directory: String, candidates: &[Item]) -> Pl
 
 fn usable_source_directory(library: &Library, directory: Option<&Path>) -> Option<String> {
     let directory = directory?.canonicalize().ok()?;
-    library.paths.iter().find_map(|root| {
-        let root = root.canonicalize().unwrap_or_else(|_| root.clone());
-        if directory == root || !directory.starts_with(&root) {
-            return None;
-        }
-        let suffix = directory.strip_prefix(&root).ok()?;
-        // Store paths use the configured root spelling. Rebase a targeted
-        // scan's canonical path onto that spelling so it can find files that
-        // a full WalkDir scan already recorded through a symlinked mount.
-        let configured_root = library.paths.iter().find(|configured| {
-            configured
-                .canonicalize()
-                .unwrap_or_else(|_| (*configured).clone())
-                == root
-        })?;
-        Some(configured_root.join(suffix).to_string_lossy().into_owned())
-    })
+    let roots = library
+        .paths
+        .iter()
+        .map(|configured| {
+            (
+                configured,
+                configured
+                    .canonicalize()
+                    .unwrap_or_else(|_| configured.clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+    if roots.iter().any(|(_, root)| directory == *root) {
+        return None;
+    }
+    let (configured_root, root) = roots
+        .into_iter()
+        .filter(|(_, root)| directory.starts_with(root))
+        .max_by_key(|(_, root)| root.components().count())?;
+    let suffix = directory.strip_prefix(&root).ok()?;
+    // Store paths use the configured root spelling. Rebase a targeted scan's
+    // canonical path onto that spelling so it can find files recorded through
+    // a symlinked mount.
+    Some(configured_root.join(suffix).to_string_lossy().into_owned())
 }
 
 async fn existing_owner_problem(
@@ -1506,21 +1513,17 @@ async fn find_or_create_show(
     library: &Library,
     parsed: &parse::ParsedEpisode,
 ) -> Result<(Item, Option<DuplicateDirectory>), StoreError> {
-    if !library.anime {
-        if let Some(directory) =
-            usable_source_directory(library, parsed.source_directory.as_deref())
-        {
-            let candidates = store
-                .find_shows_by_directory(library.id, &directory, parsed.season)
-                .await?;
-            if let Some(show) = candidates.first().cloned() {
-                let duplicate = (candidates.len() > 1).then(|| DuplicateDirectory {
-                    directory,
-                    candidate_ids: candidates.iter().map(|candidate| candidate.id).collect(),
-                    chosen_id: show.id,
-                });
-                return Ok((show, duplicate));
-            }
+    if let Some(directory) = usable_source_directory(library, parsed.source_directory.as_deref()) {
+        let candidates = store
+            .find_shows_by_directory(library.id, &directory, parsed.season)
+            .await?;
+        if let Some(show) = candidates.first().cloned() {
+            let duplicate = (candidates.len() > 1).then(|| DuplicateDirectory {
+                directory,
+                candidate_ids: candidates.iter().map(|candidate| candidate.id).collect(),
+                chosen_id: show.id,
+            });
+            return Ok((show, duplicate));
         }
     }
     if let Some(show) = store
@@ -3022,10 +3025,27 @@ mod tests {
             None,
             "a root/Season N/file layout cannot turn the root into one show"
         );
+
+        let nested = dir.path().join("Nested Show");
+        std::fs::create_dir_all(&nested).expect("nested root");
+        let overlapping = store
+            .create_library(&NewLibrary {
+                name: "Overlapping roots".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![dir.path().to_path_buf(), nested.clone()],
+                anime: false,
+            })
+            .await
+            .expect("overlapping library");
+        assert_eq!(
+            usable_source_directory(&overlapping, Some(&nested)),
+            None,
+            "a path equal to any configured root is never show identity"
+        );
     }
 
     #[tokio::test]
-    async fn scan_identity_anime_keeps_existing_title_fallback() {
+    async fn scan_identity_anime_uses_directory_when_layout_is_recognized() {
         let store = SqliteStore::open_in_memory().expect("store");
         let dir = tempfile::tempdir().expect("tmp");
         write_fake_video(
@@ -3070,8 +3090,8 @@ mod tests {
                 .expect("shows")
                 .items
                 .len(),
-            2,
-            "anime keeps the established title/numbering fallback instead of directory identity"
+            1,
+            "recognized anime layouts keep directory ownership after a display rename"
         );
     }
 

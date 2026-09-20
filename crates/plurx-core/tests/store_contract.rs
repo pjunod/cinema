@@ -23244,6 +23244,14 @@ async fn scan_identity_repair_contract() {
             .put_progress(user.id, second.2, 8_000, Some(10_000))
             .await
             .expect("losing watch");
+        let copy_user = store
+            .create_user("identity-repair-copy-viewer", "hash", false)
+            .await
+            .expect("repair copy viewer");
+        let copied_watch = store
+            .put_progress(copy_user.id, second.2, 4_000, Some(10_000))
+            .await
+            .expect("copy-source watch");
         let snapshot = store
             .identity_repair_snapshot(library.id, &[first.0, second.0])
             .await
@@ -23255,6 +23263,7 @@ async fn scan_identity_repair_contract() {
         assert_eq!(plan.file_moves[0].file_id, second.3);
         assert_eq!(plan.file_moves[0].new_item_id, first.2);
         assert_eq!(plan.watch_conflicts.len(), 1);
+        assert_eq!(plan.watch_copies.len(), 1);
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -23289,6 +23298,15 @@ async fn scan_identity_repair_contract() {
                 .expect("surviving watch row"),
             surviving_watch,
             "{backend}: survivor watch row wins unchanged"
+        );
+        assert_eq!(
+            store
+                .watch_state(copy_user.id, first.2)
+                .await
+                .expect("copied watch read")
+                .expect("copied watch row"),
+            copied_watch,
+            "{backend}: an absent destination receives the exact source watch row"
         );
         assert!(store
             .get_item(second.0)
@@ -23348,15 +23366,17 @@ async fn scan_identity_repair_contract() {
         let stale_plan = plurx_core::store::plan_identity_repair(stale_snapshot.clone())
             .expect("stale repair plan");
         store
-            .apply_metadata(
-                third.0,
-                &MetadataPatch {
-                    overview: Some("changed after preview".to_owned()),
-                    ..Default::default()
-                },
-            )
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Episode,
+                parent_id: Some(fourth.1),
+                title: "Episode 2 added after preview".into(),
+                year: None,
+                season_number: Some(1),
+                episode_number: Some(2),
+            })
             .await
-            .expect("concurrent metadata change");
+            .expect("concurrent descendant insert");
         let stale_successor = publication_successor(&retry);
         assert_eq!(
             store
