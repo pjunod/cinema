@@ -57,6 +57,7 @@ const WEB_ELEMENT_FOR_ITEM = {
   pip: "pbpip",
   title_info: "pbinfo",
   fullscreen: "pbfs",
+  larger: "pblarger",
   close: "pbclose",
   airplay: "apbtn",
   spacer: null,

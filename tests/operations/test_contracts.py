@@ -1674,6 +1674,19 @@ assert.equal(context.ACT_TIMER, null);
             workflow,
         )
 
+    def test_manual_effort_scope_enables_every_compile_surface(self):
+        from validation.ci_scope import resolve_scope
+
+        scope = workflow_step_blocks(
+            workflow_job_blocks(".github/workflows/effort-ci.yml")["scope"]
+        )["Select affected compile surfaces"]
+        self.assertIn("--event workflow_dispatch", scope)
+        self.assertNotIn("--base", scope)
+        selected = resolve_scope("workflow_dispatch", None)
+        for surface in ("rust", "apple", "android_jvm", "web_layout"):
+            self.assertTrue(selected[surface], surface)
+        self.assertFalse(selected["docs_only"])
+
     def test_main_qualification_is_full_and_effort_prs_are_compile_only(self):
         workflow = read(".github/workflows/ci.yml")
         fast_lane = read(".github/workflows/main-fast-lane.yml")

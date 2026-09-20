@@ -41,6 +41,7 @@ async function playNextEpisode(){
     }
   }
   if(!next) return false;                                    // end of the series
+  if(WATCH&&watchBrowserMounted())return await watchPlayEpisode(exactWireId(next));
   AUTOPLAY=exactWireId(next);
   toast("▶ Up next: "+next.title);
   location.hash="#/item/"+exactWireId(next);
