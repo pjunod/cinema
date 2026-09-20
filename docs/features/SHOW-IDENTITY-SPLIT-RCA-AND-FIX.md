@@ -1,7 +1,7 @@
 # Scan identity — prevent split items and preserve watch state
 
-**Status:** M1 prevention built and fixture-verified on the effort; M2 hints and
-M3 repair remain unbuilt ·
+**Status:** M1 prevention merged to the effort; M2 hints built and
+fixture-verified; M3 repair remains unbuilt ·
 **Written:** 2026-09-19 · **Revised:** 2026-09-19 ·
 **Incident:** reference show S, season 5.
 

@@ -29,7 +29,8 @@ use plurx_core::store::{
     ArtworkRepairFence, CatalogueReader, ClusterFragmentIndexArtifact,
     ClusterFragmentIndexLocation, DvConversionMode, DvConversionQueueBatch, DvConversionState,
     DvRecoveryGuardState, NewAnalysisRequest, NewClusterFragmentIndexJob, PrometheusStoreSnapshot,
-    PublicationStore, QueueDvConversionOutcome, Store, DV_CONVERSION_QUEUE_BATCH_MAX,
+    PublicationStore, QueueDvConversionOutcome, SeriesHintOutcome, Store,
+    DV_CONVERSION_QUEUE_BATCH_MAX,
 };
 use plurx_core::transcode::EncoderCaps;
 use serde::{Deserialize, Serialize};
@@ -4383,9 +4384,11 @@ impl JobManager {
             waiters = requests.len(),
             "targeted scan requested"
         );
-        let out = scan::scan_path_with_publication(publisher, &library, &req.path).await?;
+        let mut out = scan::scan_path_with_publication(publisher, &library, &req.path).await?;
         for request in requests {
-            self.apply_ids(request, &out.items, publisher).await;
+            for problem in self.apply_ids(request, &out.items, publisher).await {
+                out.report.add_problem(problem);
+            }
         }
 
         // The rows exist; without this they would have no artwork until
@@ -4773,44 +4776,91 @@ impl JobManager {
         req: &ScanRequest,
         items: &[PlacedFile],
         publisher: &PublicationStore<'_>,
-    ) {
+    ) -> Vec<String> {
         let Some(ids) = req.ids.as_ref().filter(|i| !i.is_empty()) else {
-            return;
+            return Vec::new();
         };
+        let mut problems = Vec::new();
+        let mut seen = HashSet::new();
         for placed in items {
-            let target = if ids.episodeish {
-                match self.show_root(placed.item_id).await {
-                    Some(id) => id,
-                    None => continue,
+            if ids.episodeish {
+                let Some(series_tmdb) = ids.series_tmdb else {
+                    continue;
+                };
+                let Some(show_id) = self.show_root(placed.item_id).await else {
+                    continue;
+                };
+                if !seen.insert(show_id) {
+                    continue;
                 }
-            } else {
-                placed.item_id
-            };
+                match publisher
+                    .apply_series_tmdb_hint(req.library_id, show_id, series_tmdb)
+                    .await
+                {
+                    Ok(SeriesHintOutcome::Applied | SeriesHintOutcome::AlreadyEqual) => {
+                        tracing::info!(
+                            target: "plurxd::integrate",
+                            item = show_id,
+                            tmdb = series_tmdb,
+                            correlation_id = req.correlation_id.as_deref().unwrap_or("-"),
+                            "applied caller-supplied series id"
+                        );
+                    }
+                    Ok(SeriesHintOutcome::Conflict { current_tmdb_id }) => {
+                        tracing::warn!(
+                            target: "plurxd::integrate",
+                            item = show_id,
+                            current_tmdb = current_tmdb_id,
+                            requested_tmdb = series_tmdb,
+                            correlation_id = req.correlation_id.as_deref().unwrap_or("-"),
+                            "caller-supplied series id conflicts with known metadata"
+                        );
+                        problems.push(format!(
+                            "series TMDB hint {series_tmdb} conflicts with existing ID {current_tmdb_id} on show {show_id}; the existing ID was kept"
+                        ));
+                    }
+                    Ok(SeriesHintOutcome::MissingOrWrongKind) => tracing::warn!(
+                        target: "plurxd::integrate",
+                        item = show_id,
+                        tmdb = series_tmdb,
+                        correlation_id = req.correlation_id.as_deref().unwrap_or("-"),
+                        "series hint target is missing, outside the library, or not a show"
+                    ),
+                    Err(e) => tracing::warn!(
+                        target: "plurxd::integrate",
+                        item = show_id, error = %e,
+                        correlation_id = req.correlation_id.as_deref().unwrap_or("-"),
+                        "could not apply caller-supplied series id"
+                    ),
+                }
+                continue;
+            }
+
+            if !seen.insert(placed.item_id) {
+                continue;
+            }
             let patch = MetadataPatch {
-                tmdb_id: ids.series_tmdb.or(ids.tmdb),
-                imdb_id: if ids.episodeish {
-                    None
-                } else {
-                    ids.imdb.clone()
-                },
+                tmdb_id: ids.tmdb,
+                imdb_id: ids.imdb.clone(),
                 ..Default::default()
             };
-            match publisher.apply_metadata(target, &patch).await {
+            match publisher.apply_metadata(placed.item_id, &patch).await {
                 Ok(_) => tracing::info!(
                     target: "plurxd::integrate",
-                    item = target,
+                    item = placed.item_id,
                     tmdb = patch.tmdb_id.unwrap_or(0),
                     correlation_id = req.correlation_id.as_deref().unwrap_or("-"),
                     "applied caller-supplied ids"
                 ),
                 Err(e) => tracing::warn!(
                     target: "plurxd::integrate",
-                    item = target, error = %e,
+                    item = placed.item_id, error = %e,
                     correlation_id = req.correlation_id.as_deref().unwrap_or("-"),
                     "could not apply caller-supplied ids; falling back to title matching"
                 ),
             }
         }
+        problems
     }
 
     /// Apply Curator's exact work/edition relation after local EPUB
@@ -11346,6 +11396,287 @@ mod tests {
             2,
             "the queued target must extend the full-scan show rather than split it"
         );
+    }
+
+    #[tokio::test]
+    async fn scan_identity_hint_routes_only_series_id_and_surfaces_conflict() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = crate::test_tempdir().expect("artwork");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Hint Shows".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let show = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Show,
+                parent_id: None,
+                title: "Hint Show".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("show");
+        let season = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Season,
+                parent_id: Some(show),
+                title: "Season 1".into(),
+                year: None,
+                season_number: Some(1),
+                episode_number: None,
+            })
+            .await
+            .expect("season");
+        let episode = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Episode,
+                parent_id: Some(season),
+                title: "Episode 1".into(),
+                year: None,
+                season_number: Some(1),
+                episode_number: Some(1),
+            })
+            .await
+            .expect("episode");
+        let jobs = manager(store.clone(), artwork.path());
+        let publisher = PublicationStore::unfenced(store.as_ref());
+        let placed = vec![
+            PlacedFile {
+                item_id: episode,
+                file_id: 1,
+                path: "/fixture/one.mkv".into(),
+            },
+            PlacedFile {
+                item_id: episode,
+                file_id: 2,
+                path: "/fixture/two.mkv".into(),
+            },
+        ];
+        let request = |series_tmdb, tmdb| ScanRequest {
+            id: "hint-routing".into(),
+            library_id: library.id,
+            path: PathBuf::from("/fixture"),
+            ids: Some(IdHints {
+                tmdb,
+                series_tmdb,
+                episodeish: true,
+                ..Default::default()
+            }),
+            book: None,
+            correlation_id: Some("hint-routing".into()),
+            source: Some("fixture".into()),
+        };
+
+        assert!(jobs
+            .apply_ids(&request(None, Some(9001)), &placed, &publisher)
+            .await
+            .is_empty());
+        assert_eq!(
+            store
+                .get_item(show)
+                .await
+                .expect("show")
+                .expect("show")
+                .tmdb_id,
+            None,
+            "an episode TMDB id is never reinterpreted as a series id"
+        );
+        assert!(jobs
+            .apply_ids(&request(Some(42), Some(9001)), &placed, &publisher)
+            .await
+            .is_empty());
+        assert_eq!(
+            store
+                .get_item(show)
+                .await
+                .expect("show")
+                .expect("show")
+                .tmdb_id,
+            Some(42)
+        );
+        let problems = jobs
+            .apply_ids(&request(Some(43), None), &placed, &publisher)
+            .await;
+        assert_eq!(
+            problems.len(),
+            1,
+            "duplicate files report one show conflict"
+        );
+        assert!(problems[0].contains("43") && problems[0].contains("42"));
+        assert_eq!(
+            store
+                .get_item(show)
+                .await
+                .expect("show")
+                .expect("show")
+                .tmdb_id,
+            Some(42),
+            "the known provider id wins"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_identity_hint_conflict_keeps_targeted_scan_playable_and_visible() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let artwork = crate::test_tempdir().expect("artwork");
+        let season_one = media.path().join("Beacon Field/Season 1");
+        std::fs::create_dir_all(&season_one).expect("season one");
+        std::fs::write(season_one.join("Beacon Field S01E01.mkv"), b"video").expect("episode one");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Shows".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![media.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        scan::scan_library(store.as_ref(), &library)
+            .await
+            .expect("initial scan");
+        let show = store
+            .find_show(library.id, "Beacon Field", None)
+            .await
+            .expect("show lookup")
+            .expect("show");
+        store
+            .apply_series_tmdb_hint(library.id, show.id, 42)
+            .await
+            .expect("seed show id");
+        let season_two = media.path().join("Beacon Field/Season 2");
+        std::fs::create_dir_all(&season_two).expect("season two");
+        std::fs::write(season_two.join("Beacon Field S02E01.mkv"), b"video").expect("episode two");
+        let jobs = manager(store.clone(), artwork.path());
+        let scan = jobs
+            .request_scan(ScanRequest {
+                id: "scan-identity-hint-conflict".into(),
+                library_id: library.id,
+                path: season_two,
+                ids: Some(IdHints {
+                    series_tmdb: Some(43),
+                    episodeish: true,
+                    ..Default::default()
+                }),
+                book: None,
+                correlation_id: Some("hint-conflict".into()),
+                source: Some("fixture".into()),
+            })
+            .await
+            .expect("targeted scan")
+            .expect("ran immediately");
+
+        assert_eq!(
+            scan.items.len(),
+            1,
+            "the conflicting import remains playable"
+        );
+        assert!(scan.report.problems.iter().any(|problem| {
+            problem.contains("43")
+                && problem.contains("42")
+                && problem.contains(&show.id.to_string())
+        }));
+        assert_eq!(
+            store
+                .get_item(show.id)
+                .await
+                .expect("show")
+                .expect("show")
+                .tmdb_id,
+            Some(42)
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_identity_hint_coalesced_order_keeps_first_series_id() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let artwork = crate::test_tempdir().expect("artwork");
+        let season = media.path().join("Ordered Signals/Season 1");
+        std::fs::create_dir_all(&season).expect("season");
+        std::fs::write(season.join("Ordered Signals S01E01.mkv"), b"video").expect("episode");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Shows".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![media.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let jobs = manager(store.clone(), artwork.path());
+        jobs.statuses.lock().await.insert(
+            library.id,
+            ScanStatus {
+                running: true,
+                ..Default::default()
+            },
+        );
+        for (id, series_tmdb) in [("ordered-first", 42), ("ordered-second", 43)] {
+            assert!(jobs
+                .request_scan(ScanRequest {
+                    id: id.into(),
+                    library_id: library.id,
+                    path: season.clone(),
+                    ids: Some(IdHints {
+                        series_tmdb: Some(series_tmdb),
+                        episodeish: true,
+                        ..Default::default()
+                    }),
+                    book: None,
+                    correlation_id: Some(id.into()),
+                    source: Some("fixture".into()),
+                })
+                .await
+                .expect("queue waiter")
+                .is_none());
+        }
+        jobs.statuses.lock().await.remove(&library.id);
+        jobs.drain_pending(library.id).await;
+
+        let second = jobs
+            .scan_request("ordered-second")
+            .await
+            .expect("second record");
+        assert_eq!(second.status, "done");
+        assert!(second
+            .report
+            .as_ref()
+            .expect("scan report")
+            .problems
+            .iter()
+            .any(|problem| problem.contains("43") && problem.contains("42")));
+        let episode_id = second
+            .items
+            .expect("placed items")
+            .first()
+            .expect("episode")
+            .item_id;
+        let episode = store
+            .get_item(episode_id)
+            .await
+            .expect("episode")
+            .expect("episode");
+        let season_item = store
+            .get_item(episode.parent_id.expect("season"))
+            .await
+            .expect("season")
+            .expect("season");
+        let show = store
+            .get_item(season_item.parent_id.expect("show"))
+            .await
+            .expect("show")
+            .expect("show");
+        assert_eq!(show.tmdb_id, Some(42));
     }
 
     #[tokio::test]

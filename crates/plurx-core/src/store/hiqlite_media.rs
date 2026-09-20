@@ -11,7 +11,7 @@ use super::hiqlite::{database_error, validate_sql, HiqliteAuthStore, TimedClient
 use super::{
     directory_matches_movie_path, directory_matches_show_path, directory_path_bounds,
     normalized_directory, ArtworkInventoryItem, ArtworkRepairFence, MediaStore,
-    MissingVideoCodecTag, ReconcileOutcome, RootFingerprintStatus, WatchStore,
+    MissingVideoCodecTag, ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome, WatchStore,
     TOP_LEVEL_ITEM_PREDICATE,
 };
 use crate::domain::DolbyVisionFacts;
@@ -80,6 +80,18 @@ struct DirectoryItemRow {
     item: ItemRow,
 }
 
+struct SeriesHintRow {
+    tmdb_id: Option<i64>,
+}
+
+impl From<&mut Row<'_>> for SeriesHintRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            tmdb_id: row.get("tmdb_id"),
+        }
+    }
+}
+
 impl From<&mut Row<'_>> for DirectoryItemRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
@@ -96,6 +108,30 @@ impl From<&mut Row<'_>> for ItemTitleRow {
             item_id: row.get("item_id"),
             title: row.get("title"),
         }
+    }
+}
+
+impl HiqliteAuthStore {
+    pub(super) async fn current_series_hint_outcome(
+        &self,
+        library_id: i64,
+        show_id: i64,
+        tmdb_id: i64,
+    ) -> Result<SeriesHintOutcome, StoreError> {
+        let rows = self
+            .client()
+            .query_consistent_map::<SeriesHintRow, _>(
+                "SELECT tmdb_id FROM items
+                 WHERE id = $1 AND library_id = $2 AND kind = 'show'",
+                params!(show_id, library_id),
+            )
+            .await
+            .map_err(database_error)?;
+        Ok(match rows.first().and_then(|row| row.tmdb_id) {
+            Some(current_tmdb_id) if current_tmdb_id == tmdb_id => SeriesHintOutcome::AlreadyEqual,
+            Some(current_tmdb_id) => SeriesHintOutcome::Conflict { current_tmdb_id },
+            None => SeriesHintOutcome::MissingOrWrongKind,
+        })
     }
 }
 
@@ -1649,6 +1685,38 @@ impl MediaStore for HiqliteAuthStore {
                 .await
                 .map_err(database_error)?,
         )
+    }
+
+    async fn apply_series_tmdb_hint(
+        &self,
+        library_id: i64,
+        show_id: i64,
+        tmdb_id: i64,
+    ) -> Result<SeriesHintOutcome, StoreError> {
+        if tmdb_id <= 0 {
+            return Err(StoreError::Task(
+                "series TMDB hint must be a positive integer".to_owned(),
+            ));
+        }
+        let now = self.now()?;
+        let rows = self
+            .client()
+            .execute_returning_map::<_, SeriesHintRow>(
+                "UPDATE items SET tmdb_id = $1, updated_at = $2
+                 WHERE id = $3 AND library_id = $4 AND kind = 'show'
+                   AND tmdb_id IS NULL
+                 RETURNING tmdb_id",
+                params!(tmdb_id, now, show_id, library_id),
+            )
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        if !rows.is_empty() {
+            return Ok(SeriesHintOutcome::Applied);
+        }
+        self.current_series_hint_outcome(library_id, show_id, tmdb_id)
+            .await
     }
 
     async fn apply_metadata(&self, item_id: i64, patch: &MetadataPatch) -> Result<(), StoreError> {

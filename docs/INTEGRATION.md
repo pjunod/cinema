@@ -175,7 +175,13 @@ unresolvable path and counts the rejection as a pass).
 
 `hint` is advisory. The library's own kind decides how a file is parsed; the
 hint only picks which item an id applies to. For an episode, `series.tmdb` is
-the **show's** id — an episode's own id does not identify the series. A book
+the **show's** id — an episode's own id does not identify the series, and plurx
+never falls back from item-level `ids.tmdb` to the show. The series ID must be
+positive and is applied after placement with an absent-or-equal guard: the
+first hint wins, repeats are idempotent, and a different known ID is retained.
+That disagreement does not fail the import or remove its playable file; the
+200 result (or the terminal queued record) carries a bounded problem naming the
+show and both IDs, and the correlated log records the same conflict. A book
 request may add a `book` object. `medium` is `ebook` or `audiobook`; `work_id`
 and `edition_id` are bounded opaque Curator keys; `cover_url`, when present,
 must be an HTTPS Open Library cover URL. Cinema accepts this object only below

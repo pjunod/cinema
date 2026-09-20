@@ -815,6 +815,18 @@ pub struct MissingVideoCodecTag {
     pub probe_json: String,
 }
 
+/// Result of applying an externally supplied series identifier to one show.
+/// The operation is deliberately narrower than general metadata updates: a
+/// known, different provider ID is diagnostic evidence, never permission to
+/// overwrite it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SeriesHintOutcome {
+    Applied,
+    AlreadyEqual,
+    Conflict { current_tmdb_id: i64 },
+    MissingOrWrongKind,
+}
+
 /// Lexical file-path range for a canonical directory, using the separator
 /// already present in the stored representation. The upper bound is the
 /// successor of the trailing separator: `/` becomes `0`, while `\` becomes
@@ -2588,6 +2600,12 @@ pub trait MediaStore: Send + Sync + 'static {
     async fn search_items(&self, query: &str, limit: i64) -> Result<Vec<RecentItem>, StoreError>;
 
     // --- metadata enrichment ---
+    async fn apply_series_tmdb_hint(
+        &self,
+        library_id: i64,
+        show_id: i64,
+        tmdb_id: i64,
+    ) -> Result<SeriesHintOutcome, StoreError>;
     async fn apply_metadata(&self, item_id: i64, patch: &MetadataPatch) -> Result<(), StoreError>;
     /// Apply provider metadata only while the replicated
     /// owner/term/generation fence is still current. A stale submitted command
@@ -3977,6 +3995,14 @@ pub trait FencedPublicationStore: Send + Sync + 'static {
         lease: &Lease,
         replacement: &Lease,
     ) -> Result<(), StoreError>;
+    async fn apply_series_tmdb_hint_fenced(
+        &self,
+        library_id: i64,
+        show_id: i64,
+        tmdb_id: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<SeriesHintOutcome, StoreError>;
     #[allow(clippy::too_many_arguments)]
     async fn apply_metadata_if_artwork_repair_current_fenced(
         &self,

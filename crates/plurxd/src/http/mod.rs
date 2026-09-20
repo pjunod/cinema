@@ -3941,6 +3941,30 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn scan_identity_hint_rejects_nonpositive_series_id() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        let key = scan_key(&app, &admin, json!(["scan:trigger"])).await;
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/scan",
+                Some(&key),
+                json!({
+                    "path": "/fixture/series",
+                    "hint": "episode",
+                    "series": { "tmdb": 0 }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("positive integer")));
+    }
+
     /// A scan of one folder must not disturb the rest of the library. This is
     /// the no-prune property, asserted through the HTTP surface as well as in
     /// the core, because it is the one that would destroy data.
