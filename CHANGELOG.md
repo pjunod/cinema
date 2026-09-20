@@ -29,13 +29,6 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
-- **Settings → Developer now explains how to enable nzbd BitTorrent without
-  pretending Plurx owns the switch.** The Enable index links to an advisory
-  card covering the single-node boundary, cluster exclusion, public peer
-  traffic, durable payload mounts, unlimited-seeding default and release
-  evidence. Each row says whether Plurx can observe it; unknown or unmet rows
-  never disable nzbd or hide a Plurx feature.
-
 - **`make install` installs the server as a service in one command on every
   platform it runs on.** `make install` detects the host and hands off to
   `deploy/install`: a sandboxed systemd unit with a dedicated `plurx` user on
