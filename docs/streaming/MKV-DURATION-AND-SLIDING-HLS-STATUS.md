@@ -1,7 +1,7 @@
 # MKV duration and sliding HLS — implementation status
 
 **Status:** qualified candidate; promotion pending · **Updated:** 2026-09-19 EDT ·
-**Branch:** `effort/mkv-duration-sliding-hls` · **Base:** `87664620`
+**Branch:** `effort/mkv-duration-sliding-hls` · **Base:** `535f95d2`
 
 Companion to the
 [reviewed RCA](MKV-DURATION-AND-APPLE-SLIDING-HLS-RCA-AND-FIX.md) and
@@ -23,7 +23,7 @@ operator decision.
 | W2b publication clock | qualified | Publication, playback-rate pacing, typed capacity, pause, fetch-stopped, replacement, and EOF cases pass | Preserve actor-owned publication timing |
 | W3 object promises | qualified | Rolling-session retention and object-promise regressions pass, including grace ownership and hard-cap accounting | Preserve immutable served snapshots |
 | W4 diagnostics/clients | qualified for affected surfaces | Rust serialization/reservation tests, the full web lane, Android build/JVM/lint, Apple compilation, and the three changed Apple tests pass. Developer enablement remains advisory | Broad Apple-suite failures stay with the separate unit-failure batching process |
-| W5 review/qualification | PR #377 open; promotion gate pending | The single adversarial review's four findings are fixed. Candidate `063a638d` passes the affected fast lane; current `main` is integrated | Wait for the current PR head's promotion gate, then merge |
+| W5 review/qualification | PR #377 open; promotion gate pending | The single adversarial review's four findings are fixed. Candidate `063a638d` passes the affected fast lane; current `main` is integrated and the changed mobile release counters are claimed | Compile and policy-check the reconciled tree, then wait for its promotion gate and merge |
 
 ## Working decisions — defaults remain visible
 
