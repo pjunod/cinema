@@ -50,6 +50,37 @@ internal enum class SubtitleDelivery {
 internal val SubtitleDelivery.usesPlanTransport: Boolean
     get() = this == SubtitleDelivery.Plan || this == SubtitleDelivery.BitmapOverlay
 
+/** The media envelope the player should attach for one immutable recipe. */
+internal enum class PlaybackMediaTransport {
+    Direct,
+    ProgressiveRemux,
+    HlsCopy,
+    HlsTranscode,
+}
+
+/**
+ * Resolve the plan and subtitle route into one transport decision.
+ *
+ * `requiresHls` is an execution constraint, not a feature gate: the setting
+ * still decides whether conversion is enabled, while this rule selects the
+ * producer capable of executing the already-selected operation.
+ */
+internal fun desiredPlaybackTransport(
+    mode: String,
+    requiresHls: Boolean,
+    subtitleDelivery: SubtitleDelivery,
+): PlaybackMediaTransport = when {
+    subtitleDelivery == SubtitleDelivery.Burn -> PlaybackMediaTransport.HlsTranscode
+    subtitleDelivery == SubtitleDelivery.NativeSession -> {
+        if (mode == "transcode") PlaybackMediaTransport.HlsTranscode
+        else PlaybackMediaTransport.HlsCopy
+    }
+    mode == "direct" -> PlaybackMediaTransport.Direct
+    mode == "remux" && requiresHls -> PlaybackMediaTransport.HlsCopy
+    mode == "remux" -> PlaybackMediaTransport.ProgressiveRemux
+    else -> PlaybackMediaTransport.HlsTranscode
+}
+
 /**
  * [delivery] is where the selection belongs; [reopen] is whether getting there
  * costs a new server session (or, on direct play, a new media item).

@@ -329,14 +329,19 @@ class PlaybackIntent(
 internal data class PlaybackMediaRecipe(
     val quality: PlaybackQuality,
     val mode: String,
+    val requiresHls: Boolean = false,
     val audioIndex: Long?,
     val subtitleIndex: Long?,
     val subtitleDelivery: SubtitleDelivery,
     val audioOffsetMs: Long,
     val compatibilityTranscode: Boolean = false,
 ) {
+    val desiredTransport: PlaybackMediaTransport
+        get() = desiredPlaybackTransport(mode, requiresHls, subtitleDelivery)
+
     fun hasSameMedia(other: PlaybackMediaRecipe): Boolean =
-        quality == other.quality && mode == other.mode && audioIndex == other.audioIndex &&
+        quality == other.quality && mode == other.mode && requiresHls == other.requiresHls &&
+            audioIndex == other.audioIndex &&
             audioOffsetMs == other.audioOffsetMs && compatibilityTranscode == other.compatibilityTranscode &&
             mediaSubtitleDelivery == other.mediaSubtitleDelivery &&
             (subtitleDelivery != SubtitleDelivery.Burn || subtitleIndex == other.subtitleIndex)
@@ -352,6 +357,8 @@ internal class PlaybackRecipeOwnership {
     private var desired: Claim? = null
     var attached: Claim? = null
         private set
+    var attachedTransport: PlaybackMediaTransport? = null
+        private set
     private var appliedSelectionRevision: Long? = null
 
     fun request(recipe: PlaybackMediaRecipe): Claim {
@@ -359,8 +366,9 @@ internal class PlaybackRecipeOwnership {
         return desired!!
     }
 
-    fun attach(claim: Claim) {
+    fun attach(claim: Claim, transport: PlaybackMediaTransport = claim.recipe.desiredTransport) {
         attached = claim
+        attachedTransport = transport
         appliedSelectionRevision = null
     }
 

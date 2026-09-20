@@ -20,6 +20,19 @@ class PlaybackRecipeOwnershipTest {
     )
 
     @Test
+    fun androidDvDeliveryTracksTheAttachedTransportAndRequirementAsMediaIdentity() {
+        val owner = PlaybackRecipeOwnership()
+        val progressive = owner.request(original.copy(mode = "remux"))
+        owner.attach(progressive, PlaybackMediaTransport.HlsCopy)
+        assertEquals(PlaybackMediaTransport.HlsCopy, owner.attachedTransport)
+
+        val requiredHls = owner.request(original.copy(mode = "remux", requiresHls = true))
+        assertTrue(owner.needsMediaReplacement(requiredHls))
+        owner.attach(requiredHls)
+        assertEquals(PlaybackMediaTransport.HlsCopy, owner.attachedTransport)
+    }
+
+    @Test
     fun seekAfterUnpublishedAudioOffsetOrBurnCarriesTheWholeMediaRecipe() = runBlocking {
         for (wanted in listOf(
             original.copy(audioIndex = 2),

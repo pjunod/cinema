@@ -1,5 +1,6 @@
 package tv.plurx.app.player
 
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
@@ -10,6 +11,7 @@ import org.junit.Test
 import tv.plurx.app.data.ClientInfo
 import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.DisplayCaps
+import tv.plurx.app.data.Delivery
 import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.ReopenReason
 import tv.plurx.app.data.SubTrack
@@ -52,6 +54,42 @@ class SubtitlePolicyTest {
         SubTrack(index = index, codec = "ass", language = language, default = default, text = true, native = false)
 
     // ---- routing -----------------------------------------------------------
+
+    @Test
+    fun androidDvDeliveryChoosesOneTransportForEveryPlanAndSubtitleRoute() {
+        data class Case(
+            val mode: String,
+            val requiresHls: Boolean,
+            val subtitles: SubtitleDelivery,
+            val expected: PlaybackMediaTransport,
+        )
+
+        listOf(
+            Case("direct", false, SubtitleDelivery.Plan, PlaybackMediaTransport.Direct),
+            Case("remux", false, SubtitleDelivery.Plan, PlaybackMediaTransport.ProgressiveRemux),
+            Case("remux", true, SubtitleDelivery.Plan, PlaybackMediaTransport.HlsCopy),
+            Case("remux", true, SubtitleDelivery.BitmapOverlay, PlaybackMediaTransport.HlsCopy),
+            Case("remux", false, SubtitleDelivery.NativeSession, PlaybackMediaTransport.HlsCopy),
+            Case("remux", true, SubtitleDelivery.Burn, PlaybackMediaTransport.HlsTranscode),
+            Case("transcode", false, SubtitleDelivery.Plan, PlaybackMediaTransport.HlsTranscode),
+        ).forEach { case ->
+            assertEquals(
+                case.toString(),
+                case.expected,
+                desiredPlaybackTransport(case.mode, case.requiresHls, case.subtitles),
+            )
+        }
+    }
+
+    @Test
+    fun androidDvDeliveryOmittedWireRequirementKeepsProgressiveCompatibility() {
+        val delivery = Json.decodeFromString<Delivery>("""{"mode":"remux"}""")
+        assertFalse(delivery.requires_hls)
+        assertEquals(
+            PlaybackMediaTransport.ProgressiveRemux,
+            desiredPlaybackTransport(delivery.mode, delivery.requires_hls, SubtitleDelivery.Plan),
+        )
+    }
 
     @Test
     fun offReturnsToThePlanAndOnlyLeavingABurnReopens() {

@@ -4,12 +4,14 @@
 **Updated:** 2026-09-20 UTC · **Executes:** the Fable-reviewed
 [root cause and proposed fix](ANDROID-DV-CONVERSION-RCA-AND-FIX.md).
 
-Progress: pinned Rust 1.97.1 baseline and server exact-tree compilation are
-green. The server now narrows conversion by request transport, marks every
-converted remux as HLS-required, re-decides concrete progressive requests,
-and uses structured source facts plus preserved-DV muxer strictness. Android
-transport retention is next. Tests remain intentionally deferred until the
-merge-boundary review is addressed.
+Progress: server and Android implementation are complete; pinned Rust 1.97.1
+and Android debug Kotlin compilation are green. The server narrows conversion
+by request transport, marks converted remuxes as HLS-required, re-decides
+concrete progressive requests, and uses structured source facts plus
+preserved-DV muxer strictness. Android build 109 retains the selected transport
+through initial play, seek, reopen, track changes, recovery, failover and
+prepared handoff. Tests remain intentionally deferred until the merge-boundary
+review is addressed.
 
 Build one correction to the server/Android delivery contract: send Profile 7
 conversion through the existing HLS converter, retain that transport through
