@@ -12,12 +12,28 @@ use crate::domain::{
 use crate::error::StoreError;
 use crate::store::dv_conversion::validate_recovery_guard_identity;
 use crate::store::{
-    ArtworkRepairFence, DvRecoveryGuardState, FencedPublicationStore, ReconcileOutcome,
-    RootFingerprintStatus, SeriesHintOutcome,
+    ArtworkRepairFence, DvRecoveryGuardState, FencedPublicationStore, IdentityRepairOutcome,
+    IdentityRepairPlan, IdentityRepairSnapshot, ReconcileOutcome, RootFingerprintStatus,
+    SeriesHintOutcome,
 };
 
 #[async_trait]
 impl FencedPublicationStore for SqliteStore {
+    async fn apply_identity_repair_fenced(
+        &self,
+        snapshot: &IdentityRepairSnapshot,
+        plan: &IdentityRepairPlan,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<IdentityRepairOutcome, StoreError> {
+        let snapshot = snapshot.clone();
+        let plan = plan.clone();
+        self.with_fenced_conn(lease, replacement, move |conn| {
+            apply_identity_repair(conn, &snapshot, &plan)
+        })
+        .await
+    }
+
     async fn put_setting_fenced(
         &self,
         key: &str,
@@ -651,6 +667,155 @@ impl FencedPublicationStore for SqliteStore {
         })
         .await
     }
+}
+
+fn identity_repair_already_applied(
+    conn: &Connection,
+    plan: &IdentityRepairPlan,
+) -> Result<bool, StoreError> {
+    let Some(survivor) = plan.survivor_show_id else {
+        return Ok(false);
+    };
+    let survivor_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM items WHERE id = ?1 AND library_id = ?2 AND kind = 'show')",
+        params![survivor, plan.library_id],
+        |row| row.get(0),
+    )?;
+    if !survivor_exists {
+        return Ok(false);
+    }
+    for item_id in &plan.retired_item_ids {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM items WHERE id = ?1)",
+            params![item_id],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Ok(false);
+        }
+    }
+    for movement in &plan.item_moves {
+        let current = conn
+            .query_row(
+                "SELECT parent_id FROM items WHERE id = ?1",
+                params![movement.item_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?;
+        if current != Some(Some(movement.new_parent_id)) {
+            return Ok(false);
+        }
+    }
+    for movement in &plan.file_moves {
+        let current = conn
+            .query_row(
+                "SELECT item_id FROM files WHERE id = ?1",
+                params![movement.file_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if current != Some(movement.new_item_id) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn apply_identity_repair(
+    conn: &Connection,
+    snapshot: &IdentityRepairSnapshot,
+    plan: &IdentityRepairPlan,
+) -> Result<IdentityRepairOutcome, StoreError> {
+    if !plan.ready() {
+        return Err(StoreError::Task("repair_blocked".to_owned()));
+    }
+    let current =
+        super::media::identity_repair_snapshot(conn, snapshot.library_id, &snapshot.input_show_ids);
+    match current {
+        Ok(current) if current == *snapshot => {}
+        _ if identity_repair_already_applied(conn, plan)? => {
+            return Ok(IdentityRepairOutcome::AlreadyApplied)
+        }
+        _ => return Ok(IdentityRepairOutcome::Stale),
+    }
+
+    for movement in &plan.item_moves {
+        if conn.execute(
+            "UPDATE items SET parent_id = ?1
+              WHERE id = ?2 AND parent_id = ?3 AND library_id = ?4",
+            params![
+                movement.new_parent_id,
+                movement.item_id,
+                movement.expected_parent_id,
+                plan.library_id
+            ],
+        )? != 1
+        {
+            return Err(StoreError::Task("repair_stale".to_owned()));
+        }
+    }
+    for movement in &plan.file_moves {
+        if conn.execute(
+            "UPDATE files SET item_id = ?1 WHERE id = ?2 AND item_id = ?3",
+            params![
+                movement.new_item_id,
+                movement.file_id,
+                movement.expected_item_id
+            ],
+        )? != 1
+        {
+            return Err(StoreError::Task("repair_stale".to_owned()));
+        }
+    }
+    for copy in &plan.watch_copies {
+        if conn.execute(
+            "INSERT INTO watch_state
+                    (user_id, item_id, position_ms, duration_ms, watched, updated_at)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6
+              WHERE NOT EXISTS (SELECT 1 FROM watch_state WHERE user_id = ?1 AND item_id = ?2)
+                AND EXISTS (SELECT 1 FROM watch_state
+                             WHERE user_id = ?1 AND item_id = ?7
+                               AND position_ms = ?3 AND duration_ms IS ?4
+                               AND watched = ?5 AND updated_at = ?6)",
+            params![
+                copy.user_id,
+                copy.destination_item_id,
+                copy.state.position_ms,
+                copy.state.duration_ms,
+                copy.state.watched,
+                copy.state.updated_at,
+                copy.source_item_id,
+            ],
+        )? != 1
+        {
+            return Err(StoreError::Task("repair_stale".to_owned()));
+        }
+    }
+
+    for kind in ["episode", "season", "show"] {
+        for item_id in &plan.retired_item_ids {
+            if snapshot
+                .items
+                .iter()
+                .any(|item| item.id == *item_id && item.kind == kind)
+                && conn.execute(
+                    "DELETE FROM items
+                      WHERE id = ?1 AND library_id = ?2 AND kind = ?3
+                        AND NOT EXISTS (SELECT 1 FROM files WHERE item_id = ?1)
+                        AND NOT EXISTS (SELECT 1 FROM items WHERE parent_id = ?1)",
+                    params![item_id, plan.library_id, kind],
+                )? != 1
+            {
+                return Err(StoreError::Task("repair_stale".to_owned()));
+            }
+        }
+    }
+    if !identity_repair_already_applied(conn, plan)? {
+        return Err(StoreError::Task(
+            "identity repair postcondition failed".to_owned(),
+        ));
+    }
+    Ok(IdentityRepairOutcome::Applied)
 }
 
 fn put_setting(conn: &Connection, key: &str, value: &str) -> Result<(), StoreError> {

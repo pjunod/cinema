@@ -1263,6 +1263,9 @@ impl IntegrationMetrics {
 
 pub struct JobManager {
     store: Arc<dyn Store>,
+    /// Bounded, node-local repair previews. A plan ID is a lookup handle, not
+    /// authority; every status/apply request authenticates its original admin.
+    pub(crate) identity_repairs: crate::http::scan_identity::IdentityRepairCache,
     coordinator: StoreCoordinator,
     /// Live "may this node run leader-singleton work?" authority. Held rather
     /// than sampled once, because committed membership moves under a running
@@ -2767,6 +2770,7 @@ impl JobManager {
             .expect("configured node id is a valid lease owner");
         JobManager {
             store,
+            identity_repairs: Default::default(),
             coordinator,
             job_authority,
             membership: None,
@@ -2820,6 +2824,27 @@ impl JobManager {
 
     async fn acquire_job(&self, resource: String) -> Result<Option<ActiveJobLease>, StoreError> {
         acquire_cluster_job(&self.coordinator, self.job_authority.as_ref(), resource).await
+    }
+
+    pub(crate) async fn apply_identity_repair(
+        &self,
+        snapshot: &plurx_core::store::IdentityRepairSnapshot,
+        plan: &plurx_core::store::IdentityRepairPlan,
+    ) -> Result<Option<plurx_core::store::IdentityRepairOutcome>, StoreError> {
+        let Some(lease) = self
+            .acquire_job(format!("scan:library:{}", plan.library_id))
+            .await?
+        else {
+            return Ok(None);
+        };
+        let outcome = lease
+            .publisher(self.store.as_ref())
+            .apply_identity_repair(snapshot, plan)
+            .await;
+        if let Err(error) = lease.release().await {
+            tracing::warn!(error = %error, "identity repair lease cleanup was ambiguous");
+        }
+        outcome.map(Some)
     }
 
     /// Whether this node may run cluster-wide scheduled work right now.

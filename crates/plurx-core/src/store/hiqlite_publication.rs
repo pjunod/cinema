@@ -10,6 +10,7 @@ use hiqlite::macros::params;
 use hiqlite::{Param, Row};
 
 use super::hiqlite::{database_error, HiqliteAuthStore};
+use super::hiqlite_media::{IDENTITY_REPAIR_FILE_COLS, IDENTITY_REPAIR_ITEM_COLS};
 use crate::cluster::coordination::{unix_ms, Lease};
 use crate::domain::{
     sort_title_for, ArtworkAttempt, BookMetadataPatch, Item, ItemKind, MetadataPatch, NewItem,
@@ -18,8 +19,9 @@ use crate::domain::{
 use crate::error::StoreError;
 use crate::store::dv_conversion::validate_recovery_guard_identity;
 use crate::store::{
-    ArtworkRepairFence, DvRecoveryGuardState, FencedPublicationStore, ReconcileOutcome,
-    RootFingerprintStatus, SeriesHintOutcome,
+    ArtworkRepairFence, DvRecoveryGuardState, FencedPublicationStore, IdentityRepairOutcome,
+    IdentityRepairPlan, IdentityRepairSnapshot, ReconcileOutcome, RootFingerprintStatus,
+    SeriesHintOutcome,
 };
 
 const ATOMIC_PUBLICATION_TTL_MS: i64 = 90_000;
@@ -185,10 +187,410 @@ impl HiqliteAuthStore {
         debug_assert_eq!(results.first().copied(), Some(1));
         Ok(results.into_iter().skip(1).collect())
     }
+
+    async fn identity_repair_mapping_applied(
+        &self,
+        plan: &IdentityRepairPlan,
+    ) -> Result<bool, StoreError> {
+        let Some(survivor) = plan.survivor_show_id else {
+            return Ok(false);
+        };
+        let retired = serde_json::to_string(&plan.retired_item_ids).map_err(database_error)?;
+        let item_moves = serde_json::to_string(
+            &plan
+                .item_moves
+                .iter()
+                .map(|movement| (movement.item_id, movement.new_parent_id))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(database_error)?;
+        let file_moves = serde_json::to_string(
+            &plan
+                .file_moves
+                .iter()
+                .map(|movement| (movement.file_id, movement.new_item_id))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(database_error)?;
+        let count = self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM items survivor \
+                  WHERE survivor.id=$1 AND survivor.library_id=$2 AND survivor.kind='show' \
+                    AND NOT EXISTS (SELECT 1 FROM json_each($3) r JOIN items i ON i.id=r.value) \
+                    AND NOT EXISTS (SELECT 1 FROM json_each($4) m LEFT JOIN items i \
+                          ON i.id=json_extract(m.value,'$[0]') \
+                         WHERE i.parent_id IS NOT json_extract(m.value,'$[1]')) \
+                    AND NOT EXISTS (SELECT 1 FROM json_each($5) m LEFT JOIN files f \
+                          ON f.id=json_extract(m.value,'$[0]') \
+                         WHERE f.item_id IS NOT json_extract(m.value,'$[1]'))",
+                params!(
+                    survivor,
+                    plan.library_id,
+                    retired.as_str(),
+                    item_moves.as_str(),
+                    file_moves.as_str()
+                ),
+            )
+            .await
+            .map_err(database_error)?
+            .first()
+            .map(|row| row.count)
+            .unwrap_or_default();
+        Ok(count == 1)
+    }
 }
 
 #[async_trait]
 impl FencedPublicationStore for HiqliteAuthStore {
+    async fn apply_identity_repair_fenced(
+        &self,
+        snapshot: &IdentityRepairSnapshot,
+        plan: &IdentityRepairPlan,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<IdentityRepairOutcome, StoreError> {
+        if !plan.ready() {
+            return Err(StoreError::Task("repair_blocked".to_owned()));
+        }
+        if self.identity_repair_mapping_applied(plan).await? {
+            let Some(survivor) = plan.survivor_show_id else {
+                return Err(StoreError::Task("repair_blocked".to_owned()));
+            };
+            let counts = self
+                .atomic_publication(
+                    lease,
+                    replacement,
+                    vec![(
+                        "UPDATE items SET id=id WHERE id=$1 AND EXISTS (SELECT 1 FROM job_leases \
+                         WHERE resource=$2 AND owner_node_id=$3 AND fence=$4 AND revision=$5 \
+                           AND expires_at_ms=$6)"
+                            .to_owned(),
+                        params!(
+                            survivor,
+                            lease.resource.as_str(),
+                            lease.owner_node_id.as_str(),
+                            lease_i64("fence", lease.fence)?,
+                            lease_i64("revision", lease.revision)?,
+                            lease.expires_at_unix_ms
+                        ),
+                    )],
+                )
+                .await?;
+            return if counts == [1] {
+                Ok(IdentityRepairOutcome::AlreadyApplied)
+            } else {
+                Ok(IdentityRepairOutcome::Stale)
+            };
+        }
+        let Some(survivor) = plan.survivor_show_id else {
+            return Err(StoreError::Task("repair_blocked".to_owned()));
+        };
+        let ids_json = serde_json::to_string(
+            &snapshot
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(database_error)?;
+        let expected_items = serde_json::to_string(
+            &snapshot
+                .items
+                .iter()
+                .map(|item| item.row.clone())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(database_error)?;
+        let expected_files = serde_json::to_string(
+            &snapshot
+                .files
+                .iter()
+                .map(|file| file.row.clone())
+                .collect::<Vec<_>>(),
+        )
+        .map_err(database_error)?;
+        let watch_rows = snapshot
+            .watches
+            .iter()
+            .map(|watch| {
+                serde_json::to_string(&(
+                    watch.user_id,
+                    watch.item_id,
+                    watch.position_ms,
+                    watch.duration_ms,
+                    i64::from(watch.watched),
+                    watch.updated_at,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        let expected_watches = serde_json::to_string(&watch_rows).map_err(database_error)?;
+        let expected_owners =
+            serde_json::to_string(&snapshot.directory_owner_ids).map_err(database_error)?;
+        let source_directory = plan
+            .source_directory
+            .as_deref()
+            .ok_or_else(|| StoreError::Task("repair_blocked".to_owned()))?;
+        let (lower, upper) = super::directory_path_bounds(source_directory)?;
+
+        let artwork_guard = if snapshot
+            .dependency_rows
+            .iter()
+            .any(|row| row == "artwork_table_present")
+        {
+            "AND NOT EXISTS (SELECT 1 FROM cluster_artwork_repairs WHERE item_id IN (SELECT value FROM json_each($3)))"
+        } else {
+            ""
+        };
+        let guard_sql = format!(
+            "UPDATE items SET id = id WHERE id = $1 AND library_id = $2 AND kind = 'show' \
+             AND COALESCE((SELECT json_group_array(row_json) FROM ( \
+                   SELECT json_array({IDENTITY_REPAIR_ITEM_COLS}) AS row_json FROM items \
+                    WHERE id IN (SELECT value FROM json_each($3)) ORDER BY id)), '[]') = $4 \
+             AND COALESCE((SELECT json_group_array(row_json) FROM ( \
+                   SELECT json_array({IDENTITY_REPAIR_FILE_COLS}) AS row_json FROM files \
+                    WHERE item_id IN (SELECT value FROM json_each($3)) ORDER BY id)), '[]') = $5 \
+             AND COALESCE((SELECT json_group_array(row_json) FROM ( \
+                   SELECT json_array(user_id,item_id,position_ms,duration_ms,watched,updated_at) AS row_json \
+                     FROM watch_state WHERE item_id IN (SELECT value FROM json_each($3)) \
+                    ORDER BY item_id,user_id)), '[]') = $6 \
+             AND COALESCE((SELECT json_group_array(show_id) FROM ( \
+                   SELECT DISTINCT show.id AS show_id FROM files f INDEXED BY sqlite_autoindex_files_1 \
+                   JOIN items episode ON episode.id=f.item_id AND episode.kind='episode' \
+                   JOIN items season ON season.id=episode.parent_id AND season.kind='season' \
+                   JOIN items show ON show.id=season.parent_id AND show.kind='show' \
+                  WHERE f.path >= $7 AND f.path < $8 AND show.library_id=$2 \
+                  ORDER BY show.id)), '[]') = $9 \
+             AND NOT EXISTS (SELECT 1 FROM reading_state WHERE item_id IN (SELECT value FROM json_each($3))) \
+             AND NOT EXISTS (SELECT 1 FROM scan_reconcile_items WHERE item_id IN (SELECT value FROM json_each($3))) \
+             AND NOT EXISTS (SELECT 1 FROM media_classifications WHERE item_id IN (SELECT value FROM json_each($3)) \
+                  AND (json_array_length(overrides,'$.include')>0 OR json_array_length(overrides,'$.exclude')>0)) \
+             AND NOT EXISTS (SELECT 1 FROM library_channel_entries WHERE item_id IN (SELECT value FROM json_each($3)) OR show_id IN (SELECT value FROM json_each($3))) \
+             AND NOT EXISTS (SELECT 1 FROM library_channels c WHERE EXISTS (SELECT 1 FROM json_each($3) ids WHERE \
+                  EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.include_item_ids') WHERE value=ids.value) OR \
+                  EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.exclude_item_ids') WHERE value=ids.value) OR \
+                  EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.include_show_ids') WHERE value=ids.value) OR \
+                  EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.exclude_show_ids') WHERE value=ids.value))) \
+             AND NOT EXISTS (SELECT 1 FROM media_sessions s WHERE s.state IN ('starting','active') AND ( \
+                  EXISTS (SELECT 1 FROM json_tree(s.recipe_json) j JOIN json_each($3) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id')) OR \
+                  EXISTS (SELECT 1 FROM json_tree(s.response_json) j JOIN json_each($3) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id')))) \
+             AND NOT EXISTS (SELECT 1 FROM library_channel_session_recipes r WHERE EXISTS (SELECT 1 FROM json_tree(r.recipe_json) j JOIN json_each($3) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))) \
+             AND NOT EXISTS (SELECT 1 FROM watched_outbox o WHERE EXISTS (SELECT 1 FROM json_tree(o.payload) j JOIN json_each($3) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))) \
+             AND NOT EXISTS (SELECT 1 FROM dvr_recordings WHERE item_id IN (SELECT value FROM json_each($3))) \
+             {artwork_guard} \
+             AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$10 AND owner_node_id=$11 \
+                  AND fence=$12 AND revision=$13 AND expires_at_ms=$14) RETURNING id"
+        );
+        let mut statements = vec![(
+            guard_sql,
+            params!(
+                survivor,
+                plan.library_id,
+                ids_json.as_str(),
+                expected_items.as_str(),
+                expected_files.as_str(),
+                expected_watches.as_str(),
+                lower,
+                upper,
+                expected_owners.as_str(),
+                lease.resource.as_str(),
+                lease.owner_node_id.as_str(),
+                lease_i64("fence", lease.fence)?,
+                lease_i64("revision", lease.revision)?,
+                lease.expires_at_unix_ms
+            ),
+        )];
+
+        for movement in &plan.item_moves {
+            let mut statement_params = params!(
+                movement.new_parent_id,
+                movement.item_id,
+                movement.expected_parent_id,
+                plan.library_id,
+                survivor,
+                survivor,
+                lease.resource.as_str(),
+                lease.owner_node_id.as_str(),
+                lease_i64("fence", lease.fence)?,
+                lease_i64("revision", lease.revision)?,
+                lease.expires_at_unix_ms
+            );
+            statement_params[4] = Param::StmtOutputNamed(1, "id".into());
+            statements.push((
+                "UPDATE items SET parent_id=$1 WHERE id=$2 AND parent_id=$3 AND library_id=$4 \
+                 AND $5=$6 AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$7 \
+                 AND owner_node_id=$8 AND fence=$9 AND revision=$10 AND expires_at_ms=$11)"
+                    .to_owned(),
+                statement_params,
+            ));
+        }
+        for movement in &plan.file_moves {
+            let mut statement_params = params!(
+                movement.new_item_id,
+                movement.file_id,
+                movement.expected_item_id,
+                survivor,
+                survivor,
+                lease.resource.as_str(),
+                lease.owner_node_id.as_str(),
+                lease_i64("fence", lease.fence)?,
+                lease_i64("revision", lease.revision)?,
+                lease.expires_at_unix_ms
+            );
+            statement_params[3] = Param::StmtOutputNamed(1, "id".into());
+            statements.push((
+                "UPDATE files SET item_id=$1 WHERE id=$2 AND item_id=$3 AND $4=$5 \
+                 AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$6 AND owner_node_id=$7 \
+                 AND fence=$8 AND revision=$9 AND expires_at_ms=$10)"
+                    .to_owned(),
+                statement_params,
+            ));
+        }
+        for copy in &plan.watch_copies {
+            let mut statement_params = params!(
+                copy.user_id,
+                copy.destination_item_id,
+                copy.state.position_ms,
+                copy.state.duration_ms,
+                copy.state.watched,
+                copy.state.updated_at,
+                copy.source_item_id,
+                survivor,
+                survivor,
+                lease.resource.as_str(),
+                lease.owner_node_id.as_str(),
+                lease_i64("fence", lease.fence)?,
+                lease_i64("revision", lease.revision)?,
+                lease.expires_at_unix_ms
+            );
+            statement_params[7] = Param::StmtOutputNamed(1, "id".into());
+            statements.push((
+                "INSERT INTO watch_state(user_id,item_id,position_ms,duration_ms,watched,updated_at) \
+                 SELECT $1,$2,$3,$4,$5,$6 WHERE NOT EXISTS (SELECT 1 FROM watch_state WHERE user_id=$1 AND item_id=$2) \
+                 AND EXISTS (SELECT 1 FROM watch_state WHERE user_id=$1 AND item_id=$7 AND position_ms=$3 \
+                   AND duration_ms IS $4 AND watched=$5 AND updated_at=$6) AND $8=$9 \
+                 AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$10 AND owner_node_id=$11 \
+                   AND fence=$12 AND revision=$13 AND expires_at_ms=$14)"
+                    .to_owned(),
+                statement_params,
+            ));
+        }
+        for kind in ["episode", "season", "show"] {
+            for item_id in &plan.retired_item_ids {
+                if snapshot
+                    .items
+                    .iter()
+                    .any(|item| item.id == *item_id && item.kind == kind)
+                {
+                    let mut statement_params = params!(
+                        *item_id,
+                        plan.library_id,
+                        kind,
+                        survivor,
+                        survivor,
+                        lease.resource.as_str(),
+                        lease.owner_node_id.as_str(),
+                        lease_i64("fence", lease.fence)?,
+                        lease_i64("revision", lease.revision)?,
+                        lease.expires_at_unix_ms
+                    );
+                    statement_params[3] = Param::StmtOutputNamed(1, "id".into());
+                    statements.push((
+                        "DELETE FROM items WHERE id=$1 AND library_id=$2 AND kind=$3 AND $4=$5 \
+                         AND NOT EXISTS (SELECT 1 FROM files WHERE item_id=$1) \
+                         AND NOT EXISTS (SELECT 1 FROM items WHERE parent_id=$1) \
+                         AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$6 AND owner_node_id=$7 \
+                           AND fence=$8 AND revision=$9 AND expires_at_ms=$10)"
+                            .to_owned(),
+                        statement_params,
+                    ));
+                }
+            }
+        }
+        let retired_json = serde_json::to_string(&plan.retired_item_ids).map_err(database_error)?;
+        let item_moves_json = serde_json::to_string(
+            &plan
+                .item_moves
+                .iter()
+                .map(|movement| (movement.item_id, movement.new_parent_id))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(database_error)?;
+        let file_moves_json = serde_json::to_string(
+            &plan
+                .file_moves
+                .iter()
+                .map(|movement| (movement.file_id, movement.new_item_id))
+                .collect::<Vec<_>>(),
+        )
+        .map_err(database_error)?;
+        let mut post_params = params!(
+            survivor,
+            plan.library_id,
+            retired_json.as_str(),
+            item_moves_json.as_str(),
+            file_moves_json.as_str(),
+            survivor,
+            survivor,
+            lease.resource.as_str(),
+            lease.owner_node_id.as_str(),
+            lease_i64("fence", lease.fence)?,
+            lease_i64("revision", lease.revision)?,
+            lease.expires_at_unix_ms
+        );
+        post_params[5] = Param::StmtOutputNamed(1, "id".into());
+        statements.push((
+            "UPDATE items SET id=id WHERE id=$1 AND library_id=$2 AND kind='show' \
+             AND NOT EXISTS (SELECT 1 FROM json_each($3) r JOIN items i ON i.id=r.value) \
+             AND NOT EXISTS (SELECT 1 FROM json_each($4) m LEFT JOIN items i ON i.id=json_extract(m.value,'$[0]') \
+                              WHERE i.parent_id IS NOT json_extract(m.value,'$[1]')) \
+             AND NOT EXISTS (SELECT 1 FROM json_each($5) m LEFT JOIN files f ON f.id=json_extract(m.value,'$[0]') \
+                              WHERE f.item_id IS NOT json_extract(m.value,'$[1]')) \
+             AND $6=$7 AND EXISTS (SELECT 1 FROM job_leases WHERE resource=$8 AND owner_node_id=$9 \
+                 AND fence=$10 AND revision=$11 AND expires_at_ms=$12) RETURNING id"
+                .to_owned(),
+            post_params,
+        ));
+        let post_transaction_index = statements.len();
+        let mut ack_params = params!(
+            survivor,
+            survivor,
+            lease.resource.as_str(),
+            lease.owner_node_id.as_str(),
+            lease_i64("fence", lease.fence)?,
+            lease_i64("revision", lease.revision)?,
+            lease.expires_at_unix_ms
+        );
+        ack_params[0] = Param::StmtOutputNamed(post_transaction_index, "id".into());
+        statements.push((
+            "UPDATE items SET id=id WHERE id=$1 AND id=$2 AND EXISTS (SELECT 1 FROM job_leases \
+             WHERE resource=$3 AND owner_node_id=$4 AND fence=$5 AND revision=$6 AND expires_at_ms=$7)"
+                .to_owned(),
+            ack_params,
+        ));
+
+        let result = self
+            .atomic_publication(lease, replacement, statements)
+            .await;
+        match result {
+            Ok(counts) if counts.iter().all(|count| *count == 1) => {
+                Ok(IdentityRepairOutcome::Applied)
+            }
+            Ok(_) if self.identity_repair_mapping_applied(plan).await? => {
+                Ok(IdentityRepairOutcome::AlreadyApplied)
+            }
+            Ok(_) => Ok(IdentityRepairOutcome::Stale),
+            Err(_error) if self.identity_repair_mapping_applied(plan).await? => {
+                Ok(IdentityRepairOutcome::AlreadyApplied)
+            }
+            Err(error) if error.to_string().contains("StmtIndex(1)") => {
+                Ok(IdentityRepairOutcome::Stale)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     async fn put_setting_fenced(
         &self,
         key: &str,

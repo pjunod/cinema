@@ -1,7 +1,7 @@
 # Scan identity — prevent split items and preserve watch state
 
-**Status:** M1 prevention merged to the effort; M2 hints built and
-fixture-verified; M3 repair remains unbuilt ·
+**Status:** M1 prevention, M2 guarded hints and M3 bounded repair built and
+fixture-verified; production repair remains unauthorized ·
 **Written:** 2026-09-19 · **Revised:** 2026-09-19 ·
 **Incident:** reference show S, season 5.
 
@@ -9,9 +9,10 @@ Companion to [Integration](../INTEGRATION.md) and the
 [targeted-scan API](../API.md#63-the-targeted-scan-seam). This document owns
 the root causes and revised fix proposal. It incorporates Fable's supplied
 review, replacing the first draft's source-claims schema and backfill with
-lookup through existing file ownership. M1 now preserves existing-path
-ownership and performs bounded directory lookup on both stores; the guarded
-hint and repair stages have not run, and no production repair is authorized.
+lookup through existing file ownership. M1 preserves existing-path ownership
+and performs bounded directory lookup on both stores; M2 applies guarded
+post-placement series hints; M3 provides a bounded admin preview/status/apply
+transaction. No production repair is authorized.
 Read §4–§7 as the staged contract and §8 as review disposition.
 
 [Sol's implementation plan](SCAN-IDENTITY-IMPLEMENTATION.md) owns the detailed
@@ -504,9 +505,9 @@ workstream from the first draft are withdrawn.
 | 9. Neutral naming | Applied to title, prose, paths, SQL and index row. |
 | 10. Provenance/prototype limits | Updated; reported review tests are not presented as tests run here or a production-complete implementation. |
 
-Before implementation, confirm the bounded movie-directory recognizer and
-host-specific prefix behavior, and review the survivor-wins watch-state
-tradeoff. Before production repair, resolve the S episode-count discrepancy
+The bounded movie recognizer, prefix behavior and survivor-wins disclosure are
+implemented and covered by the named scan-identity contracts. Before
+production repair, resolve the S episode-count discrepancy
 and repeat the full reference census for every retiring episode, season and
 show. Do not copy the original review's unverified final totals into a
 repair command.

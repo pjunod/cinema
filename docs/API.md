@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 214
+One binary serves everything on one port (`:32400` by default). plurx has 217
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -537,6 +537,9 @@ away.
 | DELETE | `/api/v1/libraries/{id}` | admin | Deletes the library |
 | PUT | `/api/v1/libraries/{id}/schedule` | admin | Sets automatic intervals without scanning |
 | POST | `/api/v1/libraries/{id}/scan` | admin | Starts a background scan |
+| POST | `/api/v1/libraries/{id}/identity-repairs/preview` | admin | Builds one bounded, catalogue-only duplicate-show repair preview |
+| GET | `/api/v1/libraries/{id}/identity-repairs/{plan_id}` | admin who created the preview | Reads the node-local preview/apply status |
+| POST | `/api/v1/libraries/{id}/identity-repairs/{plan_id}/apply` | admin who created the preview | Applies the exact fingerprinted plan under the library scan lease |
 | POST | `/api/v1/libraries/{id}/refresh` | admin | Scans **and** forces metadata re-fetch |
 | POST | `/api/v1/libraries/{id}/root-identity/reset` | admin | Forgets the root fingerprint so replaced storage can re-establish |
 | GET | `/api/v1/libraries/{id}/items` | bearer | Paged, sorted, optionally genre-filtered grid |
@@ -728,6 +731,39 @@ sledgehammer: it rescans *and* forces metadata re-enrichment for items already
 matched, which is how season artwork gets backfilled onto older shows. Its
 cost scales with library size and it re-hits the metadata providers.
 
+### 6.6 Bounded show-identity repair
+
+The identity-repair API is an administrator maintenance surface, not a feature
+flag and not an automatic merge. Preview accepts 2–32 positive show IDs as
+decimal strings, verifies that they form one complete exact-directory owner
+set in one Shows library, and returns a deterministic mapping. Every new
+catalogue, user and file ID in this response is a decimal string so IDs above
+JavaScript's exact-integer range round-trip safely.
+
+Preview is catalogue-only and reports `file_availability: "not_checked"`.
+It selects the oldest `(added_at, id)` show, retains intact disjoint seasons,
+reattaches every file version for overlapping episodes, and discloses complete
+watch-state copies and survivor-wins conflicts. Different known series IDs,
+manual classification overrides, reading/reconciliation state, artwork work,
+channel generations or recipe selectors are blockers rather than inferred
+transfers.
+
+Plans live only on the origin node, are associated with the authenticated
+admin, expire after 15 minutes, and occupy one of eight bounded cache slots.
+Apply requires the returned 64-character fingerprint and
+`accept_watch_conflicts: true` when the preview lists conflicts. It acquires
+`scan:library:{id}`, compares the complete relevant preimage inside the fenced
+transaction, performs all moves/copies/deletions atomically, and recognizes an
+already-completed mapping after an uncertain response without repeating watch
+merges. A restart or expiry loses the plan and requires a new preview.
+
+Typed failures are `repair_too_large` (413), `repair_plan_expired` (410), and
+409 responses for `repair_busy`, `repair_stale`, `repair_blocked`,
+`watch_conflicts_unaccepted`, or `repair_wrong_node`. An ambiguous store result
+is `repair_outcome_unknown` (503); read status on the origin node rather than
+assuming the transaction did not commit. No endpoint in this API authorizes a
+production catalogue repair by itself.
+
 `PATCH /items/{id}` refuses with 400 unless the library kind is `home`: movie
 and show items are owned by their metadata agent, and a hand edit would be
 overwritten by the next refresh. Its fields are doubly optional — absent means
@@ -737,7 +773,7 @@ overwritten by the next refresh. Its fields are doubly optional — absent means
 not only the failed ones, synchronously, and returns
 `{attempted, repaired, still_failing, gone, problems}`.
 
-### 6.6 Images
+### 6.7 Images
 
 `GET /api/v1/images/{filename}` takes a bare filename — no directories, no
 traversal — and serves it `private, max-age=604800, immutable`. Seven days and

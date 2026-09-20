@@ -61,8 +61,8 @@ use plurx_core::store::{
     analysis_backoff_ms, cluster_fragment_index_generation_key, cluster_fragment_index_key,
     AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryQuery, ArtworkRepairFence,
     ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
-    DvConversionMode, DvConversionState, DvRecoveryGuardState, LibraryStore, MediaStore,
-    NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
+    DvConversionMode, DvConversionState, DvRecoveryGuardState, IdentityRepairOutcome, LibraryStore,
+    MediaStore, NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
     QueueDvConversionOutcome, ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome,
     SqliteStore, Store, ANALYSIS_LIFECYCLE_METRICS, ANALYSIS_METRIC_COMPONENTS,
     ANALYSIS_METRIC_PRIORITIES, ANALYSIS_METRIC_STATES, ANALYSIS_METRIC_TRIGGERS,
@@ -23141,6 +23141,240 @@ async fn scan_identity_series_hint_contract() {
                 .await,
             Err(StoreError::FenceRejected { .. })
         ));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn scan_identity_repair_contract() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Identity Repair Shows".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![PathBuf::from("/contract/repair")],
+                anime: false,
+            })
+            .await
+            .expect("repair library");
+
+        async fn tree(
+            store: &dyn Store,
+            library_id: i64,
+            title: &str,
+            directory: &str,
+            suffix: &str,
+        ) -> (i64, i64, i64, i64) {
+            let show = store
+                .insert_item(&NewItem {
+                    library_id,
+                    kind: ItemKind::Show,
+                    parent_id: None,
+                    title: title.into(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("show");
+            let season = store
+                .insert_item(&NewItem {
+                    library_id,
+                    kind: ItemKind::Season,
+                    parent_id: Some(show),
+                    title: "Season 1".into(),
+                    year: None,
+                    season_number: Some(1),
+                    episode_number: None,
+                })
+                .await
+                .expect("season");
+            let episode = store
+                .insert_item(&NewItem {
+                    library_id,
+                    kind: ItemKind::Episode,
+                    parent_id: Some(season),
+                    title: "Episode 1".into(),
+                    year: None,
+                    season_number: Some(1),
+                    episode_number: Some(1),
+                })
+                .await
+                .expect("episode");
+            let file = store
+                .upsert_file(
+                    episode,
+                    &format!(
+                        "/contract/repair/{directory}/Season 1/{directory}.S01E01{suffix}.mkv"
+                    ),
+                    100,
+                    10,
+                    &ProbeResult::default(),
+                )
+                .await
+                .expect("file");
+            (show, season, episode, file)
+        }
+
+        let first = tree(
+            store.as_ref(),
+            library.id,
+            "Original title",
+            "Synthetic Show",
+            "",
+        )
+        .await;
+        let second = tree(
+            store.as_ref(),
+            library.id,
+            "Metadata title",
+            "Synthetic Show",
+            ".2160p",
+        )
+        .await;
+        let user = store
+            .create_user("identity-repair-viewer", "hash", false)
+            .await
+            .expect("repair viewer");
+        let surviving_watch = store
+            .put_progress(user.id, first.2, 1_000, Some(10_000))
+            .await
+            .expect("surviving watch");
+        store
+            .put_progress(user.id, second.2, 8_000, Some(10_000))
+            .await
+            .expect("losing watch");
+        let snapshot = store
+            .identity_repair_snapshot(library.id, &[first.0, second.0])
+            .await
+            .expect("repair snapshot");
+        let plan = plurx_core::store::plan_identity_repair(snapshot.clone()).expect("repair plan");
+        assert!(plan.ready(), "{backend}: {:#?}", plan.blockers);
+        assert_eq!(plan.survivor_show_id, Some(first.0));
+        assert_eq!(plan.file_moves.len(), 1);
+        assert_eq!(plan.file_moves[0].file_id, second.3);
+        assert_eq!(plan.file_moves[0].new_item_id, first.2);
+        assert_eq!(plan.watch_conflicts.len(), 1);
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let lease = acquired(
+            store
+                .acquire_lease(
+                    &format!("scan:library:{}", library.id),
+                    "node-a",
+                    now,
+                    now + 90_000,
+                )
+                .await
+                .expect("repair lease"),
+            backend,
+        );
+        let replacement = publication_successor(&lease);
+        assert_eq!(
+            store
+                .apply_identity_repair_fenced(&snapshot, &plan, &lease, &replacement)
+                .await
+                .expect("apply repair"),
+            IdentityRepairOutcome::Applied
+        );
+        assert_eq!(
+            store
+                .watch_state(user.id, first.2)
+                .await
+                .expect("surviving watch read")
+                .expect("surviving watch row"),
+            surviving_watch,
+            "{backend}: survivor watch row wins unchanged"
+        );
+        assert!(store
+            .get_item(second.0)
+            .await
+            .expect("losing show read")
+            .is_none());
+        assert!(store
+            .get_item(second.1)
+            .await
+            .expect("losing season read")
+            .is_none());
+        assert!(store
+            .get_item(second.2)
+            .await
+            .expect("losing episode read")
+            .is_none());
+        assert_eq!(
+            store
+                .get_file(second.3)
+                .await
+                .expect("moved file read")
+                .expect("moved file")
+                .item_id,
+            first.2,
+            "{backend}: file ID and facts survive overlap consolidation"
+        );
+
+        let retry = publication_successor(&replacement);
+        assert_eq!(
+            store
+                .apply_identity_repair_fenced(&snapshot, &plan, &replacement, &retry)
+                .await
+                .expect("idempotent repair retry"),
+            IdentityRepairOutcome::AlreadyApplied
+        );
+
+        let third = tree(
+            store.as_ref(),
+            library.id,
+            "Other original",
+            "Other Synthetic",
+            "",
+        )
+        .await;
+        let fourth = tree(
+            store.as_ref(),
+            library.id,
+            "Other metadata",
+            "Other Synthetic",
+            ".1080p",
+        )
+        .await;
+        let stale_snapshot = store
+            .identity_repair_snapshot(library.id, &[third.0, fourth.0])
+            .await
+            .expect("stale repair snapshot");
+        let stale_plan = plurx_core::store::plan_identity_repair(stale_snapshot.clone())
+            .expect("stale repair plan");
+        store
+            .apply_metadata(
+                third.0,
+                &MetadataPatch {
+                    overview: Some("changed after preview".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("concurrent metadata change");
+        let stale_successor = publication_successor(&retry);
+        assert_eq!(
+            store
+                .apply_identity_repair_fenced(
+                    &stale_snapshot,
+                    &stale_plan,
+                    &retry,
+                    &stale_successor,
+                )
+                .await
+                .expect("stale repair outcome"),
+            IdentityRepairOutcome::Stale
+        );
+        assert!(store
+            .get_item(fourth.0)
+            .await
+            .expect("stale loser read")
+            .is_some());
     })
     .await;
 }

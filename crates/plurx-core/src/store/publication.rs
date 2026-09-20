@@ -19,7 +19,8 @@ use crate::domain::{BookMetadataPatch, MetadataPatch, NewItem, NewPretranscodeJo
 use crate::error::StoreError;
 
 use super::{
-    DvRecoveryGuardState, ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome, Store,
+    DvRecoveryGuardState, IdentityRepairOutcome, IdentityRepairPlan, IdentityRepairSnapshot,
+    ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome, Store,
 };
 
 const PUBLICATION_CALL_SAFETY_WINDOW: Duration = Duration::from_secs(3);
@@ -149,6 +150,23 @@ pub struct PublicationStore<'a> {
 }
 
 impl<'a> PublicationStore<'a> {
+    pub async fn apply_identity_repair(
+        &self,
+        snapshot: &IdentityRepairSnapshot,
+        plan: &IdentityRepairPlan,
+    ) -> Result<IdentityRepairOutcome, StoreError> {
+        let snapshot = snapshot.clone();
+        let plan = plan.clone();
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .apply_identity_repair_fenced(&snapshot, &plan, &lease, &replacement)
+                    .await
+            })
+        })
+        .await
+    }
+
     pub fn unfenced(store: &'a dyn Store) -> Self {
         Self { store, fence: None }
     }

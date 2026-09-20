@@ -10,9 +10,12 @@ use hiqlite::Row;
 use super::hiqlite::{database_error, validate_sql, HiqliteAuthStore, TimedClient};
 use super::{
     directory_matches_movie_path, directory_matches_show_path, directory_path_bounds,
-    normalized_directory, ArtworkInventoryItem, ArtworkRepairFence, MediaStore,
-    MissingVideoCodecTag, ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome, WatchStore,
-    TOP_LEVEL_ITEM_PREDICATE,
+    normalized_directory, ArtworkInventoryItem, ArtworkRepairFence, IdentityRepairBlocker,
+    IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot, IdentityRepairWatch,
+    MediaStore, MissingVideoCodecTag, ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome,
+    WatchStore, IDENTITY_REPAIR_EPISODES_MAX, IDENTITY_REPAIR_FILES_MAX,
+    IDENTITY_REPAIR_SEASONS_MAX, IDENTITY_REPAIR_SHOWS_MAX, IDENTITY_REPAIR_SHOWS_MIN,
+    IDENTITY_REPAIR_WATCHES_MAX, TOP_LEVEL_ITEM_PREDICATE,
 };
 use crate::domain::DolbyVisionFacts;
 use crate::domain::{
@@ -28,6 +31,9 @@ const ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, yea
      poster_path, backdrop_path, added_at, updated_at, recorded_at, tags, nfo_seeded_at, \
      artwork_attempted_at, artwork_error, genres, author, book_work_id, book_edition_id, \
      book_metadata_source";
+
+pub(super) const IDENTITY_REPAIR_ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, year, overview, tmdb_id, imdb_id, season_number, episode_number, air_date, runtime_ms, poster_path, backdrop_path, added_at, updated_at, recorded_at, tags, nfo_seeded_at, metadata_at, artwork_attempted_at, artwork_error, genres, author, book_work_id, book_edition_id, book_metadata_source";
+pub(super) const IDENTITY_REPAIR_FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, subtitle_streams, probe_json, scanned_at, hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, video_codec_tag";
 
 fn item_cols(alias: &str) -> String {
     ITEM_COLS
@@ -82,6 +88,106 @@ struct DirectoryItemRow {
 
 struct SeriesHintRow {
     tmdb_id: Option<i64>,
+}
+
+struct IdentityRepairLibraryRow {
+    kind: String,
+    paths: String,
+}
+
+impl From<&mut Row<'_>> for IdentityRepairLibraryRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            kind: row.get("kind"),
+            paths: row.get("paths"),
+        }
+    }
+}
+
+struct IdentityRepairItemRow {
+    id: i64,
+    library_id: i64,
+    kind: String,
+    parent_id: Option<i64>,
+    tmdb_id: Option<i64>,
+    season_number: Option<i64>,
+    episode_number: Option<i64>,
+    added_at: i64,
+    row_json: String,
+}
+
+impl From<&mut Row<'_>> for IdentityRepairItemRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            library_id: row.get("library_id"),
+            kind: row.get("kind"),
+            parent_id: row.get("parent_id"),
+            tmdb_id: row.get("tmdb_id"),
+            season_number: row.get("season_number"),
+            episode_number: row.get("episode_number"),
+            added_at: row.get("added_at"),
+            row_json: row.get("row_json"),
+        }
+    }
+}
+
+struct IdentityRepairFileRow {
+    id: i64,
+    item_id: i64,
+    path: String,
+    size: i64,
+    mtime: i64,
+    row_json: String,
+}
+
+impl From<&mut Row<'_>> for IdentityRepairFileRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            id: row.get("id"),
+            item_id: row.get("item_id"),
+            path: row.get("path"),
+            size: row.get("size"),
+            mtime: row.get("mtime"),
+            row_json: row.get("row_json"),
+        }
+    }
+}
+
+struct IdentityRepairWatchRow {
+    user_id: i64,
+    item_id: i64,
+    position_ms: i64,
+    duration_ms: Option<i64>,
+    watched: i64,
+    updated_at: i64,
+}
+
+impl From<&mut Row<'_>> for IdentityRepairWatchRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            user_id: row.get("user_id"),
+            item_id: row.get("item_id"),
+            position_ms: row.get("position_ms"),
+            duration_ms: row.get("duration_ms"),
+            watched: row.get("watched"),
+            updated_at: row.get("updated_at"),
+        }
+    }
+}
+
+struct IdentityRepairOwnerRow {
+    evidence_path: String,
+    show_id: i64,
+}
+
+impl From<&mut Row<'_>> for IdentityRepairOwnerRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            evidence_path: row.get("evidence_path"),
+            show_id: row.get("show_id"),
+        }
+    }
 }
 
 impl From<&mut Row<'_>> for SeriesHintRow {
@@ -1121,6 +1227,291 @@ impl HiqliteAuthStore {
 
 #[async_trait]
 impl MediaStore for HiqliteAuthStore {
+    async fn identity_repair_snapshot(
+        &self,
+        library_id: i64,
+        show_ids: &[i64],
+    ) -> Result<IdentityRepairSnapshot, StoreError> {
+        if !(IDENTITY_REPAIR_SHOWS_MIN..=IDENTITY_REPAIR_SHOWS_MAX).contains(&show_ids.len())
+            || show_ids.iter().any(|id| *id <= 0)
+        {
+            return Err(StoreError::Task(
+                "invalid identity repair show IDs".to_owned(),
+            ));
+        }
+        let mut sorted_ids = show_ids.to_vec();
+        sorted_ids.sort_unstable();
+        if sorted_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(StoreError::Task(
+                "duplicate identity repair show ID".to_owned(),
+            ));
+        }
+        let ids_json = serde_json::to_string(&sorted_ids).map_err(database_error)?;
+        let library = self
+            .client()
+            .query_consistent_map::<IdentityRepairLibraryRow, _>(
+                "SELECT kind, paths FROM libraries WHERE id = $1",
+                params!(library_id),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| StoreError::Task("identity repair library not found".to_owned()))?;
+        let item_rows = self
+            .client()
+            .query_consistent_map::<IdentityRepairItemRow, _>(
+                format!(
+                    "WITH requested(id) AS (SELECT value FROM json_each($1)), \
+                          selected(id) AS ( \
+                            SELECT id FROM requested \
+                            UNION SELECT i.id FROM items i JOIN requested r ON i.parent_id = r.id \
+                            UNION SELECT e.id FROM items e JOIN items s ON s.id = e.parent_id \
+                                 JOIN requested r ON s.parent_id = r.id) \
+                     SELECT id, library_id, kind, parent_id, tmdb_id, season_number, \
+                            episode_number, added_at, json_array({IDENTITY_REPAIR_ITEM_COLS}) AS row_json \
+                       FROM items WHERE id IN (SELECT id FROM selected) ORDER BY id"
+                ),
+                params!(ids_json.as_str()),
+            )
+            .await
+            .map_err(database_error)?;
+        let items = item_rows
+            .into_iter()
+            .map(|row| IdentityRepairItem {
+                id: row.id,
+                library_id: row.library_id,
+                kind: row.kind,
+                parent_id: row.parent_id,
+                tmdb_id: row.tmdb_id,
+                season_number: row.season_number,
+                episode_number: row.episode_number,
+                added_at: row.added_at,
+                row: row.row_json,
+            })
+            .collect::<Vec<_>>();
+        if items.iter().filter(|item| item.kind == "season").count() > IDENTITY_REPAIR_SEASONS_MAX
+            || items.iter().filter(|item| item.kind == "episode").count()
+                > IDENTITY_REPAIR_EPISODES_MAX
+        {
+            return Err(StoreError::Task("repair_too_large".to_owned()));
+        }
+        let item_ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
+        let item_ids_json = serde_json::to_string(&item_ids).map_err(database_error)?;
+        let file_rows = self
+            .client()
+            .query_consistent_map::<IdentityRepairFileRow, _>(
+                format!(
+                    "SELECT id, item_id, path, size, mtime, json_array({IDENTITY_REPAIR_FILE_COLS}) AS row_json \
+                       FROM files WHERE item_id IN (SELECT value FROM json_each($1)) ORDER BY id"
+                ),
+                params!(item_ids_json.as_str()),
+            )
+            .await
+            .map_err(database_error)?;
+        let files = file_rows
+            .into_iter()
+            .map(|row| IdentityRepairFile {
+                id: row.id,
+                item_id: row.item_id,
+                path: row.path,
+                size: row.size,
+                mtime: row.mtime,
+                row: row.row_json,
+            })
+            .collect::<Vec<_>>();
+        if files.len() > IDENTITY_REPAIR_FILES_MAX {
+            return Err(StoreError::Task("repair_too_large".to_owned()));
+        }
+        let watches = self
+            .client()
+            .query_consistent_map::<IdentityRepairWatchRow, _>(
+                "SELECT user_id, item_id, position_ms, duration_ms, watched, updated_at \
+                   FROM watch_state WHERE item_id IN (SELECT value FROM json_each($1)) \
+                  ORDER BY item_id, user_id",
+                params!(item_ids_json.as_str()),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| IdentityRepairWatch {
+                user_id: row.user_id,
+                item_id: row.item_id,
+                position_ms: row.position_ms,
+                duration_ms: row.duration_ms,
+                watched: row.watched != 0,
+                updated_at: row.updated_at,
+            })
+            .collect::<Vec<_>>();
+        if watches.len() > IDENTITY_REPAIR_WATCHES_MAX {
+            return Err(StoreError::Task("repair_too_large".to_owned()));
+        }
+        let mut directories = files
+            .iter()
+            .filter_map(|file| {
+                crate::scan::parse::parse_episode(std::path::Path::new(&file.path))
+                    .or_else(|_| {
+                        crate::scan::parse::parse_anime_episode(std::path::Path::new(&file.path))
+                    })
+                    .ok()
+                    .and_then(|parsed| parsed.source_directory)
+                    .map(|path| path.to_string_lossy().into_owned())
+            })
+            .collect::<Vec<_>>();
+        directories.sort();
+        directories.dedup();
+        let mut directory_owner_ids = Vec::new();
+        for directory in &directories {
+            let (lower, upper) = directory_path_bounds(directory)?;
+            let owners = self
+                .client()
+                .query_consistent_map::<IdentityRepairOwnerRow, _>(
+                    "SELECT f.path AS evidence_path, show.id AS show_id \
+                       FROM files f INDEXED BY sqlite_autoindex_files_1 \
+                       JOIN items episode ON episode.id = f.item_id AND episode.kind = 'episode' \
+                       JOIN items season ON season.id = episode.parent_id AND season.kind = 'season' \
+                       JOIN items show ON show.id = season.parent_id AND show.kind = 'show' \
+                      WHERE f.path >= $1 AND f.path < $2 AND show.library_id = $3 \
+                        AND season.library_id = $3 AND episode.library_id = $3",
+                    params!(lower, upper, library_id),
+                )
+                .await
+                .map_err(database_error)?;
+            for owner in owners {
+                if directory_matches_show_path(&owner.evidence_path, directory) {
+                    directory_owner_ids.push(owner.show_id);
+                }
+            }
+        }
+        directory_owner_ids.sort_unstable();
+        directory_owner_ids.dedup();
+
+        let mut blockers = Vec::new();
+        for (code, sql, detail) in [
+            (
+                "reading_state",
+                "SELECT COUNT(*) AS count FROM reading_state WHERE item_id IN (SELECT value FROM json_each($1))",
+                "reading-state rows reference selected items",
+            ),
+            (
+                "scan_reconcile_items",
+                "SELECT COUNT(*) AS count FROM scan_reconcile_items WHERE item_id IN (SELECT value FROM json_each($1))",
+                "reconciliation rows reference selected items",
+            ),
+            (
+                "classification_overrides",
+                "SELECT COUNT(*) AS count FROM media_classifications WHERE item_id IN (SELECT value FROM json_each($1)) AND (json_array_length(overrides, '$.include') > 0 OR json_array_length(overrides, '$.exclude') > 0)",
+                "selected items have manual classification overrides",
+            ),
+            (
+                "library_channel_entries",
+                "SELECT COUNT(*) AS count FROM library_channel_entries WHERE item_id IN (SELECT value FROM json_each($1)) OR show_id IN (SELECT value FROM json_each($1))",
+                "channel entries reference selected items",
+            ),
+            (
+                "active_media_session",
+                "SELECT COUNT(*) AS count FROM media_sessions s WHERE s.state IN ('starting','active') AND (EXISTS (SELECT 1 FROM json_tree(s.recipe_json) j JOIN json_each($1) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id')) OR EXISTS (SELECT 1 FROM json_tree(s.response_json) j JOIN json_each($1) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id')))",
+                "active media sessions reference selected items",
+            ),
+            (
+                "channel_session_recipe",
+                "SELECT COUNT(*) AS count FROM library_channel_session_recipes r WHERE EXISTS (SELECT 1 FROM json_tree(r.recipe_json) j JOIN json_each($1) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))",
+                "channel session recipes reference selected items",
+            ),
+            (
+                "watched_outbox",
+                "SELECT COUNT(*) AS count FROM watched_outbox o WHERE EXISTS (SELECT 1 FROM json_tree(o.payload) j JOIN json_each($1) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))",
+                "watched outbox payloads reference selected items",
+            ),
+            (
+                "dvr_recording",
+                "SELECT COUNT(*) AS count FROM dvr_recordings WHERE item_id IN (SELECT value FROM json_each($1))",
+                "DVR recordings reference selected items",
+            ),
+        ] {
+            let count = self
+                .client()
+                .query_consistent_map::<CountRow, _>(sql, params!(item_ids_json.as_str()))
+                .await
+                .map_err(database_error)?
+                .first()
+                .map(|row| row.count)
+                .unwrap_or_default();
+            if count != 0 {
+                blockers.push(IdentityRepairBlocker {
+                    code: code.to_owned(),
+                    detail: format!("{count} {detail}"),
+                });
+            }
+        }
+        let artwork_table_exists = self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='cluster_artwork_repairs'",
+                params!(),
+            )
+            .await
+            .map_err(database_error)?
+            .first()
+            .is_some_and(|row| row.count == 1);
+        if artwork_table_exists {
+            let count = self
+                .client()
+                .query_consistent_map::<CountRow, _>(
+                    "SELECT COUNT(*) AS count FROM cluster_artwork_repairs WHERE item_id IN (SELECT value FROM json_each($1))",
+                    params!(item_ids_json.as_str()),
+                )
+                .await
+                .map_err(database_error)?
+                .first()
+                .map(|row| row.count)
+                .unwrap_or_default();
+            if count != 0 {
+                blockers.push(IdentityRepairBlocker {
+                    code: "artwork_repair".to_owned(),
+                    detail: format!("{count} artwork repairs reference selected items"),
+                });
+            }
+        }
+        let recipe_count = self
+            .client()
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM library_channels c WHERE EXISTS ( \
+                    SELECT 1 FROM json_each($1) ids WHERE \
+                       EXISTS (SELECT 1 FROM json_each(c.recipe_json, '$.include_item_ids') WHERE value = ids.value) \
+                    OR EXISTS (SELECT 1 FROM json_each(c.recipe_json, '$.exclude_item_ids') WHERE value = ids.value) \
+                    OR EXISTS (SELECT 1 FROM json_each(c.recipe_json, '$.include_show_ids') WHERE value = ids.value) \
+                    OR EXISTS (SELECT 1 FROM json_each(c.recipe_json, '$.exclude_show_ids') WHERE value = ids.value))",
+                params!(item_ids_json.as_str()),
+            )
+            .await
+            .map_err(database_error)?
+            .first()
+            .map(|row| row.count)
+            .unwrap_or_default();
+        if recipe_count != 0 {
+            blockers.push(IdentityRepairBlocker {
+                code: "library_channel_recipe".to_owned(),
+                detail: format!("{recipe_count} channel recipes reference selected items"),
+            });
+        }
+        Ok(IdentityRepairSnapshot {
+            library_id,
+            library_kind: library.kind,
+            library_paths: library.paths,
+            input_show_ids: sorted_ids,
+            items,
+            files,
+            watches,
+            directory_owner_ids,
+            dependency_rows: artwork_table_exists
+                .then(|| "artwork_table_present".to_owned())
+                .into_iter()
+                .collect(),
+            blockers,
+        })
+    }
+
     async fn item_by_external_id(
         &self,
         kind: ItemKind,

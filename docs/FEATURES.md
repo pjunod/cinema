@@ -91,6 +91,13 @@ books, and home media.
   candidate and selected IDs once per directory. Flat layouts, release folders,
   anime libraries and renamed directories retain title/year fallback and its
   limits.
+- **Bounded duplicate-show repair:** an admin-only preview/status/apply API can
+  consolidate one reviewed exact-directory owner set without changing file
+  IDs or discarding versions. It reports watch conflicts and unsupported
+  references, expires node-local plans after 15 minutes, and applies the exact
+  fingerprinted preimage atomically under the library scan lease. This is a
+  direct maintenance capability with advisory prerequisites, not a gated or
+  automatic catalogue merge; no production repair runs during deployment.
 - **Live scan status** per library: `scanning… N / M files`, then `fetching
   metadata…`, then `idle` — with the file count and any errors surfaced loudly,
   not swallowed. The scan result publishes *before* enrichment so counts and

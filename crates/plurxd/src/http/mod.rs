@@ -40,6 +40,7 @@ mod plex;
 pub(crate) mod publication;
 mod reading;
 mod scan;
+pub(crate) mod scan_identity;
 pub(crate) mod stream;
 pub(crate) mod system;
 mod trakt;
@@ -263,6 +264,18 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/libraries/{id}/schedule", put(libraries::set_schedule))
         .route("/libraries/{id}/scan", post(libraries::scan))
+        .route(
+            "/libraries/{id}/identity-repairs/preview",
+            post(scan_identity::preview),
+        )
+        .route(
+            "/libraries/{id}/identity-repairs/{plan_id}",
+            get(scan_identity::status),
+        )
+        .route(
+            "/libraries/{id}/identity-repairs/{plan_id}/apply",
+            post(scan_identity::apply),
+        )
         .route("/libraries/{id}/refresh", post(libraries::refresh))
         .route("/libraries/{id}/dv-conversion", put(dv_disk::set_mode))
         .route(
