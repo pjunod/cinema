@@ -611,8 +611,8 @@ pub(crate) fn progressive_hevc_output_tag(
             },
         );
     }
-    Some(plurx_core::transcode::hevc_copy_tag(
-        file.hdr.as_deref(),
+    Some(plurx_core::transcode::hevc_copy_tag_for_source(
+        file,
         preserve_dolby_vision,
     ))
 }
@@ -647,6 +647,29 @@ pub(crate) fn hevc_copy_requires_hls(
             "progressive HEVC output uses {actual}, which this client did not admit, and HLS was not claimed"
         ),
     ))
+}
+
+fn remux_requires_hls(
+    file: &MediaFile,
+    decision: &Decision,
+    caps: Option<&playback::DeviceCaps>,
+    promote_hevc_parameter_sets: bool,
+) -> Result<bool, ApiError> {
+    if decision.method != playback::PlaybackMethod::Remux {
+        return Ok(false);
+    }
+    Ok(decision.convert_dolby_vision
+        || caps
+            .map(|caps| {
+                hevc_copy_requires_hls(
+                    file,
+                    caps,
+                    decision.preserve_dolby_vision,
+                    promote_hevc_parameter_sets,
+                )
+            })
+            .transpose()?
+            .unwrap_or(false))
 }
 
 /// Effective request-local choices returned only when the caller supplied an
@@ -755,6 +778,31 @@ pub(super) async fn render_caps(state: &AppState) -> playback::RenderCaps {
         // after it stopped.
         dolby_vision_convert: state.transcode.dv_convert_enabled().await,
     }
+}
+
+/// Narrow one request's producer facts without changing the persisted switch.
+///
+/// Profile 7 conversion exists only in the copy-HLS producer. A decision made
+/// for an explicit v2 document that does not advertise HLS, or for the
+/// concrete progressive endpoint, therefore has to be re-decided with that
+/// operation unavailable. Legacy decision queries retain the historical
+/// eligibility because they never carried an explicit transport document.
+fn render_caps_with_conversion_transport(
+    mut node: playback::RenderCaps,
+    conversion_producer_available: bool,
+) -> playback::RenderCaps {
+    node.dolby_vision_convert &= conversion_producer_available;
+    node
+}
+
+fn decision_render_caps(
+    node: playback::RenderCaps,
+    caps: Option<&playback::DeviceCaps>,
+) -> playback::RenderCaps {
+    render_caps_with_conversion_transport(
+        node,
+        caps.is_none_or(|caps| caps.transports.iter().any(|transport| transport == "hls")),
+    )
 }
 
 fn source_summary(file: &MediaFile) -> SourceSummary {
@@ -2073,11 +2121,8 @@ pub async fn decision(
     // therefore about whether `Auto` wants full subtitles at all.
     let container_audio_streams = file.audio_streams.clone();
     set_selected_audio_default(&mut file.audio_streams, selected_audio);
-    let mut decision = q.decide(
-        &file,
-        &render_caps(&state).await,
-        crate::media_sessions::unix_ms(),
-    );
+    let node = decision_render_caps(render_caps(&state).await, q.caps_v2.as_ref());
+    let mut decision = q.decide(&file, &node, crate::media_sessions::unix_ms());
     // The grade of the plan **with no subtitle burn**. Read here, before
     // `apply_selected_subtitle` can rewrite it, because both users below are
     // asking what adding a burn would cost — and a plan that is already SDR
@@ -2147,22 +2192,12 @@ pub async fn decision(
         .fragment_index(id, &vod_identity)
         .await?
         .is_some();
-    let requires_hls = if decision.method == playback::PlaybackMethod::Remux {
-        q.caps_v2
-            .as_ref()
-            .map(|caps| {
-                hevc_copy_requires_hls(
-                    &file,
-                    caps,
-                    decision.preserve_dolby_vision,
-                    vod_video.promotes_parameter_sets(),
-                )
-            })
-            .transpose()?
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    let requires_hls = remux_requires_hls(
+        &file,
+        &decision,
+        q.caps_v2.as_ref(),
+        vod_video.promotes_parameter_sets(),
+    )?;
 
     tracing::info!(
         user_id = user.id,
@@ -2193,7 +2228,10 @@ pub async fn decision(
         source_hdr_format = file.hdr_format.as_deref().unwrap_or(""),
         method = ?decision.method,
         delivered_dynamic_range = decision.delivered_dynamic_range,
+        delivered_dolby_vision_profile = decision.delivered_dolby_vision_profile,
         preserve_dolby_vision = decision.preserve_dolby_vision,
+        convert_dolby_vision = decision.convert_dolby_vision,
+        requires_hls,
         reasons = ?decision.reasons,
         "playback capability decision"
     );
@@ -2567,6 +2605,41 @@ pub async fn stream_mp4(
     } else {
         q.audio_offset_ms.unwrap_or(0).clamp(-15_000, 15_000)
     };
+    let prefs = state.transcode.lang_prefs().await;
+    let audio = remux_audio_index(&file.audio_streams, q.audio, &prefs);
+    set_selected_audio_default(&mut file.audio_streams, Some(audio));
+    let caps = q.caps();
+    let node = render_caps(&state).await;
+    let requested = caps.decide(&file, &node, crate::media_sessions::unix_ms());
+    let served = caps.decide(
+        &file,
+        &render_caps_with_conversion_transport(node, false),
+        crate::media_sessions::unix_ms(),
+    );
+    if served.method == playback::PlaybackMethod::Transcode {
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            "unsupported_progressive_delivery",
+            "this source cannot be made compatible by the progressive copy endpoint; use the planned HLS session",
+        ));
+    }
+    tracing::info!(
+        user_id = user.id,
+        file_id = id,
+        requested_preserve_dolby_vision = requested.preserve_dolby_vision,
+        requested_convert_dolby_vision = requested.convert_dolby_vision,
+        served_preserve_dolby_vision = served.preserve_dolby_vision,
+        served_convert_dolby_vision = served.convert_dolby_vision,
+        served_dynamic_range = served.delivered_dynamic_range,
+        served_dolby_vision_profile = served.delivered_dolby_vision_profile,
+        selected_transport = "progressive",
+        narrowing_reason = if requested.convert_dolby_vision {
+            "progressive_has_no_profile_7_conversion_producer"
+        } else {
+            "none"
+        },
+        "progressive delivery narrowed requested playback policy"
+    );
     crate::playstart::note_playback_started(
         &state,
         user.id,
@@ -2574,14 +2647,6 @@ pub async fn stream_mp4(
         id,
         crate::delivery::Method::Remux,
         q.stream.as_deref(),
-    );
-    let prefs = state.transcode.lang_prefs().await;
-    let audio = remux_audio_index(&file.audio_streams, q.audio, &prefs);
-    set_selected_audio_default(&mut file.audio_streams, Some(audio));
-    let decision = q.caps().decide(
-        &file,
-        &render_caps(&state).await,
-        crate::media_sessions::unix_ms(),
     );
     let probe_json = state.store.get_file_probe_json(id).await?;
     let promote_hevc_parameter_sets =
@@ -2635,7 +2700,7 @@ pub async fn stream_mp4(
         #[cfg(windows)]
         source: &source.handle,
         start: q.start,
-        transcode_audio: decision.transcode_audio,
+        transcode_audio: served.transcode_audio,
         audio_index: audio,
         // Zeroed for a file with no audio track: the correction becomes an
         // `-af` when audio is transcoded, and a filter with no stream to
@@ -2643,11 +2708,11 @@ pub async fn stream_mp4(
         // inert.
         audio_offset_ms: file.audio_offset_ms,
         hevc,
-        hdr: file.hdr.clone(),
+        media: &file,
         // The probed capability, like the decision above — not the version
         // line parsed a second time somewhere else.
         have_dovi_bsf: state.system.dovi_rpu,
-        preserve_dolby_vision: decision.preserve_dolby_vision,
+        preserve_dolby_vision: served.preserve_dolby_vision,
         promote_hevc_parameter_sets,
         readrate,
         tracked,
@@ -2886,9 +2951,8 @@ struct RemuxSpec<'a> {
     audio_offset_ms: i64,
     /// Tag the video `hvc1` so Safari accepts HEVC in MP4.
     hevc: bool,
-    /// The source's HDR flavour — picks the copy bitstream filter (a Dolby
-    /// Vision source also sheds its EL/RPU units; see `hevc_copy_bsf`).
-    hdr: Option<String>,
+    /// Structured source facts for the shared source-aware sample-entry rule.
+    media: &'a MediaFile,
     /// This ffmpeg has `dovi_rpu` (≥ 7.1), so a DV strip can also drop the
     /// DOVI side data and with it the `dvcC` box VideoToolbox chokes on.
     have_dovi_bsf: bool,
@@ -2968,7 +3032,7 @@ fn spawn_remux_process_owner(
 }
 
 fn progressive_hevc_copy_args(
-    hdr: Option<&str>,
+    source: &MediaFile,
     have_dovi_bsf: bool,
     preserve_dolby_vision: bool,
     promote_hevc_parameter_sets: bool,
@@ -2976,32 +3040,33 @@ fn progressive_hevc_copy_args(
     let mut args = vec![
         "-tag:v".to_owned(),
         if promote_hevc_parameter_sets {
-            if hdr == Some("dolby_vision") && preserve_dolby_vision {
+            if source.hdr.as_deref() == Some("dolby_vision") && preserve_dolby_vision {
                 "dvhe"
             } else {
                 "hev1"
             }
         } else {
-            plurx_core::transcode::hevc_copy_tag(hdr, preserve_dolby_vision)
+            plurx_core::transcode::hevc_copy_tag_for_source(source, preserve_dolby_vision)
         }
         .to_owned(),
     ];
-    if promote_hevc_parameter_sets && hdr == Some("dolby_vision") && preserve_dolby_vision {
-        // MOV gates dvcC/dvvC behind unofficial strictness. The in-band
-        // Dolby Vision sample entry is `dvhe`, not plain `hev1`; otherwise the
-        // response keeps RPUs while declaring only ordinary HEVC.
+    if source.hdr.as_deref() == Some("dolby_vision") && preserve_dolby_vision {
+        // MOV gates every dvcC/dvvC record behind unofficial strictness. This
+        // is required for ordinary hvc1/dvh1 preserved-DV copies as well as
+        // the in-band dvhe promotion branch; without it RPUs survive but the
+        // decoder configuration box can be silently omitted.
         args.extend(["-strict".to_owned(), "unofficial".to_owned()]);
     }
     if !promote_hevc_parameter_sets {
         args.extend([
             "-bsf:v".to_owned(),
             plurx_core::transcode::hevc_copy_bsf_for_client(
-                hdr,
+                source.hdr.as_deref(),
                 have_dovi_bsf,
                 preserve_dolby_vision,
             ),
         ]);
-    } else if hdr == Some("dolby_vision") && !preserve_dolby_vision {
+    } else if source.hdr.as_deref() == Some("dolby_vision") && !preserve_dolby_vision {
         args.extend([
             "-bsf:v".to_owned(),
             if have_dovi_bsf {
@@ -3025,7 +3090,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         audio_index,
         audio_offset_ms,
         hevc,
-        hdr,
+        media,
         have_dovi_bsf,
         preserve_dolby_vision,
         promote_hevc_parameter_sets,
@@ -3100,7 +3165,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     // as the segmented copy path (`hevc_copy_bsf`).
     if hevc {
         cmd.args(progressive_hevc_copy_args(
-            hdr.as_deref(),
+            media,
             have_dovi_bsf,
             preserve_dolby_vision,
             promote_hevc_parameter_sets,
@@ -3557,7 +3622,8 @@ mod tests {
 
     #[test]
     fn progressive_minimal_hevc_uses_an_in_band_sample_entry() {
-        let args = progressive_hevc_copy_args(None, false, false, true).join(" ");
+        let file = hevc_file(None);
+        let args = progressive_hevc_copy_args(&file, false, false, true).join(" ");
         assert!(args.contains("-tag:v hev1"), "{args}");
         assert!(!args.contains("-strict"), "{args}");
         assert!(!args.contains("remove_types=32-34"), "{args}");
@@ -3565,13 +3631,13 @@ mod tests {
 
     #[test]
     fn progressive_minimal_dolby_vision_keeps_its_in_band_identity() {
-        let args = progressive_hevc_copy_args(Some("dolby_vision"), true, true, true).join(" ");
+        let file = hevc_file(Some("dolby_vision"));
+        let args = progressive_hevc_copy_args(&file, true, true, true).join(" ");
         assert!(args.contains("-tag:v dvhe"), "{args}");
         assert!(args.contains("-strict unofficial"), "{args}");
         assert!(!args.contains("-bsf:v"), "{args}");
 
-        let stripped =
-            progressive_hevc_copy_args(Some("dolby_vision"), true, false, true).join(" ");
+        let stripped = progressive_hevc_copy_args(&file, true, false, true).join(" ");
         assert!(stripped.contains("-tag:v hev1"), "{stripped}");
         assert!(
             stripped.contains("dovi_rpu=strip=1,filter_units=remove_types=62-63"),
@@ -3610,6 +3676,113 @@ mod tests {
             Some("hev1"),
             "stripping DV leaves the in-band ordinary HEVC sample entry"
         );
+    }
+
+    #[test]
+    fn android_dv_delivery_native_progressive_packaging_uses_structured_source_facts() {
+        let mut p8 = hevc_file(Some("dolby_vision"));
+        p8.dolby_vision.profile = Some(8);
+        p8.dolby_vision.bl_compat_id = Some(1);
+        p8.dolby_vision.rpu_present = Some(true);
+        let p8_args = progressive_hevc_copy_args(&p8, true, true, false).join(" ");
+        assert!(p8_args.contains("-tag:v hvc1"), "{p8_args}");
+        assert!(p8_args.contains("-strict unofficial"), "{p8_args}");
+
+        let mut p5 = p8.clone();
+        p5.dolby_vision.profile = Some(5);
+        p5.dolby_vision.bl_compat_id = Some(0);
+        let p5_args = progressive_hevc_copy_args(&p5, true, true, false).join(" ");
+        assert!(p5_args.contains("-tag:v dvh1"), "{p5_args}");
+        assert!(p5_args.contains("-strict unofficial"), "{p5_args}");
+
+        let stripped = progressive_hevc_copy_args(&p8, true, false, false).join(" ");
+        assert!(stripped.contains("-tag:v hvc1"), "{stripped}");
+        assert!(!stripped.contains("-strict"), "{stripped}");
+    }
+
+    fn android_dv_p7_source() -> MediaFile {
+        let mut file = hevc_file(Some("dolby_vision"));
+        file.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".into());
+        file.dolby_vision.profile = Some(7);
+        file.dolby_vision.level = Some(6);
+        file.dolby_vision.bl_compat_id = Some(1);
+        file.dolby_vision.el_present = Some(true);
+        file.dolby_vision.rpu_present = Some(true);
+        file
+    }
+
+    fn android_dv_caps(transports: &[&str]) -> playback::DeviceCaps {
+        playback::DeviceCaps {
+            v: playback::DeviceCaps::VERSION,
+            video: vec![playback::VideoCaps {
+                codec: "hevc".into(),
+                profiles: vec!["main10".into()],
+                max_height: Some(2160),
+                present: vec![playback::Transfer::Sdr, playback::Transfer::Pq],
+                dv_profiles: vec![5, 8],
+                ..Default::default()
+            }],
+            containers: vec!["mp4".into()],
+            transports: transports.iter().map(|value| (*value).to_owned()).collect(),
+            display: Some(playback::caps::DisplayCaps {
+                hdr: true,
+                dolby_vision: true,
+                max_nits: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn android_dv_delivery_conversion_requires_an_available_hls_producer() {
+        let source = android_dv_p7_source();
+        let hls = android_dv_caps(&["hls", "progressive"]);
+        let progressive = android_dv_caps(&["progressive"]);
+
+        let converted = Caps {
+            caps_v2: Some(hls.clone()),
+            ..Default::default()
+        }
+        .decide(
+            &source,
+            &decision_render_caps(playback::RenderCaps::proven(true), Some(&hls)),
+            NOW_MS,
+        );
+        assert!(converted.convert_dolby_vision);
+        assert!(converted.preserve_dolby_vision);
+        assert!(remux_requires_hls(&source, &converted, Some(&hls), false)
+            .expect("copy HLS is admitted"));
+
+        let stripped = Caps {
+            caps_v2: Some(progressive.clone()),
+            ..Default::default()
+        }
+        .decide(
+            &source,
+            &decision_render_caps(playback::RenderCaps::proven(true), Some(&progressive)),
+            NOW_MS,
+        );
+        assert!(!stripped.convert_dolby_vision);
+        assert!(!stripped.preserve_dolby_vision);
+        assert_eq!(stripped.delivered_dynamic_range, "hdr10");
+        assert_eq!(stripped.delivered_dolby_vision_profile, None);
+
+        let legacy = Caps {
+            vcodec: Some("hevc".into()),
+            container: Some("mp4".into()),
+            hdr: Some(1),
+            dvprofile: Some("5,8".into()),
+            hdr10t: Some(1),
+            ..Default::default()
+        }
+        .decide(
+            &source,
+            &decision_render_caps(playback::RenderCaps::proven(true), None),
+            NOW_MS,
+        );
+        assert!(legacy.convert_dolby_vision);
+        assert!(remux_requires_hls(&source, &legacy, None, false)
+            .expect("legacy transport is not an explicit refusal"));
     }
 
     #[test]
