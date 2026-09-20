@@ -81,6 +81,16 @@ books, and home media.
   *Invalid data* need opposite fixes.
 - **Multiple versions per item:** two files of the same movie (a 2160p remux and
   a 1080p encode) attach to one item, ordered best-first (height, then bitrate).
+- **Stable scan identity:** when bytes change at an already known canonical
+  path, the file keeps its existing item association while probe facts refresh.
+  New files under a direct `Show/Season N/file` layout or a direct
+  `Title (YYYY)/file` movie layout consult the catalogue ownership already
+  evidenced by that exact directory before mutable display-title matching.
+  If historical duplicates own one show directory, the incoming season owner
+  wins, then the oldest item; the scan remains playable and reports the
+  candidate and selected IDs once per directory. Flat layouts, release folders,
+  anime libraries and renamed directories retain title/year fallback and its
+  limits.
 - **Live scan status** per library: `scanning… N / M files`, then `fetching
   metadata…`, then `idle` — with the file count and any errors surfaced loudly,
   not swallowed. The scan result publishes *before* enrichment so counts and

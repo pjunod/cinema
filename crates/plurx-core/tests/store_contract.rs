@@ -22762,6 +22762,208 @@ async fn library_contract_runs_through_dyn_store() {
 }
 
 #[tokio::test]
+async fn scan_identity_directory_contract() {
+    for_each_backend(|store, backend| async move {
+        let shows = store
+            .create_library(&NewLibrary {
+                name: "Identity Contract Shows".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![PathBuf::from("/contract/shows")],
+                anime: false,
+            })
+            .await
+            .expect("shows library");
+        let other_shows = store
+            .create_library(&NewLibrary {
+                name: "Other Identity Shows".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![PathBuf::from("/other/shows")],
+                anime: false,
+            })
+            .await
+            .expect("other shows library");
+
+        async fn show_tree(
+            store: &dyn Store,
+            library_id: i64,
+            title: &str,
+            season_number: i32,
+            path: &str,
+        ) -> i64 {
+            let show = store
+                .insert_item(&NewItem {
+                    library_id,
+                    kind: ItemKind::Show,
+                    parent_id: None,
+                    title: title.into(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("show");
+            let season = store
+                .insert_item(&NewItem {
+                    library_id,
+                    kind: ItemKind::Season,
+                    parent_id: Some(show),
+                    title: format!("Season {season_number}"),
+                    year: None,
+                    season_number: Some(season_number),
+                    episode_number: None,
+                })
+                .await
+                .expect("season");
+            let episode = store
+                .insert_item(&NewItem {
+                    library_id,
+                    kind: ItemKind::Episode,
+                    parent_id: Some(season),
+                    title: "Episode 1".into(),
+                    year: None,
+                    season_number: Some(season_number),
+                    episode_number: Some(1),
+                })
+                .await
+                .expect("episode");
+            store
+                .upsert_file(episode, path, 1, 1, &ProbeResult::default())
+                .await
+                .expect("episode file");
+            show
+        }
+
+        let directory = "/contract/shows/Café_100%";
+        let oldest = show_tree(
+            store.as_ref(),
+            shows.id,
+            "Old display title",
+            1,
+            "/contract/shows/Café_100%/Season 1/Café S01E01.mkv",
+        )
+        .await;
+        let season_owner = show_tree(
+            store.as_ref(),
+            shows.id,
+            "New display title",
+            5,
+            "/contract/shows/Café_100%/Season 5/Café S05E01.mkv",
+        )
+        .await;
+        let _nested = show_tree(
+            store.as_ref(),
+            shows.id,
+            "Nested show",
+            1,
+            "/contract/shows/Café_100%/Nested Show/Season 1/Nested Show S01E01.mkv",
+        )
+        .await;
+        let _sibling = show_tree(
+            store.as_ref(),
+            shows.id,
+            "Sibling prefix",
+            1,
+            "/contract/shows/Café_100%x/Season 1/Sibling S01E01.mkv",
+        )
+        .await;
+        let _other_library = show_tree(
+            store.as_ref(),
+            other_shows.id,
+            "Other library",
+            1,
+            "/contract/shows/Café_100%/Season 1/Other Library S01E02.mkv",
+        )
+        .await;
+
+        let candidates = store
+            .find_shows_by_directory(shows.id, directory, 5)
+            .await
+            .expect("directory shows");
+        assert_eq!(
+            candidates.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![season_owner, oldest],
+            "{backend}: incoming-season owner first, nested/sibling/library evidence excluded"
+        );
+        let oldest_first = store
+            .find_shows_by_directory(shows.id, directory, 9)
+            .await
+            .expect("directory shows without season owner");
+        assert_eq!(
+            oldest_first.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![oldest, season_owner],
+            "{backend}: stable oldest/id fallback"
+        );
+
+        let movies = store
+            .create_library(&NewLibrary {
+                name: "Identity Contract Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from("/contract/movies")],
+                anime: false,
+            })
+            .await
+            .expect("movies library");
+        let movie = store
+            .insert_item(&NewItem {
+                library_id: movies.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Renamed Film".into(),
+                year: Some(2024),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("movie");
+        store
+            .upsert_file(
+                movie,
+                "/contract/movies/Original Film (2024)/Original.Film.2024.2160p.mkv",
+                1,
+                1,
+                &ProbeResult::default(),
+            )
+            .await
+            .expect("movie file");
+        let conflicting = store
+            .insert_item(&NewItem {
+                library_id: movies.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Other Film".into(),
+                year: Some(2024),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("conflicting movie");
+        store
+            .upsert_file(
+                conflicting,
+                "/contract/movies/Original Film (2024)/Other.Film.2024.mkv",
+                1,
+                1,
+                &ProbeResult::default(),
+            )
+            .await
+            .expect("conflicting filename");
+        let movie_candidates = store
+            .find_movies_by_directory(movies.id, "/contract/movies/Original Film (2024)/")
+            .await
+            .expect("directory movies");
+        assert_eq!(
+            movie_candidates
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![movie],
+            "{backend}: a contradictory filename cannot lend collection-folder ownership"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn media_contract_runs_through_dyn_store() {
     for_each_backend(|store, backend| async move {
         let movies = store

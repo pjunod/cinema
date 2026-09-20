@@ -3053,6 +3053,17 @@ files while you can see the folder full of media. That means the path you typed
 isn't the path the server process has — under Docker, the container-side mount
 path must match. Fix the mount, not the library name.
 
+When a scan reports that one directory is owned by duplicate catalogue items,
+it still indexes the file. The note lists every candidate item ID and the ID
+selected deterministically: a show that already owns the incoming season wins,
+then the oldest item. Treat the note as evidence for the identity-repair preview,
+not as permission to delete rows manually. An existing canonical file path is
+never re-parented merely because provider metadata changed its display title;
+size, mtime and probe facts refresh on the same file and item IDs. Directory
+lineage is intentionally limited to direct `Show/Season N/file` and direct
+`Title (YYYY)/file` movie layouts. Flat, release-folder, anime and renamed-folder
+layouts continue to use title/year matching.
+
 ### Scan deletion and root-identity safety
 
 A complete scan refuses vanished-file cleanup when it would exceed

@@ -8998,7 +8998,7 @@ fn error_status(message: &str) -> ScanStatus {
 mod tests {
     use super::*;
     use plurx_core::domain::{
-        DolbyVisionFacts, ItemKind, NewItem, NewLibrary, PlaybackEventQuery, ProbeResult,
+        DolbyVisionFacts, ItemEdit, ItemKind, NewItem, NewLibrary, PlaybackEventQuery, ProbeResult,
     };
 
     #[tokio::test]
@@ -11249,6 +11249,102 @@ mod tests {
                 .tmdb_id,
             Some(4242),
             "the later waiter's caller-specific ids must not be discarded"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_identity_queued_target_keeps_full_scan_directory_owner() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = crate::test_tempdir().expect("media");
+        let artwork = crate::test_tempdir().expect("artwork");
+        let season_one = media.path().join("Signal House/Season 1");
+        std::fs::create_dir_all(&season_one).expect("season one");
+        std::fs::write(season_one.join("Signal House S01E01.mkv"), b"video").expect("episode one");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Shows".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![media.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        scan::scan_library(store.as_ref(), &library)
+            .await
+            .expect("full scan");
+        let original = store
+            .find_show(library.id, "Signal House", None)
+            .await
+            .expect("show lookup")
+            .expect("show");
+        store
+            .update_item_fields(
+                original.id,
+                &ItemEdit {
+                    title: Some("Signal House (North)".into()),
+                    ..ItemEdit::default()
+                },
+            )
+            .await
+            .expect("provider-style rename");
+
+        let season_two = media.path().join("Signal House/Season 2");
+        std::fs::create_dir_all(&season_two).expect("season two");
+        std::fs::write(season_two.join("Signal House S02E01.mkv"), b"video").expect("episode two");
+        let jobs = manager(store.clone(), artwork.path());
+        jobs.statuses.lock().await.insert(
+            library.id,
+            ScanStatus {
+                running: true,
+                ..Default::default()
+            },
+        );
+        assert!(jobs
+            .request_scan(ScanRequest {
+                id: "scan-identity-queued".into(),
+                library_id: library.id,
+                path: season_two,
+                ids: None,
+                book: None,
+                correlation_id: Some("scan-identity".into()),
+                source: Some("fixture".into()),
+            })
+            .await
+            .expect("queue request")
+            .is_none());
+        jobs.statuses.lock().await.remove(&library.id);
+        jobs.drain_pending(library.id).await;
+
+        let request = jobs
+            .scan_request("scan-identity-queued")
+            .await
+            .expect("request record");
+        assert_eq!(request.status, "done");
+        let episode_id = request
+            .items
+            .expect("placed items")
+            .first()
+            .expect("placed episode")
+            .item_id;
+        let episode = store
+            .get_item(episode_id)
+            .await
+            .expect("episode lookup")
+            .expect("episode");
+        let season = store
+            .get_item(episode.parent_id.expect("season id"))
+            .await
+            .expect("season lookup")
+            .expect("season");
+        assert_eq!(season.parent_id, Some(original.id));
+        assert_eq!(
+            store
+                .get_item_children(original.id)
+                .await
+                .expect("seasons")
+                .len(),
+            2,
+            "the queued target must extend the full-scan show rather than split it"
         );
     }
 
