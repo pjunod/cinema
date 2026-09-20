@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["2161b8b3"]
+points = ["core.media", "cluster.auth", "server.api", "library.catalog"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "api-wire"]
+reason = "The adversarial review exposed destructive repair gaps retained by focused regressions. Planner readiness now requires exact-directory file evidence from every requested show, a directory strictly below and unequal to every configured root, and set-based uniqueness per parent; recognized anime layouts share that ownership path. Dependency blockers target only rows actually retired. Hiqlite refuses library or descendant membership changes in its atomic preimage guard and verifies the assembled core preview against one aggregate leader snapshot; SQLite reuses its transactional snapshot. Both backends prove complete retry and postconditions with exact structural counts, unique numbering, required destination watch rows, cleared retired JSON references, and unchanged later watch progress. The cross-backend contract now includes absent-destination watch copy and a post-preview descendant race, while daemon coverage proves admin isolation, wrong-node refusal, expiry, and strict wire IDs."

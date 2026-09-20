@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["6a65ad17"]
+points = []
+checks = []
+reason = "Documentation only: this commit froze the current-main-integrated scan identity candidate on its maintained status page before the one adversarial review. It changes no runtime behavior; the history audit classifies the word freeze as corrective, so this entry records the commit as intentionally non-runtime work."
+ignore = true

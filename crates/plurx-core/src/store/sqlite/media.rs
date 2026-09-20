@@ -16,9 +16,352 @@ use crate::domain::{
 use crate::error::StoreError;
 use crate::mediafacts::{FactsRow, MediaFacts};
 use crate::store::{
-    ArtworkInventoryItem, ArtworkRepairFence, MediaStore, MissingVideoCodecTag, ReconcileOutcome,
-    RootFingerprintStatus, TOP_LEVEL_ITEM_PREDICATE,
+    directory_matches_movie_path, directory_matches_show_path, directory_path_bounds,
+    normalized_directory, ArtworkInventoryItem, ArtworkRepairFence, IdentityRepairBlocker,
+    IdentityRepairFile, IdentityRepairItem, IdentityRepairSnapshot, IdentityRepairWatch,
+    MediaStore, MissingVideoCodecTag, ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome,
+    IDENTITY_REPAIR_EPISODES_MAX, IDENTITY_REPAIR_FILES_MAX, IDENTITY_REPAIR_SEASONS_MAX,
+    IDENTITY_REPAIR_SHOWS_MAX, IDENTITY_REPAIR_SHOWS_MIN, IDENTITY_REPAIR_WATCHES_MAX,
+    TOP_LEVEL_ITEM_PREDICATE,
 };
+
+pub(super) fn identity_repair_snapshot(
+    conn: &Connection,
+    library_id: i64,
+    show_ids: &[i64],
+) -> Result<IdentityRepairSnapshot, StoreError> {
+    const REPAIR_ITEM_COLS: &str = "id, library_id, kind, parent_id, title, sort_title, year, overview, tmdb_id, imdb_id, season_number, episode_number, air_date, runtime_ms, poster_path, backdrop_path, added_at, updated_at, recorded_at, tags, nfo_seeded_at, metadata_at, artwork_attempted_at, artwork_error, genres, author, book_work_id, book_edition_id, book_metadata_source";
+    const REPAIR_FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, subtitle_streams, probe_json, scanned_at, hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, video_codec_tag";
+    if !(IDENTITY_REPAIR_SHOWS_MIN..=IDENTITY_REPAIR_SHOWS_MAX).contains(&show_ids.len())
+        || show_ids.iter().any(|id| *id <= 0)
+    {
+        return Err(StoreError::Task(
+            "invalid identity repair show IDs".to_owned(),
+        ));
+    }
+    let mut sorted_ids = show_ids.to_vec();
+    sorted_ids.sort_unstable();
+    if sorted_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(StoreError::Task(
+            "duplicate identity repair show ID".to_owned(),
+        ));
+    }
+    let ids_json = serde_json::to_string(&sorted_ids)
+        .map_err(|error| StoreError::Task(format!("encode repair show IDs: {error}")))?;
+    let library = conn
+        .query_row(
+            "SELECT kind, paths FROM libraries WHERE id = ?1",
+            params![library_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| StoreError::Task("identity repair library not found".to_owned()))?;
+
+    let mut item_statement = conn.prepare(&format!(
+        "WITH requested(id) AS (SELECT value FROM json_each(?1)),
+              selected(id) AS (
+                SELECT id FROM requested
+                UNION SELECT i.id FROM items i JOIN requested r ON i.parent_id = r.id
+                UNION SELECT e.id FROM items e JOIN items s ON s.id = e.parent_id
+                     JOIN requested r ON s.parent_id = r.id)
+         SELECT id, library_id, kind, parent_id, tmdb_id, season_number, episode_number,
+                added_at, json_array({REPAIR_ITEM_COLS})
+           FROM items WHERE id IN (SELECT id FROM selected) ORDER BY id"
+    ))?;
+    let items = item_statement
+        .query_map(params![ids_json], |row| {
+            Ok(IdentityRepairItem {
+                id: row.get(0)?,
+                library_id: row.get(1)?,
+                kind: row.get(2)?,
+                parent_id: row.get(3)?,
+                tmdb_id: row.get(4)?,
+                season_number: row.get(5)?,
+                episode_number: row.get(6)?,
+                added_at: row.get(7)?,
+                row: row.get(8)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    let season_count = items.iter().filter(|item| item.kind == "season").count();
+    let episode_count = items.iter().filter(|item| item.kind == "episode").count();
+    if season_count > IDENTITY_REPAIR_SEASONS_MAX || episode_count > IDENTITY_REPAIR_EPISODES_MAX {
+        return Err(StoreError::Task("repair_too_large".to_owned()));
+    }
+    let item_ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
+    let item_ids_json = serde_json::to_string(&item_ids)
+        .map_err(|error| StoreError::Task(format!("encode repair item IDs: {error}")))?;
+
+    let mut file_statement = conn.prepare(&format!(
+        "SELECT id, item_id, path, size, mtime, json_array({REPAIR_FILE_COLS})
+           FROM files WHERE item_id IN (SELECT value FROM json_each(?1)) ORDER BY id"
+    ))?;
+    let files = file_statement
+        .query_map(params![item_ids_json], |row| {
+            Ok(IdentityRepairFile {
+                id: row.get(0)?,
+                item_id: row.get(1)?,
+                path: row.get(2)?,
+                size: row.get(3)?,
+                mtime: row.get(4)?,
+                row: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if files.len() > IDENTITY_REPAIR_FILES_MAX {
+        return Err(StoreError::Task("repair_too_large".to_owned()));
+    }
+
+    let mut watch_statement = conn.prepare(
+        "SELECT user_id, item_id, position_ms, duration_ms, watched, updated_at
+           FROM watch_state WHERE item_id IN (SELECT value FROM json_each(?1))
+          ORDER BY item_id, user_id",
+    )?;
+    let watches = watch_statement
+        .query_map(params![item_ids_json], |row| {
+            Ok(IdentityRepairWatch {
+                user_id: row.get(0)?,
+                item_id: row.get(1)?,
+                position_ms: row.get(2)?,
+                duration_ms: row.get(3)?,
+                watched: row.get(4)?,
+                updated_at: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if watches.len() > IDENTITY_REPAIR_WATCHES_MAX {
+        return Err(StoreError::Task("repair_too_large".to_owned()));
+    }
+
+    let mut directories = files
+        .iter()
+        .filter_map(|file| {
+            crate::scan::parse::parse_episode(std::path::Path::new(&file.path))
+                .or_else(|_| {
+                    crate::scan::parse::parse_anime_episode(std::path::Path::new(&file.path))
+                })
+                .ok()
+                .and_then(|parsed| parsed.source_directory)
+                .map(|path| path.to_string_lossy().into_owned())
+        })
+        .collect::<Vec<_>>();
+    directories.sort();
+    directories.dedup();
+    let mut directory_owner_ids = Vec::new();
+    for directory in &directories {
+        let (lower, upper) = directory_path_bounds(directory)?;
+        let mut statement = conn.prepare(
+            "SELECT f.path, show.id
+               FROM files f INDEXED BY sqlite_autoindex_files_1
+               JOIN items episode ON episode.id = f.item_id AND episode.kind = 'episode'
+               JOIN items season ON season.id = episode.parent_id AND season.kind = 'season'
+               JOIN items show ON show.id = season.parent_id AND show.kind = 'show'
+              WHERE f.path >= ?1 AND f.path < ?2
+                AND show.library_id = ?3 AND season.library_id = ?3 AND episode.library_id = ?3",
+        )?;
+        for row in statement.query_map(params![lower, upper, library_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })? {
+            let (path, show_id) = row?;
+            if directory_matches_show_path(&path, directory) {
+                directory_owner_ids.push(show_id);
+            }
+        }
+    }
+    directory_owner_ids.sort_unstable();
+    directory_owner_ids.dedup();
+
+    let retiring_ids = crate::store::plan_identity_repair(IdentityRepairSnapshot {
+        library_id,
+        library_kind: library.0.clone(),
+        library_paths: library.1.clone(),
+        input_show_ids: sorted_ids.clone(),
+        items: items.clone(),
+        files: files.clone(),
+        watches: watches.clone(),
+        directory_owner_ids: directory_owner_ids.clone(),
+        dependency_rows: Vec::new(),
+        blockers: Vec::new(),
+    })?
+    .retired_item_ids;
+    let dependency_ids_json = serde_json::to_string(&retiring_ids)
+        .map_err(|error| StoreError::Task(format!("encode retiring item IDs: {error}")))?;
+
+    let mut blockers = Vec::new();
+    let reading_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM reading_state WHERE item_id IN (SELECT value FROM json_each(?1))",
+        params![dependency_ids_json],
+        |row| row.get(0),
+    )?;
+    if reading_count != 0 {
+        blockers.push(IdentityRepairBlocker {
+            code: "reading_state".to_owned(),
+            detail: format!("{reading_count} reading-state rows reference selected items"),
+        });
+    }
+    let reconcile_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM scan_reconcile_items
+          WHERE library_id = ?1 AND item_id IN (SELECT value FROM json_each(?2))",
+        params![library_id, dependency_ids_json],
+        |row| row.get(0),
+    )?;
+    if reconcile_count != 0 {
+        blockers.push(IdentityRepairBlocker {
+            code: "scan_reconcile_items".to_owned(),
+            detail: format!("{reconcile_count} reconciliation rows reference selected items"),
+        });
+    }
+    let override_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM media_classifications
+          WHERE item_id IN (SELECT value FROM json_each(?1))
+            AND (json_array_length(overrides, '$.include') > 0
+              OR json_array_length(overrides, '$.exclude') > 0)",
+        params![dependency_ids_json],
+        |row| row.get(0),
+    )?;
+    if override_count != 0 {
+        blockers.push(IdentityRepairBlocker {
+            code: "classification_overrides".to_owned(),
+            detail: format!("{override_count} selected items have manual classification overrides"),
+        });
+    }
+    let artwork_table_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                        WHERE type='table' AND name='cluster_artwork_repairs')",
+        [],
+        |row| row.get(0),
+    )?;
+    let artwork_count: i64 = if artwork_table_exists {
+        conn.query_row(
+            "SELECT COUNT(*) FROM cluster_artwork_repairs
+              WHERE item_id IN (SELECT value FROM json_each(?1))",
+            params![dependency_ids_json],
+            |row| row.get(0),
+        )?
+    } else {
+        0
+    };
+    if artwork_count != 0 {
+        blockers.push(IdentityRepairBlocker {
+            code: "artwork_repair".to_owned(),
+            detail: format!("{artwork_count} artwork repairs reference selected items"),
+        });
+    }
+    let channel_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM library_channel_entries
+          WHERE item_id IN (SELECT value FROM json_each(?1))
+             OR show_id IN (SELECT value FROM json_each(?1))",
+        params![dependency_ids_json],
+        |row| row.get(0),
+    )?;
+    if channel_count != 0 {
+        blockers.push(IdentityRepairBlocker {
+            code: "library_channel_entries".to_owned(),
+            detail: format!("{channel_count} channel entries reference selected items"),
+        });
+    }
+    let recipe_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM library_channels c
+          WHERE EXISTS (
+            SELECT 1 FROM json_each(?1) ids
+             WHERE EXISTS (SELECT 1 FROM json_each(c.recipe_json, '$.include_item_ids') WHERE value = ids.value)
+                OR EXISTS (SELECT 1 FROM json_each(c.recipe_json, '$.exclude_item_ids') WHERE value = ids.value)
+                OR EXISTS (SELECT 1 FROM json_each(c.recipe_json, '$.include_show_ids') WHERE value = ids.value)
+                OR EXISTS (SELECT 1 FROM json_each(c.recipe_json, '$.exclude_show_ids') WHERE value = ids.value))",
+        params![dependency_ids_json],
+        |row| row.get(0),
+    )?;
+    if recipe_count != 0 {
+        blockers.push(IdentityRepairBlocker {
+            code: "library_channel_recipe".to_owned(),
+            detail: format!("{recipe_count} channel recipes reference selected items"),
+        });
+    }
+    for (code, sql, detail) in [
+        (
+            "active_media_session",
+            "SELECT COUNT(*) FROM media_sessions s WHERE s.state IN ('starting','active') AND (EXISTS (SELECT 1 FROM json_tree(s.recipe_json) j JOIN json_each(?1) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id')) OR EXISTS (SELECT 1 FROM json_tree(s.response_json) j JOIN json_each(?1) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id')))",
+            "active media sessions reference selected items",
+        ),
+        (
+            "channel_session_recipe",
+            "SELECT COUNT(*) FROM library_channel_session_recipes r WHERE EXISTS (SELECT 1 FROM json_tree(r.recipe_json) j JOIN json_each(?1) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))",
+            "channel session recipes reference selected items",
+        ),
+        (
+            "watched_outbox",
+            "SELECT COUNT(*) FROM watched_outbox o WHERE EXISTS (SELECT 1 FROM json_tree(o.payload) j JOIN json_each(?1) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))",
+            "watched outbox payloads reference selected items",
+        ),
+        (
+            "dvr_recording",
+            "SELECT COUNT(*) FROM dvr_recordings WHERE item_id IN (SELECT value FROM json_each(?1))",
+            "DVR recordings reference selected items",
+        ),
+    ] {
+        let count: i64 = conn.query_row(sql, params![dependency_ids_json], |row| row.get(0))?;
+        if count != 0 {
+            blockers.push(IdentityRepairBlocker {
+                code: code.to_owned(),
+                detail: format!("{count} {detail}"),
+            });
+        }
+    }
+
+    Ok(IdentityRepairSnapshot {
+        library_id,
+        library_kind: library.0,
+        library_paths: library.1,
+        input_show_ids: sorted_ids,
+        items,
+        files,
+        watches,
+        directory_owner_ids,
+        dependency_rows: Vec::new(),
+        blockers,
+    })
+}
+
+pub(super) fn apply_series_tmdb_hint(
+    conn: &rusqlite::Connection,
+    library_id: i64,
+    show_id: i64,
+    tmdb_id: i64,
+) -> Result<SeriesHintOutcome, StoreError> {
+    if tmdb_id <= 0 {
+        return Err(StoreError::Task(
+            "series TMDB hint must be a positive integer".to_owned(),
+        ));
+    }
+    let changed = conn.execute(
+        "UPDATE items SET tmdb_id = ?1, updated_at = unixepoch()
+         WHERE id = ?2 AND library_id = ?3 AND kind = 'show' AND tmdb_id IS NULL",
+        params![tmdb_id, show_id, library_id],
+    )?;
+    if changed == 1 {
+        return Ok(SeriesHintOutcome::Applied);
+    }
+    let current = conn
+        .query_row(
+            "SELECT tmdb_id FROM items
+             WHERE id = ?1 AND library_id = ?2 AND kind = 'show'",
+            params![show_id, library_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .optional()?;
+    Ok(match current {
+        Some(Some(current_tmdb_id)) if current_tmdb_id == tmdb_id => {
+            SeriesHintOutcome::AlreadyEqual
+        }
+        Some(Some(current_tmdb_id)) => SeriesHintOutcome::Conflict { current_tmdb_id },
+        Some(None) => {
+            return Err(StoreError::Database(
+                "series TMDB hint matched an unset show but changed no row".to_owned(),
+            ))
+        }
+        None => SeriesHintOutcome::MissingOrWrongKind,
+    })
+}
 
 /// Build an FTS5 MATCH expression from free text: quoted tokens, prefix
 /// matching on the last one. Returns `None` for queries with no tokens.
@@ -59,6 +402,16 @@ fn id_filter(column: &str, only: Option<&[i64]>) -> Option<String> {
 
 #[async_trait]
 impl MediaStore for SqliteStore {
+    async fn identity_repair_snapshot(
+        &self,
+        library_id: i64,
+        show_ids: &[i64],
+    ) -> Result<IdentityRepairSnapshot, StoreError> {
+        let show_ids = show_ids.to_vec();
+        self.with_conn(move |conn| identity_repair_snapshot(conn, library_id, &show_ids))
+            .await
+    }
+
     async fn item_by_external_id(
         &self,
         kind: ItemKind,
@@ -116,6 +469,38 @@ impl MediaStore for SqliteStore {
         .await
     }
 
+    async fn find_movies_by_directory(
+        &self,
+        library_id: i64,
+        directory: &str,
+    ) -> Result<Vec<Item>, StoreError> {
+        let directory = normalized_directory(directory)?.to_owned();
+        let (lower, upper) = directory_path_bounds(&directory)?;
+        self.with_conn(move |conn| {
+            let item_columns = item_cols("movie");
+            let mut statement = conn.prepare(&format!(
+                "SELECT f.path, {item_columns}
+                 FROM files f INDEXED BY sqlite_autoindex_files_1
+                 JOIN items movie ON movie.id = f.item_id AND movie.kind = 'movie'
+                 WHERE f.path >= ?1 AND f.path < ?2
+                   AND movie.library_id = ?3"
+            ))?;
+            let mut candidates = HashMap::<i64, Item>::new();
+            for row in statement.query_map(params![lower, upper, library_id], |row| {
+                Ok((row.get::<_, String>(0)?, item_from_row(row, 1)?))
+            })? {
+                let (path, item) = row?;
+                if directory_matches_movie_path(&path, &directory) {
+                    candidates.entry(item.id).or_insert(item);
+                }
+            }
+            let mut candidates = candidates.into_values().collect::<Vec<_>>();
+            candidates.sort_by_key(|item| (item.added_at, item.id));
+            Ok(candidates)
+        })
+        .await
+    }
+
     async fn find_book(
         &self,
         library_id: i64,
@@ -168,6 +553,58 @@ impl MediaStore for SqliteStore {
                 ),
                 params![library_id, title, year],
             )?)
+        })
+        .await
+    }
+
+    async fn find_shows_by_directory(
+        &self,
+        library_id: i64,
+        directory: &str,
+        season_number: i32,
+    ) -> Result<Vec<Item>, StoreError> {
+        let directory = normalized_directory(directory)?.to_owned();
+        let (lower, upper) = directory_path_bounds(&directory)?;
+        self.with_conn(move |conn| {
+            let item_columns = item_cols("show");
+            let mut statement = conn.prepare(&format!(
+                "SELECT f.path,
+                        EXISTS(SELECT 1 FROM items owned
+                               WHERE owned.parent_id = show.id
+                                 AND owned.kind = 'season'
+                                 AND owned.library_id = ?3
+                                 AND owned.season_number = ?4),
+                        {item_columns}
+                 FROM files f INDEXED BY sqlite_autoindex_files_1
+                 JOIN items episode ON episode.id = f.item_id AND episode.kind = 'episode'
+                 JOIN items season ON season.id = episode.parent_id AND season.kind = 'season'
+                 JOIN items show ON show.id = season.parent_id AND show.kind = 'show'
+                 WHERE f.path >= ?1 AND f.path < ?2
+                   AND episode.library_id = ?3
+                   AND season.library_id = ?3
+                   AND show.library_id = ?3"
+            ))?;
+            let mut candidates = HashMap::<i64, (Item, bool)>::new();
+            for row in
+                statement.query_map(params![lower, upper, library_id, season_number], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        item_from_row(row, 2)?,
+                    ))
+                })?
+            {
+                let (path, owns_season, item) = row?;
+                if directory_matches_show_path(&path, &directory) {
+                    candidates
+                        .entry(item.id)
+                        .and_modify(|(_, owns)| *owns |= owns_season)
+                        .or_insert((item, owns_season));
+                }
+            }
+            let mut candidates = candidates.into_values().collect::<Vec<_>>();
+            candidates.sort_by_key(|(item, owns)| (!*owns, item.added_at, item.id));
+            Ok(candidates.into_iter().map(|(item, _)| item).collect())
         })
         .await
     }
@@ -603,6 +1040,16 @@ impl MediaStore for SqliteStore {
             Ok(items)
         })
         .await
+    }
+
+    async fn apply_series_tmdb_hint(
+        &self,
+        library_id: i64,
+        show_id: i64,
+        tmdb_id: i64,
+    ) -> Result<SeriesHintOutcome, StoreError> {
+        self.with_conn(move |conn| apply_series_tmdb_hint(conn, library_id, show_id, tmdb_id))
+            .await
     }
 
     async fn apply_metadata(&self, item_id: i64, patch: &MetadataPatch) -> Result<(), StoreError> {
@@ -1949,6 +2396,43 @@ mod tests {
         NewLibrary, ProbeResult,
     };
     use crate::store::{LibraryStore, MediaStore, SqliteStore};
+
+    #[tokio::test]
+    async fn scan_identity_directory_lookup_uses_the_path_range_index() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        store
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "EXPLAIN QUERY PLAN
+                     SELECT show.id
+                     FROM files f INDEXED BY sqlite_autoindex_files_1
+                     JOIN items episode ON episode.id = f.item_id AND episode.kind = 'episode'
+                     JOIN items season ON season.id = episode.parent_id AND season.kind = 'season'
+                     JOIN items show ON show.id = season.parent_id AND show.kind = 'show'
+                     WHERE f.path >= ?1 AND f.path < ?2
+                       AND episode.library_id = ?3
+                       AND season.library_id = ?3
+                       AND show.library_id = ?3",
+                )?;
+                let details = statement
+                    .query_map(
+                        rusqlite::params!["/media/Show/", "/media/Show0", 1],
+                        |row| row.get::<_, String>(3),
+                    )?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                assert!(
+                    details.iter().any(|detail| {
+                        detail.contains("sqlite_autoindex_files_1")
+                            && detail.contains("path>?")
+                            && detail.contains("path<?")
+                    }),
+                    "query plan must use the bounded path index: {details:?}"
+                );
+                Ok(())
+            })
+            .await
+            .expect("query plan");
+    }
 
     /// One item, two versions: the 2160p Dolby Vision remux and the 720p copy
     /// someone kept for a phone. The block must read as the library actually

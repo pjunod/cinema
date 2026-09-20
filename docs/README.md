@@ -379,6 +379,9 @@ Two rounds of performance work, each with its plan, review, and response.
 
 | File | Answers | |
 |---|---|---|
+| [SHOW-IDENTITY-SPLIT-RCA-AND-FIX.md](features/SHOW-IDENTITY-SPLIT-RCA-AND-FIX.md) | Why reference show S split and changed files can lose watch state; Fable-reviewed directory lookup proposal, movie coverage, hint correction and catalogue repair. | open |
+| [SCAN-IDENTITY-IMPLEMENTATION.md](features/SCAN-IDENTITY-IMPLEMENTATION.md) | Sol's three-PR build contract for scan ownership, directory matching, guarded series hints and atomic catalogue repair, with backend tests and release acceptance. | open |
+| [SCAN-IDENTITY-STATUS.md](features/SCAN-IDENTITY-STATUS.md) | Live base, branch, milestone, evidence, review and promotion ledger for the scan-identity effort. | open |
 | [SCREENSHOT-TOUR.md](features/SCREENSHOT-TOUR.md) | What do native phone, tablet, browser, Live TV, recording, and library layouts look like with public-safe demo data? | live |
 | [HDHOMERUN-LIVE-TV-PLAN.md](features/HDHOMERUN-LIVE-TV-PLAN.md) | One tuner, every plurx client. | open |
 | [HDHOMERUN-LIVE-TV-STATUS.md](features/HDHOMERUN-LIVE-TV-STATUS.md) | What is built and what is proved on a real FLEX 4K. | open |

@@ -40,6 +40,7 @@ mod plex;
 pub(crate) mod publication;
 mod reading;
 mod scan;
+pub(crate) mod scan_identity;
 pub(crate) mod stream;
 pub(crate) mod system;
 mod trakt;
@@ -263,6 +264,18 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/libraries/{id}/schedule", put(libraries::set_schedule))
         .route("/libraries/{id}/scan", post(libraries::scan))
+        .route(
+            "/libraries/{id}/identity-repairs/preview",
+            post(scan_identity::preview),
+        )
+        .route(
+            "/libraries/{id}/identity-repairs/{plan_id}",
+            get(scan_identity::status),
+        )
+        .route(
+            "/libraries/{id}/identity-repairs/{plan_id}/apply",
+            post(scan_identity::apply),
+        )
         .route("/libraries/{id}/refresh", post(libraries::refresh))
         .route("/libraries/{id}/dv-conversion", put(dv_disk::set_mode))
         .route(
@@ -3939,6 +3952,30 @@ mod tests {
             Some(95396),
             "the series field was accepted by HTTP but dropped before apply_ids"
         );
+    }
+
+    #[tokio::test]
+    async fn scan_identity_hint_rejects_nonpositive_series_id() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        let key = scan_key(&app, &admin, json!(["scan:trigger"])).await;
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/scan",
+                Some(&key),
+                json!({
+                    "path": "/fixture/series",
+                    "hint": "episode",
+                    "series": { "tmdb": 0 }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("positive integer")));
     }
 
     /// A scan of one folder must not disturb the rest of the library. This is

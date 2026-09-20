@@ -61,12 +61,12 @@ use plurx_core::store::{
     analysis_backoff_ms, cluster_fragment_index_generation_key, cluster_fragment_index_key,
     AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryQuery, ArtworkRepairFence,
     ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
-    DvConversionMode, DvConversionState, DvRecoveryGuardState, LibraryStore, MediaStore,
-    NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
-    QueueDvConversionOutcome, ReconcileOutcome, RootFingerprintStatus, SqliteStore, Store,
-    ANALYSIS_LIFECYCLE_METRICS, ANALYSIS_METRIC_COMPONENTS, ANALYSIS_METRIC_PRIORITIES,
-    ANALYSIS_METRIC_STATES, ANALYSIS_METRIC_TRIGGERS, DV_CONVERSION_LEDGER_READ_MAX,
-    DV_RECOVERY_GUARD_READ_MAX,
+    DvConversionMode, DvConversionState, DvRecoveryGuardState, IdentityRepairOutcome, LibraryStore,
+    MediaStore, NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
+    QueueDvConversionOutcome, ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome,
+    SqliteStore, Store, ANALYSIS_LIFECYCLE_METRICS, ANALYSIS_METRIC_COMPONENTS,
+    ANALYSIS_METRIC_PRIORITIES, ANALYSIS_METRIC_STATES, ANALYSIS_METRIC_TRIGGERS,
+    DV_CONVERSION_LEDGER_READ_MAX, DV_RECOVERY_GUARD_READ_MAX,
 };
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::{
@@ -22757,6 +22757,644 @@ async fn library_contract_runs_through_dyn_store() {
             store.delete_library(scheduled.id).await.expect("delete"),
             "backend {backend}"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn scan_identity_directory_contract() {
+    for_each_backend(|store, backend| async move {
+        let shows = store
+            .create_library(&NewLibrary {
+                name: "Identity Contract Shows".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![PathBuf::from("/contract/shows")],
+                anime: false,
+            })
+            .await
+            .expect("shows library");
+        let other_shows = store
+            .create_library(&NewLibrary {
+                name: "Other Identity Shows".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![PathBuf::from("/other/shows")],
+                anime: false,
+            })
+            .await
+            .expect("other shows library");
+
+        async fn show_tree(
+            store: &dyn Store,
+            library_id: i64,
+            title: &str,
+            season_number: i32,
+            path: &str,
+        ) -> i64 {
+            let show = store
+                .insert_item(&NewItem {
+                    library_id,
+                    kind: ItemKind::Show,
+                    parent_id: None,
+                    title: title.into(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("show");
+            let season = store
+                .insert_item(&NewItem {
+                    library_id,
+                    kind: ItemKind::Season,
+                    parent_id: Some(show),
+                    title: format!("Season {season_number}"),
+                    year: None,
+                    season_number: Some(season_number),
+                    episode_number: None,
+                })
+                .await
+                .expect("season");
+            let episode = store
+                .insert_item(&NewItem {
+                    library_id,
+                    kind: ItemKind::Episode,
+                    parent_id: Some(season),
+                    title: "Episode 1".into(),
+                    year: None,
+                    season_number: Some(season_number),
+                    episode_number: Some(1),
+                })
+                .await
+                .expect("episode");
+            store
+                .upsert_file(episode, path, 1, 1, &ProbeResult::default())
+                .await
+                .expect("episode file");
+            show
+        }
+
+        let directory = "/contract/shows/Café_100%";
+        let oldest = show_tree(
+            store.as_ref(),
+            shows.id,
+            "Old display title",
+            1,
+            "/contract/shows/Café_100%/Season 1/Café S01E01.mkv",
+        )
+        .await;
+        let season_owner = show_tree(
+            store.as_ref(),
+            shows.id,
+            "New display title",
+            5,
+            "/contract/shows/Café_100%/Season 5/Café S05E01.mkv",
+        )
+        .await;
+        let _nested = show_tree(
+            store.as_ref(),
+            shows.id,
+            "Nested show",
+            1,
+            "/contract/shows/Café_100%/Nested Show/Season 1/Nested Show S01E01.mkv",
+        )
+        .await;
+        let _sibling = show_tree(
+            store.as_ref(),
+            shows.id,
+            "Sibling prefix",
+            1,
+            "/contract/shows/Café_100%x/Season 1/Sibling S01E01.mkv",
+        )
+        .await;
+        let _other_library = show_tree(
+            store.as_ref(),
+            other_shows.id,
+            "Other library",
+            1,
+            "/contract/shows/Café_100%/Season 1/Other Library S01E02.mkv",
+        )
+        .await;
+
+        let candidates = store
+            .find_shows_by_directory(shows.id, directory, 5)
+            .await
+            .expect("directory shows");
+        assert_eq!(
+            candidates.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![season_owner, oldest],
+            "{backend}: incoming-season owner first, nested/sibling/library evidence excluded"
+        );
+        let oldest_first = store
+            .find_shows_by_directory(shows.id, directory, 9)
+            .await
+            .expect("directory shows without season owner");
+        assert_eq!(
+            oldest_first.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![oldest, season_owner],
+            "{backend}: stable oldest/id fallback"
+        );
+
+        let movies = store
+            .create_library(&NewLibrary {
+                name: "Identity Contract Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![PathBuf::from("/contract/movies")],
+                anime: false,
+            })
+            .await
+            .expect("movies library");
+        let movie = store
+            .insert_item(&NewItem {
+                library_id: movies.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Renamed Film".into(),
+                year: Some(2024),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("movie");
+        store
+            .upsert_file(
+                movie,
+                "/contract/movies/Original Film (2024)/Original.Film.2024.2160p.mkv",
+                1,
+                1,
+                &ProbeResult::default(),
+            )
+            .await
+            .expect("movie file");
+        let conflicting = store
+            .insert_item(&NewItem {
+                library_id: movies.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Other Film".into(),
+                year: Some(2024),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("conflicting movie");
+        store
+            .upsert_file(
+                conflicting,
+                "/contract/movies/Original Film (2024)/Other.Film.2024.mkv",
+                1,
+                1,
+                &ProbeResult::default(),
+            )
+            .await
+            .expect("conflicting filename");
+        let movie_candidates = store
+            .find_movies_by_directory(movies.id, "/contract/movies/Original Film (2024)/")
+            .await
+            .expect("directory movies");
+        assert_eq!(
+            movie_candidates
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![movie],
+            "{backend}: a contradictory filename cannot lend collection-folder ownership"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn scan_identity_series_hint_contract() {
+    for_each_backend(|store, backend| async move {
+        let shows = store
+            .create_library(&NewLibrary {
+                name: "Series Hint Shows".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![PathBuf::from("/contract/hints")],
+                anime: false,
+            })
+            .await
+            .expect("shows library");
+        let other = store
+            .create_library(&NewLibrary {
+                name: "Other Series Hints".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![PathBuf::from("/contract/other-hints")],
+                anime: false,
+            })
+            .await
+            .expect("other library");
+        let show = store
+            .insert_item(&NewItem {
+                library_id: shows.id,
+                kind: ItemKind::Show,
+                parent_id: None,
+                title: "Hint Target".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("show");
+        let movie = store
+            .insert_item(&NewItem {
+                library_id: shows.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Wrong Kind".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("movie");
+
+        assert!(store.apply_series_tmdb_hint(shows.id, show, 0).await.is_err());
+        assert_eq!(
+            store
+                .apply_series_tmdb_hint(other.id, show, 41)
+                .await
+                .expect("wrong library"),
+            SeriesHintOutcome::MissingOrWrongKind
+        );
+        assert_eq!(
+            store
+                .apply_series_tmdb_hint(shows.id, movie, 41)
+                .await
+                .expect("wrong kind"),
+            SeriesHintOutcome::MissingOrWrongKind
+        );
+        assert_eq!(
+            store
+                .apply_series_tmdb_hint(shows.id, show, 41)
+                .await
+                .expect("first hint"),
+            SeriesHintOutcome::Applied
+        );
+        assert_eq!(
+            store
+                .apply_series_tmdb_hint(shows.id, show, 41)
+                .await
+                .expect("equal hint"),
+            SeriesHintOutcome::AlreadyEqual
+        );
+        assert_eq!(
+            store
+                .apply_series_tmdb_hint(shows.id, show, 99)
+                .await
+                .expect("conflicting hint"),
+            SeriesHintOutcome::Conflict {
+                current_tmdb_id: 41
+            }
+        );
+
+        let racing_show = store
+            .insert_item(&NewItem {
+                library_id: shows.id,
+                kind: ItemKind::Show,
+                parent_id: None,
+                title: "Concurrent Hint Target".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("racing show");
+        let hint_store = Arc::clone(&store);
+        let metadata_store = Arc::clone(&store);
+        let metadata_patch = MetadataPatch {
+            tmdb_id: Some(66),
+            ..Default::default()
+        };
+        let (hint, metadata) = tokio::join!(
+            hint_store.apply_series_tmdb_hint(shows.id, racing_show, 55),
+            metadata_store.apply_metadata(racing_show, &metadata_patch)
+        );
+        let hint = hint.expect("concurrent hint");
+        metadata.expect("concurrent metadata");
+        assert!(matches!(
+            hint,
+            SeriesHintOutcome::Applied
+                | SeriesHintOutcome::Conflict {
+                    current_tmdb_id: 66
+                }
+        ));
+        assert_eq!(
+            store
+                .get_item(racing_show)
+                .await
+                .expect("racing show read")
+                .expect("racing show")
+                .tmdb_id,
+            Some(66),
+            "{backend}: normal metadata and the conditional hint serialize without a stale overwrite"
+        );
+
+        let fenced_show = store
+            .insert_item(&NewItem {
+                library_id: shows.id,
+                kind: ItemKind::Show,
+                parent_id: None,
+                title: "Fenced Hint Target".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("fenced show");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let lease = acquired(
+            store
+                .acquire_lease("scan:library:series-hint", "node-a", now, now + 90_000)
+                .await
+                .expect("acquire hint lease"),
+            backend,
+        );
+        let replacement = publication_successor(&lease);
+        assert_eq!(
+            store
+                .apply_series_tmdb_hint_fenced(
+                    shows.id,
+                    fenced_show,
+                    77,
+                    &lease,
+                    &replacement,
+                )
+                .await
+                .expect("fenced hint"),
+            SeriesHintOutcome::Applied
+        );
+        let stale_replacement = publication_successor(&lease);
+        assert!(matches!(
+            store
+                .apply_series_tmdb_hint_fenced(
+                    shows.id,
+                    fenced_show,
+                    88,
+                    &lease,
+                    &stale_replacement,
+                )
+                .await,
+            Err(StoreError::FenceRejected { .. })
+        ));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn scan_identity_repair_contract() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Identity Repair Shows".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![PathBuf::from("/contract/repair")],
+                anime: false,
+            })
+            .await
+            .expect("repair library");
+
+        async fn tree(
+            store: &dyn Store,
+            library_id: i64,
+            title: &str,
+            directory: &str,
+            suffix: &str,
+        ) -> (i64, i64, i64, i64) {
+            let show = store
+                .insert_item(&NewItem {
+                    library_id,
+                    kind: ItemKind::Show,
+                    parent_id: None,
+                    title: title.into(),
+                    year: None,
+                    season_number: None,
+                    episode_number: None,
+                })
+                .await
+                .expect("show");
+            let season = store
+                .insert_item(&NewItem {
+                    library_id,
+                    kind: ItemKind::Season,
+                    parent_id: Some(show),
+                    title: "Season 1".into(),
+                    year: None,
+                    season_number: Some(1),
+                    episode_number: None,
+                })
+                .await
+                .expect("season");
+            let episode = store
+                .insert_item(&NewItem {
+                    library_id,
+                    kind: ItemKind::Episode,
+                    parent_id: Some(season),
+                    title: "Episode 1".into(),
+                    year: None,
+                    season_number: Some(1),
+                    episode_number: Some(1),
+                })
+                .await
+                .expect("episode");
+            let file = store
+                .upsert_file(
+                    episode,
+                    &format!(
+                        "/contract/repair/{directory}/Season 1/{directory}.S01E01{suffix}.mkv"
+                    ),
+                    100,
+                    10,
+                    &ProbeResult::default(),
+                )
+                .await
+                .expect("file");
+            (show, season, episode, file)
+        }
+
+        let first = tree(
+            store.as_ref(),
+            library.id,
+            "Original title",
+            "Synthetic Show",
+            "",
+        )
+        .await;
+        let second = tree(
+            store.as_ref(),
+            library.id,
+            "Metadata title",
+            "Synthetic Show",
+            ".2160p",
+        )
+        .await;
+        let user = store
+            .create_user("identity-repair-viewer", "hash", false)
+            .await
+            .expect("repair viewer");
+        let surviving_watch = store
+            .put_progress(user.id, first.2, 1_000, Some(10_000))
+            .await
+            .expect("surviving watch");
+        store
+            .put_progress(user.id, second.2, 8_000, Some(10_000))
+            .await
+            .expect("losing watch");
+        let copy_user = store
+            .create_user("identity-repair-copy-viewer", "hash", false)
+            .await
+            .expect("repair copy viewer");
+        let copied_watch = store
+            .put_progress(copy_user.id, second.2, 4_000, Some(10_000))
+            .await
+            .expect("copy-source watch");
+        let snapshot = store
+            .identity_repair_snapshot(library.id, &[first.0, second.0])
+            .await
+            .expect("repair snapshot");
+        let plan = plurx_core::store::plan_identity_repair(snapshot.clone()).expect("repair plan");
+        assert!(plan.ready(), "{backend}: {:#?}", plan.blockers);
+        assert_eq!(plan.survivor_show_id, Some(first.0));
+        assert_eq!(plan.file_moves.len(), 1);
+        assert_eq!(plan.file_moves[0].file_id, second.3);
+        assert_eq!(plan.file_moves[0].new_item_id, first.2);
+        assert_eq!(plan.watch_conflicts.len(), 1);
+        assert_eq!(plan.watch_copies.len(), 1);
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let lease = acquired(
+            store
+                .acquire_lease(
+                    &format!("scan:library:{}", library.id),
+                    "node-a",
+                    now,
+                    now + 90_000,
+                )
+                .await
+                .expect("repair lease"),
+            backend,
+        );
+        let replacement = publication_successor(&lease);
+        assert_eq!(
+            store
+                .apply_identity_repair_fenced(&snapshot, &plan, &lease, &replacement)
+                .await
+                .expect("apply repair"),
+            IdentityRepairOutcome::Applied
+        );
+        assert_eq!(
+            store
+                .watch_state(user.id, first.2)
+                .await
+                .expect("surviving watch read")
+                .expect("surviving watch row"),
+            surviving_watch,
+            "{backend}: survivor watch row wins unchanged"
+        );
+        assert_eq!(
+            store
+                .watch_state(copy_user.id, first.2)
+                .await
+                .expect("copied watch read")
+                .expect("copied watch row"),
+            copied_watch,
+            "{backend}: an absent destination receives the exact source watch row"
+        );
+        assert!(store
+            .get_item(second.0)
+            .await
+            .expect("losing show read")
+            .is_none());
+        assert!(store
+            .get_item(second.1)
+            .await
+            .expect("losing season read")
+            .is_none());
+        assert!(store
+            .get_item(second.2)
+            .await
+            .expect("losing episode read")
+            .is_none());
+        assert_eq!(
+            store
+                .get_file(second.3)
+                .await
+                .expect("moved file read")
+                .expect("moved file")
+                .item_id,
+            first.2,
+            "{backend}: file ID and facts survive overlap consolidation"
+        );
+
+        let retry = publication_successor(&replacement);
+        assert_eq!(
+            store
+                .apply_identity_repair_fenced(&snapshot, &plan, &replacement, &retry)
+                .await
+                .expect("idempotent repair retry"),
+            IdentityRepairOutcome::AlreadyApplied
+        );
+
+        let third = tree(
+            store.as_ref(),
+            library.id,
+            "Other original",
+            "Other Synthetic",
+            "",
+        )
+        .await;
+        let fourth = tree(
+            store.as_ref(),
+            library.id,
+            "Other metadata",
+            "Other Synthetic",
+            ".1080p",
+        )
+        .await;
+        let stale_snapshot = store
+            .identity_repair_snapshot(library.id, &[third.0, fourth.0])
+            .await
+            .expect("stale repair snapshot");
+        let stale_plan = plurx_core::store::plan_identity_repair(stale_snapshot.clone())
+            .expect("stale repair plan");
+        store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Episode,
+                parent_id: Some(fourth.1),
+                title: "Episode 2 added after preview".into(),
+                year: None,
+                season_number: Some(1),
+                episode_number: Some(2),
+            })
+            .await
+            .expect("concurrent descendant insert");
+        let stale_successor = publication_successor(&retry);
+        assert_eq!(
+            store
+                .apply_identity_repair_fenced(
+                    &stale_snapshot,
+                    &stale_plan,
+                    &retry,
+                    &stale_successor,
+                )
+                .await
+                .expect("stale repair outcome"),
+            IdentityRepairOutcome::Stale
+        );
+        assert!(store
+            .get_item(fourth.0)
+            .await
+            .expect("stale loser read")
+            .is_some());
     })
     .await;
 }

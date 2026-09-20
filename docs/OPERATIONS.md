@@ -66,6 +66,27 @@ an operator choice.
 Installation, firewall, upgrade, and removal commands are in the
 [Windows deploy runbook](../deploy/README.md#run-as-a-service--windows).
 
+### Duplicate-show identity repair
+
+The repair API is preview-first, administrator-only, always compiled, and has
+no feature gate. Safe use still depends on advisory conditions: all scan
+writers should run the same release, the IDs must be the complete owner set
+for one recognized directory, the normal library scan lease must be free, and
+every preview blocker must be resolved. File availability is not checked;
+verify media from a daemon with the correct mounts when needed.
+
+Create a preview with
+`POST /api/v1/libraries/{id}/identity-repairs/preview`, retain its origin
+`node_id`, and review every move, retirement, watch copy/conflict, count and
+reference summary. Plans expire after 15 minutes and do not survive a restart.
+Apply only the returned fingerprint on the origin node. A stale result needs a
+new preview. For `repair_outcome_unknown`, read status on that origin node
+before any new attempt because the transaction may already have committed.
+
+There is no bulk command, shell SQL path or deploy-time repair. Production
+catalogue changes remain a separate operator action with fresh inventory and
+explicit authorization; the build and tests use synthetic fixtures only.
+
 ### Permanent Dolby Vision Profile 7 → 8.1 conversion
 
 This is the only operator action that replaces media bytes. It is admin-only,
@@ -3057,6 +3078,17 @@ In Settings → Libraries, the Status column is the truth about each library:
 files while you can see the folder full of media. That means the path you typed
 isn't the path the server process has — under Docker, the container-side mount
 path must match. Fix the mount, not the library name.
+
+When a scan reports that one directory is owned by duplicate catalogue items,
+it still indexes the file. The note lists every candidate item ID and the ID
+selected deterministically: a show that already owns the incoming season wins,
+then the oldest item. Treat the note as evidence for the identity-repair preview,
+not as permission to delete rows manually. An existing canonical file path is
+never re-parented merely because provider metadata changed its display title;
+size, mtime and probe facts refresh on the same file and item IDs. Directory
+lineage is intentionally limited to direct `Show/Season N/file` and direct
+`Title (YYYY)/file` movie layouts. Flat, release-folder, anime and renamed-folder
+layouts continue to use title/year matching.
 
 ### Scan deletion and root-identity safety
 

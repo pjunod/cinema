@@ -18,7 +18,10 @@ use crate::cluster::coordination::{unix_ms, Lease, StoreCoordinator};
 use crate::domain::{BookMetadataPatch, MetadataPatch, NewItem, NewPretranscodeJob, ProbeResult};
 use crate::error::StoreError;
 
-use super::{DvRecoveryGuardState, ReconcileOutcome, RootFingerprintStatus, Store};
+use super::{
+    DvRecoveryGuardState, IdentityRepairOutcome, IdentityRepairPlan, IdentityRepairSnapshot,
+    ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome, Store,
+};
 
 const PUBLICATION_CALL_SAFETY_WINDOW: Duration = Duration::from_secs(3);
 type FencedFuture<'a, T> =
@@ -147,6 +150,23 @@ pub struct PublicationStore<'a> {
 }
 
 impl<'a> PublicationStore<'a> {
+    pub async fn apply_identity_repair(
+        &self,
+        snapshot: &IdentityRepairSnapshot,
+        plan: &IdentityRepairPlan,
+    ) -> Result<IdentityRepairOutcome, StoreError> {
+        let snapshot = snapshot.clone();
+        let plan = plan.clone();
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .apply_identity_repair_fenced(&snapshot, &plan, &lease, &replacement)
+                    .await
+            })
+        })
+        .await
+    }
+
     pub fn unfenced(store: &'a dyn Store) -> Self {
         Self { store, fence: None }
     }
@@ -375,6 +395,34 @@ impl<'a> PublicationStore<'a> {
             Box::pin(async move {
                 self.store
                     .apply_metadata_fenced(item_id, patch, &lease, &replacement)
+                    .await
+            })
+        })
+        .await
+    }
+
+    pub async fn apply_series_tmdb_hint(
+        &self,
+        library_id: i64,
+        show_id: i64,
+        tmdb_id: i64,
+    ) -> Result<SeriesHintOutcome, StoreError> {
+        if self.fence.is_none() {
+            return self
+                .store
+                .apply_series_tmdb_hint(library_id, show_id, tmdb_id)
+                .await;
+        }
+        self.fenced_call(move |lease, replacement| {
+            Box::pin(async move {
+                self.store
+                    .apply_series_tmdb_hint_fenced(
+                        library_id,
+                        show_id,
+                        tmdb_id,
+                        &lease,
+                        &replacement,
+                    )
                     .await
             })
         })

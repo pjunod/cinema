@@ -12,12 +12,28 @@ use crate::domain::{
 use crate::error::StoreError;
 use crate::store::dv_conversion::validate_recovery_guard_identity;
 use crate::store::{
-    ArtworkRepairFence, DvRecoveryGuardState, FencedPublicationStore, ReconcileOutcome,
-    RootFingerprintStatus,
+    ArtworkRepairFence, DvRecoveryGuardState, FencedPublicationStore, IdentityRepairOutcome,
+    IdentityRepairPlan, IdentityRepairSnapshot, ReconcileOutcome, RootFingerprintStatus,
+    SeriesHintOutcome,
 };
 
 #[async_trait]
 impl FencedPublicationStore for SqliteStore {
+    async fn apply_identity_repair_fenced(
+        &self,
+        snapshot: &IdentityRepairSnapshot,
+        plan: &IdentityRepairPlan,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<IdentityRepairOutcome, StoreError> {
+        let snapshot = snapshot.clone();
+        let plan = plan.clone();
+        self.with_fenced_conn(lease, replacement, move |conn| {
+            apply_identity_repair(conn, &snapshot, &plan)
+        })
+        .await
+    }
+
     async fn put_setting_fenced(
         &self,
         key: &str,
@@ -150,6 +166,20 @@ impl FencedPublicationStore for SqliteStore {
         let patch = patch.clone();
         self.with_fenced_conn(lease, replacement, move |conn| {
             apply_metadata(conn, item_id, &patch)
+        })
+        .await
+    }
+
+    async fn apply_series_tmdb_hint_fenced(
+        &self,
+        library_id: i64,
+        show_id: i64,
+        tmdb_id: i64,
+        lease: &Lease,
+        replacement: &Lease,
+    ) -> Result<SeriesHintOutcome, StoreError> {
+        self.with_fenced_conn(lease, replacement, move |conn| {
+            super::media::apply_series_tmdb_hint(conn, library_id, show_id, tmdb_id)
         })
         .await
     }
@@ -637,6 +667,227 @@ impl FencedPublicationStore for SqliteStore {
         })
         .await
     }
+}
+
+fn identity_repair_already_applied(
+    conn: &Connection,
+    plan: &IdentityRepairPlan,
+) -> Result<bool, StoreError> {
+    let Some(survivor) = plan.survivor_show_id else {
+        return Ok(false);
+    };
+    let survivor_exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM items WHERE id = ?1 AND library_id = ?2 AND kind = 'show')",
+        params![survivor, plan.library_id],
+        |row| row.get(0),
+    )?;
+    if !survivor_exists {
+        return Ok(false);
+    }
+    for item_id in &plan.retired_item_ids {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM items WHERE id = ?1)",
+            params![item_id],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Ok(false);
+        }
+    }
+    for movement in &plan.item_moves {
+        let current = conn
+            .query_row(
+                "SELECT parent_id FROM items WHERE id = ?1",
+                params![movement.item_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()?;
+        if current != Some(Some(movement.new_parent_id)) {
+            return Ok(false);
+        }
+    }
+    for movement in &plan.file_moves {
+        let current = conn
+            .query_row(
+                "SELECT item_id FROM files WHERE id = ?1",
+                params![movement.file_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if current != Some(movement.new_item_id) {
+            return Ok(false);
+        }
+    }
+    for copy in &plan.watch_copies {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM watch_state WHERE user_id=?1 AND item_id=?2)",
+            params![copy.user_id, copy.destination_item_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Ok(false);
+        }
+    }
+    let invalid_numbering: bool = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM items s WHERE s.parent_id=?1 AND s.kind='season'
+            GROUP BY s.season_number HAVING s.season_number IS NULL OR COUNT(*)>1
+           UNION ALL
+           SELECT 1 FROM items e JOIN items s ON s.id=e.parent_id
+            WHERE s.parent_id=?1 AND s.kind='season' AND e.kind='episode'
+            GROUP BY e.parent_id,e.episode_number
+            HAVING e.episode_number IS NULL OR COUNT(*)>1)",
+        params![survivor],
+        |row| row.get(0),
+    )?;
+    if invalid_numbering {
+        return Ok(false);
+    }
+    let actual_counts = conn.query_row(
+        "SELECT
+           (SELECT COUNT(*) FROM items WHERE parent_id=?1 AND kind='season'),
+           (SELECT COUNT(*) FROM items e JOIN items s ON s.id=e.parent_id
+             WHERE s.parent_id=?1 AND s.kind='season' AND e.kind='episode'),
+           (SELECT COUNT(*) FROM files f JOIN items e ON e.id=f.item_id
+             JOIN items s ON s.id=e.parent_id WHERE s.parent_id=?1),
+           (SELECT COUNT(*) FROM watch_state w JOIN items e ON e.id=w.item_id
+             JOIN items s ON s.id=e.parent_id WHERE s.parent_id=?1)",
+        params![survivor],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        },
+    )?;
+    if actual_counts
+        != (
+            plan.expected_after_counts.seasons as i64,
+            plan.expected_after_counts.episodes as i64,
+            plan.expected_after_counts.files as i64,
+            plan.expected_after_counts.watches as i64,
+        )
+    {
+        return Ok(false);
+    }
+    let retired_json = serde_json::to_string(&plan.retired_item_ids)
+        .map_err(|error| StoreError::Task(format!("encode retired item IDs: {error}")))?;
+    let dangling_json_reference: bool = conn.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM library_channels c WHERE EXISTS (SELECT 1 FROM json_each(?1) ids WHERE
+             EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.include_item_ids') WHERE value=ids.value) OR
+             EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.exclude_item_ids') WHERE value=ids.value) OR
+             EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.include_show_ids') WHERE value=ids.value) OR
+             EXISTS (SELECT 1 FROM json_each(c.recipe_json,'$.exclude_show_ids') WHERE value=ids.value))
+           UNION ALL SELECT 1 FROM media_sessions s WHERE EXISTS (SELECT 1 FROM json_tree(s.recipe_json) j JOIN json_each(?1) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))
+           UNION ALL SELECT 1 FROM library_channel_session_recipes r WHERE EXISTS (SELECT 1 FROM json_tree(r.recipe_json) j JOIN json_each(?1) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id'))
+           UNION ALL SELECT 1 FROM watched_outbox o WHERE EXISTS (SELECT 1 FROM json_tree(o.payload) j JOIN json_each(?1) ids ON j.type='integer' AND j.value=ids.value WHERE j.key IN ('item_id','show_id')))",
+        params![retired_json],
+        |row| row.get(0),
+    )?;
+    if dangling_json_reference {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn apply_identity_repair(
+    conn: &Connection,
+    snapshot: &IdentityRepairSnapshot,
+    plan: &IdentityRepairPlan,
+) -> Result<IdentityRepairOutcome, StoreError> {
+    if !plan.ready() {
+        return Err(StoreError::Task("repair_blocked".to_owned()));
+    }
+    let current =
+        super::media::identity_repair_snapshot(conn, snapshot.library_id, &snapshot.input_show_ids);
+    match current {
+        Ok(current) if current == *snapshot => {}
+        _ if identity_repair_already_applied(conn, plan)? => {
+            return Ok(IdentityRepairOutcome::AlreadyApplied)
+        }
+        _ => return Ok(IdentityRepairOutcome::Stale),
+    }
+
+    for movement in &plan.item_moves {
+        if conn.execute(
+            "UPDATE items SET parent_id = ?1
+              WHERE id = ?2 AND parent_id = ?3 AND library_id = ?4",
+            params![
+                movement.new_parent_id,
+                movement.item_id,
+                movement.expected_parent_id,
+                plan.library_id
+            ],
+        )? != 1
+        {
+            return Err(StoreError::Task("repair_stale".to_owned()));
+        }
+    }
+    for movement in &plan.file_moves {
+        if conn.execute(
+            "UPDATE files SET item_id = ?1 WHERE id = ?2 AND item_id = ?3",
+            params![
+                movement.new_item_id,
+                movement.file_id,
+                movement.expected_item_id
+            ],
+        )? != 1
+        {
+            return Err(StoreError::Task("repair_stale".to_owned()));
+        }
+    }
+    for copy in &plan.watch_copies {
+        if conn.execute(
+            "INSERT INTO watch_state
+                    (user_id, item_id, position_ms, duration_ms, watched, updated_at)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6
+              WHERE NOT EXISTS (SELECT 1 FROM watch_state WHERE user_id = ?1 AND item_id = ?2)
+                AND EXISTS (SELECT 1 FROM watch_state
+                             WHERE user_id = ?1 AND item_id = ?7
+                               AND position_ms = ?3 AND duration_ms IS ?4
+                               AND watched = ?5 AND updated_at = ?6)",
+            params![
+                copy.user_id,
+                copy.destination_item_id,
+                copy.state.position_ms,
+                copy.state.duration_ms,
+                copy.state.watched,
+                copy.state.updated_at,
+                copy.source_item_id,
+            ],
+        )? != 1
+        {
+            return Err(StoreError::Task("repair_stale".to_owned()));
+        }
+    }
+
+    for kind in ["episode", "season", "show"] {
+        for item_id in &plan.retired_item_ids {
+            if snapshot
+                .items
+                .iter()
+                .any(|item| item.id == *item_id && item.kind == kind)
+                && conn.execute(
+                    "DELETE FROM items
+                      WHERE id = ?1 AND library_id = ?2 AND kind = ?3
+                        AND NOT EXISTS (SELECT 1 FROM files WHERE item_id = ?1)
+                        AND NOT EXISTS (SELECT 1 FROM items WHERE parent_id = ?1)",
+                    params![item_id, plan.library_id, kind],
+                )? != 1
+            {
+                return Err(StoreError::Task("repair_stale".to_owned()));
+            }
+        }
+    }
+    if !identity_repair_already_applied(conn, plan)? {
+        return Err(StoreError::Task(
+            "identity repair postcondition failed".to_owned(),
+        ));
+    }
+    Ok(IdentityRepairOutcome::Applied)
 }
 
 fn put_setting(conn: &Connection, key: &str, value: &str) -> Result<(), StoreError> {

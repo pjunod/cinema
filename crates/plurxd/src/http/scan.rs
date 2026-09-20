@@ -97,6 +97,16 @@ pub async fn scan(
             body.path
         )));
     }
+    if body
+        .series
+        .as_ref()
+        .and_then(|series| series.tmdb)
+        .is_some_and(|tmdb_id| tmdb_id <= 0)
+    {
+        return Err(ApiError::BadRequest(
+            "`series.tmdb` must be a positive integer".to_owned(),
+        ));
+    }
 
     // plurx resolves the library, so the caller never needs to know plurx's
     // library ids — one less thing to keep in sync between two applications.

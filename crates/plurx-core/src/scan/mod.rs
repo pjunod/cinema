@@ -172,6 +172,17 @@ impl ScanReport {
             ));
         }
     }
+
+    /// Add a bounded problem after the filesystem pass has already sealed its
+    /// report. Targeted-scan integrations use this for post-placement hints;
+    /// rebuilding the summary keeps the same cap as scanner-originated notes.
+    pub fn add_problem(&mut self, problem: String) {
+        if self.suppressed > 0 {
+            self.problems.pop();
+        }
+        self.note(problem);
+        self.seal_problems();
+    }
 }
 
 /// What a re-probe pass did. Its own type rather than a [`ScanReport`] because
@@ -929,6 +940,7 @@ async fn record_candidates(
     placed_out: Option<&mut Vec<PlacedFile>>,
 ) -> Result<BTreeMap<String, SkipGroup>, StoreError> {
     let mut placed_sink = placed_out;
+    let mut reported_duplicate_directories = HashSet::new();
     // Skips are informational, not errors — kept apart so a library full of
     // unparseable filenames can't push real errors past MAX_PROBLEMS.
     // Skips accumulate per folder rather than per file: one mis-named show is
@@ -1029,30 +1041,75 @@ async fn record_candidates(
         }
         let is_new = existing.is_none();
 
-        // Couldn't place it: `place_item` hands back the reason that actually
-        // fired, not a summary of everything that could have.
-        let placed = match place_item(store, library, &path).await? {
-            Placement::Placed(placed) => placed,
-            Placement::Skipped(why) => {
-                report.skipped += 1;
-                // Still logged per file: the log is where completeness belongs,
-                // and the report line points at it.
-                tracing::warn!(path = %path_str, "skipped: {why}");
-                let folder = skip_group_folder(library, &path);
-                let group = skips.entry(folder.clone()).or_insert_with(|| SkipGroup {
-                    folder,
-                    reason: why.to_owned(),
-                    ..SkipGroup::default()
-                });
-                group.count += 1;
-                if group.samples.len() < SKIP_SAMPLES {
-                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                        group.samples.push(name.to_owned());
-                    }
-                }
-                continue;
-            }
+        let owner_problem = if let Some(file) = existing.as_ref() {
+            existing_owner_problem(store, library, &path, file.item_id).await?
+        } else {
+            None
         };
+        if let Some(problem) = owner_problem.as_ref() {
+            report.errors += 1;
+            tracing::error!(path = %path_str, item_id = existing.as_ref().map(|file| file.item_id),
+                "existing file ownership is inconsistent: {problem}");
+            report.note(format!(
+                "existing file `{path_str}` kept its current association but ownership is invalid: {problem}"
+            ));
+        }
+
+        // An existing canonical path owns its item association. Re-deriving
+        // placement from mutable titles here can orphan the old episode and
+        // cascade away watch state during reconciliation.
+        let placed = match existing.as_ref() {
+            Some(file) => PlacedItem {
+                placed: home::Placed {
+                    id: file.item_id,
+                    created: false,
+                },
+                duplicate: None,
+            },
+            None => match place_item(store, library, &path).await? {
+                Placement::Placed(placed) => placed,
+                Placement::Skipped(why) => {
+                    report.skipped += 1;
+                    // Still logged per file: the log is where completeness belongs,
+                    // and the report line points at it.
+                    tracing::warn!(path = %path_str, "skipped: {why}");
+                    let folder = skip_group_folder(library, &path);
+                    let group = skips.entry(folder.clone()).or_insert_with(|| SkipGroup {
+                        folder,
+                        reason: why.to_owned(),
+                        ..SkipGroup::default()
+                    });
+                    group.count += 1;
+                    if group.samples.len() < SKIP_SAMPLES {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            group.samples.push(name.to_owned());
+                        }
+                    }
+                    continue;
+                }
+            },
+        };
+        if let Some(duplicate) = placed.duplicate.as_ref() {
+            if reported_duplicate_directories.insert(duplicate.directory.clone()) {
+                let candidates = duplicate
+                    .candidate_ids
+                    .iter()
+                    .map(i64::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                tracing::warn!(
+                    directory = %duplicate.directory,
+                    chosen_id = duplicate.chosen_id,
+                    candidate_ids = %candidates,
+                    "multiple catalogue items own one media directory"
+                );
+                report.note(format!(
+                    "directory `{}` is owned by duplicate catalogue items [{}]; selected item {} deterministically",
+                    duplicate.directory, candidates, duplicate.chosen_id
+                ));
+            }
+        }
+        let placed = placed.placed;
         let item_id = placed.id;
 
         // Probe is best-effort — a weird file still records with null media
@@ -1091,7 +1148,7 @@ async fn record_candidates(
                 path: path_str.clone(),
             });
         }
-        if library.kind == LibraryKind::Home {
+        if owner_problem.is_none() && library.kind == LibraryKind::Home {
             let mut nfo_notes = Vec::new();
             if home::after_record(store, placed, &path, &probe, mtime, &mut nfo_notes).await? {
                 report.seeded += 1;
@@ -1100,7 +1157,8 @@ async fn record_candidates(
                 report.note(note);
             }
         }
-        if library.kind == LibraryKind::Recordings
+        if owner_problem.is_none()
+            && library.kind == LibraryKind::Recordings
             && recordings::after_record(store, placed, file_id, &path, &probe, mtime, scan_now_ms())
                 .await?
         {
@@ -1135,7 +1193,7 @@ async fn refresh_audiobook_runtimes(
         let Some(item) = store.get_item(item_id).await? else {
             continue;
         };
-        if item.kind != ItemKind::Audiobook {
+        if item.library_id != library.id || item.kind != ItemKind::Audiobook {
             continue;
         }
         let durations = store
@@ -1172,8 +1230,131 @@ async fn refresh_audiobook_runtimes(
 /// scan report will print, written where the decision is actually made — a
 /// reason reconstructed later by the caller drifts from the code that skipped.
 enum Placement {
-    Placed(home::Placed),
+    Placed(PlacedItem),
     Skipped(&'static str),
+}
+
+struct PlacedItem {
+    placed: home::Placed,
+    duplicate: Option<DuplicateDirectory>,
+}
+
+struct DuplicateDirectory {
+    directory: String,
+    candidate_ids: Vec<i64>,
+    chosen_id: i64,
+}
+
+fn placed(id: i64, created: bool) -> Placement {
+    Placement::Placed(PlacedItem {
+        placed: home::Placed { id, created },
+        duplicate: None,
+    })
+}
+
+fn directory_placement(item: Item, directory: String, candidates: &[Item]) -> Placement {
+    Placement::Placed(PlacedItem {
+        placed: home::Placed {
+            id: item.id,
+            created: false,
+        },
+        duplicate: (candidates.len() > 1).then(|| DuplicateDirectory {
+            directory,
+            candidate_ids: candidates.iter().map(|candidate| candidate.id).collect(),
+            chosen_id: item.id,
+        }),
+    })
+}
+
+fn usable_source_directory(library: &Library, directory: Option<&Path>) -> Option<String> {
+    let directory = directory?.canonicalize().ok()?;
+    let roots = library
+        .paths
+        .iter()
+        .map(|configured| {
+            (
+                configured,
+                configured
+                    .canonicalize()
+                    .unwrap_or_else(|_| configured.clone()),
+            )
+        })
+        .collect::<Vec<_>>();
+    if roots.iter().any(|(_, root)| directory == *root) {
+        return None;
+    }
+    let (configured_root, root) = roots
+        .into_iter()
+        .filter(|(_, root)| directory.starts_with(root))
+        .max_by_key(|(_, root)| root.components().count())?;
+    let suffix = directory.strip_prefix(&root).ok()?;
+    // Store paths use the configured root spelling. Rebase a targeted scan's
+    // canonical path onto that spelling so it can find files recorded through
+    // a symlinked mount.
+    Some(configured_root.join(suffix).to_string_lossy().into_owned())
+}
+
+async fn existing_owner_problem(
+    store: &PublicationStore<'_>,
+    library: &Library,
+    path: &Path,
+    item_id: i64,
+) -> Result<Option<String>, StoreError> {
+    let Some(item) = store.get_item(item_id).await? else {
+        return Ok(Some(format!("item {item_id} is missing")));
+    };
+    if item.library_id != library.id {
+        return Ok(Some(format!(
+            "item {item_id} belongs to library {}, not {}",
+            item.library_id, library.id
+        )));
+    }
+    let allowed = match library.kind {
+        LibraryKind::Movies => item.kind == ItemKind::Movie,
+        LibraryKind::Books => book_kind_for_path(path).is_some_and(|kind| item.kind == kind),
+        LibraryKind::Home => matches!(item.kind, ItemKind::Video | ItemKind::Photo),
+        LibraryKind::Recordings => item.kind == ItemKind::Video,
+        LibraryKind::Shows => item.kind == ItemKind::Episode,
+    };
+    if !allowed {
+        return Ok(Some(format!(
+            "item {item_id} has kind `{}` which cannot own this file in a `{}` library",
+            item.kind.as_str(),
+            library.kind.as_str()
+        )));
+    }
+    if library.kind != LibraryKind::Shows {
+        return Ok(None);
+    }
+    let Some(season_id) = item.parent_id else {
+        return Ok(Some(format!("episode {item_id} has no season parent")));
+    };
+    let Some(season) = store.get_item(season_id).await? else {
+        return Ok(Some(format!(
+            "episode {item_id} names missing season {season_id}"
+        )));
+    };
+    if season.library_id != library.id || season.kind != ItemKind::Season {
+        return Ok(Some(format!(
+            "episode {item_id} parent {season_id} is not a season in library {}",
+            library.id
+        )));
+    }
+    let Some(show_id) = season.parent_id else {
+        return Ok(Some(format!("season {season_id} has no show parent")));
+    };
+    let Some(show) = store.get_item(show_id).await? else {
+        return Ok(Some(format!(
+            "season {season_id} names missing show {show_id}"
+        )));
+    };
+    if show.library_id != library.id || show.kind != ItemKind::Show {
+        return Ok(Some(format!(
+            "season {season_id} parent {show_id} is not a show in library {}",
+            library.id
+        )));
+    }
+    Ok(None)
 }
 
 /// Find-or-create the item a file belongs to.
@@ -1185,14 +1366,21 @@ async fn place_item(
     match library.kind {
         LibraryKind::Movies => {
             let parsed = parse::parse_movie(path);
+            if let Some(directory) =
+                usable_source_directory(library, parsed.source_directory.as_deref())
+            {
+                let candidates = store
+                    .find_movies_by_directory(library.id, &directory)
+                    .await?;
+                if let Some(existing) = candidates.first().cloned() {
+                    return Ok(directory_placement(existing, directory, &candidates));
+                }
+            }
             if let Some(existing) = store
                 .find_movie(library.id, &parsed.title, parsed.year)
                 .await?
             {
-                return Ok(Placement::Placed(home::Placed {
-                    id: existing.id,
-                    created: false,
-                }));
+                return Ok(placed(existing.id, false));
             }
             let id = store
                 .insert_item(&NewItem {
@@ -1205,7 +1393,7 @@ async fn place_item(
                     episode_number: None,
                 })
                 .await?;
-            Ok(Placement::Placed(home::Placed { id, created: true }))
+            Ok(placed(id, true))
         }
         LibraryKind::Books => {
             let Some(kind) = book_kind_for_path(path) else {
@@ -1225,10 +1413,7 @@ async fn place_item(
                 )
                 .await?
             {
-                return Ok(Placement::Placed(home::Placed {
-                    id: existing.id,
-                    created: false,
-                }));
+                return Ok(placed(existing.id, false));
             }
             let id = store
                 .insert_item(&NewItem {
@@ -1241,19 +1426,19 @@ async fn place_item(
                     episode_number: None,
                 })
                 .await?;
-            Ok(Placement::Placed(home::Placed { id, created: true }))
+            Ok(placed(id, true))
         }
         // Folders are the organization: the directory tree is mirrored as
         // browsable folder items, and the file itself becomes a video or a
         // photo under it.
         LibraryKind::Home => Ok(match home::place(store, library, path).await? {
-            Some(placed) => Placement::Placed(placed),
+            Some(home) => placed(home.id, home.created),
             None => Placement::Skipped("it isn't a video or a photo this library can hold"),
         }),
         // One folder per programme, which is exactly what the engine writes,
         // so the same folder mirroring home video uses gives the right shape.
         LibraryKind::Recordings => Ok(match recordings::place(store, library, path).await? {
-            Some(placed) => Placement::Placed(placed),
+            Some(home) => placed(home.id, home.created),
             None => Placement::Skipped("it is not under any of this library's roots"),
         }),
         LibraryKind::Shows => {
@@ -1289,12 +1474,15 @@ async fn place_item(
                     ));
                 }
             };
-            let show = find_or_create_show(store, library, &parsed).await?;
+            let (show, duplicate) = find_or_create_show(store, library, &parsed).await?;
             let season = find_or_create_season(store, library, show.id, parsed.season).await?;
             if let Some(existing) = store.find_episode(season, parsed.episode).await? {
-                return Ok(Placement::Placed(home::Placed {
-                    id: existing.id,
-                    created: false,
+                return Ok(Placement::Placed(PlacedItem {
+                    placed: home::Placed {
+                        id: existing.id,
+                        created: false,
+                    },
+                    duplicate,
                 }));
             }
             let title = parsed
@@ -1312,7 +1500,10 @@ async fn place_item(
                     episode_number: Some(parsed.episode),
                 })
                 .await?;
-            Ok(Placement::Placed(home::Placed { id, created: true }))
+            Ok(Placement::Placed(PlacedItem {
+                placed: home::Placed { id, created: true },
+                duplicate,
+            }))
         }
     }
 }
@@ -1321,12 +1512,25 @@ async fn find_or_create_show(
     store: &PublicationStore<'_>,
     library: &Library,
     parsed: &parse::ParsedEpisode,
-) -> Result<Item, StoreError> {
+) -> Result<(Item, Option<DuplicateDirectory>), StoreError> {
+    if let Some(directory) = usable_source_directory(library, parsed.source_directory.as_deref()) {
+        let candidates = store
+            .find_shows_by_directory(library.id, &directory, parsed.season)
+            .await?;
+        if let Some(show) = candidates.first().cloned() {
+            let duplicate = (candidates.len() > 1).then(|| DuplicateDirectory {
+                directory,
+                candidate_ids: candidates.iter().map(|candidate| candidate.id).collect(),
+                chosen_id: show.id,
+            });
+            return Ok((show, duplicate));
+        }
+    }
     if let Some(show) = store
         .find_show(library.id, &parsed.show_title, parsed.show_year)
         .await?
     {
-        return Ok(show);
+        return Ok((show, None));
     }
     let id = store
         .insert_item(&NewItem {
@@ -1339,10 +1543,11 @@ async fn find_or_create_show(
             episode_number: None,
         })
         .await?;
-    store
+    let show = store
         .get_item(id)
         .await?
-        .ok_or_else(|| StoreError::Database("show vanished after insert".to_owned()))
+        .ok_or_else(|| StoreError::Database("show vanished after insert".to_owned()))?;
+    Ok((show, None))
 }
 
 async fn find_or_create_season(
@@ -1404,7 +1609,7 @@ mod tests {
 
     use super::*;
     use crate::domain::{ItemEdit, ItemSort, NewLibrary};
-    use crate::store::{LibraryStore, MediaStore, SqliteStore};
+    use crate::store::{LibraryStore, MediaStore, SqliteStore, UserStore, WatchStore};
 
     async fn write_fake_video(dir: &Path, rel: &str) -> PathBuf {
         let path = dir.join(rel);
@@ -1434,6 +1639,38 @@ mod tests {
             })
             .await
             .expect("lib")
+    }
+
+    async fn show_library(store: &SqliteStore, dir: &Path) -> Library {
+        store
+            .create_library(&NewLibrary {
+                name: "Shows".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![dir.to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("show library")
+    }
+
+    async fn only_show(store: &SqliteStore, library_id: i64) -> Item {
+        let page = store
+            .list_top_items(library_id, ItemSort::Title, 0, 10)
+            .await
+            .expect("shows");
+        assert_eq!(page.total, 1, "expected one show: {:?}", page.items);
+        page.items.into_iter().next().expect("show")
+    }
+
+    async fn only_episode(store: &SqliteStore, show_id: i64) -> Item {
+        let seasons = store.get_item_children(show_id).await.expect("seasons");
+        assert_eq!(seasons.len(), 1, "expected one season: {seasons:?}");
+        let episodes = store
+            .get_item_children(seasons[0].id)
+            .await
+            .expect("episodes");
+        assert_eq!(episodes.len(), 1, "expected one episode: {episodes:?}");
+        episodes.into_iter().next().expect("episode")
     }
 
     #[tokio::test]
@@ -2482,6 +2719,379 @@ mod tests {
             g.samples,
             vec!["trailer.mkv".to_owned()],
             "a group names some of its files, or there is nothing to act on"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_identity_new_season_keeps_directory_owner_after_show_rename() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("tmp");
+        write_fake_video(
+            dir.path(),
+            "Harbor Lights/Season 1/Harbor Lights S01E01.mkv",
+        )
+        .await;
+        let library = show_library(&store, dir.path()).await;
+        scan_library(&store, &library).await.expect("initial scan");
+        let original = only_show(&store, library.id).await;
+        store
+            .update_item_fields(
+                original.id,
+                &ItemEdit {
+                    title: Some("Harbor Lights (US)".into()),
+                    ..ItemEdit::default()
+                },
+            )
+            .await
+            .expect("rename");
+
+        let new_path = write_fake_video(
+            dir.path(),
+            "Harbor Lights/Season 5/Harbor Lights S05E01.mkv",
+        )
+        .await;
+        let targeted = scan_path(&store, &library, &new_path)
+            .await
+            .expect("targeted scan");
+
+        assert_eq!(targeted.report.added, 1);
+        assert_eq!(targeted.items.len(), 1);
+        let survivor = only_show(&store, library.id).await;
+        assert_eq!(survivor.id, original.id);
+        let seasons = store.get_item_children(survivor.id).await.expect("seasons");
+        assert_eq!(
+            seasons
+                .iter()
+                .map(|season| season.season_number)
+                .collect::<Vec<_>>(),
+            vec![Some(1), Some(5)]
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_identity_second_version_keeps_episode_after_punctuation_rename() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("tmp");
+        write_fake_video(
+            dir.path(),
+            "City Watch/Season 2/City Watch S02E03 source.mkv",
+        )
+        .await;
+        let library = show_library(&store, dir.path()).await;
+        scan_library(&store, &library).await.expect("initial scan");
+        let show = only_show(&store, library.id).await;
+        let episode = only_episode(&store, show.id).await;
+        store
+            .update_item_fields(
+                show.id,
+                &ItemEdit {
+                    title: Some("City-Watch".into()),
+                    ..ItemEdit::default()
+                },
+            )
+            .await
+            .expect("rename");
+
+        let alternate = write_fake_video(
+            dir.path(),
+            "City Watch/Season 2/City Watch S02E03 alternate.mkv",
+        )
+        .await;
+        scan_path(&store, &library, &alternate)
+            .await
+            .expect("targeted scan");
+
+        assert_eq!(only_show(&store, library.id).await.id, show.id);
+        let files = store.files_for_item(episode.id).await.expect("versions");
+        assert_eq!(files.len(), 2, "both versions remain attached");
+        assert!(files.iter().all(|file| file.item_id == episode.id));
+    }
+
+    #[tokio::test]
+    async fn scan_identity_changed_file_preserves_ids_and_complete_watch_state() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("tmp");
+        let path =
+            write_fake_video(dir.path(), "Night Shift/Season 1/Night Shift S01E04.mkv").await;
+        let library = show_library(&store, dir.path()).await;
+        scan_library(&store, &library).await.expect("initial scan");
+        let show = only_show(&store, library.id).await;
+        let episode = only_episode(&store, show.id).await;
+        let (file_id, stored_path) = store
+            .library_file_paths(library.id)
+            .await
+            .expect("file inventory")[0]
+            .clone();
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("file lookup")
+            .expect("file");
+        let source = std::fs::metadata(&stored_path).expect("source metadata");
+        store
+            .upsert_file(
+                episode.id,
+                &stored_path.to_string_lossy(),
+                source.len() as i64,
+                file.mtime,
+                &ProbeResult {
+                    raw_json: Some("{}".into()),
+                    ..ProbeResult::default()
+                },
+            )
+            .await
+            .expect("mark initial probe successful");
+        let user = store
+            .create_user("scan-identity-viewer", "hash", false)
+            .await
+            .expect("user");
+        let before = store
+            .put_progress_at(user.id, episode.id, 42_000, Some(100_000), Some(1))
+            .await
+            .expect("watch state");
+        store
+            .update_item_fields(
+                show.id,
+                &ItemEdit {
+                    title: Some("Night Shift: After Dark".into()),
+                    ..ItemEdit::default()
+                },
+            )
+            .await
+            .expect("rename");
+        std::fs::write(&path, b"not really video, but repacked").expect("rewrite");
+
+        let report = scan_library(&store, &library).await.expect("full rescan");
+        assert_eq!(report.pruned_items, 0);
+        let after_file = store
+            .get_file(file_id)
+            .await
+            .expect("file lookup")
+            .expect("file");
+        assert_eq!(after_file.id, file.id);
+        assert_eq!(after_file.item_id, episode.id);
+        assert_eq!(only_show(&store, library.id).await.id, show.id);
+        assert_eq!(
+            store
+                .watch_state(user.id, episode.id)
+                .await
+                .expect("watch lookup"),
+            Some(before)
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_identity_changed_file_control_keeps_ids_without_metadata_rename() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("tmp");
+        let path =
+            write_fake_video(dir.path(), "Quiet Harbor/Season 1/Quiet Harbor S01E01.mkv").await;
+        let library = show_library(&store, dir.path()).await;
+        scan_library(&store, &library).await.expect("initial scan");
+        let show = only_show(&store, library.id).await;
+        let episode = only_episode(&store, show.id).await;
+        let file_id = store
+            .library_file_paths(library.id)
+            .await
+            .expect("file inventory")[0]
+            .0;
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("file lookup")
+            .expect("file");
+        std::fs::write(&path, b"not really video, but changed").expect("rewrite");
+
+        scan_library(&store, &library).await.expect("full rescan");
+        let after = store
+            .get_file(file_id)
+            .await
+            .expect("file lookup")
+            .expect("file");
+        assert_eq!((after.id, after.item_id), (file.id, episode.id));
+        assert_eq!(only_show(&store, library.id).await.id, show.id);
+    }
+
+    #[tokio::test]
+    async fn scan_identity_mtime_only_change_keeps_movie_and_failed_probe_owner() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = write_fake_video(dir.path(), "Copper Road (2024)/Copper Road (2024).mkv").await;
+        let library = movie_library(&store, dir.path()).await;
+        scan_library(&store, &library).await.expect("initial scan");
+        let original = store
+            .list_top_items(library.id, ItemSort::Title, 0, 10)
+            .await
+            .expect("movies")
+            .items
+            .into_iter()
+            .next()
+            .expect("movie");
+        let file_id = store.library_file_paths(library.id).await.expect("files")[0].0;
+        store
+            .update_item_fields(
+                original.id,
+                &ItemEdit {
+                    title: Some("Copper Road: Restored".into()),
+                    ..ItemEdit::default()
+                },
+            )
+            .await
+            .expect("rename");
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .expect("open source");
+        file.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(5)),
+        )
+        .expect("change mtime only");
+
+        let report = scan_library(&store, &library).await.expect("rescan");
+        assert_eq!(report.updated, 1);
+        assert_eq!(report.pruned_items, 0);
+        let after = store.get_file(file_id).await.expect("file").expect("file");
+        assert_eq!(after.item_id, original.id);
+        assert_eq!(
+            store
+                .list_top_items(library.id, ItemSort::Title, 0, 10)
+                .await
+                .expect("movies")
+                .items
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_identity_movie_version_uses_directory_after_display_rename() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("tmp");
+        write_fake_video(dir.path(), "Copper Road (2024)/Copper.Road.2024.source.mkv").await;
+        let library = movie_library(&store, dir.path()).await;
+        scan_library(&store, &library).await.expect("initial scan");
+        let movie = store
+            .list_top_items(library.id, ItemSort::Title, 0, 10)
+            .await
+            .expect("movies")
+            .items[0]
+            .clone();
+        store
+            .update_item_fields(
+                movie.id,
+                &ItemEdit {
+                    title: Some("Copper Road: Restored".into()),
+                    ..ItemEdit::default()
+                },
+            )
+            .await
+            .expect("rename");
+        let alternate = write_fake_video(
+            dir.path(),
+            "Copper Road (2024)/Copper.Road.2024.alternate.mkv",
+        )
+        .await;
+        scan_path(&store, &library, &alternate)
+            .await
+            .expect("targeted scan");
+
+        assert_eq!(
+            store
+                .list_top_items(library.id, ItemSort::Title, 0, 10)
+                .await
+                .expect("movies")
+                .items
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .files_for_item(movie.id)
+                .await
+                .expect("versions")
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_identity_library_root_is_not_a_show_directory_identity() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("tmp");
+        let library = show_library(&store, dir.path()).await;
+        assert_eq!(
+            usable_source_directory(&library, Some(dir.path())),
+            None,
+            "a root/Season N/file layout cannot turn the root into one show"
+        );
+
+        let nested = dir.path().join("Nested Show");
+        std::fs::create_dir_all(&nested).expect("nested root");
+        let overlapping = store
+            .create_library(&NewLibrary {
+                name: "Overlapping roots".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![dir.path().to_path_buf(), nested.clone()],
+                anime: false,
+            })
+            .await
+            .expect("overlapping library");
+        assert_eq!(
+            usable_source_directory(&overlapping, Some(&nested)),
+            None,
+            "a path equal to any configured root is never show identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_identity_anime_uses_directory_when_layout_is_recognized() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let dir = tempfile::tempdir().expect("tmp");
+        write_fake_video(
+            dir.path(),
+            "Lantern Archive/Season 1/Lantern Archive S01E01.mkv",
+        )
+        .await;
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Anime".into(),
+                kind: LibraryKind::Shows,
+                paths: vec![dir.path().to_path_buf()],
+                anime: true,
+            })
+            .await
+            .expect("library");
+        scan_library(&store, &library).await.expect("initial scan");
+        let original = only_show(&store, library.id).await;
+        store
+            .update_item_fields(
+                original.id,
+                &ItemEdit {
+                    title: Some("Lantern Archive: Remastered".into()),
+                    ..ItemEdit::default()
+                },
+            )
+            .await
+            .expect("rename");
+        let next = write_fake_video(
+            dir.path(),
+            "Lantern Archive/Season 2/Lantern Archive S02E01.mkv",
+        )
+        .await;
+        scan_path(&store, &library, &next)
+            .await
+            .expect("targeted scan");
+
+        assert_eq!(
+            store
+                .list_top_items(library.id, ItemSort::Title, 0, 10)
+                .await
+                .expect("shows")
+                .items
+                .len(),
+            1,
+            "recognized anime layouts keep directory ownership after a display rename"
         );
     }
 

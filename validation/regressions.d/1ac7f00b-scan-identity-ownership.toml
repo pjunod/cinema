@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1ac7f00b"]
+points = ["core.media", "cluster.auth", "library.catalog", "server.api"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+reason = "Retained scanner regressions reproduce and invert the three identity-split failures: a provider-renamed show receiving a new season, a punctuation-renamed episode receiving a second version, and changed bytes at one canonical path orphaning complete watch state. Direct show/movie directory lineage is parser-derived, root-bounded, range-prefiltered through the files.path unique index, exact-filtered, library-scoped and deterministic across SQLite and three-voter Hiqlite; anime, flat, release-folder, collection and contradictory movie shapes stay on the prior fallback. A daemon regression queues the targeted import behind full-scan state and proves it extends the original show. Existing paths retain their item and file IDs while probe facts refresh, and duplicate directory ownership produces one bounded diagnostic without blocking playback."
