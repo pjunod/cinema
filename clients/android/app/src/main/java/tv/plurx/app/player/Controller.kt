@@ -312,10 +312,15 @@ class Controller(
      * rescue moves everything to a transcode, because "the device refused
      * these bytes" is exactly a demand for different ones.
      */
+    /** Effective plan facts adopted only when a prepared successor commits. */
+    private var attachedModeOverride: String? = null
+    private var attachedRequiresHlsOverride: Boolean? = null
+
     private val planMode: String
         get() = when {
             forceCompatibilityTranscode -> "transcode"
             forceCompatibilityRemux -> "remux"
+            attachedModeOverride != null -> attachedModeOverride!!
             audioOffsetMs != 0L && plan.mode == "direct" -> "remux"
             else -> plan.mode
         }
@@ -350,6 +355,7 @@ class Controller(
         PlaybackMediaRecipe(
             quality = playbackIntent.desiredQuality,
             mode = planMode,
+            requiresHls = attachedRequiresHlsOverride ?: plan.requiresHls,
             audioIndex = selectedAudio,
             subtitleIndex = selectedSubtitle,
             subtitleDelivery = subtitleDelivery,
@@ -364,8 +370,11 @@ class Controller(
      */
     private val behindLiveWindow = BehindLiveWindowRecovery()
 
-    private fun attachRecipe(recipe: PlaybackRecipeOwnership.Claim) {
-        recipeOwnership.attach(recipe)
+    private fun attachRecipe(
+        recipe: PlaybackRecipeOwnership.Claim,
+        transport: PlaybackMediaTransport = recipe.recipe.desiredTransport,
+    ) {
+        recipeOwnership.attach(recipe, transport)
         selectionRecipe = recipe
         textSelectionArmed = true
         audioSelectionArmed = true
@@ -431,13 +440,12 @@ class Controller(
      */
     val deliveryMode: String
         get() {
-            val recipe = recipeOwnership.attached?.recipe
-            val mode = recipe?.mode ?: planMode
-            return when (recipe?.subtitleDelivery ?: subtitleDelivery) {
-                SubtitleDelivery.Burn -> "transcode"
-                SubtitleDelivery.NativeSession -> if (mode == "transcode") "transcode" else "remux"
-                SubtitleDelivery.BitmapOverlay,
-                SubtitleDelivery.Plan -> mode
+            return when (recipeOwnership.attachedTransport) {
+                PlaybackMediaTransport.Direct -> "direct"
+                PlaybackMediaTransport.ProgressiveRemux,
+                PlaybackMediaTransport.HlsCopy -> "remux"
+                PlaybackMediaTransport.HlsTranscode -> "transcode"
+                null -> planMode
             }
         }
 
@@ -446,13 +454,11 @@ class Controller(
 
     /** True while the original file is being read directly, base timeline = 0. */
     private val directTransport: Boolean
-        get() = (recipeOwnership.attached?.recipe?.subtitleDelivery ?: subtitleDelivery).usesPlanTransport &&
-            (recipeOwnership.attached?.recipe?.mode ?: planMode) == "direct"
+        get() = recipeOwnership.attachedTransport == PlaybackMediaTransport.Direct
 
     /** True while Media3 is reading the live progressive remux response. */
     private val progressiveTransport: Boolean
-        get() = (recipeOwnership.attached?.recipe?.subtitleDelivery ?: subtitleDelivery).usesPlanTransport &&
-            (recipeOwnership.attached?.recipe?.mode ?: planMode) == "remux"
+        get() = recipeOwnership.attachedTransport == PlaybackMediaTransport.ProgressiveRemux
 
     var encoder: String? = null
         private set
@@ -1198,13 +1204,13 @@ class Controller(
             return
         }
         armTrackSelections(recipe)
-        when {
-            directTransport -> {
+        when (recipe.recipe.desiredTransport) {
+            PlaybackMediaTransport.Direct -> {
                 beginPlaybackAttempt("seek")
                 player.seekTo(t)
                 markIntentExecuted(sequence)
             }
-            subtitleDelivery.usesPlanTransport && planMode == "remux" -> {
+            PlaybackMediaTransport.ProgressiveRemux -> {
                 val attempt = beginPlaybackAttempt("seek")
                 leaveSessionPlayback()
                 Session.resetMediaFailover()
@@ -1222,12 +1228,12 @@ class Controller(
             }
             // A cached session holds the whole stream: native seeking, no
             // session churn. A live one can't be range-sought, so it reopens.
-            sessionIsVod -> {
+            PlaybackMediaTransport.HlsCopy,
+            PlaybackMediaTransport.HlsTranscode -> if (sessionIsVod) {
                 beginPlaybackAttempt("seek")
                 player.seekTo(t)
                 markIntentExecuted(sequence)
-            }
-            else -> {
+            } else {
                 val attempt = beginPlaybackAttempt("seek")
                 openSession(t, attempt, sequence)
             }
@@ -1594,10 +1600,8 @@ class Controller(
         val attempt = beginPlaybackAttempt(reason, observedAtMs)
         val executionSequence = playbackIntent.pendingSeek?.sequence
         val recipe = currentRecipe()
-        when {
-            !subtitleDelivery.usesPlanTransport ->
-                openSession(positionMs, attempt, executionSequence)
-            planMode == "direct" -> {
+        when (recipe.recipe.desiredTransport) {
+            PlaybackMediaTransport.Direct -> {
                 leaveSessionPlayback()
                 activeMediaPath = relativeMediaPath(plan.playUrl)
                 player.setMediaItem(MediaItem.fromUri(plan.playUrl), positionMs)
@@ -1610,7 +1614,7 @@ class Controller(
                 player.playWhenReady = playbackIntent.playbackRequested
                 armTrackSelections()
             }
-            planMode == "remux" -> {
+            PlaybackMediaTransport.ProgressiveRemux -> {
                 leaveSessionPlayback()
                 baseMs = positionMs
                 val uri = remuxUri(positionMs)
@@ -1626,7 +1630,9 @@ class Controller(
                 player.playWhenReady = playbackIntent.playbackRequested
                 armTrackSelections()
             }
-            else -> openSession(positionMs, attempt, executionSequence)
+            PlaybackMediaTransport.HlsCopy,
+            PlaybackMediaTransport.HlsTranscode ->
+                openSession(positionMs, attempt, executionSequence)
         }
     }
 
@@ -1959,7 +1965,8 @@ class Controller(
                         startSeconds = positionMs / 1000.0,
                         delivery = recipe.recipe.subtitleDelivery,
                         subtitleIndex = recipe.recipe.subtitleIndex,
-                        copyableVideo = recipe.recipe.mode != "transcode",
+                        copyableVideo = recipe.recipe.desiredTransport ==
+                            PlaybackMediaTransport.HlsCopy,
                         aac = plan.aac,
                         preserveDolbyVision = plan.preserveDolbyVision,
                         audioIndex = recipe.recipe.audioIndex,
@@ -2055,24 +2062,14 @@ class Controller(
         controlSequence: Long? = null,
         recipe: PlaybackMediaRecipe = currentRecipe().recipe,
     ): CreateSessionReq = bindDecisionPlan(
-        body = subtitleSessionBody(
+        body = playbackSessionBody(
             playbackId = playbackIntent.playbackId,
             requestId = UUID.randomUUID().toString(),
             controlSequence = controlSequence,
             startSeconds = ms / 1000.0,
-            delivery = recipe.subtitleDelivery,
-            subtitleIndex = recipe.subtitleIndex,
-            // A transcode verdict is the only one that forbids copying the video;
-            // direct and remux verdicts both mean the source stream is playable
-            // as-is, which is what makes the native-rendition session free. The
-            // compatibility rescue turns `planMode` into a transcode precisely so
-            // it lands here — the copy is the thing the device just refused.
-            copyableVideo = recipe.mode != "transcode",
+            recipe = recipe,
             aac = plan.aac,
             preserveDolbyVision = plan.preserveDolbyVision,
-            audioIndex = recipe.audioIndex,
-            audioOffsetMs = recipe.audioOffsetMs,
-            quality = recipe.quality,
             sourceHeight = plan.sourceHeight,
         ),
         caps = decisionCaps,
@@ -2285,6 +2282,7 @@ class Controller(
         val path = activeMediaPath ?: return false
         val next = Session.nextMediaFailoverUrl(path) ?: return false
         val recipe = recipeOwnership.attached ?: currentRecipe()
+        val transport = recipeOwnership.attachedTransport ?: recipe.recipe.desiredTransport
         val presentationSequence = playbackIntent.executedSequence()
         // Same session, different ingress — but the incumbent is about to be
         // re-attached and the successor was primed against the playhead the
@@ -2314,7 +2312,7 @@ class Controller(
             progressiveMediaOrigin.begin(next, realPosition())
         }
         player.setMediaItem(MediaItem.fromUri(next), attachPosition)
-        attachRecipe(recipe)
+        attachRecipe(recipe, transport)
         presentationSequence?.let { sequence ->
             markIntentExecuted(sequence, recipe)
         }
@@ -3149,6 +3147,10 @@ class Controller(
     private data class PreparedPredecessor(
         val player: ExoPlayer,
         val filmPositionMs: Long,
+        val recipe: PlaybackRecipeOwnership.Claim?,
+        val transport: PlaybackMediaTransport?,
+        val modeOverride: String?,
+        val requiresHlsOverride: Boolean?,
         val progressiveMediaOrigin: ProgressiveMediaOrigin,
         val baseMs: Long,
         val sessionId: String?,
@@ -3512,6 +3514,10 @@ class Controller(
         val predecessor = PreparedPredecessor(
             player = previous,
             filmPositionMs = commitFilmMs,
+            recipe = recipeOwnership.attached,
+            transport = recipeOwnership.attachedTransport,
+            modeOverride = attachedModeOverride,
+            requiresHlsOverride = attachedRequiresHlsOverride,
             progressiveMediaOrigin = progressiveMediaOrigin,
             baseMs = baseMs,
             sessionId = sessionId,
@@ -3550,9 +3556,13 @@ class Controller(
         mediaSession.setPlayer(successor)
         // A different `ExoPlayer` with its own item is on the screen now, so
         // it gets its own single `BEHIND_LIVE_WINDOW` recovery. This path never
-        // reaches `attachRecipe`, which is why the budget is re-armed here
-        // rather than assumed.
-        behindLiveWindow.attached()
+        // passed through the ordinary session attachment, so record both the
+        // desired recipe and the HLS transport this prepared player actually
+        // owns. The server-selected codec distinguishes copy from transcode.
+        val preparedAdoption = preparedTransportAdoption(action.effectiveSelection?.codec)
+        attachedModeOverride = preparedAdoption.modeOverride
+        attachedRequiresHlsOverride = preparedAdoption.requiresHlsOverride
+        attachRecipe(currentRecipe(), preparedAdoption.transport)
 
         // The successor is its own session on its own timeline. Everything the
         // controller derives from "which session am I playing" moves with it,
@@ -3658,6 +3668,11 @@ class Controller(
         externalListeners.forEach { predecessor.player.addListener(it) }
 
         progressiveMediaOrigin = predecessor.progressiveMediaOrigin
+        attachedModeOverride = predecessor.modeOverride
+        attachedRequiresHlsOverride = predecessor.requiresHlsOverride
+        predecessor.recipe?.let { recipe ->
+            attachRecipe(recipe, predecessor.transport ?: recipe.recipe.desiredTransport)
+        }
         baseMs = predecessor.baseMs
         sessionId = predecessor.sessionId
         activeMediaPath = predecessor.activeMediaPath
@@ -3907,6 +3922,8 @@ interface PlanLike {
     val fileId: Long
     val playUrl: String
     val mode: String // "direct" | "remux" | "transcode"
+    /** `delivery.requires_hls`: this remux needs the copy-HLS producer. */
+    val requiresHls: Boolean get() = false
     val durationMs: Long
     val videoCodec: String?
     val requestedQuality: PlaybackQuality

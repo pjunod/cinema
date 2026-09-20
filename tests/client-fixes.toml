@@ -2188,3 +2188,23 @@ source = "clients/android/README.md"
 source_anchor = "Status: **v0.3.0**, build"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "def test_repository_build_claims_match_release_inputs(self) -> None:"
+[[fixes]]
+# The server's transport requirement is durable playback recipe identity on
+# Android, not a one-shot URL choice. This table regression exercises direct,
+# progressive remux, required copy HLS, native-session HLS, and burn/transcode.
+id = "android.dv-required-hls-transport-policy"
+commits = ["fe58cd90"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SubtitlePolicy.kt"
+source_anchor = "internal fun desiredPlaybackTransport("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest.kt"
+test_anchor = "fun androidDvDeliveryChoosesOneTransportForEveryPlanAndSubtitleRoute()"
+
+[[fixes]]
+# The review correction centralized session bodies so start, seek, track
+# changes, recovery, and reopen cannot silently lose the required HLS recipe.
+id = "android.dv-required-hls-lifecycle-body"
+commits = ["4f71e58c"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/SubtitlePolicy.kt"
+source_anchor = "internal fun playbackSessionBody("
+test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest.kt"
+test_anchor = "fun androidDvDeliveryRequiredHlsSurvivesStartSeekTracksAndRecoveryBodies()"

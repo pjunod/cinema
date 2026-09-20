@@ -213,3 +213,15 @@ Before main promotion, freeze task integration, merge then-current main,
 requalify the exact candidate, and require the Main promotion gate and receipt.
 A moved base invalidates earlier candidate evidence. Deployment is a separate
 authorized action.
+
+## 7. Main promotion follow-up
+
+Paul explicitly authorized promotion using the completed local checks and
+asked not to repeat the tests. Main `568dbe2e1` was reconciled into the effort;
+its Android Dolby Vision changes are preserved alongside the watch input
+outcomes. The two conflicts were additive documentation/evidence entries.
+Android claims versionCode 111 above main's 110; Apple remains build 173.
+The completed checks above describe the earlier tested candidate, not a new
+post-reconciliation test run. Hosted CI is monitored after merge under Paul's
+explicit instruction. Native layouts and physical/Safari acceptance remain
+outside the completed web implementation.
