@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1f274c85"]
+points = ["web.experience"]
+checks = ["web-static"]
+reason = "The watch-and-browse player's shrink control reads Smaller in the full presentation; tests/web/live-tv.test.js asserts the label, and web-static runs that suite."
