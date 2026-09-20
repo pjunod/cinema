@@ -28,7 +28,13 @@
 //! * `used_bytes` is the apparent length of the regular files this
 //!   incarnation actually has in its scratch directory. It is a measurement,
 //!   so it can exceed the grant — an overrun is charged, never clamped down
-//!   to the reservation that failed to contain it.
+//!   to the reservation that failed to contain it. Because it is only
+//!   refreshed on a directory walk, two further terms carry what the walk
+//!   has not seen yet: `pending_bytes`, authorized for writes that are in
+//!   flight, and `written_bytes`, for writes that landed since the last
+//!   complete measurement. Without them an authorization would be
+//!   re-usable an unlimited number of times per scan interval, which is a
+//!   timing bound dressed up as a write bound.
 //! * `unlinked_pinned_bytes` is the apparent length of objects whose names
 //!   have been removed while an accepted read still holds them open. A
 //!   directory scan cannot see those bytes; the filesystem still owes them.
@@ -160,6 +166,14 @@ struct Entry {
     attempt: u64,
     grant_bytes: i64,
     used_bytes: i64,
+    /// Authorized for writes that have not landed yet. Debited when the
+    /// write settles, so N consecutive writes between two measurements each
+    /// consume allowance instead of all passing the same stale comparison.
+    pending_bytes: i64,
+    /// Landed since the last complete measurement. Folded in until a scan
+    /// subsumes it, so the window between a write and the next directory
+    /// walk is charged rather than free.
+    written_bytes: i64,
     pins: HashMap<PinObject, PinGroup>,
     /// Registered scratch writers that have not proven they can no longer
     /// write. Retirement fences new ones and waits for these.
@@ -187,14 +201,21 @@ impl Entry {
             .fold(0_i64, |total, group| total.saturating_add(group.bytes))
     }
 
+    /// Everything this incarnation has, owes or is authorized to make.
+    fn materialized(&self) -> i64 {
+        self.used_bytes
+            .saturating_add(self.written_bytes)
+            .saturating_add(self.pending_bytes)
+    }
+
     fn charge(&self) -> i64 {
         self.grant_bytes
-            .max(self.used_bytes)
+            .max(self.materialized())
             .saturating_add(self.pinned_extra())
     }
 
     fn grant_unused(&self) -> i64 {
-        (self.grant_bytes - self.used_bytes).max(0)
+        (self.grant_bytes - self.materialized()).max(0)
     }
 
     /// Nothing can write here, nothing is linked, nobody is reading, and
@@ -202,7 +223,7 @@ impl Entry {
     /// state in which forgetting the entry is honest.
     fn releasable(&self) -> bool {
         self.writers == 0
-            && self.used_bytes == 0
+            && self.materialized() == 0
             && self.grant_bytes == 0
             && self.pins.is_empty()
             && (self.owner_dropped || self.lifecycle == ScratchLifecycle::Releasing)
@@ -286,6 +307,8 @@ impl ScratchLedger {
                 attempt: 0,
                 grant_bytes: grant,
                 used_bytes: 0,
+                pending_bytes: 0,
+                written_bytes: 0,
                 pins: HashMap::new(),
                 writers: 0,
                 next_writer: 1,
@@ -360,6 +383,10 @@ impl ScratchLedger {
         drop(state);
         if settled {
             barrier.notify_waiters();
+            // An entry whose names were already released while a writer was
+            // still registered becomes collectable only now. Nothing else
+            // would ever look at it again.
+            self.collect(key);
         }
     }
 
@@ -405,6 +432,9 @@ impl ScratchLedger {
         let mut state = self.lock();
         if let Some(entry) = state.entries.get_mut(&key) {
             entry.used_bytes = bytes.max(0);
+            // The walk saw the directory as it is now, so everything that had
+            // landed is in that number. Writes still in flight are not.
+            entry.written_bytes = 0;
         }
         state.touch();
     }
@@ -437,6 +467,7 @@ impl ScratchLedger {
         }
         let measured = bytes.max(0);
         entry.used_bytes = measured;
+        entry.written_bytes = 0;
         entry.grant_bytes = measured;
         entry.conservative_reason = None;
         if entry.lifecycle == ScratchLifecycle::Retiring {
@@ -477,7 +508,9 @@ impl ScratchLedger {
         }
         let before = entry.charge();
         let raised = entry.grant_bytes.checked_add(additional)?;
-        let after = raised.max(entry.used_bytes).saturating_add(entry.pinned_extra());
+        let after = raised
+            .max(entry.materialized())
+            .saturating_add(entry.pinned_extra());
         if configured > 0 {
             let projected = charged
                 .saturating_sub(before)
@@ -515,12 +548,16 @@ impl ScratchLedger {
             return false;
         }
         let before = entry.charge();
+        // Never below what is already materialized or authorized: pulling the
+        // ceiling in under an in-flight write would hand the budget capacity
+        // a writer is about to spend, and two starts would then be admitted
+        // against the same bytes.
         let wanted = entry
             .used_bytes
             .saturating_add(envelope.max(0))
-            .max(entry.used_bytes);
+            .max(entry.materialized());
         let after = wanted
-            .max(entry.used_bytes)
+            .max(entry.materialized())
             .saturating_add(entry.pinned_extra());
         if configured > 0 {
             let projected = charged
@@ -541,38 +578,81 @@ impl ScratchLedger {
         true
     }
 
-    /// Reserve `bytes` of the already-granted, not-yet-used allowance for one
-    /// imminent write, or grow to cover it. Returns false when neither is
-    /// possible, which is the writer's signal to backpressure rather than
-    /// write.
+    /// Reserve `bytes` for one imminent write, growing the ceiling if the
+    /// budget allows, and hold the reservation until the write settles.
+    ///
+    /// This is the whole write bound. It debits `pending_bytes` under the
+    /// same lock that checks the allowance, so N consecutive writes between
+    /// two directory walks each consume capacity rather than all passing the
+    /// same stale comparison — which is what makes "the writer waits" true
+    /// rather than "the writer waits once per scan interval".
+    ///
+    /// `None` is the signal to backpressure. A fenced allocation always
+    /// refuses: retirement has decided nothing more may be written here, and
+    /// a writer parked on a grant that can never be issued is a stall.
     pub(crate) fn authorize_write(
-        &self,
+        self: &Arc<Self>,
         key: ScratchKey,
         bytes: i64,
         configured: i64,
         headroom: i64,
-    ) -> bool {
-        if bytes <= 0 {
-            return true;
-        }
-        {
-            let state = self.lock();
-            let Some(entry) = state.entries.get(&key) else {
-                return false;
-            };
-            if entry.grant_unused() >= bytes {
-                return true;
-            }
-        }
+    ) -> Option<ScratchWrite> {
+        let bytes = bytes.max(0);
         let shortfall = {
-            let state = self.lock();
-            let Some(entry) = state.entries.get(&key) else {
-                return false;
-            };
+            let mut state = self.lock();
+            let entry = state.entries.get_mut(&key)?;
+            if entry.writers_fenced {
+                return None;
+            }
+            if entry.grant_unused() >= bytes {
+                entry.pending_bytes = entry.pending_bytes.saturating_add(bytes);
+                state.touch();
+                return Some(ScratchWrite {
+                    ledger: Arc::clone(self),
+                    key,
+                    bytes,
+                    settled: false,
+                });
+            }
             bytes.saturating_sub(entry.grant_unused())
         };
-        self.grow(key, shortfall.saturating_add(headroom.max(0)), configured)
-            .is_some()
+        self.grow(key, shortfall.saturating_add(headroom.max(0)), configured)?;
+        let mut state = self.lock();
+        let entry = state.entries.get_mut(&key)?;
+        if entry.writers_fenced || entry.grant_unused() < bytes {
+            // A concurrent regrant or fence moved under us between the grow
+            // and here. Refuse rather than write into space the ledger did
+            // not keep.
+            return None;
+        }
+        entry.pending_bytes = entry.pending_bytes.saturating_add(bytes);
+        state.touch();
+        drop(state);
+        Some(ScratchWrite {
+            ledger: Arc::clone(self),
+            key,
+            bytes,
+            settled: false,
+        })
+    }
+
+    /// The write landed (or did not). Move the reservation out of
+    /// `pending_bytes`; a write that produced bytes keeps them charged until
+    /// the next complete measurement subsumes them.
+    fn settle_write(&self, key: ScratchKey, bytes: i64, written: i64) {
+        let mut state = self.lock();
+        if let Some(entry) = state.entries.get_mut(&key) {
+            entry.pending_bytes = (entry.pending_bytes - bytes).max(0);
+            entry.written_bytes = entry.written_bytes.saturating_add(written.max(0));
+        }
+        state.touch();
+    }
+
+    pub(crate) fn writers_fenced(&self, key: ScratchKey) -> bool {
+        self.lock()
+            .entries
+            .get(&key)
+            .is_none_or(|entry| entry.writers_fenced)
     }
 
     /// Track an object an accepted read has opened. Concurrent range readers
@@ -592,10 +672,14 @@ impl ScratchLedger {
         };
         let mut state = self.lock();
         let entry = state.entries.get_mut(&key)?;
+        // A pin taken after cleanup has removed the names is an
+        // unlinked-but-open object from the start: the directory walk can
+        // never see it again, so it has to carry its own charge.
+        let linked = entry.lifecycle != ScratchLifecycle::Releasing;
         let group = entry.pins.entry(object.clone()).or_insert(PinGroup {
             bytes,
             readers: 0,
-            linked: true,
+            linked,
         });
         group.readers += 1;
         state.touch();
@@ -638,6 +722,7 @@ impl ScratchLedger {
                 group.linked = false;
             }
             entry.used_bytes = 0;
+            entry.written_bytes = 0;
             entry.grant_bytes = 0;
             entry.lifecycle = ScratchLifecycle::Releasing;
         }
@@ -727,7 +812,7 @@ impl ScratchLedger {
         self.lock()
             .entries
             .get(&key)
-            .is_some_and(|entry| entry.used_bytes >= entry.grant_bytes)
+            .is_some_and(|entry| entry.materialized() >= entry.grant_bytes)
     }
 
     pub(crate) fn grant_of(&self, key: ScratchKey) -> Option<i64> {
@@ -878,6 +963,35 @@ impl WriterBarrier {
             if tokio::time::timeout_at(deadline, waiting).await.is_err() {
                 return ledger.writers_settled(key);
             }
+        }
+    }
+}
+
+/// One authorized, not-yet-landed write.
+///
+/// Held from before the temporary file is created until after the rename,
+/// and settled exactly once: `landed` charges what was actually produced,
+/// dropping it without landing returns the reservation. The bytes it holds
+/// are part of the charge for its whole life, so a second write cannot be
+/// authorized against them.
+pub(crate) struct ScratchWrite {
+    ledger: Arc<ScratchLedger>,
+    key: ScratchKey,
+    bytes: i64,
+    settled: bool,
+}
+
+impl ScratchWrite {
+    pub(crate) fn landed(mut self, written: i64) {
+        self.settled = true;
+        self.ledger.settle_write(self.key, self.bytes, written);
+    }
+}
+
+impl Drop for ScratchWrite {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.ledger.settle_write(self.key, self.bytes, 0);
         }
     }
 }
@@ -1094,9 +1208,9 @@ mod tests {
             "growth must not exceed the budget"
         );
         assert_eq!(ledger.charge_of(key), Some(5_000));
-        assert!(ledger.authorize_write(key, 3_000, 10_000, 0));
+        assert!(ledger.authorize_write(key, 3_000, 10_000, 0).is_some());
         assert!(
-            !ledger.authorize_write(key, 9_000, 10_000, 0),
+            ledger.authorize_write(key, 9_000, 10_000, 0).is_none(),
             "an oversized next slice is refused before it is written"
         );
         drop((small, other));
@@ -1109,8 +1223,70 @@ mod tests {
         let key = permit.key();
         ledger.observe_used(key, 900);
         // 100 unused; a 500-byte slice needs 400 more plus the headroom.
-        assert!(ledger.authorize_write(key, 500, 100_000, 250));
+        let first = ledger
+            .authorize_write(key, 500, 100_000, 250)
+            .expect("growth covers the shortfall");
+        assert_eq!(ledger.grant_of(key), Some(1_650));
         assert_eq!(ledger.charge_of(key), Some(1_650));
+        drop(first);
+        drop(permit);
+    }
+
+    /// The whole write bound in one case: an authorization is *held*, so two
+    /// outstanding writes cannot be satisfied out of the same allowance.
+    ///
+    /// Without the debit both calls compared against the same
+    /// `grant - used`, and `used` only moves on a directory walk — so a
+    /// writer could publish object after object between two walks against a
+    /// single authorization, and "the writer waits" became "the writer waits
+    /// once per poll interval". That is a timing bound wearing a write
+    /// bound's clothes, and it is exactly what the smaller copy-path
+    /// admission rests on not being.
+    #[test]
+    fn scratch_charge_two_writes_cannot_share_one_allowance() {
+        let ledger = ScratchLedger::new();
+        // A budget with no room to grow into, so the allowance is the only
+        // thing that can answer.
+        let permit = ledger.reserve(1_000, 1_000).expect("admission");
+        let key = permit.key();
+
+        let first = ledger
+            .authorize_write(key, 600, 1_000, 0)
+            .expect("the first write fits");
+        assert_eq!(
+            ledger.charge_of(key),
+            Some(1_000),
+            "an authorized write is charged before a single byte is written"
+        );
+        assert!(
+            ledger.authorize_write(key, 600, 1_000, 0).is_none(),
+            "the second cannot have the bytes the first is holding"
+        );
+
+        // Abandoned: the reservation comes back.
+        drop(first);
+        let second = ledger
+            .authorize_write(key, 600, 1_000, 0)
+            .expect("the allowance returned");
+
+        // Landed: the bytes stay charged until a walk subsumes them, so the
+        // window between the write and the next scan is not free either.
+        second.landed(600);
+        assert!(
+            ledger.authorize_write(key, 600, 1_000, 0).is_none(),
+            "bytes that landed are still bytes; the allowance is spent"
+        );
+        assert_eq!(ledger.charge_of(key), Some(1_000));
+        ledger.observe_used(key, 600);
+        assert_eq!(
+            ledger.charge_of(key),
+            Some(1_000),
+            "the walk moves the measurement, not the ceiling"
+        );
+        assert!(
+            ledger.authorize_write(key, 400, 1_000, 0).is_some(),
+            "and what the walk proved is not there is available again"
+        );
         drop(permit);
     }
 
@@ -1163,8 +1339,16 @@ mod tests {
         let permit = ledger.reserve(1_000, 10_000).expect("admission");
         let key = permit.key();
         // A slice bigger than the unused allowance grows the grant.
-        assert!(ledger.authorize_write(key, 2_000, 10_000, 500));
+        let authorized = ledger
+            .authorize_write(key, 2_000, 10_000, 500)
+            .expect("growth covers an oversized slice");
         assert!(ledger.grant_of(key).expect("grant") > 1_000);
+        authorized.landed(1_800);
+        assert_eq!(
+            ledger.charge_of(key),
+            Some(ledger.grant_of(key).expect("grant")),
+            "bytes that landed are charged before the next walk sees them"
+        );
         // Then the producer's own bytes are measured and the envelope is
         // re-granted from them, so the ceiling follows the disk rather than
         // the high-water mark of every write it ever authorized.

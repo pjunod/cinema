@@ -1406,6 +1406,15 @@ const ROLLING_SCRATCH_UNKNOWN_RATE_BYTES: i64 = 256 * 1024 * 1024;
 /// is why only the copy path is admitted with a reduced startup reservation.
 const ROLLING_SCRATCH_ENVELOPE_SAFETY: f64 = 5.0;
 
+/// How far above a title's *average* bitrate its opening is sized.
+///
+/// `MediaFile::bitrate` is ffprobe's `format.bit_rate` — the whole container
+/// averaged over the whole title, all tracks included. A UHD remux's first
+/// reel commonly runs at two to three times that. This is the multiplier on
+/// the startup allowance only; steady-state growth is governed by the write
+/// boundary, which does not need to guess.
+const ROLLING_SCRATCH_STARTUP_PEAK_FACTOR: f64 = 3.0;
+
 /// The evaluation cadence the envelope is sized against.
 ///
 /// Honest about what it is: a *sizing* input, not an enforced deadline. The
@@ -1458,7 +1467,15 @@ fn rolling_startup_bytes(bitrate_bits_per_second: Option<f64>, playback_rate: f6
     else {
         return ROLLING_SCRATCH_UNKNOWN_RATE_BYTES;
     };
-    let media_bytes = (bitrate / 8.0) * (startup_ms as f64 / 1_000.0);
+    // The stored figure is the container's *average* over the whole title,
+    // every track included. An opening reel routinely runs at two or three
+    // times it, and under-sizing the startup allowance is the one case that
+    // cannot be recovered by growing — a session that cannot publish a first
+    // playlist has no client to drain it and nothing to wait for. Pay for
+    // the peak here; the exact write boundary is what stops the cost running
+    // away afterwards.
+    let media_bytes =
+        (bitrate / 8.0) * (startup_ms as f64 / 1_000.0) * ROLLING_SCRATCH_STARTUP_PEAK_FACTOR;
     let envelope = rolling_scratch_envelope(Some(bitrate), playback_rate) as f64;
     let total = media_bytes + envelope;
     if total.is_finite() && total > 0.0 {
@@ -1636,18 +1653,19 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
     let publication_target_seconds =
         (rolling_publication_batch_ms(rolling_playback_rate(demand)) + 999) / 1_000;
     if lease_mode == crate::playback_control::RollingLeaseMode::Legacy {
-        let hard_hold = physical_ahead.and_then(|ahead| {
-            ahead_hold(
-                ahead,
-                global_live_bytes,
-                global_ahead_bytes,
-                AheadLimits {
-                    max_secs: 0,
-                    ..limits
-                },
-                currently_suspended,
-                scratch_grant_exhausted,
-            )
+        let hard_hold = scratch_grant_hold(scratch_grant_exhausted).or_else(|| {
+            physical_ahead.and_then(|ahead| {
+                ahead_hold(
+                    ahead,
+                    global_live_bytes,
+                    global_ahead_bytes,
+                    AheadLimits {
+                        max_secs: 0,
+                        ..limits
+                    },
+                    currently_suspended,
+                )
+            })
         });
         return FlowEvaluation {
             hold: hard_hold.or_else(|| {
@@ -1743,18 +1761,19 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
             seconds: 0,
             bytes: 0,
         }));
-    let hard_hold = ahead_for_limits.and_then(|ahead| {
-        ahead_hold(
-            ahead,
-            global_live_bytes,
-            global_ahead_bytes,
-            AheadLimits {
-                max_secs: 0,
-                ..limits
-            },
-            currently_suspended,
-            scratch_grant_exhausted,
-        )
+    let hard_hold = scratch_grant_hold(scratch_grant_exhausted).or_else(|| {
+        ahead_for_limits.and_then(|ahead| {
+            ahead_hold(
+                ahead,
+                global_live_bytes,
+                global_ahead_bytes,
+                AheadLimits {
+                    max_secs: 0,
+                    ..limits
+                },
+                currently_suspended,
+            )
+        })
     });
     let hold = hard_hold.or_else(|| {
         (!starting)
@@ -1781,25 +1800,28 @@ fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
 /// Byte budgets release at half because they are hard disk bounds. Media-time
 /// pacing is intentionally absent: [`evaluate_flow`] derives it from staged
 /// inventory and the immutable publication clock.
+/// A producer that has materialized everything its ledger entry authorizes
+/// must stop until the budget re-grants.
+///
+/// Deliberately **not** folded into [`ahead_hold`]: that one is reached
+/// through `physical_ahead.and_then(...)`, and `physical_ahead` is `None`
+/// for exactly the session this is about — a copy producer inside its
+/// publish gate has an empty segment index. A capacity hold that evaporates
+/// whenever there is nothing published yet is no hold at all.
+fn scratch_grant_hold(scratch_grant: Option<i64>) -> Option<AheadHold> {
+    scratch_grant.map(|release_value| AheadHold {
+        reason: AheadHoldReason::Global,
+        release_value,
+    })
+}
+
 fn ahead_hold(
     ahead: Ahead,
     global_live_bytes: i64,
     global_ahead_bytes: i64,
     limits: AheadLimits,
     currently_suspended: bool,
-    scratch_grant: Option<i64>,
 ) -> Option<AheadHold> {
-    // A producer that has materialized everything its ledger entry authorizes
-    // must stop until the budget re-grants. This is the per-session half of
-    // the capacity bound: the global hold below only trips when the *whole*
-    // budget is spent, which a single session outrunning its own growing
-    // reservation need not do.
-    if let Some(grant) = scratch_grant {
-        return Some(AheadHold {
-            reason: AheadHoldReason::Global,
-            release_value: grant,
-        });
-    }
     let half = |limit: i64| limit / 2;
     let byte_limit = |limit: i64| {
         if currently_suspended {
@@ -1853,7 +1875,6 @@ fn should_suspend(
         global_ahead_bytes,
         limits,
         currently_suspended,
-        None,
     )
     .is_some()
 }
@@ -3696,6 +3717,14 @@ fn spawn_retired_presentation_cleanup_owner(
         let mut attempt = 0_u64;
         loop {
             attempt = attempt.saturating_add(1);
+            // Exactness governs the *map entry*, not the directory: `dir` is
+            // this incarnation's own `w-{uuid}` and is shared with nothing.
+            // A session id can be reused, so the map row can be overwritten
+            // by a successor while this owner is still retrying a failing
+            // unlink -- and returning here would abandon a charged ledger
+            // entry whose last `Arc<Session>` is about to drop, leaving bytes
+            // charged for the life of the process with nobody able to
+            // release them. Clean our own directory either way.
             let exact = retired_presentations
                 .lock()
                 .await
@@ -3704,9 +3733,6 @@ fn spawn_retired_presentation_cleanup_owner(
                     current.producer_attempt == retired.producer_attempt
                         && Arc::ptr_eq(&current.session, &retired.session)
                 });
-            if !exact {
-                return;
-            }
             let cleanup = tokio::time::timeout(ROLLING_SCRATCH_CLEANUP_ATTEMPT, async {
                 clear_session_dir(&retired.session.dir).await?;
                 match tokio::fs::remove_dir_all(&retired.session.dir).await {
@@ -3723,9 +3749,9 @@ fn spawn_retired_presentation_cleanup_owner(
                         && Arc::ptr_eq(&current.session, &retired.session)
                 }) {
                     presentations.remove(&session_id);
-                    retired.session.live_bytes.store(0, Release);
-                    retired.session.retention_garbage_bytes.store(0, Release);
                 }
+                retired.session.live_bytes.store(0, Release);
+                retired.session.retention_garbage_bytes.store(0, Release);
                 drop(presentations);
                 // The names are gone. Anything an accepted read still holds
                 // open keeps its own charge; the rest is released once, and
@@ -3738,6 +3764,7 @@ fn spawn_retired_presentation_cleanup_owner(
                 session = %session_log_id(&session_id),
                 path = %retired.session.dir.display(),
                 attempt,
+                superseded = !exact,
                 "retired rolling object cleanup failed; promises remain charged for retry"
             );
             tokio::time::sleep(ROLLING_SCRATCH_CLEANUP_RETRY).await;
@@ -5035,10 +5062,31 @@ fn spawn_copy_reader_owner(
         // It belongs to the worker and not to this outer owner: the actor may
         // reject a late classification as `SessionEnded`, and that rejection
         // says nothing about whether the worker has stopped writing.
-        let writer = session
-            .scratch
-            .as_ref()
-            .and_then(|permit| permit.ledger().register_writer(permit.key()));
+        let writer = match session.scratch.as_ref() {
+            Some(permit) => match permit.ledger().register_writer(permit.key()) {
+                Some(writer) => Some(writer),
+                None => {
+                    // Retirement fenced this allocation before the worker was
+                    // polled. `None` means "do not start writing", and
+                    // starting anyway would put bytes into a directory whose
+                    // final inventory has already been measured and committed.
+                    tracing::debug!(
+                        session = %session_log_id(&sid),
+                        producer_attempt,
+                        "copy reader refused: this incarnation was retired before it could write"
+                    );
+                    publish_copy_reader_outcome(
+                        &session,
+                        &sid,
+                        producer_attempt,
+                        copyseg::Outcome::Cancelled(Default::default()),
+                    )
+                    .await;
+                    return;
+                }
+            },
+            None => None,
+        };
         let worker = tokio::spawn(async move {
             let _writer = writer;
             let mut stdout = reader_stdout.lock_owned().await;
@@ -6937,10 +6985,12 @@ impl Session {
     ///
     /// Session scratch is one flat directory: `init.mp4`, `index.m3u8`, the
     /// segment objects, their `*.tmp` staging names and the
-    /// `.plurx-retention-*` renames are all regular files at its top level,
-    /// and `metadata()` follows a symlink to the thing it points at, so a
-    /// link planted there is charged for its target's apparent length rather
-    /// than skipped. Nothing writes a subdirectory here.
+    /// `.plurx-retention-*` renames are all regular files at its top level.
+    /// Nothing writes a subdirectory here, and nothing writes a symlink —
+    /// `DirEntry::metadata` does not traverse one, so `is_file()` is false
+    /// for a link and it is skipped rather than charged for its target. That
+    /// undercounts a thing this directory never contains; it is recorded
+    /// because a reader deserves to know which way the scanner is wrong.
     ///
     /// The sum is `metadata.len()` — apparent length in this namespace, not
     /// `st_blocks` and not a claim about physical reclamation.
@@ -7366,6 +7416,37 @@ impl Session {
         // Not yet retired: `prepare_retired_object_promise` reads the
         // recorded release time above when it publishes.
         self.retired_release.shorten_to(deadline)
+    }
+
+    /// Bring every per-object grace deadline in with the promise.
+    ///
+    /// Without this the cleanup owner deletes at the shortened deadline while
+    /// the segment index still advertises the old one, so a read admitted in
+    /// between opens a file that is already gone and answers a bare miss
+    /// instead of the retired/gone answer the contract specifies. Reads
+    /// already accepted are untouched: they hold an open descriptor and a
+    /// ledger pin, and neither is a deadline.
+    async fn shorten_object_grace(&self, deadline: Instant) {
+        let mut segments = self.segments.lock().await;
+        let mut moved = false;
+        for segment in &mut segments.segs {
+            if let SegmentVisibility::Grace {
+                removed_at,
+                serve_until,
+            } = segment.visibility
+            {
+                if serve_until > deadline {
+                    segment.visibility = SegmentVisibility::Grace {
+                        removed_at,
+                        serve_until: deadline,
+                    };
+                    moved = true;
+                }
+            }
+        }
+        if moved {
+            segments.revision = segments.revision.wrapping_add(1);
+        }
     }
 
     /// The identity a reservation against the recovery ledger is keyed by,
@@ -26663,6 +26744,17 @@ impl TranscodeManager {
             return None;
         }
         let shortened = session.accept_exact_release(Instant::now(), class);
+        if let Some(deadline) = shortened {
+            // Everything that decides whether a read is admitted moves with
+            // the promise, or cleanup would outrun the serve gate.
+            session.shorten_object_grace(deadline).await;
+            let mut retired = self.retired_presentations.lock().await;
+            if let Some(entry) = retired.get_mut(session_id) {
+                if Arc::ptr_eq(&entry.session, &session) && entry.serve_until > deadline {
+                    entry.serve_until = deadline;
+                }
+            }
+        }
         tracing::debug!(
             session = %session_log_id(session_id),
             class = class.label(),
@@ -27135,6 +27227,12 @@ fn ensure_retention_cleanup(session: &Session) {
     let active = Arc::clone(&session.retention_cleanup_active);
     let garbage_bytes = Arc::clone(&session.retention_garbage_bytes);
     let live_bytes = Arc::clone(&session.live_bytes);
+    // The ledger entry outlives this Session's registry membership, so the
+    // detached worker carries the key rather than a reference to the session.
+    let scratch = session
+        .scratch
+        .as_ref()
+        .map(|permit| (Arc::clone(permit.ledger()), permit.key()));
     tokio::spawn(async move {
         #[cfg(test)]
         if let Some(pause) = &cleanup_pause {
@@ -27193,7 +27291,11 @@ fn ensure_retention_cleanup(session: &Session) {
             {
                 let bytes = queued.remove(position).1;
                 garbage_bytes.store(garbage_bytes.load(Relaxed).saturating_sub(bytes), Release);
-                live_bytes.store(live_bytes.load(Relaxed).saturating_sub(bytes), Release);
+                let live = live_bytes.load(Relaxed).saturating_sub(bytes);
+                live_bytes.store(live, Release);
+                if let Some((ledger, key)) = scratch.as_ref() {
+                    ledger.observe_used(*key, live);
+                }
             }
         }
         active.store(false, Release);
@@ -27348,9 +27450,13 @@ async fn gc_expired_segments(session: &Session) {
             .store(garbage_bytes, Release);
         // Rename changes served ownership, not disk use. Keep every handed-off
         // byte charged until detached cleanup confirms the path is absent.
-        session
-            .live_bytes
-            .store(index.total_bytes().saturating_add(garbage_bytes), Relaxed);
+        let live = index.total_bytes().saturating_add(garbage_bytes);
+        session.live_bytes.store(live, Relaxed);
+        // And say so in the ledger in the same breath. The periodic walk
+        // would find these files anyway -- they are regular files in the same
+        // flat directory -- but "anyway" is up to a poll interval away, and
+        // the global cap is compared against the ledger on every admission.
+        session.observe_scratch_bytes(live);
     }
     drop(index);
     drop(producer_transition);
@@ -35576,16 +35682,16 @@ pub(crate) mod tests {
         assert!(!should_suspend(secs(10_000), 1 << 40, 1 << 40, off, false));
         assert!(!should_suspend(secs(10_000), 1 << 40, 1 << 40, off, true));
 
-        assert_eq!(ahead_hold(secs(151), 0, 0, limits, true, None), None);
+        assert_eq!(ahead_hold(secs(151), 0, 0, limits, true), None);
         assert_eq!(
-            ahead_hold(bytes(1_001), 0, 0, limits, true, None),
+            ahead_hold(bytes(1_001), 0, 0, limits, true),
             Some(AheadHold {
                 reason: AheadHoldReason::Bytes,
                 release_value: 1_000,
             })
         );
         assert_eq!(
-            ahead_hold(secs(10), 8_001, 4_001, limits, true, None),
+            ahead_hold(secs(10), 8_001, 4_001, limits, true),
             Some(AheadHold {
                 reason: AheadHoldReason::Global,
                 release_value: 4_000,
@@ -35637,7 +35743,7 @@ pub(crate) mod tests {
             global_max_bytes: 8_000,
         };
         assert_eq!(
-            ahead_hold(Ahead::default(), global_live, global_ahead, limits, true, None),
+            ahead_hold(Ahead::default(), global_live, global_ahead, limits, true),
             None,
             "retained floors above the 4,000-byte release line are not a permanent hold"
         );
@@ -38071,7 +38177,26 @@ pub(crate) mod tests {
 
         let dir = crate::test_tempdir().expect("tempdir");
         seeded_session_dir(dir.path(), 40, 4.0).await;
-        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        // Built against the manager's own ledger, because the global cap is
+        // the ledger now: a fixture with no admission contributes nothing,
+        // and this test exists to prove failed physical deletion stays inside
+        // the cap.
+        let ledger_store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = TranscodeManager::new(
+            ledger_store,
+            dir.path().join("manager-work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let mut fixture = test_session(dir.path().to_path_buf());
+        fixture.scratch = Some(
+            manager
+                .scratch_ledger
+                .reserve(0, HLS_SCRATCH_MAX_BYTES_DEFAULT)
+                .expect("fixture admission")
+                .bound_to("failed-garbage", 0),
+        );
+        let session = Arc::new(fixture);
         session.refresh_segments().await;
         session.fetched_end_ms.store(300_000, Relaxed);
         let pause = Arc::new(tokio::sync::Barrier::new(2));
@@ -38124,13 +38249,6 @@ pub(crate) mod tests {
             session.live_bytes.load(Acquire),
             retained_bytes + charged_garbage,
             "failed physical deletion remains included in the hard scratch cap"
-        );
-        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let manager = TranscodeManager::new(
-            store,
-            dir.path().join("manager-work"),
-            EncoderCaps::default(),
-            Pipeline::Cpu,
         );
         manager
             .sessions

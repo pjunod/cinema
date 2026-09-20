@@ -1054,6 +1054,13 @@ fn worker_session_request_fields_are_valid(request: &SessionRequest) -> bool {
             .previous_session_id
             .as_deref()
             .is_none_or(|value| uuid::Uuid::parse_str(value).is_ok())
+        // Bounded on the peer wire too, not only at public ingress: a relayed
+        // envelope reaches the durable recipe by a different door, and an
+        // unbounded string there would still end up in a log line.
+        && request
+            .transport
+            .as_deref()
+            .is_none_or(crate::transcode::session_transport_is_valid)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

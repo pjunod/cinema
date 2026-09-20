@@ -215,7 +215,7 @@ impl WriteGrants {
         }
     }
 
-    fn authorize(&self, bytes: usize) -> bool {
+    fn authorize(&self, bytes: usize) -> Option<crate::scratch_ledger::ScratchWrite> {
         self.ledger.authorize_write(
             self.key,
             i64::try_from(bytes).unwrap_or(i64::MAX),
@@ -224,16 +224,28 @@ impl WriteGrants {
             self.headroom,
         )
     }
+
+    /// Retirement has decided nothing more may be written here. A writer
+    /// parked waiting for a grant that can never be issued is a stall, and a
+    /// stall holds the whole conservative producer charge for as long as it
+    /// lasts.
+    fn fenced(&self) -> bool {
+        self.ledger.writers_fenced(self.key)
+    }
 }
 
-/// How long a writer waits for the budget before it gives up.
+/// How long a writer waits for the budget before a session that has never
+/// published gives up.
 ///
 /// Waiting is right: the global budget frees as other sessions retire and as
 /// retention prunes, and holding a completed slice in memory for a few
-/// seconds is far better than failing a playing stream. Waiting *forever* is
-/// not: a cap too small to publish a first playlist would leave a session
-/// held for a client that has nothing to drain. So the wait is bounded and
-/// its expiry is a classified failure, never a silent stall.
+/// seconds is far better than failing a stream somebody is watching. The
+/// bound exists for one case only — a cap too small to publish a first
+/// playlist, where nobody can ever drain anything and waiting is waiting for
+/// nothing. Once the playlist is out, a parked writer is the same thing as
+/// the flow controller's own hold, and it waits for as long as the session
+/// lives: its idle and startup deadlines already bound that, and retirement
+/// fences it awake.
 const GRANT_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_secs(120);
 const GRANT_WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -295,34 +307,75 @@ impl SessionDir {
     /// asks for the slice twice over rather than pretending the rename is
     /// free.
     async fn publish_file(&self, name: &str, bytes: &[u8]) -> std::io::Result<()> {
-        self.authorize_write(name, bytes.len().saturating_mul(2))
+        let authorized = self
+            .authorize_write(name, bytes.len().saturating_mul(2))
             .await?;
         let tmp = self.dir.join(format!("{name}.tmp"));
-        tokio::fs::write(&tmp, bytes).await?;
-        tokio::fs::rename(&tmp, self.dir.join(name)).await
+        let written = async {
+            tokio::fs::write(&tmp, bytes).await?;
+            tokio::fs::rename(&tmp, self.dir.join(name)).await
+        }
+        .await;
+        // The reservation is held until the rename settles and is then
+        // converted into bytes the ledger knows about, so the window between
+        // the write and the next directory walk is charged rather than free.
+        // A failed write returns the reservation and charges the temporary
+        // file's own length, which cleanup owns.
+        if let Some(authorized) = authorized {
+            // The same length either way. A failed write usually leaves the
+            // temporary file behind at its full length, and a partial one is
+            // still bytes the directory owes, so charging the slice is the
+            // conservative answer and cleanup owns what is actually there.
+            authorized.landed(i64::try_from(bytes.len()).unwrap_or(i64::MAX));
+        }
+        written
     }
 
     /// Wait until the budget authorizes this write, the session goes away, or
     /// the bounded wait expires.
-    async fn authorize_write(&self, name: &str, bytes: usize) -> std::io::Result<()> {
+    async fn authorize_write(
+        &self,
+        name: &str,
+        bytes: usize,
+    ) -> std::io::Result<Option<crate::scratch_ledger::ScratchWrite>> {
         let Some(grants) = self.grants.as_ref() else {
-            return Ok(());
+            return Ok(None);
         };
-        if grants.authorize(bytes) {
-            return Ok(());
+        if let Some(authorized) = grants.authorize(bytes) {
+            return Ok(Some(authorized));
         }
-        let deadline = std::time::Instant::now() + GRANT_WAIT_BUDGET;
+        // Only a session that has never published can wait forever for
+        // nothing, so only that one gets a deadline.
+        let deadline = self
+            .started
+            .then(|| std::time::Instant::now() + GRANT_WAIT_BUDGET);
         let mut waited = std::time::Duration::ZERO;
         loop {
-            if std::time::Instant::now() >= deadline {
+            if deadline.is_some_and(|deadline| std::time::Instant::now() >= deadline) {
+                // Prefixed with the daemon's existing insufficient-capacity
+                // marker, the one `publication_cycle` keys on, so this reads
+                // as what it is rather than as a producer fault. The typed
+                // classification a copy reader can carry is still
+                // `ReaderFailed` — recorded as a limitation rather than
+                // papered over.
                 return Err(std::io::Error::other(format!(
-                    "rolling scratch capacity unavailable: {name} needs {bytes} bytes and the \
-                     global budget did not free any in {}s",
+                    "rolling_insufficient_capacity: {name} needs {bytes} bytes before this \
+                     session can publish anything, and the global budget did not free any in {}s",
                     GRANT_WAIT_BUDGET.as_secs()
                 )));
             }
             tokio::time::sleep(GRANT_WAIT_POLL).await;
             waited += GRANT_WAIT_POLL;
+            // Retirement fenced this allocation while we waited. No grant can
+            // ever be issued now, and holding the writer registered would
+            // keep the whole conservative producer charge alive for the rest
+            // of the wait -- exactly the capacity the fence exists to return.
+            if grants.fenced() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "the copy session was retired while waiting for scratch capacity",
+                ));
+            }
             // Teardown removed the directory under us: this is the session
             // ending, and the caller already treats that as cancellation.
             if session_directory_gone(&self.dir).await {
@@ -331,14 +384,14 @@ impl SessionDir {
                     "the copy session directory was removed while waiting for scratch capacity",
                 ));
             }
-            if grants.authorize(bytes) {
+            if let Some(authorized) = grants.authorize(bytes) {
                 tracing::debug!(
                     object = name,
                     bytes,
                     waited_ms = waited.as_millis(),
                     "copy writer resumed after the scratch budget authorized its next object"
                 );
-                return Ok(());
+                return Ok(Some(authorized));
             }
         }
     }
