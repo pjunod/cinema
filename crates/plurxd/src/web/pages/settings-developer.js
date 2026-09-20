@@ -41,7 +41,13 @@ function devReq(readiness,itemId,reqId,title,detail){
     <p class="devcheck-evidence" data-devev="${esc(key)}">${esc(devReadinessEvidence(found,readiness))}</p>
   </div>`;
 }
+// The last readiness document this page received, so a card that re-renders
+// itself after its own save can redraw its advisory rows instead of dropping
+// them back to "checking…". Set on both the success and the failure path, so
+// "unavailable" survives a save too.
+let DEVELOPER_READINESS=null;
 function applyDeveloperReadiness(readiness){
+  DEVELOPER_READINESS=readiness;
   document.querySelectorAll("[data-devstat]").forEach(node=>{
     const [itemId,reqId]=String(node.getAttribute("data-devstat")).split(":");
     node.innerHTML=devReadinessPill(devReadinessRow(readiness,itemId,reqId),readiness);
@@ -223,28 +229,7 @@ function uiEnableAdvisory(){
   const browser=typeof CSS!=='undefined'&&CSS.supports('display','grid')&&typeof fetch==='function';
   const libs=SETTINGS_DATA&&SETTINGS_DATA.libs;
   const row=(title,state,detail)=>`<div><strong>${esc(title)} · ${esc(state)}</strong><small>${esc(detail)}</small></div>`;
-  return `<section class="card" id="ui-enable"><h2>Enable</h2><p>The updated search and activity layouts are enabled in this build. They need no rollout flag.</p><div class="enable-advisory">${row('Browser support',browser?'Met':'Not confirmed','Responsive layout and API support. This observation is advisory.')}${row('Signed-in account',ME?'Met':'Not confirmed','Watch state and recording visibility use the signed-in account.')}${row('Library data',Array.isArray(libs)?libs.length?'Available':'No libraries configured':'Not loaded','Readable files and accurate metadata make continuation and preview useful. Missing data is shown in context.')}${row('Playback and recording','Your saved choices','Use the controls below to enable recovery, recording, channel playback or quality handoff. Readiness results never override your choice.')}</div><p class="hint">Advisory only: unmet or unknown checks do not hide features or disable enable switches. Existing authorization, file availability and operational safety rules still apply.</p><nav class="watch-browse" aria-label="Enable controls"><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-live-hls')?.scrollIntoView({behavior:'smooth',block:'start'})">Live HLS ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-bittorrent')?.scrollIntoView({behavior:'smooth',block:'start'})">nzbd BitTorrent ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-analysis')?.scrollIntoView({behavior:'smooth',block:'start'})">Content analysis ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-recording')?.scrollIntoView({behavior:'smooth',block:'start'})">Recording ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-channels')?.scrollIntoView({behavior:'smooth',block:'start'})">Library channels ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-quality')?.scrollIntoView({behavior:'smooth',block:'start'})">Quality handoff ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-hevc-sample-entry')?.scrollIntoView({behavior:'smooth',block:'start'})">HEVC admission ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-source-probe')?.scrollIntoView({behavior:'smooth',block:'start'})">Source verification ↓</a></nav></section>`;
-}
-function nzbdBittorrentEnableCard(){
-  return setCard(`${cardHead("nzbd BitTorrent",
-      "What a single-node nzbd deployment needs before its peer session is enabled.",
-      `<span class="pill">advisory</span>`)}
-      <div class="hint"><b>Enablement belongs to nzbd.</b> Set <code>[torrent].enabled = true</code> in nzbd Settings after reviewing these rows. Plurx never changes that setting and never blocks it.</div>
-      <details class="setdetails" open><summary>Safe enablement and current evidence</summary><div class="setdetails-body">
-      ${devStaticReq("Single-node nzbd runtime","supported",
-        "The nzbd single-node v1 backend owns native admission, restart recovery, seeding, explicit payload deletion and the qBittorrent Web API 2.8.1 routes Sonarr and Radarr use.","ok")}
-      ${devStaticReq("Cluster exclusion","not observable",
-        "Torrent ownership is single-node in the first release. nzbd rejects startup when BitTorrent and cluster mode are both enabled; this Plurx process cannot inspect the nzbd configuration.")}
-      ${devStaticReq("Peer port and public discovery","not observable",
-        "Publish the configured TCP peer port only where intended. DHT and PEX disclose swarm participation; a SOCKS proxy is not a VPN kill switch, and proxy use requires DHT off.")}
-      ${devStaticReq("Durable payload storage","not observable",
-        "The torrent payload and state roots need durable free space, stable mounts and identical import-path mapping in nzbd and the media manager. Completed payload stays immutable while seeding.")}
-      ${devStaticReq("Seeding policy","not observable",
-        "The default is unlimited upload and seed time. Choose an upload ceiling, ratio or time when indefinite seeding is not intended; reaching a limit pauses and retains data.")}
-      ${devStaticReq("Release qualification","not reported",
-        "Enable only a reviewed nzbd build whose fast qualification and deployment-specific port, mount, restart and deletion checks are green. Plurx has no credential or probe for that external service.","warn")}
-      <p class="devcheck-note">Advisory only. Unmet, unavailable and unobservable rows do not disable nzbd's switch or hide any Plurx feature. Existing network, filesystem and authorization rules still apply.</p>
-      </div></details>`);
+  return `<section class="card" id="ui-enable"><h2>Enable</h2><p>The updated search and activity layouts are enabled in this build. They need no rollout flag.</p><div class="enable-advisory">${row('Browser support',browser?'Met':'Not confirmed','Responsive layout and API support. This observation is advisory.')}${row('Signed-in account',ME?'Met':'Not confirmed','Watch state and recording visibility use the signed-in account.')}${row('Library data',Array.isArray(libs)?libs.length?'Available':'No libraries configured':'Not loaded','Readable files and accurate metadata make continuation and preview useful. Missing data is shown in context.')}${row('Playback and recording','Your saved choices','Use the controls below to enable recovery, recording, channel playback or quality handoff. Readiness results never override your choice.')}</div><p class="hint">Advisory only: unmet or unknown checks do not hide features or disable enable switches. Existing authorization, file availability and operational safety rules still apply.</p><nav class="watch-browse" aria-label="Enable controls"><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-live-hls')?.scrollIntoView({behavior:'smooth',block:'start'})">Live HLS ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-analysis')?.scrollIntoView({behavior:'smooth',block:'start'})">Content analysis ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-recording')?.scrollIntoView({behavior:'smooth',block:'start'})">Recording ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-channels')?.scrollIntoView({behavior:'smooth',block:'start'})">Library channels ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-quality')?.scrollIntoView({behavior:'smooth',block:'start'})">Quality handoff ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-hevc-sample-entry')?.scrollIntoView({behavior:'smooth',block:'start'})">HEVC admission ↓</a><a href="#/settings/developer" onclick="event.preventDefault();document.getElementById('enable-source-probe')?.scrollIntoView({behavior:'smooth',block:'start'})">Source verification ↓</a></nav></section>`;
 }
 // Source verification compatibility.
 //
@@ -398,7 +383,6 @@ function developerPanel(settings,readiness){
   return `${setHead("Developer","Compatibility controls and device diagnostics.")}
       ${destinations}${uiEnableAdvisory()}
       <div class="setsection" id="enable-live-hls"><h2>Sliding Live HLS</h2><p>Explicit recovery enablement with advisory build, usage and device evidence.</p></div>${liveHlsRecoveryCard(settings,readiness)}
-      <div class="setsection" id="enable-bittorrent"><h2>nzbd BitTorrent</h2><p>External downloader enablement with advisory deployment requirements.</p></div>${nzbdBittorrentEnableCard()}
       <div class="setsection" id="enable-analysis"><h2>Content analysis</h2><p>Explicit enablement for durable selected-video indexing with advisory rollout evidence.</p></div>${contentAnalysisEnableCard(settings,readiness)}
       <div class="setsection" id="enable-recording"><h2>Recording</h2><p>Explicit enablement for capturing the tuner to a disk, with advisory deployment facts.</p></div>${dvrCard(settings,readiness)}
       <div class="setsection" id="enable-channels"><h2>Library channels</h2><p>Explicit playback enablement with advisory deployment facts.</p></div>${libraryChannels}
@@ -408,6 +392,7 @@ function developerPanel(settings,readiness){
       <div class="setsection" id="enable-hevc-sample-entry"><h2>HEVC sample-entry admission</h2><p>Always-on packaging admission with advisory deployment and evidence status.</p></div>${hevcSampleEntryAdmissionCard()}
       <div class="setsection" id="enable-source-probe"><h2>Source verification</h2><p>Always-on probe-compatibility rules with advisory provenance and diagnostics status.</p></div>${sourceProbeCompatibilityCard(readiness)}
       <div class="setsection"><h2>Compatibility</h2><p>Native server and protocol controls for compatible playback clients.</p></div>${windowsServerCard(settings,readiness)}${protocol}
+      <div class="setsection" id="enable-subtitle-refusal"><h2>Subtitle delivery</h2><p>Explicit enablement for refusing a subtitle segment this server cannot produce, with advisory per-engine observations.</p></div>${subtitleNotReadyCard(settings,readiness)}
       <div class="setsection"><h2>Decoder experiments</h2><p>Recovery and cache-policy experiments. Evidence is advisory; saved choices remain authoritative.</p></div>${verifiedDecodeCard(settings)}${decodeRecoveryCard(settings)}<div class="card"><h2>Search and classification</h2><p>Local text search, channel rules and automatic metadata labels are always available. Add optional search by meaning using an embedded model.</p>${devReq(readiness,"embedded_semantic_search","runtime","Embedded CPU runtime","Included in ordinary builds; no inference service is required.")}${devReq(readiness,"embedded_semantic_search","model","Verified model loaded","Enable to download approximately 91 MB once per node.")}${devReq(readiness,"embedded_semantic_search","index","Local semantic index","Indexing uses additional CPU and memory.")}<p class="hint">These observations are advisory. You can enable or disable semantic search at any time.</p><button class="ghost" onclick="showSearchSettings()">Enable and search settings</button></div>`;
 }
 // Automatic decode recovery.
@@ -415,6 +400,35 @@ function developerPanel(settings,readiness){
 // Direct opt-in with advisory evidence. The retained diagnostic-contract
 // coverage still tells an operator how much confidence to place in the
 // decision, but it never disables or overrides the switch.
+// Refusing a subtitle segment whose extraction failed.
+//
+// A not-ready subtitle segment is answered with a valid but empty WebVTT
+// body. While the sidecar is warming that is true. Once the extraction has
+// failed it is a lie, and players keep the bytes in memory whatever
+// `no-store` says — so the viewer is left with a track that is selected,
+// silent, and never going to fill in.
+//
+// The switch is the enable path and the rows below never gate it. They are
+// all `unobservable` on purpose: whether an engine keeps playing video
+// through a subtitle 503 is a measurement on an Apple TV, an Android device
+// and a browser, not something this server can read about itself.
+function subtitleNotReadyCard(s,readiness){
+  const enabled=!!s.subtitle_not_ready_503;
+  const state=enabled
+    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
+    : `<span class="pill">disabled</span>`;
+  return setCard(`${cardHead("Refuse a subtitle segment that failed","Answer 503 with Retry-After when a subtitle track's extraction has failed, instead of an empty subtitle segment the player keeps.",state)}
+      ${togRow("sub503",`Refuse instead of serving an empty subtitle segment <span class="pill warn">experimental</span>`,`Applies immediately to new segment requests. This checkbox is authoritative: an unobserved engine never turns it back off.`,enabled)}
+      <div class="hint"><b>This checkbox is the enable path.</b> The observations below are advisory only. Only a <i>failed</i> extraction is refused; a track that is still warming keeps its empty segment and the client's readiness retry, because "not yet" and "not going to" are different answers.</div>
+      <details class="setdetails" open><summary>What to confirm before enabling</summary><div class="setdetails-body">
+      ${devReq(readiness,"subtitle_not_ready_503","avplayer_survives_subtitle_refusal","AVPlayer keeps the picture","Apple TV and iPad. AVPlayer allows a subtitle segment about two seconds and blocks the muxed video while it waits, so this is the refusal with a picture riding on it. Play a title whose subtitle extraction fails and confirm the video continues.")}
+      ${devReq(readiness,"subtitle_not_ready_503","media3_survives_subtitle_refusal","Media3 keeps the picture","Android. Confirm a refused subtitle rendition surfaces as a text-track problem and not a fatal source error that stops playback.")}
+      ${devReq(readiness,"subtitle_not_ready_503","hlsjs_survives_subtitle_refusal","hls.js keeps the picture","Any browser. Confirm the bundled hls.js treats a 503 with Retry-After on a subtitle rendition as recoverable rather than escalating to a fatal network error.")}
+      <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice. These are device measurements; this server cannot take them for you, which is why all three read "not observable" rather than showing a tick nobody earned.</p>
+      </div></details>
+      <div class="err" id="sub503err" role="alert"></div>
+      ${setCardFoot("saveSubtitleNotReady")}`,{id:"sub503card"});
+}
 function decodeRecoveryCard(s){
   const q=s.decoder_health_qualification||{};
   // FFmpeg's strings again — a build banner and decoder names.

@@ -206,6 +206,43 @@ pub fn subtitle_requires_burn(codec: &str) -> bool {
     !is_native_text_subtitle(codec)
 }
 
+/// Whether the server may pick this subtitle **by itself**, as a default the
+/// viewer never asked for, and expect the viewer to actually see cues.
+///
+/// This is the clients' own long-standing veto — *never auto-start a burn for
+/// a non-forced track; forced may* — said once, server-side, so the server,
+/// the web client, Apple and Android cannot disagree about it. Three routes
+/// qualify:
+///
+/// - a native WebVTT rendition (or sidecar), which costs nothing and changes
+///   no pixels;
+/// - a PGS track while the application overlay is serving it, which is drawn
+///   by the client and likewise changes no video bytes;
+/// - a *forced* bitmap track on a delivery that is already SDR, where the
+///   burn costs an encode the viewer would otherwise not have paid for but
+///   takes no dynamic range away.
+///
+/// ASS/SSA and `mov_text` are deliberately absent. Their only session-mode
+/// route is a burn, and `is_native_text_subtitle` excludes them on purpose
+/// (positioning, typefaces, karaoke do not survive WebVTT). They remain
+/// perfectly selectable *by hand* — this predicate governs what the server
+/// chooses unprompted, not what it will deliver when asked.
+///
+/// `base_is_hdr` is the grade of the delivery **without** any subtitle burn.
+/// It must not be read off a plan that already has the burn applied: that
+/// plan is SDR *because of* the burn, and judging the burn by its own effect
+/// always says yes.
+pub fn deliverable_as_default(
+    codec: &str,
+    forced: bool,
+    overlay_enabled: bool,
+    base_is_hdr: bool,
+) -> bool {
+    is_native_text_subtitle(codec)
+        || (overlay_enabled && is_pgs_subtitle(codec))
+        || (is_bitmap_subtitle(codec) && forced && !base_is_hdr)
+}
+
 fn default_or_first(audio: &[AudioStream]) -> Option<i64> {
     audio
         .iter()
@@ -216,10 +253,23 @@ fn default_or_first(audio: &[AudioStream]) -> Option<i64> {
 
 /// Best full (non-forced) subtitle in a language, falling back to a forced one
 /// in that language.
-fn sub_in_lang<'a>(subs: &'a [SubtitleStream], lang: &str) -> Option<&'a SubtitleStream> {
+///
+/// `eligible` is applied before every `find`, not after the whole rule: a
+/// candidate this delivery cannot show is *skipped*, so the next candidate in
+/// the same rule still gets its turn. Filtering afterwards would turn "the
+/// English SRT is also here" into "no subtitle", which is the defect this
+/// parameter exists to fix.
+fn sub_in_lang<'a>(
+    subs: &'a [SubtitleStream],
+    lang: &str,
+    eligible: &dyn Fn(&SubtitleStream) -> bool,
+) -> Option<&'a SubtitleStream> {
     subs.iter()
-        .find(|s| lang_matches(&s.language, lang) && !s.forced)
-        .or_else(|| subs.iter().find(|s| lang_matches(&s.language, lang)))
+        .find(|s| eligible(s) && lang_matches(&s.language, lang) && !s.forced)
+        .or_else(|| {
+            subs.iter()
+                .find(|s| eligible(s) && lang_matches(&s.language, lang))
+        })
 }
 
 /// The floor: only a forced overlay (or flagged default) in the viewer's
@@ -227,33 +277,74 @@ fn sub_in_lang<'a>(subs: &'a [SubtitleStream], lang: &str) -> Option<&'a Subtitl
 /// forced track as both first and default even while English audio is playing;
 /// burning that track is not a harmless fallback, it is the wrong language.
 /// Untagged tracks remain eligible because there is no contrary information.
-fn forced_or_default(subs: &[SubtitleStream], lang: &str) -> Option<i64> {
+fn forced_or_default(
+    subs: &[SubtitleStream],
+    lang: &str,
+    eligible: &dyn Fn(&SubtitleStream) -> bool,
+) -> Option<i64> {
     subs.iter()
-        .find(|s| s.forced && lang_matches(&s.language, lang))
+        .find(|s| eligible(s) && s.forced && lang_matches(&s.language, lang))
         .or_else(|| {
             subs.iter()
-                .find(|s| s.default && lang_matches(&s.language, lang))
+                .find(|s| eligible(s) && s.default && lang_matches(&s.language, lang))
         })
-        .or_else(|| subs.iter().find(|s| s.forced && s.language.is_none()))
-        .or_else(|| subs.iter().find(|s| s.default && s.language.is_none()))
+        .or_else(|| {
+            subs.iter()
+                .find(|s| eligible(s) && s.forced && s.language.is_none())
+        })
+        .or_else(|| {
+            subs.iter()
+                .find(|s| eligible(s) && s.default && s.language.is_none())
+        })
         .map(|s| s.index)
 }
 
 /// Choose default tracks. See the module docs for the rules.
+///
+/// Every subtitle this picks is deliverable to the viewer by construction —
+/// see [`select_tracks_with`], which this calls with "everything is
+/// eligible". Callers that know what the delivery can actually show should
+/// use that one instead.
 pub fn select_tracks(
     audio: &[AudioStream],
     subs: &[SubtitleStream],
     prefer_original: bool,
     prefs: &LangPrefs,
 ) -> TrackSelection {
+    select_tracks_with(audio, subs, prefer_original, prefs, |_| true)
+}
+
+/// Choose default tracks, skipping subtitles this delivery cannot show.
+///
+/// The rules are [`select_tracks`]'s, unchanged. `eligible` answers one
+/// question — *if the server picks this track by itself, will the viewer see
+/// cues?* — and it is asked before every candidate, in every rule, including
+/// the fallbacks. A track that fails it is skipped, never a veto: the next
+/// candidate in the same rule is tried, then the next rule, then `None`.
+///
+/// This exists because selection used to be codec-blind. A Blu-ray remux with
+/// a `default`-flagged English PGS track and an English SRT beside it had the
+/// PGS stamped as the default; on an HDR base delivery that track can only be
+/// shown by an SDR burn the HDR guard then refuses, so the viewer got the
+/// refusal notice on the web client and silence on the native ones — for a
+/// choice nobody made. `None` is a better answer than an undeliverable
+/// default, and the SRT sitting next to it is better than either.
+pub fn select_tracks_with(
+    audio: &[AudioStream],
+    subs: &[SubtitleStream],
+    prefer_original: bool,
+    prefs: &LangPrefs,
+    eligible: impl Fn(&SubtitleStream) -> bool,
+) -> TrackSelection {
+    let eligible: &dyn Fn(&SubtitleStream) -> bool = &eligible;
     if prefer_original {
         // Prefer Japanese audio; if present, pair it with full subs in the
         // preferred subtitle language (mode is ignored — subs are the point).
         if let Some(jp) = audio.iter().find(|a| lang_is(&a.language, JAPANESE)) {
-            let sub = sub_in_lang(subs, &prefs.sub_lang)
-                .or_else(|| subs.iter().find(|s| s.default))
-                .or_else(|| subs.iter().find(|s| !s.forced))
-                .or_else(|| subs.first());
+            let sub = sub_in_lang(subs, &prefs.sub_lang, eligible)
+                .or_else(|| subs.iter().find(|s| eligible(s) && s.default))
+                .or_else(|| subs.iter().find(|s| eligible(s) && !s.forced))
+                .or_else(|| subs.iter().find(|s| eligible(s)));
             return TrackSelection {
                 audio_index: Some(jp.index),
                 subtitle_index: sub.map(|s| s.index),
@@ -281,19 +372,23 @@ pub fn select_tracks(
 
     let subtitle_index = match prefs.sub_mode {
         SubMode::Off => None,
-        SubMode::Always => sub_in_lang(subs, &prefs.sub_lang)
+        SubMode::Always => sub_in_lang(subs, &prefs.sub_lang, eligible)
             .map(|s| s.index)
-            .or_else(|| subs.iter().find(|s| !s.forced).map(|s| s.index))
-            .or_else(|| forced_or_default(subs, &prefs.sub_lang)),
+            .or_else(|| {
+                subs.iter()
+                    .find(|s| eligible(s) && !s.forced)
+                    .map(|s| s.index)
+            })
+            .or_else(|| forced_or_default(subs, &prefs.sub_lang, eligible)),
         SubMode::Auto => {
             if lang_matches(&audio_lang, &prefs.sub_lang) {
                 // Audio already speaks the preferred language → overlay only.
-                forced_or_default(subs, &prefs.sub_lang)
+                forced_or_default(subs, &prefs.sub_lang, eligible)
             } else {
                 // Foreign audio → full subs in the preferred language.
-                sub_in_lang(subs, &prefs.sub_lang)
+                sub_in_lang(subs, &prefs.sub_lang, eligible)
                     .map(|s| s.index)
-                    .or_else(|| forced_or_default(subs, &prefs.sub_lang))
+                    .or_else(|| forced_or_default(subs, &prefs.sub_lang, eligible))
             }
         }
     };
@@ -460,6 +555,226 @@ mod tests {
             assert!(subtitle_requires_burn(codec), "{codec}");
         }
     }
+    /// A subtitle stream of an arbitrary codec, for the deliverability matrix.
+    fn coded(index: i64, codec: &str, lang: &str, forced: bool, default: bool) -> SubtitleStream {
+        SubtitleStream {
+            index,
+            codec: codec.into(),
+            language: Some(lang.into()),
+            title: None,
+            default,
+            forced,
+            hearing_impaired: false,
+        }
+    }
+
+    /// The predicate `/decision` hands to [`select_tracks_with`], spelled once
+    /// here so the matrix below and the server read the same rule.
+    fn eligible_on(overlay: bool, base_is_hdr: bool) -> impl Fn(&SubtitleStream) -> bool {
+        move |s: &SubtitleStream| deliverable_as_default(&s.codec, s.forced, overlay, base_is_hdr)
+    }
+
+    #[test]
+    fn an_hdr_base_never_defaults_a_burn_only_track_when_text_is_beside_it() {
+        // The reported defect: a Blu-ray remux whose English PGS carries the
+        // container's `default` flag, with a perfectly good English SRT next
+        // to it. Codec-blind selection stamped the PGS.
+        let a = vec![audio(0, "eng", true)];
+        let s = vec![
+            coded(0, "hdmv_pgs_subtitle", "eng", false, true),
+            coded(1, "subrip", "eng", false, false),
+        ];
+        let sel = select_tracks_with(
+            &a,
+            &s,
+            false,
+            &prefs("eng", "eng", SubMode::Always),
+            eligible_on(false, true),
+        );
+        assert_eq!(
+            sel.subtitle_index,
+            Some(1),
+            "the text track beside the bitmap default is what the viewer can see"
+        );
+    }
+
+    #[test]
+    fn an_hdr_base_with_only_a_forced_bitmap_track_selects_nothing() {
+        let a = vec![audio(0, "fre", true)];
+        let s = vec![coded(0, "hdmv_pgs_subtitle", "eng", true, false)];
+        let sel = select_tracks_with(
+            &a,
+            &s,
+            false,
+            &LangPrefs::default(),
+            eligible_on(false, true),
+        );
+        assert_eq!(
+            sel.subtitle_index, None,
+            "no subtitle beats a notice the viewer never asked for"
+        );
+    }
+
+    #[test]
+    fn an_sdr_base_still_defaults_a_forced_bitmap_track() {
+        // The burn costs an encode; it takes no dynamic range away, and a
+        // forced track is signage the viewer needs to follow the film.
+        let a = vec![audio(0, "fre", true)];
+        let s = vec![coded(0, "hdmv_pgs_subtitle", "eng", true, false)];
+        let sel = select_tracks_with(
+            &a,
+            &s,
+            false,
+            &LangPrefs::default(),
+            eligible_on(false, false),
+        );
+        assert_eq!(sel.subtitle_index, Some(0));
+    }
+
+    #[test]
+    fn the_overlay_makes_pgs_selectable_again_even_on_hdr() {
+        let a = vec![audio(0, "eng", true)];
+        let s = vec![coded(0, "hdmv_pgs_subtitle", "eng", false, true)];
+        let sel = select_tracks_with(
+            &a,
+            &s,
+            false,
+            &prefs("eng", "eng", SubMode::Always),
+            eligible_on(true, true),
+        );
+        assert_eq!(
+            sel.subtitle_index,
+            Some(0),
+            "an overlay draws PGS without touching the video bytes"
+        );
+        // VobSub is not PGS: the overlay contract does not cover it.
+        let vob = vec![coded(0, "dvd_subtitle", "eng", false, true)];
+        assert_eq!(
+            select_tracks_with(
+                &a,
+                &vob,
+                false,
+                &prefs("eng", "eng", SubMode::Always),
+                eligible_on(true, true)
+            )
+            .subtitle_index,
+            None
+        );
+    }
+
+    #[test]
+    fn always_mode_with_only_styled_text_selects_nothing() {
+        // ASS/SSA carry text but have no rendition route, so the server
+        // picking one unprompted can only mean a burn. `Always` has three
+        // fallbacks and every one of them must skip it.
+        let a = vec![audio(0, "jpn", true)];
+        let s = vec![
+            coded(0, "ass", "eng", false, true),
+            coded(1, "ssa", "jpn", false, false),
+        ];
+        let sel = select_tracks_with(
+            &a,
+            &s,
+            false,
+            &prefs("eng", "eng", SubMode::Always),
+            eligible_on(false, false),
+        );
+        assert_eq!(sel.subtitle_index, None);
+    }
+
+    #[test]
+    fn anime_original_audio_skips_a_bitmap_default_for_the_text_track() {
+        // `prefer_original` has its own four-deep fallback chain, including a
+        // bare `subs.first()`. Missing one of them is how this case fails.
+        let a = vec![audio(0, "eng", true), audio(1, "jpn", false)];
+        let s = vec![
+            coded(0, "hdmv_pgs_subtitle", "jpn", false, true),
+            coded(1, "subrip", "eng", false, false),
+        ];
+        let sel = select_tracks_with(
+            &a,
+            &s,
+            true,
+            &LangPrefs::default(),
+            eligible_on(false, true),
+        );
+        assert_eq!(sel.audio_index, Some(1));
+        assert_eq!(sel.subtitle_index, Some(1));
+
+        // And with nothing deliverable at all, every fallback declines.
+        let bitmap_only = vec![coded(0, "hdmv_pgs_subtitle", "jpn", false, true)];
+        assert_eq!(
+            select_tracks_with(
+                &a,
+                &bitmap_only,
+                true,
+                &LangPrefs::default(),
+                eligible_on(false, true)
+            )
+            .subtitle_index,
+            None,
+            "the prefer_original fallbacks must not readmit what the rules skipped"
+        );
+    }
+
+    #[test]
+    fn eligibility_skips_a_candidate_rather_than_vetoing_its_rule() {
+        // Inside one rule: the forced English PGS is the first `forced &&
+        // lang` match, and the forced English SRT behind it is the answer.
+        let a = vec![audio(0, "eng", true)];
+        let s = vec![
+            coded(0, "hdmv_pgs_subtitle", "eng", true, false),
+            coded(1, "subrip", "eng", true, false),
+        ];
+        let sel = select_tracks_with(
+            &a,
+            &s,
+            false,
+            &LangPrefs::default(),
+            eligible_on(false, true),
+        );
+        assert_eq!(sel.subtitle_index, Some(1));
+    }
+
+    #[test]
+    fn deliverability_is_the_clients_own_veto_said_once() {
+        // Native text: always, regardless of grade or overlay.
+        for codec in ["subrip", "srt", "webvtt", "vtt"] {
+            for forced in [false, true] {
+                for hdr in [false, true] {
+                    assert!(deliverable_as_default(codec, forced, false, hdr), "{codec}");
+                }
+            }
+        }
+        // Styled text: never, by any route.
+        for codec in ["ass", "ssa", "mov_text"] {
+            assert!(!deliverable_as_default(codec, true, true, false), "{codec}");
+        }
+        // Bitmap: overlay any time it is PGS, else forced-and-SDR only.
+        assert!(deliverable_as_default(
+            "hdmv_pgs_subtitle",
+            false,
+            true,
+            true
+        ));
+        assert!(!deliverable_as_default("dvd_subtitle", false, true, true));
+        assert!(deliverable_as_default("dvd_subtitle", true, false, false));
+        assert!(!deliverable_as_default("dvd_subtitle", false, false, false));
+        assert!(!deliverable_as_default("dvd_subtitle", true, false, true));
+    }
+
+    #[test]
+    fn select_tracks_still_admits_everything() {
+        // The unfiltered wrapper must keep its existing matrix meaning: a
+        // caller with no delivery to judge against changes nothing.
+        let a = vec![audio(0, "eng", true)];
+        let s = vec![coded(0, "hdmv_pgs_subtitle", "eng", false, true)];
+        assert_eq!(
+            select_tracks(&a, &s, false, &prefs("eng", "eng", SubMode::Always)).subtitle_index,
+            Some(0)
+        );
+    }
+
     #[test]
     fn bcp47_tags_come_from_the_alias_table() {
         // ISO 639-2/B is what containers actually write, and it is not a

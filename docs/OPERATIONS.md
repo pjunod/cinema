@@ -3275,6 +3275,27 @@ how far ahead the session is. A held session is normally healthy — it has buil
 everything it is allowed to — but a `global` hold can remain until aggregate
 scratch across other sessions falls below its release point.
 
+### Subtitle segments that failed
+
+A subtitle segment whose cues are not extracted yet answers a valid but empty
+`WEBVTT` body. That is the right answer while the extraction is still warming
+and the wrong one once it has failed: the player keeps the empty track in
+memory and stops asking, so the subtitle is gone for the rest of the session.
+
+| Runtime setting | Default | Meaning |
+|---|---:|---|
+| `playback.subtitle_not_ready_503` | off | Answer `503` with `Retry-After` for a segment whose whole-track extraction has **failed**, instead of an empty `WEBVTT` body. A track that is merely warming still gets the empty segment |
+
+The switch is **Settings → Developer → *Refuse a subtitle segment whose
+extraction failed*** (`subtitle_not_ready_503` in the settings API). Leave it
+off until you have watched the failure on the engine you care about: what a
+player does with a refused subtitle segment is unmeasured here, and AVPlayer,
+Media3, and hls.js each decide for themselves how long to retry and whether one
+503 ends the rendition. The card's three readiness rows report `unobservable`
+and never gate the switch, so the only evidence is a real title whose
+extraction genuinely fails — confirm the player comes back to the track rather
+than abandoning it.
+
 ### Playback telemetry
 
 Performance II stores structured playback observations beside the local

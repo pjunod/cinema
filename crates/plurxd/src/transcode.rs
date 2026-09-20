@@ -13535,11 +13535,19 @@ impl TranscodeManager {
         });
         let geometry_supported =
             (MIN_HEIGHT..=capabilities.max_target_height).contains(&target_height);
+        // The grade with no burn, read before the tracks are chosen, because
+        // it is what decides whether an implicit burn may be chosen at all.
+        let base_grade = self.grade_preview(file, hdr10, target_height, None).await;
         let Tracks {
             audio_index,
             subtitle_burn,
         } = self
-            .select_tracks(file, audio_override, subtitle_override)
+            .select_tracks(
+                file,
+                audio_override,
+                subtitle_override,
+                base_grade == OutputGrade::Hdr10,
+            )
             .await;
         let (encoder, grade) = self
             .encoder_and_grade_for(file, hdr10, target_height, subtitle_burn.is_some())
@@ -14164,16 +14172,24 @@ impl TranscodeManager {
         file: &plurx_core::domain::MediaFile,
         audio_override: Option<i64>,
         subtitle_override: Option<i64>,
+        base_is_hdr: bool,
     ) -> Tracks {
         let prefs = self.lang_prefs().await;
-        Self::select_tracks_with_prefs(file, audio_override, subtitle_override, &prefs)
+        Self::select_tracks_with_prefs(file, audio_override, subtitle_override, &prefs, base_is_hdr)
     }
 
+    /// `base_is_hdr` is whether the session this request would build delivers
+    /// HDR **without** a subtitle burn — see
+    /// [`plurx_core::playback::burn_would_discard_hdr`]. It is what stops the
+    /// implicit anime pick below tone-mapping a Dolby Vision remux to draw a
+    /// subtitle nobody selected: the viewer never asked, so they never get the
+    /// choice the clients' own HDR guard would have given them.
     fn select_tracks_with_prefs(
         file: &plurx_core::domain::MediaFile,
         audio_override: Option<i64>,
         subtitle_override: Option<i64>,
         prefs: &plurx_core::tracks::LangPrefs,
+        base_is_hdr: bool,
     ) -> Tracks {
         // Prefer original (Japanese) audio + subs when the file is dual-audio
         // anime-style (REQ-SUB-2), and honour the server-wide language
@@ -14185,6 +14201,14 @@ impl TranscodeManager {
         // so a `JPN` dual-audio file was advertised as Japanese by all three
         // of those surfaces and then played as English by this one.
         let prefer_original = plurx_core::tracks::prefers_original_audio(&file.audio_streams);
+        // Unfiltered, deliberately. `deliverable_as_default` answers "would the
+        // viewer see cues *without* a burn", and this is the one caller whose
+        // job is to burn — REQ-SUB-2's whole point is that a dual-audio anime
+        // release carries one ASS track and the server draws it. Handing that
+        // predicate to the pick here would make `subtitle_index` skip every
+        // ASS/SSA track, and the `subtitle_requires_burn` filter below would
+        // strip whatever was left, so the anime rule would silently select
+        // Japanese audio and no subtitles at all.
         let selection = plurx_core::tracks::select_tracks(
             &file.audio_streams,
             &file.subtitle_streams,
@@ -14205,6 +14229,14 @@ impl TranscodeManager {
                         .get(*idx as usize)
                         .is_some_and(|s| plurx_core::tracks::subtitle_requires_burn(&s.codec))
                 })
+                // The guess may not cost the viewer their dynamic range. An
+                // implicit burn on a delivery that would otherwise be HDR is
+                // the M1 defect in this second place: nobody asked for the
+                // subtitle, so nobody gets the choice the clients' own HDR
+                // guard would have offered. Refused means no subtitle, never a
+                // downgrade. An explicit override above is untouched — that
+                // one the viewer did ask for, and session creation judges it.
+                .filter(|_| !base_is_hdr)
         });
         Tracks {
             audio_index: audio_override.or(selection.audio_index),
@@ -14234,7 +14266,9 @@ impl TranscodeManager {
         &self,
         file: &plurx_core::domain::MediaFile,
     ) -> Option<i64> {
-        self.select_tracks(file, None, None).await.audio_index
+        self.select_tracks(file, None, None, false)
+            .await
+            .audio_index
     }
 
     /// Whether this file needs RPU-driven reshaping rather than the ordinary
@@ -14422,6 +14456,40 @@ impl TranscodeManager {
             return Ok(OutputGrade::Sdr);
         }
         Ok(OutputGrade::Hdr10)
+    }
+
+    /// The grade a session would deliver, without building one.
+    ///
+    /// A projection of [`Self::encoder_and_grade_for`] rather than a second
+    /// resolver: the encoder and the grade are one measured route, and a
+    /// preview that re-derived the grade on its own is exactly the drift seam
+    /// `resolve_plan`'s doc warns about. Callers that only need the grade get
+    /// the same answer `start` will, because it is literally the same call.
+    ///
+    /// `subtitle_burn: None` asks the question the HDR subtitle guard needs —
+    /// *what would this session deliver with no burn?* — which is the only
+    /// grade a burn may be judged against. Passing the burn here instead
+    /// always answers `Sdr`, because a burn tone-maps by design.
+    ///
+    /// An encoder the node cannot resolve degrades to `Sdr`, the same way
+    /// every refusal inside `hdr10_grade_for` does: a grade nobody can prove
+    /// is not an HDR delivery, so a burn into it takes nothing away.
+    pub(crate) async fn grade_preview(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        requested_hdr10: bool,
+        target_height: i64,
+        subtitle_burn: Option<i64>,
+    ) -> OutputGrade {
+        self.encoder_and_grade_for(
+            file,
+            requested_hdr10,
+            target_height,
+            subtitle_burn.is_some_and(|index| index >= 0),
+        )
+        .await
+        .map(|(_, grade)| grade)
+        .unwrap_or(OutputGrade::Sdr)
     }
 
     /// Resolve grade and encoder together. The HDR filter and encoder are one
@@ -15870,7 +15938,18 @@ impl TranscodeManager {
         let Tracks {
             audio_index,
             subtitle_burn,
-        } = Self::select_tracks_with_prefs(file, None, None, &policy.prefs);
+        } = Self::select_tracks_with_prefs(
+            file,
+            None,
+            None,
+            &policy.prefs,
+            // A speculative artifact is an SDR ladder rung: nothing here asks
+            // for the HDR10 grade, so `hdr10_grade_for` answers `Sdr` on its
+            // second line and there is no grade to lose. Asking `grade_preview`
+            // would be a store read and, on a Profile 5 source with a cold
+            // proof cache, an ffmpeg pass — to compute a constant.
+            false,
+        );
         let opts = self.speculative_producer_options(
             policy.rate_control,
             encoder,
@@ -20256,11 +20335,20 @@ impl TranscodeManager {
         // the cache lookup below needs the answer — two sessions differing only
         // in audio track are different bytes, and a cache that ignored that
         // would serve the wrong language.
+        // The grade with no burn. Read before the tracks, because whether the
+        // implicit pick may be a burn at all depends on what this session
+        // would otherwise be delivering.
+        let base_grade = self.grade_preview(&file, hdr10, target_height, None).await;
         let Tracks {
             audio_index,
             subtitle_burn,
         } = self
-            .select_tracks(&file, audio_override, subtitle_override)
+            .select_tracks(
+                &file,
+                audio_override,
+                subtitle_override,
+                base_grade == OutputGrade::Hdr10,
+            )
             .await;
 
         // The cache, before anything is claimed. A hit needs no encoder, no
@@ -21023,8 +21111,23 @@ impl TranscodeManager {
         // default, so silently falling back to ffmpeg's first stream here can
         // make the player show English while the session carries (for example)
         // an Italian container default. An explicit viewer choice still wins.
+        // A copy session burns nothing — only the audio index is read here —
+        // but the fact is reported honestly rather than defaulted, so the one
+        // predicate cannot be handed a lie at any call site. A copy delivers
+        // the source's own grade, which is `Sdr`'s row in
+        // `delivered_dynamic_range` for an SDR file and the source grade for
+        // an HDR one.
+        let copy_delivers_hdr = plurx_core::playback::burn_would_discard_hdr(
+            plurx_core::playback::delivered_dynamic_range(
+                &file,
+                plurx_core::playback::PlaybackMethod::Remux,
+                options.preserve_dolby_vision,
+                OutputGrade::Sdr,
+            ),
+            true,
+        );
         let audio_index = self
-            .select_tracks(&file, audio_override, None)
+            .select_tracks(&file, audio_override, None, copy_delivers_hdr)
             .await
             .audio_index;
         let item_title = self
@@ -30252,7 +30355,7 @@ pub(crate) mod tests {
         let Tracks {
             audio_index,
             subtitle_burn,
-        } = mgr.select_tracks(&file, None, None).await;
+        } = mgr.select_tracks(&file, None, None, false).await;
         let live = mgr.live_lookup_options(
             captured,
             encoder,
@@ -46839,6 +46942,116 @@ scope = "test"
     /// throw away the checkpoint every time and rehash the whole film, which
     /// on a long title is the difference between finishing and never
     /// finishing.
+    /// The anime rule's two halves, on the shape that broke each of them.
+    ///
+    /// `select_tracks_with_prefs` is the one place the server chooses a burn
+    /// nobody asked for, and it had no HDR guard at all: a dual-audio HDR
+    /// release with a default English PGS track was tone-mapped to draw a
+    /// subtitle the viewer never selected and could not turn off.
+    ///
+    /// The fix must not take REQ-SUB-2 with it. A standard fansub or BD remux
+    /// carries exactly one ASS track, and `deliverable_as_default` — correctly
+    /// — says a viewer cannot see an ASS track *without* a burn. Handing that
+    /// predicate to this pick would make the anime rule select Japanese audio
+    /// and no subtitles at all, silently, on every such file.
+    #[test]
+    fn the_implicit_anime_burn_survives_ass_and_stops_at_an_hdr_delivery() {
+        fn anime(codec: &str, hdr: Option<&str>) -> plurx_core::domain::MediaFile {
+            plurx_core::domain::MediaFile {
+                id: 4_242,
+                item_id: 1,
+                path: "/media/Ash.Season.S01E01.mkv".into(),
+                size: 1,
+                mtime: 1,
+                duration_ms: Some(1_440_000),
+                container: Some("mkv".into()),
+                video_codec: Some("hevc".into()),
+                video_codec_tag: None,
+                video_profile: None,
+                width: Some(1920),
+                height: Some(1080),
+                bit_depth: Some(if hdr.is_some() { 10 } else { 8 }),
+                hdr: hdr.map(str::to_owned),
+                hdr_format: hdr.map(str::to_owned),
+                bitrate: Some(8_000_000),
+                audio_streams: vec![
+                    plurx_core::domain::AudioStream {
+                        index: 0,
+                        codec: "aac".into(),
+                        channels: Some(2),
+                        language: Some("eng".into()),
+                        default: true,
+                        ..Default::default()
+                    },
+                    plurx_core::domain::AudioStream {
+                        index: 1,
+                        codec: "aac".into(),
+                        channels: Some(2),
+                        language: Some("jpn".into()),
+                        ..Default::default()
+                    },
+                ],
+                subtitle_streams: vec![plurx_core::domain::SubtitleStream {
+                    index: 0,
+                    codec: codec.into(),
+                    language: Some("eng".into()),
+                    default: true,
+                    ..Default::default()
+                }],
+                scanned_at: 0,
+                audio_offset_ms: 0,
+                probed: true,
+                dolby_vision: Default::default(),
+            }
+        }
+        let prefs = plurx_core::tracks::LangPrefs::default();
+
+        // The regression the predicate would have caused: one ASS track, SDR.
+        let ass = anime("ass", None);
+        let picked = TranscodeManager::select_tracks_with_prefs(&ass, None, None, &prefs, false);
+        assert_eq!(picked.audio_index, Some(1), "Japanese audio, not the dub");
+        assert_eq!(
+            picked
+                .subtitle_burn
+                .as_ref()
+                .map(|burn| burn.subtitle_index),
+            Some(0),
+            "REQ-SUB-2: the one ASS track is what the viewer is here for"
+        );
+
+        // The defect: the same rule on an HDR delivery, where the burn costs
+        // the grade and nobody asked for it. No subtitle, never a downgrade.
+        let hdr = anime("hdmv_pgs_subtitle", Some("dolby_vision"));
+        let refused = TranscodeManager::select_tracks_with_prefs(&hdr, None, None, &prefs, true);
+        assert_eq!(refused.audio_index, Some(1));
+        assert!(
+            refused.subtitle_burn.is_none(),
+            "an implicit burn may not spend the delivered grade"
+        );
+        // The same file on an SDR base keeps the old behaviour exactly.
+        let allowed = TranscodeManager::select_tracks_with_prefs(&hdr, None, None, &prefs, false);
+        assert_eq!(
+            allowed
+                .subtitle_burn
+                .as_ref()
+                .map(|burn| burn.subtitle_index),
+            Some(0)
+        );
+
+        // And an explicit choice is untouched by the guard — that one the
+        // viewer did ask for, and session creation is what judges it.
+        let explicit =
+            TranscodeManager::select_tracks_with_prefs(&hdr, None, Some(0), &prefs, true);
+        assert_eq!(
+            explicit
+                .subtitle_burn
+                .as_ref()
+                .map(|burn| burn.subtitle_index),
+            Some(0),
+            "an override is the viewer's own decision, not the server's guess"
+        );
+    }
+
     #[test]
     fn the_generation_identity_is_the_final_directory_and_survives_a_fence() {
         // The three shapes `produce_normalized` builds, spelled the way it

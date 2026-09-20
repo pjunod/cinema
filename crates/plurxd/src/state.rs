@@ -748,6 +748,26 @@ impl AppState {
         plurx_core::store::bounded_subtitle_window_seconds(stored.as_deref())
     }
 
+    /// Whether a subtitle segment whose sidecar has failed answers `503` with
+    /// a `Retry-After` rather than an empty track.
+    ///
+    /// A store read that fails takes the default rather than the error, and
+    /// deliberately so, unlike `pgs_overlay_enabled` above: the fallback here
+    /// is the behaviour that has always shipped, so an unreadable setting
+    /// costs a viewer a slightly less honest answer on one segment. Failing
+    /// the request instead would cost them the picture.
+    pub(crate) async fn subtitle_not_ready_503(&self) -> bool {
+        plurx_core::store::stored_switch(
+            self.store
+                .get_setting(keys::SUBTITLE_NOT_READY_503)
+                .await
+                .ok()
+                .flatten()
+                .as_deref(),
+            false,
+        )
+    }
+
     /// `node_id` is this server's stable id — the `node_id` a cache location
     /// is recorded against, so a cluster can tell whose copy is whose.
     #[cfg(test)]

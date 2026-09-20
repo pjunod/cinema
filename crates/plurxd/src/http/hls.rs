@@ -1326,21 +1326,49 @@ fn bound(value: &str) -> Option<String> {
 const HDR_SUBTITLE_BURN_REFUSAL: &str =
     "That subtitle requires an SDR burn-in. HDR playback was kept unchanged.";
 
-/// Old clients can still post `subtitle_burn` without first applying the
-/// native clients' HDR guard. A known HDR source therefore fails closed unless
-/// the client explicitly acknowledges that its selected plan already delivers
-/// SDR. That acknowledgement is safe for an existing tone-map and remains
-/// absent when the burn would replace DV, HDR10, or HLG with SDR.
-fn hdr_subtitle_burn_is_refused(
+/// Would building this session with its requested burn cost the viewer the
+/// dynamic range they would otherwise be getting?
+///
+/// This asks [`plurx_core::playback::burn_would_discard_hdr`] — the one guard
+/// — about the grade this exact request resolves to **with no burn**, which
+/// is the only grade the question has an honest answer against.
+///
+/// It replaces a predicate that keyed on the *source* `hdr` column and
+/// demanded a `subtitle_burn_sdr` acknowledgement from the client. That
+/// failed closed on sessions which were already being tone-mapped: a display
+/// sending `hdr=0` gets an SDR transcode, drawing a forced PGS track into it
+/// takes nothing away, and the server refused it anyway because the *file*
+/// was HDR. The web client never sent the acknowledgement at all and Apple
+/// computed it from the wrong range, so in practice the only way past the
+/// guard was to not be an HDR title.
+///
+/// The grade comes from [`crate::transcode::TranscodeManager::grade_preview`]
+/// rather than `Decision::transcode_grade`: that field ignores encoder proof
+/// and can say HDR10 where `start` will deliver SDR, which would judge the
+/// request by a different function than the one that delivers it.
+async fn burn_would_discard_this_session_hdr(
+    state: &AppState,
     source: Option<&MediaFile>,
-    subtitle_burn: Option<i64>,
-    subtitle_burn_sdr: Option<bool>,
+    request: &crate::transcode::SessionRequest,
+    hdr10_requested: bool,
+    height: i64,
 ) -> bool {
-    subtitle_burn.is_some_and(|index| index >= 0)
-        && subtitle_burn_sdr != Some(true)
-        && source.is_some_and(|file| {
-            matches!(file.hdr.as_deref(), Some("dolby_vision" | "hdr10" | "hlg"))
-        })
+    let Some(file) = source else {
+        // No source row: this request is on its way to a 404, and there is
+        // nothing honest to say about a file we cannot see.
+        return false;
+    };
+    if !request.subtitle_burn.is_some_and(|index| index >= 0) {
+        return false;
+    }
+    let base_grade = state
+        .transcode
+        .grade_preview(file, hdr10_requested, height, None)
+        .await;
+    let (method, preserve, _) = session_delivery_shape(&request.kind);
+    let base_range =
+        plurx_core::playback::delivered_dynamic_range(file, method, preserve, base_grade);
+    plurx_core::playback::burn_would_discard_hdr(base_range, true)
 }
 
 /// The dynamic range this session puts on the wire, read off the session it
@@ -1817,11 +1845,30 @@ async fn create_with_purpose(
         .get_file(id)
         .await
         .map_err(|error| session_store_error("reading the source file", error))?;
-    if hdr_subtitle_burn_is_refused(source.as_ref(), req.subtitle_burn, req.subtitle_burn_sdr) {
-        return Err(ApiError::Unprocessable(serde_json::json!({
-            "code": "hdr_subtitle_burn_refused",
-            "error": HDR_SUBTITLE_BURN_REFUSAL,
-        })));
+    // The HDR subtitle-burn guard used to stand here, keyed on the source's
+    // own `hdr` column. It now runs after `resolve_plan`, against the grade
+    // this request actually resolves to — see
+    // `burn_would_discard_this_session_hdr`. Nothing between here and there
+    // opens an encoder or takes a durable admission row: the ladder ceiling,
+    // the network prior, `resolve_plan` and `validate_hevc_copy_transport`
+    // are reads, and `claim_media_session_request` is the first write, after
+    // it. `plan_review_for` is the one exception and it is not a write
+    // either — it bumps the process-lifetime caps-migration counters, so a
+    // create that this guard now refuses is counted as a straggler where
+    // before it was refused first. That is a metric inflating slightly, not
+    // state being left behind.
+    //
+    // `subtitle_burn_sdr` stays on the wire for clients that still send it,
+    // and is no longer load-bearing. It was an acknowledgement the web client
+    // never sent and Apple computed from the wrong range, so consulting it
+    // decided nothing except which clients could burn at all.
+    if req.subtitle_burn_sdr.is_some() {
+        tracing::debug!(
+            file_id = id,
+            subtitle_burn = req.subtitle_burn,
+            subtitle_burn_sdr = req.subtitle_burn_sdr,
+            "client sent the legacy SDR burn acknowledgement; the session's own grade decides"
+        );
     }
     // Whose build this is, for every line below. The v2 document names
     // itself; a client that sends none leaves only its User-Agent, which is
@@ -1899,6 +1946,20 @@ async fn create_with_purpose(
         validate_hevc_copy_transport(&state, source, caps, &request).await?;
     }
     let height = resolved.height;
+    if burn_would_discard_this_session_hdr(
+        &state,
+        source.as_ref(),
+        &request,
+        hdr10_requested,
+        height,
+    )
+    .await
+    {
+        return Err(ApiError::Unprocessable(serde_json::json!({
+            "code": "hdr_subtitle_burn_refused",
+            "error": HDR_SUBTITLE_BURN_REFUSAL,
+        })));
+    }
     let fingerprint = match library_channel.as_ref() {
         Some(purpose) => purpose.bind_session_fingerprint(&resolved.intent_fingerprint),
         None => resolved.intent_fingerprint,
@@ -8221,12 +8282,33 @@ async fn plan_preparation_candidate(
                 .await
             }
         };
-        return Ok(crate::playback_control::candidate_request(
+        // The legacy branch builds a candidate too, and it carries the
+        // viewer's `subtitle_burn` just as the caps-v2 branch does — so it
+        // needs the same guard. Without it a client that sends no caps
+        // document (or one this build cannot parse) can still have a
+        // successor staged as a burn that tone-maps the picture at the moment
+        // it is committed, which is the failure this guard exists for.
+        let candidate = crate::playback_control::candidate_request(
             &predecessor.request,
             selection,
             height,
             source.height,
-        ));
+        );
+        if burn_would_discard_this_session_hdr(
+            state,
+            Some(source),
+            &candidate,
+            predecessor.request.hdr10,
+            height,
+        )
+        .await
+        {
+            return Err(ApiError::Unprocessable(serde_json::json!({
+                "code": "hdr_subtitle_burn_refused",
+                "error": HDR_SUBTITLE_BURN_REFUSAL,
+            })));
+        }
+        return Ok(candidate);
     };
 
     use plurx_core::playback::{DeviceProfile, Force, PlaybackMethod};
@@ -8414,7 +8496,11 @@ async fn plan_preparation_candidate(
         )
         .then_some(selection.subtitle.track)
         .flatten(),
-        subtitle_burn_sdr: Some(!requested_hdr10),
+        // No acknowledgement. This path calls `resolve_plan` directly, so the
+        // create handler's guard never ran on it and `Some(!requested_hdr10)`
+        // had no reader at all — it was an answer to a question nobody asked.
+        // The candidate is judged by the same guard below instead.
+        subtitle_burn_sdr: None,
         native_subtitles: Some(native_subtitle.is_some()),
         subtitle: native_subtitle,
         start: Some(predecessor.request.start_seconds),
@@ -8440,7 +8526,7 @@ async fn plan_preparation_candidate(
         unix_ms(),
         false,
     );
-    let mut resolved = resolve_plan(
+    let plan = resolve_plan(
         PlanInputs {
             state,
             user_id: predecessor.user_id,
@@ -8451,9 +8537,35 @@ async fn plan_preparation_candidate(
         Some(review),
         body,
     )
-    .await?
-    .request;
+    .await?;
+    let plan_height = plan.height;
+    let mut resolved = plan.request;
     validate_hevc_copy_transport(state, source, caps, &resolved).await?;
+    // The same guard ordinary create runs, on the same function. This path
+    // reaches `resolve_plan` directly and therefore skipped it entirely: a
+    // successor prepared for an HDR delivery could be staged as a burn that
+    // silently tone-maps the picture at the moment it is committed, with the
+    // viewer given no notice and no choice. Refusing the candidate is right
+    // here — the incumbent keeps playing, which is what a refused preparation
+    // means everywhere else.
+    // `resolved.hdr10`, not the pre-review `requested_hdr10`: the review may
+    // clamp the ask against the device profile, and the request this guard is
+    // judging carries the clamped value. Create reads its post-review value
+    // for the same reason.
+    if burn_would_discard_this_session_hdr(
+        state,
+        Some(source),
+        &resolved,
+        resolved.hdr10,
+        plan_height,
+    )
+    .await
+    {
+        return Err(ApiError::Unprocessable(serde_json::json!({
+            "code": "hdr_subtitle_burn_refused",
+            "error": HDR_SUBTITLE_BURN_REFUSAL,
+        })));
+    }
     // Planning chooses the codec/container recipe. It must not silently turn
     // a retained rolling fallback into VOD: the source prerequisite that made
     // the incumbent use rolling has not changed merely because its quality or
@@ -10780,7 +10892,52 @@ trait SubtitleSegmentSource: Send + Sync {
         anchor_seconds: i64,
         window_seconds: i64,
     ) -> BoxFuture<'a, bool>;
+
+    /// Is a producer for exactly this window span alive right now?
+    ///
+    /// Only asked after a `read_window` miss, and only to decide whether
+    /// waiting a moment longer could turn this request's answer from an empty
+    /// track into real cues. On the trait rather than called directly so the
+    /// boundary fixture measures the same decision production makes.
+    fn window_flight_is_live<'a>(
+        &'a self,
+        dir: &'a Path,
+        file: &'a MediaFile,
+        index: i64,
+        anchor_seconds: i64,
+        window_seconds: i64,
+    ) -> BoxFuture<'a, bool>;
+
+    /// What the whole-track sidecar for this track is doing. Observation
+    /// only; it starts nothing.
+    fn whole_track_state<'a>(
+        &'a self,
+        dir: &'a Path,
+        file: &'a MediaFile,
+        index: i64,
+    ) -> BoxFuture<'a, crate::subtitles::SidecarState>;
 }
+
+/// How long a subtitle segment may wait for a window that is already being
+/// extracted for it.
+///
+/// AVPlayer gives a subtitle segment about two seconds and stalls the muxed
+/// video while it waits, so this is not a budget to spend freely — it exists
+/// to win the *last* moment of a warm, which is the common case at a window
+/// boundary once the previous segment's request kicked the next window. A
+/// request that arrives at the start of an extraction still gets its empty
+/// answer immediately and leaves the recovery to the client's readiness
+/// retry; only a flight already in progress is worth standing still for.
+const SUBTITLE_SEGMENT_PUBLICATION_WAIT: Duration = Duration::from_millis(1_500);
+
+/// How often that wait re-reads the window path.
+const SUBTITLE_SEGMENT_PUBLICATION_POLL: Duration = Duration::from_millis(100);
+
+/// What the wait leaves of the response publication budget for the work that
+/// still has to happen after it: the whole-track warm, the settled-target
+/// read, the window kick and the response publication itself. Without it a
+/// request that caught its cues at the deadline fails on the very next await.
+const SUBTITLE_SEGMENT_PUBLICATION_RESERVE: Duration = Duration::from_millis(750);
 
 struct ProductionSubtitleSegmentSource;
 
@@ -10839,6 +10996,78 @@ impl SubtitleSegmentSource for ProductionSubtitleSegmentSource {
             anchor_seconds,
             window_seconds,
         ))
+    }
+
+    fn window_flight_is_live<'a>(
+        &'a self,
+        dir: &'a Path,
+        file: &'a MediaFile,
+        index: i64,
+        anchor_seconds: i64,
+        window_seconds: i64,
+    ) -> BoxFuture<'a, bool> {
+        Box::pin(crate::subtitles::window_flight_is_live(
+            dir,
+            file,
+            index,
+            anchor_seconds,
+            window_seconds,
+        ))
+    }
+
+    fn whole_track_state<'a>(
+        &'a self,
+        dir: &'a Path,
+        file: &'a MediaFile,
+        index: i64,
+    ) -> BoxFuture<'a, crate::subtitles::SidecarState> {
+        Box::pin(crate::subtitles::sidecar_state(dir, file, index))
+    }
+}
+
+/// Wait out the tail of a window extraction that is already running for this
+/// exact span, and hand back its bytes if they land in time.
+///
+/// Bounded twice: by [`SUBTITLE_SEGMENT_PUBLICATION_WAIT`], which is the
+/// engine's constraint, and by the response publication deadline, which is
+/// the request's. Whichever is sooner wins, and missing both is not an error
+/// — the caller's empty segment is still a correct answer.
+async fn await_window_publication<S: SubtitleSegmentSource + ?Sized>(
+    source: &S,
+    dir: &Path,
+    file: &MediaFile,
+    index: i64,
+    anchor: i64,
+    window_seconds: i64,
+    publication_deadline: Instant,
+) -> Option<Vec<u8>> {
+    // The handler still has to warm, settle and publish after this returns, so
+    // the wait may not spend the whole remaining budget — a request that
+    // caught its cues and then timed out on the work behind them has failed
+    // *because* it succeeded. Leave the rest of the lifecycle its own slack.
+    let reserved = publication_deadline.checked_sub(SUBTITLE_SEGMENT_PUBLICATION_RESERVE);
+    let give_up = match reserved {
+        Some(reserved) => (Instant::now() + SUBTITLE_SEGMENT_PUBLICATION_WAIT).min(reserved),
+        // Already inside the reserve. Answer now.
+        None => return None,
+    };
+    loop {
+        // Read first: a window that published while this request was deciding
+        // to wait is served without paying a poll interval for it, and the
+        // loop cannot overshoot `give_up` by a whole sleep before noticing.
+        if let Ok(Some(bytes)) = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(give_up),
+            source.read_window(dir, file, index, anchor, window_seconds),
+        )
+        .await
+        .unwrap_or(Ok(None))
+        {
+            return Some(bytes);
+        }
+        if Instant::now() + SUBTITLE_SEGMENT_PUBLICATION_POLL >= give_up {
+            return None;
+        }
+        tokio::time::sleep(SUBTITLE_SEGMENT_PUBLICATION_POLL).await;
     }
 }
 
@@ -10991,7 +11220,38 @@ async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSource + ?Sized
             )
             .await
             .map_err(|_| response_publication_timeout())?;
-            if let Ok(Some(bytes)) = window_bytes {
+            // A window for this exact span may be seconds from publishing —
+            // the common case at a window boundary, where the previous
+            // segment's request already kicked this one. Standing still for
+            // the tail of a flight that is *already running* turns an empty
+            // segment into real cues without adding an extraction, and
+            // without ever awaiting one that has not started.
+            let window_bytes = match window_bytes {
+                Ok(Some(bytes)) => Some(bytes),
+                _ if source
+                    .window_flight_is_live(
+                        &state.subs_dir,
+                        &file,
+                        index,
+                        anchor,
+                        subtitle_window_seconds,
+                    )
+                    .await =>
+                {
+                    await_window_publication(
+                        source,
+                        &state.subs_dir,
+                        &file,
+                        index,
+                        anchor,
+                        subtitle_window_seconds,
+                        publication_deadline,
+                    )
+                    .await
+                }
+                _ => None,
+            };
+            if let Some(bytes) = window_bytes {
                 // Start the whole-track warm even though this request is
                 // answered. A window is a bridge: it persists on disk across
                 // restarts while the whole-track sidecar may not exist yet, so
@@ -11033,15 +11293,32 @@ async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSource + ?Sized
                 // window declines itself past the midpoint of the file, where
                 // it would read the same bytes as the whole track for a
                 // disposable result.
+                // Read the whole track's state BEFORE warming it. `warm_vtt`
+                // enlists the key in `warmups` synchronously and clears it
+                // from a spawned task, and `sidecar_state` reports any
+                // enlisted key as `Warming` — so asking afterwards races the
+                // warm this very request just started, and a failed track
+                // answers `Failed` or `Warming` depending on which task the
+                // scheduler ran. A refusal that is a coin flip is worse than
+                // no refusal.
+                let whole_track = source
+                    .whole_track_state(&state.subs_dir, &file, index)
+                    .await;
                 // The whole-track warm keeps its original contract, including
                 // that a timeout here fails the request rather than being
                 // swallowed: it is the path every other consumer depends on.
-                tokio::time::timeout_at(
-                    tokio::time::Instant::from_std(publication_deadline),
-                    source.warm_whole(&state.subs_dir, &file, index),
-                )
-                .await
-                .map_err(|_| response_publication_timeout())?;
+                // A track inside its failure memo is the one exception: the
+                // warm cannot start an extraction while the memo stands, so
+                // enlisting the key would buy nothing and would corrupt the
+                // reading above for every request behind this one.
+                if whole_track != crate::subtitles::SidecarState::Failed {
+                    tokio::time::timeout_at(
+                        tokio::time::Instant::from_std(publication_deadline),
+                        source.warm_whole(&state.subs_dir, &file, index),
+                    )
+                    .await
+                    .map_err(|_| response_publication_timeout())?;
+                }
                 // The destination is read here, immediately before the warm,
                 // and not once at the top of the handler: a seek that lands
                 // between the two reads is exactly the case M7 is about, and
@@ -11097,6 +11374,53 @@ async fn subtitle_vtt_local_before_with_source<S: SubtitleSegmentSource + ?Sized
                     windowing,
                     "serving an empty subtitle segment while its sidecar cache warms"
                 );
+                // An empty segment says "there are no cues here", which is
+                // true while a sidecar is warming and a lie once it has
+                // failed — and players keep the bytes in memory whatever
+                // `no-store` says, so the lie is what a client is left with.
+                // A refusal with `Retry-After` is the honest answer, and the
+                // memo's own remaining time is the only moment a retry could
+                // achieve anything.
+                //
+                // Behind an operator switch, and off by default, because the
+                // cost of being honest here is not yet measured: AVPlayer
+                // blocks the muxed video for about two seconds on a subtitle
+                // segment, and whether each engine keeps playing video
+                // through a subtitle 503 or stalls the picture has to be
+                // observed per engine before this becomes the default. The
+                // Developer tab reports what has been observed and does not
+                // gate the switch on it.
+                if whole_track == crate::subtitles::SidecarState::Failed
+                    && state.subtitle_not_ready_503().await
+                {
+                    let retry_after =
+                        crate::subtitles::failure_memo_remaining(&state.subs_dir, &file, index)
+                            .await
+                            .map(|remaining| remaining.as_secs().max(1))
+                            .unwrap_or(1);
+                    tracing::info!(
+                        session = %crate::transcode::session_log_id(session),
+                        file_id = file.id,
+                        index,
+                        retry_after,
+                        "refusing a subtitle segment whose sidecar extraction failed"
+                    );
+                    authorize_attempt_status(
+                        state,
+                        session,
+                        &owner,
+                        "subtitle-segment",
+                        None,
+                        publication_deadline,
+                    )
+                    .await?;
+                    return Ok((
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        [(header::RETRY_AFTER, retry_after.to_string())],
+                        [(header::CACHE_CONTROL, "no-store")],
+                    )
+                        .into_response());
+                }
                 (b"WEBVTT\n\n".to_vec(), "no-store", false)
             }
         }
@@ -16525,6 +16849,32 @@ mod tests {
                 },
             ))
         }
+
+        fn window_flight_is_live<'a>(
+            &'a self,
+            dir: &'a Path,
+            file: &'a MediaFile,
+            index: i64,
+            anchor_seconds: i64,
+            window_seconds: i64,
+        ) -> BoxFuture<'a, bool> {
+            Box::pin(crate::subtitles::window_flight_is_live(
+                dir,
+                file,
+                index,
+                anchor_seconds,
+                window_seconds,
+            ))
+        }
+
+        fn whole_track_state<'a>(
+            &'a self,
+            dir: &'a Path,
+            file: &'a MediaFile,
+            index: i64,
+        ) -> BoxFuture<'a, crate::subtitles::SidecarState> {
+            Box::pin(crate::subtitles::sidecar_state(dir, file, index))
+        }
     }
 
     /// M7 R-M2 B7: exercise the real subtitle-segment handler boundary while
@@ -16595,7 +16945,14 @@ mod tests {
                 .await
                 .expect("whole-track producer starts")
                 .expect("whole started semaphore remains open");
-        let (first, second) = tokio::time::timeout(Duration::from_secs(2), async {
+        // Three seconds, not two, and the reason is the publication wait: the
+        // second request can find the first's flight already live and stand
+        // still for up to `SUBTITLE_SEGMENT_PUBLICATION_WAIT` hoping it
+        // publishes. It never does here — the producer is parked — so the
+        // answer is still the empty segment, and the point of the bound is
+        // that the request is not waiting for the *extraction*, which this
+        // fixture holds open indefinitely.
+        let (first, second) = tokio::time::timeout(Duration::from_secs(3), async {
             (
                 first.await.expect("first request task"),
                 second.await.expect("second request task"),
@@ -17884,6 +18241,193 @@ mod tests {
             })
             .await
             .expect("the whole-track producer settles before cleanup");
+        }
+        /// The last second of a warm, which is the common case at a window
+        /// boundary: the previous segment's request already kicked this window,
+        /// and this one arrives while it is finishing. Standing still for the
+        /// tail of a flight that is *already running* turns an empty segment into
+        /// real cues without starting anything.
+        ///
+        /// The bound is the point. A request that waits longer than
+        /// `SUBTITLE_SEGMENT_PUBLICATION_WAIT` is a request AVPlayer has already
+        /// given up on, with the muxed video stalled behind it.
+        #[tokio::test]
+        async fn a_subtitle_segment_waits_out_a_live_window_and_no_longer() {
+            let dir = crate::test_tempdir().expect("session directory");
+            // A fresh id per test: the ownership, warmup and memo registries
+            // are process-global, so a fixed id is a collision waiting for the
+            // day two of these run in one binary.
+            let wait_session = &uuid::Uuid::new_v4().to_string();
+            let (fixture, _file) = cold_windowed_fixture(dir.path(), wait_session).await;
+            let source = Arc::new(WindowFixtureSubtitleSource::counting());
+
+            // First request: nothing is live yet, so it answers immediately and
+            // leaves a flight behind it.
+            let cold = subtitle_segment(&fixture.state, wait_session, 1, source.as_ref()).await;
+            assert_eq!(cold.status(), StatusCode::OK);
+            assert_eq!(
+                cold.into_body()
+                    .collect()
+                    .await
+                    .expect("cold body")
+                    .to_bytes()
+                    .as_ref(),
+                b"WEBVTT\n\n",
+                "a request that finds no live flight does not stand still for one"
+            );
+            producer_started(source.as_ref()).await;
+
+            // Second request for the same anchor, with the producer released a
+            // moment later: the wait catches the publication.
+            let waiting = tokio::spawn({
+                let state = fixture.state.clone();
+                let source = Arc::clone(&source);
+                let session = wait_session.clone();
+                async move { subtitle_segment(&state, &session, 1, source.as_ref()).await }
+            });
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            source.release.add_permits(1);
+            let served = tokio::time::timeout(Duration::from_secs(3), waiting)
+                .await
+                .expect("the waiting request settles")
+                .expect("request task");
+            assert_eq!(served.status(), StatusCode::OK);
+            let body = String::from_utf8(
+                served
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("served body")
+                    .to_bytes()
+                    .to_vec(),
+            )
+            .expect("utf8 VTT");
+            assert!(
+                body.contains("ready cue"),
+                "a window that publishes inside the wait is served as real cues: {body}"
+            );
+            assert_eq!(
+                source.window_runs(),
+                1,
+                "waiting for a live flight starts no second extraction"
+            );
+            crate::subtitles::release_session_window(wait_session).await;
+        }
+
+        /// The other half of the bound: a live flight that does *not* publish is
+        /// abandoned, and the empty segment goes out inside the engine's budget.
+        #[tokio::test]
+        async fn a_live_window_that_does_not_publish_still_answers_inside_the_wait() {
+            let dir = crate::test_tempdir().expect("session directory");
+            let timeout_session = &uuid::Uuid::new_v4().to_string();
+            let (fixture, _file) = cold_windowed_fixture(dir.path(), timeout_session).await;
+            let source = Arc::new(WindowFixtureSubtitleSource::counting());
+
+            let cold = subtitle_segment(&fixture.state, timeout_session, 1, source.as_ref()).await;
+            assert_eq!(cold.status(), StatusCode::OK);
+            producer_started(source.as_ref()).await;
+
+            // The producer stays parked for the whole of this request.
+            let began = std::time::Instant::now();
+            let response =
+                subtitle_segment(&fixture.state, timeout_session, 1, source.as_ref()).await;
+            let waited = began.elapsed();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("empty body")
+                    .to_bytes()
+                    .as_ref(),
+                b"WEBVTT\n\n"
+            );
+            // Both bounds. The ceiling alone passes with the wait deleted,
+            // and "it did not wait at all" is precisely what this test is
+            // named after not happening. The floor proves the live flight was
+            // waited on; the ceiling is AVPlayer's constraint.
+            assert!(
+                waited >= SUBTITLE_SEGMENT_PUBLICATION_WAIT - SUBTITLE_SEGMENT_PUBLICATION_POLL,
+                "a live flight must be waited on, not skipped: waited {waited:?}"
+            );
+            assert!(
+                waited < SUBTITLE_SEGMENT_PUBLICATION_WAIT + Duration::from_millis(600),
+                "a subtitle segment must answer inside AVPlayer's patience, waited {waited:?}"
+            );
+            // The fixture producer is parked on a zero-permit semaphore, so
+            // without this its flight and warmup entry outlive the test in the
+            // process-global registries.
+            crate::subtitles::release_session_window(timeout_session).await;
+        }
+
+        /// An empty segment says "there are no cues here". While a sidecar is
+        /// warming that is true; once its extraction has failed it is a lie, and
+        /// the player keeps the bytes whatever `no-store` says.
+        ///
+        /// Off by default, because whether each engine keeps its picture through
+        /// a subtitle refusal is a device measurement nobody has taken — so the
+        /// shipped answer is still the empty segment, and the switch is what an
+        /// operator who *has* taken it turns on.
+        #[tokio::test]
+        async fn a_failed_subtitle_extraction_is_refused_only_when_the_operator_asked() {
+            let dir = crate::test_tempdir().expect("session directory");
+            let memo_session = &uuid::Uuid::new_v4().to_string();
+            let (fixture, file) = cold_windowed_fixture(dir.path(), memo_session).await;
+            let source = Arc::new(WindowFixtureSubtitleSource::counting());
+
+            crate::subtitles::remember_whole_track_failure_for_test(
+                &fixture.state.subs_dir,
+                &file,
+                0,
+                "the source could not be read",
+                Duration::from_secs(90),
+            )
+            .await;
+
+            let default_off =
+                subtitle_segment(&fixture.state, memo_session, 1, source.as_ref()).await;
+            assert_eq!(
+                default_off.status(),
+                StatusCode::OK,
+                "the shipped default keeps the empty segment"
+            );
+            assert_eq!(
+                default_off
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("empty body")
+                    .to_bytes()
+                    .as_ref(),
+                b"WEBVTT\n\n"
+            );
+
+            fixture
+                .store
+                .put_setting(plurx_core::store::keys::SUBTITLE_NOT_READY_503, "1")
+                .await
+                .expect("the operator turns the refusal on");
+
+            let refused = subtitle_segment(&fixture.state, memo_session, 2, source.as_ref()).await;
+            assert_eq!(refused.status(), StatusCode::SERVICE_UNAVAILABLE);
+            let retry_after = refused
+                .headers()
+                .get(header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .expect("a refusal says when a retry could achieve anything");
+            assert!(
+                (80..=90).contains(&retry_after),
+                "Retry-After is the memo's own remaining time, not a constant: got {retry_after}"
+            );
+            crate::subtitles::release_session_window(memo_session).await;
+            crate::subtitles::forget_whole_track_failure_for_test(
+                &fixture.state.subs_dir,
+                &file,
+                0,
+            )
+            .await;
         }
     }
 
@@ -26999,28 +27543,63 @@ mod tests {
         ));
     }
 
+    /// The create guard's arithmetic, without a server around it: session
+    /// kind and no-burn grade in, wire range out, one guard's verdict on it.
+    ///
+    /// `burn_would_discard_this_session_hdr` is these three lines plus a store
+    /// read for the grade, so this pins everything about it that can be wrong
+    /// without pinning `grade_preview`'s own encoder proof — which belongs to
+    /// the pipeline, and which the HTTP regressions exercise end to end.
     #[test]
-    fn server_refuses_hdr_burns_unless_the_plan_is_already_sdr() {
+    fn the_create_guard_reads_the_grade_this_session_would_deliver_without_a_burn() {
+        use plurx_core::playback::{burn_would_discard_hdr, delivered_dynamic_range};
+        use plurx_core::transcode::OutputGrade;
+
         let mut file = hls_file(vec![]);
+        let copy = crate::transcode::SessionKind::Copy {
+            aac: false,
+            preserve_dolby_vision: true,
+            convert_dolby_vision: false,
+        };
+        let transcode = crate::transcode::SessionKind::Transcode { height: 2160 };
+
+        let verdict =
+            |kind: &crate::transcode::SessionKind, file: &MediaFile, base_grade: OutputGrade| {
+                let (method, preserve, _) = session_delivery_shape(kind);
+                let range = delivered_dynamic_range(file, method, preserve, base_grade);
+                (range, burn_would_discard_hdr(range, true))
+            };
+
         for hdr in ["dolby_vision", "hdr10", "hlg"] {
             file.hdr = Some(hdr.into());
-            assert!(hdr_subtitle_burn_is_refused(Some(&file), Some(5), None));
-            assert!(hdr_subtitle_burn_is_refused(
-                Some(&file),
-                Some(5),
-                Some(false)
-            ));
-            assert!(
-                !hdr_subtitle_burn_is_refused(Some(&file), Some(5), Some(true)),
-                "an existing HDR-to-SDR plan may keep its forced subtitle"
+            // Row 1: an HDR copy has no encode to burn into, so keeping the
+            // grade and honouring the request are genuinely exclusive.
+            assert_eq!(
+                verdict(&copy, &file, OutputGrade::Sdr).1,
+                true,
+                "{hdr}: an HDR copy must refuse"
+            );
+            // Row 2: the one the old predicate got wrong. Since the M4 rung a
+            // transcode can negotiate HDR10, and a burn into it drops the
+            // grade — being a transcode is not an exemption any more.
+            assert_eq!(
+                verdict(&transcode, &file, OutputGrade::Hdr10),
+                ("hdr10", true),
+                "{hdr}: a negotiated HDR10 transcode is an HDR delivery"
+            );
+            // Row 3: already tone-mapped. The old create guard refused this
+            // because the *file* was HDR; nothing is being taken away.
+            assert_eq!(
+                verdict(&transcode, &file, OutputGrade::Sdr),
+                ("sdr", false),
+                "{hdr}: an already tone-mapped transcode keeps its burn"
             );
         }
 
+        // Row 4: an SDR source, by any method.
         file.hdr = None;
-        assert!(!hdr_subtitle_burn_is_refused(Some(&file), Some(5), None));
-        assert!(!hdr_subtitle_burn_is_refused(Some(&file), Some(-1), None));
-        assert!(!hdr_subtitle_burn_is_refused(Some(&file), None, None));
-        assert!(!hdr_subtitle_burn_is_refused(None, Some(5), None));
+        assert_eq!(verdict(&copy, &file, OutputGrade::Sdr), ("sdr", false));
+        assert_eq!(verdict(&transcode, &file, OutputGrade::Sdr), ("sdr", false));
     }
 
     /// The session's answer is the one that wins once playback attaches, so

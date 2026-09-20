@@ -1591,6 +1591,16 @@ pub mod keys {
     /// Forward subtitle materialization span. The settings API constrains this
     /// to 30–900 seconds and absent means the 200-second default.
     pub const SUBTITLE_WINDOW_SECS: &str = "playback.subtitle_window_secs";
+    /// Answer a subtitle segment whose sidecar has failed with `503` +
+    /// `Retry-After`, instead of a syntactically valid but empty track.
+    ///
+    /// Off by default, and the reason is measurement rather than caution:
+    /// AVPlayer gives a subtitle segment roughly two seconds and blocks the
+    /// muxed video while it waits, so how each engine reacts to a refusal on
+    /// that request — keeps playing video, or stalls the picture — has to be
+    /// observed per engine before this can flip. The Developer tab reports
+    /// what has been observed, advisory only; it never blocks the switch.
+    pub const SUBTITLE_NOT_READY_503: &str = "playback.subtitle_not_ready_503";
     /// VOD availability kill switch. Absent/on accepts immutable VOD session
     /// creation; `0` refuses it. It never selects the removed live HLS path.
     pub const VOD_PRESENTATION: &str = "playback.vod_presentation";

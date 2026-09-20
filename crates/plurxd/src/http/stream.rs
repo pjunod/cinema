@@ -663,6 +663,11 @@ pub struct DecisionSelection {
     /// The existing HDR guard refuses that burn instead of silently replacing
     /// HDR/Dolby Vision with SDR. False when no burn is needed.
     pub subtitle_burn_in_blocked_by_hdr: bool,
+    /// How this selection's cues reach the viewer: `native`, `overlay`,
+    /// `sidecar` or `burn`. See `subtitle_route`. Absent when nothing is
+    /// selected; additive, so older clients ignore it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subtitle_route: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -856,6 +861,69 @@ fn subtitle_requires_burn_in(
         })
 }
 
+/// How this selected subtitle's cues reach the viewer.
+///
+/// One classifier, on the wire, because until now every client derived this
+/// for itself from `text`, `native` and `overlay` — and they derived it
+/// differently. The web client burns on `text === false`, so ASS/SSA are
+/// handed to a `<track>`; Android burns on `!isNativeHls`, so the same file
+/// re-encodes. Two clients, one file, two answers, and neither of them is
+/// the server's.
+///
+/// The four values, in the order they are decided:
+///
+/// - `overlay` — a PGS track while this server is serving the `pgs-v1`
+///   application overlay. The client draws the bitmaps; the video is
+///   untouched.
+/// - `native` — a codec that survives WebVTT conversion, so the server can
+///   publish it as an HLS rendition and the player renders text the server
+///   never drew.
+/// - `sidecar` — text the server can extract but cannot publish as a
+///   rendition: ASS/SSA and `mov_text`, whose authored positioning and
+///   typefaces do not survive the conversion. `GET /files/{id}/subs/{i}.vtt`
+///   is the route, and it is a *manual* pick only — see
+///   `plurx_core::tracks::deliverable_as_default`.
+/// - `burn` — nothing else is left. The server draws the track into the
+///   picture, which costs an encode and, on an HDR delivery, the grade.
+///
+/// This names the route by **codec**, which is a deliberate limit and the one
+/// thing a client must not misread. `sidecar` means "this server can hand you
+/// this track as text at `GET /files/{id}/subs/{i}.vtt`" — it does not
+/// promise your player can use a fetched sidecar in the delivery you are on.
+/// A client that can attach its own text track (the web player does, on every
+/// route) uses it and pays nothing; a client that cannot must ask for a burn,
+/// and `POST …/hls/sessions` will refuse the same track as a native rendition
+/// with "the selected subtitle requires burn-in". `TranscodeManager` likewise
+/// burns an explicitly selected ASS track inside a session, because there is
+/// no rendition for it.
+///
+/// So: this says how the cues can be *produced*, not which transport carries
+/// them. A `native` track is an HLS rendition on a session and the
+/// container's own text track on direct play; a `sidecar` track is a fetch on
+/// any route that has somewhere to put it, and a burn everywhere else.
+/// `subtitle_requires_burn_in` beside it stays the answer to "must the server
+/// draw this into the picture". Additive; older clients ignore it.
+fn subtitle_route(
+    file: &MediaFile,
+    selected: Option<i64>,
+    overlay_enabled: bool,
+) -> Option<&'static str> {
+    let track = selected.and_then(|index| {
+        file.subtitle_streams
+            .iter()
+            .find(|track| track.index == index)
+    })?;
+    Some(if overlay_enabled && is_pgs_subtitle(&track.codec) {
+        "overlay"
+    } else if is_native_text_subtitle(&track.codec) {
+        "native"
+    } else if !is_bitmap_subtitle(&track.codec) {
+        "sidecar"
+    } else {
+        "burn"
+    })
+}
+
 /// The audio track a raw direct play actually delivers: the container's own
 /// default, else its first stream — the same "default, else first" rule
 /// `playback::evaluate` judges the audio codec on.
@@ -913,11 +981,18 @@ fn apply_unselectable_direct_audio(
     ));
 }
 
+/// Apply a chosen burn-only subtitle to the plan, unless doing so would cost
+/// the viewer their dynamic range.
+///
+/// `base_delivered_range` is this decision's grade as it stood before this
+/// function was reached — the caller reads it once, because the last line
+/// here overwrites the field it came from.
 fn apply_selected_subtitle(
     decision: &mut Decision,
     file: &MediaFile,
     selected: Option<i64>,
     requires_burn_in: bool,
+    base_delivered_range: &str,
 ) {
     if !requires_burn_in {
         return;
@@ -936,7 +1011,7 @@ fn apply_selected_subtitle(
     // tone-mapped to SDR (for example because the display has `hdr=0`) loses
     // no dynamic range by drawing its forced PGS subtitle into that SDR
     // transcode. Looking at `file.hdr` here used to reject that valid plan.
-    if subtitle_burn_would_discard_hdr(decision, requires_burn_in) {
+    if plurx_core::playback::burn_would_discard_hdr(base_delivered_range, requires_burn_in) {
         return;
     }
 
@@ -947,27 +1022,6 @@ fn apply_selected_subtitle(
     decision
         .reasons
         .push(format!("selected subtitle codec {codec} requires burn-in"));
-}
-
-fn subtitle_burn_would_discard_hdr(decision: &Decision, requires_burn_in: bool) -> bool {
-    // A transcode is exempt, and has to be: it re-encodes, so the burn happens
-    // inside a graph that can tone-map on the way, which is exactly what a
-    // burn on an HDR title did before the HDR10 rung existed. Since M4 a
-    // transcode's `delivered_dynamic_range` is the negotiated grade rather
-    // than a hard-coded "sdr", so without this term every HDR title that
-    // transcoded for a height cap would start refusing burns it used to
-    // perform. `hdr10_grade_for` drops such a session to SDR for the same
-    // reason: subtitle white is a code value, and on a PQ output it lands at
-    // the top of the curve.
-    //
-    // A copy is not exempt. There is no encode to burn into, so keeping the
-    // HDR grade and honouring the request are genuinely exclusive.
-    requires_burn_in
-        && decision.method != playback::PlaybackMethod::Transcode
-        && matches!(
-            decision.delivered_dynamic_range,
-            "dolby_vision" | "hdr10" | "hlg"
-        )
 }
 
 /// Classify a chapter title as an intro, end-credits, or next-episode-preview
@@ -1994,32 +2048,68 @@ pub async fn decision(
     // audio is only a fallback; the execution plan must describe the codec
     // selected by the same language policy exposed to the clients below.
     let prefs = state.transcode.lang_prefs().await;
-    let policy_selection = plurx_core::tracks::select_tracks(
+    let prefer_original = prefers_original_audio(&file.audio_streams);
+    let policy_audio = plurx_core::tracks::select_tracks(
         &file.audio_streams,
         &file.subtitle_streams,
-        prefers_original_audio(&file.audio_streams),
+        prefer_original,
         &prefs,
-    );
-    let selected_audio = effective_audio_selection(&file, q.audio, policy_selection.audio_index)?;
-    let selected_subtitle =
-        effective_subtitle_selection(&file, q.subtitle, policy_selection.subtitle_index)?;
+    )
+    .audio_index;
+    let selected_audio = effective_audio_selection(&file, q.audio, policy_audio)?;
     let selection_requested = q.audio.is_some() || q.subtitle.is_some();
     // One read for both uses below: whether a PGS track is offered to the
     // client and whether selecting one forces a burn-in are the same question
     // asked twice, and answering them from two reads would let a switch flip
     // between them inside one request.
     let pgs_overlay = state.pgs_overlay_enabled().await?;
-    let selected_subtitle_requires_burn =
-        subtitle_requires_burn_in(&file, selected_subtitle, pgs_overlay);
     let container_default_audio = container_default_audio_index(&file.audio_streams);
+    // The policy subtitle is chosen against the plan, so the plan has to exist
+    // first — and the audio rules are what the subtitle rules read, so the
+    // audio pick has to come first in turn. `set_selected_audio_default`
+    // rewrites the container flags for the compatibility evaluation, so the
+    // second selection runs on the streams as the container described them;
+    // otherwise the two calls could disagree about the audio language and
+    // therefore about whether `Auto` wants full subtitles at all.
+    let container_audio_streams = file.audio_streams.clone();
     set_selected_audio_default(&mut file.audio_streams, selected_audio);
     let mut decision = q.decide(
         &file,
         &render_caps(&state).await,
         crate::media_sessions::unix_ms(),
     );
-    let subtitle_burn_in_blocked_by_hdr =
-        subtitle_burn_would_discard_hdr(&decision, selected_subtitle_requires_burn);
+    // The grade of the plan **with no subtitle burn**. Read here, before
+    // `apply_selected_subtitle` can rewrite it, because both users below are
+    // asking what adding a burn would cost — and a plan that is already SDR
+    // because of the burn answers that question with its own effect.
+    let base_delivered_range = decision.delivered_dynamic_range;
+    let base_is_hdr = plurx_core::playback::burn_would_discard_hdr(base_delivered_range, true);
+    // A default nobody asked for must be one the viewer can actually see on
+    // *this* delivery. The clients already refuse to auto-start a burn for a
+    // non-forced track; saying it here is what stops the server proposing one
+    // in the first place, so all four parties agree.
+    let policy_subtitle = plurx_core::tracks::select_tracks_with(
+        &container_audio_streams,
+        &file.subtitle_streams,
+        prefer_original,
+        &prefs,
+        |track| {
+            plurx_core::tracks::deliverable_as_default(
+                &track.codec,
+                track.forced,
+                pgs_overlay,
+                base_is_hdr,
+            )
+        },
+    )
+    .subtitle_index;
+    let selected_subtitle = effective_subtitle_selection(&file, q.subtitle, policy_subtitle)?;
+    let selected_subtitle_requires_burn =
+        subtitle_requires_burn_in(&file, selected_subtitle, pgs_overlay);
+    let subtitle_burn_in_blocked_by_hdr = plurx_core::playback::burn_would_discard_hdr(
+        base_delivered_range,
+        selected_subtitle_requires_burn,
+    );
     // Only an explicit subtitle choice may change the delivery verdict. An
     // audio-only request still echoes the effective policy subtitle below,
     // but delivery does not burn that track unless the caller chose it.
@@ -2029,6 +2119,7 @@ pub async fn decision(
             &file,
             selected_subtitle,
             selected_subtitle_requires_burn,
+            base_delivered_range,
         );
     }
     // Likewise, only an explicit `audio=` may change the transport: criterion 4
@@ -2145,6 +2236,7 @@ pub async fn decision(
             subtitle_index: selected_subtitle,
             subtitle_requires_burn_in: selected_subtitle_requires_burn,
             subtitle_burn_in_blocked_by_hdr,
+            subtitle_route: subtitle_route(&file, selected_subtitle, pgs_overlay),
         }),
         markers,
         audio_offset_ms: 0,
@@ -5295,8 +5387,8 @@ mod tests {
         file.hdr = Some("hdr10".into());
         let mut already_sdr = planned(playback::PlaybackMethod::Transcode);
         already_sdr.delivered_dynamic_range = "sdr";
-        assert!(!subtitle_burn_would_discard_hdr(&already_sdr, true));
-        apply_selected_subtitle(&mut already_sdr, &file, Some(3), true);
+        assert!(!plurx_core::playback::burn_would_discard_hdr("sdr", true));
+        apply_selected_subtitle(&mut already_sdr, &file, Some(3), true, "sdr");
         assert_eq!(already_sdr.method, playback::PlaybackMethod::Transcode);
         assert!(already_sdr
             .reasons
@@ -5305,12 +5397,130 @@ mod tests {
 
         let mut still_hdr = planned(playback::PlaybackMethod::Remux);
         still_hdr.delivered_dynamic_range = "hdr10";
-        assert!(subtitle_burn_would_discard_hdr(&still_hdr, true));
-        apply_selected_subtitle(&mut still_hdr, &file, Some(3), true);
+        assert!(plurx_core::playback::burn_would_discard_hdr("hdr10", true));
+        apply_selected_subtitle(&mut still_hdr, &file, Some(3), true, "hdr10");
         assert_eq!(still_hdr.method, playback::PlaybackMethod::Remux);
         assert!(
             still_hdr.reasons.is_empty(),
             "a burn must not silently replace an HDR delivery with SDR"
         );
+
+        // The row the old `/decision` predicate got wrong, and the reason the
+        // `method != Transcode` term is gone: since the M4 HDR10 rung, an HDR
+        // title that transcodes for a height cap is putting HDR10 on the
+        // wire. Burning into it drops the grade, so it must refuse — the old
+        // predicate exempted it purely for being a transcode.
+        let mut negotiated_hdr10 = planned(playback::PlaybackMethod::Transcode);
+        negotiated_hdr10.delivered_dynamic_range = "hdr10";
+        assert!(plurx_core::playback::burn_would_discard_hdr("hdr10", true));
+        apply_selected_subtitle(&mut negotiated_hdr10, &file, Some(3), true, "hdr10");
+        assert_eq!(negotiated_hdr10.delivered_dynamic_range, "hdr10");
+        assert!(
+            negotiated_hdr10.reasons.is_empty(),
+            "an HDR10 transcode is an HDR delivery; a burn into it is a downgrade"
+        );
+    }
+
+    /// One classifier for all four routes, so a client never has to rebuild
+    /// it out of `text`/`native`/`overlay` — which is how the web client came
+    /// to hand ASS to a `<track>` while Android re-encoded the same file.
+    #[test]
+    fn the_subtitle_route_names_how_the_cues_are_produced() {
+        let file = MediaFile {
+            id: 1,
+            item_id: 1,
+            path: "/media/routes.mkv".into(),
+            size: 1,
+            mtime: 1,
+            duration_ms: Some(1_000),
+            container: Some("mkv".into()),
+            video_codec: Some("hevc".into()),
+            video_codec_tag: None,
+            video_profile: None,
+            width: Some(1920),
+            height: Some(1080),
+            bit_depth: Some(8),
+            hdr: None,
+            hdr_format: None,
+            bitrate: Some(1_000),
+            audio_streams: vec![],
+            subtitle_streams: [
+                "subrip",
+                "ass",
+                "mov_text",
+                "hdmv_pgs_subtitle",
+                "dvd_subtitle",
+            ]
+            .iter()
+            .enumerate()
+            .map(|(index, codec)| plurx_core::domain::SubtitleStream {
+                index: index as i64,
+                codec: (*codec).into(),
+                language: None,
+                title: None,
+                default: false,
+                forced: false,
+                hearing_impaired: false,
+            })
+            .collect(),
+            scanned_at: 0,
+            audio_offset_ms: 0,
+            probed: true,
+            dolby_vision: Default::default(),
+        };
+
+        for (index, off, on) in [
+            (0, "native", "native"),
+            (1, "sidecar", "sidecar"),
+            (2, "sidecar", "sidecar"),
+            // The only row the overlay moves, and it moves it off `burn`.
+            (3, "burn", "overlay"),
+            // VobSub is not PGS; the overlay contract does not cover it.
+            (4, "burn", "burn"),
+        ] {
+            assert_eq!(subtitle_route(&file, Some(index), false), Some(off));
+            assert_eq!(subtitle_route(&file, Some(index), true), Some(on));
+        }
+
+        assert_eq!(subtitle_route(&file, None, true), None, "nothing selected");
+        assert_eq!(
+            subtitle_route(&file, Some(99), true),
+            None,
+            "a track this file does not have is not a route"
+        );
+
+        // And it agrees with the two flags it exists to stop clients from
+        // combining by hand.
+        for index in 0..5 {
+            let burns = subtitle_route(&file, Some(index), false) == Some("burn");
+            assert_eq!(burns, subtitle_requires_burn_in(&file, Some(index), false));
+        }
+    }
+
+    /// The whole guard, as one table. Four rows, one function, and the same
+    /// function the create path and the preparation path now call.
+    #[test]
+    fn one_burn_guard_judges_the_delivery_without_the_burn() {
+        for (base, want, why) in [
+            (
+                "dolby_vision",
+                true,
+                "an HDR copy has no encode to burn into",
+            ),
+            ("hdr10", true, "including one a transcode negotiated"),
+            ("hlg", true, "and HLG is HDR too"),
+            ("sdr", false, "an already tone-mapped plan loses nothing"),
+            ("", false, "an unknown grade is not a claim of HDR"),
+        ] {
+            assert_eq!(
+                plurx_core::playback::burn_would_discard_hdr(base, true),
+                want,
+                "{base}: {why}"
+            );
+            assert!(
+                !plurx_core::playback::burn_would_discard_hdr(base, false),
+                "{base}: a track that needs no burn is never refused"
+            );
+        }
     }
 }
