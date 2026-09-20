@@ -2812,6 +2812,10 @@ test("the shipped player adapter applies state precedence and preview-then-commi
       shippedSource("clearPendingSeekTimer"),
       shippedSource("commitPendingSeek"),
       shippedSource("cancelPendingSeek"),
+      // Relative input counts from the desired destination, not from the
+      // attached element's clock, so the base helper comes with them.
+      shippedSource("unexecutedPlaybackDestinationSec"),
+      shippedSource("pbRelativeSeekBase"),
       shippedSource("nudge"),
       shippedSource("nudgeKeyboard"),
       shippedSource("playerContractInput"),

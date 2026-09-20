@@ -173,10 +173,19 @@ function playbackControlHlsFatal(data,started){
 }
 function playbackControlSnapshot(v,p){
   if(!v||!p) return null;
+  // R1. A committed destination is only this presentation's seek once an
+  // attachment has executed it — `markPlaybackControlSeekExecuted` runs when
+  // a local seek is applied to this element or when a successor attaches. An
+  // unexecuted destination belongs to a replacement that is still being
+  // created, or was refused, and it is not something the attached stream is
+  // doing. Reporting it as `seeking` with a foreign `seek_target_ms` is what
+  // reset the server's startup baseline on every exchange and reaped a
+  // healthy incumbent at first_served_at + 30 s while it was visibly playing.
   const pendingSeek=p.controlSeek||null;
-  const seeking=!!pendingSeek || !!v.seeking || p._seekPreview!=null;
+  const attachedSeek=pendingSeek&&pendingSeek.executed?pendingSeek:null;
+  const seeking=!!attachedSeek || !!v.seeking || p._seekPreview!=null;
   const hinted=!p.started&&p.controlPositionHintSec!=null?p.controlPositionHintSec:null;
-  const preview=!pendingSeek&&seeking&&p._seekPreview!=null
+  const preview=!attachedSeek&&seeking&&p._seekPreview!=null
     ? Math.max(0,p._seekPreview-((p.bookOffset||0)/1000)) : null;
   let positionMs=Math.max(0,Math.round((hinted!=null?hinted:
     preview!=null?preview:(p.offset||0)+(v.currentTime||0))*1000));
@@ -218,7 +227,7 @@ function playbackControlSnapshot(v,p){
   const snapshot={demand,position_ms:positionMs,buffered_from_ms:range.from,
     buffered_through_ms:range.through,playback_rate:playbackRate,render_state:render,
     seek_target_ms:render==="seeking"
-      ? (pendingSeek?pendingSeek.targetMs:positionMs) : null,
+      ? (attachedSeek?attachedSeek.targetMs:positionMs) : null,
     observed_download_bps:Number.isFinite(bps)&&bps>0?Math.round(bps):null,
     selection:playbackControlSelection(p),capabilities:playbackControlCapabilities(),
     observation,acknowledgement:pendingPlaybackControlAcknowledgement(p,demand)};
