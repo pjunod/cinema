@@ -28435,7 +28435,11 @@ mod tests {
                 forced_autoselect: true,
             },
         );
-        assert_eq!(forced.matches("CLOSED-CAPTIONS=NONE").count(), 1, "{forced}");
+        assert_eq!(
+            forced.matches("CLOSED-CAPTIONS=NONE").count(),
+            1,
+            "{forced}"
+        );
         assert_eq!(forced.matches("AUTOSELECT=YES").count(), 2, "{forced}");
     }
 
