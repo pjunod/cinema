@@ -1,6 +1,6 @@
 # Android Dolby Vision — why a capable Lenovo plays the HDR base
 
-**Status:** Fable review addressed; repair building on `codex/android-dv-delivery` ·
+**Status:** Fable review addressed; repair implemented on `codex/android-dv-delivery`, validation pending ·
 **Written:** 2026-09-20 UTC (incident: 2026-09-19 America/New_York) ·
 **Revised:** 2026-09-20 UTC · **Scope:** Android Profile 7 → 8.1 transport
 and preserved-DV progressive signaling, including native Profile 5/8 sources.
@@ -511,6 +511,7 @@ implementation obligations, not a reason to
 restore the withdrawn 409 proposal. The checked-in policy must describe the
 served grade even when a client UI continues displaying an earlier plan.
 
-**Delivery status:** documentation only. No production fix has been built,
-tested or deployed. No emitted-media capture or post-fix device run exists.
-
+**Delivery status:** the server and Android repair is implemented and compiles
+on the pinned Rust and Android toolchains. The merge-boundary adversarial
+review, focused validation, fast lane, emitted-media capture, deployment and
+post-fix Lenovo run remain pending; none is claimed as evidence yet.
