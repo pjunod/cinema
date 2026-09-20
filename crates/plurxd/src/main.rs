@@ -36,6 +36,7 @@ mod progressive;
 mod reader_formats;
 mod renditiondir;
 mod schedule;
+mod scratch_ledger;
 mod serving_fence;
 mod shared_cache;
 mod state;
