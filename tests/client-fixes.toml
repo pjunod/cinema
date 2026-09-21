@@ -2213,7 +2213,7 @@ test_anchor = "fun androidDvDeliveryRequiredHlsSurvivesStartSeekTracksAndRecover
 # All three detail layouts use this lossless wire-ID path; the regression
 # fixture is the live episode ID that JavaScript previously rounded.
 id = "web.artwork-refresh-exact-item-id"
-commits = ["77435710"]
+commits = ["447a5f76"]
 source = "crates/plurxd/src/web/detail/preplay-selection.js"
 source_anchor = "onclick=\"refreshArtwork('${exactWireId(it)}',this)\""
 test = "tests/web/reader.test.js"
