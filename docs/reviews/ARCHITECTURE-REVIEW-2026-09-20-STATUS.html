@@ -300,6 +300,7 @@
       aggregateCommitStatus,
       collectPullPages,
       createRefreshFence,
+      effectiveStatus,
       mapPullsToPlans,
       overlayAbsenceText,
       overlayFallback,
@@ -334,17 +335,6 @@
       tableHead: document.querySelector("#table-head"),
       tableWrap: document.querySelector("#table-wrap"),
     };
-
-    function statusGroup(status) {
-      const normalized = status.trim().toLowerCase();
-      if (normalized === "unclaimed") return "unclaimed";
-      if (["claimed", "in-progress", "in-review"].includes(normalized)) return "active";
-      if (normalized.startsWith("blocked:")) return "blocked";
-      if (normalized === "merged" || normalized.startsWith("merged:")) return "merged";
-      if (normalized === "done") return "done";
-      if (normalized.startsWith("abandoned:")) return "abandoned";
-      return "active";
-    }
 
     function safeHref(href) {
       if (/^(?:https?:|#|\.\.?\/)/.test(href)) return href;
@@ -393,12 +383,18 @@
         ["unclaimed", "active", "blocked", "merged", "done", "abandoned"]
           .map((group) => [group, 0]),
       );
-      for (const row of state.rows) counts[statusGroup(row.Status)] += 1;
+      let livePlans = 0;
+      for (const row of state.rows) {
+        const pulls = state.overlay.byPlan[row.Id] || [];
+        if (pulls.length) livePlans += 1;
+        counts[effectiveStatus(row.Status, pulls).group] += 1;
+      }
 
       elements.summary.replaceChildren(
         metric("Total plans", state.rows.length),
-        metric("Unclaimed", counts.unclaimed),
+        metric("Unclaimed without PR", counts.unclaimed),
         metric("Active", counts.active),
+        metric("Plans with open PRs", livePlans),
         metric("Blocked", counts.blocked),
         metric("Merged", counts.merged),
         metric("Done", counts.done),
@@ -409,9 +405,10 @@
     function filteredRows() {
       const query = elements.search.value.trim().toLowerCase();
       return state.rows.filter((row) => {
+        const pulls = state.overlay.byPlan[row.Id] || [];
         const matchesSearch = !query || Object.values(row).join(" ").toLowerCase().includes(query);
         const matchesStatus = elements.status.value === "all" ||
-          statusGroup(row.Status) === elements.status.value;
+          effectiveStatus(row.Status, pulls).group === elements.status.value;
         const matchesPriority = elements.priority.value === "all" ||
           row.Priority.toLowerCase().includes(elements.priority.value);
         return matchesSearch && matchesStatus && matchesPriority;
@@ -432,11 +429,11 @@
 
       elements.tableBody.replaceChildren();
       for (const row of rows) {
+        const pulls = state.overlay.byPlan[row.Id] || [];
         const tableRow = document.createElement("tr");
         for (const column of [...EXPECTED_COLUMNS, LIVE_COLUMN]) {
           const cell = document.createElement("td");
           if (column === LIVE_COLUMN) {
-            const pulls = state.overlay.byPlan[row.Id] || [];
             if (pulls.length) {
               cell.innerHTML = pulls.map(pullOverlayMarkup).join("");
             } else {
@@ -446,9 +443,10 @@
               cell.append(empty);
             }
           } else if (column === "Status") {
+            const current = effectiveStatus(row.Status, pulls);
             const status = document.createElement("span");
-            status.className = `status status-${statusGroup(row.Status)}`;
-            status.textContent = row.Status;
+            status.className = `status status-${current.group}`;
+            status.textContent = current.text;
             cell.append(status);
           } else {
             appendInlineMarkdown(cell, row[column]);
@@ -551,6 +549,7 @@
             hasSnapshot: true,
             reason: "",
           };
+          renderSummary();
           renderTable();
           elements.overlayFreshness.textContent =
             `Forgejo overlay loaded ${mappedCount} mapped open plan PRs at ${loaded}` +
@@ -559,6 +558,7 @@
       } catch (error) {
         refresh.commit(() => {
           state.overlay = overlayFallback(previous, error.message);
+          renderSummary();
           renderTable();
           elements.overlayFreshness.textContent = state.overlay.mode === "stale"
             ? `Forgejo overlay is stale; the last successful mapping remains visible. ${state.overlay.reason}`

@@ -104,6 +104,23 @@ assert.strictEqual(status.MAX_PULL_PAGES, 2);
 assert.strictEqual(status.MAX_STATUS_FETCHES, 12);
 assert.strictEqual(status.STATUS_CONCURRENCY, 4);
 assert.strictEqual(status.REQUEST_TIMEOUT_MS, 10_000);
+assert.deepStrictEqual(
+  status.effectiveStatus("unclaimed", mapped.byPlan["P-01"]),
+  { group: "active", text: "in-progress (live PR)" },
+);
+assert.deepStrictEqual(
+  status.effectiveStatus("unclaimed", [{ ...mapped.byPlan["P-01"][0], draft: false }]),
+  { group: "active", text: "in-review (live PR)" },
+);
+assert.deepStrictEqual(
+  status.effectiveStatus("merged: M1-M3", mapped.byPlan["C-01"]),
+  { group: "merged", text: "merged: M1-M3" },
+  "an open evidence PR must not erase the canonical merged state",
+);
+assert.deepStrictEqual(
+  status.effectiveStatus("unclaimed", []),
+  { group: "unclaimed", text: "unclaimed" },
+);
 
 async function main() {
   const unavailable = status.overlayFallback(null, "HTTP 401");

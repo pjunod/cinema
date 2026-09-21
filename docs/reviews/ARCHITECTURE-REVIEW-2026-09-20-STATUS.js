@@ -146,6 +146,27 @@
     return { byPlan, ignored };
   }
 
+  function statusGroup(status) {
+    const normalized = String(status || "").trim().toLowerCase();
+    if (normalized === "unclaimed") return "unclaimed";
+    if (["claimed", "in-progress", "in-review"].includes(normalized)) return "active";
+    if (normalized.startsWith("blocked:")) return "blocked";
+    if (normalized === "merged" || normalized.startsWith("merged:")) return "merged";
+    if (normalized === "done") return "done";
+    if (normalized.startsWith("abandoned:")) return "abandoned";
+    return "active";
+  }
+
+  function effectiveStatus(status, pulls) {
+    const group = statusGroup(status);
+    if (group !== "unclaimed" || !Array.isArray(pulls) || pulls.length === 0) {
+      return { group, text: status };
+    }
+    return pulls.some((pull) => pull.draft !== true)
+      ? { group: "active", text: "in-review (live PR)" }
+      : { group: "active", text: "in-progress (live PR)" };
+  }
+
   function aggregateCommitStatus(payload, expectedSha) {
     if (!COMMIT_SHA.test(expectedSha) || payload?.sha !== expectedSha) return null;
     const state = typeof payload.state === "string" ? payload.state.toLowerCase() : "";
@@ -298,6 +319,7 @@
     aggregateCommitStatus,
     collectPullPages,
     createRefreshFence,
+    effectiveStatus,
     escapeHtml,
     mapPullsToPlans,
     overlayAbsenceText,
@@ -307,5 +329,6 @@
     pullOverlayMarkup,
     runWithDeadline,
     splitMarkdownRow,
+    statusGroup,
   });
 });
