@@ -5951,6 +5951,14 @@ final class PlayerController: ObservableObject {
         guard let requestId = body.requestId else {
             throw APIError.transport("The optical session request has no identity.")
         }
+        // A physical drive admits one reader, so a successor cannot be
+        // prepared beside its incumbent as a catalog-file session can. Await
+        // exact teardown before reclaiming the drive for a viewer-directed
+        // track or quality replacement.
+        if let incumbent = sessionId {
+            try await model.requireAPI().releaseHlsSession(incumbent)
+            if sessionId == incumbent { sessionId = nil }
+        }
         return try await model.requireAPI().createOpticalSession(
             driveId: opticalContext.driveId,
             titleId: opticalContext.titleId,

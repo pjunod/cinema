@@ -302,6 +302,15 @@ class Controller(
             if (optical == null) {
                 vm.createHlsSession(requireNotNull(plan.fileId), body)
             } else {
+                // A physical drive admits one reader. Unlike a catalog file,
+                // it cannot prepare a successor while the incumbent session
+                // still owns the lease. End the exact incumbent and await the
+                // server acknowledgement before reclaiming the drive for this
+                // ordered track/quality replacement.
+                sessionId?.let { incumbent ->
+                    vm.api().endHlsSession(incumbent)
+                    if (sessionId == incumbent) sessionId = null
+                }
                 vm.createOpticalSession(
                     optical.driveId,
                     optical.titleId,

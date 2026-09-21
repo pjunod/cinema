@@ -667,11 +667,19 @@ struct PlurxAPI {
     /// idempotent and capability-authed, and a failure to say goodbye is not
     /// worth surfacing to a viewer who has already left.
     func endHlsSession(_ sessionId: String) async {
+        try? await releaseHlsSession(sessionId)
+    }
+
+    /// Replacement must know the old physical-reader lease is gone before it
+    /// asks for the next one. Teardown callers stay best-effort through
+    /// `endHlsSession`; source adapters use this acknowledged form.
+    func releaseHlsSession(_ sessionId: String) async throws {
         guard let url = makeURL("hls/\(sessionId)") else { return }
         var req = URLRequest(url: url)
         req.httpMethod = "DELETE"
         Session.shared.authorize(&req)
-        _ = try? await session.data(for: req)
+        let (data, response) = try await session.data(for: req)
+        try Self.check(response, data: data)
     }
 
     func offlineOptions(
