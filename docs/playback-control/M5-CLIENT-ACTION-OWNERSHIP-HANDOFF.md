@@ -1,6 +1,6 @@
 # M5 — moving recovery authority off the clients
 
-**Status:** ready to build · **Executes:** item 6 of
+**Status:** built — ready to build · **Executes:** item 6 of
 [PLAYBACK-CONTROL-IMPLEMENTATION-HANDOFF.md](PLAYBACK-CONTROL-IMPLEMENTATION-HANDOFF.md)
 §6, which is step 5 of
 [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md) §9.3 ·

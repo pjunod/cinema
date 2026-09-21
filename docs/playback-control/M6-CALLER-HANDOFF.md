@@ -4,7 +4,7 @@
 > [lifecycle contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) removes its
 > axis-set, direction, software-proof, and throughput admission rules.
 
-**Status:** ready to build · **Executes:** the remainder of
+**Status:** superseded — ready to build · **Executes:** the remainder of
 [REMAINING-ROADMAP-HANDOFF.md](REMAINING-ROADMAP-HANDOFF.md) §3, after the
 slot, the executor and the decision ·
 **Written:** 2026-09-02 · **Baseline:** `main` after

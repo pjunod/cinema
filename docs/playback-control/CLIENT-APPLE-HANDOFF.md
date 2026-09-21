@@ -1,6 +1,6 @@
 # Apple prepared-switch adapter — handoff
 
-**Status:** ready to build, message plumbing only · **Platform:** the one to
+**Status:** built — ready to build, message plumbing only · **Platform:** the one to
 build first · **Repo:** `noirr/plurx` on Forgejo, branch from
 `effort/streaming-reliability` · **Written:** 2026-09-08
 

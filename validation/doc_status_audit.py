@@ -22,11 +22,11 @@ _ROW = re.compile(
 )
 _LINK = re.compile(r"\[[^\]]+\]\(([^)#]+)")
 _STATUS = re.compile(
-    r"^\s*>?\s*(?:\*\*)?Status(?:\s*\([^\n]*?\))?(?::)?(?:\*\*)?\s*:?[ \t]*(.*)$",
+    r"^\s*>?\s*\*\*Status(?:\s*\([^\n]*?\))?:?\*\*\s*:?[ \t]*(.*)$",
     re.IGNORECASE | re.MULTILINE,
 )
 _TERMINAL = re.compile(
-    r"\b(?:built|complete|done|executed|landed|merged|shipped)\b"
+    r"\b(?:built|complete|done|executed|landed|merged|shipped|superseded)\b"
     r"|^live\b|^M\d+\s+accepted\b",
     re.IGNORECASE,
 )
@@ -83,6 +83,8 @@ def audit(root: Path = REPO_ROOT) -> dict[str, Any]:
         rows += 1
         index_status = row.group(3)
         relative_path = link.group(1)
+        if not relative_path.endswith(".md"):
+            continue
         document = root / "docs" / relative_path
         header_match = _STATUS.search(document.read_text(encoding="utf-8"))
         if header_match is None:

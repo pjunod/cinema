@@ -1,5 +1,7 @@
 # Playback control M3a — rolling lease actor foundation
 
+**Status:** built · **Reconciled:** 2026-09-20
+
 This slice replaces the rolling fallback's split control mutex and inferred
 activity clock with one bounded per-generation mailbox. It is the first M3
 implementation slice from
