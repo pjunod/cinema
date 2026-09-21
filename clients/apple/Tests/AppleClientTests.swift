@@ -3787,11 +3787,28 @@ final class AppleClientTests: XCTestCase {
         XCTAssertTrue(source.contains("self?.setPlaybackRequested(true)"))
         XCTAssertTrue(source.contains("self?.setPlaybackRequested(false)"))
         // Every remaining writer, named. One is the viewer, one is the end of
-        // the film, one is teardown, and one is the owner's single helper.
+        // the film, one is teardown, one is the owner's single helper, and one
+        // makes the visible intent agree after iOS ends an interruption without
+        // granting automatic resume.
         let writers = source.components(separatedBy: "wantsPlayback = false").count - 1
         XCTAssertEqual(
-            writers, 4,
-            "a fifth writer of the viewer's transport intent wants a reason in this test"
+            writers, 5,
+            "another writer of the viewer's transport intent wants a reason in this test"
+        )
+        let interruption = try XCTUnwrap(source.range(
+            of: "func handleAudioSessionEvent(_ event: PlaybackAudioSessionObserver.Event) {"
+        ))
+        let interruptionEnd = try XCTUnwrap(
+            source.range(of: "\n    }\n", range: interruption.upperBound..<source.endIndex)
+        )
+        XCTAssertTrue(
+            String(source[interruption.upperBound..<interruptionEnd.lowerBound])
+                .contains("case .interruption(.stay):")
+        )
+        XCTAssertTrue(
+            String(source[interruption.upperBound..<interruptionEnd.lowerBound])
+                .contains("wantsPlayback = false"),
+            "declined automatic resume is the fifth, explicitly owned intent transition"
         )
         let start = try XCTUnwrap(source.range(
             of: "private func stopForBlockingSurface(revokingPlaybackIntent: Bool = false) {"
