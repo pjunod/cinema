@@ -113,7 +113,7 @@ document (the twelve written second landed on 2026-09-20 as well).
 | S-03 | [ENCODED-VOD-HOLD-AND-RELEASE](../streaming/ENCODED-VOD-HOLD-AND-RELEASE.md) | §2.6 | week | unclaimed | | | | 2026-09-20 | M0 fleet count first |
 | S-04 | [FONT-ATTESTATION-AND-BLOCKING-IO](../streaming/FONT-ATTESTATION-AND-BLOCKING-IO.md) | §2.7 | week (M1) / month (M2) | unclaimed | | | | 2026-09-20 | Needs `ldd \| grep fontconfig` on media1 before M2 |
 | S-05 | [FFMPEG-SPAWN-UNIFICATION](../streaming/FFMPEG-SPAWN-UNIFICATION.md) | F-stream-12/13, §4.1 | month | unclaimed | | | | 2026-09-20 | After S-01 |
-| S-06 | [ENCODER-RATE-CONTROL-DEFAULTS](../streaming/ENCODER-RATE-CONTROL-DEFAULTS.md) | Q1 | month | unclaimed | | | | 2026-09-20 | Per-family evidence; no universal maxrate cap |
+| S-06 | [ENCODER-RATE-CONTROL-DEFAULTS](../streaming/ENCODER-RATE-CONTROL-DEFAULTS.md) | Q1 | month | claimed | gpt-5.6-sol | agent:/root/p01_builder | `plan/S-06` | 2026-09-21 | Per-family evidence first; no universal maxrate cap. |
 | S-07 | [TONE-MAP-CHAIN-CORRECTIONS](../streaming/TONE-MAP-CHAIN-CORRECTIONS.md) | Q3 | month | unclaimed | | | | 2026-09-20 | M0 is the hwdownload metadata test |
 | S-08 | [INTERLACE-IN-THE-MEDIA-CONTRACT](../streaming/INTERLACE-IN-THE-MEDIA-CONTRACT.md) | Q4, Q9 (bitrate half) | month | unclaimed | | | | 2026-09-20 | Reproduced defect; fixture in review §9 |
 | S-09 | [AUDIO-RESOLVED-INDEPENDENTLY](../streaming/AUDIO-RESOLVED-INDEPENDENTLY.md) | Q5 | month | unclaimed | | | | 2026-09-20 | |
