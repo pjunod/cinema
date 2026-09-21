@@ -9916,7 +9916,7 @@ mod tests {
         let successor =
             StoreCoordinator::new(Arc::clone(&store), "provider-successor").expect("successor");
         let lease = match first
-            .acquire("scan:library:1", std::time::Duration::from_secs(1))
+            .acquire("scan:library:1", Duration::from_secs(1))
             .await
             .expect("first acquire")
         {
@@ -9926,15 +9926,15 @@ mod tests {
         let active = ActiveJobLease::start_with_policy(
             first,
             lease,
-            std::time::Duration::from_secs(1),
-            std::time::Duration::from_millis(100),
+            Duration::from_secs(1),
+            Duration::from_millis(100),
         )
         .expect("valid test lease policy");
 
-        tokio::time::sleep(std::time::Duration::from_millis(1_150)).await;
+        tokio::time::sleep(Duration::from_millis(1_150)).await;
         assert!(matches!(
             successor
-                .acquire("scan:library:1", std::time::Duration::from_secs(1))
+                .acquire("scan:library:1", Duration::from_secs(1))
                 .await
                 .expect("successor acquire"),
             LeaseClaim::Held { .. }
