@@ -1,6 +1,6 @@
 # Tone-map chain corrections — an explicit peak, primaries before the curve, dither
 
-**Status:** ready for review · **Executes:** Q3 / F-stream-3 from
+**Status:** implementation in progress; M0 measured · **Executes:** Q3 / F-stream-3 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -11,8 +11,9 @@ Read the review's §3.1 row Q3, the assessment's Q3 and F-stream-3 rows
 and the module header of
 [`pipeprobe.rs`](../../crates/plurxd/src/pipeprobe.rs) — the CPU chain this
 plan edits is the *reference* every GPU graph is judged against at boot, so
-a change here moves the yardstick. Work M0 → M3 in order; each milestone is
-one draft PR into `main` under the fast lane. Every `file:line` was read at
+a change here moves the yardstick. Work M0 → M3 in order in the one draft PR
+named on the board; milestones are logical commits and execution-log rows,
+not separate PRs. Every `file:line` was read at
 `88a3957a` and is marked **re-verify at build time**. If a step seems to
 require changing a GPU graph's operator (`bt.2390` in libplacebo,
 `tonemap=1` in vpp_qsv, `hable` in tonemap_opencl), stop and flag it: those
@@ -36,6 +37,14 @@ and only when a source's MaxCLL is not 1,000 and the side data does not
 reach the filter. The plan below still makes the peak explicit — an implicit
 default that happens to be right is not a contract — but the severity and
 the acceptance criteria are written against what actually happens.
+
+**M0 correction, 2026-09-21:** media1's shipped daemon uses
+`/usr/lib/jellyfin-ffmpeg/ffmpeg` 8.1.2-Jellyfin. Both QSV and VA-API retain
+MDCV/CLL across `hwdownload`, but the next `zscale=…:t=linear` removes those
+two side-data records. `tonemap` therefore computes `peak=10` for no-CLL,
+MaxCLL-1000 and MaxCLL-4000 inputs on hardware and software decode alike.
+The explicit peak is corrective for the shipped chain; hardware download is
+not the point that loses the facts.
 
 ## 1. Objective
 
@@ -191,6 +200,29 @@ each:
 M0's result decides how much of M1/M2 is corrective and how much is
 contractual. The plan proceeds either way, because an inferred peak is not a
 contract even when it infers correctly.
+
+The 2026-09-21 media1 result makes M1/M2 corrective. The shipped binary,
+QSV and VA-API graphs all ran inside the active `plurxd` container. Temporary
+fixtures were removed after the reading.
+
+| fixture | decode | metadata after download | computed peak | final-frame YAVG |
+|---|---|---|---:|---:|
+| no CLL/MDCV | QSV | colour tags; no luminance records | 10 | 143.617 |
+| no CLL/MDCV | software | not applicable | 10 | 143.617 |
+| MaxCLL 1,000 / MaxFALL 400 | QSV | MDCV + CLL retained | 10 | 128.011 |
+| MaxCLL 1,000 / MaxFALL 400 | software | not applicable | 10 | 128.011 |
+| MaxCLL 4,000 / MaxFALL 1,000 | QSV | MDCV + CLL retained | 10 | 143.617 |
+| MaxCLL 4,000 / MaxFALL 1,000 | software | not applicable | 10 | 143.617 |
+| no CLL/MDCV | VA-API | colour tags; no luminance records | 10 | 143.617 |
+| MaxCLL 1,000 / MaxFALL 400 | VA-API | MDCV + CLL retained | 10 | 128.011 |
+| MaxCLL 4,000 / MaxFALL 1,000 | VA-API | MDCV + CLL retained | 10 | 143.617 |
+
+The equal hardware/software values compare the same fixture and chain; the
+different 1,000-nit fixture YAVG is content, not a decode-path delta. A stage
+probe retained MDCV/CLL after `scale`, lost both at the linearising `zscale`,
+then reported only the unrelated unregistered SEI record. Deleting side data
+explicitly still produced `peak=10`; forcing the post-zscale frame tag back to
+PQ produced `peak=100`, matching FFmpeg's documented fallback.
 
 ### 3.2 M1 — peak luminance facts at scan
 
@@ -358,9 +390,11 @@ YAVG). Also read the boot probe's own fixture: `ffprobe -show_frames
 -read_intervals '%+#1' -show_entries frame_side_data=side_data_type
 <data_dir>/pipeprobe/*.mkv` (path re-verified from `pipeprobe::fixture`).
 
-Acceptance: a filled table in the M0 PR body (docs-only PR), each cell an
+Acceptance: a filled table in the plan and whole-plan PR body, each cell an
 observation, plus the same three readings from this document's §2.2 re-run
-on the shipped build. The M2 default is confirmed or corrected from it.
+on the shipped build. The table above satisfies this on media1: the M2
+default remains `peak=10`, while explicit MaxCLL/MDCV input is confirmed as
+corrective because the linearising zscale drops those records.
 
 ### 5.2 M1 — luminance facts
 
@@ -482,4 +516,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [#416](http://192.168.4.7:3000/noirr/plurx/pulls/416) / this commit | On media1's shipped FFmpeg 8.1.2-Jellyfin, QSV and VA-API retained MDCV/CLL through hardware download; the linearising zscale dropped both. Hardware and software produced the same effective peak and YAVG per fixture. MaxCLL 4,000 still reached tonemap as `peak=10`, so M1/M2 are corrective. Temporary fixtures were removed. |
