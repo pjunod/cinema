@@ -246,7 +246,7 @@ test("provider outage explains that subject matching did not find zero results",
   assert.match(html, /Subject matching is unavailable/);
   assert.match(html, /0 of 5856 titles checked/);
   assert.match(html, /resume automatically/);
-  assert.match(html, /#\/settings\/developer/);
+  assert.match(html, /#\/settings\/livetv/);
   assert.doesNotMatch(html, /Selection is partial; matching continues|provider_unreachable/);
   assert.equal(d.recipe.subject, "Stand-up comedy");
   assert.equal(d.recipe.match_all_in_scope, false);

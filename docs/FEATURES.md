@@ -655,9 +655,9 @@ media: no duplicate files, recording process, or live-tuner lease exists.
   Shipped presets distinguish stand-up from broad comedy. No inference service
   is required. The classifier records evidence and preserves administrator
   corrections; optional TMDB keywords enrich its metadata. Save and enable
-  immediately while an existing schedule keeps playing. Developer settings can
+  immediately while an existing schedule keeps playing. Live TV settings can
   pause new rule evaluations without stopping playback.
-- **Semantic search is optional.** Settings → Developer offers an embedded CPU
+- **Semantic search is optional.** Settings → Metadata offers an embedded CPU
   model, disabled by default. Once downloaded, it keeps queries and catalogue
   text local. Web search displays its suggestions separately from ordinary
   text matches. Suggestions never alter channel admission rules.
@@ -680,7 +680,7 @@ media: no duplicate files, recording process, or live-tuner lease exists.
   use the explicit management listing; normal browsing never exposes another
   account's personal channel. Favourites are private per-user presentation
   state and never alter the shared schedule.
-- **Enablement is a choice, not a readiness gate.** Settings → Developer shows
+- **Enablement is a choice, not a readiness gate.** Settings → Live TV shows
   whether storage, eligible probed video, and client compatibility look ready.
   Those facts are advice beside an explicit switch. Disabling stops new
   resolves and following sessions, but leaves definitions and the editor
@@ -823,13 +823,22 @@ browse and play directly against plurx — validated end-to-end with
 `python-plexapi`. plex.tv is never contacted. Detail: [CLIENTS.md](CLIENTS.md),
 [ARCHITECTURE.md](ARCHITECTURE.md) §5.
 
-**Web settings:** Live TV has its own Content section for tuner enablement,
-owner recovery, and guide configuration. Playback owns player defaults and advanced server delivery. Cluster owns the
-automatic transport-recovery guidance. Developer groups recording and library
-channel enablement, prepared quality handoff, protocol compatibility,
-this-browser preparation, decoder experiments, and HLS delivery comparisons. Each server card saves only the setting it shows; the browser
-override saves locally. Readiness and device qualification are expandable,
-textual, and advisory: missing or failed evidence never disables a toggle,
+**Web settings:** Live TV owns tuner enablement, owner recovery, guide
+configuration, recording, library-channel playback and subject matching.
+Playback owns player defaults and advanced server delivery, including Live
+HLS recovery and protocol compatibility. Analysis owns the durable index queue.
+Metadata owns search and classification settings. Maintenance owns Windows
+conversion and runtime readiness alongside Dolby Vision disk conversion.
+Cluster owns automatic transport-recovery guidance.
+
+Developer contains only experiments awaiting device qualification: prepared
+quality handoff (including the browser's second-player permission), subtitle
+failure refusal, verified decode artifacts and automatic decoder recovery.
+The recently shipped seek-scratch diagnostic card remains while native-device
+evidence is incomplete. Always-on startup recovery, HEVC admission, source verification and the playback
+surface contract need no rollout cards or enable switches. Each server card
+saves only its own settings; the browser override saves locally. Readiness is
+expandable and advisory: missing or failed evidence never disables a toggle,
 rejects its Save, or replaces the saved choice.
 
 **Operations:** `/healthz` (liveness), `/readyz` (storage reachable), Prometheus
