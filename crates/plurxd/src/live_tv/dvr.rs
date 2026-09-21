@@ -22,7 +22,9 @@
 //!   concatenates them in order and the gap is recorded rather than hidden.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -36,7 +38,8 @@ use tokio_util::sync::CancellationToken;
 use super::schedule;
 use super::{
     collect_live_prefix, open_tuner_stream, pinned_url, unix_seconds, DvrConfig, GuideWindow,
-    LiveTunerInput, LiveTvChannel, LiveTvConfig, LiveTvError, LiveTvManager, TUNER_READ_TIMEOUT,
+    LiveTunerInput, LiveTvChannel, LiveTvConfig, LiveTvError, LiveTvManager, LiveTvMetrics,
+    TUNER_READ_TIMEOUT,
 };
 
 /// How often the owner re-reads the world. Fast enough that a capture starts
@@ -60,6 +63,12 @@ const REMINDER_RETENTION_S: i64 = 7 * 24 * 3600;
 const UNLINKED_SCAN_WINDOW_S: i64 = 24 * 3600;
 const DVR_WRITE_RATE_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
 pub(crate) const DVR_OBSERVATIONS_MAX: usize = 64;
+/// About 3.3 seconds of a 19.4 Mbit/s ATSC 1.0 multiplex. One stalled disk
+/// costs this much memory, then only that sink ends its current attempt.
+const DVR_SINK_QUEUE_BYTES: u64 = 8 * 1024 * 1024;
+/// The byte bound is authoritative; this second bound stops a pathological
+/// stream of tiny chunks from allocating an unbounded number of queue nodes.
+const DVR_SINK_QUEUE_CHUNKS: usize = 512;
 
 /// One tuner GET, feeding every sink on its channel.
 pub(crate) struct DvrTransport {
@@ -112,11 +121,61 @@ pub(crate) struct DvrSink {
     /// programme and are simply not written here.
     pub(crate) window: (i64, i64),
     pub(crate) base: PathBuf,
-    pub(crate) file: tokio::sync::Mutex<Option<tokio::fs::File>>,
+    /// The fan-out owns only this bounded queue. The writer task is the sole
+    /// owner of the file, so a slow filesystem can never stall the tuner read.
+    writer: std::sync::Mutex<Option<SinkQueue>>,
+    /// Kept until it settles. A timed-out stop puts the handle back so the
+    /// next DVR tick can join it before reading the attempt file.
+    writer_task: std::sync::Mutex<Option<tokio::task::JoinHandle<SinkWriterOutcome>>>,
     pub(crate) bytes: AtomicU64,
     pub(crate) prior_attempt_bytes: Option<u64>,
     observation: std::sync::Mutex<DvrSinkObservation>,
+    metrics: Arc<LiveTvMetrics>,
     pub(crate) cancel: CancellationToken,
+}
+
+#[derive(Clone)]
+struct SinkQueue {
+    tx: tokio::sync::mpsc::Sender<bytes::Bytes>,
+    queued_bytes: Arc<AtomicU64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SinkWriterOutcome {
+    Closed { bytes: u64 },
+    Failed { reason: &'static str },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SinkStopResult {
+    NotFound,
+    Settled,
+    Settling,
+}
+
+/// Production needs `sync_all`; tests need an in-memory `AsyncWrite`. Keeping
+/// the durability operation on this object-safe seam avoids a test-only field
+/// on the shipping sink while preserving the file contract.
+trait SinkWriter: tokio::io::AsyncWrite + Send + Unpin {
+    fn sync_all<'a>(&'a mut self)
+        -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>>;
+}
+
+impl SinkWriter for tokio::fs::File {
+    fn sync_all<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
+        Box::pin(tokio::fs::File::sync_all(self))
+    }
+}
+
+#[cfg(test)]
+impl SinkWriter for tokio::io::DuplexStream {
+    fn sync_all<'a>(
+        &'a mut self,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
+        Box::pin(async { tokio::io::AsyncWriteExt::flush(self).await })
+    }
 }
 
 #[derive(Debug)]
@@ -155,7 +214,7 @@ impl DvrSinkObservation {
     }
 
     fn successful_write(&mut self, now: std::time::Instant, at_ms: i64, total: u64) {
-        if self.phase != "finishing" {
+        if !matches!(self.phase, "finishing" | "settling") {
             self.phase = "writing";
         }
         if self.first_write_at_ms.is_none() {
@@ -191,6 +250,25 @@ impl DvrSinkObservation {
             reason_code: None,
             actionable: false,
         });
+    }
+
+    fn interrupted(&mut self, reason: &'static str) -> bool {
+        let first = self.reason_code.is_none();
+        if first {
+            self.pending_events.push_back(LatchedDvrEvent {
+                event_id: uuid::Uuid::new_v4().to_string(),
+                kind: "capture_interrupted",
+                occurred_at_ms: unix_millis(),
+                reason_code: Some(reason.to_owned()),
+                actionable: true,
+            });
+            self.reason_code = Some(reason.to_owned());
+        }
+        first
+    }
+
+    fn settling(&mut self) {
+        self.phase = "settling";
     }
 
     fn write_bps(&self) -> Option<u64> {
@@ -236,12 +314,178 @@ pub(crate) struct DvrObservationSnapshot {
 }
 
 impl DvrSink {
-    fn part_path(&self) -> PathBuf {
-        attempt_path(&self.base, self.attempt)
-    }
-
     fn final_path(&self) -> PathBuf {
         final_path(&self.base)
+    }
+}
+
+fn reserve_sink_queue_bytes(queued: &AtomicU64, bytes: usize) -> bool {
+    let Ok(bytes) = u64::try_from(bytes) else {
+        return false;
+    };
+    queued
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current
+                .checked_add(bytes)
+                .filter(|next| *next <= DVR_SINK_QUEUE_BYTES)
+        })
+        .is_ok()
+}
+
+fn interrupt_sink(sink: &Arc<DvrSink>, reason: &'static str) {
+    let first = sink
+        .observation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .interrupted(reason);
+    if first {
+        sink.metrics.observe_dvr_sink_failure(reason);
+    }
+    sink.cancel.cancel();
+    sink.writer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+}
+
+fn start_sink_writer(sink: &Arc<DvrSink>, writer: Box<dyn SinkWriter>, delivered: Arc<AtomicU64>) {
+    let (tx, rx) = tokio::sync::mpsc::channel(DVR_SINK_QUEUE_CHUNKS);
+    let queued_bytes = Arc::new(AtomicU64::new(0));
+    *sink
+        .writer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(SinkQueue {
+        tx,
+        queued_bytes: Arc::clone(&queued_bytes),
+    });
+    let weak = Arc::downgrade(sink);
+    let task =
+        tokio::spawn(
+            async move { sink_writer_loop(weak, writer, rx, queued_bytes, delivered).await },
+        );
+    *sink
+        .writer_task
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
+}
+
+async fn sink_writer_loop(
+    sink: std::sync::Weak<DvrSink>,
+    mut writer: Box<dyn SinkWriter>,
+    mut rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
+    queued_bytes: Arc<AtomicU64>,
+    delivered: Arc<AtomicU64>,
+) -> SinkWriterOutcome {
+    use tokio::io::AsyncWriteExt as _;
+
+    while let Some(bytes) = rx.recv().await {
+        let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        match tokio::time::timeout(TUNER_READ_TIMEOUT, writer.write_all(&bytes)).await {
+            Ok(Ok(())) => {
+                queued_bytes.fetch_sub(len, Ordering::AcqRel);
+                let Some(sink) = sink.upgrade() else {
+                    return SinkWriterOutcome::Closed { bytes: 0 };
+                };
+                let total = sink
+                    .bytes
+                    .fetch_add(len, Ordering::AcqRel)
+                    .saturating_add(len);
+                sink.observation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .successful_write(std::time::Instant::now(), unix_millis(), total);
+                delivered.fetch_add(len, Ordering::Release);
+            }
+            Ok(Err(error)) => {
+                queued_bytes.store(0, Ordering::Release);
+                if let Some(sink) = sink.upgrade() {
+                    tracing::warn!(
+                        recording = %sink.recording_id,
+                        %error,
+                        "a recording's file could not be written; that capture is stopping"
+                    );
+                    interrupt_sink(&sink, "disk_write_failed");
+                }
+                return SinkWriterOutcome::Failed {
+                    reason: "disk_write_failed",
+                };
+            }
+            Err(_) => {
+                queued_bytes.store(0, Ordering::Release);
+                if let Some(sink) = sink.upgrade() {
+                    tracing::warn!(
+                        recording = %sink.recording_id,
+                        "a recording's file write stalled; that capture is stopping"
+                    );
+                    interrupt_sink(&sink, "disk_write_timeout");
+                }
+                return SinkWriterOutcome::Failed {
+                    reason: "disk_write_timeout",
+                };
+            }
+        }
+    }
+
+    let close = async {
+        writer.flush().await?;
+        writer.sync_all().await
+    };
+    let failure = match tokio::time::timeout(TUNER_READ_TIMEOUT, close).await {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => {
+            if let Some(sink) = sink.upgrade() {
+                tracing::warn!(recording = %sink.recording_id, %error, "closing a recording file");
+            }
+            Some("disk_write_failed")
+        }
+        Err(_) => Some("disk_write_timeout"),
+    };
+    if let Some(reason) = failure {
+        if let Some(sink) = sink.upgrade() {
+            interrupt_sink(&sink, reason);
+        }
+        SinkWriterOutcome::Failed { reason }
+    } else {
+        SinkWriterOutcome::Closed {
+            bytes: sink
+                .upgrade()
+                .map(|sink| sink.bytes.load(Ordering::Acquire))
+                .unwrap_or_default(),
+        }
+    }
+}
+
+async fn settle_sink(sink: &Arc<DvrSink>) -> SinkStopResult {
+    sink.cancel.cancel();
+    sink.writer
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    let task = sink
+        .writer_task
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    let Some(mut task) = task else {
+        return SinkStopResult::Settled;
+    };
+    match tokio::time::timeout(super::SESSION_DRAIN_TIMEOUT, &mut task).await {
+        Ok(Ok(_)) => SinkStopResult::Settled,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, recording = %sink.recording_id, "capture writer stopped unexpectedly");
+            SinkStopResult::Settled
+        }
+        Err(_) => {
+            sink.observation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .settling();
+            *sink
+                .writer_task
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
+            SinkStopResult::Settling
+        }
     }
 }
 
@@ -916,11 +1160,11 @@ impl LiveTvManager {
                 continue;
             }
             let owner = guide.as_ref().and_then(|guide| {
-                let programme = guide.channels.iter().find_map(|channel| {
+                let programme = guide.guide.channels.iter().find_map(|channel| {
                     (channel.id == row.channel_id)
                         .then(|| {
                             channel
-                                .programmes
+                                .programmes_in(&window)
                                 .iter()
                                 .find(|programme| programme.start == row.airing_start)
                         })
@@ -1000,7 +1244,13 @@ impl LiveTvManager {
                     .await
                     .map_err(store_error)?;
             }
-            self.stop_sink(&row.id).await;
+            if self.stop_sink(&row.id).await == SinkStopResult::Settling {
+                tracing::warn!(
+                    recording = %row.id,
+                    "capture file is still settling; stop will finish on the next DVR tick"
+                );
+                continue;
+            }
             self.finish_row_with_facts(
                 &row,
                 facts,
@@ -1159,7 +1409,7 @@ impl LiveTvManager {
                     recording = %row.id,
                     "the recording changed under its own start; closing the capture"
                 );
-                self.stop_sink(&row.id).await;
+                let _ = self.stop_sink(&row.id).await;
                 self.close_finished_transports().await;
                 continue;
             }
@@ -1221,7 +1471,13 @@ impl LiveTvManager {
                     .await
                     .map_err(store_error)?;
             }
-            self.stop_sink(&row.id).await;
+            if self.stop_sink(&row.id).await == SinkStopResult::Settling {
+                tracing::warn!(
+                    recording = %row.id,
+                    "capture file is still settling; assembly waits for the next DVR tick"
+                );
+                continue;
+            }
             self.finish_row(&row, events, now, 0, None, "capture complete", generation)
                 .await?;
         }
@@ -1370,20 +1626,6 @@ impl LiveTvManager {
         // own orphan and read it as a fenced predecessor's. Every fallible step
         // that does not need the file therefore happens first, and the two
         // that remain after it undo themselves.
-        let sink = Arc::new(DvrSink {
-            recording_id: row.id.clone(),
-            channel_id: row.channel_id.clone(),
-            airing_start: row.airing_start,
-            title: row.title.clone(),
-            attempt,
-            window: (row.capture_start, row.capture_end),
-            base: base.clone(),
-            file: tokio::sync::Mutex::new(None),
-            bytes: AtomicU64::new(0),
-            prior_attempt_bytes: prior_attempt_bytes(&base, attempt).await,
-            observation: std::sync::Mutex::new(DvrSinkObservation::new(attempt)),
-            cancel: CancellationToken::new(),
-        });
         let joined = {
             let registry = self
                 .registry
@@ -1422,14 +1664,34 @@ impl LiveTvManager {
         let file = tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
-            .open(sink.part_path())
+            .open(attempt_path(&base, attempt))
             .await
             .map_err(|error| {
                 LiveTvError::StreamFailed(format!(
                     "opening attempt {attempt} of this recording: {error}"
                 ))
             })?;
-        *sink.file.lock().await = Some(file);
+        let delivered = joined
+            .as_ref()
+            .map(|transport| Arc::clone(&transport.delivered))
+            .unwrap_or_else(|| Arc::new(AtomicU64::new(0)));
+        let sink = Arc::new(DvrSink {
+            recording_id: row.id.clone(),
+            channel_id: row.channel_id.clone(),
+            airing_start: row.airing_start,
+            title: row.title.clone(),
+            attempt,
+            window: (row.capture_start, row.capture_end),
+            base: base.clone(),
+            writer: std::sync::Mutex::new(None),
+            writer_task: std::sync::Mutex::new(None),
+            bytes: AtomicU64::new(0),
+            prior_attempt_bytes: prior_attempt_bytes(&base, attempt).await,
+            observation: std::sync::Mutex::new(DvrSinkObservation::new(attempt)),
+            metrics: Arc::clone(&self.metrics),
+            cancel: CancellationToken::new(),
+        });
+        start_sink_writer(&sink, Box::new(file), Arc::clone(&delivered));
 
         if let Some(transport) = joined {
             // Publish the sink only once its file is open, so the fan-out
@@ -1447,7 +1709,7 @@ impl LiveTvManager {
             generation,
             owner_serving_generation: serving_generation,
             cancel: CancellationToken::new(),
-            delivered: Arc::new(AtomicU64::new(0)),
+            delivered,
             sinks: std::sync::Mutex::new(vec![Arc::clone(&sink)]),
             worker: std::sync::Mutex::new(None),
             source: std::sync::Mutex::new(None),
@@ -1477,7 +1739,14 @@ impl LiveTvManager {
             )
             .await;
             if let Some(manager) = manager.upgrade() {
-                manager.close_transport(&worker_transport.channel.id).await;
+                let channel_id = worker_transport.channel.id.clone();
+                // Cleanup must not await the JoinHandle of the task that is
+                // currently executing this block. Hand it to a sibling task
+                // so the worker can become joinable before close_transport
+                // settles writers and collects it.
+                tokio::spawn(async move {
+                    manager.close_transport(&channel_id).await;
+                });
             }
             result
         });
@@ -1492,7 +1761,7 @@ impl LiveTvManager {
     /// sink still wants bytes — stopping one of two recordings on a channel
     /// frees no tuner, and pretending otherwise is what would make the
     /// capacity dialog lie.
-    pub(crate) async fn stop_sink(&self, recording_id: &str) -> bool {
+    async fn stop_sink(&self, recording_id: &str) -> SinkStopResult {
         let transports = {
             let registry = self
                 .registry
@@ -1500,28 +1769,19 @@ impl LiveTvManager {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             registry.transports.values().cloned().collect::<Vec<_>>()
         };
-        let mut stopped = false;
         for transport in transports {
-            for sink in transport.live_sinks() {
+            let sinks = transport
+                .sinks
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            for sink in sinks {
                 if sink.recording_id == recording_id {
-                    // Cancel first so the fan-out stops choosing this sink,
-                    // then take the file: `flush` on a `tokio::fs::File` is
-                    // what pushes the last buffered write to the kernel, and
-                    // `sync_all` is what makes it survive the concatenation
-                    // that reads the same bytes back immediately.
-                    sink.cancel.cancel();
-                    if let Some(mut file) = sink.file.lock().await.take() {
-                        use tokio::io::AsyncWriteExt as _;
-                        if let Err(error) = file.flush().await {
-                            tracing::warn!(%error, recording = %recording_id, "flushing a capture");
-                        }
-                        let _ = file.sync_all().await;
-                    }
-                    stopped = true;
+                    return settle_sink(&sink).await;
                 }
             }
         }
-        stopped
+        SinkStopResult::NotFound
     }
 
     /// Publish the closure phase before removing a sink from the write fanout.
@@ -1591,18 +1851,40 @@ impl LiveTvManager {
 
     pub(crate) async fn close_transport(&self, channel_id: &str) {
         let transport = {
-            let mut registry = self
+            let registry = self
                 .registry
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            registry.transports.remove(channel_id)
+            registry.transports.get(channel_id).cloned()
         };
         let Some(transport) = transport else {
             return;
         };
         transport.cancel.cancel();
-        for sink in transport.live_sinks() {
-            sink.cancel.cancel();
+        let sinks = transport
+            .sinks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut settling = false;
+        for sink in sinks {
+            settling |= settle_sink(&sink).await == SinkStopResult::Settling;
+        }
+        if settling {
+            return;
+        }
+        {
+            let mut registry = self
+                .registry
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if registry
+                .transports
+                .get(channel_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &transport))
+            {
+                registry.transports.remove(channel_id);
+            }
         }
         let worker = transport
             .worker
@@ -1913,7 +2195,6 @@ async fn pump_tuner_fanout(
     transport: Arc<DvrTransport>,
 ) -> Result<(), LiveTvError> {
     use futures_util::StreamExt as _;
-    use tokio::io::AsyncWriteExt as _;
 
     let mut stream = input.remainder;
     let mut pending = std::iter::once(input.prefix)
@@ -1967,73 +2248,33 @@ async fn pump_tuner_fanout(
             if now < sink.window.0 || now >= sink.window.1 {
                 continue;
             }
-            let mut handle = sink.file.lock().await;
-            let Some(file) = handle.as_mut() else {
+            let queue = sink
+                .writer
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            let Some(queue) = queue else {
                 continue;
             };
-            match tokio::time::timeout(TUNER_READ_TIMEOUT, file.write_all(&bytes)).await {
-                Ok(Ok(())) => {
-                    let total = sink
-                        .bytes
-                        .fetch_add(bytes.len() as u64, Ordering::AcqRel)
-                        .saturating_add(bytes.len() as u64);
-                    sink.observation
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .successful_write(std::time::Instant::now(), unix_millis(), total);
-                    transport
-                        .delivered
-                        .fetch_add(bytes.len() as u64, Ordering::Release);
+            if !reserve_sink_queue_bytes(&queue.queued_bytes, bytes.len()) {
+                tracing::warn!(
+                    recording = %sink.recording_id,
+                    queued_bytes = queue.queued_bytes.load(Ordering::Acquire),
+                    "a recording's disk queue filled; that capture is stopping"
+                );
+                interrupt_sink(&sink, "disk_write_backlog");
+                continue;
+            }
+            let len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+            match queue.tx.try_send(bytes.clone()) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    queue.queued_bytes.fetch_sub(len, Ordering::AcqRel);
+                    interrupt_sink(&sink, "disk_write_backlog");
                 }
-                // One sink's disk failing is that recording's problem, not
-                // every recording on the channel. Cancel it and keep the
-                // transport feeding the others.
-                Ok(Err(error)) => {
-                    tracing::warn!(
-                        recording = %sink.recording_id,
-                        %error,
-                        "a recording's file could not be written; that capture is stopping"
-                    );
-                    let mut observation = sink
-                        .observation
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if observation.reason_code.is_none() {
-                        observation.pending_events.push_back(LatchedDvrEvent {
-                            event_id: uuid::Uuid::new_v4().to_string(),
-                            kind: "capture_interrupted",
-                            occurred_at_ms: unix_millis(),
-                            reason_code: Some("disk_write_failed".to_owned()),
-                            actionable: true,
-                        });
-                    }
-                    observation.reason_code = Some("disk_write_failed".to_owned());
-                    drop(observation);
-                    drop(handle);
-                    sink.cancel.cancel();
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        recording = %sink.recording_id,
-                        "a recording's file write stalled; that capture is stopping"
-                    );
-                    let mut observation = sink
-                        .observation
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if observation.reason_code.is_none() {
-                        observation.pending_events.push_back(LatchedDvrEvent {
-                            event_id: uuid::Uuid::new_v4().to_string(),
-                            kind: "capture_interrupted",
-                            occurred_at_ms: unix_millis(),
-                            reason_code: Some("disk_write_timeout".to_owned()),
-                            actionable: true,
-                        });
-                    }
-                    observation.reason_code = Some("disk_write_timeout".to_owned());
-                    drop(observation);
-                    drop(handle);
-                    sink.cancel.cancel();
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    queue.queued_bytes.fetch_sub(len, Ordering::AcqRel);
+                    interrupt_sink(&sink, "disk_write_failed");
                 }
             }
         }
@@ -2471,6 +2712,651 @@ async fn ensure_recordings_library(
 mod tests {
     use super::*;
 
+    async fn oversized_scheduler_fixture() -> (
+        Arc<LiveTvManager>,
+        LiveTvConfig,
+        DvrConfig,
+        i64,
+        i64,
+        tempfile::TempDir,
+    ) {
+        use plurx_core::store::{SqliteStore, UserStore as _};
+        use plurx_core::transcode::{EncoderCaps, Pipeline};
+
+        let root = tempfile::tempdir().expect("temporary scheduler root");
+        let root_path = root.path();
+        let sqlite = Arc::new(SqliteStore::open_in_memory().expect("scheduler store"));
+        let user = sqlite
+            .create_user("scheduler", "test-only", true)
+            .await
+            .expect("scheduler user");
+        let store: Arc<dyn plurx_core::store::Store> = sqlite;
+        let transcode = Arc::new(crate::transcode::TranscodeManager::new(
+            Arc::clone(&store),
+            root_path.join("finite"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let manager = LiveTvManager::new(
+            Arc::clone(&store),
+            Arc::new(super::super::SystemInfo::default()),
+            transcode,
+            crate::serving_fence::ServingAuthority::always_ready(),
+            "node-a".to_owned(),
+            root_path.join("live-tv"),
+            root_path.join("guide"),
+        );
+        let now = 1_800_000_000;
+        let target_start = now + 13 * 86_400;
+        let target_title = "late programme the public clip drops";
+        let guide = super::super::LiveTvGuide {
+            source: "hdhomerun".to_owned(),
+            freshness: super::super::GuideFreshness::Fresh,
+            age_seconds: 0,
+            fetched_at: Some(now),
+            window: GuideWindow {
+                start: now,
+                end: now + DVR_SCHEDULE_DAYS_MAX * 86_400,
+            },
+            refresh_error: None,
+            next_refresh_at: None,
+            matched_channels: 64,
+            lineup_channels: 64,
+            channels: (0..64)
+                .map(|channel| super::super::LiveTvGuideChannel {
+                    id: format!("{channel}.1"),
+                    guide_number: format!("{channel}.1"),
+                    affiliate: None,
+                    image_url: None,
+                    programmes: (0..700)
+                        .map(|slot| {
+                            let start = now + i64::from(slot) * 1_800;
+                            super::super::LiveTvProgramme {
+                                start,
+                                end: start + 1_800,
+                                title: if channel == 63 && start == target_start {
+                                    target_title.to_owned()
+                                } else {
+                                    format!(
+                                        "ordinary programme {channel:02}-{slot:03} {}",
+                                        "x".repeat(180)
+                                    )
+                                },
+                                episode_title: None,
+                                episode: None,
+                                synopsis: None,
+                                image_url: None,
+                                original_air_date: None,
+                                series_id: None,
+                                programme_id: None,
+                                is_new: None,
+                                filters: Vec::new(),
+                            }
+                        })
+                        .collect(),
+                })
+                .collect(),
+        };
+        manager.guide_cache.store(7, 1, &Ok(guide)).await;
+
+        let mut live_tv = LiveTvConfig::from_snapshot(&BTreeMap::new(), "node-a");
+        live_tv.enabled = true;
+        live_tv.owner_node_id = "node-a".to_owned();
+        live_tv.guide_source = super::super::GuideSource::HdHomeRun;
+        live_tv.guide_hours = 336;
+        live_tv.generation = 7;
+        let dvr = DvrConfig {
+            enabled: true,
+            root: root_path.join("dvr").to_string_lossy().into_owned(),
+            free_floor_gb: 0,
+            tuner_reserve: 0,
+            pad_start_s: 0,
+            pad_end_s: 0,
+            reminder_lead_s: 0,
+            webhook_url: String::new(),
+        };
+        store
+            .put_dvr_rule(&plurx_core::dvr::DvrRule {
+                id: "late-rule".to_owned(),
+                owner_user_id: user.id,
+                priority: 0,
+                name: "late rule".to_owned(),
+                match_mode: plurx_core::dvr::DvrMatchMode::Title,
+                match_value: target_title.to_owned(),
+                channel_id: Some("63.1".to_owned()),
+                new_only: false,
+                keep_mode: DvrKeepMode::All,
+                keep_value: 0,
+                pad_start_s: 0,
+                pad_end_s: 0,
+                enabled: true,
+                created_at_ms: now * 1_000,
+                updated_at_ms: now * 1_000,
+            })
+            .await
+            .expect("store late rule");
+        (manager, live_tv, dvr, now, target_start, root)
+    }
+
+    #[tokio::test]
+    async fn the_scheduler_sees_an_airing_the_public_clip_drops() {
+        let (manager, live_tv, dvr, now, target_start, _root) = oversized_scheduler_fixture().await;
+        manager
+            .dvr_expand(&live_tv, &dvr, now)
+            .await
+            .expect("expand late rule");
+        let row = manager
+            .store
+            .get_dvr_recording_for_airing("63.1", target_start)
+            .await
+            .expect("read scheduled row")
+            .expect("late programme scheduled from full view");
+        assert_eq!(row.title, "late programme the public clip drops");
+
+        let public = manager
+            .local_guide(
+                &live_tv,
+                GuideWindow {
+                    start: now,
+                    end: now + DVR_SCHEDULE_DAYS_MAX * 86_400,
+                },
+            )
+            .await;
+        assert!(
+            public.channels.iter().all(|channel| channel
+                .programmes
+                .iter()
+                .all(|programme| programme.title != row.title)),
+            "the fixture must prove the scheduler used data omitted by the 2 MiB response"
+        );
+    }
+
+    #[tokio::test]
+    async fn already_scheduled_late_rows_survive_reconciliation_of_an_oversized_guide() {
+        let (manager, live_tv, dvr, now, target_start, _root) = oversized_scheduler_fixture().await;
+        manager
+            .dvr_expand(&live_tv, &dvr, now)
+            .await
+            .expect("expand late rule");
+        manager
+            .dvr_reconcile(&live_tv, live_tv.generation, now)
+            .await
+            .expect("reconcile late row");
+        let row = manager
+            .store
+            .get_dvr_recording_for_airing("63.1", target_start)
+            .await
+            .expect("read reconciled row")
+            .expect("late row retained");
+        assert_eq!(row.state, DvrState::Scheduled);
+    }
+
+    #[derive(Clone, Default)]
+    struct MemoryWriter {
+        bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl tokio::io::AsyncWrite for MemoryWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            bytes: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            self.bytes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            std::task::Poll::Ready(Ok(bytes.len()))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    impl SinkWriter for MemoryWriter {
+        fn sync_all<'a>(
+            &'a mut self,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    struct FailingWriter;
+
+    impl tokio::io::AsyncWrite for FailingWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _bytes: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::other("injected disk failure")))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    impl SinkWriter for FailingWriter {
+        fn sync_all<'a>(
+            &'a mut self,
+        ) -> Pin<Box<dyn Future<Output = std::io::Result<()>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn test_sink(
+        id: &str,
+        writer: Box<dyn SinkWriter>,
+        delivered: Arc<AtomicU64>,
+        metrics: Arc<LiveTvMetrics>,
+    ) -> Arc<DvrSink> {
+        test_sink_at(
+            id,
+            PathBuf::from(format!("/unused/{id}")),
+            writer,
+            delivered,
+            metrics,
+        )
+    }
+
+    fn test_sink_at(
+        id: &str,
+        base: PathBuf,
+        writer: Box<dyn SinkWriter>,
+        delivered: Arc<AtomicU64>,
+        metrics: Arc<LiveTvMetrics>,
+    ) -> Arc<DvrSink> {
+        let now = unix_seconds();
+        let sink = Arc::new(DvrSink {
+            recording_id: id.to_owned(),
+            channel_id: "7.1".to_owned(),
+            airing_start: now,
+            title: id.to_owned(),
+            attempt: 1,
+            window: (now - 60, now + 60),
+            base,
+            writer: std::sync::Mutex::new(None),
+            writer_task: std::sync::Mutex::new(None),
+            bytes: AtomicU64::new(0),
+            prior_attempt_bytes: None,
+            observation: std::sync::Mutex::new(DvrSinkObservation::new(1)),
+            metrics,
+            cancel: CancellationToken::new(),
+        });
+        start_sink_writer(&sink, writer, delivered);
+        sink
+    }
+
+    fn test_transport(
+        sinks: Vec<Arc<DvrSink>>,
+        delivered: Arc<AtomicU64>,
+        serving_generation: u64,
+    ) -> Arc<DvrTransport> {
+        Arc::new(DvrTransport {
+            channel: LiveTvChannel {
+                id: "7.1".to_owned(),
+                guide_number: "7.1".to_owned(),
+                guide_name: "Test".to_owned(),
+                favorite: false,
+                drm: false,
+                support: super::super::LiveTvChannelSupport::Ready,
+                hd: Some(true),
+                video_codec: None,
+                audio_codec: None,
+                source_format: None,
+            },
+            generation: 1,
+            owner_serving_generation: serving_generation,
+            cancel: CancellationToken::new(),
+            delivered,
+            sinks: std::sync::Mutex::new(sinks),
+            worker: std::sync::Mutex::new(None),
+            source: std::sync::Mutex::new(None),
+        })
+    }
+
+    fn tuner_input(
+        chunks: Vec<bytes::Bytes>,
+        pulled_at: Arc<std::sync::Mutex<Vec<std::time::Instant>>>,
+    ) -> LiveTunerInput {
+        use futures_util::StreamExt as _;
+
+        let prefix = chunks[0].clone();
+        let queued = chunks.get(1).cloned();
+        let remainder = chunks.into_iter().skip(2).collect::<Vec<_>>();
+        let stream = futures_util::stream::unfold(
+            (remainder, 0usize, pulled_at),
+            |(chunks, index, pulled_at)| async move {
+                if index >= chunks.len() {
+                    return None;
+                }
+                tokio::task::yield_now().await;
+                pulled_at
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(std::time::Instant::now());
+                Some((
+                    Ok::<_, reqwest::Error>(chunks[index].clone()),
+                    (chunks, index + 1, pulled_at),
+                ))
+            },
+        )
+        .boxed();
+        LiveTunerInput {
+            prefix,
+            queued,
+            remainder: stream,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slow_sink_never_delays_the_tuner_reader_or_its_sibling() {
+        let metrics = Arc::new(LiveTvMetrics::default());
+        let delivered = Arc::new(AtomicU64::new(0));
+        let fast_writer = MemoryWriter::default();
+        let fast_bytes = Arc::clone(&fast_writer.bytes);
+        let fast = test_sink(
+            "fast",
+            Box::new(fast_writer),
+            Arc::clone(&delivered),
+            Arc::clone(&metrics),
+        );
+        let (stalled_writer, stalled_reader) = tokio::io::duplex(1);
+        let slow = test_sink(
+            "slow",
+            Box::new(stalled_writer),
+            Arc::clone(&delivered),
+            Arc::clone(&metrics),
+        );
+        let slow_queue_bytes = slow
+            .writer
+            .lock()
+            .expect("slow writer queue")
+            .as_ref()
+            .expect("slow writer")
+            .queued_bytes
+            .clone();
+        let serving = crate::serving_fence::ServingAuthority::always_ready();
+        let transport = test_transport(
+            vec![Arc::clone(&fast), Arc::clone(&slow)],
+            delivered,
+            serving.admit().expect("serving generation"),
+        );
+        let chunk_count = 160usize;
+        let chunk_bytes = 64 * 1024usize;
+        let chunks = (0..chunk_count)
+            .map(|index| bytes::Bytes::from(vec![(index % 251) as u8; chunk_bytes]))
+            .collect::<Vec<_>>();
+        let pulled_at = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let started = std::time::Instant::now();
+        let result = pump_tuner_fanout(
+            tuner_input(chunks, Arc::clone(&pulled_at)),
+            serving,
+            transport,
+        )
+        .await;
+        assert!(matches!(result, Err(LiveTvError::StreamFailed(_))));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(slow.cancel.is_cancelled());
+        assert!(!fast.cancel.is_cancelled());
+        assert!(slow_queue_bytes.load(Ordering::Acquire) <= DVR_SINK_QUEUE_BYTES);
+        assert_eq!(
+            slow.observation
+                .lock()
+                .expect("slow observation")
+                .reason_code
+                .as_deref(),
+            Some("disk_write_backlog")
+        );
+        let pulls = pulled_at.lock().expect("pull timings");
+        let max_gap = pulls
+            .windows(2)
+            .map(|pair| pair[1].duration_since(pair[0]))
+            .max()
+            .unwrap_or_default();
+        assert!(max_gap < std::time::Duration::from_millis(100));
+        drop(pulls);
+
+        assert_eq!(settle_sink(&fast).await, SinkStopResult::Settled);
+        assert_eq!(
+            fast_bytes.lock().expect("fast bytes").len(),
+            chunk_count * chunk_bytes
+        );
+        drop(stalled_reader);
+        assert_eq!(settle_sink(&slow).await, SinkStopResult::Settled);
+        assert!(metrics
+            .dvr_sink_failures_prometheus()
+            .contains("reason=\"disk_write_backlog\"} 1"));
+    }
+
+    #[tokio::test]
+    async fn a_failing_sink_records_one_named_interruption() {
+        let metrics = Arc::new(LiveTvMetrics::default());
+        let delivered = Arc::new(AtomicU64::new(0));
+        let sink = test_sink(
+            "failing",
+            Box::new(FailingWriter),
+            Arc::clone(&delivered),
+            Arc::clone(&metrics),
+        );
+        let serving = crate::serving_fence::ServingAuthority::always_ready();
+        let transport = test_transport(
+            vec![Arc::clone(&sink)],
+            delivered,
+            serving.admit().expect("serving generation"),
+        );
+        let pulled_at = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let result = pump_tuner_fanout(
+            tuner_input(
+                vec![
+                    bytes::Bytes::from_static(b"first"),
+                    bytes::Bytes::from_static(b"second"),
+                    bytes::Bytes::from_static(b"third"),
+                ],
+                pulled_at,
+            ),
+            serving,
+            transport,
+        )
+        .await;
+        assert!(
+            result.is_ok(),
+            "a sink-local disk failure must not become a tuner failure"
+        );
+        assert_eq!(settle_sink(&sink).await, SinkStopResult::Settled);
+        let observation = sink.observation.lock().expect("failure observation");
+        assert_eq!(
+            observation.reason_code.as_deref(),
+            Some("disk_write_failed")
+        );
+        assert_eq!(
+            observation
+                .pending_events
+                .iter()
+                .filter(|event| event.kind == "capture_interrupted")
+                .count(),
+            1
+        );
+        drop(observation);
+        assert!(metrics
+            .dvr_sink_failures_prometheus()
+            .contains("reason=\"disk_write_failed\"} 1"));
+    }
+
+    #[tokio::test]
+    async fn two_overlapping_recordings_get_identical_bytes_in_their_overlap() {
+        let metrics = Arc::new(LiveTvMetrics::default());
+        let delivered = Arc::new(AtomicU64::new(0));
+        let left_writer = MemoryWriter::default();
+        let left_bytes = Arc::clone(&left_writer.bytes);
+        let right_writer = MemoryWriter::default();
+        let right_bytes = Arc::clone(&right_writer.bytes);
+        let left = test_sink(
+            "left",
+            Box::new(left_writer),
+            Arc::clone(&delivered),
+            Arc::clone(&metrics),
+        );
+        let right = test_sink(
+            "right",
+            Box::new(right_writer),
+            Arc::clone(&delivered),
+            metrics,
+        );
+        let serving = crate::serving_fence::ServingAuthority::always_ready();
+        let transport = test_transport(
+            vec![Arc::clone(&left), Arc::clone(&right)],
+            delivered,
+            serving.admit().expect("serving generation"),
+        );
+        let chunks = vec![
+            bytes::Bytes::from_static(b"overlap-a"),
+            bytes::Bytes::from_static(b"overlap-b"),
+            bytes::Bytes::from_static(b"overlap-c"),
+        ];
+        let expected = chunks.concat();
+        let result = pump_tuner_fanout(
+            tuner_input(chunks, Arc::new(std::sync::Mutex::new(Vec::new()))),
+            serving,
+            transport,
+        )
+        .await;
+        assert!(matches!(result, Err(LiveTvError::StreamFailed(_))));
+        assert_eq!(settle_sink(&left).await, SinkStopResult::Settled);
+        assert_eq!(settle_sink(&right).await, SinkStopResult::Settled);
+        assert_eq!(*left_bytes.lock().expect("left bytes"), expected);
+        assert_eq!(*right_bytes.lock().expect("right bytes"), expected);
+    }
+
+    #[tokio::test]
+    async fn a_fenced_transport_cancels_every_sink_before_exiting() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+
+        let metrics = Arc::new(LiveTvMetrics::default());
+        let delivered = Arc::new(AtomicU64::new(0));
+        let left_writer = MemoryWriter::default();
+        let left_bytes = Arc::clone(&left_writer.bytes);
+        let right_writer = MemoryWriter::default();
+        let right_bytes = Arc::clone(&right_writer.bytes);
+        let left = test_sink(
+            "fenced-left",
+            Box::new(left_writer),
+            Arc::clone(&delivered),
+            Arc::clone(&metrics),
+        );
+        let right = test_sink(
+            "fenced-right",
+            Box::new(right_writer),
+            Arc::clone(&delivered),
+            metrics,
+        );
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let serving = fence.authority();
+        let generation = serving.admit().expect("serving generation");
+        let transport = test_transport(
+            vec![Arc::clone(&left), Arc::clone(&right)],
+            delivered,
+            generation,
+        );
+        fence.validation_set_ready(false).await;
+
+        let result = pump_tuner_fanout(
+            tuner_input(
+                vec![
+                    bytes::Bytes::from_static(b"must-not-land"),
+                    bytes::Bytes::from_static(b"nor-this"),
+                ],
+                Arc::new(std::sync::Mutex::new(Vec::new())),
+            ),
+            serving,
+            transport,
+        )
+        .await;
+        assert!(matches!(result, Err(LiveTvError::OwnerUnavailable(_))));
+        assert!(left.cancel.is_cancelled());
+        assert!(right.cancel.is_cancelled());
+        assert_eq!(settle_sink(&left).await, SinkStopResult::Settled);
+        assert_eq!(settle_sink(&right).await, SinkStopResult::Settled);
+        assert!(left_bytes.lock().expect("left bytes").is_empty());
+        assert!(right_bytes.lock().expect("right bytes").is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_waits_for_the_writer_and_never_concatenates_an_unsettled_attempt() {
+        let root = tempfile::tempdir().expect("temporary recording root");
+        let base = root.path().join("stalled-recording");
+        tokio::fs::write(attempt_path(&base, 1), b"settling")
+            .await
+            .expect("attempt fixture");
+        let (writer, reader) = tokio::io::duplex(1);
+        let sink = test_sink_at(
+            "settling",
+            base.clone(),
+            Box::new(writer),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(LiveTvMetrics::default()),
+        );
+        let queue = sink
+            .writer
+            .lock()
+            .expect("writer queue")
+            .as_ref()
+            .expect("active writer")
+            .clone();
+        assert!(reserve_sink_queue_bytes(&queue.queued_bytes, 64 * 1024));
+        queue
+            .tx
+            .try_send(bytes::Bytes::from(vec![0_u8; 64 * 1024]))
+            .expect("queue stalled write");
+        tokio::task::yield_now().await;
+
+        assert_eq!(settle_sink(&sink).await, SinkStopResult::Settling);
+        assert_eq!(
+            sink.observation.lock().expect("settling observation").phase,
+            "settling"
+        );
+        assert!(attempt_path(&base, 1).exists());
+        assert!(!final_path(&base).exists());
+
+        drop(reader);
+        assert_eq!(settle_sink(&sink).await, SinkStopResult::Settled);
+    }
+
+    #[test]
+    fn queue_byte_reservations_never_exceed_the_bound() {
+        let queued = AtomicU64::new(0);
+        for _ in 0..DVR_SINK_QUEUE_CHUNKS * 2 {
+            let _ = reserve_sink_queue_bytes(&queued, 64 * 1024);
+            assert!(queued.load(Ordering::Acquire) <= DVR_SINK_QUEUE_BYTES);
+        }
+        assert_eq!(queued.load(Ordering::Acquire), DVR_SINK_QUEUE_BYTES);
+        assert!(!reserve_sink_queue_bytes(&queued, 1));
+    }
+
     #[test]
     fn write_rate_uses_successful_samples_from_one_five_second_window() {
         let mut sample = DvrSinkObservation::new(1);
@@ -2499,6 +3385,10 @@ mod tests {
             sample.pending_events.front().map(|event| event.kind),
             Some("finishing")
         );
+
+        sample.settling();
+        sample.successful_write(std::time::Instant::now(), 2_002, 1_024);
+        assert_eq!(sample.phase, "settling");
     }
 
     fn base(root: &str, title: &str, start: i64, number: &str, id: &str) -> PathBuf {

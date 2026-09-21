@@ -1637,6 +1637,9 @@ pub(crate) struct LiveTvMetrics {
     /// stalled refresh loop reports staleness instead of a frozen number.
     guide_refreshes: StdMutex<BTreeMap<(&'static str, &'static str), u64>>,
     guide: StdMutex<Option<(tokio::time::Instant, Duration, usize)>>,
+    /// Fixed-cardinality DVR sink failure reasons. A per-sink writer records
+    /// exactly once when its attempt ends; recording ids never become labels.
+    dvr_sink_failures: [AtomicU64; 3],
 }
 
 #[derive(Default)]
@@ -1665,6 +1668,29 @@ impl LiveTvMetrics {
 
     fn observe_stray_eviction(&self) {
         self.stray_evictions.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn observe_dvr_sink_failure(&self, reason: &'static str) {
+        let index = match reason {
+            "disk_write_failed" => 0,
+            "disk_write_timeout" => 1,
+            "disk_write_backlog" => 2,
+            _ => return,
+        };
+        self.dvr_sink_failures[index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn dvr_sink_failures_prometheus(&self) -> String {
+        format!(
+            "# HELP plurx_dvr_sink_failures_total DVR capture attempts ended by a sink-local write failure.\n\
+             # TYPE plurx_dvr_sink_failures_total counter\n\
+             plurx_dvr_sink_failures_total{{reason=\"disk_write_failed\"}} {}\n\
+             plurx_dvr_sink_failures_total{{reason=\"disk_write_timeout\"}} {}\n\
+             plurx_dvr_sink_failures_total{{reason=\"disk_write_backlog\"}} {}\n",
+            self.dvr_sink_failures[0].load(Ordering::Acquire),
+            self.dvr_sink_failures[1].load(Ordering::Acquire),
+            self.dvr_sink_failures[2].load(Ordering::Acquire),
+        )
     }
 
     /// One line per reason, and a zero line when nothing has ended yet so the
@@ -4825,6 +4851,7 @@ impl LiveTvMetrics {
             self.relay_bytes.load(Ordering::Acquire),
         ) + &self.session_ends_prometheus()
             + &self.guide_prometheus()
+            + &self.dvr_sink_failures_prometheus()
     }
 }
 
