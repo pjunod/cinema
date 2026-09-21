@@ -11585,9 +11585,16 @@ async fn exact_hls_context_before(
     let inspection_deadline = deadline
         .checked_sub(Duration::from_millis(25))
         .unwrap_or(deadline);
+    let inspect_avc_init = owner.avc_master_uses_init();
     let inspected = tokio::time::timeout_at(
         tokio::time::Instant::from_std(deadline),
-        exact_hls_context_at(state, session, context, inspection_deadline),
+        exact_hls_context_at(
+            state,
+            session,
+            context,
+            inspect_avc_init,
+            inspection_deadline,
+        ),
     )
     .await;
     match inspected {
@@ -11712,6 +11719,7 @@ async fn exact_hls_context(
         state,
         session,
         context,
+        true,
         Instant::now() + RESPONSE_PUBLICATION_LIFECYCLE_BUDGET,
     )
     .await
@@ -11721,12 +11729,13 @@ async fn exact_hls_context_at(
     state: &AppState,
     session: &str,
     mut context: crate::transcode::HlsContext,
+    inspect_avc_init: bool,
     deadline: Instant,
 ) -> Result<crate::transcode::HlsContext, HlsInitInspectionError> {
     let fallback_video = context.codecs.split(',').next().unwrap_or_default();
-    let Some(sample_entry) = ["hvc1", "hev1", "dvh1", "dvhe"]
+    let Some(sample_entry) = ["hvc1", "hev1", "dvh1", "dvhe", "avc1"]
         .into_iter()
-        .find(|entry| fallback_video.starts_with(entry))
+        .find(|entry| fallback_video.starts_with(entry) && (*entry != "avc1" || inspect_avc_init))
     else {
         return Ok(context);
     };
@@ -11862,16 +11871,26 @@ async fn exact_hls_context_at(
             | plurx_core::fmp4::Fmp4Error::MultipleHevcSampleEntries { .. },
         ) => return Err(HlsInitInspectionError::unsupported()),
     };
-    let required_box = if matches!(sample_entry, "dvh1" | "dvhe") {
-        init.windows(4)
-            .any(|window| window == b"dvcC" || window == b"dvvC")
-    } else {
-        init.windows(4).any(|window| window == b"hvcC")
+    let required_box = match sample_entry {
+        "dvh1" | "dvhe" => init
+            .windows(4)
+            .any(|window| window == b"dvcC" || window == b"dvvC"),
+        "avc1" => init.windows(4).any(|window| window == b"avcC"),
+        _ => init.windows(4).any(|window| window == b"hvcC"),
     };
     if !required_box {
         return Err(HlsInitInspectionError::invalid());
     }
-    if matches!(sample_entry, "hvc1" | "dvh1") {
+    if sample_entry == "avc1" {
+        if !matches!(
+            parsed.video(),
+            Some(video)
+                if video.codec == Some(plurx_core::fmp4::VideoCodec::H264)
+                    && video.nal_length_size > 0
+        ) {
+            return Err(HlsInitInspectionError::invalid());
+        }
+    } else if matches!(sample_entry, "hvc1" | "dvh1") {
         match plurx_core::fmp4::hevc_parameter_sets_complete(&parsed) {
             Ok(true) => {}
             Ok(false) | Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
@@ -11883,22 +11902,26 @@ async fn exact_hls_context_at(
             ) => return Err(HlsInitInspectionError::unsupported()),
         }
     }
-    match plurx_core::fmp4::validate_hevc_sample_entries(&parsed) {
-        Ok(plurx_core::fmp4::HevcSampleEntryLayout::Single) => {}
-        Ok(plurx_core::fmp4::HevcSampleEntryLayout::NotHevc)
-        | Ok(plurx_core::fmp4::HevcSampleEntryLayout::Multiple { .. }) => {
-            return Err(HlsInitInspectionError::unsupported());
+    if sample_entry != "avc1" {
+        match plurx_core::fmp4::validate_hevc_sample_entries(&parsed) {
+            Ok(plurx_core::fmp4::HevcSampleEntryLayout::Single) => {}
+            Ok(plurx_core::fmp4::HevcSampleEntryLayout::NotHevc)
+            | Ok(plurx_core::fmp4::HevcSampleEntryLayout::Multiple { .. }) => {
+                return Err(HlsInitInspectionError::unsupported());
+            }
+            Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
+                return Err(HlsInitInspectionError::invalid());
+            }
+            Err(
+                plurx_core::fmp4::Fmp4Error::Unsupported(_)
+                | plurx_core::fmp4::Fmp4Error::MultipleHevcSampleEntries { .. },
+            ) => return Err(HlsInitInspectionError::unsupported()),
         }
-        Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
-            return Err(HlsInitInspectionError::invalid());
-        }
-        Err(
-            plurx_core::fmp4::Fmp4Error::Unsupported(_)
-            | plurx_core::fmp4::Fmp4Error::MultipleHevcSampleEntries { .. },
-        ) => return Err(HlsInitInspectionError::unsupported()),
     }
     let derived = if matches!(sample_entry, "dvh1" | "dvhe") {
         dolby_vision_codec_from_init(&init, sample_entry)
+    } else if sample_entry == "avc1" {
+        avc_codec_from_init(&init)
     } else {
         hevc_codec_from_init(&init, sample_entry)
     };
@@ -11991,6 +12014,25 @@ fn hevc_codec_from_init(init: &[u8], sample_entry: &str) -> Option<String> {
         codec.push_str(&constraints);
     }
     Some(codec)
+}
+
+/// RFC 6381 identifier from the AVCDecoderConfigurationRecord in `avcC`.
+fn avc_codec_from_init(init: &[u8]) -> Option<String> {
+    let type_at = init.windows(4).position(|window| window == b"avcC")?;
+    let box_start = type_at.checked_sub(4)?;
+    let box_size = u32::from_be_bytes(init.get(box_start..type_at)?.try_into().ok()?) as usize;
+    let box_end = box_start.checked_add(box_size)?;
+    if box_size < 12 || box_end > init.len() {
+        return None;
+    }
+    let payload = init.get(type_at + 4..box_end)?;
+    let [1, profile, compatibility, level, ..] = payload else {
+        return None;
+    };
+    if *profile == 0 || *level == 0 {
+        return None;
+    }
+    Some(format!("avc1.{profile:02X}{compatibility:02X}{level:02X}"))
 }
 
 /// Whether an Apple HDR master should collapse to its media rendition.
@@ -28154,6 +28196,88 @@ mod tests {
             Some("hvc1.2.4.H150.B0")
         );
         assert!(hevc_codec_from_init(&init[..12], "hvc1").is_none());
+    }
+
+    #[test]
+    fn avc_codec_from_init_reads_the_avcc_triplet() {
+        let mut init = vec![0, 0, 0, 12];
+        init.extend_from_slice(b"avcC");
+        init.extend_from_slice(&[1, 0x64, 0x00, 0x28]);
+
+        assert_eq!(avc_codec_from_init(&init).as_deref(), Some("avc1.640028"));
+    }
+
+    #[test]
+    fn avc_codec_from_init_refuses_a_truncated_box() {
+        let mut init = vec![0, 0, 0, 12];
+        init.extend_from_slice(b"avcC");
+        init.extend_from_slice(&[1, 0x64, 0x00, 0x28]);
+
+        assert!(avc_codec_from_init(&init[..10]).is_none());
+        assert!(avc_codec_from_init(b"not an init").is_none());
+    }
+
+    fn valid_avc_init() -> Vec<u8> {
+        use plurx_core::fmp4::{FragmentReader, Unit};
+        let feed = plurx_core::testfixtures::pipe("h264");
+        let mut reader = FragmentReader::new();
+        reader.push(&feed);
+        let Some(Unit::Init(init)) = reader.next_unit().expect("fixture init parses") else {
+            panic!("the fixture opens with an init");
+        };
+        init.bytes
+    }
+
+    #[tokio::test]
+    async fn an_fmp4_avc_session_normalises_its_codec_from_the_init() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "avc-init").await;
+        fixture.make_segment_window_servable().await;
+        let init = valid_avc_init();
+        let expected = avc_codec_from_init(&init).expect("fixture carries avcC");
+        tokio::fs::write(dir.path().join("init.mp4"), &init)
+            .await
+            .expect("AVC init");
+
+        let context = crate::transcode::HlsContext {
+            file_id: 1,
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            codecs: "avc1.640034,mp4a.40.2".to_owned(),
+            supplemental_codecs: None,
+            frame_rate: None,
+        };
+        let resolved = exact_hls_context(&fixture.state, "avc-init", context)
+            .await
+            .expect("valid AVC init is supported");
+
+        assert_eq!(resolved.codecs, format!("{expected},mp4a.40.2"));
+    }
+
+    #[tokio::test]
+    async fn an_mpegts_session_keeps_its_static_codec_string() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "mpegts-avc").await;
+        let context = crate::transcode::HlsContext {
+            file_id: 1,
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            codecs: "avc1.640034,mp4a.40.2".to_owned(),
+            supplemental_codecs: None,
+            frame_rate: None,
+        };
+
+        let resolved = exact_hls_context_at(
+            &fixture.state,
+            "mpegts-avc",
+            context.clone(),
+            false,
+            Instant::now() + RESPONSE_PUBLICATION_LIFECYCLE_BUDGET,
+        )
+        .await
+        .expect("MPEG-TS needs no init inspection");
+
+        assert_eq!(resolved, context);
     }
 
     /// A `dvcC` record laid out the way the reference episode I Profile 5 title's init

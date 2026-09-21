@@ -5644,7 +5644,7 @@ impl FrozenHlsPresentation {
             file.height = geometry.map(|(_, height)| height);
         }
         let identity = serde_json::json!({
-            "version": 1,
+            "version": 2,
             "file": &file,
             "kind": kind,
             "start_seconds": context.start_seconds,
@@ -5655,9 +5655,11 @@ impl FrozenHlsPresentation {
         });
         let contract_fingerprint = hex::encode(Sha256::digest(identity.to_string().as_bytes()));
         let master_requires_attempt_init = context.codecs.split(',').next().is_some_and(|video| {
+            let video = video.trim();
             ["hvc1", "hev1", "dvh1", "dvhe"]
                 .into_iter()
-                .any(|entry| video.trim().starts_with(entry))
+                .any(|entry| video.starts_with(entry))
+                || (matches!(kind, SessionKind::Copy { .. }) && video.starts_with("avc1"))
         });
         let sealed_stable_master_contract =
             (!master_requires_attempt_init).then(|| contract_fingerprint.clone());
@@ -9237,6 +9239,17 @@ pub(crate) struct VodResponsePublication<T> {
 }
 
 impl MediaResponseOwner {
+    /// AVC is init-derived only for fMP4 sessions. Rolling full transcodes use
+    /// MPEG-TS and have no initialization object to inspect.
+    pub(crate) fn avc_master_uses_init(&self) -> bool {
+        match &self.0 {
+            MediaResponseOwnerKind::Rolling { session, .. } => {
+                matches!(session.kind, SessionKind::Copy { .. })
+            }
+            MediaResponseOwnerKind::Vod(_) => true,
+        }
+    }
+
     /// A strong validator for one rolling object. VOD supplies its own
     /// artifact digest; rolling scratch needs both the process-local Session
     /// incarnation and exact producer attempt so an ABA reuse can never turn
@@ -30535,6 +30548,33 @@ pub(crate) mod tests {
 
         assert_eq!(first.contract_fingerprint, identical.contract_fingerprint);
         assert_ne!(first.contract_fingerprint, changed.contract_fingerprint);
+    }
+
+    #[test]
+    fn an_fmp4_avc_master_is_attempt_media_not_generation_metadata() {
+        let file = profile5_file();
+        let context = HlsContext {
+            file_id: file.id,
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            codecs: "avc1.640034,mp4a.40.2".into(),
+            supplemental_codecs: None,
+            frame_rate: None,
+        };
+        let fmp4 = FrozenHlsPresentation::new(
+            file.clone(),
+            context.clone(),
+            &SessionKind::Copy {
+                aac: false,
+                preserve_dolby_vision: false,
+                convert_dolby_vision: false,
+            },
+        );
+        let mpeg_ts =
+            FrozenHlsPresentation::new(file, context, &SessionKind::Transcode { height: 1080 });
+
+        assert!(fmp4.sealed_stable_master_contract.is_none());
+        assert!(mpeg_ts.sealed_stable_master_contract.is_some());
     }
 
     #[test]

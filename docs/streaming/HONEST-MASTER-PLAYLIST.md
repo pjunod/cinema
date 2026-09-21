@@ -1,6 +1,6 @@
 # Honest master playlist — say what this session delivers, not what the file is
 
-**Status:** implementation in progress · **Executes:** Q7 / F-stream-14 / A11 /
+**Status:** implementation blocked on fleet and device evidence · **Executes:** Q7 / F-stream-14 / A11 /
 F-apple-11 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -645,6 +645,13 @@ green; `make unit` green; on a dev server, an encoded-VOD session's
 `grep session_init_object` of the logs shows exactly one init read per
 session.
 
+Implemented with a bounded `avcC` parser and the existing init-publication
+deadline. AVC inspection is owner-scoped: encoded VOD and rolling copy use
+fMP4 init bytes, while a rolling full transcode keeps its static MPEG-TS
+answer and never waits for an init object it cannot produce. AVC fMP4 masters
+are attempt media, and the frozen-presentation fingerprint is version 2 so
+the changed publication contract cannot collide with the older shape.
+
 ### 5.3 M3 — forced profile/level on hardware, and a rung-derived string
 
 Code: §3.3, both halves. This is the recipe-identity PR; the body states
@@ -897,6 +904,22 @@ fleet.
    is a diagnostic value that exists for one device run. It is deleted in
    M4's own PR — confirm in review that it did not survive.
 
+## 8. Implementation decisions
+
+1. **Geometry is resolved once, at frozen-presentation construction.** Every
+   rolling creation path already passes through that constructor, including
+   cached starts, takeovers and prepared successors. One rule there prevents
+   a later call site from accidentally advertising source dimensions again.
+2. **AVC init inspection follows the container, not the codec name alone.**
+   Encoded VOD and copy sessions publish fMP4 initialization objects; rolling
+   full transcodes publish MPEG-TS and do not. Treating every `avc1` context as
+   init-derived would turn a truthful static fallback into a permanent pending
+   playlist on the MPEG-TS path.
+3. **No advisory switch is added.** M1 and M2 make existing declarations more
+   exact. M3–M6 are withheld until their required observations exist, so a
+   Developer setting would expose an unqualified contract rather than useful
+   readiness information.
+
 ---
 
 ## Execution log
@@ -911,3 +934,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Claimed `plan/S-10` from `665b8b5c`; M1–M2 are locally implementable, while M3–M6 remain evidence-gated. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Rolling frozen presentations use `output_size`; three focused rolling-geometry tests and the copy-session guard passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Bounded `avcC` parsing, fMP4 normalization, MPEG-TS bypass and attempt-media classification passed focused tests. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3–M6 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | needs: fleet encoder/SPS qualification, named-device SDR `CODECS` re-qualification, measured corpus peak/average/overhead, and Apple-panel before/after observations. |
