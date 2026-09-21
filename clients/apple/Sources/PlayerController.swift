@@ -7491,10 +7491,9 @@ final class PlayerController: ObservableObject {
     }
 
     private func postClientLog<Payload: Encodable>(_ payload: Payload) {
-        // Existing client-log payloads require a real catalog file ID. Optical
-        // delivery is already visible through session Activity; do not send a
-        // fabricated zero until the telemetry schema has a source union.
-        guard opticalContext == nil else { return }
+        // `file_id` is optional on the bounded client-log contract. Optical
+        // playback therefore uses the same diagnostics without fabricating a
+        // catalog identity; session Activity carries the source union.
         guard let url = Session.shared.url("/api/v1/client-log"),
               let body = try? JSONEncoder().encode(payload)
         else { return }
