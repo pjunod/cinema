@@ -1673,11 +1673,10 @@ mod tests {
             "a claim a ceiling cut makes false"
         );
 
-        // TARGETDURATION is the client's playlist-reload interval on a live
-        // EVENT playlist (RFC 8216 §6.3.4), so it has to be the real ceiling
-        // of what was published — not a constant far above it, which is how a
-        // player ends up waiting fifteen seconds to learn a second segment
-        // exists and stalls at the end of the first.
+        // TARGETDURATION is fixed before the first response. It covers every
+        // segment rather than following the longest segment published so far,
+        // because a target that grows under a client holding an earlier
+        // snapshot violates the rolling-presentation contract.
         let longest = text
             .lines()
             .filter_map(|l| l.strip_prefix("#EXTINF:"))
@@ -1688,10 +1687,10 @@ mod tests {
             .find_map(|l| l.strip_prefix("#EXT-X-TARGETDURATION:"))
             .and_then(|v| v.trim().parse().ok())
             .expect("a target duration");
-        assert_eq!(
-            declared,
-            longest.ceil().max(1.0) as u32,
-            "TARGETDURATION {declared} against a longest segment of {longest:.3}s"
+        assert_eq!(declared, brisk().target_seconds);
+        assert!(
+            longest <= f64::from(declared),
+            "TARGETDURATION {declared} does not cover a {longest:.3}s segment"
         );
 
         let part = crate::produce::Part::from_playlist(&text);

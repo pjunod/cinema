@@ -44,6 +44,7 @@ class Check:
     missing: str
     timeout_seconds: int
     skip_if_env: tuple[str, ...]
+    expect_at_least: int | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -175,6 +176,11 @@ def load_catalog(path: Path = DEFAULT_CATALOG) -> Catalog:
                 missing=str(item.get("missing", "fail")),
                 timeout_seconds=timeout,
                 skip_if_env=_strings(item.get("skip_if_env"), f"{where}.skip_if_env"),
+                expect_at_least=(
+                    int(item["expect_at_least"])
+                    if "expect_at_least" in item
+                    else None
+                ),
             )
         )
 
@@ -379,6 +385,8 @@ def lint_catalog(
             errors.append(f"{prefix}.missing must be 'fail' or 'skip'")
         if check.timeout_seconds <= 0:
             errors.append(f"{prefix}.timeout_seconds must be positive")
+        if check.expect_at_least is not None and check.expect_at_least <= 0:
+            errors.append(f"{prefix}.expect_at_least must be positive")
 
     for check_id in catalog.always_checks:
         if check_id not in known_checks:
