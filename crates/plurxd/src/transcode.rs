@@ -28124,11 +28124,16 @@ impl HlsDeliveryFixture {
             .control
             .observe_publication(crate::playback_control::RollingPublicationObservation {
                 producer_attempt,
+                publication_commit: true,
+                demand_sequence: None,
                 produced_segment: Some(15),
                 produced_end_ms: Some(64_000),
                 playlist_ready: true,
                 published_segment: Some(11),
                 published_end_ms: Some(48_000),
+                published_first_segment: Some(0),
+                published_start_ms: Some(0),
+                media_origin_ms: 0,
                 next_media_sequence: 12,
                 resolved_fetched_segment: None,
                 resolved_fetched_end_ms: None,
@@ -37256,8 +37261,13 @@ pub(crate) mod tests {
         let end_ms = index
             .produced_playable_end_ms()
             .expect("seeded playable end");
-        let raw = served_live_playlist(raw, Some(first_segment), session.takeover.as_ref())
-            .expect("seeded served playlist");
+        let raw = served_live_playlist(
+            raw,
+            Some(first_segment),
+            Some(last_segment),
+            session.takeover.as_ref(),
+        )
+        .expect("seeded served playlist");
         session.publication.lock().await.served = Some(ServedPlaylistSnapshot {
             raw: Arc::from(raw),
             producer_attempt,
@@ -37280,11 +37290,16 @@ pub(crate) mod tests {
                 .control
                 .observe_publication(crate::playback_control::RollingPublicationObservation {
                     producer_attempt,
+                    publication_commit: true,
+                    demand_sequence: None,
                     produced_segment: Some(last_segment),
                     produced_end_ms: Some(end_ms),
                     playlist_ready: true,
                     published_segment: Some(last_segment),
                     published_end_ms: Some(end_ms),
+                    published_first_segment: Some(0),
+                    published_start_ms: Some(0),
+                    media_origin_ms: 0,
                     next_media_sequence: last_segment.saturating_add(1),
                     resolved_fetched_segment: None,
                     resolved_fetched_end_ms: None,
