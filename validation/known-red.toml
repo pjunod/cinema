@@ -1,2 +1,7 @@
 version = 1
+
+# `test` is an exact source/module identity:
+# crates/<crate>/<source>.rs::<cargo module path>::<function>
+# Bare names and suffixes are intentionally invalid because two targets can
+# expose the same function name.
 entries = []

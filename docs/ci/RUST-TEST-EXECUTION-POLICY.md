@@ -187,12 +187,15 @@ command form, which is exactly the form AGENTS.md asks contributors to run.
 
 ### 2.7 Ignored tests today
 
-Eleven `#[ignore = "…"]` in `crates/`,
-every one with a reason (600 MB store probe, 620 MiB EPUB proof, two-hour
-audio benchmark, the two serial FFmpeg restart fixtures, MiniLM download
-opt-in, nightly runner capability, private ATSC capture, macOS
-VideoToolbox, and contract-factory spawns). `validation.known_red` derives
-this inventory and rejects expired, unknown, or non-ignored entries.
+Eleven `#[ignore = "…"]` in `crates/`, every one attached to a test and
+carrying a reason (600 MB store probe, 620 MiB EPUB proof, two-hour audio
+benchmark, the two serial FFmpeg restart fixtures, MiniLM download opt-in,
+nightly runner capability, private ATSC capture, macOS VideoToolbox, and
+contract-factory spawns). `validation.known_red` lexes Rust source, follows
+the module graph and `include!`, and gives each ignore an exact
+`source.rs::module::function` identity. Bare, empty, commented, detached,
+duplicate, unreachable and ambiguous ignores fail closed; Cargo-list
+matching is exact rather than a bare-name suffix match.
 
 ---
 
@@ -331,17 +334,24 @@ Not a timeout widen. Steps, in order, each recorded in the PR:
 
 ### 3.6 Known-red inventory
 
-`scripts/known-red` (Python, in `validation/`): parses `cargo test
---workspace --exclude plurx-cluster-check -- --list --format terse` output
-plus `grep -rn '#\[ignore'` and emits a table: every ignored test with its
-reason, every test whose name appears in `validation/known-red.toml` with
-an owner, a reason and an expiry date. The rule: **the file is empty, or
-every entry is a test carrying `#[ignore = "<reason>"]` in source**. A
-test that is red on `main` and not ignored is a build break, not an entry.
-`make operations-check` gains a test that the TOML's entries all resolve
-to ignored tests and none has passed its expiry. Node and Python suites
-are listed in the same file with the same rule (the two §2.6 tests are the
-only candidates today, and M4/M5 make them green rather than entries).
+`scripts/known-red` (Python, in `validation/`): lexes Rust rather than
+grepping text, follows external modules and `include!`, and reconciles the
+result with `cargo test --workspace --exclude plurx-cluster-check -- --list
+--format terse`. It emits every ignored test with its reason and stable
+`source.rs::module::function` identity. Comments and string literals cannot
+create attributes; a bare, empty, duplicate, detached or non-test ignore is
+an error. Every Cargo name must match exactly once, except the three named
+platform/feature-gated identities that may be absent on this host.
+
+Every `validation/known-red.toml` entry uses that full identity and carries
+an owner, reason and expiry date. Bare names, suffix matches, duplicate rows
+and ambiguous identities are invalid. The rule remains: **the file is empty,
+or every entry resolves to exactly one test carrying a reasoned ignore in
+source**. A test that is red on `main` and not ignored is a build break, not
+an entry. `make operations-check` executes the positive and negative parser,
+identity and expiry cases. Node and Python suites are listed in the same file
+with the same rule (the two §2.6 tests are the only candidates today, and
+M4/M5 make them green rather than entries).
 
 ---
 
@@ -503,3 +513,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | `10baad55`, `88f689bd` / #401 | Option (a) implemented with Node playback preflight, workspace Clippy, `make unit`, Ubuntu 24.04 / FFmpeg 6 pin, and a 30-minute bound; no schedule added. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | `f62eb0ab`–`75ed2823` / #401 | Temporary branch instrumentation was committed and removed. Runs 2382/2384/2386/2388 did not measure; run 2392 exposed FFmpeg drift. One bounded source-only fallback measured 155 s compile, 85 s Clippy and ~610 s unit, all green. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Exact-main reconciliation | final reconciliation / #401 | One 336-second workspace confirmation found four fixture failures after merging `882862e8`; all four exact tests then passed together, and Rustfmt plus workspace Clippy passed. No broad retry was spent. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Adversarial review P1 | review fix / [#401 comment 3187](http://192.168.4.7:3000/noirr/plurx/pulls/401#issuecomment-3187) | Replaced regex and suffix matching with lexical, attached-attribute scanning, stable source/module identities, duplicate rejection and exact Cargo-list reconciliation; executable positives and negatives cover every reported bypass. |
