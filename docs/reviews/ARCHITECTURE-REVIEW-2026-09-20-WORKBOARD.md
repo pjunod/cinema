@@ -123,7 +123,7 @@ document (the twelve written second landed on 2026-09-20 as well).
 | S-14 | [TRANSCODE-DECOMPOSITION-PLAN](../streaming/TRANSCODE-DECOMPOSITION-PLAN.md) | §4.1, §4.2, §4.9 | quarter | unclaimed | | | | 2026-09-20 | Behaviour-preserving moves first; registry unification separate |
 | K-01 | [CLUSTER-BACKUP-AND-RESTORE](../cluster/CLUSTER-BACKUP-AND-RESTORE.md) | §2.3, S4 | month | unclaimed | | | | 2026-09-20 | The procedure is the deliverable |
 | K-02 | [RAFT-SNAPSHOT-CADENCE-AND-CONSISTENT-CUT](../cluster/RAFT-SNAPSHOT-CADENCE-AND-CONSISTENT-CUT.md) | S2, S5 | month | unclaimed | | | | 2026-09-20 | M0 measurement on each voter |
-| K-03 | [REPLICATED-WRITE-RATE-HYGIENE](../cluster/REPLICATED-WRITE-RATE-HYGIENE.md) | S3 | week | unclaimed | | | | 2026-09-20 | Keep the atomic claim |
+| K-03 | [REPLICATED-WRITE-RATE-HYGIENE](../cluster/REPLICATED-WRITE-RATE-HYGIENE.md) | S3 | week | claimed | gpt-5.6-sol | agent:/root/c02_builder | `plan/K-03` | 2026-09-20 | Keep the atomic claim |
 | K-04 | [BOUNDED-REPLICA-READS-ROLLOUT](../cluster/BOUNDED-REPLICA-READS-ROLLOUT.md) | S1 | month | unclaimed | | | | 2026-09-20 | Consistency-policy change; no auth cache |
 | K-05 | [SQLITE-READ-PATH-AND-QUERY-PLANS](../cluster/SQLITE-READ-PATH-AND-QUERY-PLANS.md) | S6, S7, S11 | month | unclaimed | | | | 2026-09-20 | Search predicate is the corrected one |
 | K-06 | [CLOCK-SKEW-GUARD-DESIGN](../cluster/CLOCK-SKEW-GUARD-DESIGN.md) | S9 | design | unclaimed | | | | 2026-09-20 | Half the exchange exists (`x-plurx-cluster-time-ms`); auth windows already assume ≤5 s |
