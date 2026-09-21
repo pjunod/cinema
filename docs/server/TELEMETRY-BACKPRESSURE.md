@@ -618,4 +618,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | Claim | pending | Claimed `plan/C-06` for one four-milestone implementation PR; implementation evidence follows milestone by milestone. |
