@@ -6,6 +6,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 from types import SimpleNamespace
 import tempfile
@@ -41,6 +42,7 @@ def write_corpus(
     classes=("easy", "hard"),
     pinned=True,
     dynamic_range="sdr",
+    output_grade="sdr",
 ):
     fixtures = []
     references = {}
@@ -54,6 +56,7 @@ def write_corpus(
             "identity": f"{content_class}-{index}",
             "class": content_class,
             "dynamic_range": dynamic_range,
+            "output_grade": output_grade,
             "filename": filename,
             "reference": filename,
             "reference_sha256": file_sha(reference) if pinned else None,
@@ -360,6 +363,7 @@ class RateControlBenchCase(unittest.TestCase):
             self.assertEqual([fixture["class"] for fixture in loaded["fixtures"]], ["easy", "hard"])
             self.assertTrue(all(fixture["reference_sha256_pinned"] for fixture in loaded["fixtures"]))
             self.assertTrue(all(fixture["dynamic_range"] == "sdr" for fixture in loaded["fixtures"]))
+            self.assertTrue(all(fixture["output_grade"] == "sdr" for fixture in loaded["fixtures"]))
 
     def test_full_manifest_rejects_minimal_unbalanced_and_null_hash_corpora(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -415,6 +419,23 @@ class RateControlBenchCase(unittest.TestCase):
             with self.assertRaisesRegex(BENCH["BenchError"], "mismatch"):
                 BENCH["load_rate_control_corpus"](path)
 
+    def test_hdr_source_requires_an_explicit_sdr_output_grade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path, _ = write_corpus(root, dynamic_range="hdr10", output_grade="sdr")
+            loaded = BENCH["load_rate_control_corpus"](path)
+            self.assertTrue(all(
+                fixture["dynamic_range"] == "hdr10"
+                and fixture["output_grade"] == "sdr"
+                for fixture in loaded["fixtures"]
+            ))
+
+            document = json.loads(path.read_text())
+            document["fixtures"][0]["output_grade"] = "hdr10"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(BENCH["BenchError"], "HDR source comparison"):
+                BENCH["load_rate_control_corpus"](path)
+
     def test_manifest_rejects_nonfinite_trim_numbers(self):
         for field, value, message in (
             ("start_seconds", float("nan"), "start_seconds"),
@@ -459,6 +480,37 @@ class RateControlBenchCase(unittest.TestCase):
             len(document["fixtures"]),
         )
         self.assertTrue(all(fixture["dynamic_range"] == "sdr" for fixture in document["fixtures"]))
+        self.assertNotIn("ffmpeg_args", path.read_text())
+
+    def test_n2_manifest_names_the_balanced_representative_corpus(self):
+        path = ROOT / "scripts/perf2-rate-control-n2-corpus.json"
+        document = json.loads(path.read_text())
+        self.assertEqual(document["purpose"], "n1_acceptance")
+        self.assertEqual(
+            [fixture["identity"] for fixture in document["fixtures"]],
+            [
+                "easy-1080p-h264",
+                "easy-1080p-animation",
+                "easy-720p-web",
+                "hard-1080p-grain",
+                "hard-1080p-dark-gradient",
+                "hard-1080p-sport",
+            ],
+        )
+        self.assertEqual(
+            [fixture["class"] for fixture in document["fixtures"]],
+            ["easy", "easy", "easy", "hard", "hard", "hard"],
+        )
+        self.assertTrue(all(fixture["dynamic_range"] == "sdr" for fixture in document["fixtures"]))
+        self.assertTrue(all(fixture["output_grade"] == "sdr" for fixture in document["fixtures"]))
+        self.assertTrue(all(
+            re.fullmatch(r"[0-9a-f]{64}", fixture["reference_sha256"])
+            for fixture in document["fixtures"]
+        ))
+        self.assertEqual(
+            len({fixture["reference_sha256"] for fixture in document["fixtures"]}),
+            6,
+        )
         self.assertNotIn("ffmpeg_args", path.read_text())
 
     def test_server_sha256_manifest_is_fail_closed_and_self_identifying(self):
@@ -604,8 +656,8 @@ class RateControlBenchCase(unittest.TestCase):
         cases = (
             (SessionApi(vod=True), "cached"),
             (SessionApi(unsafe=True), "unsafe"),
-            (SessionApi(dynamic_range=None), "prove SDR"),
-            (SessionApi(dynamic_range="hdr10"), "prove SDR"),
+            (SessionApi(dynamic_range=None), "declared output grade"),
+            (SessionApi(dynamic_range="hdr10"), "declared output grade"),
             (SessionApi(status_encoder="software-h264"), "encoder changed"),
         )
         for api, message in cases:
@@ -754,17 +806,25 @@ class RateControlBenchCase(unittest.TestCase):
             self.assertIn("producing=yes", report["failures"][0]["detail"])
             self.assertEqual(api.puts, [])
 
-    def test_server_source_hdr_is_fail_closed_when_unknown_or_non_sdr(self):
+    def test_server_source_dynamic_range_must_match_the_corpus(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             corpus, references = write_corpus(root)
             fixtures = BENCH["load_rate_control_corpus"](corpus)["fixtures"]
-            for hdr, message in ((MISSING, "unknown"), ("hdr10", "not SDR")):
+            for hdr, message in ((MISSING, "unknown"), ("hdr10", "differs")):
                 with self.subTest(hdr=hdr):
                     with self.assertRaisesRegex(BENCH["BenchError"], message):
                         BENCH["resolve_fixture_file_ids"](
                             FullApi(references, hdr=hdr), fixtures, None
                         )
+
+            hdr_corpus, hdr_references = write_corpus(
+                root, dynamic_range="hdr10", output_grade="sdr"
+            )
+            hdr_fixtures = BENCH["load_rate_control_corpus"](hdr_corpus)["fixtures"]
+            BENCH["resolve_fixture_file_ids"](
+                FullApi(hdr_references, hdr="hdr10"), hdr_fixtures, None
+            )
 
     def test_server_source_requires_real_probed_available_video_facts(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1053,6 +1113,37 @@ class RateControlBenchCase(unittest.TestCase):
             "encoder_identity_mismatch", "vmaf_regression", "easy_bytes_regression",
             "speed_regression", "advertised_peak_exceeded",
         })
+
+    def test_benefit_gate_accepts_only_the_two_recorded_paths(self):
+        easy = {
+            "identity": "easy", "class": "easy",
+            "modes": {
+                "vbr": passing_measurement("vbr"),
+                "qvbr": passing_measurement("qvbr"),
+            },
+        }
+        hard = {
+            "identity": "hard", "class": "hard",
+            "modes": {
+                "vbr": passing_measurement("vbr"),
+                "qvbr": passing_measurement("qvbr"),
+            },
+        }
+        benefit, failures = BENCH["evaluate_rate_control_benefit"]([easy, hard])
+        self.assertEqual(failures, [])
+        self.assertTrue(benefit["bytes_benefit_path"])
+
+        for fixture in (easy, hard):
+            fixture["modes"]["qvbr"]["bytes"] = fixture["modes"]["vbr"]["bytes"]
+        hard["modes"]["qvbr"]["vmaf"] = hard["modes"]["vbr"]["vmaf"] + 1.0
+        benefit, failures = BENCH["evaluate_rate_control_benefit"]([easy, hard])
+        self.assertEqual(failures, [])
+        self.assertTrue(benefit["quality_benefit_path"])
+
+        hard["modes"]["qvbr"]["vmaf"] = hard["modes"]["vbr"]["vmaf"] + 0.999
+        benefit, failures = BENCH["evaluate_rate_control_benefit"]([easy, hard])
+        self.assertFalse(benefit["passed"])
+        self.assertEqual([failure["code"] for failure in failures], ["benefit_gate_not_met"])
 
     def test_advertised_peak_exact_boundary_passes_and_each_mode_overshoot_fails(self):
         def fixture():
