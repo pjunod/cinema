@@ -13,7 +13,8 @@ digest check and the file-identity struct as they are, and names the
 deliberate choice (`original` backdrops) this plan must not touch. Then
 build §5 in order: M1 (verified-digest cache, separate permits, `ETag`) and
 M2 (`?size=` derivatives). M2 depends on M1's digest cache. One draft PR per
-milestone into `main` under the fast lane. Every `file:line` is from
+plan into `main` under the fast lane; milestones are logical commits in that
+one PR. Every `file:line` is from
 `88a3957a`; re-verify by function name.
 
 **If a step seems to require changing `BACKDROP_SIZE`/`STILL_SIZE`, serving
@@ -469,4 +470,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | pending | Claimed `plan/C-03` from `main` @ `9deb58a2`; M1-M2 remain pending. |
