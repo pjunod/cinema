@@ -172,6 +172,16 @@ test("every retirement reason a class names is reachable, and none is invented",
   }
 });
 
+test("source retirement overrides are explicit and narrowly owned", () => {
+  assert.deepEqual(
+    contract.sources
+      .filter((row) => row.retired_by != null)
+      .map((row) => ({ id: row.id, retired_by: row.retired_by })),
+    [{ id: "system_interruption", retired_by: ["system_resumed"] }],
+    "a source-level retirement must be visible as an intentional exception",
+  );
+});
+
 test("the shipped policy carries the fixture verbatim", () => {
   assert.deepEqual(policy.SURFACE_CLASSES, contract.classes);
   assert.deepEqual(policy.SURFACE_SOURCES, contract.sources);
