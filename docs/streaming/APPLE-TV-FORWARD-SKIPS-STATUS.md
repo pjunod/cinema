@@ -1,0 +1,67 @@
+# Apple TV forward skips — implementation and promotion ledger
+
+**Status:** implementation in progress · **Started:** 2026-09-20 ·
+**Branch:** `codex/apple-tv-forward-skips` · **Base:** `79113254`
+
+Companion to
+[MKV-DURATION-AND-SLIDING-HLS-IMPLEMENTATION.md](MKV-DURATION-AND-SLIDING-HLS-IMPLEMENTATION.md)
+— this page records the exact implementation, review, focused proof, fast-lane
+and merge state for the rolling-publication pacing repair.
+
+## Outcome — advertise consumption, not writer speed
+
+The rolling server currently publishes the writer's whole completed tail at
+each target. A writer running near 2× can therefore move an Apple TV's live
+edge by roughly twice the elapsed playback time, eventually forcing native
+recovery and a large forward position discontinuity.
+
+This repair keeps the existing rolling route and actor ownership. It adds a
+cumulative publication budget, selects only the earned completed prefix,
+protects the segment containing the viewer's back-buffer position, and fences
+publication against the exact accepted demand and producer attempt.
+
+There is no feature flag or settings toggle. This is an always-on correctness
+repair for an existing path, so an advisory "enable" control would falsely
+present safe playlist accounting as optional. Existing resource, lifetime and
+failure checks remain authoritative.
+
+## Delivery state — one branch, one main-bound pull request
+
+| Stage | State | Evidence |
+|---|---|---|
+| Separate working clone | done | Fresh Forgejo clone at `79113254`; the user's existing clones are read-only references |
+| Rust compiler loop | done | Rust 1.97.1; baseline `cargo check -p plurxd --all-targets` passed before edits |
+| Cumulative budget and bounded prefix | in progress | `RollingPublicationClock` and `publication_cycle` |
+| Actor demand/protected-start fence | not started | `RollingLeaseSnapshot` and `observe_publication_at` |
+| Retention and EOF preservation | not started | final first-segment selection and cleanup path |
+| Focused regression set | not started | tests prefixed `rolling_publication_budget` |
+| Documentation and validation catalog | in progress | this page and `docs/README.md`; catalog mapping follows the final test names |
+| Adversarial implementation review | not started | exactly one review after implementation is complete |
+| Final focused and fast-lane proof | not started | run once on the reviewed candidate |
+| Merge to `main` | not started | only after the current fast lane is green |
+
+## Evidence rules — make every green claim reproducible
+
+The final entry records the candidate SHA, Rust version, exact focused test
+filters and selected test counts, compile/lint/format results, review findings,
+PR number, fast-lane run and merge SHA. A filtered command that selects zero
+tests is a failure even if Cargo exits successfully.
+
+The physical Apple TV and actual-server ten-minute continuity runs require
+the lab and reference title named in the handoff. If that environment is not
+available from this execution host, the page will state the missing evidence;
+it will not relabel a synthetic regression as device qualification.
+
+## Decisions to revisit — only if evidence forces them
+
+1. **Keep the existing flow scheduler.** The bounded publication prefix should
+   make its staged-inventory hold effective. A predictive scheduler is out of
+   scope unless the 1.2×/1× focused regression misses a deadline.
+2. **Keep legacy playback available.** Its fixed 1× bootstrap clock is bounded
+   by elapsed time and resolved fetch progress; no client-buffer guess disables
+   the route.
+3. **No Developer-settings enable section.** The implementation handoff calls
+   this an always-on repair and explicitly excludes settings work. The user's
+   advisory-enable instruction is applied to optional features, not to this
+   correctness invariant.
+
