@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["86e658a3"]
+points = ["metadata.enrichment"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The strict Rust gates retain the show-completion path's missing-episode state transition while requiring its asynchronous conditional to remain warning-free; the two-season retry regression mapped by e49591fd continues to pin the runtime behavior."
