@@ -128,6 +128,22 @@ test("reader open, save, keepalive, and close retain opaque 64-bit route identif
   assert.doesNotMatch(flow, /(?:READER|r)\.(?:item|file)\.id/);
 });
 
+test("artwork refresh retains opaque 64-bit item identifiers in every detail layout", () => {
+  const exactId = "6886412050810749299";
+  assert.notEqual(String(Number(exactId)), exactId, "fixture exceeds JavaScript's safe integer range");
+  for (const name of ["classicItemBody", "catalogItemBody", "theaterItemBody"]) {
+    const start = INDEX.indexOf(`function ${name}(`);
+    assert.notEqual(start, -1, `${name} is served`);
+    const body = INDEX.slice(start, INDEX.indexOf("\n}", start) + 2);
+    assert.match(
+      body,
+      /onclick="refreshArtwork\('\$\{exactWireId\(it\)\}',this\)"/,
+      `${name} passes the DTO's exact decimal id as a string`,
+    );
+    assert.doesNotMatch(body, /refreshArtwork\(\$\{it\.id\}/, `${name} never emits a rounded numeric id`);
+  }
+});
+
 test("native handoff carries no bearer in its URL or durable browser storage", () => {
   assert.match(INDEX, /new URLSearchParams\(location\.search\)\.get\("native-reader"\)==="1"/);
   assert.match(INDEX, /let TOKEN = NATIVE_READER_BOOT \? null/);
