@@ -827,6 +827,18 @@ final class LiveTvTests: XCTestCase {
                                         favorite: false, drm: false, support: "ready",
                                         hd: nil, videoCodec: nil, audioCodec: nil)
 
+    private var libraryChannel: LibraryChannel {
+        LibraryChannel(
+            id: "library-1", ownerUserId: 1, name: "Library One", description: "",
+            visibility: .personal, enabled: true, revision: 1,
+            recipe: LibraryChannelRecipe(), seed: [], activeGenerationId: "generation-1",
+            activeEpochMs: 0, pendingGenerationId: nil, pendingEpochMs: nil,
+            favourite: false, createdAtMs: 0, updatedAtMs: 0, source: nil,
+            canEdit: true, canDelete: true, canShare: false, now: nil, next: nil,
+            matching: nil
+        )
+    }
+
     private func started(_ capability: String = "one") -> LiveTvStarted {
         LiveTvStarted(sessionId: capability, channel: channel, live: true)
     }
@@ -1287,6 +1299,55 @@ final class LiveTvTests: XCTestCase {
         XCTAssertEqual(audioEvents, ["activate"], "audio is active before live playback begins")
         await controller.stop()
         XCTAssertEqual(audioEvents, ["activate", "deactivate"])
+    }
+
+    func testLiveTvInterruptionWithoutResumeNeedsExactlyOnePlay() async {
+        let controller = LiveTvPlayerController.testing(
+            requests: LiveTvMockRequests(result: started())
+        )
+        await controller.watch(channel)
+        XCTAssertTrue(controller.playing)
+        XCTAssertFalse(controller.paused)
+
+        controller.handleAudioSessionEvent(.interruption(.suspend))
+        XCTAssertTrue(controller.systemPaused)
+        controller.handleAudioSessionEvent(.interruption(.stay))
+        XCTAssertFalse(controller.systemPaused)
+        XCTAssertTrue(controller.playing, "the attached tuner session remains owned")
+        XCTAssertTrue(controller.paused, "the visible transport must offer Play")
+
+        controller.togglePause()
+        XCTAssertFalse(controller.paused, "one visible Play resumes the attached session")
+        await controller.stop()
+    }
+
+    func testLiveTvOldRouteLossKeepsVisiblePlayFunctional() async {
+        let controller = LiveTvPlayerController.testing(
+            requests: LiveTvMockRequests(result: started())
+        )
+        await controller.watch(channel)
+        controller.handleAudioSessionEvent(.routeChange(revokesIntent: true))
+
+        XCTAssertTrue(controller.playing, "route loss pauses but does not detach the tuner session")
+        XCTAssertTrue(controller.paused)
+        XCTAssertEqual(controller.surfaceMessage, "Paused — audio route disconnected")
+
+        controller.togglePause()
+        XCTAssertFalse(controller.paused, "the button labelled Play must not be guarded out")
+        await controller.stop()
+    }
+
+    func testLibraryChannelInterruptionWithoutResumeNeedsExactlyOnePlay() async {
+        let controller = LibraryChannelPlayerController.testingAttached(to: libraryChannel)
+        controller.handleAudioSessionEvent(.interruption(.suspend))
+        XCTAssertTrue(controller.systemPaused)
+        controller.handleAudioSessionEvent(.interruption(.stay))
+        XCTAssertFalse(controller.systemPaused)
+        XCTAssertTrue(controller.paused, "the inline and fullscreen controls must both offer Play")
+
+        await controller.togglePause()
+        XCTAssertFalse(controller.paused, "one Play resumes the retained channel attachment")
+        await controller.stop()
     }
 
     func testSettingsWritesSeparateConfigEnableAndExactPhysicalRecovery() throws {

@@ -305,6 +305,12 @@ struct DeveloperReadiness: Codable {
 final class LibraryChannelPlayerController: ObservableObject {
     static let shared = LibraryChannelPlayerController()
 
+    static func testingAttached(to channel: LibraryChannel) -> LibraryChannelPlayerController {
+        let controller = LibraryChannelPlayerController()
+        controller.watching = channel
+        return controller
+    }
+
     @Published private(set) var channels: [LibraryChannel] = []
     @Published private(set) var programmes: [LibraryChannelProgramme] = []
     @Published private(set) var watching: LibraryChannel?
@@ -557,7 +563,7 @@ final class LibraryChannelPlayerController: ObservableObject {
         )
     }
 
-    private func handleAudioSessionEvent(_ event: PlaybackAudioSessionObserver.Event) {
+    func handleAudioSessionEvent(_ event: PlaybackAudioSessionObserver.Event) {
         switch event {
         case .interruption(.suspend):
             systemPaused = true
@@ -570,7 +576,14 @@ final class LibraryChannelPlayerController: ObservableObject {
                 message = "Following live · seeking and watch history are off"
             }
         case .interruption(.stay):
+            let wasSystemPaused = systemPaused
             systemPaused = false
+            if wasSystemPaused && watching != nil {
+                paused = true
+                player.pause()
+                message = "Paused — press Play to resume"
+                playbackControl.playerChanged()
+            }
         case .routeChange(let revokesIntent):
             guard revokesIntent else { return }
             systemPaused = false

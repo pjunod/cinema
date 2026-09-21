@@ -63,6 +63,9 @@ final class LiveTvPlayerController: ObservableObject {
     private var guideRefresh: Task<Void, Never>?
     private var channelChange: Task<Void, Never>?
     private var timeControlObservation: NSKeyValueObservation?
+    #if os(tvOS)
+    private var displayCriteriaObservation: NSKeyValueObservation?
+    #endif
     private var waitingDebounce: Task<Void, Never>?
     private let audioSessionObserver = PlaybackAudioSessionObserver()
     private var ownsAudioSession = false
@@ -174,11 +177,7 @@ final class LiveTvPlayerController: ObservableObject {
         item.preferredForwardBufferDuration = 12
         player.replaceCurrentItem(with: item)
         #if os(tvOS)
-        _ = PlaybackDisplayCriteria.apply(
-            item: item,
-            itemIsCurrent: player.currentItem === item,
-            openIsCurrent: serial == expected
-        )
+        observeDisplayCriteriaReadiness(of: item, expected: expected)
         #endif
         // Live TV owns a separate AVPlayer from finite-media playback, so
         // it must establish the same playback audio session itself. The
@@ -466,6 +465,29 @@ final class LiveTvPlayerController: ObservableObject {
         }
     }
 
+    #if os(tvOS)
+    private func observeDisplayCriteriaReadiness(of item: AVPlayerItem, expected: Int) {
+        displayCriteriaObservation?.invalidate()
+        displayCriteriaObservation = item.observe(\.status, options: [.initial, .new]) {
+            [weak self, weak item] observed, _ in
+            guard observed.status == .readyToPlay, let item else { return }
+            Task { @MainActor [weak self] in
+                guard let self,
+                      self.serial == expected,
+                      self.player.currentItem === item
+                else { return }
+                _ = PlaybackDisplayCriteria.apply(
+                    item: item,
+                    itemIsCurrent: true,
+                    openIsCurrent: true
+                )
+                self.displayCriteriaObservation?.invalidate()
+                self.displayCriteriaObservation = nil
+            }
+        }
+    }
+    #endif
+
     func stop(clearProfile: Bool = false) async {
         if clearProfile { loadId = UUID(); channels = [] }
         do { try await stopChecked() }
@@ -493,7 +515,7 @@ final class LiveTvPlayerController: ObservableObject {
         )
     }
 
-    private func handleAudioSessionEvent(_ event: PlaybackAudioSessionObserver.Event) {
+    func handleAudioSessionEvent(_ event: PlaybackAudioSessionObserver.Event) {
         switch event {
         case .interruption(.suspend):
             systemPaused = true
@@ -506,14 +528,20 @@ final class LiveTvPlayerController: ObservableObject {
             surfaceMessage = nil
             if playing && !paused { player.play() }
         case .interruption(.stay):
+            let wasSystemPaused = systemPaused
             systemPaused = false
             surfaceMessage = nil
+            if wasSystemPaused && playing {
+                paused = true
+                player.pause()
+                message = "Paused — press Play to resume"
+            }
         case .routeChange(let revokesIntent):
             guard revokesIntent else { return }
             systemPaused = false
-            playing = false
             paused = true
             player.pause()
+            message = "Paused — audio route disconnected"
             surfaceMessage = "Paused — audio route disconnected"
         }
     }
@@ -531,6 +559,10 @@ final class LiveTvPlayerController: ObservableObject {
         channelChange = nil
         timeControlObservation?.invalidate()
         timeControlObservation = nil
+        #if os(tvOS)
+        displayCriteriaObservation?.invalidate()
+        displayCriteriaObservation = nil
+        #endif
         waitingDebounce?.cancel()
         waitingDebounce = nil
         waiting = false

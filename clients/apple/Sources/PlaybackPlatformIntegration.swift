@@ -12,9 +12,10 @@ enum DisplayCriteriaDecision: Equatable, Sendable {
     nonisolated static func decide(
         matchingEnabled: Bool,
         itemIsCurrent: Bool,
-        openIsCurrent: Bool
+        openIsCurrent: Bool,
+        itemIsReady: Bool
     ) -> Self {
-        matchingEnabled && itemIsCurrent && openIsCurrent ? .apply : .skip
+        matchingEnabled && itemIsCurrent && openIsCurrent && itemIsReady ? .apply : .skip
     }
 }
 
@@ -39,7 +40,8 @@ enum PlaybackDisplayCriteria {
               DisplayCriteriaDecision.decide(
                   matchingEnabled: manager.isDisplayCriteriaMatchingEnabled,
                   itemIsCurrent: itemIsCurrent,
-                  openIsCurrent: openIsCurrent
+                  openIsCurrent: openIsCurrent,
+                  itemIsReady: item.status == .readyToPlay
               ) == .apply
         else { return false }
         manager.preferredDisplayCriteria = item.asset.preferredDisplayCriteria

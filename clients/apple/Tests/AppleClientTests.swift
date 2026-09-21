@@ -5365,27 +5365,39 @@ final class AppleClientTests: XCTestCase {
     func testDisplayCriteriaRequiresMatchingCurrentItemAndCurrentOpen() {
         XCTAssertEqual(
             DisplayCriteriaDecision.decide(
-                matchingEnabled: true, itemIsCurrent: true, openIsCurrent: true
+                matchingEnabled: true, itemIsCurrent: true, openIsCurrent: true,
+                itemIsReady: true
             ),
             .apply
         )
         XCTAssertEqual(
             DisplayCriteriaDecision.decide(
-                matchingEnabled: false, itemIsCurrent: true, openIsCurrent: true
+                matchingEnabled: false, itemIsCurrent: true, openIsCurrent: true,
+                itemIsReady: true
             ),
             .skip
         )
         XCTAssertEqual(
             DisplayCriteriaDecision.decide(
-                matchingEnabled: true, itemIsCurrent: false, openIsCurrent: true
+                matchingEnabled: true, itemIsCurrent: false, openIsCurrent: true,
+                itemIsReady: true
             ),
             .skip
         )
         XCTAssertEqual(
             DisplayCriteriaDecision.decide(
-                matchingEnabled: true, itemIsCurrent: true, openIsCurrent: false
+                matchingEnabled: true, itemIsCurrent: true, openIsCurrent: false,
+                itemIsReady: true
             ),
             .skip
+        )
+        XCTAssertEqual(
+            DisplayCriteriaDecision.decide(
+                matchingEnabled: true, itemIsCurrent: true, openIsCurrent: true,
+                itemIsReady: false
+            ),
+            .skip,
+            "a nil-before-loaded asset is retried from the item-ready observer"
         )
     }
 
@@ -5414,6 +5426,22 @@ final class AppleClientTests: XCTestCase {
             ),
             .stay
         )
+    }
+
+    @MainActor
+    func testFiniteInterruptionWithoutResumeNeedsExactlyOnePlay() {
+        let controller = PlayerController()
+        XCTAssertTrue(controller.wantsPlayback)
+        controller.handleAudioSessionEvent(.interruption(.suspend))
+        XCTAssertTrue(controller.systemPaused)
+        XCTAssertTrue(controller.wantsPlayback, "the interruption beginning does not revoke intent")
+
+        controller.handleAudioSessionEvent(.interruption(.stay))
+        XCTAssertFalse(controller.systemPaused)
+        XCTAssertFalse(controller.wantsPlayback, "the UI must now offer Play for the paused transport")
+
+        controller.togglePlayPause()
+        XCTAssertTrue(controller.wantsPlayback, "one Play creates the resume request")
     }
 
     func testOnlyLosingTheOldAudioRouteRevokesPlaybackIntent() {

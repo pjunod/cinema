@@ -3994,7 +3994,7 @@ final class PlayerController: ObservableObject {
         )
     }
 
-    private func handleAudioSessionEvent(_ event: PlaybackAudioSessionObserver.Event) {
+    func handleAudioSessionEvent(_ event: PlaybackAudioSessionObserver.Event) {
         switch event {
         case .interruption(.suspend):
             systemPaused = true
@@ -4009,8 +4009,17 @@ final class PlayerController: ObservableObject {
             Self.applyPlaybackCommand(to: player, preferredRate: preferredRate, immediately: false)
             isPlaying = true
         case .interruption(.stay):
+            let wasSystemPaused = systemPaused
             systemPaused = false
             present(.systemPaused(false))
+            guard wasSystemPaused, wantsPlayback else { return }
+            // iOS declined automatic resume. The system suspension is over,
+            // but the transport is still paused, so make the visible intent
+            // agree: the next on-screen or remote Play is one real resume.
+            wantsPlayback = false
+            isPlaying = false
+            pauseBeganAt = resumeNow()
+            player.pause()
         case .routeChange(let revokesIntent):
             guard revokesIntent else { return }
             systemPaused = false
