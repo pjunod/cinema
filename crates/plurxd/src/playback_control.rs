@@ -19801,7 +19801,7 @@ mod tests {
     ) -> RollingPublicationObservation {
         RollingPublicationObservation {
             producer_attempt,
-            publication_commit: true,
+            publication_commit: playlist_ready,
             demand_sequence: None,
             produced_segment: Some(published_segment),
             produced_end_ms: Some(published_end_ms),
