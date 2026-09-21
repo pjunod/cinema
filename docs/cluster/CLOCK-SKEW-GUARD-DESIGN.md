@@ -1,22 +1,24 @@
 # Clock-skew guard — measure the offset, bound it, and refuse the dangerous side
 
-**Status:** ready for review · **Executes:** S9 / F-sc-10 from
+**Status:** design-only boundary; sole review addressed; runtime work not started · **Executes:** S9 / F-sc-10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
-· **Written:** 2026-09-20 against `main` @ `0f02b7ea`
+· **Written:** 2026-09-20 · **Revised:** 2026-09-21 against `main` @
+`9deb58a2`
 
 **Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
 
 Read §2 first: every wall-clock comparison that decides ownership is listed
 there with its current line. Then §3, which is a design, not a diff — it
 fixes the measurement, the uncertainty, the three states an observation can
-be in, and exactly which decisions consult it. Execute §5 in order; M0 is
-the measurement everything after it is judged against. If a step seems to
-require putting a clock inside a replicated statement, deriving an offset
-from `cluster_nodes.last_seen_at`, terminating the process on a bad clock,
-or making `/readyz` do a Store round trip, stop and flag it — each of those
-is explicitly refused in §4 and each has a reason.
+be in, and exactly which decisions consult it. This plan PR ends at that
+design boundary. Section 5 is the executable contract for later runtime work,
+not permission to implement it here. If a later step seems to require putting
+a clock inside a replicated statement, deriving an offset from
+`cluster_nodes.last_seen_at`, terminating the process on a bad clock, adding
+an enablement switch, or making `/readyz` do a Store round trip, stop and flag
+it — each is explicitly refused in §4 and each has a reason.
 
-**Correction to the review:** four, all in plurx's favour.
+**Correction to the review:** five, all in plurx's favour.
 
 1. The line numbers moved. S9 cites `media_sessions.rs:3888-3899, 4384-4388`;
    on `0f02b7ea` the renewal clock is
@@ -28,27 +30,39 @@ is explicitly refused in §4 and each has a reason.
    signed peer request carries `x-plurx-cluster-time-ms`
    ([peer_transport.rs:15](../../crates/plurxd/src/http/peer_transport.rs)),
    signed into the authentication message
-   ([membership.rs:10297-10305](../../crates/plurx-core/src/cluster/membership.rs)).
-   That is `t1`, authenticated, today. What is missing is the *response*
-   side: `signed_response_payload`
-   ([peer_transport.rs:303-308](../../crates/plurxd/src/http/peer_transport.rs))
-   covers `(status, body)` and no timestamp. So this plan extends an
-   existing exchange rather than inventing one.
+   ([membership.rs:10307-10335](../../crates/plurx-core/src/cluster/membership.rs)).
+   That is `t1`, authenticated, today, but `PeerTransport::request` does not
+   return the value to its caller. The response proof already authenticates
+   `(status, body)` and binds it to the request nonce and route
+   ([peer_transport.rs:156-217](../../crates/plurxd/src/http/peer_transport.rs));
+   putting `t2` and `t3` in the JSON body therefore needs no new signature
+   format. The missing pieces are a clock route and a transport result that
+   exposes the exact signed `t1` and the receive-side `t4`.
 3. **The code already assumes a two-second bound and never checks it.**
    `RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE = 2 s`
    ([media_sessions.rs:112-116](../../crates/plurxd/src/media_sessions.rs))
    is a one-sided allowance added to a relayed deadline. The number S9 asks
    us to enforce is therefore already load-bearing in one place and
    unverified in all of them.
-4. **Large skew is already fatal, just illegibly.** Activity RPC refuses a
-   request whose timestamp differs from local now by more than
+4. **The wire has two freshness windows, and the five-second one is already
+   load-bearing.** General exact peer requests use
    `ACTIVITY_AUTH_WINDOW_MS = 30_000`
-   ([membership.rs:961, 6284](../../crates/plurx-core/src/cluster/membership.rs)),
-   and the exact internal read window is `INTERNAL_READ_AUTH_WINDOW_MS =
-   5_000` ([membership.rs:1009](../../crates/plurx-core/src/cluster/membership.rs)).
-   A node five seconds out already loses exact peer reads — reported as an
-   authentication refusal, which names the wrong cause. §3.3 turns that
-   refusal into evidence instead of hiding it.
+   ([membership.rs:961, 6355](../../crates/plurx-core/src/cluster/membership.rs));
+   high-volume idempotent internal reads use the narrower
+   `INTERNAL_READ_AUTH_WINDOW_MS = 5_000`
+   ([membership.rs:1009, 6564](../../crates/plurx-core/src/cluster/membership.rs)).
+   A node five seconds out already loses exact peer reads, while the 30-second
+   control path can still carry the probe. The clock route deliberately uses
+   the existing 30-second exact-request authorizer, never widens either
+   window, and reports a failed/expired exchange as `Unknown` rather than
+   pretending it measured zero skew.
+5. **Relative offset is necessary but cannot detect a common-mode wall-clock
+   step.** The local process therefore keeps a wall/monotonic continuity
+   generation as a second, independent input. Every dangerous acquisition
+   checks it before reading wall time and rechecks that generation immediately
+   before its irreversible CAS or Raft proposal. Target removal is classified
+   separately: it preserves the existing durable-fence and surviving-quorum
+   recovery path instead of treating removal as new authority acquisition.
 
 ## 1. Objective
 
@@ -56,11 +70,12 @@ Board id **K-06**. A node that steps its clock must not be able to steal
 every session in the fleet, and an operator must be able to see the offset
 before it does. Concretely: each node continuously measures its clock offset
 against each committed peer with an explicit uncertainty; exports it; and
-refuses session takeover, expiry-based recovery and membership change when
+refuses session takeover, expiry-based recovery and membership admission when
 the measurement — or the absence of one — cannot rule out an offset above a
-stated bound. Renewals, self-fencing and serving are untouched, because a
-node with a bad clock must fail closed on what it *takes*, not on what it
-already owns.
+stated bound. Membership removal retains the existing safe-reduction path only
+after its durable fence and quorum rules hold. Renewals, self-fencing and
+serving are untouched, because a node with a bad clock must fail closed on
+what it *takes*, not on what it already owns or safely relinquishes.
 
 ## 2. Contract today
 
@@ -206,8 +221,21 @@ pub(crate) fn signed_response_payload(status: u16, body: &[u8]) -> Vec<u8> {
 ```
 
 Request timestamps are signed
-([membership.rs:6256-6270](../../crates/plurx-core/src/cluster/membership.rs));
-response payloads carry none.
+([membership.rs:6320-6338](../../crates/plurx-core/src/cluster/membership.rs)).
+`authorize_internal_peer_request` accepts them for 30 seconds and keeps each
+nonce for that whole monotonic replay window; the separate
+`authorize_internal_peer_read_request` accepts high-volume reads for five
+seconds and has its own larger replay cache. The same header therefore has
+different freshness semantics according to the route's authorizer. The clock
+probe uses the 30-second exact-request path because a five-second authorizer
+would become unavailable only three seconds beyond the guard's proposed
+two-second refusal threshold.
+
+The response proof already covers the body and is additionally bound to the
+request nonce and path by `sign_internal_peer_response`; timestamps in that
+body are authenticated without changing `signed_response_payload`. What the
+transport lacks is timing metadata in its return value: it currently captures
+the signed request time internally and returns only status and bytes.
 
 ### 2.5 The only defence today
 
@@ -257,65 +285,142 @@ prober (node A)                               responder (node B)
      |  200 { t2, t3 }, signature over               |       before writing
      |  (status, body, request nonce)               |
      | <------------------------------------------- |
- t4  |                                              |
+ t4  |  captured immediately after the bounded      |
+     |  response bytes arrive, before signature     |
+     |  verification or membership lookup           |
      v                                              v
 
  offset      = ((t2 - t1) + (t3 - t4)) / 2       // B's clock minus A's
  round_trip  =  (t4 - t1) - (t3 - t2)            // network time only
- uncertainty =  round_trip / 2                   // one-way asymmetry bound
+ uncertainty = round_trip / 2 + 1 ms             // exact half-ms + quantization
 ```
 
 The uncertainty term is the whole point and is the part the review's first
 remedy lacked. One-way delays are non-negative, so the true offset lies in
-`[offset − round_trip/2, offset + round_trip/2]` whatever the asymmetry;
-that interval is exact, not statistical. A sample with
-`round_trip < 0` or `round_trip > CLOCK_PROBE_MAX_RTT_MS` (2 000, the
-existing peer deadline in
+`[offset − uncertainty, offset + uncertainty]` whatever the asymmetry.
+The extra millisecond covers integer division and the four millisecond-grained
+wall-clock samples. This is a conservative interval, not a confidence band.
+A half-millisecond result is representable: subtract timestamps before
+scaling, then store `offset_us = numerator * 500` and
+`uncertainty_us = round_trip_ms * 500 + 1_000`. Saturating checked arithmetic
+turns overflow into `Unknown`; it never wraps an epoch-sized input into a safe
+offset.
+A sample with `t3 < t2`, `round_trip < 0`, or
+`round_trip > CLOCK_PROBE_MAX_RTT_MS` (2 000, the existing peer deadline in
 [internal_activity.rs:29](../../crates/plurxd/src/http/internal_activity.rs))
-is discarded as unusable rather than believed.
+is unusable and makes that peer `Unknown` for the current round.
+
+`PeerTransport` must return the exact `timestamp_ms` it put in
+`x-plurx-cluster-time-ms`; taking another wall-clock reading outside the
+transport is not `t1`. It also captures `t4` immediately after the bounded
+body is read and before it awaits response-signature or live-membership
+verification, because local verification latency is not network delay. A
+failed signature or membership proof discards all four timestamps. The
+specialized return value is transport metadata, not a second timestamp header
+or a new signature format.
 
 NTP's clock filter is adopted for the same reason NTP has it: the minimum-
-delay sample in a window is the least contaminated by queueing. Keep the
-last `CLOCK_FILTER_DEPTH = 8` samples per peer (80 s at a 10 s cadence) and
-report the one with the smallest `round_trip`, together with its
-`uncertainty`. Discard a sample whose `round_trip` exceeds four times the
-window minimum before it enters the window.
+delay sample in a window is the least contaminated by queueing. Keep the last
+`CLOCK_FILTER_DEPTH = 8` usable samples per peer (80 s at a 10 s cadence) and
+report the one with the smallest `round_trip`, together with its uncertainty.
+The delay-ratio comparison uses
+`max(round_trip_us, CLOCK_RTT_QUANTIZATION_FLOOR_US)` with a
+`CLOCK_RTT_QUANTIZATION_FLOOR_US = 1_000` floor. The floor is comparison-only:
+the recorded point and uncertainty still use the measured round trip. It
+prevents a valid zero-millisecond sample from making every later positive
+sample fail `candidate > 4 * minimum`; a `0 ms` then `1 ms` LAN observation is
+accepted. A candidate whose floored `round_trip` exceeds four times the
+floored window minimum is unusable for that round rather than silently
+leaving an old sample authoritative.
+
+Before every comparison, discard entries whose monotonic `observed_at` age is
+greater than `CLOCK_OBSERVATION_MAX_AGE = 25 s`, even if every candidate since
+the selected sample was rejected. Expiry is time-based, not accepted-sample-
+count-based: a zero-delay minimum cannot remain in an eight-entry window
+forever by rejecting the observations that would evict it. If pruning empties
+the window, the current otherwise-usable candidate starts a new one. A
+rejected current round still publishes `Unknown`; expiry prevents poisoning
+later rounds rather than converting a rejected sample into success.
+
+A minimum-delay window must not hide a clock step for 80 seconds. Before a
+usable candidate enters the window, compare its conservative interval with
+the selected sample's interval. If the intervals do not intersect, clear the
+window and make the candidate its first sample. Stable clocks under asymmetric
+delay still intersect because both intervals contain the true offset; a
+disjoint interval is evidence that the offset moved (or that the observation
+model stopped holding). M4 tests this reset directly.
 
 `t2` and `t3` are distinct on purpose: `t3 − t2` is the responder's own
-service time and must be excluded from the network term, or a busy peer
-looks like a skewed one.
+service time and must be excluded from the network term, or a busy peer looks
+like a skewed one. The route captures `t2` before awaiting authorization and
+`t3` after authorization immediately before serializing the body, so signature
+verification and a cold live-membership check are service time, not apparent
+clock skew.
+
+Relative probes cannot detect a simultaneous jump from a shared time source.
+`ClusterClockGuard` therefore owns a second invariant, independent of every
+peer sample: a local wall/monotonic continuity anchor and monotonically
+increasing `clock_generation`. A continuity check reads `Instant` immediately
+before and after `SystemTime`; the wall reading must fall inside the elapsed
+monotonic interval from the fixed anchor, expanded by
+`CLOCK_LOCAL_DISCONTINUITY_TOLERANCE_MS = 250`. The fixed anchor is not moved
+after each successful check, because doing so would let a slow sequence of
+same-direction corrections disappear one interval at a time. The 250 ms
+tolerance matches the existing absolute fleet go/no-go bound and is eight
+times stricter than the 2 s relative refusal bound; the measurement release's
+M4 record must show the discontinuity counter stays flat during healthy load
+before runtime enforcement is proposed.
+
+An out-of-range or unrepresentable wall reading increments `clock_generation`,
+clears every peer sample, publishes `Incomplete`, and installs the new
+wall/monotonic pair only as a recovery anchor. It cannot itself restore
+`Bounded`: a complete later authenticated probe round must do that. Each
+dangerous decision obtains a `ClockDecisionTicket { clock_generation,
+state_generation, now_ms }` from one serialized continuity-and-state read.
+That `now_ms`, not another `SystemTime` read, feeds the expiry query. After any
+await and immediately before each irreversible lease CAS, durable membership
+intent or Raft proposal, the caller repeats the continuity check and verifies
+both generations and the policy state. A mismatch refuses and discards the
+work. `state_generation` advances for a roster change, explicit failed round,
+sample expiry or safe/unsafe transition, so a peer becoming `Unknown` during
+the awaited work also closes the decision-time race.
+
+The probe uses the same rule at both ends: capture the ticket before `t1`,
+check continuity immediately after `t4`, then reject the exchange unless both
+generations still match. This detects a local step during the request even if
+all peers share that step and the four-timestamp offset is near zero. Reading
+the continuity state only on the ten-second probe cadence is expressly
+insufficient; takeover and membership call it synchronously at their own
+decision boundaries.
 
 ### 3.2 The route
 
 A new peer route, `GET /_internal/v1/clock`, answered by
-`crates/plurxd/src/http/internal_clock.rs`. It touches no Store, holds no
-lock, and returns
+`crates/plurxd/src/http/internal_clock.rs`. The handler itself reads no Store
+and holds no application lock, but its existing live-member authorization may
+perform the same consistent authority check as any other exact peer request;
+M0 measures that cost rather than claiming it is free. It returns
 
 ```json
 { "node_id": "lab2", "received_unix_ms": 1789..., "sent_unix_ms": 1789... }
 ```
 
-It reuses `PeerAuthMode::Exact` (nonce + body digest,
-[peer_transport.rs:380-405](../../crates/plurxd/src/http/peer_transport.rs))
-with one deliberate difference, which is a security decision and is written
-here so it is reviewed as one:
+It uses `PeerAuthMode::ExactRequestAndMemberResponse` (nonce + method + path +
+body digest on the request, then status + exact body + request nonce + path on
+the response) and the responder's existing
+`authorize_internal_peer_request`. That is the 30-second exact-request window,
+not the five-second high-volume read window. No freshness window is widened
+and no second clock-specific authorizer is introduced. The two-second guard
+threshold is therefore observable before the five-second internal-read
+assumption fails, while a gross skew above 30 seconds fails closed as
+`Unknown`.
 
-**`CLOCK_PROBE_AUTH_WINDOW_MS = 120_000`, not the 5 000 of
-`INTERNAL_READ_AUTH_WINDOW_MS`.** The narrow window exists so a captured
-request cannot be replayed later to obtain a *stale read of state*. This
-route returns no state: its body is the responder's clock at the moment it
-answers, so a replayed request yields a fresh, correct answer and teaches an
-attacker nothing a `Date` header would not. Meanwhile the narrow window is
-exactly the failure this guard exists to detect — at five seconds of skew
-the probe would be refused and the offset would stay invisible. Sender,
-target, path, nonce and body digest remain signed and unchanged; only the
-freshness window widens, and only on this route.
-
-Refusal is still evidence. When the responder refuses for any reason it
-answers `409` with a signed body carrying its own `sent_unix_ms`; the prober
-records that as a one-sided sample with `uncertainty = round_trip` (no `t2`,
-so the interval is wider) rather than as "unknown". A peer that refuses
-without a timestamp — an older binary — yields `Unknown`, not zero (§3.4).
+An authentication refusal, unsigned error, unsupported `404`, timeout,
+invalid body, or invalid response proof yields `Unknown`, never a one-sided
+offset estimate. A timestamp from an unauthenticated refusal is attacker input
+and cannot become safety evidence. The metrics distinguish `unknown` from a
+zero offset so the operator can still see the failure mode even when the exact
+offset is outside the authentication envelope.
 
 Cadence: `CLOCK_PROBE_INTERVAL = 10 s`, aligned with `HEARTBEAT_INTERVAL`,
 fan-out bounded by the existing activity-peer budget
@@ -323,18 +428,21 @@ fan-out bounded by the existing activity-peer budget
 [membership.rs:969-970](../../crates/plurx-core/src/cluster/membership.rs))
 with `PEER_CONCURRENCY = 8` as
 [internal_activity.rs:45](../../crates/plurxd/src/http/internal_activity.rs)
-already uses. Cost per node per day: 8 640 requests × peers, no Store, no
-consensus entry.
+already uses. Cost per node per day: 8 640 requests × peers and no consensus
+entry from the clock route itself. Existing exact authorization can add one
+authority read per accepted inbound probe; the M0 readout must report that
+rate, and a later implementation must not hide it behind the phrase
+"no Store".
 
 ### 3.3 The state, which has three values and not two
 
 ```rust
-// crates/plurxd/src/clock_offset.rs (new)
+// crates/plurx-core/src/cluster/clock.rs (new shared policy state)
 pub(crate) enum PeerClockOffset {
     /// A filtered sample exists and is fresh.
-    Bounded { offset_ms: i64, uncertainty_ms: i64, observed_at: Instant },
-    /// A peer exists but no usable sample does — never probed, every probe
-    /// failed, or the newest sample is older than CLOCK_OBSERVATION_MAX_AGE.
+    Bounded { offset_us: i64, uncertainty_us: i64, observed_at: Instant },
+    /// A peer exists but this round produced no usable authenticated sample,
+    /// or the probe loop has not completed a round recently enough.
     Unknown,
 }
 
@@ -343,29 +451,61 @@ pub(crate) enum ClusterClockState {
     /// voter, or a node whose roster is only itself.
     NoPeers,
     /// Every peer has a fresh bounded sample.
-    Bounded { worst_abs_lower_ms: i64 },
+    Bounded { worst_abs_upper_us: i64 },
     /// At least one peer is Unknown.
-    Incomplete { unknown_peers: usize, worst_abs_lower_ms: i64 },
+    Incomplete { unknown_peers: usize, worst_abs_upper_us: i64 },
 }
 ```
 
-`worst_abs_lower_ms` is `max over peers of max(0, |offset| − uncertainty)` —
-the largest offset magnitude the evidence *cannot rule out being below*. A
-decision refuses on the lower bound, never on the point estimate, so a
-momentarily congested link widens the interval and produces indecision, not
-a false fence.
+The policy types and one `Arc<ClusterClockGuard>` live in `plurx-core` so
+`MembershipManager`, media-session recovery and HTTP readiness consult the
+same local snapshot. The daemon owns transport and filtering and publishes one
+complete roster snapshot into that handle; `plurx-core` never performs HTTP.
+Putting the state only in `plurxd` would force membership mutation either to
+bypass the guard or to depend upward on the daemon crate.
 
-`Unknown` is not zero. A node that has just started, or whose peers all run
-an older binary, has no evidence of synchrony and must be treated as such by
-each decision in §3.5 — but "treated as such" differs per decision, which is
-the point of separating them.
+The same handle owns `clock_generation`, `state_generation`, the fixed local
+continuity anchor and the serialized ticket operation from §3.1. Publication
+is one snapshot: readers cannot observe a new generation with the old peer
+states or vice versa. The later implementation may use a short mutex for the
+three clock reads and publication; it must not compose independently loaded
+atomics into a ticket, because that recreates the decision-time race this
+contract closes.
 
-`CLOCK_OBSERVATION_MAX_AGE = 60 s` (six probe intervals, the same ratio
-`NODE_REACHABLE_WINDOW_MS` has to `HEARTBEAT_INTERVAL`).
+Initialization fails closed. A standalone SQLite process starts `NoPeers`; a
+replicated process starts `Incomplete { unknown_peers: 1, ... }` until it has
+read the committed roster. It publishes `NoPeers` only after that roster proves
+there is no remote member. A newly committed peer enters as `Unknown` before
+its first probe, and a removed peer disappears only after the committed roster
+no longer contains it. Startup must never transiently publish `NoPeers` merely
+because discovery has not finished.
+
+`worst_abs_upper_us` is `max over peers of |offset| + uncertainty` — the
+largest offset magnitude the authenticated interval cannot rule out. A
+decision allows only when that upper bound is at or below the configured
+limit. Comparing `|offset| − uncertainty` would answer a different question
+("is violation certain?") and would allow an interval that crosses the safety
+bound, contradicting the objective. A congested link therefore produces
+`Unknown` or a conservative refusal, not false evidence of synchrony.
+
+`Unknown` is not zero. A node that has just started, whose current probe
+failed, or whose peers all run an older binary has no current evidence of
+synchrony and must be treated as such by each decision in §3.5 — but
+"treated as such" differs per decision, which is the point of separating
+them. One failed round makes that peer `Unknown` immediately; retaining a
+previous sample for six failed rounds would spend another node's lease using
+evidence known to be stale.
+
+`CLOCK_OBSERVATION_MAX_AGE = 25 s` is only a watchdog for a stalled probe
+loop: two complete 10-second intervals plus five seconds of scheduler margin.
+It is not a grace period after an explicit probe failure. The filter prunes
+entries against the same monotonic age before every delay comparison, so
+sample selection and the published state cannot disagree about freshness.
 
 ### 3.4 The bound, and where it comes from
 
-`CLOCK_OFFSET_REFUSAL_MS = 2_000`. Not chosen: derived.
+`CLOCK_OFFSET_REFUSAL_MS = 2_000`. It is a source constant, not a setting or
+an enablement gate. Not chosen: derived.
 `RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE` is already 2 s
 ([media_sessions.rs:116](../../crates/plurxd/src/media_sessions.rs)), and
 `LEASE_INTERVAL` is 3 s — an offset that consumes a whole renewal interval
@@ -374,18 +514,23 @@ that and equal to the allowance the relay path already grants. If the fleet's
 measured offsets make 2 s noisy, the number moves by measurement (M0), not
 by argument.
 
-This is the *relative* bound the protocols actually need. OPERATIONS.md's
+This is the *relative* bound the protocols actually need. If M0 shows the
+authenticated interval's upper bound routinely approaches 2 seconds on a
+healthy fleet, implementation stops: changing the constant requires a new
+protocol argument against the 3-second renewal interval, not a dashboard
+toggle. OPERATIONS.md's
 250 ms is an *absolute* bound to UTC and stays where it is: a
 go/no-go rule for benchmark and drill runs. M4 adds one sentence there
 pointing at the metric, and does not change the number.
 
 ### 3.5 Where the guard fires — and where it does not
 
-| Decision | `NoPeers` | `Bounded` ≤ 2 s | `Bounded` > 2 s | `Incomplete` |
+| Decision | `NoPeers` | bounded upper ≤ 2 s | bounded upper > 2 s | `Incomplete` |
 |---|---|---|---|---|
 | Session takeover (initiate) | allow | allow | **refuse** | **refuse** |
 | `expired_media_sessions` scan | allow | allow | **refuse** | **refuse** |
-| Membership change (propose) | allow | allow | **refuse** | **refuse** |
+| Membership admission/acquisition | allow | allow | **refuse** | **refuse** |
+| Remove the fenced target | n/a | allow | target-excluded proof | target-excluded proof |
 | `/readyz` | ready | ready | **not ready** | ready |
 | Own lease renewal | allow | allow | allow | allow |
 | Serving an admitted body | allow | allow | allow | allow |
@@ -399,9 +544,30 @@ Reasons, each row:
   restart, which is the F-sc-10 scenario. Refusal here means `continue` on
   the existing takeover tick — the loop already tolerates a skipped tick
   ([media_sessions.rs:4384-4390](../../crates/plurxd/src/media_sessions.rs)).
-- **Membership change refuses** because OPERATIONS.md already says a
-  membership change under unsynchronized clocks is a no-go; this makes the
-  daemon enforce what the runbook asks of the operator.
+- **Membership admission and authority acquisition refuse.** `redeem`,
+  `finalize`, voter join, learner admission, learner promotion and protocol
+  activation require a complete bounded survivor set. Each checks a ticket at
+  entry and revalidates it immediately before writing an intent or proposing a
+  Raft membership change. Token issuance alone is not membership admission.
+- **Target removal is safe reduction, not acquisition.** `remove_node` and
+  `leave_node` retain the shipped durable route/job-owner fence, target-applied
+  barrier, tombstone, leader and surviving-quorum rules. They may exclude only
+  the node being removed from clock coverage, and only after the removal fence
+  exists and either the target has applied its barrier or the existing
+  authoritative unreachable-target rule has fired. Local wall continuity and
+  every *surviving* peer must still be bounded; an unrelated `Unknown` peer is
+  not excused. A lost follower therefore remains removable by a healthy
+  quorum, and an interrupted unreachable learner cannot deadlock learner-
+  protocol rollback. The exception never skips a fence, manufactures quorum,
+  permits self-promotion, or turns a missing clock probe alone into proof that
+  the target is unreachable.
+- **A post-step removal waits for stable reachability evidence.** After a local
+  discontinuity, target exclusion cannot use a `last_seen_at` comparison from
+  the new wall-clock generation until `NODE_REACHABLE_WINDOW_MS = 30_000` has
+  elapsed monotonically or the target has written a post-generation heartbeat.
+  This prevents the very forward step being guarded from making a healthy
+  target look stale. An actually lost target becomes removable after the
+  bounded 30-second stabilization interval; recovery is delayed, not stranded.
 - **`/readyz` stays ready on `Incomplete`.** A rolling deploy makes every
   peer temporarily `Unknown`; taking the whole fleet out of rotation because
   a probe route is new would be the upgrade turning itself off. Only a
@@ -418,6 +584,11 @@ Reasons, each row:
   media server whose every in-flight playback dies with the process. The
   review cites CockroachDB's behaviour; this plan takes its *measurement* and
   refuses its *remedy*, and says so here so the divergence is deliberate.
+
+Every bold `allow` in the table assumes the synchronous local continuity check
+passes. A local discontinuity or a generation mismatch refuses takeover,
+expiry and membership acquisition even when the cached peer state says
+`Bounded`; the table describes the peer-state half of a two-part decision.
 
 ### 3.6 Metrics
 
@@ -448,6 +619,10 @@ plurx_cluster_clock_refusals_total{decision="membership_change",cause="offset"} 
 plurx_cluster_clock_refusals_total{decision="membership_change",cause="unknown"} 0
 plurx_cluster_clock_refusals_total{decision="expiry_scan",cause="offset"} 0
 plurx_cluster_clock_refusals_total{decision="expiry_scan",cause="unknown"} 0
+
+# HELP plurx_cluster_clock_discontinuities_total Local wall/monotonic discontinuities observed.
+# TYPE plurx_cluster_clock_discontinuities_total counter
+plurx_cluster_clock_discontinuities_total 0
 ```
 
 Label bounds, stated because an unbounded label set is a cardinality bug:
@@ -455,11 +630,16 @@ Label bounds, stated because an unbounded label set is a cardinality bug:
 ([membership.rs:969](../../crates/plurx-core/src/cluster/membership.rs)),
 and a node that leaves the roster loses its series on the next scrape;
 `state` ∈ {`bounded`, `unknown`}; `decision` ∈ {`takeover`,
-`membership_change`, `expiry_scan`}; `cause` ∈ {`offset`, `unknown`}. The
+`membership_change`, `expiry_scan`}; `cause` ∈ {`offset`, `unknown`,
+`local_discontinuity`, `generation_changed`}. The
 offset gauge is a signed value in seconds so `abs()` and a symmetric alert
 work in PromQL; it is absent for a peer in `Unknown`, which is why the
 separate state gauge exists — a missing series and a zero offset must not
 look alike.
+
+Removal uses the same `membership_change` decision rather than adding a target
+id label. The unlabelled discontinuity counter makes a common-mode step visible
+without turning the generation number into a time series.
 
 ### 3.7 Leader-assigned times
 
@@ -488,24 +668,30 @@ The existing test named in the appendix,
 the auth schema; M3 extends the same assertion shape to the session and
 membership statements.
 
-### 3.8 Settings
+### 3.8 Developer readiness is advisory, not an enablement switch
 
-Two replicated settings in
-[store/mod.rs:1467+ `keys`](../../crates/plurx-core/src/store/mod.rs),
-surfaced in Settings → Developer with an advisory readiness list (never a
-blocking one), per the repo's rule that a switch is a setting and not a
-compile flag:
+K-06 adds no setting, cargo feature, environment variable, hidden query
+parameter or per-node enable button. M0 is a measurement-only binary by
+construction. The later enforcement change is a separate reviewed change
+that lands only after M0 evidence confirms the fixed 2-second contract; once
+that change lands, every clustered node enforces it. A mixed deployment is
+handled by `Unknown`, not by an operator coordinating a switch across voters.
 
-- `cluster.clock_guard_enabled` — default absent/off for the first deploy,
-  flipped on after M0's fleet readout. Off means measure and export only:
-  every refusal becomes a counter increment and a `tracing::warn!` with no
-  behaviour change, so the bound can be validated against real data before it
-  fences anything.
-- `cluster.clock_offset_refusal_ms` — the bound, default `2000`, so the
-  number can be corrected from the fleet without a deploy. Parsed with a
-  floor of 250 and a ceiling of 30 000 (`ACTIVITY_AUTH_WINDOW_MS`, above
-  which the peer RPC fails anyway); an out-of-range value logs and uses the
-  default rather than being honoured.
+Settings → Developer may display these read-only facts:
+
+| Field | Meaning |
+|---|---|
+| Clock contract | `measurement-only` or `enforcing`, reported by the binary |
+| Observation coverage | bounded peers / committed remote peers |
+| Worst upper bound | `max(|offset| + uncertainty)` in milliseconds |
+| Refusal bound | the compiled `CLOCK_OFFSET_REFUSAL_MS` (`2 000`) |
+| Readiness consequence | advisory text naming `Incomplete` or the decision that would refuse |
+
+The panel never mutates these values and never blocks saving unrelated
+Developer settings. `/readyz` remains the machine-facing signal described in
+§3.5; the page only explains it. Rollback of enforcement is a reviewed binary
+rollback or corrective release, not a setting flip that can leave voters on
+different safety policies.
 
 No recipe identity, cache digest or manifest changes: nothing here enters a
 transcode recipe or a cache key.
@@ -525,13 +711,25 @@ Each is an assessment disposition; each says how this plan honours it.
   and the per-decision table in §3.5, where `Incomplete` and `Bounded ≤ 2 s`
   have different answers for takeover and the same answer for readiness.
 - **Explicit delay/uncertainty bounds** (correction 3). Honoured by §3.1:
-  every sample carries `uncertainty = round_trip/2`, decisions compare
-  `|offset| − uncertainty`, and a sample whose round trip exceeds the
-  transport deadline is discarded.
+  every sample carries `uncertainty = round_trip/2 + quantization`, retained
+  in microseconds so half-millisecond results are exact; decisions
+  compare `|offset| + uncertainty`, and a sample whose round trip exceeds the
+  transport deadline becomes `Unknown`. The delay ratio has a 1 ms
+  quantization floor, and selected entries expire by monotonic age even when
+  later candidates are rejected.
+- **Relative agreement is not local-clock continuity.** A fixed
+  wall/monotonic anchor detects local and common-mode steps synchronously at
+  dangerous decisions. Generation revalidation closes awaits between the
+  decision and its CAS/proposal; the ten-second probe loop is not the fence.
+- **Removal must remain recoverable.** Clock evidence is mandatory for new
+  authority, but the node being durably fenced and removed may be excluded
+  after the existing target-applied or authoritative-unreachable proof. Every
+  surviving peer, quorum and tombstone rule remains mandatory.
 - **Do not weaken the peer authentication fence.** The nonce, target
-  binding, body digest, signature length and redirect refusal are unchanged;
-  only this one route's freshness window widens, with the reason in §3.2.
-  Everything else keeps `INTERNAL_READ_AUTH_WINDOW_MS`.
+  binding, body digest, signature length, replay window and redirect refusal
+  are unchanged. The route uses the existing 30-second exact-request
+  authorizer; it neither borrows nor changes the five-second internal-read
+  authorizer.
 - **Do not make readiness a Store round trip** ([mod.rs:1034-1037](../../crates/plurxd/src/http/mod.rs)).
   Honoured: readiness reads an `ArcSwap` of the cached state.
 - **Do not fence a sole voter or a standalone SQLite node.** `NoPeers` allows
@@ -539,184 +737,247 @@ Each is an assessment disposition; each says how this plan honours it.
   explicitly, because a guard that bricks the single-node install is worse
   than no guard.
 - **Do not terminate the process.** §3.5, last bullet, with the reason.
-- **No in-code feature gate.** The switch is `cluster.clock_guard_enabled`, a
-  replicated setting in Settings → Developer, not a cargo feature — the same
-  rule the `live-hls-recovery` removal note records in
-  [plurxd/Cargo.toml:11-17](../../crates/plurxd/Cargo.toml).
+- **No feature or enablement gate.** No cargo feature, setting, environment
+  variable or UI control switches enforcement. Measurement and enforcement
+  are separate reviewed releases, and Developer readiness is read-only.
 - **Do not change `LEASE_TTL_MS`, `LEASE_INTERVAL` or
   `RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE`** in this work. The guard measures
   the assumption those constants already make; changing them is a separate
   decision with its own evidence.
 
-## 5. Milestones
+## 5. Design milestones — this PR stops before runtime behaviour
 
-One draft PR per milestone into `main` under the fast lane. Every milestone
-has a focused test command; the fleet-only ones carry a GPT prompt.
+K-06 is one design plan and one draft PR. These milestones complete the
+decision artifact; they do not authorize Rust changes. After adversarial
+review, the work board must create separately owned implementation plans for
+the measurement release and the enforcement release. That split is required
+because fleet evidence from the merged measurement release is an input to the
+enforcement release, not evidence a single unmerged branch can manufacture.
 
-### 5.1 M0 — measure before designing the bound
+### 5.1 M0 — inventory the actual wire and clock assumptions
 
-Route, prober loop, filter and metrics, with `cluster.clock_guard_enabled`
-absent so nothing refuses anything. No decision reads the state yet.
+The inventory in §2 records the existing signed request timestamp, response
+proof, 30-second exact-request window, five-second internal-read window,
+two-second relay allowance, and every ownership decision that uses wall time.
 
-Acceptance: `cargo test -p plurxd clock_offset` covers the offset and
-round-trip arithmetic against fixed `t1..t4` quadruples, including a
-deliberately asymmetric pair (`t2−t1 = 50 ms`, `t4−t3 = 1 ms`) where the
-point estimate is wrong by 24.5 ms and the reported interval still contains
-the truth; `curl -s localhost:32400/metrics | grep plurx_cluster_clock_`
-on a lab voter prints one series per peer.
+Acceptance:
 
-```text
-GPT prompt (fleet): With <sha> on lab1-lab3, leave the new setting unset and
-let the fleet idle for one hour. Then give me, from each of the three nodes,
-the full output of `curl -s localhost:32400/metrics | grep
-plurx_cluster_clock_`, plus `chronyc tracking` and `chronyc sources -v` from
-each node. I want the observed |offset| distribution and the observed
-uncertainty (round_trip/2) so the 2 000 ms bound can be confirmed or
-corrected before anything refuses on it. Also run it once with lab3's
-network path loaded (`ping -f` from lab1 for 60 s, or an ffmpeg job
-saturating its NIC) so I can see the uncertainty widen rather than the
-offset move.
+```bash
+rg -n "TIMESTAMP_HEADER|signed_response_payload|PeerAuthMode" \
+  crates/plurxd/src/http/peer_transport.rs
+rg -n "ACTIVITY_AUTH_WINDOW_MS|INTERNAL_READ_AUTH_WINDOW_MS" \
+  crates/plurx-core/src/cluster/membership.rs
+rg -n "RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE|expired_media_sessions" \
+  crates/plurxd/src/media_sessions.rs
 ```
 
-### 5.2 M1 — takeover and the expiry scan consult the state
+### 5.2 M1 — make the measurement arithmetic executable
 
-The two refusals in §3.5, gated on `cluster.clock_guard_enabled`, with the
-`plurx_cluster_clock_refusals_total` counter incrementing in both the gated
-and ungated cases so the shadow period shows what would have been refused.
+The later `clock_offset` unit test uses these exact fixtures. Arithmetic keeps
+half-millisecond results exactly (store signed microseconds or doubled
+milliseconds; do not truncate the point estimate before constructing the
+interval).
 
-Acceptance: `cargo test -p plurxd media_sessions::tests::takeover_refuses`
-covers three cases — a `Bounded` 5 s offset refuses, a `Bounded` 5 s offset
-with 4 s uncertainty (lower bound 1 s) allows, and `Incomplete` refuses —
-and `cargo test -p plurxd media_sessions::tests::takeover_allows_without_peers`
-proves a one-peer-less node still takes over. `make unit` green.
+| Case | `t1,t2,t3,t4` (ms) | Expected offset | Expected uncertainty | Result |
+|---|---:|---:|---:|---|
+| symmetric | `1000,1011,1013,1024` | `0 ms` | `12 ms` | bounded, contains 0 |
+| asymmetric | `1000,1050,1052,1053` | `+24.5 ms` | `26.5 ms` | bounded, contains 0 |
+| above bound | `1000,3510,3512,1022` | `+2500 ms` | `11 ms` | upper `2511 ms`, refuse |
+| crosses bound | `1000,3100,3102,2202` | `+1500 ms` | `601 ms` | upper `2101 ms`, refuse |
+| quantized LAN | `1000,1000,1000,1000`, then `2000,2000,2000,2001` | `0 ms`, then `-0.5 ms` | `1 ms`, then `1.5 ms` | both bounded; `0 ms` minimum accepts `1 ms` RTT |
+| responder step | any `t3 < t2` | n/a | n/a | `Unknown` |
+| excessive RTT | network RTT `2001 ms` | n/a | n/a | `Unknown` |
 
-### 5.3 M2 — readiness and membership change
+Acceptance for the later measurement PR:
 
-`ReadinessFailure::ClockUnbounded` in
-[http/mod.rs:1022-1084](../../crates/plurxd/src/http/mod.rs), requiring two
-consecutive rounds above the bound; membership-change proposal refusal in
-[membership.rs](../../crates/plurx-core/src/cluster/membership.rs) with a
-stable refusal code so the admin surface can name the cause.
+```bash
+cargo test -p plurxd clock_offset::tests::four_timestamp_contract
+cargo test -p plurxd clock_offset::tests::step_resets_minimum_delay_window
+cargo test -p plurxd clock_offset::tests::zero_then_one_ms_recovers
+cargo test -p plurxd clock_offset::tests::expired_minimum_cannot_poison_window
+cargo test -p plurxd clock_offset::tests::local_discontinuity_invalidates_generation
+```
 
-Acceptance: `cargo test -p plurxd http::readiness_clock` shows `/readyz`
-returning `503 clock unbounded` only after the second consecutive round, and
-returning `200` throughout an `Incomplete` window; `cargo test -p plurx-core
-cluster::membership::tests::change_refuses_unbounded_clock` green;
-`make unit` green.
+The second test seeds a low-delay sample, advances the peer by 15 seconds,
+then supplies another low-delay sample. The conservative intervals are
+disjoint, so the old eight-sample window is cleared and the new sample is
+selected in that round.
+
+The local-discontinuity test has four deterministic schedules: a forward step
+after a bounded observation but before the next probe; a step between `t1` and
+`t4`; a step after membership obtains its ticket but before its proposal; and
+the same step applied to every peer so relative offsets remain zero. All four
+must invalidate the ticket generation before an irreversible operation.
+
+### 5.3 M2 — fix the refusal and rollout decisions
+
+The decisions are final for follow-on planning:
+
+1. **Compare the upper bound.** Allow only when
+   `abs(offset) + uncertainty <= 2_000 ms`; an interval crossing the bound is
+   not evidence of safety.
+2. **Fail dangerous acquisition closed on `Unknown`.** Takeover, expiry scan,
+   join, admission and promotion refuse; renewal, serving, self-fencing and
+   target removal under §3.5's target-excluded proof remain available.
+   `/readyz` remains ready on `Incomplete` so a mixed deployment does not drain
+   the fleet.
+3. **Keep the refusal node-local.** The Store primitive accepts a caller-bound
+   `now_ms` as today; it does not receive or reinterpret clock evidence.
+   `ClusterClockGuard` lives in `plurx-core`, so membership entry points can
+   refuse before writing lifecycle intent while the daemon remains the only
+   component that performs probes.
+4. **Do not widen authentication.** The probe uses the existing 30-second
+   exact-request path. The five-second internal-read path is evidence that the
+   guard must act earlier, not a window to change.
+5. **Use no enablement gate.** Measurement and enforcement are separate
+   reviewed releases. Developer readiness explains state but cannot change it.
+
+Acceptance for the later enforcement plan:
+
+```bash
+cargo test -p plurxd media_sessions::tests::takeover_clock_guard
+cargo test -p plurxd http::tests::readiness_clock_guard
+cargo test -p plurx-core --features hiqlite-store \
+  cluster::membership::tests::change_refuses_unbounded_clock
+cargo test -p plurx-core --features hiqlite-store \
+  cluster::membership::tests::unreachable_learner_removal_preserves_fence
+cargo test -p plurx-core --features hiqlite-store \
+  cluster::membership::tests::lost_follower_removal_preserves_quorum
+```
+
+The takeover test covers `NoPeers`, a safe upper bound, an interval crossing
+2 seconds, a certain violation, and `Incomplete`. The readiness test requires
+two consecutive violating rounds for `503` but stays `200` through
+`Incomplete`. The membership test asserts one stable typed refusal code.
+The two removal tests seed an `Unknown` target and bounded survivors. They
+prove the target exception occurs only after the durable fence and existing
+unreachable/target-applied proof, while an unrelated unknown survivor, lost
+quorum or generation change still refuses.
 
 ### 5.4 M3 — pin the replicated-clock rule
 
-Extend the binding assertion beyond the auth schema: a test that walks the
-session and membership statements and fails if any of them contains a
-`FORBIDDEN_IDENTIFIERS` entry, plus a two-voter replay fixture proving both
-voters store the same bound timestamp for one entry.
+Later runtime work extends the existing SQL guard; it does not move time into
+SQLite. A source census covers session and membership statements, and a
+two-voter fixture proves that one caller-bound timestamp replays identically.
 
-Acceptance: `cargo test -p plurx-core store::replicated` and
-`cargo test -p plurx-core --features hiqlite-contract-tests
-replicated_auth_schema_and_writes_bind_every_clock_value` green; reverting
-one statement to `unixepoch('subsec')` makes the first fail.
+Acceptance for that implementation plan:
 
-### 5.5 M4 — steps, asymmetry, and the runbook
+```bash
+cargo test -p plurx-core --features hiqlite-store store::replicated
+cargo test -p plurx-core --features hiqlite-contract-tests \
+  replicated_auth_schema_and_writes_bind_every_clock_value
+```
 
-Three behaviour tests driven by an injectable clock (a `ClockSource` trait
-with a test implementation; production keeps `SystemTime::now`):
+Replacing one bound timestamp with `unixepoch('subsec')` must make the first
+command fail.
 
-1. **Step.** A peer's clock jumps +15 s between two probe rounds. The window
-   holds eight samples, so the minimum-delay sample is stale for up to 80 s —
-   the test asserts the guard refuses within two rounds, which requires the
-   filter to discard the window on a discontinuity rather than average
-   through it. This is the case a naive minimum-delay filter gets wrong and
-   is why it is a milestone rather than a line.
-2. **Asymmetric delay.** A 200 ms one-way delay in one direction only, clocks
-   identical. The point estimate reads 100 ms; the interval must contain 0
-   and the guard must not refuse.
-3. **Unknown.** A peer that never answers, and a peer that answers `409`
-   without a timestamp. Both yield `Unknown`; takeover refuses, readiness
-   does not.
+### 5.5 M4 — record the evidence gate
 
-Also in this PR: one paragraph in [OPERATIONS.md](../OPERATIONS.md) §"Synchronize
-clocks before cluster work" naming `plurx_cluster_clock_offset_seconds` and
-the two settings keys, leaving the 250 ms absolute rule unchanged, and one
-row in [ARCHITECTURE.md](../ARCHITECTURE.md) §9 replacing "membership
-reachability and artwork repair proofs currently compare Unix timestamps
-from different nodes" with the measured guard.
-
-Acceptance: `cargo test -p plurxd clock_offset::tests` covers all three;
-`python3 -m unittest discover -s tests/validation -p 'test_*.py'` green (the
-docs index test); `make unit` green.
-
-### 5.6 M5 — enable on the fleet
-
-Flip `cluster.clock_guard_enabled` on all voters, keeping
-`cluster.clock_offset_refusal_ms` at whatever M0 justified.
-
-Acceptance: 24 h with `plurx_cluster_clock_refusals_total` flat at zero on a
-healthy fleet, and a deliberate step reproducing the F-sc-10 scenario.
+The measurement release contains the route, prober, filter, metrics, advisory
+Developer fields and no refusal call site. Its fleet evidence must exist before
+an enforcement plan is claimed.
 
 ```text
-GPT prompt (fleet): With <sha> deployed to lab1-lab3 and
-cluster.clock_guard_enabled set on all three, start one playback session on
-each node. Then on lab3 only, step the clock forward 15 seconds
-(`sudo chronyc makestep` will not do this — use `sudo systemctl stop
-chrony && sudo date -s '+15 seconds'`), wait 60 seconds, and tell me:
-(a) whether any session moved owner, (b) lab3's
-plurx_cluster_clock_refusals_total and plurx_cluster_clock_offset_seconds,
-(c) lab1's and lab2's offset series for peer="lab3", (d) whether lab3's
-/readyz went 503 and after how long. Then restore chrony
-(`sudo systemctl start chrony`) and confirm all three return to ready and
-the offset series return under 0.05. Repeat the whole thing with
-cluster.clock_guard_enabled unset on lab1 and lab2 only, so I can see the
-unguarded takeover happen once and compare.
+GPT prompt (fleet): With <measurement-sha> on lab1-lab3, leave the fleet idle
+for one hour. From each node provide `curl -s localhost:32400/metrics | grep
+plurx_cluster_clock_`, `chronyc tracking`, and `chronyc sources -v`. Report
+the distribution of abs(offset), uncertainty, abs(offset)+uncertainty,
+Unknown rounds, and authority reads attributable to the clock route. Then
+load lab3's network path for 60 seconds with an ordinary media encode and
+repeat the readout. Do not step any host clock in this measurement phase.
+The enforcement plan may proceed only if every healthy upper bound remains
+below 2,000 ms and the probe's authority-read rate matches the design.
 ```
+
+After enforcement exists in a disposable lab deployment, its acceptance is
+24 hours with healthy refusals flat, followed by an approved 15-second clock
+step proving that no session changes owner, takeover/expiry/membership refuse,
+readiness drops after two violating rounds, and recovery occurs after clock
+discipline returns. The drill includes one single-node step and one common-mode
+step on all three lab voters; the latter must be caught by local continuity
+even though every relative offset remains near zero. That destructive drill is
+not authorized by this design PR and must name its operator and recovery
+procedure before execution.
 
 ## 6. Verification and rollout
 
-Fast lane `make unit` per PR plus the named filters. M0-M4 are additive: an
-older binary refuses `/_internal/v1/clock` with 404, which the prober records
-as `Unknown`, so a mixed fleet degrades to "no guard" rather than to a wrong
-guard — which is why M1's refusal on `Incomplete` must not reach `/readyz`
-(§3.5). M5 is a settings flip and rolls back by unsetting the key; no
-binary change is needed to disable the guard, which is the reason it is a
-replicated setting.
+This design PR changes documentation and a Python design-contract test only,
+so it does not establish a Rust compile loop or run a broad unit suite. Its
+local acceptance is the docs index, link contracts, formatting, the static
+source checks in §5.1, and the executable arithmetic/lifecycle model added for
+the sole-review disposition:
 
-Order matters: M0's fleet readout gates M1's bound. Do not merge M1 with a
-bound that has not been compared against a measured distribution.
+```bash
+python3 -m unittest tests.operations.test_clock_skew_guard_design
+```
 
-## 7. Open questions
+That Python model is a design contract, not the runtime implementation. The
+later Rust tests in §5 must consume the same fixtures before either release is
+eligible to merge.
 
-1. Does anything besides chrony discipline these hosts? If a hypervisor
-   injects time on VM resume (the F-sc-10 scenario names it), the step can
-   land between two probes with no NTP event to correlate against. Paul to
-   confirm whether lab1-lab6 are bare metal.
-2. `CLOCK_FILTER_DEPTH = 8` and `CLOCK_PROBE_INTERVAL = 10 s` give an 80 s
-   window; M4.1 shows that is also the worst-case staleness after a step.
-   A shorter window reacts faster and filters worse. Paul confirms, or M0's
-   data picks it.
-3. Should `expired_media_sessions` refusal be node-local (skip the tick) or
-   should the *store primitive* refuse a `now_ms` that the caller cannot
-   bound? Node-local is planned here because the store has no view of the
-   caller's clock evidence; a store-side rule would need the evidence passed
-   in, which is a wider contract change.
-4. Widening one route's auth window (§3.2) is the only security-relevant
-   change in this plan. If it is unacceptable, the fallback is the `409`
-   path alone — measurable, but only above five seconds of skew, and with a
-   wider interval. Paul decides.
-5. Whether a chrony reading (`chronyc tracking` root delay + root
-   dispersion) should be a second, absolute input exported alongside the
-   relative offset. It would let the daemon enforce OPERATIONS.md's 250 ms
-   rule directly, at the cost of a process spawn and a parser for a format
-   plurx does not control. Not planned here.
+The eventual rollout has two release boundaries:
+
+1. **Measurement release.** Older peers return `404`; the prober records
+   `Unknown`. No production decision consults the observation, so mixed
+   versions do not change behaviour.
+2. **Enforcement release.** It is proposed only after the M4 fleet record is
+   attached to its own plan. Mixed versions make observation `Incomplete`,
+   which refuses new ownership/membership actions but does not make readiness
+   fail. Rollback is a reviewed binary rollback, not a per-node switch.
+
+Silence is not evidence of synchrony: a missing, expired, rejected or invalid
+probe is always represented as `Unknown`.
+
+## 7. Decisions made and evidence still missing
+
+There are no unresolved protocol decisions in this design boundary.
+
+1. **Host type is evidence, not a branch in the protocol.** Record whether
+   lab1-lab6 are bare metal or can receive a hypervisor resume step in the M4
+   fleet artifact. The four-timestamp exchange and interval-reset rule are the
+   same either way.
+2. **The filter is eight samples at ten seconds, with discontinuity reset.**
+   A step does not wait 80 seconds because disjoint intervals clear the old
+   window. M0 may show this cadence is too expensive, but it does not silently
+   change the safety rule.
+3. **Expiry refusal is node-local.** The Store does not accept clock evidence
+   and does not evaluate a second clock. Passing evidence into replicated SQL
+   would widen the state-machine contract without improving the caller's
+   proof.
+4. **Authentication windows stay 30 seconds and five seconds.** The probe
+   uses the former; it does not create a 120-second exception or trust an
+   unsigned rejection timestamp.
+5. **Chrony is corroborating fleet evidence only.** The daemon does not spawn
+   `chronyc`, parse its output, or enforce the runbook's absolute 250 ms UTC
+   rule. Relative peer offset is the ownership protocol's input.
+6. **Dangerous decisions use a two-generation ticket.** The local
+   wall/monotonic generation detects a process clock discontinuity; the state
+   generation detects roster and peer-evidence changes. Both are checked at
+   decision time and immediately before CAS/proposal, because a safe snapshot
+   taken before an await is not authority afterward.
+7. **Removal excludes only its fenced target.** Admission and promotion need
+   complete clock coverage. Removal may ignore the target after the shipped
+   target-applied or authoritative-unreachable proof, but never ignores an
+   unknown survivor, a lost quorum, a missing fence or a generation change.
+
+The remaining blockers are observations: M4's per-voter offset, uncertainty,
+Unknown-rate and authorization-cost readout; confirmation of the lab hosts'
+clock-discipline environment; and an explicitly approved disposable-lab clock
+step after enforcement exists. None has been performed or implied by this
+design PR.
 
 ---
 
 ## Execution log
 
-Executing sessions append one row per milestone PR (see the
+Executing sessions append one row per logical milestone in the one K-06 plan
+PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
-**Session** is the session id or URL; the same two values are commit
-trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
+**Session** is the session id or URL; the same two values are commit trailers
+`Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M0-M4 design | [#430](http://192.168.4.7:3000/noirr/plurx/pulls/430) · `1ddfe0c26` | Reconciled the existing signed request timestamp, distinct 30 s/5 s auth windows, authenticated response body, conservative upper-bound decision, discontinuity reset, no-gate rollout split and executable follow-on evidence. No runtime behaviour or fleet result is claimed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | sole-review disposition | [#430](http://192.168.4.7:3000/noirr/plurx/pulls/430) · `1318972bb` | Added synchronous wall/monotonic continuity plus decision/state generations; split acquisition from fenced target removal; floored and time-expired the delay filter; and added executable common-mode, decision-race, removal and 0→1 ms fixtures. Runtime and fleet evidence remain unclaimed. |
