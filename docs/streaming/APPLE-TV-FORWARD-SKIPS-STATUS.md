@@ -38,7 +38,7 @@ failure checks remain authoritative.
 | Focused regression set | passed | 13/13 `rolling_publication_budget*` and 4/4 `mkv_hls_schedule*` tests passed on code candidate `7654a184` |
 | Documentation and validation catalog | implemented | This page, `docs/README.md`, the `playback.pipeline` contract, and exact `6f4e279e`/`a157179a`/`5a387be6` regression mappings |
 | Adversarial implementation review | complete and addressed | The single review found a variable-duration legacy bootstrap deadlock, backdated commit deadlines and three weak proof seams; commit `5a387be6` addresses all findings |
-| Final focused and fast-lane proof | local proof passed; Forgejo pending | Rust 1.97.1 check/clippy/format, both focused filters, four docs-index tests and `git diff --check` passed; the current pushed candidate still needs its Forgejo fast lane |
+| Final focused and fast-lane proof | local proof passed; Forgejo rerun pending | Rust 1.97.1 check/clippy/format, both focused filters, four docs-index tests, history audit and `git diff --check` passed; run 2376 found only missing history-ledger metadata, now corrected locally |
 | Merge to `main` | not started | only after the current fast lane is green |
 
 ## Evidence rules — make every green claim reproducible
@@ -84,6 +84,7 @@ rustup run 1.97.1 cargo check -p plurxd --all-targets
 rustup run 1.97.1 cargo clippy -p plurxd --all-targets -- -D warnings
 rustup run 1.97.1 cargo fmt --all -- --check
 python3 -m unittest discover -s tests/operations -p test_docs_index.py        # 4 passed
+make history-check                                                           # 2,101 corrective commits audited
 git diff --check
 ```
 
@@ -106,6 +107,12 @@ server recognizes the `WIP:` title convention rather than the submitted draft
 field. Run `2368` was therefore created before any final validation and failed;
 it is not promotion evidence. PR #404 was immediately returned to draft and
 remains there until the reviewed candidate's one intended fast-lane run.
+
+The exact-head promotion run 2376 reached policy preflight and reported no
+code failure. It found that the initial status commit `a71985e2` and the first
+catalog commit `8a57c1dc` were not named in the historical evidence row. Both
+are now in the same `playback.pipeline` mapping, and the local full-history
+audit passes all 2,101 classified corrective commits before the rerun.
 
 ## Decisions to revisit — only if evidence forces them
 
