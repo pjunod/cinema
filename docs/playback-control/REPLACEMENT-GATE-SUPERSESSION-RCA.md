@@ -18,8 +18,7 @@ ages, expires, or force-releases that registry.
 
 ## 1. What emits the string
 
-`crates/plurxd/src/transcode.rs:19047` (pre-fix), inside
-`acquire_cluster_replacement_gate`:
+`crates/plurxd/src/transcode.rs`, inside `acquire_cluster_replacement_gate`:
 
 ```rust
 let gate_deadline = std::cmp::min(deadline, now() + CLUSTER_REPLACEMENT_GATE_WAIT);
@@ -28,13 +27,13 @@ let permit = tokio::time::timeout_at(gate_deadline, gate.lock_owned())
     .map_err(|_| capacity_error("another replacement for this player is still being committed"))?;
 ```
 
-The gate is a plain `tokio::sync::Mutex<()>` in a process-local registry keyed
+The gate was a plain `tokio::sync::Mutex<()>` in a process-local registry keyed
 **only** on `(user_id, playback_id)` — `["[\"user_id\",1]","<playback_id>"]`.
 `file_id`, height, track selection and `request_id` are not in the key, so an
 ordinary first open, a stall reopen, an M6 prepared commit and a quality change
 all contend for the same lock. `CLUSTER_REPLACEMENT_GATE_WAIT` is 3 s.
 
-What it is waiting on is therefore not a *state* at all — it is whoever holds
+What it waits on is therefore not a *state* at all — it is whoever holds
 `ClusterReplacementGuard` for that key. Every production holder is a detached
 task:
 
@@ -46,13 +45,13 @@ task:
 | takeover supervisor | `media_sessions.rs:4938`, spawned at `5197` | there is no request |
 | `Drop for StartedSessionGuard` cleanup | `hls.rs:481-521` | no |
 
-`cluster_replacement_gates` appears at exactly four lines in the workspace: the
-field, its init, the acquire, and the guard's back-reference. **There is no
-sweeper, reaper, TTL, generation or reconcile pass over it.** `entries.retain(…
-strong_count() > 0)` prunes only *unheld* map slots. The release path bottoms
-out in `retire_session_until_with_cause(…, None, …)` →
+`cluster_replacement_gates` appeared at exactly four lines in the workspace: the
+field, its init, the acquire, and the guard's back-reference. **There was no
+sweeper, reaper, TTL, generation or reconcile pass over it.**
+`entries.retain(… strong_count() > 0)` prunes only *unheld* map slots. The
+release path bottoms out in `retire_session_until_with_cause(…, None, …)` →
 `ticket.wait()` — an unbounded await inside an unbounded retry loop
-(`transcode.rs:23640-23675`). A single wedged retirement converts that player's
+(`transcode.rs:23640-23675`). A single wedged retirement converted that player's
 key into a 3-second refusal for the lifetime of the process.
 
 ## 2. What actually happened, from the nodes
@@ -85,11 +84,11 @@ Three facts settle it.
    the `Drop for StartedSessionGuard` spawn, not by anything the viewer was
    waiting for. That is the reported overlay, and it is the orphan.
 2. **What held it inside the create was an unbounded await under the gate.**
-   `transcode.rs:19472` awaits `subtitles::ensure_burn_file(…)`, which joins the
-   single-flight sidecar extraction with no timeout. That extraction ran
-   **402,639 ms**. Both 50.7 s attempts died on their own start budget while
-   parked there; the third only succeeded once the extraction finally published
-   at 23:01:41.
+   `transcode.rs` awaits `subtitles::ensure_burn_file(…)` while building the
+   encoder options, and that joins the single-flight sidecar extraction with no
+   timeout. The extraction ran **402,639 ms**. Both 50.7 s attempts died on
+   their own start budget while parked there; the third only succeeded once the
+   extraction finally published at 23:01:41.
 3. **This is not the M6 prepared-replacement path.** `/metrics` on all four
    nodes: `plurx_playback_preparation_staged_total{outcome="staged"} 0`,
    `plurx_playback_preparation_cancelled_total{reason=…} 0` for every reason,
@@ -99,58 +98,60 @@ Three facts settle it.
 
 ## 3. The fix
 
-### 3.1 The gate is now supersedable
+### 3.1 A key is reclaimed on evidence, never on a clock
 
-`ReplacementGate` replaces the bare mutex and carries an arrival ticket, the
-newest arrival's ticket (`wanted`), and the session ids the current holder has
-published.
+The first version of this fix let an arrival take the key whenever the holder
+had not yielded inside the 3 s cooperative window. Adversarial review killed it,
+correctly: **the legitimate work under this gate takes tens of seconds** — this
+very incident had two 50-second starts — so a timer short enough to unwedge a
+player is short enough to destroy every healthy one. Worse, the client-side half
+of this change makes the retry ladder re-post into that window, so a start that
+was nearly built when attempt *n* was refused would have been destroyed by
+attempt *n+1* three seconds later. It also fenced nothing in the case it existed
+for, because session ids were published only after `create_session_inner`
+returned and the wedge is *inside* that call.
 
-- An arriving open **announces itself before waiting**, so a holder learns it
-  lost the player while it still has work to abandon. `ClusterReplacementGuard::
-  is_superseded()` is checked at the start checkpoint in
-  `create_cluster_session_with_priority`, which refuses cheaply rather than
-  spending an encoder slot on a start no viewer is waiting for.
-- If the holder does not yield inside the cooperative 3 s window, the arrival
-  **fences everything the holder published and takes the key**, installing a
-  fresh gate under the same registry entry. The abandoned holder keeps its own
-  `Arc` and its own lock; releasing it later touches nothing the key now uses.
-- A start whose own budget expires before the cooperative window does neither
-  announces nor evicts: it is out of time, not stuck behind a wedged holder, and
-  telling a healthy replacement it lost the player on its behalf would end a
-  replacement that is doing nothing wrong. It keeps getting the capacity
-  refusal, which is what its own deadline earned.
+What replaced it reclaims only what it can prove is reclaimable.
 
-**Why taking the key early is safe.** The gate serializes one player's
-replacements; it is not what decides which worker wins. That is the durable
-activation CAS, and the loser of it already tears itself down through
-`StartedSessionGuard`. So the cost of moving the key is bounded to "two
-provisional workers exist for a moment" — the state cluster make-before-break is
-built for — while fencing the holder's published ids first means a registration
-it completes afterwards is reaped rather than served. The cost of *not* moving
-it is what the tablet saw.
+- **Abandoned.** A hold says so itself. `ClusterReplacementGuard::
+  mark_abandoned()` is called by `Drop for StartedSessionGuard` — before it
+  spawns, together with `publish_fenceable(&session_id)` — and by
+  `TakeoverWorkerGuard::spawn_teardown`. Both are the shape that wedged this
+  player: a guard that has outlived the request it belonged to and now lives
+  inside an unbounded teardown. This is a fact the holder knows and a waiter
+  cannot infer, which is exactly why the timer was the wrong instrument.
+- **Past its ceiling.** `CLUSTER_REPLACEMENT_HOLD_CEILING` is 120 s — longer
+  than the longest declared start budget plus the activation and settlement
+  windows the key is legitimately held across. A hold past it has outlived every
+  budget it asked for.
+- **Anything else keeps its player.** A start still inside its budget is refused
+  to the waiter, which waits the bounded refusal out and re-posts.
 
-Ids are published as soon as they exist: `creation.info.session_id` when
-`create_session_inner` returns, and the predetermined
-`start.provisional_session_id` at takeover, from the moment the gate is held.
+Reclaiming fences everything the hold has published, then installs a fresh gate
+under the same registry key and retires the old one. Retirement and ownership
+live under one lock (`GateState`), so "judge this hold and retire it" and "claim
+this hold" are mutually exclusive: a reclaim that loses the race finds a fresh,
+healthy holder and refuses, and a claimant that loses sees the retirement and
+re-enters the registry. Without that, a start that won the lock a moment before
+a reclaim became a second live owner of one player.
 
-`plurx_playback_replacement_superseded_total{outcome}` counts every handover,
-split by whether anything had to be fenced. A non-zero `fenced` bucket is the
-signal that a holder is wedging often enough to go find.
+`plurx_playback_replacement_reclaimed_total{reason}` counts every handover.
+`abandoned` is the design working; `hold_ceiling` is not — it means something
+under the gate ran past every budget it declared, and it is the signal to go
+find what.
 
 ### 3.2 The overlay
 
-The wait *is* bounded — at most the cooperative window, because the arrival now
-takes the key rather than queueing. So the honest answer to "say how long and
-auto-retry" is to make the refusal legible to the retry ladder every client
-already has.
+The wait *is* bounded now, so the honest answer to "say how long and auto-retry"
+is to make the refusal legible to the retry ladder the clients already have.
 
-`session_start_error` stopped answering the retryable-capacity class with a bare
+`session_start_error` stopped answering this refusal with a bare
 `{"error": "<sentence>"}`. It now returns
 
 ```
 HTTP/1.1 503 Service Unavailable
 Retry-After: 3
-{"code":"transcode_capacity_pending","message":"transcode capacity is temporarily unavailable: …"}
+{"code":"transcode_capacity_pending","message":"transcode capacity is temporarily unavailable: waiting for this player's previous start: …"}
 ```
 
 and `transcode_capacity_pending` joins the fixture's `create_503_not_yet` row.
@@ -165,23 +166,32 @@ Android and web raise `preparing` ("Still preparing this stream…") and re-post
 on the ladder; Apple, whose parser requires `code` and had been showing
 `"Server returned 503"`, gets both fields for the first time.
 
-The case that is **not** bounded gets its own class rather than borrowing
-"temporarily": a start that lost its player to a newer open answers
-`409 media_player_superseded`, deliberately outside the retry ladder. The
-viewer is already looking at the player that won, and retrying would take the
-key back from it.
+**The new code is deliberately narrower than the capacity class.** Review found
+two siblings in that class where auto-retrying is actively wrong: *"the proved
+4K HDR10 QuickSync slot is busy; retry at 1080p"* instructs the client to change
+the request, and a scratch ceiling above the configured budget is a
+misconfiguration no retry can satisfy — and each re-post re-enters the admission
+poll loop, so retrying would multiply load against the exact resource that is
+exhausted. Those keep the codeless 503 that nothing retries.
+`is_replacement_wait_error` is a strict subset of `is_retryable_capacity_error`,
+so every existing server-side consumer of the capacity class is unchanged.
 
 ## 4. Left open
 
-- **`ensure_burn_file` is still awaited under the gate** (`transcode.rs:19472`)
-  with no timeout, so a slow sidecar extraction still burns a whole start
-  budget — it just can no longer wedge the player. The 402 s extraction for
-  file 5208 is its own problem: a per-file, already single-flighted, shared
-  artifact being waited on inside a per-player exclusive lock. Worth moving
-  ahead of the gate or bounding against the start deadline.
+- **`ensure_burn_file` is still awaited under the gate** with no timeout, so a
+  slow sidecar extraction still burns a whole start budget — it just can no
+  longer wedge the player past the ceiling. The 402 s extraction for file 5208
+  is its own defect: a per-file, already single-flighted, shared artifact being
+  waited on inside a per-player exclusive lock. Worth moving ahead of the gate
+  or bounding against the start deadline.
 - **`Drop for StartedSessionGuard` still releases the guard only after a full
-  retirement**, not after the fence. The supersession makes that survivable
-  rather than fatal; releasing at the fence would make the handover free.
-- The `media_player_superseded` 409 falls through to each client's terminal row
-  with the server's sentence. A dedicated surface row (row 12a in the contract)
-  would let it be silent, which is what it should be.
+  retirement**, not after the fence. Marking the hold abandoned makes that
+  survivable — the next open reclaims rather than queues — but releasing at the
+  fence would make the handover free rather than merely bounded.
+- **A hold wedged before it registers anything has nothing to fence.** The
+  ceiling reclaim then moves the key with an empty fence list, and if that hold
+  later registers, only the durable activation CAS separates the two workers.
+  The robust answer is a fenced-id set on the registry that `register_session`
+  refuses against, rather than `fence_sessions`' snapshot of a map the worker
+  has not been inserted into yet.
+- **Not deployed**, and neither client half has run on hardware.

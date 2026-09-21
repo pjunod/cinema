@@ -13955,23 +13955,30 @@ pub(crate) fn preparation_cancelled_label(reason: &str) -> &'static str {
     }
 }
 
-/// Replacements whose player was taken from them because they did not release
-/// it inside the cooperative window, split by whether anything had to be
-/// fenced first.
+/// Players whose replacement key was reclaimed from a hold that could not use
+/// it, by what proved the hold was reclaimable.
 ///
-/// Index order is [`REPLACEMENT_SUPERSEDED_OUTCOMES`]. Counted rather than only
+/// Index order is [`REPLACEMENT_RECLAIMED_REASONS`]. Counted rather than only
 /// logged for the same reason the teardown above is: a key moving between two
 /// starts for one player is a decision the product made about someone's
-/// playback, and it has to be visible from inside the product. A non-zero
-/// `fenced` bucket is also the signal that a holder is wedging often enough to
-/// be worth finding.
-static REPLACEMENTS_SUPERSEDED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+/// playback, and it has to be visible from inside the product.
+///
+/// The two buckets mean different things to whoever is reading. `abandoned` is
+/// the design working — a cleanup outlived its request and the next open took
+/// the key back. `hold_ceiling` is not: it means something under the gate ran
+/// past every budget it declared, and it is the signal to go find what.
+static REPLACEMENTS_RECLAIMED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
-/// The label vocabulary for [`record_replacement_superseded`], in index order.
-pub(crate) const REPLACEMENT_SUPERSEDED_OUTCOMES: [&str; 2] = ["fenced", "nothing_to_fence"];
+/// The label vocabulary for [`record_replacement_reclaimed`], in index order.
+pub(crate) const REPLACEMENT_RECLAIMED_REASONS: [&str; 2] = ["abandoned", "hold_ceiling"];
 
-pub(crate) fn record_replacement_superseded(fenced: bool) {
-    REPLACEMENTS_SUPERSEDED[usize::from(!fenced)].fetch_add(1, Ordering::Relaxed);
+pub(crate) fn record_replacement_reclaimed(reason: &str) {
+    if let Some(index) = REPLACEMENT_RECLAIMED_REASONS
+        .iter()
+        .position(|name| *name == reason)
+    {
+        REPLACEMENTS_RECLAIMED[index].fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 pub(crate) fn record_preparation_cancelled(reason: &str) {
@@ -14366,13 +14373,13 @@ pub(crate) fn prometheus() -> String {
         ));
     }
     output.push_str(
-        "# HELP plurx_playback_replacement_superseded_total Players whose replacement gate was taken from a holder that did not release it, by what had to be fenced first.\n\
-         # TYPE plurx_playback_replacement_superseded_total counter\n",
+        "# HELP plurx_playback_replacement_reclaimed_total Players whose replacement key was reclaimed from a hold that could not use it, by what proved it reclaimable.\n\
+         # TYPE plurx_playback_replacement_reclaimed_total counter\n",
     );
-    for (index, outcome) in REPLACEMENT_SUPERSEDED_OUTCOMES.iter().enumerate() {
+    for (index, reason) in REPLACEMENT_RECLAIMED_REASONS.iter().enumerate() {
         output.push_str(&format!(
-            "plurx_playback_replacement_superseded_total{{outcome=\"{outcome}\"}} {}\n",
-            REPLACEMENTS_SUPERSEDED[index].load(Ordering::Relaxed)
+            "plurx_playback_replacement_reclaimed_total{{reason=\"{reason}\"}} {}\n",
+            REPLACEMENTS_RECLAIMED[index].load(Ordering::Relaxed)
         ));
     }
     output.push_str(

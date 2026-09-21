@@ -499,6 +499,14 @@ impl Drop for StartedSessionGuard {
             #[cfg(test)]
             test_settlement,
         } = cleanup;
+        // Declared before the spawn, not inside it: from here the guard is
+        // held by cleanup, its request has already answered the viewer, and a
+        // later open for this player must not queue behind it. Publishing the
+        // session first is what lets that open fence this teardown exactly.
+        if let Some(replacement) = _replacement.as_ref() {
+            replacement.publish_fenceable(&session_id);
+            replacement.mark_abandoned();
+        }
         std::mem::drop(runtime.spawn(async move {
             if owns_worker {
                 abort_started_session(&state, &owner_node_id, &incarnation_id, &session_id).await;
@@ -3901,32 +3909,31 @@ fn session_start_error(file_id: i64, error: String) -> ApiError {
         return ApiError::Conflict(error);
     }
     tracing::warn!(file = file_id, "session create failed: {error}");
-    // A newer open for the same player won. Terminal for THIS attempt on
-    // purpose: the viewer is already looking at the player that won, and a
-    // retry here would take the key back from it. 409 rather than 503 because
-    // nothing about this is a wait.
-    if crate::transcode::is_superseded_error(&error) {
-        return ApiError::typed(StatusCode::CONFLICT, "media_player_superseded", error);
-    }
-    if crate::transcode::is_serving_fence_error(&error)
-        || crate::transcode::is_start_infrastructure_error(&error)
-    {
-        return ApiError::ServiceUnavailable(error);
-    }
-    // A bounded admission wait, named so a client can wait it out. Left as a
-    // bare `{error}` sentence this was a codeless 503 — which every client
-    // correctly refuses to retry, because a 503 nobody explained is not a
-    // "still building" answer. The viewer got a terminal overlay quoting an
-    // internal sentence and a Retry button that re-posted into the same
-    // contention with no backoff. With a code it joins `create_503_not_yet`
-    // and the existing 1s/2s/4s ladder waits it out instead.
-    if crate::transcode::is_retryable_capacity_error(&error) {
+    // This player's previous start has not let go yet — a wait, and a bounded
+    // one, so name it. Left as a bare `{error}` sentence this was a codeless
+    // 503, which every client correctly refuses to retry because a 503 nobody
+    // explained is not a "still building" answer. The viewer got a terminal
+    // overlay quoting an internal sentence, over a Retry button that re-posted
+    // into the same contention with no backoff. With a code it joins
+    // `create_503_not_yet` and the existing 1s/2s/4s ladder waits it out.
+    //
+    // Deliberately narrower than the whole capacity class. Sibling refusals in
+    // that class are not all waits: one tells the client to ask for a smaller
+    // height, and one reports a scratch ceiling above the configured budget
+    // that no retry can satisfy. Those keep the codeless 503 nothing retries.
+    if crate::transcode::is_replacement_wait_error(&error) {
         return ApiError::TypedRetry {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "transcode_capacity_pending",
             message: error,
-            retry_after_seconds: crate::transcode::RETRYABLE_CAPACITY_RETRY_AFTER_SECS,
+            retry_after_seconds: crate::transcode::REPLACEMENT_WAIT_RETRY_AFTER_SECS,
         };
+    }
+    if crate::transcode::is_serving_fence_error(&error)
+        || crate::transcode::is_start_infrastructure_error(&error)
+        || crate::transcode::is_retryable_capacity_error(&error)
+    {
+        return ApiError::ServiceUnavailable(error);
     }
     if let Some(reason) = crate::transcode::invalid_reopen_reason(&error) {
         return ApiError::BadRequest(reason.to_owned());
