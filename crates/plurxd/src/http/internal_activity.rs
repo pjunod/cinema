@@ -64,13 +64,21 @@ pub struct ActivityDelivery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presentation: Option<String>,
     pub user: String,
-    pub file_id: i64,
-    pub item_id: i64,
+    #[serde(default = "file_source")]
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<i64>,
     pub title: String,
     pub started_unix: i64,
     pub idle_seconds: u64,
     pub delivered_bytes: Option<i64>,
     pub delivered_bps: Option<i64>,
+}
+
+fn file_source() -> String {
+    "file".to_owned()
 }
 
 #[allow(dead_code)] // consumed by #326 once this dependency merges
@@ -517,6 +525,9 @@ fn snapshot_is_bounded(snapshot: &ActivitySnapshot, expected_node_id: &str) -> b
         })
         && snapshot.deliveries.iter().all(|delivery| {
             delivery.method.len() <= 32
+                && matches!(delivery.source.as_str(), "file" | "optical")
+                && (delivery.source != "optical"
+                    || (delivery.file_id.is_none() && delivery.item_id.is_none()))
                 && delivery.user.len() <= MAX_USER_BYTES
                 && delivery.title.len() <= MAX_TITLE_BYTES
         })
@@ -590,8 +601,9 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
                     method: method.as_str().to_owned(),
                     presentation: Some(session.presentation.to_owned()),
                     user: bounded_text(session.user_name, MAX_USER_BYTES),
-                    file_id: session.file_id,
-                    item_id: session.item_id,
+                    source: "file".to_owned(),
+                    file_id: Some(session.file_id),
+                    item_id: Some(session.item_id),
                     title: bounded_text(session.item_title, MAX_TITLE_BYTES),
                     started_unix: session.started_unix,
                     idle_seconds: session.idle_seconds,
@@ -604,6 +616,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
                     method: session.method.as_str().to_owned(),
                     presentation: Some("vod".to_owned()),
                     user: bounded_text(session.user_name, MAX_USER_BYTES),
+                    source: session.source.to_owned(),
                     file_id: session.file_id,
                     item_id: session.item_id,
                     title: bounded_text(session.item_title, MAX_TITLE_BYTES),
@@ -618,8 +631,9 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
                     method: "remux".to_owned(),
                     presentation: None,
                     user: bounded_text(stream.user_name, MAX_USER_BYTES),
-                    file_id: stream.file_id,
-                    item_id: stream.item_id,
+                    source: "file".to_owned(),
+                    file_id: Some(stream.file_id),
+                    item_id: Some(stream.item_id),
                     title: bounded_text(
                         titles.get(&stream.item_id).cloned().unwrap_or_default(),
                         MAX_TITLE_BYTES,
@@ -635,8 +649,9 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
                     method: "direct".to_owned(),
                     presentation: None,
                     user: bounded_text(play.user_name, MAX_USER_BYTES),
-                    file_id: play.file_id,
-                    item_id: play.item_id,
+                    source: "file".to_owned(),
+                    file_id: Some(play.file_id),
+                    item_id: Some(play.item_id),
                     title: bounded_text(
                         titles.get(&play.item_id).cloned().unwrap_or_default(),
                         MAX_TITLE_BYTES,
@@ -1026,8 +1041,9 @@ mod tests {
             method: "x".repeat(32),
             presentation: Some("live-recovery".to_owned()),
             user: "\0".repeat(MAX_USER_BYTES),
-            file_id: i64::MAX,
-            item_id: i64::MAX,
+            source: "file".to_owned(),
+            file_id: Some(i64::MAX),
+            item_id: Some(i64::MAX),
             title: "\0".repeat(MAX_TITLE_BYTES),
             started_unix: i64::MAX,
             idle_seconds: u64::MAX,
@@ -1064,8 +1080,9 @@ mod tests {
             method: "direct".into(),
             presentation: None,
             user: "\0".repeat(MAX_USER_BYTES),
-            file_id: 1,
-            item_id: 1,
+            source: "file".to_owned(),
+            file_id: Some(1),
+            item_id: Some(1),
             title: "\0".repeat(MAX_TITLE_BYTES),
             started_unix: 0,
             idle_seconds: 0,
@@ -1091,8 +1108,9 @@ mod tests {
             method: "x".repeat(32),
             presentation: Some("live-recovery".to_owned()),
             user: "\0".repeat(MAX_USER_BYTES),
-            file_id: i64::MAX,
-            item_id: i64::MAX,
+            source: "file".to_owned(),
+            file_id: Some(i64::MAX),
+            item_id: Some(i64::MAX),
             title: "\0".repeat(MAX_TITLE_BYTES),
             started_unix: i64::MAX,
             idle_seconds: u64::MAX,
@@ -1162,8 +1180,9 @@ mod tests {
             delivered_idle_ms: 250,
             id: "vod-session".to_owned(),
             method: crate::delivery::Method::Transcode,
-            file_id: 7,
-            item_id: 9,
+            file_id: Some(7),
+            item_id: Some(9),
+            source: "file",
             item_title: "VOD title".to_owned(),
             user_name: "viewer".to_owned(),
             target_height: 1080,
@@ -1185,6 +1204,33 @@ mod tests {
             selected.as_slice(),
             [ActivityCandidate::Vod(info)] if info.method == crate::delivery::Method::Transcode
         ));
+    }
+
+    #[test]
+    fn optical_delivery_crosses_the_peer_snapshot_without_fake_catalog_ids() {
+        let snapshot = bounded_snapshot(
+            "node-b".to_owned(),
+            vec![ActivityDelivery {
+                method: "transcode".to_owned(),
+                presentation: Some("vod".to_owned()),
+                user: "viewer".to_owned(),
+                source: "optical".to_owned(),
+                file_id: None,
+                item_id: None,
+                title: "Disc title 1".to_owned(),
+                started_unix: 20,
+                idle_seconds: 3,
+                delivered_bytes: Some(4_096),
+                delivered_bps: Some(12_000_000),
+            }],
+            Vec::new(),
+        );
+
+        assert!(snapshot_is_bounded(&snapshot, "node-b"));
+        let wire = serde_json::to_value(snapshot).expect("snapshot JSON");
+        assert_eq!(wire["deliveries"][0]["source"], "optical");
+        assert!(wire["deliveries"][0].get("file_id").is_none());
+        assert!(wire["deliveries"][0].get("item_id").is_none());
     }
 
     #[tokio::test]

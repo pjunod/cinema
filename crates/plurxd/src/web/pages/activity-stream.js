@@ -145,6 +145,7 @@ function activityStreamDetails(session){
 // by the next poll — the same courtesy the analysis table extends.
 function activityStreamCell(de,session,open){
   const presentation=de.presentation==="vod"?"VOD HLS":de.presentation==="live-recovery"?"Live HLS":"";
+  const source=de.source==="optical"?"Optical disc":"";
   const state=activityStreamState(session);
   // `deliveries[]` names the method; the rung and the encoder ride on the
   // session row beside it, so a stream with a session reads them from there.
@@ -152,7 +153,7 @@ function activityStreamCell(de,session,open){
   const encoder=session&&session.encoder||de.encoder;
   const sub=[de.session_id&&height?`${height}p`:"",de.session_id&&encoder&&encoder!=="cached"?encoder:""]
     .filter(Boolean).join(" · ");
-  const head=`<div class="stream-head">${presentation?`<span class="mode-chip ${de.presentation==="vod"?'vod':'live'}">${esc(presentation)}</span>`:""}${
+  const head=`<div class="stream-head">${source?`<span class="mode-chip vod">${esc(source)}</span>`:""}${presentation?`<span class="mode-chip ${de.presentation==="vod"?'vod':'live'}">${esc(presentation)}</span>`:""}${
     state?`<span class="stream-state ${state.cls}">${esc(state.label)}${state.why?` <span class="why">· ${esc(state.why)}</span>`:""}</span>`:""}<span class="stream-method">${esc(activityMethodLabel(de.method,encoder))}${sub?` <span class="sub">· ${esc(sub)}</span>`:""}</span></div>`;
   const meters=activityStreamMeters(de,session);
   const strip=meters.length?`<div class="stream-meters">${meters.map(meter=>`<div class="stream-meter ${meter.tone||""}"><span class="k">${esc(meter.k)}</span><span class="v">${esc(meter.v)}${meter.of?`<span class="of">${esc(meter.of)}</span>`:""}</span>${

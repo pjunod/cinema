@@ -505,8 +505,11 @@ pub struct VodSessionInfo {
 pub struct VodDeliveryInfo {
     pub id: String,
     pub method: crate::delivery::Method,
-    pub file_id: i64,
-    pub item_id: i64,
+    /// Catalog identity exists only for ordinary file playback. Managed
+    /// sources must remain visible without fabricating a file or item row.
+    pub file_id: Option<i64>,
+    pub item_id: Option<i64>,
+    pub source: &'static str,
     pub item_title: String,
     pub user_name: String,
     pub target_height: i64,
@@ -3414,15 +3417,16 @@ impl VodServe {
             .filter(|(_, session)| session.tombstone.is_none())
             .filter_map(|(id, session)| {
                 session.live_rendition()?;
-                let file = session.file_opt()?;
+                let file = session.file_opt();
                 Some(VodDeliveryInfo {
                     id: id.clone(),
                     method: match &session.kind {
                         SessionKind::Copy { .. } => crate::delivery::Method::HlsCopy,
                         SessionKind::Transcode { .. } => crate::delivery::Method::Transcode,
                     },
-                    file_id: file.id,
-                    item_id: file.item_id,
+                    file_id: file.map(|file| file.id),
+                    item_id: file.map(|file| file.item_id),
+                    source: if file.is_some() { "file" } else { "optical" },
                     item_title: session.item_title.clone(),
                     user_name: session.user_name.clone(),
                     target_height: session.target_height,

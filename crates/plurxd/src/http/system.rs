@@ -3632,8 +3632,11 @@ struct ClusterDelivery {
     method: String,
     presentation: Option<String>,
     user: String,
-    file_id: i64,
-    item_id: i64,
+    source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item_id: Option<i64>,
     title: String,
     started_unix: i64,
     idle_seconds: u64,
@@ -3649,6 +3652,7 @@ impl ClusterDelivery {
             method: delivery.method.to_owned(),
             presentation: delivery.presentation.map(str::to_owned),
             user: delivery.user,
+            source: delivery.source.to_owned(),
             file_id: delivery.file_id,
             item_id: delivery.item_id,
             title: delivery.title,
@@ -3666,6 +3670,7 @@ impl ClusterDelivery {
             method: delivery.method,
             presentation: delivery.presentation,
             user: delivery.user,
+            source: delivery.source,
             file_id: delivery.file_id,
             item_id: delivery.item_id,
             title: delivery.title,
@@ -4260,8 +4265,12 @@ pub struct Delivery {
     /// carried on this endpoint — see the handler's note on who may look. This
     /// array names no one a `sessions` row would not have named.
     pub user: String,
-    pub file_id: i64,
-    pub item_id: i64,
+    /// `file` for catalog playback, `optical` for a managed physical source.
+    pub source: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<i64>,
     pub title: String,
     pub started_unix: i64,
     /// Seconds since this delivery last showed a sign of life: `last_access`
@@ -4295,8 +4304,9 @@ async fn deliveries(state: &AppState) -> (Vec<crate::transcode::SessionInfo>, Ve
             method: method.as_str(),
             presentation: Some(s.presentation),
             user: s.user_name.clone(),
-            file_id: s.file_id,
-            item_id: s.item_id,
+            source: "file",
+            file_id: Some(s.file_id),
+            item_id: Some(s.item_id),
             title: s.item_title.clone(),
             started_unix: s.started_unix,
             idle_seconds: s.idle_seconds,
@@ -4305,6 +4315,32 @@ async fn deliveries(state: &AppState) -> (Vec<crate::transcode::SessionInfo>, Ve
             delivered_bps: s.delivered_bps,
         })
         .collect();
+
+    // Managed VOD deliberately has no catalog file row, so it cannot pass
+    // through the legacy `SessionInfo` shape above. It is still a first-class
+    // delivery and uses the same VOD lifetime and byte meter.
+    out.extend(
+        state
+            .transcode
+            .vod_delivery_infos_bounded(usize::MAX)
+            .await
+            .into_iter()
+            .filter(|delivery| delivery.source == "optical")
+            .map(|delivery| Delivery {
+                method: delivery.method.as_str(),
+                presentation: Some("vod"),
+                user: delivery.user_name,
+                source: delivery.source,
+                file_id: None,
+                item_id: None,
+                title: delivery.item_title,
+                started_unix: delivery.started_unix,
+                idle_seconds: delivery.idle_seconds,
+                session_id: Some(crate::transcode::session_log_id(&delivery.id)),
+                delivered_bytes: Some(delivery.delivered_bytes),
+                delivered_bps: delivery.delivered_bps,
+            }),
+    );
 
     // The two routes that hold no session. A remux carries the item id already
     // loaded at stream start, while titles are resolved here so they do not go
@@ -4315,8 +4351,9 @@ async fn deliveries(state: &AppState) -> (Vec<crate::transcode::SessionInfo>, Ve
             method: crate::delivery::Method::Remux.as_str(),
             presentation: None,
             user: stream.user_name,
-            file_id: stream.file_id,
-            item_id: stream.item_id,
+            source: "file",
+            file_id: Some(stream.file_id),
+            item_id: Some(stream.item_id),
             title: title_of(state, stream.item_id, &mut titles).await,
             started_unix: stream.started_unix,
             // A remux is one pipe with no `last_access` of its own; how long
@@ -4332,8 +4369,9 @@ async fn deliveries(state: &AppState) -> (Vec<crate::transcode::SessionInfo>, Ve
             method: crate::delivery::Method::Direct.as_str(),
             presentation: None,
             user: play.user_name,
-            file_id: play.file_id,
-            item_id: play.item_id,
+            source: "file",
+            file_id: Some(play.file_id),
+            item_id: Some(play.item_id),
             title: title_of(state, play.item_id, &mut titles).await,
             started_unix: play.started_unix,
             idle_seconds: play.idle_seconds,
@@ -5189,8 +5227,9 @@ mod tests {
             method,
             presentation: Some("live-recovery"),
             user: "paul".to_owned(),
-            file_id: started_unix,
-            item_id: started_unix + 100,
+            source: "file",
+            file_id: Some(started_unix),
+            item_id: Some(started_unix + 100),
             title: format!("Title {started_unix}"),
             started_unix,
             idle_seconds: 2,
@@ -5276,8 +5315,9 @@ mod tests {
                                 method: "direct".to_owned(),
                                 presentation: None,
                                 user: "viewer".to_owned(),
-                                file_id: 2,
-                                item_id: 102,
+                                source: "file".to_owned(),
+                                file_id: Some(2),
+                                item_id: Some(102),
                                 title: "Remote title".to_owned(),
                                 started_unix: 2,
                                 idle_seconds: 1,

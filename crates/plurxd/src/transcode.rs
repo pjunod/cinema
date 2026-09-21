@@ -8867,8 +8867,12 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
     SessionInfo {
         id: info.id,
         presentation: "vod",
-        file_id: info.file_id,
-        item_id: info.item_id,
+        file_id: info
+            .file_id
+            .expect("only catalog VOD deliveries become legacy session rows"),
+        item_id: info
+            .item_id
+            .expect("only catalog VOD deliveries become legacy session rows"),
         item_title: info.item_title,
         user_name: info.user_name,
         target_height: info.target_height,
@@ -22940,10 +22944,17 @@ impl TranscodeManager {
             .into_iter()
             .filter_map(|candidate| details.remove(&candidate.id))
             .collect::<Vec<_>>();
-        deliveries.extend(self.vod.delivery_infos().await.into_iter().map(|info| {
-            let method = info.method;
-            (vod_delivery_session_info(info), method)
-        }));
+        deliveries.extend(
+            self.vod
+                .delivery_infos()
+                .await
+                .into_iter()
+                .filter(|info| info.file_id.is_some() && info.item_id.is_some())
+                .map(|info| {
+                    let method = info.method;
+                    (vod_delivery_session_info(info), method)
+                }),
+        );
         deliveries.sort_by(|left, right| {
             right
                 .0
