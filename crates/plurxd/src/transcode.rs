@@ -12927,7 +12927,13 @@ async fn forget_unfenced_claim_with(
                 .await;
         }
         None => {
-            let _ = store.forget_cache_entry(hash, node_id, "local").await;
+            // Best-effort cache repair: the invalid entry is already excluded
+            // from this lookup and later cache reconciliation retries removal.
+            crate::store_result::observe(
+                crate::store_result::Operation::ForgetUnfencedCacheEntry,
+                crate::store_result::Discard::BestEffort,
+                store.forget_cache_entry(hash, node_id, "local").await,
+            );
         }
     }
 }
@@ -16578,15 +16584,30 @@ impl TranscodeManager {
         };
         drop(cache_lookup);
         if let Some(generation_id) = cache_location.generation_id.as_deref() {
-            let _ = self
-                .store
-                .touch_shared_cache_entry(&hash, &cache_location.node_id, generation_id, unix_ms())
-                .await;
+            // Best-effort recency hint: playback already pinned the generation
+            // and a later read can refresh its last-access timestamp.
+            crate::store_result::observe(
+                crate::store_result::Operation::TouchSharedCacheEntry,
+                crate::store_result::Discard::BestEffort,
+                self.store
+                    .touch_shared_cache_entry(
+                        &hash,
+                        &cache_location.node_id,
+                        generation_id,
+                        unix_ms(),
+                    )
+                    .await,
+            );
         } else {
-            let _ = self
-                .store
-                .touch_cache_entry(&hash, &cache_location.node_id)
-                .await;
+            // Best-effort recency hint: the selected cache object remains
+            // usable, and a later read can refresh its access timestamp.
+            crate::store_result::observe(
+                crate::store_result::Operation::TouchCacheEntry,
+                crate::store_result::Discard::BestEffort,
+                self.store
+                    .touch_cache_entry(&hash, &cache_location.node_id)
+                    .await,
+            );
         }
         let cached_kind = SessionKind::Transcode {
             height: opts.target_height,
@@ -17836,10 +17857,15 @@ impl TranscodeManager {
                             .forget_cache_entry(&hash, &cache.node_id, "local")
                             .await;
                     } else {
-                        let _ = self
-                            .store
-                            .forget_cache_entry(&hash, &cache.node_id, "local")
-                            .await;
+                        // Cancelled: the produce path is already returning its
+                        // source error; this cleanup failure is not that cause.
+                        crate::store_result::observe(
+                            crate::store_result::Operation::ForgetFailedOfflineCacheEntry,
+                            crate::store_result::Discard::Cancelled,
+                            self.store
+                                .forget_cache_entry(&hash, &cache.node_id, "local")
+                                .await,
+                        );
                     }
                 }
                 return Err(error);
