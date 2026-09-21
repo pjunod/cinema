@@ -213,15 +213,27 @@ fn optical_media(state: &AppState, enabled: bool) -> DeveloperEnableItem {
     use plurx_core::optical::{HostRequirementStatus, OpticalDriveState};
 
     let snapshots = state.optical.manager().snapshots();
-    let mut requirements = Vec::new();
-    if snapshots.is_empty() {
-        requirements.push(DeveloperRequirement {
-            id: "optical_drive_configured",
-            title: "A node-local optical drive is configured",
-            status: RequirementStatus::Unmet,
-            evidence: "No [[optical.drives]] entry is configured on this node. The saved enable choice remains available and authoritative.".to_owned(),
-        });
-    }
+    let mut requirements = vec![DeveloperRequirement {
+        id: "optical_drive_configured",
+        title: "A node-local optical drive is configured",
+        status: if snapshots.is_empty() {
+            RequirementStatus::Unmet
+        } else {
+            RequirementStatus::Met
+        },
+        evidence: if snapshots.is_empty() {
+            "No [[optical.drives]] entry is configured on this node. The saved enable choice remains available and authoritative.".to_owned()
+        } else {
+            format!(
+                "This node has {} configured optical drive(s).",
+                snapshots.len()
+            )
+        },
+    }];
+    let mut host_rows: std::collections::BTreeMap<
+        &'static str,
+        (&'static str, RequirementStatus, Vec<String>),
+    > = std::collections::BTreeMap::new();
     for snapshot in &snapshots {
         for requirement in state.optical.requirements(&snapshot.id).unwrap_or_default() {
             let status = match requirement.status {
@@ -229,26 +241,42 @@ fn optical_media(state: &AppState, enabled: bool) -> DeveloperEnableItem {
                 HostRequirementStatus::Unmet => RequirementStatus::Unmet,
                 HostRequirementStatus::Unknown => RequirementStatus::Unobservable,
             };
-            requirements.push(DeveloperRequirement {
-                id: match requirement.id {
-                    "linux_host" => "optical_linux_host",
-                    "helper" => "optical_helper",
-                    "device" => "optical_device",
-                    "mount" => "optical_mount",
-                    _ => "optical_permissions",
-                },
-                title: match requirement.id {
-                    "linux_host" => "Linux host adapter",
-                    "helper" => "Optical inspection helper",
-                    "device" => "Configured drive device",
-                    "mount" => "Configured read-only mount",
-                    _ => "Operation-time drive permissions",
-                },
-                status,
-                evidence: format!("{}: {}", snapshot.label, requirement.detail),
-            });
+            let id = match requirement.id {
+                "linux_host" => "optical_linux_host",
+                "helper" => "optical_helper",
+                "device" => "optical_device",
+                "mount" => "optical_mount",
+                _ => "optical_permissions",
+            };
+            let title = match requirement.id {
+                "linux_host" => "Linux host adapter",
+                "helper" => "Optical inspection helper",
+                "device" => "Configured drive device",
+                "mount" => "Configured read-only mount",
+                _ => "Operation-time drive permissions",
+            };
+            let row = host_rows
+                .entry(id)
+                .or_insert_with(|| (title, RequirementStatus::Met, Vec::new()));
+            if status == RequirementStatus::Unmet
+                || (status == RequirementStatus::Unobservable && row.1 == RequirementStatus::Met)
+            {
+                row.1 = status;
+            }
+            row.2
+                .push(format!("{}: {}", snapshot.label, requirement.detail));
         }
     }
+    requirements.extend(
+        host_rows
+            .into_iter()
+            .map(|(id, (title, status, evidence))| DeveloperRequirement {
+                id,
+                title,
+                status,
+                evidence: evidence.join(" "),
+            }),
+    );
     let ready_count = snapshots
         .iter()
         .filter(|snapshot| matches!(snapshot.state, OpticalDriveState::Ready { .. }))

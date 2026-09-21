@@ -215,6 +215,42 @@ function seekScratchReservationsCard(){
       <p class="devcheck-note">Advisory only. Capacity, authorization and retention rules are unchanged by anything on this card; the global scratch ceiling is still the one on <a href="#/settings/playback">Playback</a>.</p>
       </div></details>`);
 }
+function opticalMediaCard(settings,readiness){
+  const enabled=!!settings.optical_enabled;
+  const state=enabled
+    ? `<span class="pill" style="color:var(--good);border-color:var(--good)">enabled</span>`
+    : `<span class="pill">disabled</span>`;
+  return setCard(`${cardHead("DVD and Blu-ray playback","Observe configured server drives and make inspected titles available to granted users.",state)}
+      ${togRow("optical-enabled",`Enable optical media <span class="pill warn">experimental</span>`,`Applies without a restart. This saved choice is authoritative; every requirement below is advice, never a gate.`,enabled)}
+      <div class="hint"><b>This checkbox is the enable path.</b> Enabling with an unmet reader, device or permission requirement keeps the choice on and reports a specific operation error. It does not silently fall back to disc ripping or a guessed title.</div>
+      <details class="setdetails" open><summary>Requirements and current evidence</summary><div class="setdetails-body">
+      ${devReq(readiness,"optical_media","optical_drive_configured","Configured drive","Add one or more node-local <code>[[optical.drives]]</code> entries with stable IDs and trusted device/mount paths.")}
+      ${devReq(readiness,"optical_media","optical_linux_host","Supported host","This release hosts physical drives on Linux. Web, Apple and Android clients may connect from any supported platform.")}
+      ${devReq(readiness,"optical_media","optical_helper","Inspection helper","Install the versioned <code>plurx-optical-helper</code> with DVD/Blu-ray title inspection support.")}
+      ${devReq(readiness,"optical_media","optical_device","Drive device","The configured optical device must exist on its owner node.")}
+      ${devReq(readiness,"optical_media","optical_mount","Read-only media mount","The configured mount must exist where the Blu-ray reader expects it.")}
+      ${devReq(readiness,"optical_media","optical_permissions","Runtime permissions","The daemon must be able to read the device and perform explicitly authorized ejects. This is checked again for each operation.")}
+      ${devReq(readiness,"optical_media","optical_physical_acceptance","Physical-media qualification","Qualify representative authored and retail DVD/Blu-ray media, seeks, chapters, track changes and installed-package behavior on the real drive.")}
+      <p class="devcheck-note">Readiness is advisory and never changes this checkbox. Authorization, drive ownership, one-reader admission and insertion-generation checks remain enforced operational safety rules.</p>
+      </div></details>
+      <div class="err" id="optical-enable-error" role="alert"></div>
+      ${setCardFoot("saveOpticalMedia")}`,{id:"optical-media-card"});
+}
+async function saveOpticalMedia(btn){
+  const error=document.getElementById("optical-enable-error");
+  if(error) error.textContent="";
+  btn.disabled=true;
+  try{
+    const saved=await api("/settings",{method:"PUT",body:{optical_enabled:!!document.getElementById("optical-enabled")?.checked}});
+    cacheSettings(saved);
+    const card=document.getElementById("optical-media-card");
+    if(card) card.outerHTML=opticalMediaCard(saved,DEVELOPER_READINESS);
+    toast(saved.optical_enabled?"Optical media enabled":"Optical media disabled");
+  }catch(e){
+    if(error) error.textContent=e.message;
+    btn.disabled=false;
+  }
+}
 function developerPanel(settings,readiness){
   const destinations=`<nav class="setdestinations" aria-label="Everyday settings">
     <a href="#/settings/livetv"><strong>Live TV <span aria-hidden="true">↗</span></strong><span>Tuner, guide, recording and library channels</span></a>
@@ -227,6 +263,7 @@ function developerPanel(settings,readiness){
       ${directedChangeDeveloperRows()}`,{local:true});
   return `${setHead("Developer","Experimental features still awaiting device qualification.")}
       ${destinations}
+      <div class="setsection" id="enable-optical"><h2>Optical media</h2><p>DVD and Blu-ray drives attached to a plurx server. Requirements are visible before and after enabling.</p></div>${opticalMediaCard(settings,readiness)}
       <div class="setsection" id="enable-seek-scratch"><h2>Seek scratch accounting</h2><p>Recently shipped accounting and retention changes with unverified native-device behavior.</p></div>${seekScratchReservationsCard()}
       <div class="setsection" id="enable-quality"><h2>Prepared quality handoff</h2><p>Prepare a replacement stream using a second player. Device qualification is still incomplete.</p></div>${preparedQualityCard(settings,readiness)}${browser}
       <div class="setsection" id="enable-subtitle-refusal"><h2>Subtitle delivery</h2><p>Experimental error handling that still needs observations on each playback engine.</p></div>${subtitleNotReadyCard(settings,readiness)}

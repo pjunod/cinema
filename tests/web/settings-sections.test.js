@@ -342,6 +342,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       // calls has to be composed here or the panel throws on the name and this
       // whole gate reports one failure instead of checking anything.
       shippedSource("subtitleNotReadyCard"),
+      shippedSource("opticalMediaCard"),
       shippedSource("seekScratchReservationsCard"),
       shippedSource("liveTvGuideCard"), shippedConst("DEV_READINESS_LABEL"),
       shippedSource("devReadinessRow"), shippedSource("devReadinessPill"),
@@ -362,7 +363,7 @@ test("Developer keeps only experiments; everyday controls retain their saves and
       shippedSource("seekScratchReservationsCard"),
       shippedSource("developerPanel"),
       shippedSource("liveTvPanel"),
-      "return {developerPanel,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard,playbackPanel,metadataPanel,maintenancePanel};",
+      "return {developerPanel,opticalMediaCard,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard,playbackPanel,metadataPanel,maintenancePanel};",
     ].join("\n"),
   )(
     (title, sub) => `HEAD:${title}|${sub}`,
@@ -403,14 +404,18 @@ test("Developer keeps only experiments; everyday controls retain their saves and
     dvr_pad_end_s: 120,
     dvr_reminder_lead_s: 300,
     dvr_webhook_url: "",
+    optical_enabled: true,
   };
   const html = panels.developerPanel(settings, readiness);
-  for (const id of ["pqh", "pdp", "dhqa", "adr", "sub503"])
+  for (const id of ["optical-enabled", "pqh", "pdp", "dhqa", "adr", "sub503"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   assert.doesNotMatch(html, /HDHomeRun Live TV|CARDHEAD:Programme guide/);
   for (const route of ["livetv", "playback", "cluster"])
     assert.ok(html.includes(`href="#/settings/${route}"`), `${route} has a destination link`);
   assert.match(html, /FOOT:savePreparedQuality/);
+  assert.match(html, /FOOT:saveOpticalMedia/);
+  assert.match(html, /This checkbox is the enable path/);
+  assert.match(html, /Readiness is advisory and never changes this checkbox/);
   assert.match(html, /Seek scratch accounting/);
   for (const id of ["pcpv1", "dvlr", "dvrenabled", "lcenabled", "lcsubjectenabled", "ca-enabled", "dvwin"])
     assert.ok(!html.includes(`TOG:${id}|`), `Developer no longer owns ${id}`);
@@ -492,6 +497,31 @@ test("Developer keeps only experiments; everyday controls retain their saves and
   assert.match(live, /api\.hdhomerun\.com/);
   assert.match(live, /never stores, logs or relays that credential/);
   assert.match(live, /FOOT:saveLiveTvGuide/);
+});
+
+test("Optical enable saves only the authoritative switch and never reads readiness", async () => {
+  const elements = {
+    "optical-enabled": { checked: true },
+    "optical-enable-error": { textContent: "" },
+    "optical-media-card": null,
+  };
+  let write;
+  const save = new Function(
+    "api", "document", "cacheSettings", "toast", "opticalMediaCard", "DEVELOPER_READINESS",
+    `${shippedSource("saveOpticalMedia")}\nreturn saveOpticalMedia;`,
+  )(
+    async (path, opts) => {
+      write = { path, body: opts.body };
+      return { optical_enabled: true };
+    },
+    { getElementById: (id) => elements[id] },
+    () => {}, () => {}, () => "", { items: [{ id: "optical_media", requirements: [] }] },
+  );
+  const button = { disabled: false };
+  await save(button);
+  assert.deepEqual(write, { path: "/settings", body: { optical_enabled: true } });
+  assert.equal(button.disabled, true);
+  assert.doesNotMatch(shippedSource("saveOpticalMedia"), /readiness|requirements/);
 });
 
 test("server guidance sends disabled Live TV features to their current settings", () => {
