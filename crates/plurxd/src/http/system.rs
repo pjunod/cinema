@@ -1818,7 +1818,14 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             transcode_rate_mode.as_deref(),
             transcode_quality.as_deref(),
         );
-    let transcode_rate_mode = transcode_rate_mode.as_str().to_owned();
+    // The settings form keeps its existing compatibility value for an unset
+    // pair. The tri-state is an internal policy distinction: `/system`
+    // reports family defaults, while the form still presents the legacy
+    // bitrate choice until the operator explicitly changes it.
+    let transcode_rate_mode = transcode_rate_mode
+        .unwrap_or(plurx_core::transcode::RateMode::Bitrate)
+        .as_str()
+        .to_owned();
     let text = |v: Option<String>, default: &str| -> String {
         v.map(|v| v.trim().to_owned())
             .filter(|v| !v.is_empty())
