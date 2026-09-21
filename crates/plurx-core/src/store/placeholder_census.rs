@@ -655,7 +655,7 @@ fn constants_for(name: &str, source: &str, literals: &[Literal]) -> Vec<(String,
 /// the complete `1..=max` set prevents a gap from silently shifting a
 /// `params!` list written in appearance order, while rejecting a mixed bare
 /// `?` keeps the assignment independent of the text that precedes it.
-fn validate_sqlite_placeholders(sql: &str) -> Result<usize, String> {
+pub(super) fn validate_sqlite_placeholders(sql: &str) -> Result<usize, String> {
     let bytes = sql.as_bytes();
     let mut index = 0_usize;
     let mut numbered = std::collections::BTreeSet::new();

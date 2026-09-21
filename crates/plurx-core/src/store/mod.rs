@@ -29,6 +29,7 @@ mod timeline_annotations;
 
 mod publication;
 mod scan_identity_repair;
+mod sql_source;
 pub use scan_identity_repair::{
     plan_identity_repair, IdentityRepairBlocker, IdentityRepairCounts, IdentityRepairFile,
     IdentityRepairFileMove, IdentityRepairItem, IdentityRepairItemMove, IdentityRepairOutcome,
