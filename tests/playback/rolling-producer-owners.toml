@@ -1600,7 +1600,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # +4 for C-02's bounded scan walk, root fingerprint, contained-path check, and
 # sparse-walker cancellation fixture. Every blocking task is awaited; none is
 # a detached producer or process owner.
-expected_occurrences = 534
+# 534 -> 535 with S-07's luminance backfill. `run_due_jobs` spawns
+# `backfill_luminance_facts` from the same per-tick block as the Dolby Vision
+# facts and video codec tag backfills beside it, in the same shape: a
+# leased catalogue job that walks a node-local cursor and writes MaxCLL,
+# MaxFALL, mastering peak and provenance columns. It owns no producer, no
+# process and no timer of its own.
+expected_occurrences = 535
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
