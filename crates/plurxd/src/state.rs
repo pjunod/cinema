@@ -3031,16 +3031,27 @@ impl JobManager {
                         )
                         .await?;
                     if !loss.is_cancelled() {
-                        let _ = self
-                            .store
-                            .put_setting(&cursor_key, &library_id.to_string())
-                            .await;
+                        // Best-effort cursor: a failed write repeats bounded
+                        // discovery work; it does not skip a library.
+                        crate::store_result::observe(
+                            crate::store_result::Operation::ResetDvQueueCursorAfterLoss,
+                            crate::store_result::Discard::BestEffort,
+                            self.store
+                                .put_setting(&cursor_key, &library_id.to_string())
+                                .await,
+                        );
                     }
                     batch
                 }
             } else {
                 if cursor != 0 {
-                    let _ = self.store.put_setting(&cursor_key, "0").await;
+                    // Best-effort cursor reset: the next tick safely repeats
+                    // the empty inventory pass if persistence is unavailable.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::ResetDvQueueCursorAfterEmptyPage,
+                        crate::store_result::Discard::BestEffort,
+                        self.store.put_setting(&cursor_key, "0").await,
+                    );
                 }
                 DvConversionQueueBatch::default()
             };
@@ -3100,7 +3111,13 @@ impl JobManager {
         };
         if candidates.is_empty() {
             if cursor != 0 {
-                let _ = self.store.put_setting(&cursor_key, "0").await;
+                // Best-effort cursor reset: repeating the exhausted scan is
+                // bounded and cannot omit conversion candidates.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ResetDvQueueCursorAfterExhaustion,
+                    crate::store_result::Discard::BestEffort,
+                    self.store.put_setting(&cursor_key, "0").await,
+                );
             }
             return;
         }
@@ -3180,10 +3197,15 @@ impl JobManager {
             });
         }
         if last_examined != cursor {
-            let _ = self
-                .store
-                .put_setting(&cursor_key, &last_examined.to_string())
-                .await;
+            // Best-effort cursor advance: failure repeats examined candidates
+            // instead of skipping work, while job claims prevent duplication.
+            crate::store_result::observe(
+                crate::store_result::Operation::AdvanceDvQueueCursor,
+                crate::store_result::Discard::BestEffort,
+                self.store
+                    .put_setting(&cursor_key, &last_examined.to_string())
+                    .await,
+            );
         }
         while let Some(result) = workers.join_next().await {
             if let Err(error) = result {
@@ -3227,7 +3249,13 @@ impl JobManager {
         }
         let Some(file_id) = candidate else {
             if cursor != 0 {
-                let _ = self.store.put_setting(&cursor_key, "0").await;
+                // Best-effort recovery cursor reset: a failed reset only
+                // repeats the bounded recovery inventory on the next tick.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ResetDvRecoveryCursor,
+                    crate::store_result::Discard::BestEffort,
+                    self.store.put_setting(&cursor_key, "0").await,
+                );
             }
             return;
         };
@@ -3344,7 +3372,13 @@ impl JobManager {
         }
         let Some(guard) = candidates.into_iter().next() else {
             if !cursor.is_empty() {
-                let _ = self.store.put_setting(&cursor_key, "").await;
+                // Best-effort guard cursor reset: failed persistence repeats
+                // a bounded scan and cannot lose a recovery guard.
+                crate::store_result::observe(
+                    crate::store_result::Operation::ResetDvGuardCursor,
+                    crate::store_result::Discard::BestEffort,
+                    self.store.put_setting(&cursor_key, "").await,
+                );
             }
             return;
         };
@@ -7066,15 +7100,20 @@ impl JobManager {
                             .await
                         {
                             Ok(true) => {
-                                let _ = self
-                                    .store
-                                    .record_analysis_request_phase(
-                                        &request,
-                                        "retry_wait",
-                                        Some(code),
-                                        now,
-                                    )
-                                    .await;
+                                // Best effort: the retry transition already
+                                // committed; this row is diagnostic history.
+                                crate::store_result::observe(
+                                    crate::store_result::Operation::RecordAnalysisRetryWaitPhase,
+                                    crate::store_result::Discard::BestEffort,
+                                    self.store
+                                        .record_analysis_request_phase(
+                                            &request,
+                                            "retry_wait",
+                                            Some(code),
+                                            now,
+                                        )
+                                        .await,
+                                );
                             }
                             Ok(false) => {}
                             Err(error) => tracing::warn!(
@@ -7097,15 +7136,20 @@ impl JobManager {
                             .await
                         {
                             Ok(true) => {
-                                let _ = self
-                                    .store
-                                    .record_analysis_request_phase(
-                                        &request,
-                                        "failed",
-                                        Some(code),
-                                        now,
-                                    )
-                                    .await;
+                                // Best effort: the failed terminal state is
+                                // durable already; this row explains it.
+                                crate::store_result::observe(
+                                    crate::store_result::Operation::RecordAnalysisFailedPhase,
+                                    crate::store_result::Discard::BestEffort,
+                                    self.store
+                                        .record_analysis_request_phase(
+                                            &request,
+                                            "failed",
+                                            Some(code),
+                                            now,
+                                        )
+                                        .await,
+                                );
                             }
                             Ok(false) => {}
                             Err(error) => tracing::warn!(
@@ -7209,7 +7253,13 @@ impl JobManager {
                         }
                     };
                     if let Ok(json) = serde_json::to_string(&chapters) {
-                        let _ = self.store.merge_file_probe_chapters(file.id, &json).await;
+                        // Lost work: these discovered chapters are otherwise
+                        // discarded when this analysis attempt completes.
+                        crate::store_result::observe(
+                            crate::store_result::Operation::MergeProbeChapters,
+                            crate::store_result::Discard::LostWork,
+                            self.store.merge_file_probe_chapters(file.id, &json).await,
+                        );
                     }
                     chapters
                 }
@@ -7257,10 +7307,15 @@ impl JobManager {
             }
             self.analysis_metrics
                 .publication("skip_markers", request.force_rebuild);
-            let _ = self
-                .store
-                .record_analysis_request_phase(request, "published", None, clock_ms())
-                .await;
+            // Best-effort diagnostic: publication is already committed; a
+            // missing phase row must not undo the durable result.
+            crate::store_result::observe(
+                crate::store_result::Operation::RecordPublishedAnalysisPhase,
+                crate::store_result::Discard::BestEffort,
+                self.store
+                    .record_analysis_request_phase(request, "published", None, clock_ms())
+                    .await,
+            );
             return Ok(());
         }
         if !crate::ffmpeg::fragment_index_engine_is_current().await {
@@ -7507,7 +7562,13 @@ impl JobManager {
                 charge_attempt: false,
             });
         }
-        let _ = self.store.settle_analysis_requests(now).await;
+        // Best-effort maintenance: unsettled requests remain durable and the
+        // next queue pass retries the same bounded settlement.
+        crate::store_result::observe(
+            crate::store_result::Operation::SettleAnalysisAfterQueueAdmission,
+            crate::store_result::Discard::BestEffort,
+            self.store.settle_analysis_requests(now).await,
+        );
         Ok(())
     }
 
@@ -8065,10 +8126,15 @@ impl JobManager {
                 return false;
             }
         };
-        let _ = self
-            .store
-            .record_fragment_index_source(&attested.observation)
-            .await;
+        // Lost work: this fresh source attestation is required for another
+        // node to use the index being built from it.
+        crate::store_result::observe(
+            crate::store_result::Operation::RecordFragmentIndexSource,
+            crate::store_result::Discard::LostWork,
+            self.store
+                .record_fragment_index_source(&attested.observation)
+                .await,
+        );
         // The job names one pipeline by digest; this node offers one identity
         // per copy pipeline the file can be asked for. Claim the job only if
         // one of them still produces the bytes the job was queued for — a job
@@ -8147,7 +8213,13 @@ impl JobManager {
                 .await
             {
                 Ok(true) => {
-                    let _ = self.store.settle_analysis_requests(now).await;
+                    // Best-effort maintenance: hydration is already durable
+                    // and the next pass retries settlement of pending requests.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::SettleAnalysisAfterHydration,
+                        crate::store_result::Discard::BestEffort,
+                        self.store.settle_analysis_requests(now).await,
+                    );
                     tracing::info!(
                         cache_key = %job.cache_key,
                         built_by = %published.built_by_node_id,

@@ -12784,12 +12784,24 @@ async fn forget_unfenced_claim_with(
 ) {
     match publication_fence {
         Some(fence) => {
-            let _ = PublicationStore::fenced(store, fence.clone())
-                .forget_cache_entry(hash, node_id, "local")
-                .await;
+            // Best-effort cache repair: the invalid fenced entry is already
+            // excluded and later reconciliation retries its removal.
+            crate::store_result::observe(
+                crate::store_result::Operation::ForgetFencedUnfencedClaim,
+                crate::store_result::Discard::BestEffort,
+                PublicationStore::fenced(store, fence.clone())
+                    .forget_cache_entry(hash, node_id, "local")
+                    .await,
+            );
         }
         None => {
-            let _ = store.forget_cache_entry(hash, node_id, "local").await;
+            // Best-effort cache repair: the invalid entry is already excluded
+            // from this lookup and later cache reconciliation retries removal.
+            crate::store_result::observe(
+                crate::store_result::Operation::ForgetUnfencedCacheEntry,
+                crate::store_result::Discard::BestEffort,
+                store.forget_cache_entry(hash, node_id, "local").await,
+            );
         }
     }
 }
@@ -16114,16 +16126,22 @@ impl TranscodeManager {
         .await;
 
         if let Some(pin) = shared_pin.as_ref() {
-            let _ = store
-                .release_cache_consumer_pin(
-                    &pin.storage_id,
-                    &pin.recipe_hash,
-                    &pin.generation_id,
-                    pin.consumer_kind,
-                    &pin.consumer_id,
-                    pin.consumer_epoch,
-                )
-                .await;
+            // Best effort: the durable pin expires if verification cleanup
+            // cannot release it immediately.
+            crate::store_result::observe(
+                crate::store_result::Operation::ReleaseSharedLookupPinAfterVerification,
+                crate::store_result::Discard::BestEffort,
+                store
+                    .release_cache_consumer_pin(
+                        &pin.storage_id,
+                        &pin.recipe_hash,
+                        &pin.generation_id,
+                        pin.consumer_kind,
+                        &pin.consumer_id,
+                        pin.consumer_epoch,
+                    )
+                    .await,
+            );
         };
         CacheOfferVerification {
             verified,
@@ -16177,8 +16195,12 @@ impl TranscodeManager {
                         u64::try_from(SHARED_LOOKUP_PIN_MS).unwrap_or(u64::MAX),
                     ))
                     .await;
-                    let _ = cleanup_store
-                        .release_cache_consumer_pin(
+                    // Best effort: this delayed release only shortens the
+                    // durable pin's own bounded expiry.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::ReleaseExpiredSharedLookupPin,
+                        crate::store_result::Discard::BestEffort,
+                        cleanup_store.release_cache_consumer_pin(
                             &cleanup_pin.storage_id,
                             &cleanup_pin.recipe_hash,
                             &cleanup_pin.generation_id,
@@ -16186,7 +16208,8 @@ impl TranscodeManager {
                             &cleanup_pin.consumer_id,
                             cleanup_pin.consumer_epoch,
                         )
-                        .await;
+                        .await,
+                    );
                 });
                 let prepared = async {
                     let dir =
@@ -16226,8 +16249,12 @@ impl TranscodeManager {
                 }
                 .await;
                 if prepared.is_err() {
-                    let _ = store
-                        .release_cache_consumer_pin(
+                    // Best effort: failed preparation cannot consume the
+                    // bytes, and the durable pin expires without this release.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::ReleaseSharedLookupPinAfterPreparationFailure,
+                        crate::store_result::Discard::BestEffort,
+                        store.release_cache_consumer_pin(
                             &pin.storage_id,
                             &pin.recipe_hash,
                             &pin.generation_id,
@@ -16235,7 +16262,8 @@ impl TranscodeManager {
                             &pin.consumer_id,
                             pin.consumer_epoch,
                         )
-                        .await;
+                        .await,
+                    );
                 }
                 prepared
             })
@@ -16441,15 +16469,30 @@ impl TranscodeManager {
         };
         drop(cache_lookup);
         if let Some(generation_id) = cache_location.generation_id.as_deref() {
-            let _ = self
-                .store
-                .touch_shared_cache_entry(&hash, &cache_location.node_id, generation_id, unix_ms())
-                .await;
+            // Best-effort recency hint: playback already pinned the generation
+            // and a later read can refresh its last-access timestamp.
+            crate::store_result::observe(
+                crate::store_result::Operation::TouchSharedCacheEntry,
+                crate::store_result::Discard::BestEffort,
+                self.store
+                    .touch_shared_cache_entry(
+                        &hash,
+                        &cache_location.node_id,
+                        generation_id,
+                        unix_ms(),
+                    )
+                    .await,
+            );
         } else {
-            let _ = self
-                .store
-                .touch_cache_entry(&hash, &cache_location.node_id)
-                .await;
+            // Best-effort recency hint: the selected cache object remains
+            // usable, and a later read can refresh its access timestamp.
+            crate::store_result::observe(
+                crate::store_result::Operation::TouchCacheEntry,
+                crate::store_result::Discard::BestEffort,
+                self.store
+                    .touch_cache_entry(&hash, &cache_location.node_id)
+                    .await,
+            );
         }
         let cached_kind = SessionKind::Transcode {
             height: opts.target_height,
@@ -17174,16 +17217,21 @@ impl TranscodeManager {
             OfflineProduceOutcome::Ready(_) | OfflineProduceOutcome::Cached(_)
         ) {
             if let OfflineSubtitle::Native(index) = spec.subtitle {
-                let _ = self
-                    .store
-                    .update_offline_progress(
-                        &package.id,
-                        &package.node_id,
-                        package.claim_generation,
-                        "extracting_subtitles",
-                        999,
-                    )
-                    .await;
+                // Best effort: package production continues and its later
+                // terminal settlement supersedes this progress snapshot.
+                crate::store_result::observe(
+                    crate::store_result::Operation::UpdateOfflineProgressExtractingSubtitles,
+                    crate::store_result::Discard::BestEffort,
+                    self.store
+                        .update_offline_progress(
+                            &package.id,
+                            &package.node_id,
+                            package.claim_generation,
+                            "extracting_subtitles",
+                            999,
+                        )
+                        .await,
+                );
                 crate::subtitles::ensure_vtt(&self.subtitle_cache, file, index).await?;
             }
         }
@@ -17396,16 +17444,21 @@ impl TranscodeManager {
             if let Some(package_id) = offline_package_id {
                 let claim_generation = offline_claim_generation
                     .ok_or("offline package production lost its claim generation")?;
-                let _ = self
-                    .store
-                    .update_offline_progress(
-                        package_id,
-                        &cache.node_id,
-                        claim_generation,
-                        "transcoding",
-                        999,
-                    )
-                    .await;
+                // Best effort: this near-complete progress row is advisory;
+                // final package settlement is the durable result.
+                crate::store_result::observe(
+                    crate::store_result::Operation::UpdateOfflineProgressCachedTranscode,
+                    crate::store_result::Discard::BestEffort,
+                    self.store
+                        .update_offline_progress(
+                            package_id,
+                            &cache.node_id,
+                            claim_generation,
+                            "transcoding",
+                            999,
+                        )
+                        .await,
+                );
             }
             if let Some(fence) = &pretranscode_fence {
                 if let Some(expected) = expected_policy_generation.as_deref() {
@@ -17695,14 +17748,25 @@ impl TranscodeManager {
                     && pretranscode_fence.is_none()
                 {
                     if let Some(fence) = publication_fence {
-                        let _ = PublicationStore::fenced(self.store.as_ref(), fence.clone())
-                            .forget_cache_entry(&hash, &cache.node_id, "local")
-                            .await;
+                        // Cancelled: the produce path is already returning its
+                        // source error; this cleanup failure is not that cause.
+                        crate::store_result::observe(
+                            crate::store_result::Operation::ForgetFailedFencedOfflineCacheEntry,
+                            crate::store_result::Discard::Cancelled,
+                            PublicationStore::fenced(self.store.as_ref(), fence.clone())
+                                .forget_cache_entry(&hash, &cache.node_id, "local")
+                                .await,
+                        );
                     } else {
-                        let _ = self
-                            .store
-                            .forget_cache_entry(&hash, &cache.node_id, "local")
-                            .await;
+                        // Cancelled: the produce path is already returning its
+                        // source error; this cleanup failure is not that cause.
+                        crate::store_result::observe(
+                            crate::store_result::Operation::ForgetFailedOfflineCacheEntry,
+                            crate::store_result::Discard::Cancelled,
+                            self.store
+                                .forget_cache_entry(&hash, &cache.node_id, "local")
+                                .await,
+                        );
                     }
                 }
                 return Err(error);
@@ -18383,16 +18447,21 @@ impl TranscodeManager {
                         .saturating_mul(1000)
                         .saturating_div(duration_ms)
                         .clamp(1, 999);
-                    let _ = self
-                        .store
-                        .update_offline_progress(
-                            package_id,
-                            self.offline_owner(),
-                            claim_generation,
-                            "transcoding",
-                            progress,
-                        )
-                        .await;
+                    // Best effort: a missed intermediate percentage cannot
+                    // invalidate the resumable parts or final settlement.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::UpdateOfflineProgressTranscoding,
+                        crate::store_result::Discard::BestEffort,
+                        self.store
+                            .update_offline_progress(
+                                package_id,
+                                self.offline_owner(),
+                                claim_generation,
+                                "transcoding",
+                                progress,
+                            )
+                            .await,
+                    );
                 }
             }
 

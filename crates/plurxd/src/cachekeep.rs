@@ -962,15 +962,21 @@ pub async fn sweep_with_readers(
                         Err(_) => {
                             // A malformed manifest is corruption, not merely a
                             // missed deep-scrub opportunity.
-                            let _ = store
-                                .invalidate_cache_entry(
-                                    &entry.recipe_hash,
-                                    node_id,
-                                    &entry.storage_class,
-                                    &entry.relative_dir,
-                                    Some(expected_digest),
-                                )
-                                .await;
+                            // Lost work: a corrupt manifest must not remain a
+                            // durable candidate after the scrub rejected it.
+                            crate::store_result::observe(
+                                crate::store_result::Operation::InvalidateCorruptCacheManifest,
+                                crate::store_result::Discard::LostWork,
+                                store
+                                    .invalidate_cache_entry(
+                                        &entry.recipe_hash,
+                                        node_id,
+                                        &entry.storage_class,
+                                        &entry.relative_dir,
+                                        Some(expected_digest),
+                                    )
+                                    .await,
+                            );
                             out.corrupt += 1;
                             continue;
                         }

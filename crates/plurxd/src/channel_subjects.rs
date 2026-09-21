@@ -518,10 +518,16 @@ pub async fn worker(state: AppState, shutdown: CancellationToken) {
     loop {
         if now() - last_maintenance >= 60_000 {
             last_maintenance = now();
-            let _ = state
-                .store
-                .subject_write(JobWrite::Prune { now: now() })
-                .await;
+            // Best-effort retention cleanup: expired subject rows remain
+            // harmless and the minute maintenance loop retries pruning.
+            crate::store_result::observe(
+                crate::store_result::Operation::PruneChannelSubjects,
+                crate::store_result::Discard::BestEffort,
+                state
+                    .store
+                    .subject_write(JobWrite::Prune { now: now() })
+                    .await,
+            );
             if let Ok(provider) = local::LocalSearch::configured() {
                 match provider.profile().await {
                     Ok(profile) => observe(|o| {

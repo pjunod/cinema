@@ -41,6 +41,7 @@ mod scratch_ledger;
 mod serving_fence;
 mod shared_cache;
 mod state;
+mod store_result;
 mod storeprobe;
 mod subtitles;
 mod telemetry;

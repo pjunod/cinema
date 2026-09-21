@@ -2035,7 +2035,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # no production timer, producer, process, or replacement policy is added.
 # C-02 also adds one test-only timeout around sparse-walker cancellation; it
 # bounds and awaits that exact task.
-expected_occurrences = 827
+# +1 for K-07's test-only zero-duration timeout: it deterministically exercises
+# the outer-deadline arm of the Store result observer, is awaited immediately,
+# and owns no task, process, producer, or replacement policy.
+expected_occurrences = 828
 
 [[module_structures]]
 id = "bare-time-constructor"

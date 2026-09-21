@@ -1,6 +1,6 @@
 # Rust test execution policy — where the suite runs, and what red means
 
-**Status:** implemented; ready for adversarial review · **Executes:** §2.2 / §4.8 / F-build-1 /
+**Status:** implementation merged; M1 runner evidence bounded by the recorded FFmpeg drift · **Executes:** §2.2 / §4.8 / F-build-1 /
 F-hist-7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Implemented:** 2026-09-21 against `main` @
