@@ -1,6 +1,6 @@
 # Web player recovery and local seek — worker on, one decoder rescue, seek without a reopen
 
-**Status:** implementation complete — draft awaiting adversarial review · **Executes:** Q10 / W4, W7, W3 / F-web-5 from
+**Status:** implementation complete — sole adversarial finding addressed · **Executes:** Q10 / W4, W7, W3 / F-web-5 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -604,5 +604,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 |---|---|---|---|---|---|
 | 2026-09-20 | gpt-5.6-sol | `agent:/root/c02_builder` | M1 — worker on | [#408](http://192.168.4.7:3000/noirr/plurx/pulls/408) · `b50c4816` | Removed both worker opt-outs. The deterministic MPEG-TS browser fixture proves an actual worker starts, CSP blocking falls back inline, both reach first frame, and the loader remains compatible. |
 | 2026-09-20 | gpt-5.6-sol | `agent:/root/c02_builder` | M2 — decoder rescue | [#408](http://192.168.4.7:3000/noirr/plurx/pulls/408) · `3d63b5ac` | Added the pure recovery policy and attached-player/item fences. Focused media-recovery and policy regressions cover incompatible codecs, shared budget, audio swap, settle bound, ordering, and stale handlers. |
-| 2026-09-21 | gpt-5.6-sol | `agent:/root/c02_builder` | M3 — early error reporter | [#408](http://192.168.4.7:3000/noirr/plurx/pulls/408) · `3362df6a` | Added the first head script, bounded queue/drain and boot classifications, server fields/caps, catalog contracts, focused reporter tests, and focused `client_log_` Rust evidence. Device-side missing-asset/journal proof remains post-deploy. |
+| 2026-09-21 | gpt-5.6-sol | `agent:/root/c02_builder` | M3 — early error reporter | [#408](http://192.168.4.7:3000/noirr/plurx/pulls/408) · `3362df6a`, review fix `054ac458` | Added the first head script, bounded queue/drain and boot classifications, server fields/caps, and catalog contracts. The review fix captures non-bubbling resource failures, derives their URL from the element, and proves a real Chromium 404 names `core/cards.js` in the banner and both authenticated reports. The device-side journal observation remains post-deploy. |
 | 2026-09-21 | gpt-5.6-sol | `agent:/root/c02_builder` | M4 — local seek | [#408](http://192.168.4.7:3000/noirr/plurx/pulls/408) · `aadf9c1c` | Added pure routing plus fenced three-second fallback. Focused seek regressions prove buffered/published/holdback/remux/forced routes; the browser fixture proves a +10 s HLS scrub logs `seek_local` with zero session creates. Progressive-remux browser coverage remains device/browser-matrix evidence. |
