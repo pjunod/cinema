@@ -470,4 +470,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | pending | Claimed `plan/C-03` from `main` @ `9deb58a2`; M1-M2 remain pending. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#431](http://192.168.4.7:3000/noirr/plurx/pulls/431) | Claimed `plan/C-03` from `main` @ `9deb58a2`; M1-M2 remain pending. |
