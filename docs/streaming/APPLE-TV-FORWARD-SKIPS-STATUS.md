@@ -35,9 +35,9 @@ failure checks remain authoritative.
 | Actor demand/protected-start fence | implemented | Accepted demand sequence/age ride `RollingLeaseSnapshot`; the actor rejects stale identity, attempt and a first segment past `max(origin, C - G - B)` |
 | Retention and EOF preservation | implemented | Download-frontier removal is clamped to the protected segment; EOF retains the protected history and ordered tail |
 | Legacy compatibility | implemented | Fixed 1× wall-time bootstrap plus resolved-fetch cap; explicit cutover clears the bootstrap anchor once |
-| Focused regression set | authored, not run | `rolling_publication_budget*` covers one simulated hour, 30 minutes at 1.2×, bounded low-rate recovery, the target-only negative control, variable durations, actor fences, stale/held demand, retention, legacy burst and EOF |
-| Documentation and validation catalog | implemented | This page, `docs/README.md`, the `playback.pipeline` contract, and exact `6f4e279e`/`a157179a` regression mappings |
-| Adversarial implementation review | not started | exactly one review after implementation is complete |
+| Focused regression set | authored, not run | `rolling_publication_budget*` covers one simulated hour, 30 minutes at 1.2× with real progress/hold samples, the real worker's bounded low-rate recovery, the target-only negative control, variable-duration legacy bootstrap and explicit cutover, actor fences, stale/held demand, retention, commit-time deadlines and mature EOF |
+| Documentation and validation catalog | implemented | This page, `docs/README.md`, the `playback.pipeline` contract, and exact `6f4e279e`/`a157179a`/`5a387be6` regression mappings |
+| Adversarial implementation review | complete and addressed | The single review found a variable-duration legacy bootstrap deadlock, backdated commit deadlines and three weak proof seams; commit `5a387be6` addresses all findings |
 | Final focused and fast-lane proof | not started | run once on the reviewed candidate |
 | Merge to `main` | not started | only after the current fast lane is green |
 
@@ -67,6 +67,13 @@ than one segment of new credit, it can publish only the next segment within the
 explicit final segment, so completed media beyond the selected prefix remains
 private and charged instead of leaking through the writer's EVENT tail.
 
+Legacy publication cannot safely round beyond a budget because it has no
+accepted playback position. It therefore selects the last completed endpoint
+inside the fixed wall/download allowance. This lets a 47-second prefix
+bootstrap when the next variable-duration segment ends at 52 seconds, while
+keeping that next segment private until earned. Snapshot availability, grace
+and the next publication deadlines are stamped only after actor admission.
+
 The latest compile-only pass is clean on Rust 1.97.1:
 
 ```bash
@@ -78,9 +85,16 @@ No focused regression has been executed yet. Per the requested CI economy,
 those tests run once after the adversarial implementation review is addressed.
 
 The core runtime implementation is commit `6f4e279e`; bounded low-rate
-recovery and its extra sustained/freshness regressions are commit `a157179a`.
-The regression catalog maps both exact corrective commits to
-`playback.pipeline` and the Rust gates.
+recovery and its extra sustained/freshness regressions are commit `a157179a`;
+the adversarial-review corrections are commit `5a387be6`. The regression
+catalog maps all exact corrective commits to `playback.pipeline` and the Rust
+gates.
+
+Forgejo briefly treated the initial draft API request as ready because this
+server recognizes the `WIP:` title convention rather than the submitted draft
+field. Run `2368` was therefore created before any final validation and failed;
+it is not promotion evidence. PR #404 was immediately returned to draft and
+remains there until the reviewed candidate's one intended fast-lane run.
 
 ## Decisions to revisit — only if evidence forces them
 
