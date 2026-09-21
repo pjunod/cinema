@@ -1,6 +1,6 @@
 # HTTP listener timeouts and asset delivery — a timer on the wire, gzip on the shell, headers on the page
 
-**Status:** ready for review · **Executes:** §2.5, C2, W1, W2, W5, W6-now from
+**Status:** implementation merged; post-merge evidence pending · **Executes:** §2.5, C2, W1, W2, W5, W6-now from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 (assessment rows 2.5, C2, F-core-2, F-web-1, F-web-2, F-web-3, F-web-8, W6 in
 [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md))

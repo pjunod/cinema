@@ -99,21 +99,130 @@ assert.strictEqual(
   "a status response for any commit except the PR head must be rejected",
 );
 
-const unavailable = status.overlayFallback(null, "HTTP 401");
-assert.strictEqual(unavailable.mode, "unavailable");
-assert.deepStrictEqual(unavailable.byPlan, {});
-const stale = status.overlayFallback({ byPlan: mapped.byPlan }, "HTTP 429");
-assert.strictEqual(stale.mode, "stale");
-assert.strictEqual(stale.byPlan["P-01"][0].number, 401);
-
 assert.strictEqual(status.PULL_PAGE_SIZE, 50);
 assert.strictEqual(status.MAX_PULL_PAGES, 2);
 assert.strictEqual(status.MAX_STATUS_FETCHES, 12);
 assert.strictEqual(status.STATUS_CONCURRENCY, 4);
+assert.strictEqual(status.REQUEST_TIMEOUT_MS, 10_000);
 
-process.stdout.write(JSON.stringify({
-  currentExamples: ["P-01", "C-02", "S-01"],
-  customBranchFallback: "C-01",
-  escaped: true,
-  fallbackModes: [unavailable.mode, stale.mode],
-}));
+async function main() {
+  const unavailable = status.overlayFallback(null, "HTTP 401");
+  assert.strictEqual(unavailable.mode, "unavailable");
+  assert.deepStrictEqual(unavailable.byPlan, {});
+  assert.strictEqual(status.overlayAbsenceText(unavailable), "Overlay unavailable");
+
+  const stale = status.overlayFallback({
+    byPlan: mapped.byPlan,
+    complete: true,
+    hasSnapshot: true,
+    mode: "available",
+  }, "HTTP 429");
+  assert.strictEqual(stale.mode, "stale");
+  assert.strictEqual(stale.byPlan["P-01"][0].number, 401);
+  assert.strictEqual(
+    status.overlayAbsenceText(stale),
+    "No PR in stale snapshot",
+  );
+
+  const emptyByPlan = Object.fromEntries(boardIds.map((id) => [id, []]));
+  const staleEmpty = status.overlayFallback({
+    byPlan: emptyByPlan,
+    complete: true,
+    hasSnapshot: true,
+    mode: "available",
+  }, "request deadline");
+  assert.strictEqual(staleEmpty.mode, "stale");
+  assert.strictEqual(
+    status.overlayAbsenceText(staleEmpty),
+    "No PR in stale snapshot",
+    "an empty retained snapshot is still stale, not authoritative absence",
+  );
+  assert.strictEqual(
+    status.overlayAbsenceText({ mode: "loading", complete: false }),
+    "PR state loading",
+  );
+  assert.strictEqual(
+    status.overlayAbsenceText({ mode: "truncated", complete: false }),
+    "No PR in partial snapshot",
+  );
+  assert.strictEqual(
+    status.overlayAbsenceText({ mode: "available", complete: true }),
+    "No mapped open PR",
+  );
+
+  const fullPage = Array.from({ length: status.PULL_PAGE_SIZE }, (_, index) => ({ index }));
+  const pages = [];
+  const truncated = await status.collectPullPages(async (page) => {
+    pages.push(page);
+    return fullPage;
+  });
+  assert.deepStrictEqual(pages, [1, 2]);
+  assert.strictEqual(truncated.pulls.length, 100);
+  assert.strictEqual(truncated.complete, false);
+  assert.strictEqual(truncated.pages, 2);
+
+  const complete = await status.collectPullPages(async (page) => (
+    page === 1 ? fullPage : [{ number: 101 }]
+  ));
+  assert.strictEqual(complete.pulls.length, 51);
+  assert.strictEqual(complete.complete, true);
+
+  let deadlineCallback;
+  let clearedTimer = null;
+  const fakeTimers = {
+    setTimeout(callback, milliseconds) {
+      assert.strictEqual(milliseconds, 25);
+      deadlineCallback = callback;
+      return 17;
+    },
+    clearTimeout(timer) {
+      clearedTimer = timer;
+    },
+  };
+  const stalled = status.runWithDeadline((signal) => new Promise((resolve, reject) => {
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  }), null, 25, fakeTimers);
+  deadlineCallback();
+  await assert.rejects(stalled, /25 ms deadline/);
+  assert.strictEqual(clearedTimer, 17);
+
+  const fence = status.createRefreshFence();
+  const committed = [];
+  let finishOld;
+  const oldResult = new Promise((resolve) => {
+    finishOld = resolve;
+  });
+  const oldRefresh = fence.begin();
+  const oldCompletion = oldResult.then((value) => {
+    oldRefresh.commit(() => committed.push(value));
+  });
+  const newRefresh = fence.begin();
+  assert.strictEqual(oldRefresh.signal.aborted, true);
+  assert.strictEqual(oldRefresh.isCurrent(), false);
+  assert.strictEqual(fence.hasActive(), true);
+  newRefresh.commit(() => committed.push("newest"));
+  finishOld("older late result");
+  await oldCompletion;
+  assert.deepStrictEqual(
+    committed,
+    ["newest"],
+    "a superseded generation must not overwrite the newer snapshot",
+  );
+  assert.strictEqual(newRefresh.finish(), true);
+  assert.strictEqual(fence.hasActive(), false);
+
+  process.stdout.write(JSON.stringify({
+    currentExamples: ["P-01", "C-02", "S-01"],
+    customBranchFallback: "C-01",
+    escaped: true,
+    fallbackModes: [unavailable.mode, stale.mode],
+    snapshotCompleteness: [truncated.complete, complete.complete],
+    deadlineAborted: true,
+    newestGenerationWon: committed[0] === "newest",
+  }));
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

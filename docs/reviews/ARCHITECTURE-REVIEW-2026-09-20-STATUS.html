@@ -295,12 +295,17 @@
       MAX_PULL_PAGES,
       MAX_STATUS_FETCHES,
       PULL_PAGE_SIZE,
+      REQUEST_TIMEOUT_MS,
       STATUS_CONCURRENCY,
       aggregateCommitStatus,
+      collectPullPages,
+      createRefreshFence,
       mapPullsToPlans,
+      overlayAbsenceText,
       overlayFallback,
       parseBoard,
       pullOverlayMarkup,
+      runWithDeadline,
     } =
       globalThis.ArchitectureReviewStatusParser;
     const REFRESH_MS = 60_000;
@@ -309,8 +314,11 @@
 
     const state = {
       rows: [],
-      overlay: { byPlan: {}, mode: "loading", reason: "" },
+      overlay: {
+        byPlan: {}, mode: "loading", complete: false, hasSnapshot: false, reason: "",
+      },
     };
+    const refreshFence = createRefreshFence();
     const elements = {
       error: document.querySelector("#error"),
       freshness: document.querySelector("#freshness"),
@@ -434,9 +442,7 @@
             } else {
               const empty = document.createElement("span");
               empty.className = "overlay-none";
-              empty.textContent = state.overlay.mode === "unavailable"
-                ? "Overlay unavailable"
-                : "No mapped open PR";
+              empty.textContent = overlayAbsenceText(state.overlay);
               cell.append(empty);
             }
           } else if (column === "Status") {
@@ -454,32 +460,30 @@
       elements.resultCount.textContent = `Showing ${rows.length} of ${state.rows.length} plans.`;
     }
 
-    async function apiJson(url) {
-      const response = await fetch(url, {
-        cache: "no-store",
-        credentials: "same-origin",
-        headers: { Accept: "application/json" },
-      });
-      if (!response.ok) {
-        throw new Error(`Forgejo API returned HTTP ${response.status}.`);
-      }
-      return response.json();
+    async function apiJson(url, parentSignal) {
+      return runWithDeadline(async (signal) => {
+        const response = await fetch(url, {
+          cache: "no-store",
+          credentials: "same-origin",
+          headers: { Accept: "application/json" },
+          signal,
+        });
+        if (!response.ok) {
+          throw new Error(`Forgejo API returned HTTP ${response.status}.`);
+        }
+        return response.json();
+      }, parentSignal, REQUEST_TIMEOUT_MS);
     }
 
-    async function openPulls() {
-      const pulls = [];
-      for (let page = 1; page <= MAX_PULL_PAGES; page += 1) {
+    async function openPulls(parentSignal) {
+      return collectPullPages(async (page) => {
         const query = new URLSearchParams({
           state: "open",
           limit: String(PULL_PAGE_SIZE),
           page: String(page),
         });
-        const batch = await apiJson(`${PULLS_API}?${query}`);
-        if (!Array.isArray(batch)) throw new Error("Forgejo pull list was not an array.");
-        pulls.push(...batch);
-        if (batch.length < PULL_PAGE_SIZE) break;
-      }
-      return pulls;
+        return apiJson(`${PULLS_API}?${query}`, parentSignal);
+      }, PULL_PAGE_SIZE, MAX_PULL_PAGES);
     }
 
     async function mapWithConcurrency(items, limit, operation) {
@@ -498,10 +502,11 @@
       return results;
     }
 
-    async function exactHeadStatus(pull) {
+    async function exactHeadStatus(pull, parentSignal) {
       try {
         const payload = await apiJson(
           `${COMMIT_STATUS_API}/${encodeURIComponent(pull.headSha)}/status`,
+          parentSignal,
         );
         return aggregateCommitStatus(payload, pull.headSha);
       } catch (_error) {
@@ -509,24 +514,20 @@
       }
     }
 
-    async function loadOverlay() {
-      const previous = state.overlay;
-      elements.overlayFreshness.textContent = "Loading same-origin Forgejo PR state…";
+    async function loadOverlay(refresh, previous) {
       try {
-        const pulls = await openPulls();
-        const mapped = mapPullsToPlans(pulls, state.rows.map((row) => row.Id));
+        const snapshot = await openPulls(refresh.signal);
+        const mapped = mapPullsToPlans(snapshot.pulls, state.rows.map((row) => row.Id));
         const mappedPulls = Object.values(mapped.byPlan).flat();
         const statusTargets = mappedPulls.slice(0, MAX_STATUS_FETCHES);
         const statuses = await mapWithConcurrency(
           statusTargets,
           STATUS_CONCURRENCY,
-          exactHeadStatus,
+          (pull) => exactHeadStatus(pull, refresh.signal),
         );
         statusTargets.forEach((pull, index) => {
           pull.ci = statuses[index];
         });
-        state.overlay = { byPlan: mapped.byPlan, mode: "available", reason: "" };
-        renderTable();
 
         const mappedCount = mappedPulls.length;
         const failedStatuses = statuses.filter((status) => status === null).length;
@@ -535,58 +536,103 @@
           dateStyle: "medium", timeStyle: "medium",
         }).format(new Date());
         const qualifications = [];
+        if (!snapshot.complete) {
+          qualifications.push(
+            `open pull list reached the ${MAX_PULL_PAGES * PULL_PAGE_SIZE}-result cap`,
+          );
+        }
         if (failedStatuses) qualifications.push(`${failedStatuses} CI lookups unavailable`);
         if (constrained) qualifications.push(`${constrained} CI lookups omitted by the cap`);
-        elements.overlayFreshness.textContent =
-          `Forgejo overlay loaded ${mappedCount} mapped open plan PRs at ${loaded}` +
-          (qualifications.length ? `; partial: ${qualifications.join(", ")}.` : ".");
+        refresh.commit(() => {
+          state.overlay = {
+            byPlan: mapped.byPlan,
+            mode: snapshot.complete ? "available" : "truncated",
+            complete: snapshot.complete,
+            hasSnapshot: true,
+            reason: "",
+          };
+          renderTable();
+          elements.overlayFreshness.textContent =
+            `Forgejo overlay loaded ${mappedCount} mapped open plan PRs at ${loaded}` +
+            (qualifications.length ? `; partial: ${qualifications.join(", ")}.` : ".");
+        });
       } catch (error) {
-        state.overlay = overlayFallback(previous, error.message);
-        renderTable();
-        elements.overlayFreshness.textContent = state.overlay.mode === "stale"
-          ? `Forgejo overlay is stale; the last successful mapping remains visible. ${state.overlay.reason}`
-          : `Forgejo overlay unavailable; the canonical board remains complete. ${state.overlay.reason}`;
+        refresh.commit(() => {
+          state.overlay = overlayFallback(previous, error.message);
+          renderTable();
+          elements.overlayFreshness.textContent = state.overlay.mode === "stale"
+            ? `Forgejo overlay is stale; the last successful mapping remains visible. ${state.overlay.reason}`
+            : `Forgejo overlay unavailable; the canonical board remains complete. ${state.overlay.reason}`;
+        });
       }
     }
 
     async function loadBoard() {
-      elements.refresh.disabled = true;
-      elements.error.classList.add("hidden");
+      const previousOverlay = state.overlay;
+      const refresh = refreshFence.begin();
+      refresh.commit(() => {
+        elements.refresh.disabled = true;
+        elements.error.classList.add("hidden");
+        state.overlay = {
+          ...previousOverlay,
+          mode: "loading",
+          complete: false,
+          reason: "",
+        };
+        if (state.rows.length) renderTable();
+        elements.overlayFreshness.textContent = "Loading same-origin Forgejo PR state…";
+      });
       try {
-        const response = await fetch(WORKBOARD, { cache: "no-store" });
-        if (!response.ok) throw new Error(`Workboard request returned HTTP ${response.status}.`);
-        state.rows = parseBoard(await response.text());
-        renderSummary();
-        renderTable();
+        const markdown = await runWithDeadline(async (signal) => {
+          const response = await fetch(WORKBOARD, { cache: "no-store", signal });
+          if (!response.ok) {
+            throw new Error(`Workboard request returned HTTP ${response.status}.`);
+          }
+          return response.text();
+        }, refresh.signal, REQUEST_TIMEOUT_MS);
+        const rows = parseBoard(markdown);
+        if (!refresh.isCurrent()) return;
 
-        const newest = state.rows.map((row) => row["Last update"]).sort().at(-1);
+        const newest = rows.map((row) => row["Last update"]).sort().at(-1);
         const loaded = new Intl.DateTimeFormat(undefined, {
           dateStyle: "medium", timeStyle: "medium",
         }).format(new Date());
-        elements.freshness.textContent =
-          `Loaded ${state.rows.length} plans at ${loaded}; newest recorded update ${newest}. ` +
-          "Refreshes every 60 seconds.";
-        elements.loading.classList.add("hidden");
-        elements.tableWrap.classList.remove("hidden");
-        await loadOverlay();
+        refresh.commit(() => {
+          state.rows = rows;
+          renderSummary();
+          renderTable();
+          elements.freshness.textContent =
+            `Loaded ${state.rows.length} plans at ${loaded}; newest recorded update ${newest}. ` +
+            "Refreshes every 60 seconds.";
+          elements.loading.classList.add("hidden");
+          elements.tableWrap.classList.remove("hidden");
+        });
+        await loadOverlay(refresh, previousOverlay);
       } catch (error) {
-        elements.loading.classList.add("hidden");
-        elements.tableWrap.classList.add("hidden");
-        elements.freshness.textContent = "The canonical workboard could not be loaded.";
-        elements.error.textContent =
-          `${error.message} Serve the docs directory over HTTP so the browser can fetch the sibling Markdown file.`;
-        elements.error.classList.remove("hidden");
+        refresh.commit(() => {
+          elements.loading.classList.add("hidden");
+          elements.tableWrap.classList.add("hidden");
+          elements.freshness.textContent = "The canonical workboard could not be loaded.";
+          elements.error.textContent =
+            `${error.message} Serve the docs directory over HTTP so the browser can fetch the sibling Markdown file.`;
+          elements.error.classList.remove("hidden");
+        });
       } finally {
-        elements.refresh.disabled = false;
+        if (refresh.isCurrent()) {
+          refresh.finish();
+          elements.refresh.disabled = false;
+        }
       }
     }
 
     for (const control of [elements.search, elements.status, elements.priority]) {
       control.addEventListener("input", renderTable);
     }
-    elements.refresh.addEventListener("click", loadBoard);
+    elements.refresh.addEventListener("click", () => loadBoard());
     loadBoard();
-    window.setInterval(loadBoard, REFRESH_MS);
+    window.setInterval(() => {
+      if (!refreshFence.hasActive()) loadBoard();
+    }, REFRESH_MS);
   </script>
 </body>
 </html>

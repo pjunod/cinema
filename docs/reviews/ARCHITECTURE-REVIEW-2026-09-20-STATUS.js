@@ -16,6 +16,7 @@
   const MAX_PULL_PAGES = 2;
   const MAX_STATUS_FETCHES = 12;
   const STATUS_CONCURRENCY = 4;
+  const REQUEST_TIMEOUT_MS = 10_000;
   const PLAN_BRANCH = /^plan\/([A-Z]-\d{2})$/;
   const PLAN_TITLE = /^(?:WIP:\s*)?([A-Z]-\d{2})(?=\s|:|[-\u2013\u2014]|$)/;
   const COMMIT_SHA = /^[0-9a-f]{40,64}$/;
@@ -158,16 +159,110 @@
     };
   }
 
+  function createRefreshFence(createController = () => new AbortController()) {
+    let active = null;
+    let generation = 0;
+    return Object.freeze({
+      begin({ replace = true } = {}) {
+        if (active && !replace) return null;
+        if (active) {
+          active.controller.abort(new Error("Refresh superseded by a newer generation."));
+        }
+        const controller = createController();
+        const currentGeneration = ++generation;
+        const ticket = {
+          generation: currentGeneration,
+          signal: controller.signal,
+          isCurrent() {
+            return active?.generation === currentGeneration && !controller.signal.aborted;
+          },
+          commit(operation) {
+            if (!this.isCurrent()) return false;
+            operation();
+            return true;
+          },
+          finish() {
+            if (active?.generation !== currentGeneration) return false;
+            active = null;
+            return true;
+          },
+        };
+        active = { controller, generation: currentGeneration };
+        return Object.freeze(ticket);
+      },
+      hasActive() {
+        return active !== null;
+      },
+    });
+  }
+
+  async function runWithDeadline(
+    operation,
+    parentSignal,
+    timeoutMs = REQUEST_TIMEOUT_MS,
+    timers = globalThis,
+  ) {
+    const controller = new AbortController();
+    const abort = (reason) => {
+      if (!controller.signal.aborted) controller.abort(reason);
+    };
+    const relayAbort = () => abort(parentSignal.reason);
+    if (parentSignal?.aborted) {
+      relayAbort();
+    } else {
+      parentSignal?.addEventListener("abort", relayAbort, { once: true });
+    }
+    const timer = timers.setTimeout(
+      () => abort(new Error(`Request exceeded its ${timeoutMs} ms deadline.`)),
+      timeoutMs,
+    );
+    try {
+      return await operation(controller.signal);
+    } finally {
+      timers.clearTimeout(timer);
+      parentSignal?.removeEventListener("abort", relayAbort);
+    }
+  }
+
+  async function collectPullPages(
+    loadPage,
+    pageSize = PULL_PAGE_SIZE,
+    maxPages = MAX_PULL_PAGES,
+  ) {
+    const pulls = [];
+    for (let page = 1; page <= maxPages; page += 1) {
+      const batch = await loadPage(page);
+      if (!Array.isArray(batch)) {
+        throw new Error("Forgejo pull list was not an array.");
+      }
+      pulls.push(...batch);
+      if (batch.length < pageSize) {
+        return { pulls, complete: true, pages: page };
+      }
+    }
+    return { pulls, complete: false, pages: maxPages };
+  }
+
   function overlayFallback(previous, reason) {
     const byPlan = previous?.byPlan || {};
-    const hasPrevious = Object.values(byPlan).some(
-      (pulls) => Array.isArray(pulls) && pulls.length,
-    );
+    const hasSnapshot = previous?.hasSnapshot === true;
     return {
       byPlan,
-      mode: hasPrevious ? "stale" : "unavailable",
+      mode: hasSnapshot ? "stale" : "unavailable",
+      complete: false,
+      hasSnapshot,
       reason: String(reason || "Forgejo API request failed."),
     };
+  }
+
+  function overlayAbsenceText(overlay) {
+    if (overlay?.mode === "unavailable") return "Overlay unavailable";
+    if (overlay?.mode === "available" && overlay.complete === true) {
+      return "No mapped open PR";
+    }
+    if (overlay?.mode === "stale") return "No PR in stale snapshot";
+    if (overlay?.mode === "loading") return "PR state loading";
+    return "No PR in partial snapshot";
   }
 
   function pullOverlayMarkup(pull) {
@@ -198,14 +293,19 @@
     MAX_PULL_PAGES,
     MAX_STATUS_FETCHES,
     PULL_PAGE_SIZE,
+    REQUEST_TIMEOUT_MS,
     STATUS_CONCURRENCY,
     aggregateCommitStatus,
+    collectPullPages,
+    createRefreshFence,
     escapeHtml,
     mapPullsToPlans,
+    overlayAbsenceText,
     overlayFallback,
     parseBoard,
     planIdForPull,
     pullOverlayMarkup,
+    runWithDeadline,
     splitMarkdownRow,
   });
 });

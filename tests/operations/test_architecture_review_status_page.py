@@ -14,6 +14,7 @@ PAGE = ROOT / "docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-STATUS.html"
 PARSER = ROOT / "docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-STATUS.js"
 BOARD = ROOT / "docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md"
 OVERLAY_TEST = ROOT / "tests/operations/architecture_review_status_overlay.test.js"
+C01_PLAN = ROOT / "docs/server/HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY.md"
 
 EXPECTED_COLUMNS = (
     "Id",
@@ -67,14 +68,24 @@ class ArchitectureReviewStatusPageCase(unittest.TestCase):
         self.assertIn("device-reader evidence remains pending", row)
         self.assertIn("not done", row)
 
+        plan = C01_PLAN.read_text(encoding="utf-8")
+        self.assertIn(
+            "**Status:** implementation merged; post-merge evidence pending",
+            plan,
+        )
+
     def test_page_fetches_the_canonical_board_without_caching_it(self) -> None:
         page = PAGE.read_text(encoding="utf-8")
         self.assertIn(
             'const WORKBOARD = "ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md";',
             page,
         )
-        self.assertRegex(page, r"fetch\(WORKBOARD, \{ cache: \"no-store\" \}\)")
-        self.assertIn("window.setInterval(loadBoard, REFRESH_MS)", page)
+        self.assertRegex(
+            page,
+            r"fetch\(WORKBOARD, \{ cache: \"no-store\", signal \}\)",
+        )
+        self.assertIn("if (!refreshFence.hasActive()) loadBoard();", page)
+        self.assertIn("const refresh = refreshFence.begin();", page)
         self.assertIn(PARSER.name, page)
         self.assertIn("globalThis.ArchitectureReviewStatusParser", page)
 
@@ -84,17 +95,22 @@ class ArchitectureReviewStatusPageCase(unittest.TestCase):
 
         self.assertIn('const PULLS_API = "/api/v1/repos/noirr/plurx/pulls";', page)
         self.assertIn('credentials: "same-origin"', page)
+        self.assertIn("runWithDeadline(async (signal)", page)
         self.assertIn("slice(0, MAX_STATUS_FETCHES)", page)
         self.assertIn("STATUS_CONCURRENCY", page)
         self.assertIn("state.overlay = overlayFallback(previous, error.message)", page)
+        self.assertIn('mode: snapshot.complete ? "available" : "truncated"', page)
+        self.assertIn("complete: snapshot.complete", page)
+        self.assertIn("overlayAbsenceText(state.overlay)", page)
         self.assertIn("the canonical board remains complete", page)
         load_board = page[page.index("async function loadBoard()") :]
         self.assertLess(
             load_board.index("renderTable();"),
-            load_board.index("await loadOverlay();"),
+            load_board.index("await loadOverlay(refresh, previousOverlay);"),
         )
         self.assertIn("const MAX_PULL_PAGES = 2;", parser)
         self.assertIn("const MAX_STATUS_FETCHES = 12;", parser)
+        self.assertIn("const REQUEST_TIMEOUT_MS = 10_000;", parser)
 
     def test_page_does_not_copy_plan_rows(self) -> None:
         page = PAGE.read_text(encoding="utf-8")
@@ -158,6 +174,31 @@ console.log(JSON.stringify({
         self.assertEqual("C-01", observed["customBranchFallback"])
         self.assertTrue(observed["escaped"])
         self.assertEqual(["unavailable", "stale"], observed["fallbackModes"])
+        self.assertEqual([False, True], observed["snapshotCompleteness"])
+        self.assertTrue(observed["deadlineAborted"])
+        self.assertTrue(observed["newestGenerationWon"])
+
+    def test_embedded_page_script_compiles(self) -> None:
+        page = PAGE.read_text(encoding="utf-8")
+        scripts = [
+            script
+            for script in re.findall(
+                r"<script(?:\s+[^>]*)?>(.*?)</script>", page, re.DOTALL
+            )
+            if script.strip()
+        ]
+        self.assertEqual(1, len(scripts), "only the page controller is inline")
+        subprocess.run(
+            [
+                "node",
+                "-e",
+                'new Function(require("fs").readFileSync(0, "utf8"));',
+            ],
+            cwd=ROOT,
+            input=scripts[0],
+            text=True,
+            check=True,
+        )
 
 
 if __name__ == "__main__":
