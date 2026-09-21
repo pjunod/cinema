@@ -1,7 +1,8 @@
 # DVR scheduler guide view and sink isolation — the scheduler reads the whole guide, and one slow disk stalls one recording
 
-**Status:** implementation complete in draft PR #407; adversarial review and
-fleet evidence pending · **Executes:** L1 / F-ltv-1 and L10 from
+**Status:** implementation and sole adversarial-review fixes complete in draft
+PR #407; broad qualification and fleet evidence pending · **Executes:** L1 /
+F-ltv-1 and L10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 · **Started from:** `main` @ `94e36750` ·
 **Revalidated after merging:** `main` @ `882862e8`
@@ -462,7 +463,7 @@ an unrun observation into a passing result.
 
 Post-base-merge Rust-tree evidence at `da578b7c` used Rust 1.97.1:
 `cargo fmt --all -- --check`, `cargo check -p plurxd --all-targets`, and
-`cargo clippy -p plurxd --all-targets -- -D warnings` are green; the 16-test
+`cargo clippy -p plurxd --all-targets -- -D warnings` are green; the 19-test
 `live_tv::dvr::tests::` module plus the three exact guide-view regressions are
 green; and `python3.12 -m unittest tests.operations.test_docs_index` runs the
 same four index contracts green. The broad `make unit` qualification is
@@ -550,3 +551,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 | #407 / `9a4b83af` | Full cached guide is an immutable `Arc` view; scheduler, reconciliation and reminders use binary window slices while HTTP clipping stays bounded. Day-13 and snapshot-focused regressions green on Rust 1.97.1. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 | #407 / `46a1aeec`, `f2127e1a` | Per-sink 8 MiB/512-chunk queues and owned writers isolate backlog/failure, retain attempt settlement, and emit three fixed reasons. Focused slow/failing/fenced/overlap/settling regressions and scoped Clippy are green. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 | #407 / `d7118e91` | Metric/operator/status contracts recorded; all four docs-index contracts green. Fleet prompts remain `needs: media1 336-hour guide and mixed NAS/local sink interruption evidence`. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | Sole review findings | #407 / `6837d56b` | Comment #3174 resolved: finalization fences later attempts and joins every writer through the exact row attempt; sink-local failure evidence suppresses a second `worker_lost` event; the day-13 reminder consumer now has executable full-guide coverage. All 19 DVR tests and the three exact new regressions are green on Rust 1.97.1; broad unit remains pending. |
