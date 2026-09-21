@@ -104,8 +104,9 @@ async function render(){
     // pending offset never survives the route that was on screen when it was
     // armed. Without it, switching layout on Settings scrolled the NEXT page.
     if(generation===PAGE_RENDER_GENERATION) restoreScroll();
+    if(generation===PAGE_RENDER_GENERATION) markBootReady();
   }catch(e){
-    if(generation===PAGE_RENDER_GENERATION&&e.message!=="unauthorized"){ const m=document.getElementById("main"); if(m){ m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; setPageFailure(h,generation,"render_error"); }else toast(e.message); }
+    if(generation===PAGE_RENDER_GENERATION&&e.message!=="unauthorized"){ const m=document.getElementById("main"); if(m){ m.innerHTML=`<div class="empty">${esc(e.message)}</div>`; setPageFailure(h,generation,"render_error"); markBootReady(); }else toast(e.message); }
   }
 }
 let LAST_ROUTE=null;

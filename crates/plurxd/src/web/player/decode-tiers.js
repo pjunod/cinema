@@ -853,6 +853,8 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
     _opener:playerOpener, _openerClick:playerOpenerClick,
     idleTimer:null, autoskip:libraryChannel?false:autoskipOn(), stallTimer:null, probeUrl:null, directUrl:null,
     triedFallback:false,
+    mediaRecoveries:0,
+    mediaRecoveredAtMs:null,
     refusedOriginal:false,
     aoffset:sessionAudioOffset, declared:decision.declared_offset_ms||0,
     reasons:(decision.reasons||[]), title, meta:meta||null, decodeRescued:false,
