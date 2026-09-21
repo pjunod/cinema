@@ -9870,6 +9870,56 @@ pub(crate) async fn probe_media_origin(source_path: &std::path::Path, start_seco
     origin
 }
 
+/// A copy session must use the preceding keyframe reported on stdout, not the
+/// requested seek time. Generate exactly two keyframes so the expected origin
+/// is a property of this fixture rather than of an installed media file.
+#[cfg(test)]
+#[tokio::test]
+#[ignore = "needs ffmpeg"]
+async fn probe_media_origin_reads_the_preceding_keyframe() {
+    plurx_core::testfixtures::require_ffmpeg();
+    let directory = crate::test_tempdir().expect("media-origin fixture");
+    let source = directory.path().join("two-keyframes.mp4");
+    let output = std::process::Command::new(plurx_core::testfixtures::ffmpeg())
+        .args(["-hide_banner", "-loglevel", "error", "-y"])
+        .args([
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=160x120:rate=15:duration=2",
+        ])
+        .args([
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-g",
+            "15",
+            "-keyint_min",
+            "15",
+            "-sc_threshold",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+        ])
+        .arg(&source)
+        .output()
+        .expect("generate media-origin fixture");
+    assert!(
+        output.status.success(),
+        "fixture encode failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let requested = 1.5;
+    let origin = probe_media_origin(&source, requested).await;
+    assert!(
+        (origin - 1.0).abs() < 0.05,
+        "expected the preceding 1.0 s keyframe, got {origin}"
+    );
+    assert_ne!(origin, requested, "probe fell back to the requested seek");
+}
+
 fn audio_track(
     file: &plurx_core::domain::MediaFile,
     selected: Option<i64>,

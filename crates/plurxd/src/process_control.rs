@@ -32,13 +32,31 @@ pub(crate) fn spawn_job_owned(
     Ok((child, job))
 }
 
-/// Run a bounded-output helper under the same descendant lifetime contract as
-/// a long-lived transcode. Dropping this future drops the job after Tokio has
-/// requested child termination, so timeout and cancellation cannot strand a
-/// grandchild holding a Windows cache file open.
+/// Run a short-lived helper under the same descendant lifetime contract as a
+/// long-lived transcode, with [`tokio::process::Command::output`] semantics.
+///
+/// Both streams are captured even when the caller configured them otherwise.
+/// The audited consumers depend on that override:
+///
+/// | file | calls | output consumed |
+/// |---|---:|---|
+/// | `pipeprobe.rs` | 2 | stdout and stderr |
+/// | `ffmpeg.rs` | 4 | status, stdout and stderr |
+/// | `transcode.rs` | 1 | stdout and stderr |
+/// | `subtitles.rs` | 2 | status and stderr |
+/// | `live_tv.rs` | 1 | status and stderr |
+///
+/// Dropping this future drops the job after Tokio has requested child
+/// termination, so timeout and cancellation cannot strand a grandchild
+/// holding a Windows cache file open. This helper deliberately does not bound
+/// captured output; callers with that contract use the bounded primitive.
 pub(crate) async fn output_job_owned(
     command: &mut tokio::process::Command,
 ) -> io::Result<std::process::Output> {
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
     let (child, _job) = spawn_job_owned(command)?;
     child.wait_with_output().await
 }
@@ -165,6 +183,148 @@ pub(crate) fn signal(pid: u32, signal: ProcessSignal) -> io::Result<bool> {
         Ok(false)
     } else {
         Err(error)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::io::Write as _;
+    use std::path::Path;
+    use std::time::Duration;
+
+    /// Re-exec the portable test binary instead of relying on a platform shell.
+    fn child(mode: &str) -> tokio::process::Command {
+        let mut command =
+            tokio::process::Command::new(std::env::current_exe().expect("test executable"));
+        command
+            .args([
+                "--exact",
+                "process_control::tests::child_main",
+                "--nocapture",
+            ])
+            .env("PLURX_CHILD_MODE", mode);
+        command
+    }
+
+    #[test]
+    fn child_main() {
+        match std::env::var("PLURX_CHILD_MODE").as_deref() {
+            Ok("echo") => {
+                std::io::stdout().write_all(b"out-bytes").expect("stdout");
+                std::io::stderr().write_all(b"err-bytes").expect("stderr");
+            }
+            Ok("fail") => {
+                std::io::stderr().write_all(b"reason").expect("stderr");
+                std::process::exit(3);
+            }
+            Ok("sleep") => {
+                if let Ok(path) = std::env::var("PLURX_CHILD_PID_FILE") {
+                    std::fs::write(path, std::process::id().to_string()).expect("pid file");
+                }
+                std::thread::sleep(Duration::from_secs(300));
+            }
+            _ => {}
+        }
+    }
+
+    #[tokio::test]
+    async fn both_streams_are_captured() {
+        let output = output_job_owned(&mut child("echo"))
+            .await
+            .expect("child output");
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("out-bytes"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("err-bytes"));
+    }
+
+    #[tokio::test]
+    async fn a_failing_child_reports_status_and_stderr() {
+        let output = output_job_owned(&mut child("fail"))
+            .await
+            .expect("child output");
+        assert_eq!(output.status.code(), Some(3));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("reason"));
+    }
+
+    #[tokio::test]
+    async fn a_caller_that_configured_inherit_still_gets_bytes() {
+        let mut command = child("echo");
+        command.stdout(std::process::Stdio::inherit());
+        let output = output_job_owned(&mut command).await.expect("child output");
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("out-bytes"));
+    }
+
+    #[tokio::test]
+    async fn dropping_the_future_kills_the_child() {
+        let directory = tempfile::tempdir().expect("pid directory");
+        let pid_file = directory.path().join("child.pid");
+        let mut command = child("sleep");
+        command.env("PLURX_CHILD_PID_FILE", &pid_file);
+
+        let result =
+            tokio::time::timeout(Duration::from_millis(200), output_job_owned(&mut command)).await;
+        assert!(result.is_err(), "sleeping child exceeded the deadline");
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .expect("sleeping child published its pid")
+            .parse()
+            .expect("numeric child pid");
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            !signal(pid, ProcessSignal::Terminate).expect("probe dead child"),
+            "the dropped output future left its child alive"
+        );
+    }
+
+    fn collect_output_call_sites(
+        directory: &Path,
+        source_root: &Path,
+        sites: &mut BTreeMap<String, usize>,
+    ) -> io::Result<()> {
+        for entry in std::fs::read_dir(directory)? {
+            let path = entry?.path();
+            if path.is_dir() {
+                collect_output_call_sites(&path, source_root, sites)?;
+            } else if path.extension().and_then(|value| value.to_str()) == Some("rs")
+                && path.file_name().and_then(|value| value.to_str()) != Some("process_control.rs")
+            {
+                let source = std::fs::read_to_string(&path)?;
+                let production = source
+                    .split("#[cfg(test)]\nmod tests {")
+                    .next()
+                    .expect("source prefix");
+                let count = production.matches("output_job_owned(").count();
+                if count > 0 {
+                    let file = path
+                        .strip_prefix(source_root)
+                        .expect("source below manifest src")
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                        .to_owned();
+                    sites.insert(file, count);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn output_job_owned_call_sites_are_the_audited_set() {
+        let expected = BTreeMap::from([
+            ("ffmpeg.rs".to_owned(), 4),
+            ("live_tv.rs".to_owned(), 1),
+            ("pipeprobe.rs".to_owned(), 2),
+            ("subtitles.rs".to_owned(), 2),
+            ("transcode.rs".to_owned(), 1),
+        ]);
+        let mut actual = BTreeMap::new();
+        let source_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        collect_output_call_sites(&source_root, &source_root, &mut actual)
+            .expect("audit plurxd call sites");
+        assert_eq!(actual, expected, "update the helper's caller audit");
     }
 }
 
