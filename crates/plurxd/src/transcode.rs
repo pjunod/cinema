@@ -7337,6 +7337,19 @@ impl Session {
             .map_or(i64::MIN, |served| served.last_segment.saturating_add(1));
         let selected_last = if end_list {
             last_segment
+        } else if budget.demand_sequence.is_none() {
+            // A legacy viewer has no accepted playback position with which to
+            // authorize a rounded-up segment.  Its fixed wall/download clock
+            // therefore exposes only the last complete endpoint *inside* the
+            // allowance.  Requiring an endpoint at or beyond the desired
+            // frontier deadlocks variable-duration startup whenever one
+            // segment ends just below the boundary and the next ends above it.
+            let Some(selected) = index.segs.iter().rev().find(|segment| {
+                segment.index >= first_new_segment && segment.end_ms <= budget.allowed_end_ms
+            }) else {
+                return Ok(());
+            };
+            selected.index
         } else {
             let earned = index.segs.iter().find(|segment| {
                 segment.index >= first_new_segment
@@ -7458,7 +7471,12 @@ impl Session {
         if !accepted {
             return Ok(());
         }
-        let available_at = now;
+        // `now` is an injectable policy clock used to decide whether this
+        // cycle is due.  Publication may have awaited disk and actor work
+        // since then, so availability, object grace and the next deadlines
+        // begin at the actual commit point rather than being backdated to the
+        // policy observation.
+        let available_at = Instant::now();
         let mut clock = self.publication.lock().await;
         if self.control.current_producer_attempt() != producer_attempt
             || clock.budget_attempt != Some(producer_attempt)
@@ -34039,6 +34057,22 @@ pub(crate) mod tests {
         let directory = crate::test_tempdir().expect("publication capacity");
         let session = test_session(directory.path().to_path_buf());
         let started = Instant::now();
+        let generation = session.progress.begin_attempt();
+        apply_progress_line(&session.progress, generation, "out_time_us=0");
+        session.progress.sample_wall_ms.store(-1_000, Relaxed);
+        session.progress.sample_out_ms.store(0, Relaxed);
+        apply_progress_line(&session.progress, generation, "out_time_us=1200000");
+        assert_eq!(session.progress.recent_speed(), Some(1.2));
+        session
+            .progress
+            .sample_wall_ms
+            .store(-RECENT_SAMPLE_MAX_GAP_MS * 2, Relaxed);
+        apply_progress_line(&session.progress, generation, "out_time_us=2400000");
+        assert_eq!(
+            session.progress.recent_speed(),
+            Some(1.2),
+            "an intentional producer hold must not invent insufficient capacity"
+        );
 
         for step in 0..=112_i64 {
             let elapsed_ms = step.saturating_mul(16_000);
@@ -34080,7 +34114,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn rolling_publication_budget_low_rate_retires_before_the_window_can_skip() {
         let directory = crate::test_tempdir().expect("low-rate budget");
-        let session = test_session(directory.path().to_path_buf());
+        let session = Arc::new(test_session(directory.path().to_path_buf()));
         let started = Instant::now();
         tokio::fs::write(
             directory.path().join("index.m3u8"),
@@ -34089,8 +34123,7 @@ pub(crate) mod tests {
         .await
         .expect("writer playlist");
 
-        let mut exhausted_at = None;
-        for step in 0..=12_i64 {
+        for step in 0..=6_i64 {
             let elapsed_ms = step.saturating_mul(16_000);
             let position_ms = step.saturating_mul(4_000);
             accept_rolling_publication_demand(
@@ -34102,24 +34135,54 @@ pub(crate) mod tests {
                 crate::playback_control::RenderState::Rendering,
             )
             .await;
-            if let Err(reason) = session
+            session
                 .publication_cycle_at(
                     "rolling_publication_budget_low_rate",
                     started + Duration::from_millis(u64::try_from(elapsed_ms).expect("elapsed")),
                 )
                 .await
-            {
-                assert!(
-                    reason.starts_with("rolling_window_budget_exhausted:"),
-                    "{reason}"
-                );
-                exhausted_at = Some(elapsed_ms);
-                break;
-            }
+                .expect("low-rate floor remains safe before exhaustion");
         }
+        accept_rolling_publication_demand(
+            &session,
+            8,
+            28_000,
+            0.25,
+            crate::playback_control::PlaybackDemand::Active,
+            crate::playback_control::RenderState::Rendering,
+        )
+        .await;
+        session.publication.lock().await.next_publish_at =
+            Some(Instant::now() - Duration::from_millis(1));
+
+        session.ensure_publication_worker("rolling_publication_budget_low_rate");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !session.failed.load(Acquire) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("publication worker must retire the exhausted presentation");
+        let failure = session.failure_reason();
         assert!(
-            exhausted_at.is_some_and(|elapsed_ms| elapsed_ms <= 180_000),
-            "an unsustainable low rate must recover before it can prune past playback"
+            matches!(&failure, PlaylistError::SessionFailed(reason) if reason.starts_with("rolling_window_budget_exhausted:")),
+            "unexpected worker verdict: {failure:?}"
+        );
+        assert_eq!(failure.code(), "session_failed");
+        let lease = session
+            .control
+            .snapshot()
+            .await
+            .expect("active lease retained");
+        assert_eq!(
+            lease.demand.as_ref().map(|demand| demand.position_ms),
+            Some(28_000),
+            "bounded recovery must inherit the accepted film position"
+        );
+        assert_ne!(
+            lease.terminal,
+            Some(crate::playback_control::RollingTerminalCause::PauseExpired),
+            "active window exhaustion is not pause expiry"
         );
     }
 
@@ -34177,18 +34240,150 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn rolling_publication_budget_legacy_variable_bootstrap_and_explicit_cutover() {
+        let directory = crate::test_tempdir().expect("legacy variable publication budget");
+        let session = test_session(directory.path().to_path_buf());
+        let started = Instant::now();
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[16.0, 16.0, 15.0, 5.0], false),
+        )
+        .await
+        .expect("variable bootstrap playlist");
+        session
+            .publication_cycle_at("rolling_publication_budget_legacy_variable", started)
+            .await
+            .expect("legacy variable bootstrap");
+        assert_eq!(
+            session
+                .publication
+                .lock()
+                .await
+                .served
+                .as_ref()
+                .map(|served| (served.last_segment, served.end_ms)),
+            Some((2, 47_000)),
+            "the safe prefix below the 48 second boundary must bootstrap"
+        );
+        assert!(
+            session
+                .control
+                .commit_media(
+                    "segment",
+                    0,
+                    Some(2),
+                    Some(47_000),
+                    None,
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .await,
+            "legacy bootstrap fetch"
+        );
+
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[16.0, 16.0, 15.0, 5.0, 8.0, 8.0, 8.0, 8.0], false),
+        )
+        .await
+        .expect("paced variable playlist");
+        session
+            .publication_cycle_at(
+                "rolling_publication_budget_legacy_variable",
+                started + ROLLING_PUBLICATION_TARGET,
+            )
+            .await
+            .expect("paced legacy publication");
+        assert_eq!(
+            session
+                .publication
+                .lock()
+                .await
+                .served
+                .as_ref()
+                .map(|served| served.end_ms),
+            Some(76_000),
+            "legacy publication exposes the last complete endpoint inside its clock"
+        );
+
+        accept_rolling_publication_demand(
+            &session,
+            1,
+            20_000,
+            1.0,
+            crate::playback_control::PlaybackDemand::Active,
+            crate::playback_control::RenderState::Rendering,
+        )
+        .await;
+        session
+            .publication_cycle_at(
+                "rolling_publication_budget_legacy_variable",
+                started + ROLLING_PUBLICATION_TARGET * 2,
+            )
+            .await
+            .expect("explicit cutover publication");
+        let clock = session.publication.lock().await;
+        assert_eq!(clock.budget_anchor_sequence, Some(1));
+        assert_eq!(
+            clock.served.as_ref().map(|served| served.end_ms),
+            Some(84_000),
+            "accepted explicit demand replaces the legacy wall-clock budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn rolling_publication_budget_commit_deadlines_begin_when_snapshot_is_available() {
+        let directory = crate::test_tempdir().expect("publication commit clock");
+        let session = test_session(directory.path().to_path_buf());
+        accept_rolling_publication_demand(
+            &session,
+            1,
+            0,
+            1.0,
+            crate::playback_control::PlaybackDemand::Active,
+            crate::playback_control::RenderState::Rendering,
+        )
+        .await;
+        tokio::fs::write(
+            directory.path().join("index.m3u8"),
+            rolling_playlist(&[16.0; 3], false),
+        )
+        .await
+        .expect("writer playlist");
+        let before_commit = Instant::now();
+        session
+            .publication_cycle_at(
+                "rolling_publication_budget_commit_clock",
+                before_commit - Duration::from_secs(60),
+            )
+            .await
+            .expect("publication with an old policy observation");
+        let clock = session.publication.lock().await;
+        let served = clock.served.as_ref().expect("served snapshot");
+        assert!(served.available_at >= before_commit);
+        assert_eq!(
+            clock.next_publish_at,
+            Some(served.available_at + ROLLING_PUBLICATION_TARGET)
+        );
+        assert_eq!(
+            clock.hard_deadline,
+            Some(served.available_at + ROLLING_PUBLICATION_HARD)
+        );
+    }
+
+    #[tokio::test]
     async fn rolling_publication_budget_eof_keeps_the_slow_viewers_protected_tail() {
         let directory = crate::test_tempdir().expect("EOF publication budget");
         let session = test_session(directory.path().to_path_buf());
         accept_rolling_publication_demand(
             &session,
             1,
-            12_000,
+            360_000,
             1.0,
             crate::playback_control::PlaybackDemand::Active,
             crate::playback_control::RenderState::Rendering,
         )
         .await;
+        session.publication.lock().await.retention_first_segment = Some(70);
         tokio::fs::write(
             directory.path().join("index.m3u8"),
             rolling_playlist(&[6.0; 80], true),
@@ -34201,7 +34396,10 @@ pub(crate) mod tests {
             .expect("EOF publication");
         let clock = session.publication.lock().await;
         let served = clock.served.as_ref().expect("EOF snapshot");
-        assert_eq!(served.first_segment, 0);
+        assert_eq!(
+            served.first_segment, 53,
+            "EOF must clamp an ahead-of-playback retention request to the protected segment"
+        );
         assert_eq!(served.last_segment, 79);
         assert!(served.end_list);
         assert!(String::from_utf8_lossy(&served.raw).contains("#EXT-X-ENDLIST"));
