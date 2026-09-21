@@ -13841,6 +13841,7 @@ pub struct TranscodeManager {
 pub(crate) struct TranscodeMetrics {
     active_sessions: Arc<AtomicUsize>,
     active_cache: crate::cachekeep::ActiveCacheMetrics,
+    decode_facts: Arc<crate::decode_facts::DecodeFactMetrics>,
 }
 
 /// Bounded local facts published in the cluster media snapshot. None of these
@@ -13884,6 +13885,10 @@ impl TranscodeMetrics {
             self.active_sessions.load(Relaxed),
             self.active_cache.active_entries(),
         )
+    }
+
+    pub(crate) fn decode_facts_prometheus(&self) -> String {
+        self.decode_facts.prometheus()
     }
 }
 
@@ -14382,6 +14387,7 @@ impl TranscodeManager {
         TranscodeMetrics {
             active_sessions: Arc::clone(&self.active_session_count),
             active_cache: self.cache_readers.metrics(),
+            decode_facts: self.decode_facts.metrics_handle(),
         }
     }
 

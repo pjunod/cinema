@@ -13,7 +13,8 @@ use std::ffi::{CString, OsStr};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "linux")]
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -29,6 +30,20 @@ const IDENTITY_DEADLINE: Duration = Duration::from_secs(10);
 const VERSION_DEADLINE: Duration = Duration::from_secs(5);
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 const MAX_CACHE_ENTRIES: usize = 256;
+const DECODE_FACT_PHASE_BUCKETS: &[(u64, &str)] = &[
+    (1_000_000, "0.001"),
+    (5_000_000, "0.005"),
+    (10_000_000, "0.01"),
+    (25_000_000, "0.025"),
+    (50_000_000, "0.05"),
+    (100_000_000, "0.1"),
+    (250_000_000, "0.25"),
+    (500_000_000, "0.5"),
+    (1_000_000_000, "1"),
+    (2_000_000_000, "2"),
+    (5_000_000_000, "5"),
+    (10_000_000_000, "10"),
+];
 #[cfg(unix)]
 const HELD_PROBE_FD: std::os::fd::RawFd = 4;
 
@@ -46,6 +61,276 @@ fn version_gate() -> Arc<tokio::sync::Semaphore> {
 fn test_discovery_gate() -> Arc<tokio::sync::Semaphore> {
     static GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
     Arc::clone(GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))))
+}
+
+#[derive(Clone, Copy)]
+enum DecodeFactPhase {
+    GateWait,
+    IdentityValidation,
+    SourceObservation,
+    Collection,
+    FinalValidation,
+}
+
+impl DecodeFactPhase {
+    const ALL: [Self; 5] = [
+        Self::GateWait,
+        Self::IdentityValidation,
+        Self::SourceObservation,
+        Self::Collection,
+        Self::FinalValidation,
+    ];
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::GateWait => "gate_wait",
+            Self::IdentityValidation => "identity_validation",
+            Self::SourceObservation => "source_observation",
+            Self::Collection => "collection",
+            Self::FinalValidation => "final_validation",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DecodeFactOutcome {
+    Ok,
+    Deadline,
+    Cancelled,
+    Changed,
+    Error,
+}
+
+impl DecodeFactOutcome {
+    const ALL: [Self; 5] = [
+        Self::Ok,
+        Self::Deadline,
+        Self::Cancelled,
+        Self::Changed,
+        Self::Error,
+    ];
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Deadline => "deadline",
+            Self::Cancelled => "cancelled",
+            Self::Changed => "changed",
+            Self::Error => "error",
+        }
+    }
+
+    fn of(result: &Result<(), DecodeFactError>) -> Self {
+        match result {
+            Ok(()) => Self::Ok,
+            Err(DecodeFactError::Deadline) => Self::Deadline,
+            Err(DecodeFactError::Cancelled) => Self::Cancelled,
+            Err(DecodeFactError::ProbeChanged | DecodeFactError::SourceChanged) => Self::Changed,
+            Err(_) => Self::Error,
+        }
+    }
+}
+
+#[derive(Default)]
+struct DecodeFactPhaseCell {
+    count: AtomicU64,
+    elapsed_nanos: AtomicU64,
+    buckets: [AtomicU64; DECODE_FACT_PHASE_BUCKETS.len()],
+}
+
+pub(crate) struct DecodeFactMetrics {
+    phases: [DecodeFactPhaseCell; 25],
+    lookups: [AtomicU64; 3],
+    fallbacks: [AtomicU64; 7],
+}
+
+impl Default for DecodeFactMetrics {
+    fn default() -> Self {
+        Self {
+            phases: std::array::from_fn(|_| DecodeFactPhaseCell::default()),
+            lookups: std::array::from_fn(|_| AtomicU64::new(0)),
+            fallbacks: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DecodeFactLookupResult {
+    Hit,
+    MissCollected,
+    Refused,
+}
+
+impl DecodeFactLookupResult {
+    const ALL: [Self; 3] = [Self::Hit, Self::MissCollected, Self::Refused];
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::MissCollected => "miss_collected",
+            Self::Refused => "refused",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DecodePlanFallbackReason {
+    Deadline,
+    Cancelled,
+    ProbeChanged,
+    ProbeFailed,
+    IdentityIo,
+    Invariant,
+    RefusedSourceChanged,
+}
+
+impl DecodePlanFallbackReason {
+    const ALL: [Self; 7] = [
+        Self::Deadline,
+        Self::Cancelled,
+        Self::ProbeChanged,
+        Self::ProbeFailed,
+        Self::IdentityIo,
+        Self::Invariant,
+        Self::RefusedSourceChanged,
+    ];
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Deadline => "deadline",
+            Self::Cancelled => "cancelled",
+            Self::ProbeChanged => "probe_changed",
+            Self::ProbeFailed => "probe_failed",
+            Self::IdentityIo => "identity_io",
+            Self::Invariant => "invariant",
+            Self::RefusedSourceChanged => "refused_source_changed",
+        }
+    }
+}
+
+impl DecodeFactMetrics {
+    fn saturating_add(target: &AtomicU64, amount: u64) {
+        let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            (current != u64::MAX).then(|| current.saturating_add(amount))
+        });
+    }
+
+    fn phase_cell(
+        &self,
+        phase: DecodeFactPhase,
+        outcome: DecodeFactOutcome,
+    ) -> &DecodeFactPhaseCell {
+        &self.phases[phase.index() * DecodeFactOutcome::ALL.len() + outcome.index()]
+    }
+
+    fn record_phase(
+        &self,
+        phase: DecodeFactPhase,
+        result: &Result<(), DecodeFactError>,
+        elapsed: Duration,
+    ) {
+        let cell = self.phase_cell(phase, DecodeFactOutcome::of(result));
+        let elapsed_nanos = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
+        Self::saturating_add(&cell.count, 1);
+        Self::saturating_add(&cell.elapsed_nanos, elapsed_nanos);
+        if let Some(index) = DECODE_FACT_PHASE_BUCKETS
+            .iter()
+            .position(|(upper, _)| elapsed_nanos <= *upper)
+        {
+            Self::saturating_add(&cell.buckets[index], 1);
+        }
+    }
+
+    fn record_lookup(&self, result: DecodeFactLookupResult) {
+        Self::saturating_add(&self.lookups[result.index()], 1);
+    }
+
+    pub(crate) fn record_fallback(&self, reason: DecodePlanFallbackReason) {
+        Self::saturating_add(&self.fallbacks[reason.index()], 1);
+    }
+
+    pub(crate) fn prometheus(&self) -> String {
+        use std::fmt::Write as _;
+
+        let mut out = String::from(
+            "# HELP plurx_decode_facts_phase_seconds Decode-fact lookup latency by bounded phase and outcome.\n\
+             # TYPE plurx_decode_facts_phase_seconds histogram\n",
+        );
+        for phase in DecodeFactPhase::ALL {
+            for outcome in DecodeFactOutcome::ALL {
+                let cell = self.phase_cell(phase, outcome);
+                let mut cumulative = 0_u64;
+                for (index, (_, upper)) in DECODE_FACT_PHASE_BUCKETS.iter().enumerate() {
+                    cumulative =
+                        cumulative.saturating_add(cell.buckets[index].load(Ordering::Relaxed));
+                    let _ = writeln!(
+                        out,
+                        "plurx_decode_facts_phase_seconds_bucket{{phase=\"{}\",outcome=\"{}\",le=\"{}\"}} {}",
+                        phase.label(), outcome.label(), upper, cumulative
+                    );
+                }
+                let count = cell.count.load(Ordering::Relaxed);
+                let _ = writeln!(
+                    out,
+                    "plurx_decode_facts_phase_seconds_bucket{{phase=\"{}\",outcome=\"{}\",le=\"+Inf\"}} {count}",
+                    phase.label(), outcome.label()
+                );
+                let seconds = cell.elapsed_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0;
+                let _ = writeln!(
+                    out,
+                    "plurx_decode_facts_phase_seconds_sum{{phase=\"{}\",outcome=\"{}\"}} {seconds:.9}",
+                    phase.label(), outcome.label()
+                );
+                let _ = writeln!(
+                    out,
+                    "plurx_decode_facts_phase_seconds_count{{phase=\"{}\",outcome=\"{}\"}} {count}",
+                    phase.label(),
+                    outcome.label()
+                );
+            }
+        }
+        out.push_str(
+            "# HELP plurx_decode_facts_lookups_total Decode-fact cache lookups by bounded result.\n\
+             # TYPE plurx_decode_facts_lookups_total counter\n",
+        );
+        for result in DecodeFactLookupResult::ALL {
+            let _ = writeln!(
+                out,
+                "plurx_decode_facts_lookups_total{{result=\"{}\"}} {}",
+                result.label(),
+                self.lookups[result.index()].load(Ordering::Relaxed)
+            );
+        }
+        out.push_str(
+            "# HELP plurx_decode_plan_fallbacks_total Bound decode-plan fallbacks and identity refusals by bounded reason.\n\
+             # TYPE plurx_decode_plan_fallbacks_total counter\n",
+        );
+        for reason in DecodePlanFallbackReason::ALL {
+            let _ = writeln!(
+                out,
+                "plurx_decode_plan_fallbacks_total{{reason=\"{}\"}} {}",
+                reason.label(),
+                self.fallbacks[reason.index()].load(Ordering::Relaxed)
+            );
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -2885,6 +3170,7 @@ pub(crate) struct DecodeFactCache {
     /// misses. Fact preparation cannot fan out unbounded hashing or child
     /// processes when several sessions start together.
     probe_gate: Arc<tokio::sync::Semaphore>,
+    metrics: Arc<DecodeFactMetrics>,
     capacity: usize,
 }
 
@@ -2898,8 +3184,17 @@ impl DecodeFactCache {
             entries: tokio::sync::Mutex::new(BTreeMap::new()),
             order: tokio::sync::Mutex::new(VecDeque::new()),
             probe_gate: Arc::new(tokio::sync::Semaphore::new(1)),
+            metrics: Arc::new(DecodeFactMetrics::default()),
             capacity: capacity.clamp(1, MAX_CACHE_ENTRIES),
         }
+    }
+
+    pub(crate) fn metrics(&self) -> &DecodeFactMetrics {
+        &self.metrics
+    }
+
+    pub(crate) fn metrics_handle(&self) -> Arc<DecodeFactMetrics> {
+        Arc::clone(&self.metrics)
     }
 
     pub(crate) async fn get_or_probe(
@@ -2911,31 +3206,73 @@ impl DecodeFactCache {
         budget: Duration,
         cancelled: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<DecodeFacts, DecodeFactError> {
+        let result = self
+            .get_or_probe_inner(probe, source, catalog, selected_stream, budget, cancelled)
+            .await;
+        self.metrics.record_lookup(match &result {
+            Ok((_, result)) => *result,
+            Err(_) => DecodeFactLookupResult::Refused,
+        });
+        result.map(|(facts, _)| facts)
+    }
+
+    async fn get_or_probe_inner(
+        &self,
+        probe: &DecodeProbeIdentity,
+        source: DecodeFactSource,
+        catalog: Option<&DecodeCatalogMetadata>,
+        selected_stream: ProbeStreamSelection,
+        budget: Duration,
+        cancelled: Option<&tokio_util::sync::CancellationToken>,
+    ) -> Result<(DecodeFacts, DecodeFactLookupResult), DecodeFactError> {
         let started = std::time::Instant::now();
         let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
         if remaining.is_zero() {
             return Err(DecodeFactError::Deadline);
         }
-        let gate = tokio::select! {
+        let phase_started = std::time::Instant::now();
+        let gate_result = tokio::select! {
             biased;
-            _ = wait_for_cancellation(cancelled) => return Err(DecodeFactError::Cancelled),
+            _ = wait_for_cancellation(cancelled) => Err(DecodeFactError::Cancelled),
             gate = tokio::time::timeout(remaining, Arc::clone(&self.probe_gate).acquire_owned()) => {
-                gate
-                    .map_err(|_| DecodeFactError::Deadline)?
-                    .map_err(|_| DecodeFactError::CacheInvariant)?
+                match gate {
+                    Ok(Ok(gate)) => Ok(gate),
+                    Ok(Err(_)) => Err(DecodeFactError::CacheInvariant),
+                    Err(_) => Err(DecodeFactError::Deadline),
+                }
             }
         };
+        self.metrics.record_phase(
+            DecodeFactPhase::GateWait,
+            &gate_result.as_ref().map(|_| ()).map_err(Clone::clone),
+            phase_started.elapsed(),
+        );
+        let gate = gate_result?;
         let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
-        probe.validate_current(remaining, cancelled).await?;
+        let phase_started = std::time::Instant::now();
+        let validation = probe.validate_current(remaining, cancelled).await;
+        self.metrics.record_phase(
+            DecodeFactPhase::IdentityValidation,
+            &validation,
+            phase_started.elapsed(),
+        );
+        validation?;
         let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
-        let (bound_source, gate) = source_observation_with_probe_gate(
+        let phase_started = std::time::Instant::now();
+        let observation = source_observation_with_probe_gate(
             Arc::clone(&source.handle),
             gate,
             remaining,
             cancelled,
             source.initial_identity_delay(),
         )
-        .await?;
+        .await;
+        self.metrics.record_phase(
+            DecodeFactPhase::SourceObservation,
+            &observation.as_ref().map(|_| ()).map_err(Clone::clone),
+            phase_started.elapsed(),
+        );
+        let (bound_source, gate) = observation?;
         let bound_identity = bound_source.identity.clone();
         let key = CacheKey {
             source: bound_identity.clone(),
@@ -2944,7 +3281,7 @@ impl DecodeFactCache {
             selected_stream,
         };
         if let Some(facts) = self.entries.lock().await.get(&key).cloned() {
-            return Ok(facts);
+            return Ok((facts, DecodeFactLookupResult::Hit));
         }
         let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
         if remaining.is_zero() {
@@ -2988,26 +3325,63 @@ impl DecodeFactCache {
             .await;
             (result, gate, source)
         });
-        let (facts, gate, source) =
-            await_owned_collection(collection, remaining, cancelled).await?;
+        let phase_started = std::time::Instant::now();
+        let collection_result = await_owned_collection(collection, remaining, cancelled).await;
+        let collection_outcome = match &collection_result {
+            Ok((facts, _, _)) => facts.as_ref().map(|_| ()).map_err(Clone::clone),
+            Err(error) => Err(error.clone()),
+        };
+        self.metrics.record_phase(
+            DecodeFactPhase::Collection,
+            &collection_outcome,
+            phase_started.elapsed(),
+        );
+        let (facts, gate, source) = collection_result?;
         let facts = facts?;
         let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
-        probe.validate_current(remaining, cancelled).await?;
+        let phase_started = std::time::Instant::now();
+        let validation = probe.validate_current(remaining, cancelled).await;
+        self.metrics.record_phase(
+            DecodeFactPhase::FinalValidation,
+            &validation,
+            phase_started.elapsed(),
+        );
+        validation?;
         let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
-        let (after_source, gate) = source_observation_with_probe_gate(
+        let phase_started = std::time::Instant::now();
+        let observation = source_observation_with_probe_gate(
             Arc::clone(&source.handle),
             gate,
             remaining,
             cancelled,
             source.final_identity_delay(),
         )
-        .await?;
-        if after_source.identity != key.source {
-            return Err(DecodeFactError::SourceChanged);
-        }
+        .await;
+        let (after_source, gate) = match observation {
+            Ok(observation) => observation,
+            Err(error) => {
+                self.metrics.record_phase(
+                    DecodeFactPhase::SourceObservation,
+                    &Err(error.clone()),
+                    phase_started.elapsed(),
+                );
+                return Err(error);
+            }
+        };
+        let source_outcome = if after_source.identity == key.source {
+            Ok(())
+        } else {
+            Err(DecodeFactError::SourceChanged)
+        };
+        self.metrics.record_phase(
+            DecodeFactPhase::SourceObservation,
+            &source_outcome,
+            phase_started.elapsed(),
+        );
+        source_outcome?;
         let mut entries = self.entries.lock().await;
         if let Some(existing) = entries.get(&key) {
-            return Ok(existing.clone());
+            return Ok((existing.clone(), DecodeFactLookupResult::Hit));
         }
         let mut order = self.order.lock().await;
         while entries.len() >= self.capacity {
@@ -3019,7 +3393,7 @@ impl DecodeFactCache {
         entries.insert(key.clone(), facts.clone());
         order.push_back(key);
         drop(gate);
-        Ok(facts)
+        Ok((facts, DecodeFactLookupResult::MissCollected))
     }
 }
 
@@ -5141,6 +5515,59 @@ touch "$PLURX_TEST_PROBE_PATH.done"
             task.await.expect("join collector"),
             Err(DecodeFactError::SourceChanged)
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn metrics_count_each_phase_once() {
+        let root = crate::test_tempdir().expect("tempdir");
+        let media = root.path().join("media.bin");
+        std::fs::write(&media, b"source").expect("media");
+        let probe = root.path().join("ffprobe-test");
+        executable(
+            &probe,
+            r###"#!/bin/sh
+if test "$1" = "-version"; then printf '%s\n' 'ffprobe version phase-metrics'; exit 0; fi
+printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","disposition":{"attached_pic":0}}]}'
+"###,
+        );
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
+            .await
+            .expect("identity");
+        let cache = DecodeFactCache::new();
+        for _ in 0..2 {
+            cache
+                .get_or_probe(
+                    &identity,
+                    DecodeFactSource::isolated(Arc::new(
+                        std::fs::File::open(&media).expect("open source"),
+                    )),
+                    None,
+                    ProbeStreamSelection::FirstPlayable,
+                    Duration::from_secs(2),
+                    None,
+                )
+                .await
+                .expect("miss and warm hit both resolve");
+        }
+        let metrics = cache.metrics().prometheus();
+        for (phase, count) in [
+            ("gate_wait", 2),
+            ("identity_validation", 2),
+            ("source_observation", 3),
+            ("collection", 1),
+            ("final_validation", 1),
+        ] {
+            assert!(
+                metrics.contains(&format!(
+                    "plurx_decode_facts_phase_seconds_count{{phase=\"{phase}\",outcome=\"ok\"}} {count}"
+                )),
+                "missing expected phase count for {phase}:\n{metrics}"
+            );
+        }
+        assert!(metrics.contains("plurx_decode_facts_lookups_total{result=\"hit\"} 1"));
+        assert!(metrics.contains("plurx_decode_facts_lookups_total{result=\"miss_collected\"} 1"));
+        assert!(metrics.contains("plurx_decode_facts_lookups_total{result=\"refused\"} 0"));
     }
 
     #[tokio::test]

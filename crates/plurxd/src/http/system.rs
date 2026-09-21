@@ -5012,6 +5012,7 @@ pub(crate) async fn metrics(
 ) -> impl axum::response::IntoResponse {
     let uptime = state.started_at.elapsed().as_secs();
     let (sessions, active_cache_entries) = state.transcode.snapshot();
+    let decode_fact_metrics = state.transcode.decode_facts_prometheus();
     let store_metrics = render_store_metrics(state.store_metrics.snapshot());
     let raft_metrics = render_passive_raft_metrics(state.passive_raft.snapshot());
     let membership_metrics = render_passive_membership_metrics(state.passive_membership.snapshot());
@@ -5067,7 +5068,7 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{live_tv_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}",
+        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{decode_fact_metrics}{live_tv_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         takeover_metrics = crate::media_sessions::prometheus(),
