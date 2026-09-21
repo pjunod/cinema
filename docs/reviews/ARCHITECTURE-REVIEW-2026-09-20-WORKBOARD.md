@@ -147,7 +147,7 @@ document (the twelve written second landed on 2026-09-20 as well).
 | A-02 | [APPLE-PLAYER-CONTROLLER-ATTEMPT-AND-OBSERVATION](../clients/APPLE-PLAYER-CONTROLLER-ATTEMPT-AND-OBSERVATION.md) | A3, A4, A6, A7 | month | unclaimed | | | | 2026-09-20 | After A-01 |
 | A-03 | [NATIVE-LIBRARY-PAGING](../clients/NATIVE-LIBRARY-PAGING.md) | A5, D6 (library) | month | unclaimed | | | | 2026-09-20 | Apple + Android |
 | A-04 | [NATIVE-ADAPTIVE-QUALITY-DESIGN](../clients/NATIVE-ADAPTIVE-QUALITY-DESIGN.md) | §3.8 | design | unclaimed | | | | 2026-09-20 | Design; recommends revive the wire, delete the Apple helper — Paul decides |
-| D-01 | [ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET](../clients/ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET.md) | §2.9, D1 | week (measure) / month | unclaimed | | | | 2026-09-20 | Memory measurements first |
+| D-01 | [ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET](../clients/ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET.md) | §2.9, D1 | week (measure) / month | claimed | gpt-5.6-sol | agent:/root/s01_builder | plan/D-01 | 2026-09-21 | Claimed for one whole-plan draft PR; M0/M5 physical-device evidence will be recorded, not inferred. |
 | D-02 | [ANDROID-LIFECYCLE-PLAYER-BUILDER-AND-ERROR-CLASSIFICATION](../clients/ANDROID-LIFECYCLE-PLAYER-BUILDER-AND-ERROR-CLASSIFICATION.md) | D2, D3, D4, D7 | month | unclaimed | | | | 2026-09-20 | |
 | D-03 | [ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD](../clients/ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md) | D5, D6 (release) | week (backup rules) / month | unclaimed | | | | 2026-09-20 | |
 | P-01 | [RUST-TEST-EXECUTION-POLICY](../ci/RUST-TEST-EXECUTION-POLICY.md) | §2.2, §4.8 | week | unclaimed | | | | 2026-09-20 | Decision is Paul's (§7.1); the two red tests are not |
