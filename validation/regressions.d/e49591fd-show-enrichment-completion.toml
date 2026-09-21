@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e49591fd"]
+points = ["metadata.enrichment"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The retained two-season regression lets season one publish, forces season two past the item's deadline, and proves the show remains in the ordinary metadata queue. A second non-forced scan must revisit the parent, enrich season two, and only then remove the show from that queue."
