@@ -474,7 +474,10 @@ pattern = "RESPONSE_PUBLICATION_LIFECYCLE_BUDGET"
 # 4 -> 5: exact initialization-segment inspection is a response-publication
 # operation and takes the same outer owner budget as the segment response it
 # explains. It starts no independent producer and cannot outlive the request.
-expected_occurrences = 5
+# 5 -> 6: `an_mpegts_session_keeps_its_static_codec_string` is a unit test that
+# calls `exact_hls_context_at` with that same budget as its deadline, so the
+# sixth site is the test reading the constant, not a new owner or producer.
+expected_occurrences = 6
 
 [[module_symbols]]
 id = "m4-eof-media-commit-handoff"
