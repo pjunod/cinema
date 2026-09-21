@@ -3131,14 +3131,15 @@ mod tests {
                 .as_deref(),
             Some("disk_write_backlog")
         );
-        let pulls = pulled_at.lock().expect("pull timings");
-        let max_gap = pulls
-            .windows(2)
-            .map(|pair| pair[1].duration_since(pair[0]))
-            .max()
-            .unwrap_or_default();
+        let max_gap = {
+            let pulls = pulled_at.lock().expect("pull timings");
+            pulls
+                .windows(2)
+                .map(|pair| pair[1].duration_since(pair[0]))
+                .max()
+                .unwrap_or_default()
+        };
         assert!(max_gap < std::time::Duration::from_millis(100));
-        drop(pulls);
 
         assert_eq!(settle_sink(&fast).await, SinkStopResult::Settled);
         assert_eq!(
