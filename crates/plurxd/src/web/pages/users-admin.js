@@ -7,6 +7,7 @@ function userRow(u){
   const role = u.is_admin?`<span class="pill acc">admin</span>`:`<span class="muted">user</span>`;
   const btns=[`<button class="ghost sm" aria-expanded="${open?"true":"false"}"${open?` aria-controls="userdrawer-${u.id}"`:""} onclick="openUserDrawer(${u.id})">Reset password</button>`];
   btns.push(`<button class="ghost sm" onclick="setAdmin(${u.id},${u.is_admin?0:1})">${u.is_admin?'Revoke admin':'Make admin'}</button>`);
+  btns.push(`<button class="ghost sm" onclick="setOpticalPlay(${u.id},${u.optical_play?0:1})">${u.optical_play?'Revoke disc access':'Grant disc access'}</button>`);
   if(!me) btns.push(`<button class="ghost sm" onclick='delUser(${u.id},${esc(JSON.stringify(u.username))})'>Delete</button>`);
   return `<tr${open?' class="setopen"':""}><td class="libname"><b>${esc(u.username)}</b>${me?' <span class="muted">(you)</span>':''}</td><td data-label="Role">${role}</td><td class="muted" data-label="Created">${created}</td>
     <td class="rowactions"><div class="row" style="flex-wrap:wrap;justify-content:flex-end">${btns.join("")}</div></td></tr>${open?userDrawerHtml(u):""}`;
@@ -41,8 +42,14 @@ async function resetPw(id, name, btn){
 async function setAdmin(id, makeAdmin){
   try{ await api(`/users/${id}`,{method:"PUT",body:{is_admin:!!makeAdmin}}); toast(makeAdmin?"Now an admin":"Admin revoked"); viewSettings(); }catch(e){ toast(e.message); }
 }
+async function setOpticalPlay(id, granted){
+  try{
+    await api(`/users/${id}`,{method:"PUT",body:{optical_play:!!granted}});
+    toast(granted?"Disc playback granted":"Disc playback revoked");
+    viewSettings();
+  }catch(e){ toast(e.message); }
+}
 async function delUser(id, name){
   if(!confirm(`Delete ${name}? Their watch history is removed. Media files are untouched.`)) return;
   try{ await api(`/users/${id}`,{method:"DELETE"}); toast("User deleted"); viewSettings(); }catch(e){ toast(e.message); }
 }
-

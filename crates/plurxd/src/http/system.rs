@@ -120,9 +120,13 @@ pub async fn setup(
     state
         .cache_only_admin_proofs
         .record_authenticated(proof_ticket, token_hash, &user);
+    let optical_play = state.store.optical_play_grant(user.id).await? == Some(true);
     Ok(Json(LoginResponse {
         token,
-        user: user.into(),
+        user: super::dto::UserAccessDto {
+            user: user.into(),
+            optical_play,
+        },
     }))
 }
 

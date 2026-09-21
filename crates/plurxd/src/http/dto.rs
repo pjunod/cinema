@@ -741,6 +741,13 @@ pub struct UserDto {
     pub created_at: i64,
 }
 
+#[derive(Serialize)]
+pub struct UserAccessDto {
+    #[serde(flatten)]
+    pub user: UserDto,
+    pub optical_play: bool,
+}
+
 impl From<User> for UserDto {
     fn from(u: User) -> Self {
         UserDto {

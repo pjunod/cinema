@@ -9,7 +9,7 @@ use axum::extract::{Path, State};
 use axum::Json;
 use serde::Deserialize;
 
-use super::dto::UserDto;
+use super::dto::UserAccessDto;
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
 use super::internal_auth_revocation::ClusterCacheRevocation;
@@ -19,9 +19,24 @@ use crate::state::AppState;
 pub async fn list(
     _admin: AdminUser,
     State(state): State<AppState>,
-) -> Result<Json<Vec<UserDto>>, ApiError> {
+) -> Result<Json<Vec<UserAccessDto>>, ApiError> {
     let users = state.store.list_users().await?;
-    Ok(Json(users.into_iter().map(Into::into).collect()))
+    let mut result = Vec::with_capacity(users.len());
+    for user in users {
+        result.push(managed_user(&state, user).await?);
+    }
+    Ok(Json(result))
+}
+
+async fn managed_user(
+    state: &AppState,
+    user: plurx_core::domain::User,
+) -> Result<UserAccessDto, ApiError> {
+    let optical_play = state.store.optical_play_grant(user.id).await? == Some(true);
+    Ok(UserAccessDto {
+        user: user.into(),
+        optical_play,
+    })
 }
 
 #[derive(Deserialize)]
@@ -37,7 +52,7 @@ pub async fn create(
     _admin: AdminUser,
     State(state): State<AppState>,
     Json(req): Json<CreateUser>,
-) -> Result<Json<UserDto>, ApiError> {
+) -> Result<Json<UserAccessDto>, ApiError> {
     let username = req.username.trim();
     if username.is_empty() {
         return Err(ApiError::BadRequest("username required".into()));
@@ -53,7 +68,7 @@ pub async fn create(
         .store
         .create_user(username, &hash, req.is_admin)
         .await?;
-    Ok(Json(user.into()))
+    Ok(Json(managed_user(&state, user).await?))
 }
 
 #[derive(Deserialize)]
@@ -62,6 +77,8 @@ pub struct UpdateUser {
     pub password: Option<String>,
     /// Grant or revoke admin. Absent = unchanged.
     pub is_admin: Option<bool>,
+    /// Grant or revoke access to physical optical titles. Absent = unchanged.
+    pub optical_play: Option<bool>,
 }
 
 /// PUT /api/v1/users/:id (admin)
@@ -70,7 +87,7 @@ pub async fn update(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     Json(req): Json<UpdateUser>,
-) -> Result<Json<UserDto>, ApiError> {
+) -> Result<Json<UserAccessDto>, ApiError> {
     state
         .store
         .get_user(id)
@@ -150,6 +167,9 @@ pub async fn update(
             ));
         }
     }
+    if let Some(granted) = req.optical_play {
+        state.store.set_optical_play_grant(id, granted).await?;
+    }
     if let Some(proof_revocation) = proof_revocation {
         proof_revocation.finish(&state).await?;
     }
@@ -159,7 +179,7 @@ pub async fn update(
         .get_user(id)
         .await?
         .ok_or(ApiError::NotFound("user"))?;
-    Ok(Json(user.into()))
+    Ok(Json(managed_user(&state, user).await?))
 }
 
 /// DELETE /api/v1/users/:id (admin)

@@ -8,7 +8,7 @@ use axum::Json;
 use plurx_core::auth;
 use serde::{Deserialize, Serialize};
 
-use super::dto::UserDto;
+use super::dto::UserAccessDto;
 use super::error::ApiError;
 use super::extract::{AuthUser, RawToken};
 use super::internal_auth_revocation::ClusterCacheRevocation;
@@ -38,7 +38,7 @@ pub struct LoginRequest {
 #[derive(Serialize)]
 pub struct LoginResponse {
     pub token: String,
-    pub user: UserDto,
+    pub user: UserAccessDto,
 }
 
 /// POST /api/v1/auth/login
@@ -84,9 +84,13 @@ pub async fn login(
         .cache_only_admin_proofs
         .record_authenticated(proof_ticket, hash, &user);
 
+    let optical_play = state.store.optical_play_grant(user.id).await? == Some(true);
     Ok(Json(LoginResponse {
         token,
-        user: user.into(),
+        user: UserAccessDto {
+            user: user.into(),
+            optical_play,
+        },
     }))
 }
 
@@ -112,8 +116,15 @@ pub async fn logout(
 }
 
 /// GET /api/v1/me
-pub async fn me(AuthUser(user): AuthUser) -> Json<UserDto> {
-    Json(user.into())
+pub async fn me(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<UserAccessDto>, ApiError> {
+    let optical_play = state.store.optical_play_grant(user.id).await? == Some(true);
+    Ok(Json(UserAccessDto {
+        user: user.into(),
+        optical_play,
+    }))
 }
 
 pub(crate) fn validate_password_size(password: &str) -> Result<(), ApiError> {
