@@ -2061,9 +2061,9 @@ mod tests {
             &compact_handler(browse, "pub async fn hubs", "pub async fn search"),
             &["recently_added", "child_counts", "item_max_heights"],
         );
-        assert!(
-            compact_handler(browse, "pub async fn search", "Ok(Json(SearchResponse")
-                .contains("state.store.search_items")
+        assert_catalogue_methods(
+            &compact_handler(browse, "pub async fn search", "Ok(Json(SearchResponse"),
+            &["search_items"],
         );
 
         let libraries = include_str!("libraries.rs");
@@ -2135,8 +2135,55 @@ mod tests {
         assert!(unscrobble.contains("state.store.set_watched_tree"));
         assert!(!unscrobble.contains("state.catalogue.get_item"));
         let plex_search = compact_handler(plex, "pub async fn search", "fn version");
-        assert!(plex_search.contains("state.store.search_items"));
-        assert!(!plex_search.contains("state.catalogue.search_items"));
+        assert!(plex_search.contains("state.catalogue.search_items"));
+        assert!(!plex_search.contains("state.store.search_items"));
+
+        // Media delivery and write-validation helpers intentionally remain
+        // Authority. The same `book_file` check is shared by GET and the two
+        // reading-state mutations, so moving it would weaken a pre-mutation
+        // read merely to optimize the GET path.
+        let photos = include_str!("photos.rs")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+        for method in ["get_item", "files_for_item"] {
+            assert!(photos.contains(&format!("state.store.{method}")));
+            assert!(!photos.contains(&format!("state.catalogue.{method}")));
+        }
+        let reading = compact_handler(
+            include_str!("reading.rs"),
+            "async fn book_file",
+            "fn validate_href",
+        );
+        for method in ["get_item", "get_file"] {
+            assert!(reading.contains(&format!("state.store.{method}")));
+            assert!(!reading.contains(&format!("state.catalogue.{method}")));
+        }
+
+        // These surfaces have no eligible catalogue Store call: image bytes
+        // are node-local/peer-fetched, while DVR and library-channel reads are
+        // settings, ownership, schedule, or coherent recipe snapshots.
+        let images = compact_handler(
+            include_str!("images.rs"),
+            "pub async fn serve",
+            "pub async fn serve_peer",
+        );
+        assert!(!images.contains("state.store."));
+        assert!(!images.contains("state.catalogue."));
+        let dvr = include_str!("dvr.rs")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+        assert!(dvr.contains("state.store.settings_snapshot"));
+        assert!(dvr.contains("state.store.list_dvr_rules"));
+        assert!(!dvr.contains("state.catalogue."));
+        let library_channels = compact_handler(
+            include_str!("library_channels.rs"),
+            "async fn matching_catalogue",
+            "async fn preferred_generation_files",
+        );
+        assert!(library_channels.contains("state.store.library_channel_catalog_snapshot"));
+        assert!(!library_channels.contains("state.catalogue."));
 
         let system = include_str!("system.rs");
         assert_catalogue_methods(

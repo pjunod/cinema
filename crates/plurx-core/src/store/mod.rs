@@ -5250,6 +5250,22 @@ impl CatalogueReader {
         self.authority.recently_added(library_id, limit).await
     }
 
+    /// Search is explicitly `NodeLocal`: Hiqlite's FTS tables are derived
+    /// state and its Store implementation already uses `query_map`. Keeping
+    /// the call on this named reader makes the classification visible to HTTP
+    /// handlers without incorrectly applying the bounded-replica permit.
+    pub async fn search_items(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<RecentItem>, StoreError> {
+        #[cfg(feature = "hiqlite-store")]
+        if let Some(bounded) = &self.bounded {
+            return bounded.store.search_items(query, limit).await;
+        }
+        self.authority.search_items(query, limit).await
+    }
+
     pub async fn get_file(&self, id: i64) -> Result<Option<MediaFile>, StoreError> {
         #[cfg(feature = "hiqlite-store")]
         if let Some(result) = self
