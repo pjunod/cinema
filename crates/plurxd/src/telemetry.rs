@@ -675,6 +675,9 @@ pub(crate) fn emit_with_network(
     event: PlaybackEvent,
     network: Option<NetworkIdentity>,
 ) {
+    // Metrics describe what this node observed, independently of whether raw
+    // retention, queue admission, or the node-local sidecar succeeds.
+    METRICS.record(&event);
     let sink = sink_for(store);
     let class = classify(&event);
     if sink.degraded.load(Ordering::Acquire) && class != EventClass::Terminal {
@@ -757,6 +760,50 @@ pub fn prometheus() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn metric_value(rendered: &str, prefix: &str) -> u64 {
+        rendered
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix(prefix)
+                    .and_then(|value| value.trim().parse().ok())
+            })
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn metrics_are_recorded_with_retention_off() {
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("telemetry store"));
+        store
+            .put_setting(keys::TELEMETRY_RETAIN_DAYS, "0")
+            .await
+            .expect("disable retention");
+        initialize(Arc::clone(&store)).await.expect("seed settings");
+        let prefix = "plurx_ttff_ms_count{method=\"remux\"} ";
+        let before = metric_value(&prometheus(), prefix);
+
+        emit(
+            Arc::clone(&store),
+            PlaybackEvent {
+                event: "ttff".into(),
+                method: Some("remux".into()),
+                ms: Some(321),
+                ..PlaybackEvent::default()
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        assert_eq!(metric_value(&prometheus(), prefix), before + 1);
+        assert!(store
+            .playback_events(&plurx_core::domain::PlaybackEventQuery {
+                limit: 10,
+                ..Default::default()
+            })
+            .await
+            .expect("retained events")
+            .is_empty());
+    }
 
     #[tokio::test]
     async fn settings_seed_precedes_the_first_event_and_local_changes_invalidate() {
