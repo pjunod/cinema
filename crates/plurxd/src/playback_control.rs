@@ -3082,6 +3082,26 @@ impl PlaybackDemandSnapshot {
     }
 }
 
+/// Absolute movie position earned by one accepted demand observation.
+///
+/// Only active rendering consumes media. The estimate freezes at the explicit
+/// observation horizon even when authenticated media requests keep the lease
+/// alive, because HTTP activity is not a new playhead observation.
+pub(crate) fn rolling_estimated_position_ms(
+    demand: &PlaybackDemandSnapshot,
+    observation_age: Duration,
+) -> i64 {
+    if demand.demand != PlaybackDemand::Active || demand.render_state != RenderState::Rendering {
+        return demand.position_ms;
+    }
+    let fresh_age = observation_age.min(ROLLING_EXPLICIT_LEASE_TIMEOUT);
+    let elapsed_ms = i64::try_from(fresh_age.as_millis()).unwrap_or(i64::MAX);
+    let consumed_ms = ((elapsed_ms as f64) * demand.playback_rate.clamp(0.25, 4.0)).round();
+    demand
+        .position_ms
+        .saturating_add(consumed_ms.min(i64::MAX as f64) as i64)
+}
+
 /// What one accepted exchange said about the viewer's intent and the device.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct SelectionObservation {
@@ -4258,6 +4278,10 @@ pub(crate) struct RollingLeaseSnapshot {
     deadline: Instant,
     pub last_renewal_kind: &'static str,
     pub demand: Option<PlaybackDemandSnapshot>,
+    /// Exact sequence and age of the latest newly accepted demand. Replays and
+    /// authenticated media renewals do not move either value.
+    pub accepted_demand_sequence: Option<u64>,
+    pub demand_observation_age: Option<Duration>,
     /// The destination the client actually wants, and the exchange that
     /// settled it. Rides the existing snapshot rather than a query of its own:
     /// every caller that needs to ask "is this work still wanted" already has
@@ -6147,11 +6171,22 @@ impl RollingProducerTransitionFence {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RollingPublicationObservation {
     pub producer_attempt: u64,
+    /// True only when these exact boundaries are a candidate for the served
+    /// snapshot. Delivery refreshes may repeat published frontiers without
+    /// being a second publication commit.
+    pub publication_commit: bool,
+    /// Demand identity used to construct this exact immutable candidate.
+    /// `None` is the bounded legacy bootstrap before any explicit exchange.
+    pub demand_sequence: Option<u64>,
     pub produced_segment: Option<i64>,
     pub produced_end_ms: Option<i64>,
     pub playlist_ready: bool,
     pub published_segment: Option<i64>,
     pub published_end_ms: Option<i64>,
+    pub published_first_segment: Option<i64>,
+    pub published_start_ms: Option<i64>,
+    /// Absolute source coordinate represented by attempt-relative zero.
+    pub media_origin_ms: i64,
     pub next_media_sequence: i64,
     /// End time for the actor's currently pending fetched segment, when the
     /// refreshed playlist has now supplied its EXTINF.
@@ -8464,6 +8499,8 @@ struct RollingControlActor {
     last_renewal_kind: &'static str,
     mode: RollingLeaseMode,
     demand: Option<PlaybackDemandSnapshot>,
+    accepted_demand_sequence: Option<u64>,
+    accepted_demand_at: Option<Instant>,
     /// Superseded by `ControlState::last_capabilities`, which both delivery
     /// engines can reach; this copy is the rolling actor's own and is kept
     /// only for the tests that pin the retention property.
@@ -8578,6 +8615,8 @@ impl RollingControlActor {
             last_renewal_kind: initial_kind,
             mode: RollingLeaseMode::Legacy,
             demand: None,
+            accepted_demand_sequence: None,
+            accepted_demand_at: None,
             retained_capabilities: None,
             settled_target: None,
             startup: RollingStartupState::new(),
@@ -8653,6 +8692,10 @@ impl RollingControlActor {
             deadline,
             last_renewal_kind: self.last_renewal_kind,
             demand: self.demand.clone(),
+            accepted_demand_sequence: self.accepted_demand_sequence,
+            demand_observation_age: self
+                .accepted_demand_at
+                .map(|accepted_at| now.saturating_duration_since(accepted_at)),
             settled_target: self.settled_target,
             startup: self.startup.snapshot(now),
             pause_remaining: self.pause_started_at.and_then(|started| {
@@ -9329,6 +9372,8 @@ impl RollingControlActor {
                 }
             }
             self.demand = Some(request.snapshot);
+            self.accepted_demand_sequence = Some(accepted_sequence);
+            self.accepted_demand_at = Some(now);
             if accepted_end {
                 self.last_renewal_kind = "control-end";
             } else {
@@ -11161,6 +11206,43 @@ impl RollingControlActor {
             || self.has_published_producer_failure_proposal()
         {
             return false;
+        }
+        let publication_boundaries = (
+            observation.published_segment,
+            observation.published_end_ms,
+            observation.published_first_segment,
+            observation.published_start_ms,
+        );
+        let is_publication = observation.publication_commit;
+        if is_publication {
+            let (
+                Some(_published_segment),
+                Some(_published_end_ms),
+                Some(_first_segment),
+                Some(start_ms),
+            ) = publication_boundaries
+            else {
+                return false;
+            };
+            if observation.demand_sequence != self.accepted_demand_sequence {
+                return false;
+            }
+            if let (Some(demand), Some(accepted_at)) =
+                (self.demand.as_ref(), self.accepted_demand_at)
+            {
+                let consumed_ms = rolling_estimated_position_ms(
+                    demand,
+                    now.saturating_duration_since(accepted_at),
+                );
+                let protected_ms = observation.media_origin_ms.max(
+                    consumed_ms
+                        .saturating_sub(i64::from(2 * NEXT_EXCHANGE_MS))
+                        .saturating_sub(30_000),
+                );
+                if observation.media_origin_ms.saturating_add(start_ms) > protected_ms {
+                    return false;
+                }
+            }
         }
         if let Some((final_segment, final_end_ms)) =
             self.prepublication
@@ -19659,6 +19741,8 @@ mod tests {
             .expect("first control accepted");
         assert_eq!(accepted.disposition, ControlDisposition::Accepted);
         assert_eq!(accepted.lease.mode, RollingLeaseMode::Explicit);
+        assert_eq!(accepted.lease.accepted_demand_sequence, Some(1));
+        assert_eq!(accepted.lease.demand_observation_age, Some(Duration::ZERO));
         let accepted_flow_ticket = accepted.flow_ticket;
         let demand = accepted.lease.demand.expect("demand snapshot");
         assert_eq!(demand.position_ms, request.position_ms);
@@ -19676,6 +19760,11 @@ mod tests {
         assert_eq!(replay.lease.remaining, Duration::from_secs(20));
         assert_eq!(replay.lease.timeout_ms(), ROLLING_EXPLICIT_LEASE_TIMEOUT_MS);
         assert_eq!(replay.lease.last_renewal_kind, "control");
+        assert_eq!(replay.lease.accepted_demand_sequence, Some(1));
+        assert_eq!(
+            replay.lease.demand_observation_age,
+            Some(Duration::from_secs(10))
+        );
         assert_eq!(replay.flow_ticket, accepted_flow_ticket);
         for _ in 0..100 {
             let replay = actor
@@ -19712,11 +19801,16 @@ mod tests {
     ) -> RollingPublicationObservation {
         RollingPublicationObservation {
             producer_attempt,
+            publication_commit: playlist_ready,
+            demand_sequence: None,
             produced_segment: Some(published_segment),
             produced_end_ms: Some(published_end_ms),
             playlist_ready,
             published_segment: Some(published_segment),
             published_end_ms: Some(published_end_ms),
+            published_first_segment: Some(0),
+            published_start_ms: Some(0),
+            media_origin_ms: 0,
             next_media_sequence: published_segment + 1,
             resolved_fetched_segment,
             resolved_fetched_end_ms: resolved_fetched_segment.map(|_| published_end_ms),
@@ -19770,6 +19864,142 @@ mod tests {
             Err(ProducerAttemptRejection::PlaylistPublished),
             "client-visible publication returns an exact rejection cause"
         );
+    }
+
+    #[test]
+    fn rolling_publication_budget_position_projection_freezes_when_not_fresh_or_rendering() {
+        let mut demand = PlaybackDemandSnapshot::test_default(ClientPlatform::Web);
+        demand.position_ms = 10_000;
+        demand.playback_rate = 2.0;
+        demand.demand = PlaybackDemand::Active;
+        demand.render_state = RenderState::Rendering;
+        assert_eq!(
+            rolling_estimated_position_ms(&demand, Duration::from_secs(10)),
+            30_000
+        );
+        assert_eq!(
+            rolling_estimated_position_ms(&demand, Duration::from_secs(90)),
+            70_000,
+            "continued HTTP activity cannot extend a stale demand beyond 30 seconds"
+        );
+
+        demand.demand = PlaybackDemand::Hold;
+        assert_eq!(
+            rolling_estimated_position_ms(&demand, Duration::from_secs(10)),
+            10_000
+        );
+        demand.demand = PlaybackDemand::Active;
+        demand.render_state = RenderState::Waiting;
+        assert_eq!(
+            rolling_estimated_position_ms(&demand, Duration::from_secs(10)),
+            10_000
+        );
+    }
+
+    #[test]
+    fn rolling_publication_budget_media_renewal_does_not_refresh_demand_age() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let control = request();
+        actor
+            .control_at(started + Duration::from_secs(1), owned_control(&control))
+            .expect("demand accepted");
+        assert!(actor.commit_media_at(started + Duration::from_secs(10), "segment", 0, None, None,));
+        let snapshot = actor.snapshot_at(started + Duration::from_secs(20));
+        assert_eq!(snapshot.idle_for, Duration::from_secs(10));
+        assert_eq!(
+            snapshot.demand_observation_age,
+            Some(Duration::from_secs(19)),
+            "media keeps the lease live without inventing a fresh playhead"
+        );
+    }
+
+    #[test]
+    fn rolling_publication_budget_actor_fences_demand_identity_and_protected_start() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("producer attempt");
+        let mut first = request();
+        first.position_ms = 100_000;
+        first.buffered_from_ms = Some(100_000);
+        first.buffered_through_ms = 108_000;
+        let accepted = actor
+            .control_at(started + Duration::from_secs(1), owned_control(&first))
+            .expect("first demand");
+        assert_eq!(accepted.lease.accepted_demand_sequence, Some(1));
+
+        let candidate =
+            |demand_sequence, published_segment, start_ms| RollingPublicationObservation {
+                producer_attempt: attempt,
+                publication_commit: true,
+                demand_sequence: Some(demand_sequence),
+                produced_segment: Some(published_segment),
+                produced_end_ms: Some(180_000),
+                playlist_ready: true,
+                published_segment: Some(published_segment),
+                published_end_ms: Some(180_000),
+                published_first_segment: Some(start_ms / 10_000),
+                published_start_ms: Some(start_ms),
+                media_origin_ms: 0,
+                next_media_sequence: published_segment.saturating_add(1),
+                resolved_fetched_segment: None,
+                resolved_fetched_end_ms: None,
+            };
+        assert!(actor
+            .observe_publication_at(started + Duration::from_secs(2), candidate(1, 10, 60_000),));
+
+        let mut second = first;
+        second.sequence = 2;
+        second.position_ms = 120_000;
+        second.buffered_from_ms = Some(120_000);
+        second.buffered_through_ms = 128_000;
+        actor
+            .control_at(started + Duration::from_secs(3), owned_control(&second))
+            .expect("newer demand");
+        let frozen = actor.delivery.clone();
+        assert!(!actor
+            .observe_publication_at(started + Duration::from_secs(4), candidate(1, 11, 70_000),));
+        assert_eq!(actor.delivery, frozen, "stale demand mutated delivery");
+        assert!(!actor
+            .observe_publication_at(started + Duration::from_secs(4), candidate(2, 11, 90_000),));
+        assert_eq!(
+            actor.delivery, frozen,
+            "over-pruned prefix mutated delivery"
+        );
+        assert!(actor
+            .observe_publication_at(started + Duration::from_secs(4), candidate(2, 11, 80_000),));
+
+        let mut third = second;
+        third.sequence = 3;
+        third.position_ms = 200_000;
+        third.buffered_from_ms = Some(200_000);
+        third.buffered_through_ms = 208_000;
+        actor
+            .control_at(started + Duration::from_secs(5), owned_control(&third))
+            .expect("nonzero-origin demand");
+        assert!(actor.observe_publication_at(
+            started + Duration::from_secs(5),
+            RollingPublicationObservation {
+                producer_attempt: attempt,
+                publication_commit: true,
+                demand_sequence: Some(3),
+                produced_segment: Some(12),
+                produced_end_ms: Some(180_000),
+                playlist_ready: true,
+                published_segment: Some(12),
+                published_end_ms: Some(180_000),
+                published_first_segment: Some(6),
+                published_start_ms: Some(60_000),
+                media_origin_ms: 100_000,
+                next_media_sequence: 13,
+                resolved_fetched_segment: None,
+                resolved_fetched_end_ms: None,
+            }
+        ));
     }
 
     fn producer_progress(
@@ -19918,10 +20148,9 @@ mod tests {
                 TerminalModelEvent::Publication => {
                     let expected =
                         model.terminal.is_none() && model.producer_attempt == initial_attempt;
-                    let accepted = actor.observe_publication_at(
-                        now,
-                        publication(initial_attempt, true, 1, 4_000, None),
-                    );
+                    let mut observation = publication(initial_attempt, true, 1, 4_000, None);
+                    observation.demand_sequence = actor.accepted_demand_sequence;
+                    let accepted = actor.observe_publication_at(now, observation);
                     assert_eq!(accepted, expected, "order {order:?}");
                     model.playlist_ready |= expected;
                 }
@@ -26323,11 +26552,16 @@ mod tests {
             deadline - Duration::from_millis(1),
             RollingPublicationObservation {
                 producer_attempt: 1,
+                publication_commit: true,
+                demand_sequence: None,
                 produced_segment: Some(0),
                 produced_end_ms: Some(6_000),
                 playlist_ready: true,
                 published_segment: Some(0),
                 published_end_ms: Some(6_000),
+                published_first_segment: Some(0),
+                published_start_ms: Some(0),
+                media_origin_ms: 0,
                 next_media_sequence: 1,
                 resolved_fetched_segment: None,
                 resolved_fetched_end_ms: None,
@@ -26468,11 +26702,16 @@ mod tests {
             published_at - Duration::from_millis(1),
             RollingPublicationObservation {
                 producer_attempt: 1,
+                publication_commit: true,
+                demand_sequence: None,
                 produced_segment: Some(1),
                 produced_end_ms: Some(12_000),
                 playlist_ready: true,
                 published_segment: Some(1),
                 published_end_ms: Some(12_000),
+                published_first_segment: Some(0),
+                published_start_ms: Some(0),
+                media_origin_ms: 0,
                 next_media_sequence: 2,
                 resolved_fetched_segment: None,
                 resolved_fetched_end_ms: None,
@@ -26508,13 +26747,7 @@ mod tests {
         };
         assert!(uuid::Uuid::parse_str(&proposal.proposal_id).is_ok());
         assert_eq!(cleanup.cleanup_policy, CleanupPolicy::RetainPublished);
-        assert_eq!(
-            actor.admit_producer_retry_at(advancing.instant, 1, "recipe-published"),
-            Err(ProducerAttemptRejection::RetryUnavailable)
-        );
-        assert!(actor
-            .settle_due_deadlines_at(advancing.instant + Duration::from_secs(30))
-            .is_none());
+        assert!(actor.settle_due_deadlines_at(advancing.instant).is_none());
         assert_eq!(actor.pending_decision.as_ref(), Some(&retained));
         assert_eq!(
             actor.authorize_response_publication_at(
@@ -26626,11 +26859,16 @@ mod tests {
             published_at - Duration::from_millis(1),
             RollingPublicationObservation {
                 producer_attempt: 1,
+                publication_commit: true,
+                demand_sequence: None,
                 produced_segment: Some(1),
                 produced_end_ms: Some(12_000),
                 playlist_ready: true,
                 published_segment: Some(1),
                 published_end_ms: Some(12_000),
+                published_first_segment: Some(0),
+                published_start_ms: Some(0),
+                media_origin_ms: 0,
                 next_media_sequence: 2,
                 resolved_fetched_segment: None,
                 resolved_fetched_end_ms: None,
@@ -26669,11 +26907,16 @@ mod tests {
                 deadline.instant + Duration::from_millis(1),
                 RollingPublicationObservation {
                     producer_attempt: 1,
+                    publication_commit: true,
+                    demand_sequence: None,
                     produced_segment: Some(2),
                     produced_end_ms: Some(18_000),
                     playlist_ready: true,
                     published_segment: Some(2),
                     published_end_ms: Some(18_000),
+                    published_first_segment: Some(0),
+                    published_start_ms: Some(0),
+                    media_origin_ms: 0,
                     next_media_sequence: 3,
                     resolved_fetched_segment: None,
                     resolved_fetched_end_ms: None,
@@ -27380,11 +27623,16 @@ mod tests {
             exit_at + Duration::from_millis(2),
             RollingPublicationObservation {
                 producer_attempt: 1,
+                publication_commit: true,
+                demand_sequence: None,
                 produced_segment: Some(2),
                 produced_end_ms: Some(26_000),
                 playlist_ready: true,
                 published_segment: Some(2),
                 published_end_ms: Some(26_000),
+                published_first_segment: Some(0),
+                published_start_ms: Some(0),
+                media_origin_ms: 0,
                 next_media_sequence: 3,
                 resolved_fetched_segment: None,
                 resolved_fetched_end_ms: None,

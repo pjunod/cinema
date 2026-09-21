@@ -64,10 +64,11 @@ failure it prevents.
    (waiting on a fleet measurement, a device test, or a decision that is
    Paul's — say which) ·
    `in-review` (adversarial review requested; name the reviewer session) ·
-   `merged` (the one implementation PR landed, but post-merge evidence is
-   still owed) · `done` (every milestone landed and its acceptance evidence
-   is recorded in the plan) · `abandoned: <reason>` (release the row back to
-   `unclaimed` in the same edit, keeping the reason in Notes).
+   `merged: <landed milestones>` (the one implementation PR landed, but
+   post-merge evidence is still owed; name the logical milestones without
+   implying separate PRs) · `done` (every milestone landed and its acceptance
+   evidence is recorded in the plan) · `abandoned: <reason>` (release the row
+   back to `unclaimed` in the same edit, keeping the reason in Notes).
 6. **Release what you cannot finish.** If your session is ending with a
    milestone unfinished, set `blocked:` or `abandoned:` with a one-line
    handover in Notes (branch, what is done, what is next, what is broken)
@@ -82,7 +83,7 @@ failure it prevents.
    evidence or merging for someone else, say why in Notes.
 8. **The PR lifecycle is the repository's**: draft until ready · adversarial
    review · findings folded · fast lane green (`make unit` locally for Rust
-   changes; the CI fast lane compiles but does not run tests — see
+   changes; the CI fast lane also runs it on ready Rust PRs — see
    `docs/ci/RUST-TEST-EXECUTION-POLICY.md`) · merge it yourself · delete the
    branch. Un-drafting on Forgejo is a title edit that does not re-trigger
    CI; close and reopen the PR to start the lane.
@@ -107,7 +108,7 @@ document (the twelve written second landed on 2026-09-20 as well).
 
 | Id | Plan | Executes | Priority | Status | Model | Session | Branch / PR | Last update | Notes |
 |---|---|---|---|---|---|---|---|---|---|
-| S-01 | [PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS](../streaming/PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md) | §2.1, C12 | week | unclaimed | | | | 2026-09-20 | Do first; every other ffmpeg-probe plan assumes M1 |
+| S-01 | [PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS](../streaming/PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md) | §2.1, C12 | week | blocked: P-01 #401 | gpt-5.6-sol | agent:/root/s01_builder | [`plan/S-01` · draft #396](http://192.168.4.7:3000/noirr/plurx/pulls/396) | 2026-09-20 | Adversarial finding #3080 addressed; focused exact-head evidence is current. Broad unit and ready-for-review transition wait for P-01 #401. M4 needs the merged image deployed, then §5.4 fleet evidence. |
 | S-02 | [MEDIA-BODY-BUFFERS](../streaming/MEDIA-BODY-BUFFERS.md) | §2.4, C1 | week | unclaimed | | | | 2026-09-20 | M1 only this week; M2 (ack batching) after measurement |
 | S-03 | [ENCODED-VOD-HOLD-AND-RELEASE](../streaming/ENCODED-VOD-HOLD-AND-RELEASE.md) | §2.6 | week | unclaimed | | | | 2026-09-20 | M0 fleet count first |
 | S-04 | [FONT-ATTESTATION-AND-BLOCKING-IO](../streaming/FONT-ATTESTATION-AND-BLOCKING-IO.md) | §2.7 | week (M1) / month (M2) | unclaimed | | | | 2026-09-20 | Needs `ldd \| grep fontconfig` on media1 before M2 |
@@ -129,8 +130,8 @@ document (the twelve written second landed on 2026-09-20 as well).
 | K-06 | [CLOCK-SKEW-GUARD-DESIGN](../cluster/CLOCK-SKEW-GUARD-DESIGN.md) | S9 | design | unclaimed | | | | 2026-09-20 | Half the exchange exists (`x-plurx-cluster-time-ms`); auth windows already assume ≤5 s |
 | K-07 | [STORE-CONTRACT-COVERAGE-AND-PLACEHOLDER-VALIDATION](../cluster/STORE-CONTRACT-COVERAGE-AND-PLACEHOLDER-VALIDATION.md) | S10 | week | unclaimed | | | | 2026-09-20 | Selector output confirmed 3/16 + 7/24; 29 discarded store results, not 13 |
 | K-08 | [HIQLITE-FORK-AND-DEPENDENCY-CLEANUP](../cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md) | §4.3 | month | unclaimed | | | | 2026-09-20 | Do not rename (patch-by-name); three edges reach aws-lc, cryptr fix removes one |
-| C-01 | [HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY](../server/HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY.md) | §2.5, W1, W2, W5, W6 | week | in-review | gpt-5.6-sol | agent:/root/c01_builder | `server/http-listener-timeouts` / #395 | 2026-09-20 | M1–M3 remain one plan PR under the current protocol. Adversarial finding #3067 is addressed after merging current `main`: accept-error backoff, wildcard validators, exact production HLS classification, and a real authenticated logout-fence regression. The one permitted broad-unit run passed all reached C-01 regressions but was stopped after four untouched transcode tests wedged; exact partial evidence is in plan log comment #3085. Post-merge still needs the §6.2–§6.4 lab soak, waterfall, and device-reader evidence. |
-| C-02 | [SCAN-AND-ENRICHMENT-HYGIENE](../server/SCAN-AND-ENRICHMENT-HYGIENE.md) | C3, C5 | week | blocked: P-01 #401 | gpt-5.6-sol | agent:/root/c02_builder | `plan/C-02` / #400 | 2026-09-20 | Review #3104 findings addressed with focused regressions; keep draft until #401 lands the repaired shared fast lane, then run the required whole-plan promotion evidence. Fleet NAS timing and provider-drop acceptance remain post-merge. |
+| C-01 | [HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY](../server/HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY.md) | §2.5, W1, W2, W5, W6 | week | merged: M1-M3 | gpt-5.6-sol | agent:/root/c01_builder | [PR #395](http://192.168.4.7:3000/noirr/plurx/pulls/395) | 2026-09-20 | One plan PR merged as `79113254`; §6.2–§6.4 lab soak, HAR/waterfall, and device-reader evidence remains pending, so this row is not done. |
+| C-02 | [SCAN-AND-ENRICHMENT-HYGIENE](../server/SCAN-AND-ENRICHMENT-HYGIENE.md) | C3, C5 | week | in-progress | gpt-5.6-sol | agent:/root/c02_builder | [PR #400](http://192.168.4.7:3000/noirr/plurx/pulls/400) | 2026-09-21 | Review #3104 findings addressed; P-01 is merged and exact-main promotion is running. Fleet NAS timing and provider-drop acceptance remain post-merge. |
 | C-03 | [IMAGE-SERVING-AND-DERIVATIVES](../server/IMAGE-SERVING-AND-DERIVATIVES.md) | C6 | month | unclaimed | | | | 2026-09-20 | Keep `original` backdrops |
 | C-04 | [AUTH-HARDENING](../server/AUTH-HARDENING.md) | C7, C8 | month | unclaimed | | | | 2026-09-20 | Fence kept; token expiry is Paul's call |
 | C-05 | [DETAIL-READS-AND-STORAGE-AVAILABILITY](../server/DETAIL-READS-AND-STORAGE-AVAILABILITY.md) | C14 | month | unclaimed | | | | 2026-09-20 | M1 marker must land and backfill before M2; cost is the node-local sidecar, not raft |
@@ -149,7 +150,7 @@ document (the twelve written second landed on 2026-09-20 as well).
 | D-01 | [ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET](../clients/ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET.md) | §2.9, D1 | week (measure) / month | unclaimed | | | | 2026-09-20 | Memory measurements first |
 | D-02 | [ANDROID-LIFECYCLE-PLAYER-BUILDER-AND-ERROR-CLASSIFICATION](../clients/ANDROID-LIFECYCLE-PLAYER-BUILDER-AND-ERROR-CLASSIFICATION.md) | D2, D3, D4, D7 | month | unclaimed | | | | 2026-09-20 | |
 | D-03 | [ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD](../clients/ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md) | D5, D6 (release) | week (backup rules) / month | unclaimed | | | | 2026-09-20 | |
-| P-01 | [RUST-TEST-EXECUTION-POLICY](../ci/RUST-TEST-EXECUTION-POLICY.md) | §2.2, §4.8 | week | unclaimed | | | | 2026-09-20 | Decision is Paul's (§7.1); the two red tests are not |
+| P-01 | [RUST-TEST-EXECUTION-POLICY](../ci/RUST-TEST-EXECUTION-POLICY.md) | §2.2, §4.8 | week | in-progress | gpt-5.6-sol | agent:/root/p01_builder | [`plan/P-01` / #401](http://192.168.4.7:3000/noirr/plurx/pulls/401) | 2026-09-21 | Implementation complete; the sole adversarial P1 is addressed and the plan is promotion-ready. Option (a), no schedule. M1 named runs were blocked by runner FFmpeg drift; bounded source-only sizing and failed run URLs are recorded. |
 | P-02 | [SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE](../ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md) | §4.6 | month | unclaimed | | | | 2026-09-20 | Observe inherited limits first |
 | P-03 | [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS](../ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md) | §4.4, §4.5 | month | unclaimed | | | | 2026-09-20 | Two decisions are Paul's; `publish_main` is unreachable on current triggers (blocks M7 behind P-01) |
 | P-04 | [ARCHITECTURE-DOC-RECONCILIATION](../ci/ARCHITECTURE-DOC-RECONCILIATION.md) | §4.7 | week | in-progress | gpt-5.6-sol | agent:/root/p04_builder | [PR #398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | 2026-09-20 | Both adversarial findings addressed: one-plan protocol aligned; 305-row audit now reports zero contradictions, missing headers or unclear statuses; exact-head validation pending |
@@ -165,8 +166,9 @@ C-01, C-02, K-03, K-07, P-04, then the client `week` items. A row in
 `blocked: fleet evidence` is not free work for a session without device or
 fleet access — leave it. A row in `in-review` is waiting on the named
 reviewer, not on a builder. `in-progress` always names one plan PR, never a
-set of milestone PRs; `merged` means its implementation landed and only the
-post-merge evidence recorded under rule 4 remains.
+set of milestone PRs; `merged: <landed milestones>` means its one
+implementation PR landed and only the post-merge evidence recorded under
+rule 4 remains.
 
 This file is kept honest by `tests/operations/test_docs_index.py` (every
 linked plan must exist) and by rule 2 above (a claim without a PR is not a

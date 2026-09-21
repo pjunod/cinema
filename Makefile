@@ -36,7 +36,7 @@ fmt: ## Auto-format all code
 # and daemon fixtures also require explicit features, so production dependency
 # feature unification cannot pull them into this target accidentally.
 # `--no-fail-fast` reports every failing target in one run.
-.PHONY: test-socket-permission-check unit test test-full
+.PHONY: test-socket-permission-check unit unit-core test test-full
 test-socket-permission-check: ## Verify unit tests may bind loopback mock-server sockets
 	@python3 -c 'import socket; listener = socket.socket(); listener.bind(("127.0.0.1", 0)); listener.close()' 2>/dev/null \
 		|| { echo >&2 "unit tests require permission to bind local loopback sockets; rerun outside the network-restricted sandbox or grant local-socket access"; exit 1; }
@@ -44,6 +44,13 @@ test-socket-permission-check: ## Verify unit tests may bind loopback mock-server
 unit: spike-lock-check test-socket-permission-check ## Run the fast Rust unit and SQLite contract lane
 	$(CARGO) test --workspace --exclude plurx-cluster-check --no-fail-fast
 	$(MAKE) vodencode-restart-check CARGO="$(CARGO_RAW)"
+
+# A focused core run must opt into the replicated-store implementation. The
+# workspace lane above gets it through feature unification from `plurxd`; a
+# bare `cargo test -p plurx-core --lib` does not.
+unit-core: override CARGO := PLURX_EXPECT_TEST_COUNT_AT_LEAST=$${PLURX_EXPECT_TEST_COUNT_AT_LEAST:-1100} scripts/require-test-count $(CARGO_RAW)
+unit-core: ## Run plurx-core with replicated-store tests and enforce the count floor
+	$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib
 
 test: unit ## Run the fast Rust test lane
 

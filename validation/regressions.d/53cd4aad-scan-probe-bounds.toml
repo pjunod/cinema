@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["53cd4aad"]
+points = ["library.catalog", "playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "Focused scan-probe regressions require one bounded collection and reap lifecycle for successful, failed, timed-out, and oversized helper output, while the fast Rust lanes retain the shared process owner and its library-scan consumer together."

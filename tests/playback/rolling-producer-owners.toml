@@ -1,6 +1,10 @@
 version = 1
 source = "crates/plurxd/src/transcode.rs"
-module_root = "crates/plurxd/src"
+module_roots = [
+  "crates/plurxd/src",
+  "crates/plurx-core/src/process",
+  "crates/plurx-core/src/scan",
+]
 
 # This catalog is intentionally mechanical and scans the whole Rust source,
 # including test-only references. Removing a legacy owner must update both the
@@ -146,7 +150,11 @@ pattern = "\\.observe_publication\\("
 # is being tested against. It is a fixture, not a producer owner.
 # +1 is the publication clock's exact-attempt frontier observation immediately
 # before its immutable bytes become visible.
-expected_occurrences = 5
+# 5 -> 7 in P-01's current-main fixture reconciliation: `mark_started` and
+# `install_seeded_served_playlist` now submit their synthetic publication to
+# the actor instead of mutating only compatibility state. Both are test-only
+# fixtures and neither owns a response or producer.
+expected_occurrences = 7
 kind = "response_admission"
 replacement = "background flow refresh plus exact fixtures; HTTP playlist observation uses the separately inventoried absolute-deadline admission"
 
@@ -169,7 +177,10 @@ replacement = "one helper and two call sites clamp polling to the already-owned 
 [[symbols]]
 id = "response-media-commit"
 pattern = "\\.commit_media\\("
-expected_occurrences = 2
+# +1 is the rolling-publication regression helper. It uses the production
+# move-only handoff and awaits actor acceptance so legacy fetch-budget tests
+# cannot manufacture a frontier the response path itself would reject.
+expected_occurrences = 3
 kind = "response_admission"
 replacement = "response EOF enters the actor with a move-only RollingMediaCommitHandoff so actor delivery, compatibility frontier, and flow wake settle synchronously; detached HTTP completion owns the bounded call"
 
@@ -234,7 +245,14 @@ pattern = "tokio::time::sleep\\("
 # (capped at 24 attempts) and the copy writer's grant-wait poll; the retired
 # cleanup owner's plain `sleep_until` became a shortenable select, so the net
 # count moves by one.
-expected_occurrences = 44
+# +1 is a test-only 10 ms poll inside a two-second timeout while the real
+# publication worker records low-rate window exhaustion. The worker owns the
+# terminal verdict; the regression only waits for that already-started owner.
+# 45 -> 41 in P-01's current-main fixture reconciliation: the post-fetch
+# publication-clock test no longer manufactures the retired inferred-ahead
+# suspend/resume path. Its fixed hold sleep and three progress/event polls were
+# removed; all four were test-only and owned no producer.
+expected_occurrences = 41
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -1302,9 +1320,13 @@ expected_occurrences = 9
 # list of today's helper names: comments and literals cannot contribute to or
 # offset a count, and turbofish payloads are removed before matching. Tests are
 # included deliberately. A new task, timer, process construction, or direct
-# process action anywhere under plurxd/src must change a reviewed count.
+# process action anywhere under the reviewed roots must change a reviewed
+# count.
 # Parenthesized call paths are normalized and aliases are fenced so a renamed
-# or wrapped function cannot bypass the scan.
+# or wrapped function cannot bypass the scan. S-01 extends the inventory to
+# the shared process owner and its scan consumer in plurx-core; otherwise the
+# move out of plurxd would make the most sensitive spawn, kill, wait, task and
+# timer shapes invisible to this gate. The counts below cover all three roots.
 # Cluster operations accounts for one joined test-only admission waiter; four
 # bounded timers (the shared peer deadline, its paused-time fixture, the CLI
 # drain poll, and the offline worker idle poll); and three non-process `status`
@@ -1575,7 +1597,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # +2 for the review regressions: the injectable listener server and the real
 # authenticated logout request each run in a test task whose JoinHandle is
 # awaited before the fixture returns. Neither task owns a child process.
-expected_occurrences = 529
+# +4 for C-02's bounded scan walk, root fingerprint, contained-path check, and
+# sparse-walker cancellation fixture. Every blocking task is awaited; none is
+# a detached producer or process owner.
+expected_occurrences = 534
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1642,7 +1667,7 @@ pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
 # is kill-on-drop, and is explicitly killed and reaped on timeout.
 # 47 -> 41: seven direct child spawns now enter `spawn_job_owned`; the one new
 # service checkpoint thread accounts for the net reduction of six.
-expected_occurrences = 41
+expected_occurrences = 42
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -1995,11 +2020,22 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +2 net for review fixes: the shipped accept loop adds its one-second
 # resource-pressure backoff, and the real logout-fence seam replaces the old
 # dummy sleep while its listener regression adds one bounded response wait.
+# +2 are test-only bounds around low-rate publication-worker settlement: one
+# timeout and its short poll sleep. Both are awaited, own no process, and
+# exercise the production worker's existing failure/retirement authority.
+# 821 -> 814 in P-01's current-main fixture reconciliation: the same four
+# sleeps reviewed under `all-async-sleeps`, plus the event, progress and
+# republish timeout wrappers around them, left with the retired inferred-ahead
+# suspend/resume fixture. No shipped timer or owner changed.
+# 824 is a fresh measurement of the merged S-01 and current-main tree; neither
+# branch's standalone count describes the combined source.
 # +1 for C-02's lease-heartbeat regression: one test-only sleep holds simulated
 # provider work past the original one-second lease TTL. `ActiveJobLease` owns
 # and joins the independent renewal task, and the test releases it explicitly;
 # no production timer, producer, process, or replacement policy is added.
-expected_occurrences = 820
+# C-02 also adds one test-only timeout around sparse-walker cancellation; it
+# bounds and awaits that exact task.
+expected_occurrences = 827
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2113,7 +2149,7 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # +1 is the Android-DV mux regression's test-only FFmpeg command. It copies a
 # short generated HEVC fixture to a temporary MP4, is collected synchronously
 # with `.output()`, owns no rolling producer, and cannot ship in the server.
-expected_occurrences = 123
+expected_occurrences = 127
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -2343,7 +2379,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 325 -> 324 after replacing dummy deadline responses with the production
 # authenticated logout route. Every retained `.status()` is an in-process HTTP
 # response inspection, not a command launch.
-expected_occurrences = 324
+expected_occurrences = 326
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -2434,7 +2470,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +4 are the packet probe's awaited completion, explicit timeout reap, and the
 # publication retirement ticket wait. Only the first three concern a process;
 # all retain their owner until the wait settles.
-expected_occurrences = 372
+expected_occurrences = 374
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -2466,7 +2502,7 @@ pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3
 # platform module performs the OS-specific signal operation synchronously.
 # Two additional matches are the shared job-owned wrapper declarations/calls;
 # neither is a raw unowned process lifecycle operation.
-expected_occurrences = 45
+expected_occurrences = 47
 
 [[module_structures]]
 id = "kill-on-drop-construction"
@@ -2524,7 +2560,7 @@ pattern = "kill_on_drop\\s*\\("
 # running helper; production child ownership is unchanged.
 # +1 is the bounded selected-video packet probe's cancellation backstop; normal
 # completion and timeout still explicitly reap the child.
-expected_occurrences = 75
+expected_occurrences = 77
 
 [[module_structures]]
 id = "rolling-supervisor-construction"

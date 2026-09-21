@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
 use crate::domain::{Item, ItemKind, Library, LibraryKind, MetadataPatch, NewItem, ProbeResult};
-use crate::error::StoreError;
+use crate::error::{ProbeError, StoreError};
 use crate::store::{PublicationStore, ReconcileOutcome, RootFingerprintStatus, Store};
 
 const WALK_PAGE: usize = 256;
@@ -238,6 +238,40 @@ const VIDEO_EXTS: &[&str] = &[
     "ogv", "3gp",
 ];
 
+static PROBE_OK: AtomicU64 = AtomicU64::new(0);
+static PROBE_FAILED: AtomicU64 = AtomicU64::new(0);
+static PROBE_TRANSIENT: AtomicU64 = AtomicU64::new(0);
+static PROBE_PARSE: AtomicU64 = AtomicU64::new(0);
+
+async fn probe_with_outcome(path: &Path) -> Result<ProbeResult, ProbeError> {
+    let result = probe::probe(path).await;
+    let counter = match &result {
+        Ok(_) => &PROBE_OK,
+        Err(ProbeError::Spawn(_) | ProbeError::Failed { .. }) => &PROBE_FAILED,
+        Err(ProbeError::Transient { .. }) => &PROBE_TRANSIENT,
+        Err(ProbeError::Parse(_)) => &PROBE_PARSE,
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+    result
+}
+
+/// Process-lifetime scan probe outcomes. Fixed labels keep the series bounded;
+/// paths and error text belong in the scan report and log, not metric labels.
+pub fn prometheus_probe_outcomes() -> String {
+    format!(
+        "# HELP plurx_scan_probe_outcomes_total Scan ffprobe outcomes by result class.\n\
+         # TYPE plurx_scan_probe_outcomes_total counter\n\
+         plurx_scan_probe_outcomes_total{{outcome=\"ok\"}} {}\n\
+         plurx_scan_probe_outcomes_total{{outcome=\"failed\"}} {}\n\
+         plurx_scan_probe_outcomes_total{{outcome=\"transient\"}} {}\n\
+         plurx_scan_probe_outcomes_total{{outcome=\"parse\"}} {}\n",
+        PROBE_OK.load(Ordering::Relaxed),
+        PROBE_FAILED.load(Ordering::Relaxed),
+        PROBE_TRANSIENT.load(Ordering::Relaxed),
+        PROBE_PARSE.load(Ordering::Relaxed),
+    )
+}
+
 /// Audio containers accepted in a Books library. These are formats ffmpeg's
 /// existing probe/direct-play stack understands on the project's supported
 /// platforms; M4B is listed separately even though it is an MP4-family
@@ -451,13 +485,20 @@ pub async fn reprobe_files_with_publication(
                 continue;
             }
         };
-        match probe::probe(&file.path).await {
+        match probe_with_outcome(&file.path).await {
             Ok(probe) => {
                 store
                     .upsert_file(file.item_id, &path_str, size, mtime, &probe)
                     .await?;
                 report.repaired += 1;
                 tracing::info!(path = %path_str, "media details recovered");
+            }
+            Err(e @ ProbeError::Transient { .. }) => {
+                report.still_failing += 1;
+                tracing::error!(path = %path_str, error = %e, "re-probe did not finish");
+                report.problems.push(format!(
+                    "`{path_str}` still has no media details because its probe did not finish: {e}"
+                ));
             }
             Err(e) => {
                 report.still_failing += 1;
@@ -1264,13 +1305,21 @@ async fn record_candidates(
                 // item from the filename and orphan a home video that had been
                 // renamed by an NFO or by hand.
                 if !ex.probed {
-                    match probe::probe(&path).await {
+                    match probe_with_outcome(&path).await {
                         Ok(probe) => {
                             store
                                 .upsert_file(ex.item_id, &path_str, size, mtime, &probe)
                                 .await?;
                             report.repaired += 1;
                             tracing::info!(path = %path_str, "media details recovered on rescan");
+                        }
+                        Err(e @ ProbeError::Transient { .. }) => {
+                            tracing::error!(path = %path_str, error = %e, "probe still did not finish");
+                            report.errors += 1;
+                            report.degraded += 1;
+                            report.note(format!(
+                                "still no media details for `{path_str}` because its probe did not finish: {e} — it will be tried again on the next scan"
+                            ));
                         }
                         Err(e) => {
                             tracing::error!(path = %path_str, error = %e, "probe still failing");
@@ -1367,8 +1416,17 @@ async fn record_candidates(
         {
             text_book_probe(&path)
         } else {
-            match probe::probe(&path).await {
+            match probe_with_outcome(&path).await {
                 Ok(p) => p,
+                Err(e @ ProbeError::Transient { .. }) => {
+                    tracing::error!(path = %path_str, error = %e, "probe did not finish; recording without media detail");
+                    report.errors += 1;
+                    report.degraded += 1;
+                    report.note(format!(
+                        "could not finish reading media details for `{path_str}`: {e} — it was added without codec, duration, or track info and will be tried again on the next scan"
+                    ));
+                    Default::default()
+                }
                 Err(e) => {
                     tracing::error!(path = %path_str, error = %e, "probe failed; recording without media detail");
                     report.errors += 1;
@@ -1998,6 +2056,68 @@ mod tests {
             .expect("episodes");
         assert_eq!(episodes.len(), 1, "expected one episode: {episodes:?}");
         episodes.into_iter().next().expect("episode")
+    }
+
+    #[tokio::test]
+    async fn transient_probe_is_left_unprobed_and_retried_on_the_next_scan() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        let directory = tempfile::tempdir().expect("media fixture");
+        let path = write_fake_video(directory.path(), "Heat (1995).mkv").await;
+        let library = movie_library(&store, directory.path()).await;
+        let fixture = probe::tests::install_fixture(
+            &path,
+            probe::tests::FixtureMode::SleepThenJson,
+            std::time::Duration::from_millis(200),
+        );
+
+        let first = scan_library(&store, &library).await.expect("initial scan");
+        assert_eq!(first.added, 1);
+        assert_eq!(first.degraded, 1);
+        let item = store
+            .list_top_items(library.id, ItemSort::Title, 0, 10)
+            .await
+            .expect("movie list")
+            .items
+            .into_iter()
+            .next()
+            .expect("movie item");
+        assert!(
+            !store
+                .files_for_item(item.id)
+                .await
+                .expect("stored files")
+                .into_iter()
+                .next()
+                .expect("file row")
+                .probed
+        );
+
+        let second = scan_library(&store, &library).await.expect("repair scan");
+        assert_eq!(second.unchanged, 1);
+        assert_eq!(second.repaired, 1);
+        assert!(
+            store
+                .files_for_item(item.id)
+                .await
+                .expect("stored files")
+                .into_iter()
+                .next()
+                .expect("file row")
+                .probed
+        );
+        assert_eq!(fixture.calls.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn probe_outcome_metrics_have_only_the_fixed_result_labels() {
+        let metrics = prometheus_probe_outcomes();
+        for outcome in ["ok", "failed", "transient", "parse"] {
+            assert!(metrics.contains(&format!("outcome=\"{outcome}\"")));
+        }
+        assert_eq!(
+            metrics.matches("plurx_scan_probe_outcomes_total{").count(),
+            4
+        );
     }
 
     #[tokio::test]
