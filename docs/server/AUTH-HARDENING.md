@@ -1,6 +1,6 @@
 # Auth hardening — queue the fence instead of refusing it, and bound what a stranger can try
 
-**Status:** ready for review · **Executes:** C7 and C8 from
+**Status:** executing in [PR #433](http://192.168.4.7:3000/noirr/plurx/pulls/433) · **Executes:** C7 and C8 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 (assessment correction 1 and rows C7, F-core-8, C8, F-core-9 in
 [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md))
@@ -10,11 +10,11 @@
 
 Read §2 first — it explains the two-phase revocation fence in the words of
 the code that implements it, because the first draft of the review tried to
-remove it and the assessment refused. Then build §5: M1 (bounded admission
-to the fence) is one PR; M2 (login backoff) is one PR; M3 (devices list)
-is one PR; M4 (token idle expiry) is a **product decision first** and a PR
-only after §7.1 is answered. `?token=` narrowing is not built here — §4
-says why. Every `file:line` is from `88a3957a`; re-verify by function name.
+remove it and the assessment refused. The workboard's one-plan/one-PR rule
+supersedes the original milestone-sized PR language: M1–M3 are logical commits
+in PR #433, and M4 records the delegated product decision in the same PR.
+`?token=` narrowing is not built here — §4 says why. Every `file:line` is from
+`88a3957a`; re-verify by function name.
 
 **If a step seems to require deleting a token without the Begin/End
 peer fanout, answering an admin recovery read from the cache while a
@@ -324,13 +324,14 @@ What the number would do, each read from the code:
 | Bulk expiry is a fanout per token, not one statement | one Begin/End per revocation operation; the queue from M1 bounds concurrency | A nightly sweep that expires 40 tokens is 40 fences; it must be a leader-singleton job under the job lease, paced (one per few seconds), never a `DELETE … WHERE last_seen_at < ?` |
 | Plex façade clients hold `X-Plex-Token` forever | `plex.rs` maps it onto the same tokens | Kodi/PKC has no re-login UI; an expired token is a support call |
 
-**Decision requested (§7.1):** window length, and whether `device`-tagged
-TV/offline sessions get a longer window than browsers. The plan's
-recommendation, if a number is wanted now: **180 days idle** for every
-token, expiry executed as a paced leader-singleton sweep through the M1
-fence, with `devices` (M3) shipped first so a user can see what will expire.
-Ninety days — the number the first draft implied — signs out a monthly
-Apple TV. Not building until answered.
+**Decision (2026-09-21): keep login tokens non-expiring for now.** The delegated
+choice favours recoverability over an arbitrary lifetime: Plex/Kodi has no
+reliable re-login flow, infrequently used TV clients can sleep for months, and
+offline clients may return without network access to repair a session. M3's
+visible inventory and fenced per-device revocation are the immediate safety
+control. Automatic expiry remains follow-up work only after every client has a
+tested refresh or re-login path; no schema, sweep, setting, or hidden gate is
+introduced by this plan.
 
 ## 4. Guardrails (non-goals)
 
@@ -425,15 +426,13 @@ Acceptance: `cargo test -p plurxd http::users::devices` and
 `cargo test -p plurx-core store::` green; `python3 validation/ci_scope.py`
 lists the touched store files under `cluster_auth`.
 
-### 5.4 M4 — token idle expiry (gated on §7.1)
+### 5.4 M4 — token idle expiry decision
 
-Not scheduled. When answered: schema migration adding `expires_at`
-(append-only migration, both backends, per the migration rules), the
-paced leader-singleton sweep through the M1 fence, the setting, the
-readiness line, and the client-facing "signed out because this device was
-idle for N days" message. Acceptance would include an offline-package
-lease renewal after expiry answering the typed 401 the clients already
-handle.
+Decision complete: retain non-expiring tokens. A future expiry proposal must
+first deliver and test client recovery semantics, then add the append-only
+schema, paced leader-singleton fence sweep, advisory Developer readiness, and
+client-facing expiry reason together. M4 intentionally changes no runtime
+behaviour in this PR.
 
 ## 6. Verification and rollout
 
@@ -470,10 +469,9 @@ Report anything that did not match, with the time of day for log lookup.
 
 ## 7. Open questions
 
-1. **Idle-expiry window** (§3.4). 180 days for all tokens, or a split
-   (browsers 30 days, `device`-tagged TV/offline sessions 180)? And does
-   the Plex façade get an exemption or a documented "sign in again"?
-   Nothing in M4 starts until this is answered.
+1. **Idle-expiry window — resolved 2026-09-21** (§3.4). No automatic expiry
+   until Plex/Kodi, TV, and offline clients have tested recovery semantics.
+   M3 inventory and explicit fenced revocation ship first.
 2. **`REVOCATION_ADMISSION_WAIT` on a five-voter cluster.** The numbers in
    §3.1 assume three members; a fanout to five is still under 2 s per
    phase but the tail is longer. Revisit if a five-voter lab appears.
@@ -499,4 +497,8 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | Claim | pending | Claimed the whole C-04 plan on `plan/C-04`; draft PR precedes implementation. The existing Begin/Store/End revocation fence remains non-negotiable. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | Claim | [#433](http://192.168.4.7:3000/noirr/plurx/pulls/433) | Claimed the whole C-04 plan on `plan/C-04`; draft PR preceded implementation. The existing Begin/Store/End revocation fence remains non-negotiable. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 | [#433](http://192.168.4.7:3000/noirr/plurx/pulls/433) | `3c0696eca`: eight-slot admission, 2.5 s timeout, RAII cleanup ownership, and four fixed revocation outcomes. Pinned Rust 1.97.1 `cargo check -p plurxd --all-targets` and the focused queue regression passed; three-node simultaneous-device acceptance remains deployment evidence. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 | [#433](http://192.168.4.7:3000/noirr/plurx/pulls/433) | `1373f1202`: bounded pair/address backoff, trusted-proxy boundary, fixed metrics, and advisory-only System notice. Seven focused throttle/proxy tests passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 | [#433](http://192.168.4.7:3000/noirr/plurx/pulls/433) | `b87ce2554`: bounded prefix-only inventory and uniquely matched fenced revoke on SQLite/Hiqlite, self/admin routes, docs, and cluster-auth validation ownership. Focused Store and real-router regressions passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 decision | [#433](http://192.168.4.7:3000/noirr/plurx/pulls/433) | Retain non-expiring tokens until all clients have tested refresh/re-login recovery. M3 inventory and explicit revocation are the compensating control; no expiry schema, sweep, setting, or feature gate was added. |
