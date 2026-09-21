@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["6f4e279e"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The rolling_publication_budget regressions drive the real publication cycle and actor for one simulated hour of 2x production against 1x playback, reject a target-only replenishment model, retain only the selected variable-duration prefix, freeze stale and non-rendering demand, fence stale demand identity and an over-pruned protected start, prevent download-frontier retention from passing that start, bound legacy rapid-fetch publication, and preserve a slow viewer's protected EOF tail. The mkv_hls_schedule regressions retain target/deadline behavior and the startup reserve bounds at 0.25x, 1x, 2x, and 4x."

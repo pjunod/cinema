@@ -36,7 +36,7 @@ failure checks remain authoritative.
 | Retention and EOF preservation | implemented | Download-frontier removal is clamped to the protected segment; EOF retains the protected history and ordered tail |
 | Legacy compatibility | implemented | Fixed 1× wall-time bootstrap plus resolved-fetch cap; explicit cutover clears the bootstrap anchor once |
 | Focused regression set | authored, not run | `rolling_publication_budget*` covers one simulated hour, the target-only negative control, variable durations, actor fences, stale/held demand, retention, legacy burst and EOF |
-| Documentation and validation catalog | implemented | This page, `docs/README.md`, and the `playback.pipeline` contract; commit-hash regression mapping follows the runtime commit |
+| Documentation and validation catalog | implemented | This page, `docs/README.md`, the `playback.pipeline` contract, and an exact `6f4e279e` regression mapping |
 | Adversarial implementation review | not started | exactly one review after implementation is complete |
 | Final focused and fast-lane proof | not started | run once on the reviewed candidate |
 | Merge to `main` | not started | only after the current fast lane is green |
@@ -76,6 +76,10 @@ rustup run 1.97.1 cargo check -p plurxd --all-targets
 
 No focused regression has been executed yet. Per the requested CI economy,
 those tests run once after the adversarial implementation review is addressed.
+
+The cohesive runtime implementation is commit `6f4e279e`; its regression
+catalog entry maps that exact corrective commit to `playback.pipeline` and the
+Rust gates.
 
 ## Decisions to revisit — only if evidence forces them
 
