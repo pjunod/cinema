@@ -30,6 +30,7 @@ final class LiveTvPlayerController: ObservableObject {
     @Published private(set) var busy = false
     @Published private(set) var playing = false
     @Published private(set) var paused = false
+    @Published private(set) var systemPaused = false
     /// True only for a sustained mid-stream stall. AVPlayer's ordinary
     /// buffering-rate evaluation at startup is not something the viewer
     /// should be told about.
@@ -63,10 +64,11 @@ final class LiveTvPlayerController: ObservableObject {
     private var channelChange: Task<Void, Never>?
     private var timeControlObservation: NSKeyValueObservation?
     private var waitingDebounce: Task<Void, Never>?
+    private let audioSessionObserver = PlaybackAudioSessionObserver()
     private var ownsAudioSession = false
     private var activateAudioSession: () -> Void = {
 #if os(iOS)
-        try? AVAudioSession.sharedInstance().setCategory(.playback)
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         try? AVAudioSession.sharedInstance().setActive(true)
 #endif
     }
@@ -171,11 +173,19 @@ final class LiveTvPlayerController: ObservableObject {
         let item = AVPlayerItem(url: try api.playlistURL(info.sessionId))
         item.preferredForwardBufferDuration = 12
         player.replaceCurrentItem(with: item)
+        #if os(tvOS)
+        _ = PlaybackDisplayCriteria.apply(
+            item: item,
+            itemIsCurrent: player.currentItem === item,
+            openIsCurrent: serial == expected
+        )
+        #endif
         // Live TV owns a separate AVPlayer from finite-media playback, so
         // it must establish the same playback audio session itself. The
         // default category follows the iPhone silent switch: video moves,
         // but the AAC track is inaudible.
         beginAudioSession()
+        startAudioSessionObservation()
         title = channel.title
         watching = info.channel
         delivery = info.delivery
@@ -204,7 +214,7 @@ final class LiveTvPlayerController: ObservableObject {
                     if item.status == .failed { throw Self.playerFailure(item.error) }
                     let position = self.player.currentTime().seconds
                     self.sampleLiveEdge(item: item, position: position)
-                    if !self.paused && progress.observe(position: position) {
+                    if !self.paused && !self.systemPaused && progress.observe(position: position) {
                         try await api.keepalive(info.sessionId)
                         guard self.serial == expected else { return }
                         // The other half of the keepalive: the hint's
@@ -397,6 +407,10 @@ final class LiveTvPlayerController: ObservableObject {
         let expected = serial
         waitingDebounce?.cancel()
         waitingDebounce = nil
+        guard !systemPaused else {
+            waiting = false
+            return
+        }
         guard Self.waitingDecision(status: status, reason: reason) else {
             waiting = false
             return
@@ -472,6 +486,38 @@ final class LiveTvPlayerController: ObservableObject {
         ownsAudioSession = true
     }
 
+    private func startAudioSessionObservation() {
+        audioSessionObserver.start(
+            wantsPlayback: { [weak self] in self?.playing == true && self?.paused == false },
+            receive: { [weak self] event in self?.handleAudioSessionEvent(event) }
+        )
+    }
+
+    private func handleAudioSessionEvent(_ event: PlaybackAudioSessionObserver.Event) {
+        switch event {
+        case .interruption(.suspend):
+            systemPaused = true
+            waitingDebounce?.cancel()
+            waiting = false
+            player.pause()
+            surfaceMessage = "Paused — audio interrupted"
+        case .interruption(.resume):
+            systemPaused = false
+            surfaceMessage = nil
+            if playing && !paused { player.play() }
+        case .interruption(.stay):
+            systemPaused = false
+            surfaceMessage = nil
+        case .routeChange(let revokesIntent):
+            guard revokesIntent else { return }
+            systemPaused = false
+            playing = false
+            paused = true
+            player.pause()
+            surfaceMessage = "Paused — audio route disconnected"
+        }
+    }
+
     private func endAudioSession() {
         guard ownsAudioSession else { return }
         ownsAudioSession = false
@@ -488,6 +534,8 @@ final class LiveTvPlayerController: ObservableObject {
         waitingDebounce?.cancel()
         waitingDebounce = nil
         waiting = false
+        audioSessionObserver.stop()
+        systemPaused = false
         behindEdgeSeconds = nil
         bufferedSeconds = nil
         pausedAt = nil
@@ -497,6 +545,9 @@ final class LiveTvPlayerController: ObservableObject {
         delivery = nil
         player.pause()
         player.replaceCurrentItem(with: nil)
+        #if os(tvOS)
+        PlaybackDisplayCriteria.activeManager()?.preferredDisplayCriteria = nil
+        #endif
         title = nil
         playing = false
         paused = false

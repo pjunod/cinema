@@ -292,6 +292,14 @@
       "class": "hold"
     },
     {
+      "id": "system_interruption",
+      "context": "attached",
+      "class": "hold",
+      "retired_by": [
+        "system_resumed"
+      ]
+    },
+    {
       "id": "media_waiting",
       "context": "attached",
       "class": "buffering"
@@ -365,6 +373,49 @@
     "surface_log_only"
   ],
   "cases": [
+    {
+      "name": "system_interruption_survives_hold_timer_and_clears_on_resume",
+      "events": [
+        {
+          "t": 0,
+          "attach": "g1"
+        },
+        {
+          "t": 1000,
+          "system_paused": true
+        },
+        {
+          "t": 32000,
+          "tick": true
+        },
+        {
+          "t": 33000,
+          "system_paused": false
+        }
+      ],
+      "expect": [
+        {
+          "at": 1000,
+          "surface": "banner",
+          "class": "hold",
+          "source": "system_interruption",
+          "title": "Paused — call in progress",
+          "detail": "Paused — audio interrupted"
+        },
+        {
+          "at": 32000,
+          "surface": "banner",
+          "source": "system_interruption"
+        },
+        {
+          "at": 33000,
+          "surface": "none",
+          "log": [
+            "surface_cleared"
+          ]
+        }
+      ]
+    },
     {
       "name": "buffering_retired_by_unbroken_presentation",
       "events": [

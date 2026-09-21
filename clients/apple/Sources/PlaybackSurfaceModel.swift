@@ -156,6 +156,7 @@ struct PlaybackSurfaceLog: Equatable, Sendable {
         case ownerSuccess = "owner_success"
         case ownerStopped = "owner_stopped"
         case playbackNotRequested = "playback_not_requested"
+        case systemResumed = "system_resumed"
         case timer
         case user
     }
@@ -258,6 +259,7 @@ enum PlaybackSurfaceContract {
         case attachedRetired = "attached_retired"
         case ownerSuccess = "owner_success"
         case playbackNotRequested = "playback_not_requested"
+        case systemResumed = "system_resumed"
         case timer
         case user
     }
@@ -310,6 +312,9 @@ enum PlaybackSurfaceContract {
         let thenWhenStopped: PlaybackFault.Class?
         let carries: [String]
         let retryable: Bool
+        /// A source may narrow its class's retirement rules. System suspension
+        /// is a hold notice, but unlike a server hold it must not time out.
+        let retiredBy: [Retirement]?
 
         init(
             _ id: String,
@@ -320,7 +325,8 @@ enum PlaybackSurfaceContract {
             requiresPlayerStopped: Bool = false,
             thenWhenStopped: PlaybackFault.Class? = nil,
             carries: [String] = [],
-            retryable: Bool = false
+            retryable: Bool = false,
+            retiredBy: [Retirement]? = nil
         ) {
             self.id = id
             self.context = context
@@ -331,6 +337,7 @@ enum PlaybackSurfaceContract {
             self.thenWhenStopped = thenWhenStopped
             self.carries = carries
             self.retryable = retryable
+            self.retiredBy = retiredBy
         }
     }
 
@@ -410,6 +417,15 @@ enum PlaybackSurfaceContract {
     static let sources: [SourceRow] = [
         SourceRow("owner_stopped", nil, .stopped, requiresPlayerStopped: true),
         SourceRow("owner_exhausted", nil, .exhausted, requiresPlayerStopped: true),
+        SourceRow(
+            "startup_exhausted",
+            nil,
+            .exhausted,
+            actions: [.close, .retry],
+            requiresPlayerStopped: true
+        ),
+        SourceRow("hls_init_invalid", .start, .stopped, requiresPlayerStopped: true),
+        SourceRow("hls_init_unsupported", .start, .stopped, requiresPlayerStopped: true),
         SourceRow("auth_401_403", nil, .stopped, actions: [.signIn, .close], requiresPlayerStopped: true),
         SourceRow("vod_source_rescan_required", .start, .stopped, requiresPlayerStopped: true),
         SourceRow("vod_source_unsupported", .start, .stopped, requiresPlayerStopped: true),
@@ -464,6 +480,7 @@ enum PlaybackSurfaceContract {
         // refusal about the destination rather than a verdict on the predecessor.
         SourceRow("media_owner_lost_410", nil, .recovering, thenWhenStopped: .stopped, carries: ["position_ms"]),
         SourceRow("control_hold", .attached, .hold),
+        SourceRow("system_interruption", .attached, .hold, retiredBy: [.systemResumed]),
         SourceRow("media_waiting", .attached, .buffering),
         SourceRow("owner_recovery_step", nil, .recovering),
         SourceRow("readiness_deadline_rungs_left", nil, .recovering),
@@ -554,6 +571,9 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
         /// waiting when it resumes, the next sample raises the wait again and
         /// THAT is the raise.
         case playbackRequested(Bool)
+        /// System suspension is distinct from viewer transport intent. It
+        /// raises one indefinite hold and clears only when the system ends it.
+        case systemPaused(Bool)
         case userAction(PlaybackFault.Action)
         case hidden(Bool)
         case tick
@@ -706,6 +726,25 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
                 Self.retires($0, by: .playbackNotRequested)
             }
 
+        case .systemPaused(let paused):
+            if paused, let attached {
+                let event = Self.raise(
+                    source: "system_interruption",
+                    context: .attached,
+                    attached: attached,
+                    title: "Paused — call in progress",
+                    detail: "Paused — audio interrupted"
+                )
+                if case .raise(let fault, let context) = event {
+                    applyRaise(fault, context: context, now: now, log: &log)
+                }
+            } else if !paused {
+                drop(&log, by: .systemResumed) {
+                    $0.source == "system_interruption"
+                        && Self.retires($0, by: .systemResumed)
+                }
+            }
+
         case .userAction(let action):
             let current = surfaceFrom(now: now).fault
             var target: Int? = nil
@@ -841,7 +880,11 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
         // Each retirement reason is a property of the CLASS, not of the event
         // that carries it: a prompt the viewer has to answer is not swept away
         // because a seek happened to land underneath it.
-        PlaybackSurfaceContract.rule(for: fault.cls).retiredBy.contains(reason)
+        let sourceRetirement = PlaybackSurfaceContract.sources
+            .first(where: { $0.id == fault.source })?
+            .retiredBy
+        return (sourceRetirement ?? PlaybackSurfaceContract.rule(for: fault.cls).retiredBy)
+            .contains(reason)
     }
 
     private mutating func drop(
@@ -896,8 +939,11 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
         var reasons: [Int: PlaybackSurfaceLog.Reason] = [:]
         for fault in faults {
             let rule = PlaybackSurfaceContract.rule(for: fault.cls)
+            let retiredBy = PlaybackSurfaceContract.sources
+                .first(where: { $0.id == fault.source })?
+                .retiredBy ?? rule.retiredBy
             if let timedMs = rule.timedMs,
-               rule.retiredBy.contains(.timer),
+               retiredBy.contains(.timer),
                !(rule.timerPausedWhileActions && !fault.actions.isEmpty),
                fault.raisedAt <= now,
                fault.raisedAt.duration(to: now) >= .milliseconds(timedMs) {
@@ -905,7 +951,7 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
                 reasons[fault.seq] = .timer
                 continue
             }
-            if rule.retiredBy.contains(.presentingContinuousMs),
+            if retiredBy.contains(.presentingContinuousMs),
                let bound = PlaybackSurfaceContract.continuousTiming[fault.cls],
                let elapsed = continuousElapsed(fault, now: now),
                elapsed >= .milliseconds(bound) {
@@ -916,12 +962,12 @@ struct PlaybackSurfaceModel: Equatable, Sendable {
             // Evidence never retires a fault about a pending destination.
             if fault.intent != nil { continue }
             guard presenting else { continue }
-            if rule.retiredBy.contains(.presenting) {
+            if retiredBy.contains(.presenting) {
                 expired.insert(fault.seq)
                 reasons[fault.seq] = .presenting
                 continue
             }
-            if rule.retiredBy.contains(.presentingAfterRaise), evidencePostdates(fault) {
+            if retiredBy.contains(.presentingAfterRaise), evidencePostdates(fault) {
                 expired.insert(fault.seq)
                 reasons[fault.seq] = .presenting
             }

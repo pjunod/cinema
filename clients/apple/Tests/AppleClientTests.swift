@@ -204,11 +204,13 @@ private struct PlaybackSurfaceContractFixture: Decodable {
         let thenWhenStopped: String?
         let carries: [String]?
         let retryable: Bool?
+        let retiredBy: [String]?
 
         enum CodingKeys: String, CodingKey {
             case id, context, codes, actions, requires, carries, retryable
             case cls = "class"
             case thenWhenStopped = "then_when_stopped"
+            case retiredBy = "retired_by"
         }
     }
 
@@ -253,6 +255,7 @@ private struct PlaybackSurfaceContractFixture: Decodable {
         let ownerSuccess: String?
         let userAction: String?
         let playbackRequested: Bool?
+        let systemPaused: Bool?
         let tick: Bool?
 
         enum CodingKeys: String, CodingKey {
@@ -266,6 +269,7 @@ private struct PlaybackSurfaceContractFixture: Decodable {
             case ownerSuccess = "owner_success"
             case userAction = "user_action"
             case playbackRequested = "playback_requested"
+            case systemPaused = "system_paused"
         }
     }
 
@@ -3086,6 +3090,7 @@ final class AppleClientTests: XCTestCase {
             return .userAction(PlaybackFault.Action(rawValue: action) ?? .close)
         }
         if let requested = raw.playbackRequested { return .playbackRequested(requested) }
+        if let paused = raw.systemPaused { return .systemPaused(paused) }
         return .tick
     }
 
@@ -3254,6 +3259,7 @@ final class AppleClientTests: XCTestCase {
             XCTAssertEqual(mine.thenWhenStopped?.rawValue, row.thenWhenStopped, row.id)
             XCTAssertEqual(mine.carries, row.carries ?? [], row.id)
             XCTAssertEqual(mine.retryable, row.retryable ?? false, row.id)
+            XCTAssertEqual(mine.retiredBy?.map(\.rawValue), row.retiredBy, row.id)
         }
         XCTAssertEqual(PlaybackSurfaceContract.timings.bufferingMinMs, fixture.timings.bufferingMinMs)
         XCTAssertEqual(PlaybackSurfaceContract.timings.holdNoticeMs, fixture.timings.holdNoticeMs)
@@ -5354,6 +5360,97 @@ final class AppleClientTests: XCTestCase {
         // letting it carry into the next press of Play.
         XCTAssertEqual(detector.sample(positionMs: 12_000, shouldMonitor: false, established: true, waitingRegime: false), .none)
         XCTAssertEqual(detector.sample(positionMs: 12_000, shouldMonitor: true, established: true, waitingRegime: false), .none)
+    }
+
+    func testDisplayCriteriaRequiresMatchingCurrentItemAndCurrentOpen() {
+        XCTAssertEqual(
+            DisplayCriteriaDecision.decide(
+                matchingEnabled: true, itemIsCurrent: true, openIsCurrent: true
+            ),
+            .apply
+        )
+        XCTAssertEqual(
+            DisplayCriteriaDecision.decide(
+                matchingEnabled: false, itemIsCurrent: true, openIsCurrent: true
+            ),
+            .skip
+        )
+        XCTAssertEqual(
+            DisplayCriteriaDecision.decide(
+                matchingEnabled: true, itemIsCurrent: false, openIsCurrent: true
+            ),
+            .skip
+        )
+        XCTAssertEqual(
+            DisplayCriteriaDecision.decide(
+                matchingEnabled: true, itemIsCurrent: true, openIsCurrent: false
+            ),
+            .skip
+        )
+    }
+
+    func testAudioInterruptionPolicyKeepsSystemSuspensionSeparateFromIntent() {
+        XCTAssertEqual(
+            PlaybackAudioSessionObserver.interruptionResponse(
+                type: .began, options: [], wantsPlayback: true
+            ),
+            .suspend
+        )
+        XCTAssertEqual(
+            PlaybackAudioSessionObserver.interruptionResponse(
+                type: .ended, options: .shouldResume, wantsPlayback: true
+            ),
+            .resume
+        )
+        XCTAssertEqual(
+            PlaybackAudioSessionObserver.interruptionResponse(
+                type: .ended, options: .shouldResume, wantsPlayback: false
+            ),
+            .stay
+        )
+        XCTAssertEqual(
+            PlaybackAudioSessionObserver.interruptionResponse(
+                type: .ended, options: [], wantsPlayback: true
+            ),
+            .stay
+        )
+    }
+
+    func testOnlyLosingTheOldAudioRouteRevokesPlaybackIntent() {
+        XCTAssertTrue(PlaybackAudioSessionObserver.routeChangeRevokesIntent(
+            reason: .oldDeviceUnavailable
+        ))
+        XCTAssertFalse(PlaybackAudioSessionObserver.routeChangeRevokesIntent(
+            reason: .newDeviceAvailable
+        ))
+        XCTAssertFalse(PlaybackAudioSessionObserver.routeChangeRevokesIntent(
+            reason: .categoryChange
+        ))
+    }
+
+    func testSystemSuspensionCannotAccumulateStallRecoveryEvidence() {
+        var detector = PlaybackStallDetector()
+        for _ in 0..<3 {
+            XCTAssertEqual(
+                detector.sample(
+                    positionMs: 10_000,
+                    shouldMonitor: false,
+                    established: true,
+                    waitingRegime: false
+                ),
+                .none
+            )
+        }
+        XCTAssertEqual(
+            detector.sample(
+                positionMs: 10_000,
+                shouldMonitor: true,
+                established: true,
+                waitingRegime: false
+            ),
+            .none,
+            "resuming starts a fresh evidence window rather than nudging immediately"
+        )
     }
 
     func testPresentationProgressAgeKeepsUnavailableDistinctFromZero() {

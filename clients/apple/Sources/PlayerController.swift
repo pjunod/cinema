@@ -2093,6 +2093,8 @@ final class PlayerController: ObservableObject {
     private var itemStatusObservation: NSKeyValueObservation?
     private var statusTask: Task<Void, Never>?
     private var recoveryTask: Task<Void, Never>?
+    private let audioSessionObserver = PlaybackAudioSessionObserver()
+    @Published private(set) var systemPaused = false
     /// Feeds the SURFACE section of the Playback debug ledger and the
     /// `surface_*` client-log events. Fed from the presenter's log entries,
     /// which is the only half of a fault's life the presenter can know.
@@ -2607,10 +2609,11 @@ final class PlayerController: ObservableObject {
         // background/PiP behavior. Activating it on tvOS was a regression:
         // Apple TV owns the output route and AVPlayer can remain waiting even
         // though the item and server are healthy.
-        try? AVAudioSession.sharedInstance().setCategory(.playback)
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         try? AVAudioSession.sharedInstance().setActive(true)
         installRemoteCommands()
         #endif
+        startAudioSessionObservation()
 
         audioLanguage = model.audioLang
         // P2-8, taking the plan's second option: own media selection outright.
@@ -2678,9 +2681,10 @@ final class PlayerController: ObservableObject {
         lastUncorroboratedEndMs = nil
         player.appliesMediaSelectionCriteriaAutomatically = false
         player.automaticallyWaitsToMinimizeStalling = true
-        try? AVAudioSession.sharedInstance().setCategory(.playback)
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         try? AVAudioSession.sharedInstance().setActive(true)
         installRemoteCommands()
+        startAudioSessionObservation()
         installSurfaceLifecycleObservation()
         addPeriodicObserver()
         startPlaybackRecoveryMonitor()
@@ -2779,6 +2783,7 @@ final class PlayerController: ObservableObject {
         guard isCurrentLifecycle(lifecycle), !isSuperseded(generation), player.currentItem === item else { return }
         await reconcileNativeMediaSelections(to: item)
         guard isCurrentLifecycle(lifecycle), !isSuperseded(generation), player.currentItem === item else { return }
+        applyDisplayCriteria(for: item, generation: generation)
         if wantsPlayback { player.play() } else { player.pause() }
         isPlaying = wantsPlayback
         present(.intentSettled(viewerActionEpoch))
@@ -3982,6 +3987,51 @@ final class PlayerController: ObservableObject {
     }
 
     /// Report the final position and hand any encoder back immediately.
+    private func startAudioSessionObservation() {
+        audioSessionObserver.start(
+            wantsPlayback: { [weak self] in self?.wantsPlayback == true },
+            receive: { [weak self] event in self?.handleAudioSessionEvent(event) }
+        )
+    }
+
+    private func handleAudioSessionEvent(_ event: PlaybackAudioSessionObserver.Event) {
+        switch event {
+        case .interruption(.suspend):
+            systemPaused = true
+            player.pause()
+            isPlaying = false
+            invalidateResumeAttempt(outcome: "interrupted")
+            present(.systemPaused(true))
+        case .interruption(.resume):
+            systemPaused = false
+            present(.systemPaused(false))
+            guard wantsPlayback, started, player.currentItem != nil else { return }
+            Self.applyPlaybackCommand(to: player, preferredRate: preferredRate, immediately: false)
+            isPlaying = true
+        case .interruption(.stay):
+            systemPaused = false
+            present(.systemPaused(false))
+        case .routeChange(let revokesIntent):
+            guard revokesIntent else { return }
+            systemPaused = false
+            present(.systemPaused(false))
+            setPlaybackRequested(false)
+        }
+    }
+
+    private func applyDisplayCriteria(for item: AVPlayerItem, generation: Int) {
+        #if os(tvOS)
+        let applied = PlaybackDisplayCriteria.apply(
+            item: item,
+            itemIsCurrent: player.currentItem === item,
+            openIsCurrent: !isSuperseded(generation)
+        )
+        if applied {
+            NSLog("plurx display_criteria_applied %@", String(describing: item.asset.preferredDisplayCriteria))
+        }
+        #endif
+    }
+
     func stop(deactivateAudioSession: Bool = true) {
         resetSurface()
         surfaceLifecycleObservation.removeAll()
@@ -4026,6 +4076,8 @@ final class PlayerController: ObservableObject {
         statusTask = nil
         recoveryTask?.cancel()
         recoveryTask = nil
+        audioSessionObserver.stop()
+        systemPaused = false
         surfaceClockTask?.cancel()
         surfaceClockTask = nil
         clearPGSOverlaySelection()
@@ -4055,6 +4107,9 @@ final class PlayerController: ObservableObject {
         let position = realPositionMs()
         player.pause()
         player.replaceCurrentItem(with: nil)
+        #if os(tvOS)
+        PlaybackDisplayCriteria.activeManager()?.preferredDisplayCriteria = nil
+        #endif
         isPlaying = false
         wantsPlayback = false
         isChangingStream = false
@@ -4694,6 +4749,7 @@ final class PlayerController: ObservableObject {
         guard !isSuperseded(generation) else { return }
         await reconcileNativeMediaSelections(to: item)
         guard !isSuperseded(generation) else { return }
+        applyDisplayCriteria(for: item, generation: generation)
         if wantsPlayback {
             player.play()
             // Restore the rate the viewer was last actually playing at (P2-5).
@@ -5119,6 +5175,7 @@ final class PlayerController: ObservableObject {
                 guard !Task.isCancelled, let self else { return }
                 let shouldMonitor = self.started
                     && self.wantsPlayback
+                    && !self.systemPaused
                     && !self.finished
                     && !self.isPlaybackBlocked
                     && !self.isChangingStream
@@ -7208,6 +7265,7 @@ final class PlayerController: ObservableObject {
             isChangingStream = false
             return true
         }
+        applyDisplayCriteria(for: item, generation: generation)
         if wantsPlayback { player.play() } else { player.pause() }
         isPlaying = wantsPlayback
         isChangingStream = false
@@ -9403,6 +9461,7 @@ extension PlayerController: PreparedSuccessorHost {
         if isCurrentLifecycle(reconcileGeneration), player.currentItem === item {
             await reconcileNativeMediaSelections(to: item)
         }
+        applyDisplayCriteria(for: item, generation: openGeneration)
         startStatusPolling()
         player.play()
         if !wantsPlayback { player.pause() }

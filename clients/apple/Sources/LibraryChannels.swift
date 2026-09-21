@@ -313,6 +313,7 @@ final class LibraryChannelPlayerController: ObservableObject {
     @Published private(set) var message = "Choose a channel to join its schedule."
     @Published private(set) var busy = false
     @Published private(set) var paused = false
+    @Published private(set) var systemPaused = false
     @Published private(set) var playbackError: String?
 
     let player = AVPlayer()
@@ -329,6 +330,7 @@ final class LibraryChannelPlayerController: ObservableObject {
     private var endObserver: NSObjectProtocol?
     private var failedObserver: NSObjectProtocol?
     private var itemStatusObservation: NSKeyValueObservation?
+    private let audioSessionObserver = PlaybackAudioSessionObserver()
     private var progressObserver: Any?
     private let playbackControl = PlaybackControlSession()
     private var mediaOriginMs: Int64 = 0
@@ -422,6 +424,11 @@ final class LibraryChannelPlayerController: ObservableObject {
             }
             let item = AVPlayerItem(url: playlistURL)
             item.preferredForwardBufferDuration = 60
+            #if os(iOS)
+            try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
+            try? AVAudioSession.sharedInstance().setActive(true)
+            #endif
+            startAudioSessionObservation()
             player.replaceCurrentItem(with: item)
             observeEnd(item, channel: channel, sequence: expected)
             observeFailure(item, sequence: expected)
@@ -521,6 +528,8 @@ final class LibraryChannelPlayerController: ObservableObject {
         if let progressObserver { player.removeTimeObserver(progressObserver) }
         progressObserver = nil
         playbackError = nil
+        audioSessionObserver.stop()
+        systemPaused = false
         player.pause()
         playbackControl.end()
         player.replaceCurrentItem(with: nil)
@@ -533,6 +542,43 @@ final class LibraryChannelPlayerController: ObservableObject {
         busy = false
         mediaOriginMs = 0
         mediaDurationMs = 0
+        #if os(iOS)
+        try? AVAudioSession.sharedInstance().setActive(
+            false,
+            options: .notifyOthersOnDeactivation
+        )
+        #endif
+    }
+
+    private func startAudioSessionObservation() {
+        audioSessionObserver.start(
+            wantsPlayback: { [weak self] in self?.paused == false && self?.watching != nil },
+            receive: { [weak self] event in self?.handleAudioSessionEvent(event) }
+        )
+    }
+
+    private func handleAudioSessionEvent(_ event: PlaybackAudioSessionObserver.Event) {
+        switch event {
+        case .interruption(.suspend):
+            systemPaused = true
+            player.pause()
+            message = "Paused — audio interrupted"
+        case .interruption(.resume):
+            systemPaused = false
+            if !paused, watching != nil {
+                player.play()
+                message = "Following live · seeking and watch history are off"
+            }
+        case .interruption(.stay):
+            systemPaused = false
+        case .routeChange(let revokesIntent):
+            guard revokesIntent else { return }
+            systemPaused = false
+            paused = true
+            player.pause()
+            message = "Paused — audio route disconnected"
+            playbackControl.playerChanged()
+        }
     }
 
     func setFavourite(_ channel: LibraryChannel) async {
@@ -692,7 +738,7 @@ final class LibraryChannelPlayerController: ObservableObject {
             rate: Double(player.rate),
             // A decoder waiting for bytes has zero rate too. Reporting that
             // as Hold stops the producer whose next segment would unblock it.
-            isPaused: paused,
+            isPaused: paused || systemPaused,
             isEnded: item.status == .failed || (resolved?.endsAtMs ?? Int64.max) <= serverNowMs(),
             isSeeking: false,
             hasStarted: player.timeControlStatus == .playing,

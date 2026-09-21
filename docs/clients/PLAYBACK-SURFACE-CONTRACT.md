@@ -444,14 +444,15 @@ Rows are evaluated in order; the first row whose `context` matches wins.
 | 15 | `segment_503_not_yet` | attached | `recovering` | no | class default | codes: `startup_timeout` · `playlist_state_changed` · `segment_pending` · `segment_wait_busy` · `node_wait_capacity` · `media_owner_transition` · `vod_resurrection_unavailable` · `response_owner_transition` · `response_state_changed` · `response_owner_reclassification_unavailable` · `response_publication_timeout` · `response_completion_capacity` · `response_snapshot_capacity` · `node_maintenance` · `node_removal_fenced` · `learner_route_ineligible` |
 | 16 | `media_owner_lost_410` | any | `recovering` | no | class default | re-classes to `stopped` when the owner stops; carries `position_ms` |
 | 17 | `control_hold` | attached | `hold` | no | class default |  |
-| 18 | `media_waiting` | attached | `buffering` | no | class default |  |
-| 19 | `owner_recovery_step` | any | `recovering` | no | class default |  |
-| 20 | `readiness_deadline_rungs_left` | any | `recovering` | no | class default |  |
-| 21 | `decoder_failed` | any | `stopped` | yes | class default |  |
-| 22 | `black_frame_ladder_spent` | start | `exhausted` | yes | `close` · `retry` |  |
-| 23 | `repeated_early_end` | attached | `stopped` | yes | class default |  |
-| 24 | `degraded_notice` | any | `degraded` | no | class default |  |
-| 25 | `log_only` | any | *(log only)* | no | class default |  |
+| 18 | `system_interruption` | attached | `hold` | no | class default |  |
+| 19 | `media_waiting` | attached | `buffering` | no | class default |  |
+| 20 | `owner_recovery_step` | any | `recovering` | no | class default |  |
+| 21 | `readiness_deadline_rungs_left` | any | `recovering` | no | class default |  |
+| 22 | `decoder_failed` | any | `stopped` | yes | class default |  |
+| 23 | `black_frame_ladder_spent` | start | `exhausted` | yes | `close` · `retry` |  |
+| 24 | `repeated_early_end` | attached | `stopped` | yes | class default |  |
+| 25 | `degraded_notice` | any | `degraded` | no | class default |  |
+| 26 | `log_only` | any | *(log only)* | no | class default |  |
 
 | Fixture error | Meaning |
 |---|---|
