@@ -4404,10 +4404,14 @@ impl Segmenter {
         let mut chunks: Vec<Vec<Fragment>> = Vec::new();
 
         for track in &self.init.tracks {
+            // `max_ticks` is the cutting ceiling; `strict_max_ticks` is the
+            // fixed covering duration advertised to the client. Keep the
+            // two separate here. Audio samples are indivisible, so allowing
+            // one boundary sample past an already-covering target can make a
+            // 16 second target produce a truthful 16.014 second EXTINF and
+            // then reject itself in `finish`.
             let ceiling = scale_ticks(
-                self.policy
-                    .strict_max_ticks
-                    .unwrap_or(self.policy.max_ticks),
+                self.policy.max_ticks,
                 self.video_timescale,
                 track.timescale.max(1),
             )

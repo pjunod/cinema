@@ -117,6 +117,16 @@ missing = "fail"
 timeout_seconds = 1800
 
 [[checks]]
+id = "unit-core"
+title = "plurx-core unit tests with replicated-store feature coverage"
+command = "PLURX_EXPECT_TEST_COUNT_AT_LEAST=1100 make unit-core"
+profiles = ["commit", "ci", "full", "nightly"]
+requires = ["cargo", "make"]
+missing = "fail"
+timeout_seconds = 1800
+expect_at_least = 1100
+
+[[checks]]
 id = "hiqlite-vendor-clippy"
 title = "Vendored Hiqlite production snapshot transport denied-warning Clippy"
 command = "make hiqlite-vendor-clippy"
@@ -426,7 +436,7 @@ paths = [
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
   "rust-toolchain.toml",
 ]
-checks = ["rust-gate", "rust-gate-ci"]
+checks = ["rust-gate", "rust-gate-ci", "unit-core"]
 
 [[points]]
 id = "persistence.upgrades"
@@ -671,6 +681,7 @@ contract = "Every supported source reaches a client through the intended direct,
 paths = [
   "crates/plurx-core/src/fmp4.rs",
   "crates/plurx-core/src/mediafacts.rs",
+  "crates/plurx-core/src/process/**",
   "crates/plurx-core/src/playback/**",
   "crates/plurx-core/src/tracks.rs",
   "crates/plurx-core/src/segplan.rs",
