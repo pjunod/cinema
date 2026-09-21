@@ -1,6 +1,6 @@
 # Android display-mode matching and buffer budget — implementation plan
 
-**Status:** implementation complete through M3; M0/M4/M5 need physical-device evidence · **Executes:** §2.9 / D1 / F-android-1 /
+**Status:** implementation complete through M3; M0/M4/M5 pending physical-device evidence · **Executes:** §2.9 / D1 / F-android-1 /
 F-android-2 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
