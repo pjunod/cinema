@@ -546,6 +546,8 @@ data class SourceSummary(
     val hdr_format: String? = null,
     val bitrate: Long? = null,
     val duration_ms: Long? = null,
+    /** ffprobe rational, e.g. `24000/1001`; kept exact on the wire. */
+    val frame_rate: String? = null,
 )
 
 /**

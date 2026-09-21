@@ -3938,6 +3938,9 @@ interface PlanLike {
      */
     val sourceHeight: Int?
 
+    /** Source cadence from `/decision`, available before Media3 prepares. */
+    val sourceFrameRate: Double? get() = null
+
     /** `delivery.aac`: a copy session must re-encode the audio. */
     val aac: Boolean
 

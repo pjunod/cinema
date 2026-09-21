@@ -838,6 +838,12 @@ Everything in §7–§11 is under `/api/v1`.
    plays as-is                          POST /files/{id}/hls/sessions  →  §9
 ```
 
+`source.frame_rate`, when present, is the first playable video stream's exact
+ffprobe rational (`avg_frame_rate` preferred, `r_frame_rate` fallback), such
+as `24000/1001`. Keeping the rational lets native clients select a display
+mode before decoder preparation without rounding 23.976 and 24 into the same
+cadence.
+
 | Method | Path | Auth | What it does |
 |---|---|---|---|
 | GET | `/files/{id}/decision` | bearer | Verdict and execution plan, from flat capability query keys |
