@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 
-use super::DeviceProfile;
+use super::{AudioSink, DeviceProfile};
 
 /// A transfer function a client can *present* — decode and put on the
 /// attached display as the grade it is, rather than merely accept.
@@ -176,6 +176,10 @@ pub struct DeviceCaps {
     pub video: Vec<VideoCaps>,
     #[serde(default)]
     pub audio: Vec<String>,
+    /// Codecs and channel ceilings proved on the client's current output
+    /// route. Empty preserves the legacy codec-only behavior.
+    #[serde(default)]
+    pub audio_sinks: Vec<AudioSink>,
     #[serde(default)]
     pub containers: Vec<String>,
     #[serde(default)]
@@ -226,6 +230,7 @@ pub struct LegacyCaps {
     pub containers: Vec<String>,
     pub video_codecs: Vec<String>,
     pub audio_codecs: Vec<String>,
+    pub max_audio_channels: Option<u8>,
     pub max_height: Option<i64>,
     pub codec_max_heights: HashMap<String, i64>,
     pub hdr: bool,
@@ -282,6 +287,17 @@ impl DeviceCaps {
             client: None,
             video,
             audio: legacy.audio_codecs.clone(),
+            audio_sinks: legacy
+                .max_audio_channels
+                .into_iter()
+                .flat_map(|max_channels| {
+                    legacy.audio_codecs.iter().map(move |codec| AudioSink {
+                        codec: codec.clone(),
+                        max_channels,
+                        passthrough: false,
+                    })
+                })
+                .collect(),
             containers: legacy.containers.clone(),
             transports: Vec::new(),
             progressive_hevc_sample_entries: None,
@@ -303,6 +319,7 @@ impl DeviceCaps {
     pub fn is_empty(&self) -> bool {
         self.video.is_empty()
             && self.audio.is_empty()
+            && self.audio_sinks.is_empty()
             && self.containers.is_empty()
             && self.progressive_hevc_sample_entries.is_none()
     }
@@ -329,6 +346,33 @@ impl DeviceCaps {
         }
         Ok(())
     }
+
+    /// Validate the bounded, unambiguous audio-sink vocabulary before it can
+    /// influence a playback decision.
+    pub fn validate_audio_sinks(&self) -> Result<(), &'static str> {
+        if self.audio_sinks.len() > 16 {
+            return Err("audio_sinks must contain at most 16 entries");
+        }
+        let mut seen = BTreeSet::new();
+        for sink in &self.audio_sinks {
+            let codec = sink.codec.trim().to_ascii_lowercase();
+            if codec.is_empty()
+                || codec.len() > 16
+                || !codec
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            {
+                return Err("audio_sinks contains an invalid codec");
+            }
+            if !(1..=16).contains(&sink.max_channels) {
+                return Err("audio_sinks max_channels must be between 1 and 16");
+            }
+            if !seen.insert(codec) {
+                return Err("audio_sinks contains a duplicate codec");
+            }
+        }
+        Ok(())
+    }
 }
 
 impl DeviceProfile {
@@ -348,11 +392,25 @@ impl DeviceProfile {
         } else {
             caps.containers.clone()
         };
-        let audio_codecs = if caps.audio.is_empty() {
+        let mut audio_codecs = if caps.audio.is_empty() {
             vec!["aac".into(), "mp3".into()]
         } else {
             caps.audio.clone()
         };
+        let max_audio_channels = caps
+            .audio_sinks
+            .iter()
+            .map(|sink| (sink.codec.trim().to_ascii_lowercase(), sink.max_channels))
+            .collect();
+        for sink in &caps.audio_sinks {
+            let codec = sink.codec.trim().to_ascii_lowercase();
+            if !audio_codecs
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(&codec))
+            {
+                audio_codecs.push(codec);
+            }
+        }
         let mut video_codecs: Vec<String> = Vec::new();
         // Membership is a set lookup rather than a scan of `video_codecs`.
         // The document arrives from the network with no per-field bound, and
@@ -445,6 +503,7 @@ impl DeviceProfile {
             containers,
             video_codecs,
             audio_codecs,
+            max_audio_channels,
             max_height: caps.max_height,
             video_max_heights,
             max_bitrate,

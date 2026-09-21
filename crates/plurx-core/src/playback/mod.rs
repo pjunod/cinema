@@ -13,10 +13,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::MediaFile;
 
+pub mod audio;
 pub mod caps;
 pub mod desired;
 pub mod intent;
 use crate::transcode::OutputGrade;
+pub use audio::{resolve_audio, AudioAction, AudioDelivery, AudioRoute, AudioSink, DownmixMatrix};
 pub use caps::{DeviceCaps, LearnedLimit, LegacyCaps, Transfer, VideoCaps};
 pub use desired::{
     DesiredCodec, DesiredDynamicRange, DesiredQuality, DesiredSelection, DesiredSubtitles,
@@ -73,6 +75,7 @@ pub fn caps_profile(
         containers,
         video_codecs,
         audio_codecs,
+        max_audio_channels: HashMap::new(),
         max_height,
         video_max_heights: HashMap::new(),
         max_bitrate: None,
@@ -123,6 +126,10 @@ pub struct DeviceProfile {
     pub containers: Vec<String>,
     pub video_codecs: Vec<String>,
     pub audio_codecs: Vec<String>,
+    /// Current output-route ceilings keyed by normalized audio codec. Empty is
+    /// the legacy codec-only claim and preserves its existing copy behavior.
+    #[serde(default)]
+    pub max_audio_channels: HashMap<String, u8>,
     #[serde(default)]
     pub max_height: Option<i64>,
     /// Runtime-probed direct-play ceilings keyed by normalized video codec.
@@ -218,6 +225,23 @@ impl DeviceProfile {
         self.audio_codecs
             .iter()
             .any(|x| x.eq_ignore_ascii_case(codec))
+    }
+
+    fn allows_audio_stream(&self, stream: &crate::domain::AudioStream) -> bool {
+        if !self.allows_audio(&stream.codec) {
+            return false;
+        }
+        if self.max_audio_channels.is_empty() {
+            return true;
+        }
+        let channels = stream
+            .channels
+            .and_then(|channels| u8::try_from(channels).ok())
+            .filter(|channels| *channels > 0)
+            .unwrap_or(2);
+        self.max_audio_channels
+            .get(&stream.codec.to_ascii_lowercase())
+            .is_some_and(|maximum| channels <= *maximum)
     }
 
     /// This client's height ceiling for a source in `codec`, narrowed by the
@@ -672,6 +696,10 @@ pub struct Decision {
     /// For remux/transcode: re-encode audio to AAC because the source audio
     /// codec isn't in the profile.
     pub transcode_audio: bool,
+    /// The independently resolved audio output. This is additive to
+    /// `transcode_audio`, whose legacy meaning remains "the source audio was
+    /// incompatible" until every create path consumes this richer contract.
+    pub delivered_audio: AudioDelivery,
     /// Preserve Dolby Vision configuration + RPU metadata on a copy/remux.
     /// False means the client cannot take this source profile and the remux
     /// must expose a compatible HDR base instead.
@@ -816,21 +844,26 @@ fn evaluate(file: &MediaFile, profile: &DeviceProfile) -> (Checks, Vec<String>) 
     }
 
     // Audio is judged on the default track (else the first).
-    let audio_codec = file
+    let audio_stream = file
         .audio_streams
         .iter()
         .find(|a| a.default)
-        .or_else(|| file.audio_streams.first())
-        .map(|a| a.codec.clone());
-    let audio_ok = match &audio_codec {
-        Some(c) => profile.allows_audio(c),
+        .or_else(|| file.audio_streams.first());
+    let audio_ok = match audio_stream {
+        Some(stream) => profile.allows_audio_stream(stream),
         None => true, // no audio track — nothing to reject
     };
     if !audio_ok {
-        reasons.push(format!(
-            "audio codec {} unsupported",
-            audio_codec.as_deref().unwrap_or("unknown")
-        ));
+        let codec = audio_stream
+            .map(|stream| stream.codec.as_str())
+            .unwrap_or("unknown");
+        reasons.push(if profile.allows_audio(codec) {
+            format!("audio layout for {codec} exceeds the current sink")
+        } else {
+            // Keep the established reason byte-for-byte for existing clients
+            // and tests; a sink-specific refusal earns the new wording above.
+            format!("audio codec {codec} unsupported")
+        });
     }
 
     (
@@ -844,6 +877,26 @@ fn evaluate(file: &MediaFile, profile: &DeviceProfile) -> (Checks, Vec<String>) 
             audio_ok,
         },
         reasons,
+    )
+}
+
+pub fn resolve_audio_for_method(
+    file: &MediaFile,
+    profile: &DeviceProfile,
+    method: PlaybackMethod,
+) -> AudioDelivery {
+    resolve_audio(
+        file.audio_streams
+            .iter()
+            .find(|stream| stream.default)
+            .or_else(|| file.audio_streams.first()),
+        profile,
+        if method == PlaybackMethod::Transcode {
+            AudioRoute::RollingHls
+        } else {
+            AudioRoute::Progressive
+        },
+        file.audio_offset_ms,
     )
 }
 
@@ -1483,10 +1536,12 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
     // A verdict that ended up a transcode re-encodes the picture, so there is
     // no copy pipe left to convert RPUs in and nothing to convert them for.
     let convert_dolby_vision = convert_dolby_vision && method != PlaybackMethod::Transcode;
+    let audio = resolve_audio_for_method(file, profile, method);
     Decision {
         method,
         reasons,
         transcode_audio: !c.audio_ok,
+        delivered_audio: audio,
         preserve_dolby_vision: preserve_dolby_vision && method != PlaybackMethod::Transcode,
         convert_dolby_vision,
         container: "mp4",
@@ -1529,10 +1584,12 @@ pub fn decide_forced(
             if !grade_reason.is_empty() {
                 reasons.push(grade_reason.to_owned());
             }
+            let audio = resolve_audio_for_method(file, profile, PlaybackMethod::Transcode);
             Decision {
                 method: PlaybackMethod::Transcode,
                 reasons,
                 transcode_audio: true,
+                delivered_audio: audio,
                 preserve_dolby_vision: false,
                 // A forced transcode re-encodes the picture: there is no copy
                 // pipe left for a conversion to sit inside.
@@ -1592,10 +1649,12 @@ pub fn decide_forced(
             let convert_dolby_vision = dv == DvHandling::Convert;
             let preserve_dolby_vision = convert_dolby_vision
                 || (is_dolby_vision(file) && profile.decodes_dolby_vision_as_copied(file));
+            let audio = resolve_audio_for_method(file, profile, method);
             Decision {
                 method,
                 reasons,
                 transcode_audio: !c.audio_ok,
+                delivered_audio: audio,
                 preserve_dolby_vision,
                 convert_dolby_vision,
                 container: "mp4",
