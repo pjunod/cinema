@@ -1600,7 +1600,12 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # +4 for C-02's bounded scan walk, root fingerprint, contained-path check, and
 # sparse-walker cancellation fixture. Every blocking task is awaited; none is
 # a detached producer or process owner.
-expected_occurrences = 534
+# 534 -> 536 with S-08: `state.rs` spawns the one leased field-order backfill
+# beside the existing catalogue backfills -- it walks a node-local cursor and
+# writes a column, owning no producer, process or timer -- and `decode_facts.rs`
+# spawns one `#[cfg(test)]` actor in the idet cancellation fixture, which is
+# awaited inside the test that created it.
+expected_occurrences = 536
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2038,7 +2043,11 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +1 for K-07's test-only zero-duration timeout: it deterministically exercises
 # the outer-deadline arm of the Store result observer, is awaited immediately,
 # and owns no task, process, producer, or replacement policy.
-expected_occurrences = 828
+# 828 -> 832 with S-08: one `tokio::time::timeout` bounds the idet verification
+# pass in `decode_facts.rs` against the caller's remaining budget, and three are
+# `#[cfg(test)]` bounds in the cancellation fixture beside it. None of them owns
+# a producer; the idet bound is the caller's deadline, not a new one.
+expected_occurrences = 832
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2152,7 +2161,12 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # +1 is the Android-DV mux regression's test-only FFmpeg command. It copies a
 # short generated HEVC fixture to a temporary MP4, is collected synchronously
 # with `.output()`, owns no rolling producer, and cannot ship in the server.
-expected_occurrences = 127
+# 127 -> 129 with S-08: `decode_facts.rs` builds one `tokio::process::Command`
+# for the bounded idet pass through the startup-snapshotted FFprobe and the held
+# source descriptor, and one `#[cfg(test)]` `std::process::Command` that renders
+# the interlaced fixture. The idet child is `kill_on_drop`, bounded by the
+# caller's deadline and reaped on every exit path.
+expected_occurrences = 129
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -2382,7 +2396,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # 325 -> 324 after replacing dummy deadline responses with the production
 # authenticated logout route. Every retained `.status()` is an in-process HTTP
 # response inspection, not a command launch.
-expected_occurrences = 326
+# 326 -> 327 with S-08: the added `.status()` belongs to the `#[cfg(test)]`
+# fixture renderer in `decode_facts.rs`, which is awaited to completion before
+# the test that built it proceeds.
+expected_occurrences = 327
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -2473,7 +2490,10 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +4 are the packet probe's awaited completion, explicit timeout reap, and the
 # publication retirement ticket wait. Only the first three concern a process;
 # all retain their owner until the wait settles.
-expected_occurrences = 374
+# 374 -> 375 with S-08: the added `child.wait()` reaps the bounded idet child in
+# `decode_facts.rs` on the ordinary completion path; cancellation and the
+# deadline reach the same reap through its kill-on-drop guard.
+expected_occurrences = 375
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -2563,7 +2583,10 @@ pattern = "kill_on_drop\\s*\\("
 # running helper; production child ownership is unchanged.
 # +1 is the bounded selected-video packet probe's cancellation backstop; normal
 # completion and timeout still explicitly reap the child.
-expected_occurrences = 77
+# 77 -> 78 with S-08: the bounded idet child in `decode_facts.rs`. Cancellation,
+# the caller's deadline and an early return all drop it, so no verification pass
+# can outlive the decode-facts call that asked for it.
+expected_occurrences = 78
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
