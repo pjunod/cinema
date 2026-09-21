@@ -1034,7 +1034,7 @@ compiles when its acceptance cases remain unexecuted.
 | Milestone | State at handoff | Evidence / blocker |
 |---|---|---|
 | M0 source/VOD proof | partial | [2026-09-20 evidence](../evidence/OPTICAL-M0-2026-09-20.md): pinned compiler and typed source/helper contracts established; local FFmpeg lacks both optical inputs, lab nodes were unreachable, and no identified drive exists on the reachable host. Physical DVD/Blu-ray VOD proof remains open. |
-| M1 domain/Store | open | No implementation |
+| M1 domain/Store | built | Commit `b9032504`; [M1 evidence](../evidence/OPTICAL-M1-2026-09-20.md). Common source facts, managed optical decision constraints, versioned session/output identity, both Store backends, per-user progress, matching cleanup and explicit `optical.play` grants are implemented. A live multi-node Hiqlite round trip remains M4 acceptance, not a claim of this focused receipt. |
 | M2 device lifecycle | open | No implementation |
 | M3 playback/API | open | Depends on M0 source/VOD decision |
 | M4 cluster | open | No implementation |
