@@ -35,10 +35,10 @@ failure checks remain authoritative.
 | Actor demand/protected-start fence | implemented | Accepted demand sequence/age ride `RollingLeaseSnapshot`; the actor rejects stale identity, attempt and a first segment past `max(origin, C - G - B)` |
 | Retention and EOF preservation | implemented | Download-frontier removal is clamped to the protected segment; EOF retains the protected history and ordered tail |
 | Legacy compatibility | implemented | Fixed 1× wall-time bootstrap plus resolved-fetch cap; explicit cutover clears the bootstrap anchor once |
-| Focused regression set | authored, not run | `rolling_publication_budget*` covers one simulated hour, 30 minutes at 1.2× with real progress/hold samples, the real worker's bounded low-rate recovery, the target-only negative control, variable-duration legacy bootstrap and explicit cutover, actor fences, stale/held demand, retention, commit-time deadlines and mature EOF |
+| Focused regression set | passed | 13/13 `rolling_publication_budget*` and 4/4 `mkv_hls_schedule*` tests passed on code candidate `7654a184` |
 | Documentation and validation catalog | implemented | This page, `docs/README.md`, the `playback.pipeline` contract, and exact `6f4e279e`/`a157179a`/`5a387be6` regression mappings |
 | Adversarial implementation review | complete and addressed | The single review found a variable-duration legacy bootstrap deadlock, backdated commit deadlines and three weak proof seams; commit `5a387be6` addresses all findings |
-| Final focused and fast-lane proof | not started | run once on the reviewed candidate |
+| Final focused and fast-lane proof | local proof passed; Forgejo pending | Rust 1.97.1 check/clippy/format, both focused filters, four docs-index tests and `git diff --check` passed; the current pushed candidate still needs its Forgejo fast lane |
 | Merge to `main` | not started | only after the current fast lane is green |
 
 ## Evidence rules — make every green claim reproducible
@@ -74,21 +74,32 @@ bootstrap when the next variable-duration segment ends at 52 seconds, while
 keeping that next segment private until earned. Snapshot availability, grace
 and the next publication deadlines are stamped only after actor admission.
 
-The latest compile-only pass is clean on Rust 1.97.1:
+The reviewed code candidate `7654a184` is green on
+`rustc 1.97.1 (8bab26f4f 2026-07-14)`:
 
 ```bash
-rustup run 1.97.1 cargo fmt --all
+rustup run 1.97.1 cargo test -p plurxd --bin plurxd rolling_publication_budget # 13 passed
+rustup run 1.97.1 cargo test -p plurxd --bin plurxd mkv_hls_schedule          # 4 passed
 rustup run 1.97.1 cargo check -p plurxd --all-targets
+rustup run 1.97.1 cargo clippy -p plurxd --all-targets -- -D warnings
+rustup run 1.97.1 cargo fmt --all -- --check
+python3 -m unittest discover -s tests/operations -p test_docs_index.py        # 4 passed
+git diff --check
 ```
 
-No focused regression has been executed yet. Per the requested CI economy,
-those tests run once after the adversarial implementation review is addressed.
+The first focused execution exposed test-fixture defects: an invalid client
+UUID, response commits that omitted the production handoff, and synthetic
+policy clocks paired with real actor throttling. Commits `ab2697e3` and
+`603687a9` correct those fixtures without bypassing the actor or publication
+worker. The final rerun selected 13 tests and passed all 13. Clippy then found
+one mechanical manual-clamp warning; `7654a184` applies its behavior-preserving
+rewrite and the full denied-warning pass is green.
 
 The core runtime implementation is commit `6f4e279e`; bounded low-rate
 recovery and its extra sustained/freshness regressions are commit `a157179a`;
-the adversarial-review corrections are commit `5a387be6`. The regression
-catalog maps all exact corrective commits to `playback.pipeline` and the Rust
-gates.
+the adversarial-review corrections are commit `5a387be6`; and the final proof
+corrections are `ab2697e3`, `603687a9` and `7654a184`. The regression catalog
+maps all exact corrective commits to `playback.pipeline` and the Rust gates.
 
 Forgejo briefly treated the initial draft API request as ready because this
 server recognizes the `WIP:` title convention rather than the submitted draft
