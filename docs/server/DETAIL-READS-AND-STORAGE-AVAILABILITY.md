@@ -232,12 +232,15 @@ let validated = !index.rows.is_empty()
 let validated_revision = if validated { i64::from(VALIDATION_REVISION) } else { 0 };
 ```
 
-A row that fails validation is still written, with marker `0`. It is not
-an error and not a deletion: the indexer's own retry and outcome machinery
-owns that decision (`record_typed_outcome`, `:453+`), and deleting here
-would make a publication failure indistinguishable from a file that was
-never indexed. What the `0` buys is that the row can never be read as
-`indexed`.
+A row that fails validation during typed publication is still written, with
+marker `0`. It is not an error and not a deletion: the indexer's own retry and
+outcome machinery owns that decision (`record_typed_outcome`, `:453+`), and
+deleting here would make a publication failure indistinguishable from a file
+that was never indexed. What the `0` buys is that the row can never be read as
+`indexed`. The typed publisher cannot manufacture malformed promotion JSON —
+it serialises and immediately decodes the same `PromotionInputs` value — so
+the executable malformed-payload case is a legacy row corrupted before the
+backfill, not an artificial `put` input that its type makes unrepresentable.
 
 **Legacy rows.** Every row already on disk gets `0` from the column
 default. `0` means *unverified*, not *invalid*: the projection reports
@@ -245,10 +248,15 @@ default. `0` means *unverified*, not *invalid*: the projection reports
 `vod_index_refusal` stays empty. This is fail-closed and it is visible —
 `pending` is the state the badge already uses for "the indexer has not
 answered yet". A bounded background revalidation pass (M1 step 3) reads
-`file_id, argv_fingerprint` for rows with `validated_revision <>
+`file_id, argv_fingerprint` for rows with `ABS(validated_revision) <
 VALIDATION_REVISION`, in pages of `VALIDATION_PAGE = 64`, at most one page
 per `VALIDATION_INTERVAL = 30 s`, calls the existing `get` for each (which
-does the real unpack) and writes the marker. A library converges in
+does the real unpack) and writes the marker. A valid row gets the positive
+revision; a row refused at that revision gets the negative revision. The
+negative value is still unverified to the projection, but prevents one corrupt
+row at the front of the ordered page from starving every sound row behind it;
+the absolute-value predicate naturally retries it after a revision bump. A
+library converges in
 `rows / 64` half-minutes — a 20,000-row node in under three hours —
 without a rebuild and without a startup stall.
 
@@ -485,14 +493,14 @@ Settings → Developer entry.
    `SIDECAR_SCHEMA_VERSION`), with the `creating_indexes ||
    !column_exists(…)` guard the v6 comment (`:462-478`) explains.
 2. `put` computes and writes the marker (§3.1).
-3. The bounded backfill: a new arm in the existing background loop that
-   owns index housekeeping, `VALIDATION_PAGE = 64` per
-   `VALIDATION_INTERVAL = 30 s`, calling `get` per row and writing the
-   marker; `plurx_index_validation_backfill_total`.
+3. The bounded backfill: a cancellation-bound node-local background loop,
+   `VALIDATION_PAGE = 64` per `VALIDATION_INTERVAL = 30 s`, calling `get`
+   per row and writing the marker; `plurx_index_validation_backfill_total`.
 4. Tests in `fragindex.rs`'s test module:
    `put_marks_a_sound_row_validated`;
-   `put_leaves_an_unparsable_promotion_unmarked` (construct a
-   `FragmentIndex` whose promotion fails to serialise round-trip);
+   `backfill_refuses_an_unparsable_promotion_without_deleting` (corrupt a
+   legacy persisted payload, because typed publication cannot construct an
+   unserialisable `PromotionInputs` value);
    `an_empty_row_set_is_never_marked`;
    `a_revision_bump_unmarks_without_deleting` (write at revision N, read
    at N+1, assert the row is still there and reports unverified);
@@ -633,14 +641,14 @@ badge". Three independent checks, all in M2:
    `plurx_detail_probe_json_bytes` (histogram) in M2 and decide from the
    p95 on the real library. If it is under a few hundred kilobytes per
    page, leave it.
-2. **Who owns the backfill loop.** M1 step 3 needs a home in an existing
-   background loop rather than a new one. The content-analysis housekeeping
-   loop is the obvious host
+2. **Who owns the backfill loop.** M1 step 3 initially preferred a home in an
+   existing background loop. The content-analysis housekeeping loop was the
+   obvious candidate
    ([CONTENT-ANALYSIS-FAILURES-IMPLEMENTATION.md](../streaming/CONTENT-ANALYSIS-FAILURES-IMPLEMENTATION.md)),
-   but it is lease-gated for cluster-singleton work and this backfill is
-   node-local. Confirm at build time that the arm runs on every node, not
-   only the lease holder; if the loop cannot host node-local work, the
-   backfill gets its own interval task and M1 says so.
+   but it is lease-gated for cluster-singleton work while these rows are
+   node-local on both backends. The implementation therefore owns a dedicated
+   cancellation-bound interval task on every node. It acquires the existing
+   local connection once per bounded page and never touches Raft.
 3. **`available` for `unknown` is a product call.** §3.3 chooses
    "unknown reads as available" and gives the reason. If Paul prefers the
    client to show a "cannot check this right now" state instead, that is a

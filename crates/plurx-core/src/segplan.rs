@@ -48,6 +48,16 @@ use crate::fmp4::{CutClass, CutPolicy, CutReason, PromotionInputs};
 /// checked — so v2 rows are rebuilt rather than read.
 pub const SEGPLAN_VERSION: u32 = 3;
 
+/// Proof revision for the storage-only checks a fragment-index badge cannot
+/// perform without materialising the packed index.
+///
+/// This is deliberately separate from [`SEGPLAN_VERSION`]. The segment-plan
+/// version describes what the rows mean; this marker describes which
+/// publication-time validation contract proved the stored representation.
+/// Bump it whenever `ROW_BYTES`, promotion decoding, or `get`'s structural
+/// refusal rules change.
+pub const VALIDATION_REVISION: u32 = 1;
+
 /// How many consecutive fragments a landing match compares.
 ///
 /// One fragment's byte count is not enough: two fragments of a 90-minute film

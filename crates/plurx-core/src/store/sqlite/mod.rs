@@ -1125,6 +1125,10 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v63: mirror typed retry disposition and diagnostics in the standalone
     // node-local refusal store.
     crate::store::fragindex::FRAGMENT_INDEX_TYPED_OUTCOMES_SCHEMA,
+    // v64: publication-time proof consumed by metadata-only detail status.
+    // Legacy rows default to unverified and are revalidated in bounded,
+    // node-local pages; the packed payload never enters Raft.
+    crate::store::fragindex::FRAGMENT_INDEXES_VALIDATION_COLUMN,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -2531,7 +2535,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 63,
+            version, 64,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
