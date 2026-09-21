@@ -1,0 +1,27 @@
+[package]
+name = "plurx-optical-helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Type-check the Linux implementation on a Unix development host. The shipped
+# binary does not enable this; CI uses it on macOS where the Linux target's C
+# dependencies are intentionally unavailable.
+linux-host-check = []
+
+[dependencies]
+clap = { workspace = true }
+hex = { workspace = true }
+libc = { workspace = true }
+plurx-core = { path = "../plurx-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = { workspace = true }

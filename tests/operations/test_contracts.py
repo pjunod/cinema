@@ -1162,14 +1162,23 @@ assert.equal(context.ACT_TIMER, null);
             dockerfile,
             r"cargo build(?: --locked)? --release -p plurx-cluster-check",
         )
+        self.assertRegex(
+            dockerfile,
+            r"cargo build(?: --locked)? --release -p plurx-optical-helper",
+        )
         self.assertIn("cargo tree --locked -p plurxd -e features", dockerfile)
         self.assertIn("grep -q 'cluster-read-cost-validation'", dockerfile)
         self.assertIn("CARGO_TARGET_DIR=/src/target-plurxd", dockerfile)
         self.assertIn("CARGO_TARGET_DIR=/src/target-cluster-check", dockerfile)
+        self.assertIn("CARGO_TARGET_DIR=/src/target-optical-helper", dockerfile)
         self.assertIn("id=plurx-cargo-registry,sharing=locked", dockerfile)
         self.assertIn("id=plurx-target-plurxd-${TARGETARCH},sharing=locked", dockerfile)
         self.assertIn(
             "id=plurx-target-cluster-check-${TARGETARCH},sharing=locked",
+            dockerfile,
+        )
+        self.assertIn(
+            "id=plurx-target-optical-helper-${TARGETARCH},sharing=locked",
             dockerfile,
         )
         self.assertIn("--binary-export", release)
@@ -1186,7 +1195,10 @@ assert.equal(context.ACT_TIMER, null);
         self.assertIn("target: release-binaries", compile_step)
         self.assertIn("scripts/release-package-candidate", bind_step)
         self.assertIn("binary-export release-bin", bind_step)
-        self.assertIn("for name in plurxd plurx-cluster-check", bind_step)
+        self.assertIn(
+            "for name in plurxd plurx-cluster-check plurx-optical-helper",
+            bind_step,
+        )
         retention_step = ci_package_steps[
             "Retain candidate binaries for push, tag, and qualification runs"
         ]
@@ -1198,6 +1210,7 @@ assert.equal(context.ACT_TIMER, null);
             [
                 "release-bin/plurxd",
                 "release-bin/plurx-cluster-check",
+                "release-bin/plurx-optical-helper",
                 "release-bin/build-manifest.json",
                 "release-bin/*.sha256",
             ],

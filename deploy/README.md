@@ -494,8 +494,9 @@ binary, and keeps `/var/lib/plurx` and the `plurx` user. By hand, the same
 install is:
 
 ```sh
-# 1. Install the binary + a service user + its data dir
+# 1. Install both Linux binaries + a service user + its data dir
 sudo install -m755 plurxd /usr/local/bin/plurxd
+sudo install -m755 plurx-optical-helper /usr/local/bin/plurx-optical-helper
 sudo useradd --system --home /var/lib/plurx --shell /usr/sbin/nologin plurx
 sudo install -d -o plurx -g plurx /var/lib/plurx
 
@@ -554,6 +555,66 @@ dedicated `plurx` account; the systemd allow-list does not grant filesystem
 permissions. If the library is below `/home`, also change `ProtectHome` to
 `read-only` in the drop-in so the exact `ReadWritePaths` exception can be seen.
 Do not replace the exact path with `/mnt` or another broad media root.
+
+### Optical drives on Linux
+
+Optical hosting is an explicit runtime opt-in. A source install now places
+both `plurxd` and `plurx-optical-helper` in the selected binary directory;
+the Linux container and tagged release artifact carry the same pair. The
+helper is inert until a drive is declared in `plurx.toml` and the switch is
+saved under Settings > Developer. Readiness rows beside that switch are
+advisory: they explain what will fail, but never rewrite or veto the saved
+choice.
+
+Use a stable block-device name and an operator-managed read-only mount:
+
+```toml
+[optical]
+helper_path = "plurx-optical-helper"
+poll_interval_secs = 5
+
+[[optical.drives]]
+id = "media-room"
+label = "Media room drive"
+device_path = "/dev/disk/by-id/replace-with-actual-optical-drive"
+mount_path = "/mnt/optical/media-room"
+```
+
+The helper does not mount media. Configure the host to mount DVD UDF/ISO9660
+or Blu-ray UDF media at that exact path with `ro,nosuid,nodev,noexec`; an
+inspection refuses a writable mount or a navigation tree containing symlinks.
+The service account needs traverse/read access to the mount and open/eject
+access to the device. On a typical distribution that means adding the drive's
+group (often `cdrom`) to `SupplementaryGroups` in a systemd drop-in:
+
+```ini
+[Service]
+SupplementaryGroups=cdrom
+ReadOnlyPaths=/mnt/optical/media-room
+```
+
+Confirm the configured probe binary really carries the two required inputs.
+Do not trust the command's exit status by itself; some FFmpeg builds exit zero
+while printing an unknown-input diagnostic.
+
+```sh
+ffprobe -hide_banner -h demuxer=dvdvideo 2>&1 | grep -E 'dvdvideo|title'
+ffprobe -hide_banner -h protocol=bluray 2>&1 | grep -E 'bluray'
+sudo -u plurx plurx-optical-helper presence \
+  --device /dev/disk/by-id/replace-with-actual-optical-drive \
+  --mount /mnt/optical/media-room
+```
+
+For Compose, map the stable host device to `/dev/optical`, bind the mounted
+filesystem read-only, and add the host device's numeric group with
+`group_add`. The complete commented shape is in
+[`docker-compose.override.example.yml`](docker-compose.override.example.yml).
+Set the TOML paths to the container-side paths. Do not grant broad privileged
+mode or mount `/dev` wholesale.
+
+Eject is generation- and session-checked by the API before the helper receives
+an ioctl request. Disabling optical stops observation and fences the active
+insertion; it does not need every advisory readiness row to be green.
 
 ## Run as a service — launchd (macOS)
 

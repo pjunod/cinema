@@ -1354,7 +1354,7 @@ jobs:
           scripts/release-package-candidate \
             . . binary-export release-bin \
             "${{ matrix.target }}" "$GITHUB_SHA" "$GITHUB_SHA"
-          for name in plurxd plurx-cluster-check; do
+          for name in plurxd plurx-cluster-check plurx-optical-helper; do
             max_glibc=$(readelf --version-info "release-bin/$name" \
               | sed -n 's/.*Name: GLIBC_\([0-9.]*\).*/\1/p' \
               | sort -V | tail -1)
@@ -1393,6 +1393,9 @@ jobs:
           test "$(docker run --rm --platform "linux/$ARCH" \
             --entrypoint /usr/local/bin/plurx-cluster-check \
             "$IMAGE" build-identity)" = "$GITHUB_SHA"
+          docker run --rm --platform "linux/$ARCH" \
+            --entrypoint /usr/local/bin/plurx-optical-helper \
+            "$IMAGE" --help >/dev/null
           scripts/container-smoke "$IMAGE"
       - name: Retain the exact package receipt
         uses: https://data.forgejo.org/forgejo/upload-artifact@16871d9e8cfcf27ff31822cac382bbb5450f1e1e # v4
@@ -1411,6 +1414,7 @@ jobs:
           path: |
             release-bin/plurxd
             release-bin/plurx-cluster-check
+            release-bin/plurx-optical-helper
             release-bin/build-manifest.json
             release-bin/*.sha256
           if-no-files-found: error
@@ -1424,6 +1428,7 @@ jobs:
           path: |
             release-bin/plurxd
             release-bin/plurx-cluster-check
+            release-bin/plurx-optical-helper
             release-bin/build-manifest.json
             release-bin/*.sha256
           if-no-files-found: error

@@ -11,8 +11,9 @@ from typing import Any
 
 
 SCHEMA = 1
-BINARIES = ("plurxd", "plurx-cluster-check")
-SUPPORTED_BINARY_SETS = frozenset((("plurxd",), BINARIES))
+LEGACY_BINARIES = ("plurxd", "plurx-cluster-check")
+BINARIES = (*LEGACY_BINARIES, "plurx-optical-helper")
+SUPPORTED_BINARY_SETS = frozenset((("plurxd",), LEGACY_BINARIES, BINARIES))
 GIT_OBJECT = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 SHA256 = re.compile(r"[0-9a-f]{64}")
 ELF64 = 2

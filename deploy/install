@@ -29,6 +29,7 @@ root=$(cd -P -- "$here/.." && pwd -P)
 
 mode=auto
 binary=
+helper_binary=
 prefix=
 uninstall=0
 dry_run=0
@@ -99,14 +100,21 @@ detect_platform() {
 
 # ---- shared steps ----------------------------------------------------------
 
-# The binary this install ships: --binary as given, or a release build of
-# this checkout. `--locked` matches the Dockerfile and the release workflow,
-# so every install path builds the same stamped server.
+# The runtime binaries this install ships: --binary and its Linux helper
+# sibling, or a release build of this checkout. `--locked` matches the
+# Dockerfile and release workflow, so every install path builds the same set.
 resolve_binary() {
+  local helper_candidate
   if [ -n "$binary" ]; then
     [ -f "$binary" ] || die "no such file: $binary"
     [ -x "$binary" ] || die "not executable: $binary"
     case $binary in /*) ;; *) binary=$PWD/$binary ;; esac
+    if [ "$(uname -s)" = Linux ]; then
+      helper_candidate=$(dirname -- "$binary")/plurx-optical-helper
+      [ -x "$helper_candidate" ] \
+        || die "Linux prebuilt install requires executable sibling $helper_candidate"
+      helper_binary=$helper_candidate
+    fi
     return
   fi
   command -v cargo >/dev/null 2>&1 \
@@ -115,6 +123,12 @@ resolve_binary() {
   (cd "$root" && run cargo build --locked --release -p plurxd)
   binary=${CARGO_TARGET_DIR:-$root/target}/release/plurxd
   [ "$dry_run" = 1 ] || [ -x "$binary" ] || die "build produced no $binary"
+  if [ "$(uname -s)" = Linux ]; then
+    say "building plurx-optical-helper (release, --locked) in $root"
+    (cd "$root" && run cargo build --locked --release -p plurx-optical-helper)
+    helper_binary=${CARGO_TARGET_DIR:-$root/target}/release/plurx-optical-helper
+    [ "$dry_run" = 1 ] || [ -x "$helper_binary" ] || die "build produced no $helper_binary"
+  fi
 }
 
 # ffmpeg/ffprobe are the runtime dependency. A missing one is installed with
@@ -193,6 +207,10 @@ install_binary_to() {
   run_for_dir "$dir" install -d "$dir"
   run_for_dir "$dir" install -m 0755 "$binary" "$dir/plurxd"
   say "installed $dir/plurxd"
+  if [ -n "$helper_binary" ]; then
+    run_for_dir "$dir" install -m 0755 "$helper_binary" "$dir/plurx-optical-helper"
+    say "installed $dir/plurx-optical-helper"
+  fi
 }
 
 # ---- linux: systemd ----------------------------------------------------------
@@ -263,8 +281,8 @@ linux_uninstall() {
   run_root rm -rf "$unit_dst.d"
   run_root rm -f "$unit_dst"
   run_root systemctl daemon-reload
-  run_for_dir "$dir" rm -f "$dir/plurxd"
-  say "removed the service and $dir/plurxd; kept /var/lib/plurx and the plurx user"
+  run_for_dir "$dir" rm -f "$dir/plurxd" "$dir/plurx-optical-helper"
+  say "removed the service and binaries from $dir; kept /var/lib/plurx and the plurx user"
 }
 
 # ---- macos: launchd ----------------------------------------------------------
@@ -428,8 +446,8 @@ binary_install() {
 binary_uninstall() {
   local dir
   dir=$(bin_dir)
-  run_for_dir "$dir" rm -f "$dir/plurxd"
-  say "removed $dir/plurxd"
+  run_for_dir "$dir" rm -f "$dir/plurxd" "$dir/plurx-optical-helper"
+  say "removed plurx binaries from $dir"
 }
 
 # ---- dispatch --------------------------------------------------------------------

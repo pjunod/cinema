@@ -53,6 +53,10 @@ services:
       # filesystem and PLURX_SHARED_CACHE_ID on every participating voter;
       # the container path itself may differ between hosts.
       # - /mnt/shared/plurx-cache:/var/cache/plurx-shared
+      # Optional optical mount. The same container path belongs in
+      # [[optical.drives]].mount_path; keep it read-only. Pair it with the
+      # stable block-device mapping in the devices section below.
+      # - /mnt/optical/media-room:/mnt/optical/media-room:ro
       # Optional persistent-cache and disposable-scratch roots, paired with the
       # PLURX_CACHE_DIR / PLURX_TRANSCODE_DIR block below. Create both host
       # directories owned by PUID:PGID before the first start. The scratch
@@ -83,11 +87,18 @@ services:
     #   # evidence for this workload.
     #   PLURX_CLUSTER_READ_POOL_SIZE: "4"
 
-    # --- Hardware transcode passthrough (uncomment for your GPU) ---
+    # --- Local device passthrough ---
     #
-    # Intel QuickSync / AMD VA-API:
+    # Optical drive. Prefer a stable /dev/disk/by-id path on the host and a
+    # fixed container path. The helper needs block-device read and eject ioctl
+    # access; it never writes filesystem content. Add the host device's numeric
+    # group below (stat -c '%g' /dev/sr0) when the image uid needs it.
     # devices:
+    #   - /dev/disk/by-id/replace-with-actual-optical-drive:/dev/optical
+    #   # Intel QuickSync / AMD VA-API, when needed:
     #   - /dev/dri:/dev/dri
+    # group_add:
+    #   - "24"
     #
     # NVIDIA (needs nvidia-container-toolkit on the host):
     # deploy:

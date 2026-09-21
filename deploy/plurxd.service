@@ -24,6 +24,11 @@ RestartSec=5
 # Hardware transcode: give the service user the GPU render node. Uncomment and
 # match your host's group (`stat -c '%G' /dev/dri/renderD128`, often `render`).
 # SupplementaryGroups=render
+# Optical hosting: add the drive's owning group (often cdrom) and expose only
+# the configured read-only mount. Keep readiness advisory; the Developer switch
+# remains the operator's explicit runtime choice.
+# SupplementaryGroups=cdrom
+# ReadOnlyPaths=/mnt/optical/media-room
 # Hardening
 NoNewPrivileges=true
 ProtectSystem=strict

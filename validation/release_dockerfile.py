@@ -20,6 +20,13 @@ SUPPORTED_BINARY_COPIES = (
         "COPY --chmod=0755 release-bin/plurx-cluster-check "
         "/usr/local/bin/plurx-cluster-check",
     ),
+    (
+        "plurx-optical-helper",
+        "COPY --from=build /plurx-optical-helper "
+        "/usr/local/bin/plurx-optical-helper",
+        "COPY --chmod=0755 release-bin/plurx-optical-helper "
+        "/usr/local/bin/plurx-optical-helper",
+    ),
 )
 
 

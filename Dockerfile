@@ -16,12 +16,15 @@ COPY . .
 RUN --mount=type=cache,id=plurx-cargo-registry,sharing=locked,target=/usr/local/cargo/registry \
     --mount=type=cache,id=plurx-target-plurxd-${TARGETARCH},sharing=locked,target=/src/target-plurxd \
     --mount=type=cache,id=plurx-target-cluster-check-${TARGETARCH},sharing=locked,target=/src/target-cluster-check \
+    --mount=type=cache,id=plurx-target-optical-helper-${TARGETARCH},sharing=locked,target=/src/target-optical-helper \
     ! cargo tree --locked -p plurxd -e features \
         | grep -q 'cluster-read-cost-validation' \
     && CARGO_TARGET_DIR=/src/target-plurxd cargo build --locked --release -p plurxd \
     && cp target-plurxd/release/plurxd /plurxd \
     && CARGO_TARGET_DIR=/src/target-cluster-check cargo build --locked --release -p plurx-cluster-check \
-    && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check
+    && cp target-cluster-check/release/plurx-cluster-check /plurx-cluster-check \
+    && CARGO_TARGET_DIR=/src/target-optical-helper cargo build --locked --release -p plurx-optical-helper \
+    && cp target-optical-helper/release/plurx-optical-helper /plurx-optical-helper
 
 FROM debian:bookworm-slim AS runtime-assets
 ARG TARGETARCH
@@ -152,6 +155,9 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
 # read-only, refuses a live lock, and lets an operator diagnose the same image
 # that produced the on-disk state without installing Rust on the host.
 COPY --from=build /plurx-cluster-check /usr/local/bin/plurx-cluster-check
+# Device parsing and ioctls stay outside the long-lived daemon. The helper is
+# inert until an operator configures a drive and enables optical at runtime.
+COPY --from=build /plurx-optical-helper /usr/local/bin/plurx-optical-helper
 
 # Default to jellyfin-ffmpeg (recent GPUs need its driver stack); override
 # either var to point elsewhere. It's a superset of system ffmpeg, so this is

@@ -1040,7 +1040,7 @@ compiles when its acceptance cases remain unexecuted.
 | M4 cluster | open | No implementation |
 | M5 web | open | Concept only; full UI contract is in §8 |
 | M6 native | open | No implementation |
-| M7 package/qualification | open | Physical-media and current-tree qualification required |
+| M7 package/qualification | partial | The Linux helper, source/Docker/tagged-release packaging and operator setup are built; [packaging evidence](../evidence/OPTICAL-HELPER-PACKAGING-2026-09-21.md). Physical-media and current-tree qualification remain required. |
 
 Before enabling release support, verify: accepted source/seek decision; both
 formats on actual hardware; all required lifecycle/authorization/concurrency

@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from validation.release_artifact import BINARIES, create, verify
+from validation.release_artifact import BINARIES, LEGACY_BINARIES, create, verify
 from validation.release_aliases import alias_action
 from validation.release_dockerfile import (
     render,
@@ -200,6 +200,11 @@ class ReleasePublicationContractCase(unittest.TestCase):
             "/usr/local/bin/plurx-cluster-check",
             generated,
         )
+        self.assertIn(
+            "COPY --chmod=0755 release-bin/plurx-optical-helper "
+            "/usr/local/bin/plurx-optical-helper",
+            generated,
+        )
         self.assertNotIn("FROM rust:", generated)
         self.assertNotIn("cargo build", generated)
         self.assertNotIn("COPY --from=build", generated)
@@ -222,7 +227,7 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
         )
         self.assertNotIn("plurx-cluster-check", generated)
 
-    def test_generator_derives_current_two_binary_runtime(self):
+    def test_generator_derives_current_binary_runtime(self):
         source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
 
         self.assertEqual(required_binaries(source), BINARIES)
@@ -237,7 +242,7 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
     def test_trusted_helper_can_inspect_real_isolated_tag_checkouts(self):
         tagged_contracts = {
             "v0.2.7": ("plurxd",),
-            "v0.3.0": BINARIES,
+            "v0.3.0": LEGACY_BINARIES,
         }
         with tempfile.TemporaryDirectory() as raw_directory:
             tagged_checkout = Path(raw_directory)
@@ -274,6 +279,10 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
                     self.assertEqual(
                         "plurx-cluster-check" in exporter,
                         "plurx-cluster-check" in expected,
+                    )
+                    self.assertEqual(
+                        "plurx-optical-helper" in exporter,
+                        "plurx-optical-helper" in expected,
                     )
                     self.assertEqual(exporter.count("ARG PLURX_BUILD_SHA"), 1)
 
@@ -522,6 +531,8 @@ COPY --from=build /plurxd /usr/local/bin/plurxd
                     "plurxd.sha256",
                     "plurx-cluster-check",
                     "plurx-cluster-check.sha256",
+                    "plurx-optical-helper",
+                    "plurx-optical-helper.sha256",
                 },
             )
             self.assertIn(

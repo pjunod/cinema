@@ -5,6 +5,7 @@ members = [
     "crates/plurx-cluster-check",
     "crates/plurx-compat-plex",
     "crates/plurx-pgs",
+    "crates/plurx-optical-helper",
     "crates/plurxd",
 ]
 exclude = [

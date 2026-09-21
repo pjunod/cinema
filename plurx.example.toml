@@ -32,6 +32,22 @@ transcode_dir = ""
 # require manual cleanup; values above 100 are rejected.
 scan_prune_percent = 10
 
+# Optical hosting is Linux-only. Configuration declares trusted node-local
+# paths; it does not enable the feature. Save the independent advisory-only
+# switch under Settings > Developer after reviewing that page's readiness rows.
+# The mount must be read-only, and the service identity must be able to open
+# the block device for reads and eject ioctls.
+#
+# [optical]
+# helper_path = "plurx-optical-helper"
+# poll_interval_secs = 5
+#
+# [[optical.drives]]
+# id = "media-room"
+# label = "Media room drive"
+# device_path = "/dev/disk/by-id/replace-with-actual-optical-drive"
+# mount_path = "/mnt/optical/media-room"
+
 # [cluster]
 # M2 uses both ports for the one-voter store but pins their listener hosts to
 # loopback, regardless of the addresses below. M3 membership will make the

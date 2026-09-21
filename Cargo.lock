@@ -3034,6 +3034,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "plurx-optical-helper"
+version = "0.3.0"
+dependencies = [
+ "clap",
+ "hex",
+ "libc",
+ "plurx-core",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
 name = "plurx-pgs"
 version = "0.3.0"
 dependencies = [
