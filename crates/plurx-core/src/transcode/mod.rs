@@ -987,8 +987,7 @@ fn video_filters(source: &MediaFile, opts: &TranscodeOptions, source_path: &str)
         source.hdr.as_deref(),
         source.hdr.is_some(),
         routing_hdr(source),
-        peak_nits,
-        peak_source,
+        (peak_nits, peak_source),
         opts,
         source_path,
     )
@@ -999,8 +998,7 @@ fn video_filters_for_contract(
     input_dynamic_range: Option<&str>,
     input_is_hdr: bool,
     routing_dynamic_range: Option<&str>,
-    tone_map_peak_nits: u32,
-    _tone_map_peak_source: ToneMapPeakSource,
+    tone_map_peak: (u32, ToneMapPeakSource),
     opts: &TranscodeOptions,
     source_path: &str,
 ) -> String {
@@ -1072,7 +1070,7 @@ fn video_filters_for_contract(
                      zscale=p=bt709,\
                      tonemap=tonemap=hable:desat=0:peak={peak},\
                      zscale=t=bt709:m=bt709:r=tv:dither=error_diffusion,format=yuv420p",
-                    peak = tone_map_peak_nits as f64 / 100.0,
+                    peak = tone_map_peak.0 as f64 / 100.0,
                 ));
             }
         }
@@ -1579,8 +1577,10 @@ fn hls_args_inner(
                 plan.input_hdr_format(),
                 plan.input_is_hdr(),
                 plan.routing_dynamic_range(),
-                plan.options().tone_map_peak_nits,
-                plan.options().tone_map_peak_source,
+                (
+                    plan.options().tone_map_peak_nits,
+                    plan.options().tone_map_peak_source,
+                ),
                 opts,
                 &source_path,
             )
