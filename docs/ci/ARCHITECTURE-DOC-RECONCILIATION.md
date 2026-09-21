@@ -403,8 +403,11 @@ number too.
 
 ## 5. Milestones
 
-One PR per milestone, draft into `main` under the fast lane, except M3 which
-is one PR per folder.
+One draft implementation PR owns this plan from M1 through M4. Keep each
+milestone reviewable as a logical commit (M3 keeps one commit per folder), and
+append one Execution-log row per milestone. This prevents the plan from
+recreating the milestone-PR split that the canonical work board retired while
+preserving the folder-sized review units M3 needs.
 
 ### 5.1 M1 — the checks, before the prose
 
@@ -423,9 +426,9 @@ the file and both values; `python3 -m validation.doc_status_audit --json | jq
 
 ### 5.2 M2 — the ARCHITECTURE rewrite
 
-§3.1 and §3.2 in one PR, plus the options document's header. Every rewritten
-number uses the marked form, and the constant table's rule 1 is switched on
-for all eleven entries in the same commit.
+§3.1 and §3.2 in one logical commit, plus the options document's header. Every
+rewritten number uses the marked form, and the constant table's rule 1 is
+switched on for all eleven entries in the same commit.
 
 Acceptance, all four:
 
@@ -444,15 +447,15 @@ a non-goal the tree contradicts.
 
 ### 5.3 M3 — the index rows and headers
 
-§3.4, one PR per folder (`playback-control/`, `streaming/`, `features/`,
-`clients/`, `cluster/`, `ci/`, `evidence/`, plus the two top-level rows). Each
-PR's body lists, per row, which of the four cases applied and the sentence in
-the document that decided it.
+§3.4, one logical commit per folder (`playback-control/`, `streaming/`,
+`features/`, `clients/`, `cluster/`, `ci/`, `evidence/`, plus the two top-level
+rows). The plan PR's review notes list, per row, which of the four cases
+applied and the sentence in the document that decided it.
 
 Acceptance: `python3 -m validation.doc_status_audit` reports zero
-contradictions for the folders that PR covers and no new ones elsewhere;
+contradictions for the folders that commit covers and no new ones elsewhere;
 `make operations-check` green (`test_docs_index` and `test_status_pr_claims`
-both run there); every document that PR touched has a `**Status:**` header.
+both run there); every document that commit touched has a `**Status:**` header.
 
 ### 5.4 M4 — the stale web-file comments
 
@@ -515,15 +518,15 @@ and the constant table.
 
 ## Execution log
 
-Executing sessions append one row per milestone PR (see the
+Executing sessions append one row per milestone commit in the one plan PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
 trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
-| Date | Model | Session | Milestone | PR | Outcome / evidence |
+| Date | Model | Session | Milestone | Commit / plan PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M1 | [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | Constant guard and reporting-only status audit built; focused unit green; pre-M2 audit reproduced 46 contradictions. |
-| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M2 | [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | All eleven checked claims required; retired spellings absent; docs-index test green. Delegated decisions: keep the supported 1-voter path, record the interrupted-activation recovery boot, accepted DVR reversal and maintained fork. |
-| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M3 | [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | 304 indexed status rows scanned; zero contradictions and zero missing Markdown status headers; docs-index and status-claim tests green. Merged milestones remain open where promotion, deployment or physical acceptance is outstanding. |
-| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M4 | [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | Stale spelt count absent; 65-row scratch rejects all four prose surfaces; both touched Node contracts green. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M1 | `d85125e8` · [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | Constant guard and reporting-only status audit built; focused unit green; pre-M2 audit reproduced 46 contradictions. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M2 | `ee72c187` · [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | All eleven checked claims required; retired spellings absent; docs-index test green. Delegated decisions: keep the supported 1-voter path, record the interrupted-activation recovery boot, accepted DVR reversal and maintained fork. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M3 | `98c4c750..eda11c85` · [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | 304 indexed status rows scanned; zero contradictions and zero missing Markdown status headers; docs-index and status-claim tests green. Merged milestones remain open where promotion, deployment or physical acceptance is outstanding. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M4 | `a4c21621` · [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | Stale spelt count absent; 65-row scratch rejects all four prose surfaces; both touched Node contracts green. |
