@@ -83,7 +83,7 @@ failure it prevents.
    evidence or merging for someone else, say why in Notes.
 8. **The PR lifecycle is the repository's**: draft until ready · adversarial
    review · findings folded · fast lane green (`make unit` locally for Rust
-   changes; the CI fast lane compiles but does not run tests — see
+   changes; the CI fast lane also runs it on ready Rust PRs — see
    `docs/ci/RUST-TEST-EXECUTION-POLICY.md`) · merge it yourself · delete the
    branch. Un-drafting on Forgejo is a title edit that does not re-trigger
    CI; close and reopen the PR to start the lane.
@@ -150,7 +150,7 @@ document (the twelve written second landed on 2026-09-20 as well).
 | D-01 | [ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET](../clients/ANDROID-DISPLAY-MODE-AND-BUFFER-BUDGET.md) | §2.9, D1 | week (measure) / month | unclaimed | | | | 2026-09-20 | Memory measurements first |
 | D-02 | [ANDROID-LIFECYCLE-PLAYER-BUILDER-AND-ERROR-CLASSIFICATION](../clients/ANDROID-LIFECYCLE-PLAYER-BUILDER-AND-ERROR-CLASSIFICATION.md) | D2, D3, D4, D7 | month | unclaimed | | | | 2026-09-20 | |
 | D-03 | [ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD](../clients/ANDROID-CREDENTIAL-EXPOSURE-AND-RELEASE-BUILD.md) | D5, D6 (release) | week (backup rules) / month | unclaimed | | | | 2026-09-20 | |
-| P-01 | [RUST-TEST-EXECUTION-POLICY](../ci/RUST-TEST-EXECUTION-POLICY.md) | §2.2, §4.8 | week | unclaimed | | | | 2026-09-20 | Decision is Paul's (§7.1); the two red tests are not |
+| P-01 | [RUST-TEST-EXECUTION-POLICY](../ci/RUST-TEST-EXECUTION-POLICY.md) | §2.2, §4.8 | week | in-progress | gpt-5.6-sol | agent:/root/p01_builder | [`plan/P-01` / #401](http://192.168.4.7:3000/noirr/plurx/pulls/401) | 2026-09-21 | Implementation complete; the sole adversarial P1 is addressed and the plan is promotion-ready. Option (a), no schedule. M1 named runs were blocked by runner FFmpeg drift; bounded source-only sizing and failed run URLs are recorded. |
 | P-02 | [SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE](../ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md) | §4.6 | month | unclaimed | | | | 2026-09-20 | Observe inherited limits first |
 | P-03 | [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS](../ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md) | §4.4, §4.5 | month | unclaimed | | | | 2026-09-20 | Two decisions are Paul's; `publish_main` is unreachable on current triggers (blocks M7 behind P-01) |
 | P-04 | [ARCHITECTURE-DOC-RECONCILIATION](../ci/ARCHITECTURE-DOC-RECONCILIATION.md) | §4.7 | week | in-progress | gpt-5.6-sol | agent:/root/p04_builder | [PR #398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | 2026-09-20 | Both adversarial findings addressed: one-plan protocol aligned; 305-row audit now reports zero contradictions, missing headers or unclear statuses; exact-head validation pending |
