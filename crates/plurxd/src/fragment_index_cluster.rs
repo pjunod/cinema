@@ -537,9 +537,15 @@ pub(crate) async fn discard_local_blob(
     if let Some(path) = cache_path(root, cache_key) {
         let _ = tokio::fs::remove_file(path).await;
     }
-    let _ = store
-        .forget_cluster_fragment_index_location(cache_key, node_id)
-        .await;
+    // Best-effort: the absent local blob already makes this location
+    // unverifiable, and later reconciliation removes a stale row.
+    crate::store_result::observe(
+        crate::store_result::Operation::ForgetIndexAfterLocalRemoval,
+        crate::store_result::Discard::BestEffort,
+        store
+            .forget_cluster_fragment_index_location(cache_key, node_id)
+            .await,
+    );
 }
 
 pub(crate) async fn install_local_blob(
@@ -853,9 +859,15 @@ pub(crate) async fn hydrate(
             if let Some(path) = cache_path(root, &artifact.cache_key) {
                 let _ = tokio::fs::remove_file(path).await;
             }
-            let _ = store
-                .forget_cluster_fragment_index_location(&artifact.cache_key, node_id)
-                .await;
+            // Best-effort: deleting the corrupt blob already prevents reuse;
+            // reconciliation can retire the stale catalogue location.
+            crate::store_result::observe(
+                crate::store_result::Operation::ForgetCorruptLocalIndex,
+                crate::store_result::Discard::BestEffort,
+                store
+                    .forget_cluster_fragment_index_location(&artifact.cache_key, node_id)
+                    .await,
+            );
         }
     }
     let Some(membership) = membership else {
@@ -897,18 +909,30 @@ pub(crate) async fn hydrate(
             .await;
         let Ok(response) = response else { continue };
         if response.status == reqwest::StatusCode::NOT_FOUND {
-            let _ = store
-                .forget_cluster_fragment_index_location(&artifact.cache_key, &location.node_id)
-                .await;
+            // Best-effort: this peer has already been excluded from the
+            // current hydration attempt; later repair retries stale cleanup.
+            crate::store_result::observe(
+                crate::store_result::Operation::ForgetMissingPeerIndex,
+                crate::store_result::Discard::BestEffort,
+                store
+                    .forget_cluster_fragment_index_location(&artifact.cache_key, &location.node_id)
+                    .await,
+            );
             continue;
         }
         if !response.status.is_success() {
             continue;
         }
         if validate_blob(&response.body, artifact).is_err() {
-            let _ = store
-                .forget_cluster_fragment_index_location(&artifact.cache_key, &location.node_id)
-                .await;
+            // Best-effort: the invalid blob is never installed, and future
+            // reconciliation can remove this peer's stale location row.
+            crate::store_result::observe(
+                crate::store_result::Operation::ForgetCorruptPeerIndex,
+                crate::store_result::Discard::BestEffort,
+                store
+                    .forget_cluster_fragment_index_location(&artifact.cache_key, &location.node_id)
+                    .await,
+            );
             continue;
         }
         install_local_blob(root, artifact, &response.body).await?;

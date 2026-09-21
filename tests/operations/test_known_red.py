@@ -67,6 +67,27 @@ fn held_case() {}
             self.assertEqual(ignored[0].cargo_name, "held_case")
             self.assertEqual(ignored[0].reason, "owned reason")
 
+    def test_literal_delimiters_cannot_unbalance_a_module_or_attribute(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            self._crate(
+                root,
+                r'''
+mod suite {
+    const OPEN: &[u8] = b"{";
+    const CLOSE: &str = r#"}"#;
+
+    #[test]
+    #[ignore = "owned, reason"]
+    fn held_case() {}
+}
+''',
+            )
+            ignored = ignored_tests(root)
+            self.assertEqual(len(ignored), 1)
+            self.assertEqual(ignored[0].cargo_name, "suite::held_case")
+            self.assertEqual(ignored[0].reason, "owned, reason")
+
     def test_bare_or_empty_ignore_reason_fails_closed(self):
         for attribute in (
             "#[ignore]",
