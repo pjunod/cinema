@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["00f9cc16"]
+points = ["web.experience", "live-tv.integration"]
+checks = ["web-static"]
+reason = "The settings-sections suite asserts that established controls render in Live TV, Playback, Metadata and Maintenance, with only recent experiments and seek scratch reservations left in Developer. It exercises save payloads and verifies that late diagnostics update evidence without overwriting unsaved drafts. Source-message assertions keep recording and channel refusal guidance pointed at Live TV. The page-read-budget suite verifies diagnostics load on the new owning sections; analysis and library-channel regressions pin their updated navigation. Run node --test tests/web/*.test.js. The accompanying Rust edits only update user-facing destinations and resolve existing denied-warning lints without changing runtime behavior."
