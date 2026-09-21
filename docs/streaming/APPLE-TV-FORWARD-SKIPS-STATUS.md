@@ -31,11 +31,12 @@ failure checks remain authoritative.
 |---|---|---|
 | Separate working clone | done | Fresh Forgejo clone at `79113254`; the user's existing clones are read-only references |
 | Rust compiler loop | done | Rust 1.97.1; baseline `cargo check -p plurxd --all-targets` passed before edits |
-| Cumulative budget and bounded prefix | in progress | `RollingPublicationClock` and `publication_cycle` |
-| Actor demand/protected-start fence | not started | `RollingLeaseSnapshot` and `observe_publication_at` |
-| Retention and EOF preservation | not started | final first-segment selection and cleanup path |
-| Focused regression set | not started | tests prefixed `rolling_publication_budget` |
-| Documentation and validation catalog | in progress | this page and `docs/README.md`; catalog mapping follows the final test names |
+| Cumulative budget and bounded prefix | implemented | Cumulative `C + R`, `R <= 124 s`, real-EXTINF prefix selection and carried surplus live in `RollingPublicationClock` and `publication_cycle_at` |
+| Actor demand/protected-start fence | implemented | Accepted demand sequence/age ride `RollingLeaseSnapshot`; the actor rejects stale identity, attempt and a first segment past `max(origin, C - G - B)` |
+| Retention and EOF preservation | implemented | Download-frontier removal is clamped to the protected segment; EOF retains the protected history and ordered tail |
+| Legacy compatibility | implemented | Fixed 1× wall-time bootstrap plus resolved-fetch cap; explicit cutover clears the bootstrap anchor once |
+| Focused regression set | authored, not run | `rolling_publication_budget*` covers one simulated hour, the target-only negative control, variable durations, actor fences, stale/held demand, retention, legacy burst and EOF |
+| Documentation and validation catalog | implemented | This page, `docs/README.md`, and the `playback.pipeline` contract; commit-hash regression mapping follows the runtime commit |
 | Adversarial implementation review | not started | exactly one review after implementation is complete |
 | Final focused and fast-lane proof | not started | run once on the reviewed candidate |
 | Merge to `main` | not started | only after the current fast lane is green |
@@ -52,6 +53,30 @@ the lab and reference title named in the handoff. If that environment is not
 available from this execution host, the page will state the missing evidence;
 it will not relabel a synthetic regression as device qualification.
 
+## Implementation snapshot — the existing owners remain authoritative
+
+The actor records only newly accepted demand sequences and acceptance times;
+replays and media renewals cannot manufacture freshness. Both the worker and
+actor use the same projection helper, which advances only `Active` plus
+`Rendering` observations and freezes at 30 seconds.
+
+The clock selects the first real segment end at or after the cumulative target
+without exceeding one validated segment of rounding. At a due target with less
+than one segment of new credit, it can publish only the next segment within the
+124-second safety floor and carries that excess forward. The renderer takes an
+explicit final segment, so completed media beyond the selected prefix remains
+private and charged instead of leaking through the writer's EVENT tail.
+
+The latest compile-only pass is clean on Rust 1.97.1:
+
+```bash
+rustup run 1.97.1 cargo fmt --all
+rustup run 1.97.1 cargo check -p plurxd --all-targets
+```
+
+No focused regression has been executed yet. Per the requested CI economy,
+those tests run once after the adversarial implementation review is addressed.
+
 ## Decisions to revisit — only if evidence forces them
 
 1. **Keep the existing flow scheduler.** The bounded publication prefix should
@@ -64,4 +89,3 @@ it will not relabel a synthetic regression as device qualification.
    this an always-on repair and explicitly excludes settings work. The user's
    advisory-enable instruction is applied to optional features, not to this
    correctness invariant.
-
