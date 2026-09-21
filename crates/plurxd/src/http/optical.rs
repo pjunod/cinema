@@ -1,7 +1,11 @@
 //! Authenticated, path-free HTTP contracts for physical optical media.
 
+use std::time::Duration;
+
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use plurx_core::domain::ItemKind;
@@ -16,7 +20,16 @@ use serde::{Deserialize, Serialize};
 
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
+use super::peer_transport::{
+    deadline_after, exact_auth_from_headers, signed_response_payload, PeerAuthMode, PeerTransport,
+    PeerTransportError, RESPONSE_SIGNATURE_HEADER,
+};
 use crate::state::AppState;
+
+pub(crate) const OWNER_PATH: &str = "/internal/optical/owner";
+pub(crate) const MAX_OWNER_REQUEST_BYTES: usize = 128 * 1024;
+const MAX_OWNER_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+const OWNER_EXCHANGE_DEADLINE: Duration = Duration::from_secs(5);
 
 pub(crate) fn router() -> Router<AppState> {
     Router::new()
@@ -150,6 +163,162 @@ fn local_drive_id<'a>(state: &AppState, requested: &'a str) -> Result<&'a str, A
         .ok_or(ApiError::NotFound("drive"))
 }
 
+enum DriveTarget {
+    Local(String),
+    Remote {
+        owner_node_id: String,
+        drive_id: String,
+    },
+}
+
+async fn drive_target(state: &AppState, requested: &str) -> Result<DriveTarget, ApiError> {
+    if state.optical.manager().snapshot(requested).is_some() {
+        return Ok(DriveTarget::Local(requested.to_owned()));
+    }
+    if let Some(local) = requested.strip_prefix(&format!("{}:", state.node_id)) {
+        return state
+            .optical
+            .manager()
+            .snapshot(local)
+            .is_some()
+            .then(|| DriveTarget::Local(local.to_owned()))
+            .ok_or(ApiError::NotFound("drive"));
+    }
+    let Some((owner_node_id, drive_id)) = requested.split_once(':') else {
+        return Err(ApiError::NotFound("drive"));
+    };
+    let advertised = state
+        .media_pool
+        .remote_optical_drives()
+        .await
+        .into_iter()
+        .any(|snapshot| snapshot.owner_node_id == owner_node_id && snapshot.id == drive_id);
+    if !advertised {
+        return Err(owner_unavailable());
+    }
+    Ok(DriveTarget::Remote {
+        owner_node_id: owner_node_id.to_owned(),
+        drive_id: drive_id.to_owned(),
+    })
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+enum OwnerRequest {
+    DriveDisc {
+        drive_id: String,
+    },
+    Decision {
+        drive_id: String,
+        title_id: String,
+        request: DecisionRequest,
+    },
+    Eject {
+        drive_id: String,
+        request: EjectRequest,
+    },
+}
+
+impl OwnerRequest {
+    fn mutates(&self) -> bool {
+        matches!(self, Self::Eject { .. })
+    }
+}
+
+async fn owner_peer(state: &AppState, owner_node_id: &str) -> Result<(String, String), ApiError> {
+    state
+        .membership
+        .activity_peers()
+        .await
+        .map_err(|_| owner_unavailable())?
+        .into_iter()
+        .find(|peer| peer.node_id == owner_node_id && peer.reachable)
+        .and_then(|peer| peer.http_base.map(|base| (peer.node_id, base)))
+        .ok_or_else(owner_unavailable)
+}
+
+async fn relay_owner(
+    state: &AppState,
+    owner_node_id: &str,
+    request: &OwnerRequest,
+) -> Result<super::peer_transport::PeerResponse, ApiError> {
+    let body =
+        serde_json::to_vec(request).map_err(|error| ApiError::Internal(error.to_string()))?;
+    if body.len() > MAX_OWNER_REQUEST_BYTES {
+        return Err(ApiError::BadRequest(
+            "optical owner request exceeds its byte limit".to_owned(),
+        ));
+    }
+    let (node_id, base) = owner_peer(state, owner_node_id).await?;
+    PeerTransport::new(state.membership.clone())
+        .request(
+            &node_id,
+            &base,
+            reqwest::Method::POST,
+            OWNER_PATH,
+            body,
+            deadline_after(OWNER_EXCHANGE_DEADLINE),
+            MAX_OWNER_RESPONSE_BYTES,
+            PeerAuthMode::ExactRequestAndResponse,
+        )
+        .await
+        .map_err(|error| match error {
+            PeerTransportError::Unreachable
+            | PeerTransportError::TimedOut
+            | PeerTransportError::InvalidResponse => owner_unavailable(),
+        })
+}
+
+fn owner_unavailable() -> ApiError {
+    ApiError::typed(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "optical_owner_unavailable",
+        "the advertised optical drive owner is unavailable",
+    )
+}
+
+#[derive(Deserialize)]
+struct OwnerWireError {
+    code: String,
+    message: String,
+}
+
+fn owner_wire_error(status: reqwest::StatusCode, body: &[u8]) -> ApiError {
+    let Ok(error) = serde_json::from_slice::<OwnerWireError>(body) else {
+        return owner_unavailable();
+    };
+    let status = StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
+    let code = match error.code.as_str() {
+        "optical_media_changed" => "optical_media_changed",
+        "optical_drive_busy" => "optical_drive_busy",
+        "optical_eject_conflict" => "optical_eject_conflict",
+        "optical_reader_unavailable" => "optical_reader_unavailable",
+        "optical_read_failed" => "optical_read_failed",
+        "optical_disabled" => "optical_disabled",
+        "invalid_capabilities" => "invalid_capabilities",
+        _ => return owner_unavailable(),
+    };
+    let message: String = error
+        .message
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(512)
+        .collect();
+    ApiError::typed(status, code, message)
+}
+
+fn relayed_json(response: super::peer_transport::PeerResponse) -> Result<Response, ApiError> {
+    if !response.status.is_success() {
+        return Err(owner_wire_error(response.status, &response.body));
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .body(axum::body::Body::from(response.body))
+        .map_err(|error| ApiError::Internal(error.to_string()))
+}
+
 async fn drive_dto(
     state: &AppState,
     snapshot: OpticalDriveSnapshot,
@@ -227,10 +396,30 @@ async fn drive_disc(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
     Path(drive_id): Path<String>,
-) -> Result<Json<DriveDiscDto>, ApiError> {
+) -> Result<Response, ApiError> {
     authorize_play(&state, user.id).await?;
-    let enabled = optical_enabled(&state).await?;
-    let drive_id = local_drive_id(&state, &drive_id)?;
+    match drive_target(&state, &drive_id).await? {
+        DriveTarget::Local(drive_id) => {
+            let response = local_drive_disc(&state, &drive_id).await?;
+            Ok(Json(response).into_response())
+        }
+        DriveTarget::Remote {
+            owner_node_id,
+            drive_id,
+        } => {
+            let response = relay_owner(
+                &state,
+                &owner_node_id,
+                &OwnerRequest::DriveDisc { drive_id },
+            )
+            .await?;
+            relayed_json(response)
+        }
+    }
+}
+
+async fn local_drive_disc(state: &AppState, drive_id: &str) -> Result<DriveDiscDto, ApiError> {
+    let enabled = optical_enabled(state).await?;
     let snapshot = state
         .optical
         .manager()
@@ -259,10 +448,10 @@ async fn drive_disc(
     } else {
         Vec::new()
     };
-    Ok(Json(DriveDiscDto {
-        drive: drive_dto(&state, snapshot, enabled).await?,
+    Ok(DriveDiscDto {
+        drive: drive_dto(state, snapshot, enabled).await?,
         titles,
-    }))
+    })
 }
 
 async fn title_detail(
@@ -303,7 +492,7 @@ async fn title_detail(
     }))
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DecisionRequest {
     expected_disc_id: String,
@@ -327,10 +516,40 @@ async fn decision(
     State(state): State<AppState>,
     Path((drive_id, title_id)): Path<(String, String)>,
     Json(request): Json<DecisionRequest>,
-) -> Result<Json<OpticalDecisionResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     authorize_play(&state, user.id).await?;
     require_enabled(&state).await?;
-    let drive_id = local_drive_id(&state, &drive_id)?;
+    match drive_target(&state, &drive_id).await? {
+        DriveTarget::Local(drive_id) => {
+            let response = local_decision(&state, &drive_id, &title_id, request).await?;
+            Ok(Json(response).into_response())
+        }
+        DriveTarget::Remote {
+            owner_node_id,
+            drive_id,
+        } => {
+            let response = relay_owner(
+                &state,
+                &owner_node_id,
+                &OwnerRequest::Decision {
+                    drive_id,
+                    title_id,
+                    request,
+                },
+            )
+            .await?;
+            relayed_json(response)
+        }
+    }
+}
+
+async fn local_decision(
+    state: &AppState,
+    drive_id: &str,
+    title_id: &str,
+    request: DecisionRequest,
+) -> Result<OpticalDecisionResponse, ApiError> {
+    require_enabled(state).await?;
     let snapshot = state
         .optical
         .manager()
@@ -378,16 +597,16 @@ async fn decision(
         drive_id: drive_id.to_owned(),
         media_generation: request.media_generation,
         disc_id: request.expected_disc_id,
-        title_id,
+        title_id: title_id.to_owned(),
         angle: request.angle,
     };
     source
         .validate()
         .map_err(|error| ApiError::BadRequest(error.to_string()))?;
-    Ok(Json(OpticalDecisionResponse {
+    Ok(OpticalDecisionResponse {
         source,
         decision: plan,
-    }))
+    })
 }
 
 fn validate_ready_insertion(
@@ -524,7 +743,7 @@ async fn set_match(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EjectRequest {
     expected_disc_id: String,
@@ -541,7 +760,32 @@ async fn eject(
     Json(request): Json<EjectRequest>,
 ) -> Result<StatusCode, ApiError> {
     require_enabled(&state).await?;
-    let drive_id = local_drive_id(&state, &drive_id)?;
+    match drive_target(&state, &drive_id).await? {
+        DriveTarget::Local(drive_id) => local_eject(&state, &drive_id, request).await?,
+        DriveTarget::Remote {
+            owner_node_id,
+            drive_id,
+        } => {
+            let response = relay_owner(
+                &state,
+                &owner_node_id,
+                &OwnerRequest::Eject { drive_id, request },
+            )
+            .await?;
+            if !response.status.is_success() {
+                return Err(owner_wire_error(response.status, &response.body));
+            }
+        }
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn local_eject(
+    state: &AppState,
+    drive_id: &str,
+    request: EjectRequest,
+) -> Result<(), ApiError> {
+    require_enabled(state).await?;
     let snapshot = state
         .optical
         .manager()
@@ -573,7 +817,128 @@ async fn eject(
         .eject(drive_id, &request.media_generation, stopped)
         .await
         .map_err(service_error)?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
+}
+
+pub(crate) async fn owner(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let request = match serde_json::from_slice::<OwnerRequest>(&body) {
+        Ok(request) => request,
+        Err(_) => {
+            if authorize_owner(&state, &headers, &body, false)
+                .await
+                .is_err()
+            {
+                return StatusCode::UNAUTHORIZED.into_response();
+            }
+            return signed_owner_error(
+                &state,
+                &headers,
+                ApiError::BadRequest("invalid optical owner request".to_owned()),
+            )
+            .await;
+        }
+    };
+    if authorize_owner(&state, &headers, &body, request.mutates())
+        .await
+        .is_err()
+    {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !state.serving.is_ready() {
+        return signed_owner_error(&state, &headers, owner_unavailable()).await;
+    }
+    match request {
+        OwnerRequest::DriveDisc { drive_id } => match local_drive_disc(&state, &drive_id).await {
+            Ok(response) => signed_owner_json(&state, &headers, StatusCode::OK, &response),
+            Err(error) => signed_owner_error(&state, &headers, error).await,
+        },
+        OwnerRequest::Decision {
+            drive_id,
+            title_id,
+            request,
+        } => match local_decision(&state, &drive_id, &title_id, request).await {
+            Ok(response) => signed_owner_json(&state, &headers, StatusCode::OK, &response),
+            Err(error) => signed_owner_error(&state, &headers, error).await,
+        },
+        OwnerRequest::Eject { drive_id, request } => {
+            match local_eject(&state, &drive_id, request).await {
+                Ok(()) => {
+                    signed_owner_json(&state, &headers, StatusCode::OK, &serde_json::json!({}))
+                }
+                Err(error) => signed_owner_error(&state, &headers, error).await,
+            }
+        }
+    }
+}
+
+async fn authorize_owner(
+    state: &AppState,
+    headers: &HeaderMap,
+    body: &[u8],
+    mutation: bool,
+) -> Result<(), StatusCode> {
+    let auth = exact_auth_from_headers(headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let allowed = if mutation {
+        state
+            .membership
+            .authorize_internal_peer_voter_request(&auth, "POST", OWNER_PATH, body)
+            .await
+    } else {
+        state
+            .membership
+            .authorize_internal_peer_read_request(&auth, "POST", OWNER_PATH, body)
+            .await
+    }
+    .unwrap_or(false);
+    allowed.then_some(()).ok_or(StatusCode::UNAUTHORIZED)
+}
+
+fn signed_owner_json<T: Serialize>(
+    state: &AppState,
+    headers: &HeaderMap,
+    status: StatusCode,
+    value: &T,
+) -> Response {
+    let body = match serde_json::to_vec(value) {
+        Ok(body) => body,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    signed_owner_bytes(state, headers, status, body).unwrap_or_else(|status| status.into_response())
+}
+
+async fn signed_owner_error(state: &AppState, headers: &HeaderMap, error: ApiError) -> Response {
+    let response = error.into_response();
+    let status = response.status();
+    let body = match axum::body::to_bytes(response.into_body(), MAX_OWNER_RESPONSE_BYTES).await {
+        Ok(body) => body.to_vec(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    signed_owner_bytes(state, headers, status, body).unwrap_or_else(|status| status.into_response())
+}
+
+fn signed_owner_bytes(
+    state: &AppState,
+    headers: &HeaderMap,
+    status: StatusCode,
+    body: Vec<u8>,
+) -> Result<Response, StatusCode> {
+    let auth = exact_auth_from_headers(headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let payload = signed_response_payload(status.as_u16(), &body);
+    let signature = state
+        .membership
+        .sign_internal_peer_response(&auth.node_id, &auth.nonce, OWNER_PATH, &payload)
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CACHE_CONTROL, "private, no-store")
+        .header(RESPONSE_SIGNATURE_HEADER, signature)
+        .body(axum::body::Body::from(body))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 fn optical_conflict(code: &'static str, message: &'static str) -> ApiError {

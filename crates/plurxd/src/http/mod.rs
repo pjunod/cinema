@@ -700,6 +700,10 @@ pub fn router(state: AppState) -> Router {
             post(internal_media_sessions::control).layer(DefaultBodyLimit::max(
                 crate::playback_control::MAX_RELAY_BYTES,
             )),
+        )
+        .route(
+            optical::OWNER_PATH,
+            post(optical::owner).layer(DefaultBodyLimit::max(optical::MAX_OWNER_REQUEST_BYTES)),
         );
 
     Router::new()
