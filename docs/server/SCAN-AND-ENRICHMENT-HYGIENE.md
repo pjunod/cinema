@@ -1,6 +1,6 @@
 # Scan and enrichment hygiene — walk off the runtime, deadlines on every provider call
 
-**Status:** implementation in progress · **Executes:** C3 / F-core-3 and C5 / F-core-6
+**Status:** implementation complete; ready for adversarial review · **Executes:** C3 / F-core-3 and C5 / F-core-6
 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 (assessment rows C3, F-core-3, C5, F-core-6 in
@@ -533,10 +533,12 @@ stop, paste the last 50 lines of journalctl -u plurxd, and do not restart.
 3. **`ITEM_ENRICH_DEADLINE` for anime.** AniList search is one call, so
    120 s is generous; if the metric shows AniList items never come near
    it, a per-provider constant is a one-line follow-up.
-4. **Coordinator idempotence on a repeated join digest** (M3 step 2). If
-   the handlers refuse a repeat, the fix belongs to the cluster
-   membership plan, and M3 ships with the ambiguous error pointing at
-   "start a new join" instead.
+4. **Coordinator idempotence on a repeated join digest** (M3 step 2).
+   Resolved in M3: `redeem_for_role` already returns success when the
+   reserved token and published node identity match, and
+   `a_repeated_redeem_from_the_same_node_is_idempotent` pins that recovery
+   branch. The ambiguous error therefore directs the operator to re-run the
+   same staged join.
 
 ---
 
@@ -552,3 +554,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 |---|---|---|---|---|---|
 | 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M1 | #400 | Commit `6412f1fbf7d8`: bounded four-page walker shared by full and targeted scans; async file stat and root canonicalization; walk/process histogram. `cargo test -p plurx-core scan::` (106 passed), `cargo test -p plurxd scan` (19 passed), pinned 1.97.1 checks and scoped Clippy passed. Fleet NAS timing remains post-merge evidence. |
 | 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M2 | #400 | Commit `4995d5f6f611`: bounded TMDB/AniList connect, read, total-call, retry-wall, JSON-body, and item deadlines with fixed-cardinality metrics. `cargo test -p plurx-core metadata::` (65 passed), `cargo test -p plurxd enrich` (6 passed), pinned 1.97.1 checks and scoped Clippy passed. Fleet provider-drop acceptance remains post-merge evidence. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M3 | #400 | Commit `407683cc91b1`: shared bounded no-redirect join client, capped error body, distinct ambiguous-timeout recovery, and repeated same-node redemption contract. `cargo test -p plurx-core --features hiqlite-store cluster::migration` (80 passed), both focused new contract tests, pinned 1.97.1 checks and scoped Clippy passed. |
