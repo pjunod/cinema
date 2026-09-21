@@ -499,4 +499,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | Claim | pending | Claimed the whole C-04 plan on `plan/C-04`; draft PR precedes implementation. The existing Begin/Store/End revocation fence remains non-negotiable. |
