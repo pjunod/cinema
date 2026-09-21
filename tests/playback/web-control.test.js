@@ -2487,7 +2487,19 @@ async function main() {
       },
       { PlurxPlaybackControl: control },
       control,
-      options.clock||performance,
+      // The shipped wait reads `performance.now() - began`, and every case
+      // below that does not say otherwise passes `began` as the literal 100
+      // `stalledPlayer` carries. On the real clock that difference is not a
+      // property of the case at all — it is however long this file has taken
+      // to reach the line — so once the suite grew past
+      // CONTROL_STALL_DEFER_DEADLINE_MS (20 s) every later stall case silently
+      // began asserting against a wait the shipped code had already deferred
+      // past its ask. `askWith` already froze its own clock at `began` for
+      // exactly this reason; the default belongs here, where every case that
+      // is about waiter settlement rather than elapsed time gets it. The two
+      // cases that ARE about elapsed time pass `clock: performance` and read
+      // the real one.
+      options.clock||{now:()=>100},
       (video) => {
         try {
           const at = Number(video.currentTime) || 0;
@@ -2849,7 +2861,9 @@ async function main() {
   // control budget. It must recover without putting another request on the
   // wire or waiting through another ask window.
   {
-    const h = stallHarness();
+    // Real elapsed time is the subject here: `began` is read off the same
+    // clock the shipped wait reads, 20 s behind it.
+    const h = stallHarness({ clock: performance });
     const player = stalledPlayer();
     const began = performance.now() - 20_000;
     player.waitAt = began;
@@ -3129,6 +3143,9 @@ async function main() {
       "a same-title session replacement preserves the armed diagnosis");
     const h = stallHarness({
       answer: () => ({ type: "terminal", code: "unsupported", message: "No decoder for this." }),
+      // The armed lease is compared against the real clock below, so the
+      // shipped code has to be reading the same one.
+      clock: performance,
     });
     const player = stalledPlayer();
     h.stub.attach(player, stalledVideo, bootstrap());
