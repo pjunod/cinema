@@ -1,6 +1,6 @@
 # Live TV DVR and reminders — the options, with renders
 
-**Status:** decision needed · **Written:** 2026-09-13 · **Verified against:**
+**Status:** accepted by Paul 2026-09-13 · **Written:** 2026-09-13 · **Verified against:**
 `main` `311683bc` (the tree the proportions PRs #268/#269/#271 landed in) ·
 **Renders:** `docs/mockups/live-tv/dvr-*.png`, generated from the canvas
 ["Live TV DVR and Reminders"](https://claude.ai/code/artifact/9dadbbdf-929d-4bb1-8c69-7ad8d7cc2e7e)
@@ -11,8 +11,8 @@ Companion to [LIVE-TV-GUIDE-AND-UI-PLAN.md](LIVE-TV-GUIDE-AND-UI-PLAN.md)
 [HDHOMERUN-LIVE-TV-STATUS.md](HDHOMERUN-LIVE-TV-STATUS.md) (what the tuner
 engine has proved on hardware). This is *the choices for recording and for
 "tell me when it starts"*, each with what it costs, so one round of rulings
-turns into an implementation doc. Nothing here is built. Section numbers
-exist so the rulings can cite them (`§2.3`, `§4.2`).
+turned into the implementation document after the accepted rulings. Section
+numbers exist so the decision record can cite them (`§2.3`, `§4.2`).
 
 Two things shape every option below, and they are worth stating before the
 menu, because they decide how far any of it can go:

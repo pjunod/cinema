@@ -1,6 +1,6 @@
 # Live TV DVR and reminders — proposal and implementation plan
 
-**Status:** ready to build (v2 — Astra's review of 2026-09-13 addressed, §10) ·
+**Status:** built and merged 2026-09-13 (v2 — Astra's review addressed, §10) ·
 **Executes:** the recommended options in
 [LIVE-TV-DVR-AND-REMINDERS-OPTIONS.md](LIVE-TV-DVR-AND-REMINDERS-OPTIONS.md)
 §5, which Paul accepted 2026-09-13 · **Verified against:** `main` `311683bc` ·

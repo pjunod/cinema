@@ -282,7 +282,7 @@ _DOCUMENTED_CONSTANTS = {
         "crates/plurxd/src/http/web.rs", _web_asset_count
     ),
 }
-_REQUIRED_DOCUMENTED_CONSTANTS: frozenset[str] = frozenset()
+_REQUIRED_DOCUMENTED_CONSTANTS: frozenset[str] = frozenset(_DOCUMENTED_CONSTANTS)
 _DOCUMENTED_VALUE = re.compile(r"`([A-Z][A-Z0-9_]*)`\s*=\s*(\d+)")
 
 
