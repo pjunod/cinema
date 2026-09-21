@@ -616,6 +616,12 @@ Acceptance: `cargo test -p plurxd frozen_presentation rung_geometry` green;
 `make unit` green; a manual `curl` of `master.m3u8` for a rolling 720
 session on a 4K fixture prints `RESOLUTION=1280x720`.
 
+Implemented in the shared `FrozenHlsPresentation` constructor so cached
+starts, live starts, takeovers, prepared successors and test probe refreshes
+cannot drift. The constructor reshapes only `SessionKind::Transcode`; copy
+sessions retain source geometry. Focused tests pin 4K-to-720 output, unprobed
+omission, no upscaling and unchanged copy dimensions.
+
 ### 5.2 M2 — the AVC string from `init.mp4`, for fMP4 sessions
 
 Code: §3.2, plus adding `avc1` to `master_requires_attempt_init`
@@ -904,3 +910,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Claimed `plan/S-10` from `665b8b5c`; M1–M2 are locally implementable, while M3–M6 remain evidence-gated. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Rolling frozen presentations use `output_size`; three focused rolling-geometry tests and the copy-session guard passed. |
