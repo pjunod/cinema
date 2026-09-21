@@ -920,6 +920,14 @@
     per_attach: 1,
   });
 
+  // Media recovery spends the same per-attach budget as network startLoad.
+  // The item bound survives internal reopens, so a decoder that repeatedly
+  // rejects the same title cannot acquire a fresh rescue on every attachment.
+  const HLS_MEDIA_RECOVERY = Object.freeze({
+    per_item: 2,
+    settle_ms: 4_000,
+  });
+
   // One absolute startup policy for the web HLS attachment. hls.js owns the
   // retry ladder inside a source-load cycle; the application owns one
   // corrective cycle and the ceiling across both. Keeping the numbers here
@@ -997,6 +1005,39 @@
   // that schedules the retry cannot disagree with the test that pins it.
   function hlsRetryAllowed({ used = 0 } = {}) {
     return (Number(used) || 0) < HLS_RETRY.per_attach;
+  }
+
+  function hlsMediaFatalAction({
+    type,
+    details,
+    sourceBufferName = null,
+    retryUsed = 0,
+    itemRecoveries = 0,
+    recoveredAtMs = null,
+    nowMs = 0,
+  } = {}) {
+    if (type !== "mediaError") return "none";
+    if (
+      details === "bufferIncompatibleCodecsError" ||
+      details === "bufferAddCodecError"
+    ) {
+      return "fallback";
+    }
+    if (!hlsRetryAllowed({ used: retryUsed })) return "fallback";
+    if (itemRecoveries >= HLS_MEDIA_RECOVERY.per_item) return "fallback";
+    if (
+      recoveredAtMs != null &&
+      Number(nowMs) - Number(recoveredAtMs) < HLS_MEDIA_RECOVERY.settle_ms
+    ) {
+      return "fallback";
+    }
+    if (itemRecoveries > 0) {
+      return (details === "bufferAppendError" || details === "bufferAppendingError") &&
+        sourceBufferName === "audio"
+        ? "swap_audio"
+        : "fallback";
+    }
+    return "recover";
   }
 
   // Android's `BEHIND_LIVE_WINDOW` recovery (M5 addition 3). Finite timelines
@@ -1952,6 +1993,8 @@
     createRetryStep,
     HLS_RETRY,
     hlsRetryAllowed,
+    HLS_MEDIA_RECOVERY,
+    hlsMediaFatalAction,
     HLS_STARTUP,
     HLS_STARTUP_TERMINAL_CODES,
     STREAM_FAILURE_BODY_MAX_CHARS,
