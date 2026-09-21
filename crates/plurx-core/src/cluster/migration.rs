@@ -20,10 +20,14 @@ use std::io::Seek;
 use std::net::{IpAddr, SocketAddr};
 #[cfg(feature = "hiqlite-store")]
 use std::sync::Arc;
+#[cfg(feature = "hiqlite-store")]
+use std::sync::OnceLock;
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
+#[cfg(feature = "hiqlite-store")]
+use futures_util::StreamExt;
 use rusqlite::backup::Backup;
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -92,6 +96,12 @@ const HIQLITE_HEALTH_TIMEOUT: Duration = Duration::from_secs(45);
 const MEMBERSHIP_ADMISSION_TIMEOUT: Duration = Duration::from_secs(45);
 #[cfg(feature = "hiqlite-store")]
 const SNAPSHOT_CATCHUP_GRACE: Duration = Duration::from_secs(45);
+#[cfg(feature = "hiqlite-store")]
+const JOIN_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(feature = "hiqlite-store")]
+const JOIN_TOTAL_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(feature = "hiqlite-store")]
+const JOIN_ERROR_MAX_BYTES: u64 = 4 * 1024 * 1024;
 // OpenRaft gives an AppendEntries RPC one heartbeat interval. Once a leader is
 // running this Hiqlite transport it lets that RPC use the whole hard deadline,
 // and this 800 ms window admits the observed 600-700 ms durable crash-recovery
@@ -870,19 +880,52 @@ async fn post_join_request<T: Serialize>(
     path: &str,
     request: &T,
 ) -> Result<(), StoreError> {
-    let response = reqwest::Client::new()
-        .post(format!("{}{path}", payload.bootstrap_http()))
+    post_join_url(
+        &join_client()?,
+        format!("{}{path}", payload.bootstrap_http()),
+        request,
+    )
+    .await
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn join_client() -> Result<reqwest::Client, StoreError> {
+    static CLIENT: OnceLock<Result<reqwest::Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(JOIN_CONNECT_TIMEOUT)
+                .timeout(JOIN_TOTAL_TIMEOUT)
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .cloned()
+        .map_err(|error| {
+            StoreError::Database(format!("building bounded join coordinator client: {error}"))
+        })
+}
+
+#[cfg(feature = "hiqlite-store")]
+async fn post_join_url<T: Serialize>(
+    client: &reqwest::Client,
+    url: String,
+    request: &T,
+) -> Result<(), StoreError> {
+    let response = client
+        .post(url)
         .json(request)
         .send()
         .await
-        .map_err(|error| StoreError::Database(format!("contacting join coordinator: {error}")))?;
+        .map_err(join_request_error)?;
     if response.status().is_success() {
         return Ok(());
     }
     let status = response.status();
-    let error = response
-        .json::<JoinApiError>()
-        .await
+    let error = bounded_join_error_response(response)
+        .await?
+        .and_then(|body| serde_json::from_slice::<JoinApiError>(&body).ok())
         .unwrap_or(JoinApiError {
             code: "membership_internal".to_owned(),
             message: "join coordinator refused the request".to_owned(),
@@ -891,6 +934,45 @@ async fn post_join_request<T: Serialize>(
         "{}: {} (HTTP {status})",
         error.code, error.message
     )))
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn join_request_error(error: reqwest::Error) -> StoreError {
+    if error.is_timeout() {
+        StoreError::Migration(
+            "join_request_ambiguous: the coordinator did not answer within 30 s; the request \
+             may have been accepted — re-run the same staged join, do not mint a new token"
+                .to_owned(),
+        )
+    } else {
+        StoreError::Database(format!("contacting join coordinator: {error}"))
+    }
+}
+
+#[cfg(feature = "hiqlite-store")]
+async fn bounded_join_error_response(
+    response: reqwest::Response,
+) -> Result<Option<Vec<u8>>, StoreError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > JOIN_ERROR_MAX_BYTES)
+    {
+        return Err(StoreError::Migration(format!(
+            "join_response_too_large: the coordinator error exceeded {JOIN_ERROR_MAX_BYTES} bytes"
+        )));
+    }
+    let mut body = response.bytes_stream();
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(join_request_error)?;
+        if bytes.len().saturating_add(chunk.len()) > JOIN_ERROR_MAX_BYTES as usize {
+            return Err(StoreError::Migration(format!(
+                "join_response_too_large: the coordinator error exceeded {JOIN_ERROR_MAX_BYTES} bytes"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok((!bytes.is_empty()).then_some(bytes))
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -3579,6 +3661,44 @@ fn migration_io(action: &str, path: &Path, error: std::io::Error) -> StoreError 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test]
+    async fn an_accepted_join_that_never_answers_is_reported_as_ambiguous() {
+        use axum::routing::post;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("join mock listener");
+        let address = listener.local_addr().expect("join mock address");
+        tokio::spawn(async move {
+            let app = axum::Router::new().route(
+                "/join",
+                post(|| async { std::future::pending::<axum::http::StatusCode>().await }),
+            );
+            let _ = axum::serve(listener, app).await;
+        });
+        let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_millis(50))
+            .timeout(Duration::from_millis(50))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .expect("bounded test client");
+        let started = std::time::Instant::now();
+
+        let error = post_join_url(
+            &client,
+            format!("http://{address}/join"),
+            &serde_json::json!({ "token_digest": "accepted" }),
+        )
+        .await
+        .expect_err("the missing response is ambiguous");
+
+        assert!(matches!(error, StoreError::Migration(_)));
+        assert!(error.to_string().contains("join_request_ambiguous"));
+        assert!(error.to_string().contains("re-run the same staged join"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 
     #[cfg(feature = "hiqlite-store")]
     #[test]

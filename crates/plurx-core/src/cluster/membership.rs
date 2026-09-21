@@ -14792,6 +14792,32 @@ mod tests {
         );
     }
 
+    /// An ambiguous client-side timeout is recoverable only if the same staged
+    /// node can repeat redemption after the coordinator reserved its token.
+    #[test]
+    fn a_repeated_redeem_from_the_same_node_is_idempotent() {
+        let source = production_source();
+        let redeem = source
+            .split_once("async fn redeem_for_role(")
+            .expect("join redemption")
+            .1
+            .split_once("async fn upsert_hostname(")
+            .expect("join redemption end")
+            .0;
+        let resume = redeem
+            .split_once("\"redeeming\" => {")
+            .expect("same-node resume branch")
+            .1
+            .split_once("\"issued\" if record.expires_at <= now")
+            .expect("end of token-state match")
+            .0;
+
+        assert!(resume.contains("self.redeeming_node_matches(request).await?"));
+        assert!(resume.contains("Some(false) => return Err(MembershipError::NodeIdentityInUse)"));
+        assert!(resume.contains("Some(true) => {"));
+        assert!(resume.contains("return Ok(())"));
+    }
+
     /// The case the heartbeat coupling exists to catch, constructed on purpose.
     ///
     /// A node was upgraded, wrote its capability, and was then rolled back to a
