@@ -8,12 +8,22 @@
 mod capability;
 mod input;
 mod inspector;
+mod session;
+pub(crate) mod store;
 
 pub use capability::{classify_help_output, OpticalCapabilities, OpticalCapability};
 pub use input::{InputBuildError, OpticalTitleLocator, ResolvedInput};
 pub use inspector::{
     validate_inspection, FingerprintEvidence, InspectedChapter, InspectedDisc, InspectedStream,
     InspectedTitle, InspectionError, InspectionResponse, ProtectionFacts, INSPECTION_SCHEMA_V1,
+};
+pub use session::{
+    optical_output_identity, DurableOpticalSessionSource, OpticalSessionPayloadError,
+    OPTICAL_SESSION_PAYLOAD_V1,
+};
+pub use store::{
+    OpticalDisc, OpticalInspection, OpticalMatchKind, OpticalProgress, OpticalProgressWrite,
+    OpticalTitle, OPTICAL_PLAY_GRANT, OPTICAL_SCHEMA,
 };
 
 use serde::{Deserialize, Serialize};
@@ -28,6 +38,23 @@ pub const MAX_OPTICAL_ID_BYTES: usize = 192;
 pub enum OpticalFormat {
     Dvd,
     Bluray,
+}
+
+impl OpticalFormat {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dvd => "dvd",
+            Self::Bluray => "bluray",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "dvd" => Some(Self::Dvd),
+            "bluray" => Some(Self::Bluray),
+            _ => None,
+        }
+    }
 }
 
 /// The durable or request identity of a playback source.

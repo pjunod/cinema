@@ -20,6 +20,7 @@ mod library;
 mod library_channels;
 mod media;
 mod offline;
+mod optical;
 mod outbox;
 mod pretranscode;
 mod publication;
@@ -1125,6 +1126,9 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v63: mirror typed retry disposition and diagnostics in the standalone
     // node-local refusal store.
     crate::store::fragindex::FRAGMENT_INDEX_TYPED_OUTCOMES_SCHEMA,
+    // v64: durable optical disc/title identity and per-user progress. Device
+    // paths and insertion generations remain node-local and never enter it.
+    crate::optical::OPTICAL_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.

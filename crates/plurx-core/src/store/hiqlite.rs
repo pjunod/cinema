@@ -99,7 +99,8 @@ const DVR_EVENT_SCHEMA_VERSION: i64 = 39;
 const VIDEO_CODEC_TAG_SCHEMA_VERSION: i64 = 40;
 const CLASSIFICATION_SCHEMA_VERSION: i64 = 41;
 const CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION: i64 = 42;
-pub const AUTH_SCHEMA_VERSION: i64 = CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION;
+const OPTICAL_SCHEMA_VERSION: i64 = 43;
+pub const AUTH_SCHEMA_VERSION: i64 = OPTICAL_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -141,6 +142,7 @@ const DVR_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERS
 const DVR_EVENT_SCHEMA_MIGRATION_SOURCE: i64 = SUBJECT_SCHEMA_VERSION;
 const VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE: i64 = DVR_EVENT_SCHEMA_VERSION;
 const CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE: i64 = CLASSIFICATION_SCHEMA_VERSION;
+const OPTICAL_SCHEMA_MIGRATION_SOURCE: i64 = CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -1445,6 +1447,7 @@ impl HiqliteAuthStore {
             .txn(super::hiqlite_library_channels::subject_migration_statements()?)
             .await
             .map_err(database_error)?;
+        super::hiqlite_optical::install_schema(&client).await?;
 
         let store = Self::with_clock(client, clock, NodeLocalTelemetry::open(telemetry_path)?);
         let now = store.now()?;
@@ -2530,6 +2533,19 @@ impl HiqliteAuthStore {
                         attempt,
                     )
                     .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(OPTICAL_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_optical::migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(OPTICAL_SCHEMA_VERSION, now, OPTICAL_SCHEMA_MIGRATION_SOURCE),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(OPTICAL_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
@@ -4320,7 +4336,8 @@ fn schema_migration_action(
         | DVR_EVENT_SCHEMA_MIGRATION_SOURCE
         | VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE
         | VIDEO_CODEC_TAG_SCHEMA_VERSION
-        | CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE => {
+        | CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE
+        | OPTICAL_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -6244,9 +6261,18 @@ mod tests {
             "v41 must advance exactly one step to the content-analysis repair schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 37,
+            OPTICAL_SCHEMA_MIGRATION_SOURCE, CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION,
+            "the optical migration must start from the exact v42 shape"
+        );
+        assert_eq!(
+            OPTICAL_SCHEMA_MIGRATION_SOURCE + 1,
+            OPTICAL_SCHEMA_VERSION,
+            "v42 must advance exactly one step to the optical schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 38,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v42 step"
+            "this implementation contains every additive v5→v43 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

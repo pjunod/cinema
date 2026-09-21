@@ -1281,6 +1281,10 @@ mod tests {
                  DROP TRIGGER IF EXISTS classification_ai;
                  DROP TABLE IF EXISTS classification_fts;
                  DROP TABLE IF EXISTS media_classifications;
+                 DROP TABLE IF EXISTS optical_progress;
+                 DROP TABLE IF EXISTS optical_titles;
+                 DROP TABLE IF EXISTS optical_discs;
+                 DROP TABLE IF EXISTS user_grants;
                  DROP TABLE IF EXISTS dvr_attention_acks;
                  DROP TABLE IF EXISTS dvr_events;
                  DROP TABLE IF EXISTS dvr_event_heads;
@@ -1409,7 +1413,7 @@ mod tests {
     #[test]
     fn the_downgrade_fixture_undoes_every_migration_after_the_guard() {
         const GUARD_SCHEMA_VERSION: i64 = 44;
-        const DROPPED_BY_THE_FIXTURE: [&str; 19] = [
+        const DROPPED_BY_THE_FIXTURE: [&str; 20] = [
             "fragment_index_outcomes",
             "attempt_errors",
             "video_identity",
@@ -1436,6 +1440,7 @@ mod tests {
             "CREATE TABLE IF NOT EXISTS media_classifications",
             "CREATE TABLE analysis_index_repairs",
             "ADD COLUMN typed_code",
+            "CREATE TABLE optical_discs",
         ];
 
         assert!(

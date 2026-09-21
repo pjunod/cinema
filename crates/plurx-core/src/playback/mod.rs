@@ -11,7 +11,7 @@ use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::MediaFile;
+use crate::domain::{AudioStream, DolbyVisionFacts, MediaFile, SubtitleStream};
 
 pub mod caps;
 pub mod desired;
@@ -24,6 +24,82 @@ pub use desired::{
 pub use intent::{
     IntentAxis, IntentEnvelopeError, IntentOrder, MediaIntentEnvelope, MAX_LIFETIME_ID,
 };
+
+/// How source bytes can enter the existing playback delivery machinery.
+///
+/// A managed optical title is never eligible for raw progressive range
+/// delivery even when its elementary streams are client-compatible: the drive
+/// owner must demux the selected title under its insertion/reader capability.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceDelivery {
+    #[default]
+    FileRange,
+    ManagedOpticalTitle,
+}
+
+/// Codec/timeline facts consumed by the playback decision engine, separate
+/// from file identity and filesystem path.
+///
+/// Optical inspection serializes this shape into its title record. Ordinary
+/// files project into it through [`From<&MediaFile>`], preserving the public
+/// `decide(&MediaFile, ..)` adapter while avoiding fictitious file rows.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlaybackMediaFacts {
+    pub duration_ms: Option<i64>,
+    pub container: Option<String>,
+    pub video_codec: Option<String>,
+    pub video_codec_tag: Option<String>,
+    pub video_profile: Option<String>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub bit_depth: Option<i64>,
+    pub hdr: Option<String>,
+    pub hdr_format: Option<String>,
+    #[serde(default)]
+    pub dolby_vision: DolbyVisionFacts,
+    pub bitrate: Option<i64>,
+    #[serde(default)]
+    pub audio_streams: Vec<AudioStream>,
+    #[serde(default)]
+    pub subtitle_streams: Vec<SubtitleStream>,
+    #[serde(default)]
+    pub audio_offset_ms: i64,
+    #[serde(default)]
+    pub probed: bool,
+    #[serde(default)]
+    pub source_delivery: SourceDelivery,
+    /// Exact-file decoder-limit identity. Optical titles intentionally omit
+    /// this until their own bounded telemetry identity is implemented.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub learned_limit_identity: Option<String>,
+}
+
+impl From<&MediaFile> for PlaybackMediaFacts {
+    fn from(file: &MediaFile) -> Self {
+        Self {
+            duration_ms: file.duration_ms,
+            container: file.container.clone(),
+            video_codec: file.video_codec.clone(),
+            video_codec_tag: file.video_codec_tag.clone(),
+            video_profile: file.video_profile.clone(),
+            width: file.width,
+            height: file.height,
+            bit_depth: file.bit_depth,
+            hdr: file.hdr.clone(),
+            hdr_format: file.hdr_format.clone(),
+            dolby_vision: file.dolby_vision,
+            bitrate: file.bitrate,
+            audio_streams: file.audio_streams.clone(),
+            subtitle_streams: file.subtitle_streams.clone(),
+            audio_offset_ms: file.audio_offset_ms,
+            probed: file.probed,
+            source_delivery: SourceDelivery::FileRange,
+            learned_limit_identity: Some(caps::decode_limit_identity(file)),
+        }
+    }
+}
 
 /// Built-in device profiles, parsed once from the embedded TOML.
 static PROFILES: LazyLock<HashMap<String, DeviceProfile>> = LazyLock::new(|| {
@@ -275,11 +351,11 @@ impl DeviceProfile {
     /// old `codec@height` key poisoned every 4K HEVC title on the strength of
     /// one 90 Mb/s remux, and a lenient match here would reintroduce that
     /// through the back door.
-    fn matching_learned_limit(&self, file: &MediaFile) -> Option<&caps::LearnedLimit> {
+    fn matching_learned_limit(&self, facts: &PlaybackMediaFacts) -> Option<&caps::LearnedLimit> {
         if self.learned_limits.is_empty() {
             return None;
         }
-        let identity = caps::decode_limit_identity(file);
+        let identity = facts.learned_limit_identity.as_deref()?;
         self.learned_limits
             .iter()
             .find(|limit| limit.identity == identity)
@@ -308,13 +384,13 @@ impl DeviceProfile {
     ///
     /// What may actually be *delivered* is the narrower
     /// [`DeviceProfile::decodes_dolby_vision_as_copied`].
-    fn allows_dolby_vision(&self, file: &MediaFile) -> bool {
-        self.supports_dolby_vision || self.enumerates_dolby_vision_profile(file)
+    fn allows_dolby_vision(&self, facts: &PlaybackMediaFacts) -> bool {
+        self.supports_dolby_vision || self.enumerates_dolby_vision_profile(facts)
     }
 
     /// Has this client listed this source's own Dolby Vision profile by number?
-    fn enumerates_dolby_vision_profile(&self, file: &MediaFile) -> bool {
-        dolby_vision_profile(file)
+    fn enumerates_dolby_vision_profile(&self, facts: &PlaybackMediaFacts) -> bool {
+        dolby_vision_profile_facts(facts)
             .is_some_and(|profile| self.dolby_vision_profiles.contains(&profile))
     }
 
@@ -335,11 +411,11 @@ impl DeviceProfile {
     /// asked for; everything else is routed by `dv_handling` to the conversion
     /// where this node can build one, and to the compatible base layer or a
     /// re-encode where it cannot — all of which decode.
-    fn decodes_dolby_vision_as_copied(&self, file: &MediaFile) -> bool {
-        if dolby_vision_is_dual_layer(file) {
-            return self.enumerates_dolby_vision_profile(file);
+    fn decodes_dolby_vision_as_copied(&self, facts: &PlaybackMediaFacts) -> bool {
+        if dolby_vision_is_dual_layer_facts(facts) {
+            return self.enumerates_dolby_vision_profile(facts);
         }
-        self.allows_dolby_vision(file)
+        self.allows_dolby_vision(facts)
     }
 }
 
@@ -473,11 +549,11 @@ fn hevc_height_ceiling(profile: &DeviceProfile) -> Option<i64> {
     }
 }
 
-fn source_grade(file: &MediaFile) -> SourceGrade {
-    match file.hdr.as_deref() {
+fn source_grade(facts: &PlaybackMediaFacts) -> SourceGrade {
+    match facts.hdr.as_deref() {
         Some("dolby_vision") => {
-            if has_compatible_dv_base(file) {
-                if file
+            if has_compatible_dv_base_facts(facts) {
+                if facts
                     .hdr_format
                     .as_deref()
                     .is_some_and(|label| label.contains("HLG-compatible"))
@@ -486,7 +562,7 @@ fn source_grade(file: &MediaFile) -> SourceGrade {
                 } else {
                     SourceGrade::Pq
                 }
-            } else if dolby_vision_profile(file) == Some(5) {
+            } else if dolby_vision_profile_facts(facts) == Some(5) {
                 SourceGrade::PqViaRpu
             } else {
                 SourceGrade::Unrenderable
@@ -525,7 +601,11 @@ pub enum HdrRoute {
 /// classification to choose a grade. One function, so the badge and the bytes
 /// cannot disagree about which renderer ran.
 pub fn hdr_route(file: &MediaFile) -> Option<HdrRoute> {
-    match source_grade(file) {
+    hdr_route_facts(&PlaybackMediaFacts::from(file))
+}
+
+pub fn hdr_route_facts(facts: &PlaybackMediaFacts) -> Option<HdrRoute> {
+    match source_grade(facts) {
         SourceGrade::Pq => Some(HdrRoute::Passthrough),
         SourceGrade::PqViaRpu => Some(HdrRoute::DolbyVisionRpu),
         SourceGrade::Sdr | SourceGrade::Hlg | SourceGrade::Unrenderable => None,
@@ -566,7 +646,15 @@ pub fn target_grade(
     profile: &DeviceProfile,
     node: &RenderCaps,
 ) -> (OutputGrade, &'static str) {
-    let source = source_grade(file);
+    target_grade_facts(&PlaybackMediaFacts::from(file), profile, node)
+}
+
+pub fn target_grade_facts(
+    facts: &PlaybackMediaFacts,
+    profile: &DeviceProfile,
+    node: &RenderCaps,
+) -> (OutputGrade, &'static str) {
+    let source = source_grade(facts);
     match source {
         SourceGrade::Sdr => return (OutputGrade::Sdr, ""),
         SourceGrade::Hlg => {
@@ -618,7 +706,7 @@ pub fn target_grade(
     // session time; the session reports what it actually produced
     // (MEDIA-BADGES-PLAN §3.2). What this refuses is the case where no rung
     // was ever reachable.
-    if file.height.unwrap_or(0) < HDR10_MIN_MEASURED_HEIGHT {
+    if facts.height.unwrap_or(0) < HDR10_MIN_MEASURED_HEIGHT {
         return (
             OutputGrade::Sdr,
             "tone-mapped to SDR: the HDR10 rung is measured at 1080p and above, and this source \
@@ -740,26 +828,26 @@ impl Checks {
 
 /// Run every compatibility check, collecting human reasons for the ones that
 /// fail (empty ⇒ direct-playable, profile-wise).
-fn evaluate(file: &MediaFile, profile: &DeviceProfile) -> (Checks, Vec<String>) {
+fn evaluate(facts: &PlaybackMediaFacts, profile: &DeviceProfile) -> (Checks, Vec<String>) {
     let mut reasons = Vec::new();
 
-    let video_ok = file.video_codec.is_none() || profile.allows_video(&file.video_codec);
+    let video_ok = facts.video_codec.is_none() || profile.allows_video(&facts.video_codec);
     if !video_ok {
         reasons.push(format!(
             "video codec {} unsupported",
-            file.video_codec.as_deref().unwrap_or("unknown")
+            facts.video_codec.as_deref().unwrap_or("unknown")
         ));
     }
 
-    let codec_height = file
+    let codec_height = facts
         .video_codec
         .as_ref()
-        .and_then(|codec| profile.codec_height_ceiling(codec, file.video_profile.as_deref()));
+        .and_then(|codec| profile.codec_height_ceiling(codec, facts.video_profile.as_deref()));
     let height_ceiling = match (profile.max_height, codec_height) {
         (Some(global), Some(codec)) => Some(global.min(codec)),
         (global, codec) => global.or(codec),
     };
-    let height_ok = match (height_ceiling, file.height) {
+    let height_ok = match (height_ceiling, facts.height) {
         (Some(max), Some(h)) => h <= max,
         _ => true,
     };
@@ -767,7 +855,7 @@ fn evaluate(file: &MediaFile, profile: &DeviceProfile) -> (Checks, Vec<String>) 
         reasons.push("resolution above device maximum".to_owned());
     }
 
-    let bitrate_ok = match (profile.max_bitrate, file.bitrate) {
+    let bitrate_ok = match (profile.max_bitrate, facts.bitrate) {
         (Some(max), Some(b)) => b <= max,
         _ => true,
     };
@@ -792,35 +880,39 @@ fn evaluate(file: &MediaFile, profile: &DeviceProfile) -> (Checks, Vec<String>) 
     // negotiated is excused. Plain HDR10/HLG still needs `supports_hdr`, and
     // a client that never claimed DV (or claimed other profiles) still
     // tone-maps, so an SDR-only client cannot be handed HDR by this.
-    let dolby_vision_claimed = is_dolby_vision(file) && profile.allows_dolby_vision(file);
-    let hdr_ok = file.hdr.is_none() || profile.supports_hdr || dolby_vision_claimed;
+    let dolby_vision_claimed = is_dolby_vision_facts(facts) && profile.allows_dolby_vision(facts);
+    let hdr_ok = facts.hdr.is_none() || profile.supports_hdr || dolby_vision_claimed;
     if !hdr_ok {
         reasons.push(format!(
             "HDR ({}) presentation was not proven by this client; tone-mapping to SDR",
-            file.hdr.as_deref().unwrap_or("hdr")
+            facts.hdr.as_deref().unwrap_or("hdr")
         ));
     }
 
     let dolby_vision_needs_remux = profile.remux_dolby_vision && dolby_vision_claimed;
-    let packaging_normalization = progressive_hevc_requires_normalization(file, profile);
-    let container_ok = profile.allows_container(&file.container)
+    let packaging_normalization = progressive_hevc_requires_normalization_facts(facts, profile);
+    let container_ok = profile.allows_container(&facts.container)
+        && facts.source_delivery != SourceDelivery::ManagedOpticalTitle
         && !dolby_vision_needs_remux
         && !packaging_normalization;
     if dolby_vision_needs_remux {
         reasons.push("Dolby Vision normalized through copy-video HLS for this device".to_owned());
+    } else if facts.source_delivery == SourceDelivery::ManagedOpticalTitle {
+        reasons
+            .push("optical title requires owner-managed demux and segmented delivery".to_owned());
     } else if !container_ok && !packaging_normalization {
         reasons.push(format!(
             "container {} not browser-native",
-            file.container.as_deref().unwrap_or("unknown")
+            facts.container.as_deref().unwrap_or("unknown")
         ));
     }
 
     // Audio is judged on the default track (else the first).
-    let audio_codec = file
+    let audio_codec = facts
         .audio_streams
         .iter()
         .find(|a| a.default)
-        .or_else(|| file.audio_streams.first())
+        .or_else(|| facts.audio_streams.first())
         .map(|a| a.codec.clone());
     let audio_ok = match &audio_codec {
         Some(c) => profile.allows_audio(c),
@@ -850,11 +942,18 @@ fn evaluate(file: &MediaFile, profile: &DeviceProfile) -> (Checks, Vec<String>) 
 /// Whether an otherwise supported progressive HEVC source needs a copy-video
 /// delivery because the client explicitly constrained ISO-BMFF sample entries.
 pub fn progressive_hevc_requires_normalization(file: &MediaFile, profile: &DeviceProfile) -> bool {
-    let hevc = file
+    progressive_hevc_requires_normalization_facts(&PlaybackMediaFacts::from(file), profile)
+}
+
+fn progressive_hevc_requires_normalization_facts(
+    facts: &PlaybackMediaFacts,
+    profile: &DeviceProfile,
+) -> bool {
+    let hevc = facts
         .video_codec
         .as_deref()
         .is_some_and(|codec| matches!(codec.to_ascii_lowercase().as_str(), "hevc" | "h265"));
-    let iso_bmff = file.container.as_deref().is_some_and(|container| {
+    let iso_bmff = facts.container.as_deref().is_some_and(|container| {
         matches!(
             container.to_ascii_lowercase().as_str(),
             "mp4" | "m4v" | "mov"
@@ -864,14 +963,14 @@ pub fn progressive_hevc_requires_normalization(file: &MediaFile, profile: &Devic
         return false;
     };
     hevc && iso_bmff
-        && file
+        && facts
             .video_codec_tag
             .as_ref()
             .is_none_or(|tag| !admitted.iter().any(|entry| entry == tag))
 }
 
-fn progressive_hevc_normalization_reason(file: &MediaFile) -> String {
-    match file.video_codec_tag.as_deref() {
+fn progressive_hevc_normalization_reason(facts: &PlaybackMediaFacts) -> String {
+    match facts.video_codec_tag.as_deref() {
         Some(tag) => format!(
             "HEVC sample entry {tag} not admitted for progressive playback; normalizing through \
              copy-video delivery"
@@ -884,7 +983,11 @@ fn progressive_hevc_normalization_reason(file: &MediaFile) -> String {
 /// Is this source Dolby Vision — i.e. does it carry a DV configuration a
 /// player either understands or chokes on?
 pub fn is_dolby_vision(file: &MediaFile) -> bool {
-    file.hdr.as_deref() == Some("dolby_vision")
+    is_dolby_vision_facts(&PlaybackMediaFacts::from(file))
+}
+
+fn is_dolby_vision_facts(facts: &PlaybackMediaFacts) -> bool {
+    facts.hdr.as_deref() == Some("dolby_vision")
 }
 
 /// Would drawing a subtitle into the picture take dynamic range away from the
@@ -968,13 +1071,27 @@ pub fn delivered_dynamic_range(
     preserve_dolby_vision: bool,
     grade: OutputGrade,
 ) -> &'static str {
+    delivered_dynamic_range_facts(
+        &PlaybackMediaFacts::from(file),
+        method,
+        preserve_dolby_vision,
+        grade,
+    )
+}
+
+fn delivered_dynamic_range_facts(
+    facts: &PlaybackMediaFacts,
+    method: PlaybackMethod,
+    preserve_dolby_vision: bool,
+    grade: OutputGrade,
+) -> &'static str {
     if method == PlaybackMethod::Transcode {
         return grade.delivered_dynamic_range();
     }
-    match file.hdr.as_deref() {
+    match facts.hdr.as_deref() {
         Some("dolby_vision") if preserve_dolby_vision => "dolby_vision",
         Some("dolby_vision") => {
-            if file
+            if facts
                 .hdr_format
                 .as_deref()
                 .is_some_and(|label| label.contains("HLG-compatible"))
@@ -1021,12 +1138,26 @@ pub fn delivered_dolby_vision_profile(
     preserve_dolby_vision: bool,
     convert_dolby_vision: bool,
 ) -> Option<u8> {
+    delivered_dolby_vision_profile_facts(
+        &PlaybackMediaFacts::from(file),
+        method,
+        preserve_dolby_vision,
+        convert_dolby_vision,
+    )
+}
+
+fn delivered_dolby_vision_profile_facts(
+    facts: &PlaybackMediaFacts,
+    method: PlaybackMethod,
+    preserve_dolby_vision: bool,
+    convert_dolby_vision: bool,
+) -> Option<u8> {
     // Every transcode re-encodes the picture, and no plurx encode rung
     // produces Dolby Vision.
     if method == PlaybackMethod::Transcode || !preserve_dolby_vision {
         return None;
     }
-    if !is_dolby_vision(file) {
+    if !is_dolby_vision_facts(facts) {
         return None;
     }
     if convert_dolby_vision {
@@ -1035,7 +1166,7 @@ pub fn delivered_dolby_vision_profile(
         // report the profile the conversion exists to replace.
         return Some(8);
     }
-    dolby_vision_profile(file)
+    dolby_vision_profile_facts(facts)
 }
 
 /// Profile number from the Dolby Vision configuration record, or from the
@@ -1051,13 +1182,21 @@ pub fn delivered_dolby_vision_profile(
 /// all. The fallback exists for rows written before the columns did, and can
 /// be deleted once no such row remains.
 pub fn dolby_vision_profile(file: &MediaFile) -> Option<u8> {
+    dolby_vision_profile_facts(&PlaybackMediaFacts::from(file))
+}
+
+fn dolby_vision_profile_facts(facts: &PlaybackMediaFacts) -> Option<u8> {
     // `and_then`, not an early return: a column outside a profile number's
     // range is a fact the record got wrong, and the label is still the better
     // answer for that row rather than nothing at all.
-    if let Some(profile) = file.dolby_vision.profile.and_then(|p| u8::try_from(p).ok()) {
+    if let Some(profile) = facts
+        .dolby_vision
+        .profile
+        .and_then(|p| u8::try_from(p).ok())
+    {
         return Some(profile);
     }
-    let label = file.hdr_format.as_deref()?;
+    let label = facts.hdr_format.as_deref()?;
     let after = label.to_ascii_lowercase();
     let after = after.split("profile").nth(1)?.trim_start();
     let digits: String = after.chars().take_while(char::is_ascii_digit).collect();
@@ -1094,13 +1233,17 @@ pub fn dolby_vision_profile(file: &MediaFile) -> Option<u8> {
 /// daemon), and what a copy path with no RPU rewrite in it may serve
 /// (`served_copy_options`).
 pub fn dolby_vision_is_dual_layer(file: &MediaFile) -> bool {
-    if !is_dolby_vision(file) {
+    dolby_vision_is_dual_layer_facts(&PlaybackMediaFacts::from(file))
+}
+
+fn dolby_vision_is_dual_layer_facts(facts: &PlaybackMediaFacts) -> bool {
+    if !is_dolby_vision_facts(facts) {
         return false;
     }
-    match dolby_vision_profile(file) {
+    match dolby_vision_profile_facts(facts) {
         Some(4 | 7) => true,
         Some(_) => false,
-        None => file.dolby_vision.el_present == Some(true),
+        None => facts.dolby_vision.el_present == Some(true),
     }
 }
 
@@ -1111,11 +1254,17 @@ pub fn dolby_vision_is_dual_layer(file: &MediaFile) -> bool {
 /// to; SDR and none are not — which is exactly what the label's
 /// "(HDR10-compatible)" and "(HLG-compatible)" markers were derived from, so
 /// the column and the fallback answer the same question from the same fact.
+#[cfg(test)]
 fn has_compatible_dv_base(file: &MediaFile) -> bool {
-    if let Some(compat) = file.dolby_vision.bl_compat_id {
+    has_compatible_dv_base_facts(&PlaybackMediaFacts::from(file))
+}
+
+fn has_compatible_dv_base_facts(facts: &PlaybackMediaFacts) -> bool {
+    if let Some(compat) = facts.dolby_vision.bl_compat_id {
         return matches!(compat, 1 | 4 | 6);
     }
-    file.hdr_format
+    facts
+        .hdr_format
         .as_deref()
         .is_some_and(|label| label.contains("HDR10-compatible") || label.contains("HLG-compatible"))
 }
@@ -1131,7 +1280,10 @@ fn has_compatible_dv_base(file: &MediaFile) -> bool {
 /// passthrough rung is implemented for. The two are held together by
 /// `plurxd`'s `the_grade_predicate_and_the_renderer_predicate_agree`.
 pub fn dolby_vision_needs_rpu_render(file: &MediaFile) -> bool {
-    is_dolby_vision(file) && !has_compatible_dv_base(file) && dolby_vision_profile(file) == Some(5)
+    let facts = PlaybackMediaFacts::from(file);
+    is_dolby_vision_facts(&facts)
+        && !has_compatible_dv_base_facts(&facts)
+        && dolby_vision_profile_facts(&facts) == Some(5)
 }
 
 /// What a Dolby Vision source needs doing about it for THIS client.
@@ -1202,8 +1354,16 @@ pub fn dolby_vision_converts_to_p81(
     profile: &DeviceProfile,
     node: &RenderCaps,
 ) -> bool {
+    dolby_vision_converts_to_p81_facts(&PlaybackMediaFacts::from(file), profile, node)
+}
+
+fn dolby_vision_converts_to_p81_facts(
+    facts: &PlaybackMediaFacts,
+    profile: &DeviceProfile,
+    node: &RenderCaps,
+) -> bool {
     node.dolby_vision_convert
-        && file_can_convert_to_p81(file)
+        && media_facts_can_convert_to_p81(facts)
         && profile.dolby_vision_profiles.contains(&8)
         && !profile.dolby_vision_profiles.contains(&7)
 }
@@ -1235,9 +1395,13 @@ pub fn dolby_vision_converts_to_p81(
 /// has always had until a rescan fills them in, which is a working delivery
 /// rather than a broken one.
 pub fn file_can_convert_to_p81(file: &MediaFile) -> bool {
-    is_dolby_vision(file)
-        && file.dolby_vision.profile == Some(7)
-        && file
+    media_facts_can_convert_to_p81(&PlaybackMediaFacts::from(file))
+}
+
+fn media_facts_can_convert_to_p81(facts: &PlaybackMediaFacts) -> bool {
+    is_dolby_vision_facts(facts)
+        && facts.dolby_vision.profile == Some(7)
+        && facts
             .dolby_vision
             .bl_compat_id
             .is_some_and(|compat| matches!(compat, 1 | 6))
@@ -1248,23 +1412,23 @@ pub fn file_can_convert_to_p81(file: &MediaFile) -> bool {
         // built at all — a permanent `vod_index_pending` and a fall through to
         // live recovery on every play, which is the exact outcome the column
         // requirement above exists to prevent. Real levels are 1 to 13.
-        && file
+        && facts
             .dolby_vision
             .level
             .is_some_and(|level| (1..=0x3f).contains(&level))
 }
 
 fn dv_handling(
-    file: &MediaFile,
+    facts: &PlaybackMediaFacts,
     profile: &DeviceProfile,
     node: &RenderCaps,
     target: OutputGrade,
 ) -> DvHandling {
-    if !is_dolby_vision(file) || profile.decodes_dolby_vision_as_copied(file) {
+    if !is_dolby_vision_facts(facts) || profile.decodes_dolby_vision_as_copied(facts) {
         DvHandling::None
-    } else if dolby_vision_converts_to_p81(file, profile, node) {
+    } else if dolby_vision_converts_to_p81_facts(facts, profile, node) {
         DvHandling::Convert
-    } else if node.dv_strippable && has_compatible_dv_base(file) {
+    } else if node.dv_strippable && has_compatible_dv_base_facts(facts) {
         DvHandling::Strip
     } else {
         DvHandling::Reencode(target)
@@ -1283,17 +1447,25 @@ fn dv_handling(
 /// re-encode of any HDR source keeps its grade or tone-maps
 /// ([`target_grade`]).
 pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> Decision {
-    let (mut c, mut reasons) = evaluate(file, profile);
+    decide_media_facts(&PlaybackMediaFacts::from(file), profile, node)
+}
+
+pub fn decide_media_facts(
+    facts: &PlaybackMediaFacts,
+    profile: &DeviceProfile,
+    node: &RenderCaps,
+) -> Decision {
+    let (mut c, mut reasons) = evaluate(facts, profile);
     // A converted stream carries Dolby Vision too, so it preserves. The two
     // flags are set together and read together: `preserve` decides whether the
     // copy's bitstream filter keeps the RPU NAL units, and `convert` decides
     // whether they are rewritten in the fragments it writes. Keeping them without
     // rewriting them would hand a Profile 7 stream to a decoder that asked for
     // 8; rewriting them without keeping them would rewrite nothing.
-    let convert_dolby_vision = dolby_vision_converts_to_p81(file, profile, node);
+    let convert_dolby_vision = dolby_vision_converts_to_p81_facts(facts, profile, node);
     let preserve_dolby_vision = convert_dolby_vision
-        || (is_dolby_vision(file) && profile.decodes_dolby_vision_as_copied(file));
-    let (target, grade_reason) = target_grade(file, profile, node);
+        || (is_dolby_vision_facts(facts) && profile.decodes_dolby_vision_as_copied(facts));
+    let (target, grade_reason) = target_grade_facts(facts, profile, node);
     // Whether the Dolby Vision branch below has already explained the grade in
     // its own words. It gets to speak first because its reason carries the
     // static-metadata caveat, which is specific to a re-encode of a source
@@ -1306,7 +1478,7 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
     // milestone exists to stop telling.
     let mut stripped_dolby_vision = false;
 
-    match dv_handling(file, profile, node, target) {
+    match dv_handling(facts, profile, node, target) {
         DvHandling::None => {}
         DvHandling::Convert => {
             // Not a transcode and not a strip: the base layer and every
@@ -1335,15 +1507,17 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
         }
         DvHandling::Reencode(grade) => {
             c.video_ok = false;
-            reasons.push(if has_compatible_dv_base(file) && !node.dv_strippable {
-                "this Dolby Vision profile is unsupported by this device and this ffmpeg \
+            reasons.push(
+                if has_compatible_dv_base_facts(facts) && !node.dv_strippable {
+                    "this Dolby Vision profile is unsupported by this device and this ffmpeg \
                  cannot expose its compatible HDR base (requires dovi_rpu in ffmpeg 7.1+)"
-                    .to_owned()
-            } else {
-                "this Dolby Vision profile is unsupported by this device and has no \
+                        .to_owned()
+                } else {
+                    "this Dolby Vision profile is unsupported by this device and has no \
                  compatible HDR base; transcoding"
-                    .to_owned()
-            });
+                        .to_owned()
+                },
+            );
             if grade == OutputGrade::Hdr10 {
                 // Said out loud because the alternative reads as a bug. This
                 // client is being handed a re-encode of a Dolby Vision title
@@ -1359,7 +1533,7 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
                 // is what selects a display's HDR mode; what it lacks is the
                 // mastering-display hint some panels use for headroom.
                 reasons.push(
-                    if hdr_route(file) == Some(HdrRoute::DolbyVisionRpu) {
+                    if hdr_route_facts(facts) == Some(HdrRoute::DolbyVisionRpu) {
                         // A true Profile 5 source carries no MDCV/CLL SEI at
                         // all — Dolby's L6 metadata lives inside the RPU — so
                         // there is nothing to inherit and nothing honest to
@@ -1408,14 +1582,14 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
     // statement about the DECODER: the client could not keep up with these
     // frames, so handing it the same frames in a different envelope changes
     // nothing.
-    let learned_limit = profile.matching_learned_limit(file);
+    let learned_limit = profile.matching_learned_limit(facts);
     if let Some(limit) = learned_limit {
         // What this demotion costs the picture, if it costs anything. The
         // grade is read BEFORE `video_ok` is cleared, because the question is
         // what the ordinary decision would have delivered — a transcode's
         // own grade is a different answer and would report "HDR10 → SDR" for
         // a rung that is still HDR10.
-        let lost_range = match file.hdr.as_deref() {
+        let lost_range = match facts.hdr.as_deref() {
             Some(range @ ("dolby_vision" | "hdr10" | "hlg"))
                 if !c.needs_transcode() && target == OutputGrade::Sdr =>
             {
@@ -1446,11 +1620,11 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
 
     // A manual A/V sync correction can only be applied by ffmpeg, so direct
     // play is off the table for that file — remux at minimum.
-    let has_av_offset = file.audio_offset_ms != 0;
+    let has_av_offset = facts.audio_offset_ms != 0;
     if has_av_offset {
         reasons.push(format!(
             "audio-sync correction {:+} ms",
-            file.audio_offset_ms
+            facts.audio_offset_ms
         ));
     }
 
@@ -1462,7 +1636,7 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
         PlaybackMethod::DirectPlay
     };
     if method == PlaybackMethod::Remux && c.packaging_normalization {
-        reasons.push(progressive_hevc_normalization_reason(file));
+        reasons.push(progressive_hevc_normalization_reason(facts));
     }
 
     // A verdict that did not end up a transcode encodes nothing, so it has no
@@ -1490,14 +1664,14 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
         preserve_dolby_vision: preserve_dolby_vision && method != PlaybackMethod::Transcode,
         convert_dolby_vision,
         container: "mp4",
-        delivered_dynamic_range: delivered_dynamic_range(
-            file,
+        delivered_dynamic_range: delivered_dynamic_range_facts(
+            facts,
             method,
             preserve_dolby_vision && method != PlaybackMethod::Transcode,
             transcode_grade,
         ),
-        delivered_dolby_vision_profile: delivered_dolby_vision_profile(
-            file,
+        delivered_dolby_vision_profile: delivered_dolby_vision_profile_facts(
+            facts,
             method,
             preserve_dolby_vision && method != PlaybackMethod::Transcode,
             convert_dolby_vision,
@@ -1513,10 +1687,19 @@ pub fn decide_forced(
     force: Force,
     node: &RenderCaps,
 ) -> Decision {
+    decide_media_facts_forced(&PlaybackMediaFacts::from(file), profile, force, node)
+}
+
+pub fn decide_media_facts_forced(
+    facts: &PlaybackMediaFacts,
+    profile: &DeviceProfile,
+    force: Force,
+    node: &RenderCaps,
+) -> Decision {
     match force {
-        Force::Auto => decide(file, profile, node),
+        Force::Auto => decide_media_facts(facts, profile, node),
         Force::Transcode => {
-            let (_, mut reasons) = evaluate(file, profile);
+            let (_, mut reasons) = evaluate(facts, profile);
             reasons.insert(0, "forced transcode (manual quality)".to_owned());
             // The quality menu's Transcode used to be pinned to SDR, on the
             // reasoning that widening it would be a grade change nobody asked
@@ -1525,7 +1708,7 @@ pub fn decide_forced(
             // worse *picture*, and the rung that keeps the picture is the one
             // every other transcode now gets. The negotiation still refuses
             // wherever any of the three parties does.
-            let (grade, grade_reason) = target_grade(file, profile, node);
+            let (grade, grade_reason) = target_grade_facts(facts, profile, node);
             if !grade_reason.is_empty() {
                 reasons.push(grade_reason.to_owned());
             }
@@ -1538,8 +1721,8 @@ pub fn decide_forced(
                 // pipe left for a conversion to sit inside.
                 convert_dolby_vision: false,
                 container: "mp4",
-                delivered_dynamic_range: delivered_dynamic_range(
-                    file,
+                delivered_dynamic_range: delivered_dynamic_range_facts(
+                    facts,
                     PlaybackMethod::Transcode,
                     false,
                     grade,
@@ -1552,14 +1735,14 @@ pub fn decide_forced(
             // Never re-encode video: direct-play when the browser can take the
             // container + audio, else a copy-video remux. If the pick turns out
             // undecodable, the client's error path falls back to transcode.
-            let (c, _) = evaluate(file, profile);
-            let has_av_offset = file.audio_offset_ms != 0;
+            let (c, _) = evaluate(facts, profile);
+            let has_av_offset = facts.audio_offset_ms != 0;
             // A DV source this client can't decode still may not be handed
             // over raw — Original means "no video re-encode", which a strip
             // remux honours (the base layer is untouched). When even that is
             // unavailable the remux is the client's error path to rescue, as
             // it always was.
-            let dv = dv_handling(file, profile, node, OutputGrade::Sdr);
+            let dv = dv_handling(facts, profile, node, OutputGrade::Sdr);
             let method = if c.container_ok && c.audio_ok && !has_av_offset && dv == DvHandling::None
             {
                 PlaybackMethod::DirectPlay
@@ -1568,7 +1751,7 @@ pub fn decide_forced(
             };
             let mut reasons = vec!["forced original quality (no video transcode)".to_owned()];
             if c.packaging_normalization {
-                reasons.push(progressive_hevc_normalization_reason(file));
+                reasons.push(progressive_hevc_normalization_reason(facts));
             }
             if dv == DvHandling::Strip {
                 reasons.push(
@@ -1591,7 +1774,7 @@ pub fn decide_forced(
             // above has already answered `Convert` for it.
             let convert_dolby_vision = dv == DvHandling::Convert;
             let preserve_dolby_vision = convert_dolby_vision
-                || (is_dolby_vision(file) && profile.decodes_dolby_vision_as_copied(file));
+                || (is_dolby_vision_facts(facts) && profile.decodes_dolby_vision_as_copied(facts));
             Decision {
                 method,
                 reasons,
@@ -1601,14 +1784,14 @@ pub fn decide_forced(
                 container: "mp4",
                 // Original never re-encodes video, so there is no grade: the
                 // method is DirectPlay or Remux and this argument is inert.
-                delivered_dynamic_range: delivered_dynamic_range(
-                    file,
+                delivered_dynamic_range: delivered_dynamic_range_facts(
+                    facts,
                     method,
                     preserve_dolby_vision,
                     OutputGrade::Sdr,
                 ),
-                delivered_dolby_vision_profile: delivered_dolby_vision_profile(
-                    file,
+                delivered_dolby_vision_profile: delivered_dolby_vision_profile_facts(
+                    facts,
                     method,
                     preserve_dolby_vision,
                     convert_dolby_vision,
@@ -1651,6 +1834,28 @@ pub fn prefer_segmented(bitrate_bps: Option<i64>) -> Option<String> {
 mod tests {
     use super::*;
     use crate::domain::{AudioStream, DolbyVisionFacts, MediaFile};
+
+    #[test]
+    fn optical_media_facts_use_the_common_decider_without_direct_ranges() {
+        let facts = PlaybackMediaFacts {
+            container: Some("mp4".to_owned()),
+            video_codec: Some("h264".to_owned()),
+            audio_streams: vec![AudioStream {
+                codec: "aac".to_owned(),
+                default: true,
+                ..AudioStream::default()
+            }],
+            probed: true,
+            source_delivery: SourceDelivery::ManagedOpticalTitle,
+            ..PlaybackMediaFacts::default()
+        };
+        let decision = decide_media_facts(&facts, default_profile(), &RenderCaps::default());
+        assert_eq!(decision.method, PlaybackMethod::Remux);
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("owner-managed demux")));
+    }
 
     fn file(container: &str, vcodec: &str, acodec: &str) -> MediaFile {
         MediaFile {

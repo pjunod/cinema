@@ -14604,6 +14604,10 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TRIGGER IF EXISTS classification_ai;
              DROP TABLE IF EXISTS classification_fts;
              DROP TABLE IF EXISTS media_classifications;
+             DROP TABLE IF EXISTS optical_progress;
+             DROP TABLE IF EXISTS optical_titles;
+             DROP TABLE IF EXISTS optical_discs;
+             DROP TABLE IF EXISTS user_grants;
              DROP TABLE IF EXISTS dvr_attention_acks;
              DROP TABLE IF EXISTS dvr_events;
              DROP TABLE IF EXISTS dvr_event_heads;

@@ -59,6 +59,8 @@ mod hiqlite_library_channels;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_media;
 #[cfg(feature = "hiqlite-store")]
+mod hiqlite_optical;
+#[cfg(feature = "hiqlite-store")]
 mod hiqlite_pretranscode;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_publication;
@@ -2938,6 +2940,56 @@ pub(crate) fn reconcile_payload_refusal(
 }
 
 #[async_trait]
+pub trait OpticalStore: Send + Sync + 'static {
+    /// Publish one complete inspection atomically. Existing progress survives a
+    /// reinspection; no partial title set becomes visible on failure.
+    async fn upsert_optical_inspection(
+        &self,
+        inspection: &crate::optical::OpticalInspection,
+    ) -> Result<(), StoreError>;
+    async fn optical_disc(
+        &self,
+        disc_id: &str,
+    ) -> Result<Option<crate::optical::OpticalDisc>, StoreError>;
+    async fn optical_titles(
+        &self,
+        disc_id: &str,
+    ) -> Result<Vec<crate::optical::OpticalTitle>, StoreError>;
+    async fn optical_title(
+        &self,
+        disc_id: &str,
+        title_id: &str,
+    ) -> Result<Option<crate::optical::OpticalTitle>, StoreError>;
+    async fn set_optical_match(
+        &self,
+        disc_id: &str,
+        title_id: &str,
+        matched_item_id: Option<i64>,
+        match_kind: Option<crate::optical::OpticalMatchKind>,
+    ) -> Result<bool, StoreError>;
+    async fn optical_progress(
+        &self,
+        user_id: i64,
+        disc_id: &str,
+        title_id: &str,
+        angle: u32,
+    ) -> Result<Option<crate::optical::OpticalProgress>, StoreError>;
+    async fn put_optical_progress(
+        &self,
+        progress: &crate::optical::OpticalProgressWrite,
+    ) -> Result<crate::optical::OpticalProgress, StoreError>;
+    async fn delete_user_optical_history(&self, user_id: i64) -> Result<u64, StoreError>;
+    async fn clear_optical_matches_for_item(&self, item_id: i64) -> Result<u64, StoreError>;
+    /// Read a user's explicit optical playback grant. When no override exists,
+    /// administrators default to granted and non-administrators fail closed.
+    /// `None` means the user does not exist.
+    async fn optical_play_grant(&self, user_id: i64) -> Result<Option<bool>, StoreError>;
+    /// Set the explicit `optical.play` grant for an existing user.
+    async fn set_optical_play_grant(&self, user_id: i64, granted: bool)
+        -> Result<bool, StoreError>;
+}
+
+#[async_trait]
 pub trait WatchStore: Send + Sync + 'static {
     async fn watch_state(
         &self,
@@ -4887,6 +4939,7 @@ pub trait Store:
     + LibraryChannelStore
     + DvrStore
     + MediaStore
+    + OpticalStore
     + ClassificationStore
     + WatchStore
     + ReadingStore
@@ -4921,6 +4974,7 @@ impl<T> Store for T where
         + LibraryChannelStore
         + DvrStore
         + MediaStore
+        + OpticalStore
         + ClassificationStore
         + ClassificationStore
         + WatchStore
