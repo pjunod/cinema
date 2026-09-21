@@ -304,6 +304,7 @@
       mapPullsToPlans,
       overlayAbsenceText,
       overlayFallback,
+      overlaySummaryLabels,
       parseBoard,
       pullOverlayMarkup,
       runWithDeadline,
@@ -387,14 +388,15 @@
       for (const row of state.rows) {
         const pulls = state.overlay.byPlan[row.Id] || [];
         if (pulls.length) livePlans += 1;
-        counts[effectiveStatus(row.Status, pulls).group] += 1;
+        counts[effectiveStatus(row.Status, pulls, state.overlay).group] += 1;
       }
+      const labels = overlaySummaryLabels(state.overlay);
 
       elements.summary.replaceChildren(
         metric("Total plans", state.rows.length),
-        metric("Unclaimed without PR", counts.unclaimed),
+        metric(labels.unclaimed, counts.unclaimed),
         metric("Active", counts.active),
-        metric("Plans with open PRs", livePlans),
+        metric(labels.livePlans, livePlans),
         metric("Blocked", counts.blocked),
         metric("Merged", counts.merged),
         metric("Done", counts.done),
@@ -408,7 +410,7 @@
         const pulls = state.overlay.byPlan[row.Id] || [];
         const matchesSearch = !query || Object.values(row).join(" ").toLowerCase().includes(query);
         const matchesStatus = elements.status.value === "all" ||
-          effectiveStatus(row.Status, pulls).group === elements.status.value;
+          effectiveStatus(row.Status, pulls, state.overlay).group === elements.status.value;
         const matchesPriority = elements.priority.value === "all" ||
           row.Priority.toLowerCase().includes(elements.priority.value);
         return matchesSearch && matchesStatus && matchesPriority;
@@ -443,7 +445,7 @@
               cell.append(empty);
             }
           } else if (column === "Status") {
-            const current = effectiveStatus(row.Status, pulls);
+            const current = effectiveStatus(row.Status, pulls, state.overlay);
             const status = document.createElement("span");
             status.className = `status status-${current.group}`;
             status.textContent = current.text;

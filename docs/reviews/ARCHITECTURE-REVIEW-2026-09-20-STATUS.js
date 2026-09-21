@@ -96,19 +96,27 @@
     })[character]);
   }
 
-  function planIdForPull(pull, boardIds) {
+  function planMatchForPull(pull, boardIds) {
     const known = boardIds instanceof Set ? boardIds : new Set(boardIds);
     const branch = typeof pull?.head?.ref === "string" ? pull.head.ref : "";
     const branchMatch = PLAN_BRANCH.exec(branch);
-    if (branchMatch && known.has(branchMatch[1])) return branchMatch[1];
+    if (branchMatch && known.has(branchMatch[1])) {
+      return { planId: branchMatch[1], source: "branch" };
+    }
 
     const title = typeof pull?.title === "string" ? pull.title.trim() : "";
     const titleMatch = PLAN_TITLE.exec(title);
-    if (titleMatch && known.has(titleMatch[1])) return titleMatch[1];
+    if (titleMatch && known.has(titleMatch[1])) {
+      return { planId: titleMatch[1], source: "title" };
+    }
     return null;
   }
 
-  function normalizePull(pull, planId) {
+  function planIdForPull(pull, boardIds) {
+    return planMatchForPull(pull, boardIds)?.planId || null;
+  }
+
+  function normalizePull(pull, planId, mappingSource) {
     const number = Number(pull?.number);
     const headRef = typeof pull?.head?.ref === "string" ? pull.head.ref : "";
     const headSha = typeof pull?.head?.sha === "string" ? pull.head.sha : "";
@@ -117,6 +125,7 @@
     }
     return {
       planId,
+      mappingSource,
       number,
       title: typeof pull.title === "string" ? pull.title : "",
       draft: pull.draft === true,
@@ -132,13 +141,13 @@
     const byPlan = Object.fromEntries([...known].map((id) => [id, []]));
     let ignored = 0;
     for (const pull of Array.isArray(pulls) ? pulls : []) {
-      const planId = planIdForPull(pull, known);
-      const normalized = planId && normalizePull(pull, planId);
+      const match = planMatchForPull(pull, known);
+      const normalized = match && normalizePull(pull, match.planId, match.source);
       if (!normalized) {
         ignored += 1;
         continue;
       }
-      byPlan[planId].push(normalized);
+      byPlan[match.planId].push(normalized);
     }
     for (const pullsForPlan of Object.values(byPlan)) {
       pullsForPlan.sort((left, right) => right.number - left.number);
@@ -157,12 +166,53 @@
     return "active";
   }
 
-  function effectiveStatus(status, pulls) {
+  function overlaySummaryLabels(overlay) {
+    if (overlay?.mode === "available" && overlay.complete === true) {
+      return {
+        authoritativeAbsence: true,
+        livePlans: "Plans with open PRs",
+        unclaimed: "Unclaimed without open PR",
+      };
+    }
+    if (overlay?.mode === "truncated") {
+      return {
+        authoritativeAbsence: false,
+        livePlans: "Mapped open PR plans (partial)",
+        unclaimed: "Canonical unclaimed (PR list partial)",
+      };
+    }
+    if (overlay?.mode === "stale") {
+      return {
+        authoritativeAbsence: false,
+        livePlans: "Mapped PR plans (stale snapshot)",
+        unclaimed: "Canonical unclaimed (PR state stale)",
+      };
+    }
+    if (overlay?.mode === "loading") {
+      return {
+        authoritativeAbsence: false,
+        livePlans: "Mapped PR plans (refreshing)",
+        unclaimed: "Canonical unclaimed (PR state loading)",
+      };
+    }
+    return {
+      authoritativeAbsence: false,
+      livePlans: "Mapped PR plans (overlay unavailable)",
+      unclaimed: "Canonical unclaimed (PR state unavailable)",
+    };
+  }
+
+  function effectiveStatus(status, pulls, overlay) {
     const group = statusGroup(status);
     if (group !== "unclaimed" || !Array.isArray(pulls) || pulls.length === 0) {
       return { group, text: status };
     }
-    return pulls.some((pull) => pull.draft !== true)
+    const fresh = overlay?.mode === "available" || overlay?.mode === "truncated";
+    const claimPulls = fresh
+      ? pulls.filter((pull) => pull.mappingSource === "branch")
+      : [];
+    if (!claimPulls.length) return { group, text: status };
+    return claimPulls.some((pull) => pull.draft !== true)
       ? { group: "active", text: "in-review (live PR)" }
       : { group: "active", text: "in-progress (live PR)" };
   }
@@ -324,6 +374,7 @@
     mapPullsToPlans,
     overlayAbsenceText,
     overlayFallback,
+    overlaySummaryLabels,
     parseBoard,
     planIdForPull,
     pullOverlayMarkup,

@@ -105,22 +105,95 @@ assert.strictEqual(status.MAX_STATUS_FETCHES, 12);
 assert.strictEqual(status.STATUS_CONCURRENCY, 4);
 assert.strictEqual(status.REQUEST_TIMEOUT_MS, 10_000);
 assert.deepStrictEqual(
-  status.effectiveStatus("unclaimed", mapped.byPlan["P-01"]),
+  status.effectiveStatus(
+    "unclaimed",
+    mapped.byPlan["P-01"],
+    { mode: "available", complete: true },
+  ),
   { group: "active", text: "in-progress (live PR)" },
 );
 assert.deepStrictEqual(
-  status.effectiveStatus("unclaimed", [{ ...mapped.byPlan["P-01"][0], draft: false }]),
+  status.effectiveStatus(
+    "unclaimed",
+    [{ ...mapped.byPlan["P-01"][0], draft: false }],
+    { mode: "available", complete: true },
+  ),
   { group: "active", text: "in-review (live PR)" },
 );
 assert.deepStrictEqual(
-  status.effectiveStatus("merged: M1-M3", mapped.byPlan["C-01"]),
+  status.effectiveStatus(
+    "merged: M1-M3",
+    mapped.byPlan["C-01"],
+    { mode: "available", complete: true },
+  ),
   { group: "merged", text: "merged: M1-M3" },
   "an open evidence PR must not erase the canonical merged state",
 );
 assert.deepStrictEqual(
-  status.effectiveStatus("unclaimed", []),
+  status.effectiveStatus(
+    "unclaimed",
+    mapped.byPlan["C-01"],
+    { mode: "available", complete: true },
+  ),
+  { group: "unclaimed", text: "unclaimed" },
+  "a title-only mapping may display but must not claim a plan",
+);
+for (const mode of ["loading", "stale", "unavailable"]) {
+  assert.deepStrictEqual(
+    status.effectiveStatus(
+      "unclaimed",
+      mapped.byPlan["P-01"],
+      { mode, complete: false },
+    ),
+    { group: "unclaimed", text: "unclaimed" },
+    `${mode} branch data is not current claim evidence`,
+  );
+}
+assert.deepStrictEqual(
+  status.effectiveStatus("unclaimed", [], { mode: "truncated", complete: false }),
   { group: "unclaimed", text: "unclaimed" },
 );
+assert.deepStrictEqual(
+  status.effectiveStatus(
+    "unclaimed",
+    mapped.byPlan["P-01"],
+    { mode: "truncated", complete: false },
+  ),
+  { group: "active", text: "in-progress (live PR)" },
+  "a pull present in a fresh partial page remains a true positive",
+);
+assert.deepStrictEqual(
+  status.effectiveStatus(
+    "unclaimed",
+    [mapped.byPlan["P-01"][0], { ...mapped.byPlan["C-01"][0], draft: false }],
+    { mode: "available", complete: true },
+  ),
+  { group: "active", text: "in-progress (live PR)" },
+  "a ready title fallback cannot upgrade an exact draft plan branch",
+);
+assert.deepStrictEqual(
+  status.effectiveStatus(
+    "blocked: fleet evidence",
+    [{ ...mapped.byPlan["P-01"][0], draft: false }],
+    { mode: "available", complete: true },
+  ),
+  { group: "blocked", text: "blocked: fleet evidence" },
+  "canonical non-unclaimed states remain authoritative",
+);
+assert.deepStrictEqual(
+  status.overlaySummaryLabels({ mode: "available", complete: true }),
+  {
+    authoritativeAbsence: true,
+    livePlans: "Plans with open PRs",
+    unclaimed: "Unclaimed without open PR",
+  },
+);
+for (const mode of ["loading", "stale", "truncated", "unavailable"]) {
+  assert.strictEqual(
+    status.overlaySummaryLabels({ mode, complete: false }).authoritativeAbsence,
+    false,
+  );
+}
 
 async function main() {
   const unavailable = status.overlayFallback(null, "HTTP 401");
