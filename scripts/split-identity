@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Reassemble an ordered Rust split and compare it with a Git revision.
+
+Usage: split-identity BASE SOURCE PIECE [PIECE ...]
+
+PIECE files are concatenated in source order. Lines inside a
+``// split: header`` / ``// split: end header`` pair are split-only module
+plumbing and are omitted. Passing SOURCE as the only piece is the M0
+unchanged-file self-test. Later move commits use a short manifest-expanded
+piece list in their PR evidence and delete this one-shot helper before the
+plan PR is promoted.
+"""
+
+from __future__ import annotations
+
+import difflib
+import pathlib
+import subprocess
+import sys
+
+
+def without_split_headers(path: pathlib.Path) -> list[str]:
+    lines: list[str] = []
+    inside_header = False
+    for line_number, line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(keepends=True), start=1
+    ):
+        if line.rstrip("\r\n") == "// split: header":
+            if inside_header:
+                raise SystemExit(f"{path}:{line_number}: nested split header")
+            inside_header = True
+            continue
+        if line.rstrip("\r\n") == "// split: end header":
+            if not inside_header:
+                raise SystemExit(f"{path}:{line_number}: unmatched split header end")
+            inside_header = False
+            continue
+        if not inside_header:
+            lines.append(line)
+    if inside_header:
+        raise SystemExit(f"{path}: unterminated split header")
+    return lines
+
+
+def main() -> int:
+    if len(sys.argv) < 4:
+        print("usage: split-identity BASE SOURCE PIECE [PIECE ...]", file=sys.stderr)
+        return 2
+
+    base, source, *piece_names = sys.argv[1:]
+    baseline = subprocess.run(
+        ["git", "show", f"{base}:{source}"],
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout.decode("utf-8")
+
+    assembled: list[str] = []
+    counts: list[tuple[str, int]] = []
+    for piece_name in piece_names:
+        piece = pathlib.Path(piece_name)
+        lines = without_split_headers(piece)
+        assembled.extend(lines)
+        counts.append((piece_name, len(lines)))
+    current = "".join(assembled)
+
+    if current != baseline:
+        diff = difflib.unified_diff(
+            baseline.splitlines(),
+            current.splitlines(),
+            fromfile=f"{base}:{source}",
+            tofile=" + ".join(piece_names),
+            n=3,
+            lineterm="",
+        )
+        for line in diff:
+            print(line)
+        return 1
+
+    for piece_name, count in counts:
+        print(f"{piece_name}: {count} lines")
+    print(f"OK against {base}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

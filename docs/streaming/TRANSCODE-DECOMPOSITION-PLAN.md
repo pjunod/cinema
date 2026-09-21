@@ -1,6 +1,6 @@
 # Transcode decomposition — behaviour-preserving moves first, redesign later
 
-**Status:** ready for review · **Executes:** §4.1, §4.2, §4.9, F-stream-15,
+**Status:** executing in [PR #425](http://192.168.4.7:3000/noirr/plurx/pulls/425) · **Executes:** §4.1, §4.2, §4.9, F-stream-15,
 F-core-10, F-sc-12, F-hist-13, F-build-ops-codehealth-3 and -14 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 (§5.3 "this quarter", size L) · **Written:** 2026-09-20 against `main` @
@@ -701,4 +701,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [#425](http://192.168.4.7:3000/noirr/plurx/pulls/425) | Pinned Rust 1.97.1 established. Census: module 183, fn 255, field 173, statement 156, type 31, impl 13, use 8, other 35 (all within the plan's ±5 bound). The parameterized identity template reports `OK` against the exact branch base/current parent source. |
