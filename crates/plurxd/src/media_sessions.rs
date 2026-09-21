@@ -4937,6 +4937,10 @@ async fn supervise_takeover_settlement(
         .transcode
         .acquire_cluster_takeover_replacement(&request, original.user_id, creation_deadline)
         .await?;
+    // The takeover id is predetermined, so it can be fenced from the moment the
+    // gate is held — including by a later open that has to take the key back
+    // because this supervisor never finished.
+    replacement.publish_fenceable(&provisional_id);
     let worker = TakeoverWorkerGuard::new(
         Arc::clone(&state.transcode),
         provisional_id.clone(),

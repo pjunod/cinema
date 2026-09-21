@@ -54,6 +54,18 @@ const SESSION_IDLE_SECS: u64 = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS
 /// The HTTP layer maps only this class to 503; source, filesystem, and ffmpeg
 /// failures remain server errors rather than being mislabeled as contention.
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
+/// Stable classification for a start that lost its player to a newer open.
+///
+/// Deliberately not part of the capacity class. Capacity is a wait that ends;
+/// this is not a wait at all. The viewer who caused it is already looking at
+/// the newer player, so the abandoned attempt has to die quietly rather than
+/// invite a retry that would take the key back from the open they actually
+/// want.
+const SUPERSEDED_PREFIX: &str = "this player was superseded: ";
+/// What a client should wait before re-posting a start that lost a bounded
+/// admission wait. The cooperative replacement window is the longest of those
+/// waits, so it is the honest number to publish.
+pub(crate) const RETRYABLE_CAPACITY_RETRY_AFTER_SECS: u64 = 3;
 const SERVING_FENCE_PREFIX: &str = "media serving authority is unavailable: ";
 const START_INFRASTRUCTURE_PREFIX: &str = "media session infrastructure is unavailable: ";
 /// How long descriptor-bound fact collection may borrow from a producer's
@@ -170,6 +182,14 @@ fn replacement_deadline_error() -> String {
 
 pub(crate) fn is_retryable_capacity_error(error: &str) -> bool {
     error.starts_with(RETRYABLE_CAPACITY_PREFIX)
+}
+
+fn superseded_error(message: impl AsRef<str>) -> String {
+    format!("{SUPERSEDED_PREFIX}{}", message.as_ref())
+}
+
+pub(crate) fn is_superseded_error(error: &str) -> bool {
+    error.starts_with(SUPERSEDED_PREFIX)
 }
 
 pub(crate) fn serving_fence_error(message: impl AsRef<str>) -> String {
@@ -10510,8 +10530,30 @@ struct ClusterServingAdmission {
 pub(crate) struct ClusterReplacementGuard {
     registry: Arc<ClusterReplacementGates>,
     key: String,
+    gate: Arc<ReplacementGate>,
+    ticket: u64,
     permit: Option<tokio::sync::OwnedMutexGuard<()>>,
     _predecessor_settlement: Option<SessionSettlementGuard>,
+}
+
+impl ClusterReplacementGuard {
+    /// Name a session this replacement has brought into existence, so a
+    /// supersession can fence it before taking the key. Called as soon as an
+    /// id exists: before that there is nothing a newer open could strand.
+    pub(crate) fn publish_fenceable(&self, session_id: &str) {
+        if let Ok(mut ids) = self.gate.fenceable.lock() {
+            if !ids.iter().any(|id| id == session_id) {
+                ids.push(session_id.to_owned());
+            }
+        }
+    }
+
+    /// True once a later open has asked for this player. The holder is then
+    /// working on a start no viewer is waiting for, and every checkpoint it
+    /// reaches should end it rather than spend more of the player's budget.
+    pub(crate) fn is_superseded(&self) -> bool {
+        self.gate.wanted.load(Acquire) > self.ticket
+    }
 }
 
 impl Drop for ClusterReplacementGuard {
@@ -10531,7 +10573,46 @@ impl Drop for ClusterReplacementGuard {
 
 #[derive(Default)]
 struct ClusterReplacementGates {
-    entries: std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    entries: std::sync::Mutex<HashMap<String, Weak<ReplacementGate>>>,
+    /// Arrival order across every player on this worker. Only the comparison
+    /// within one key means anything; one counter keeps it allocation-free.
+    tickets: AtomicU64,
+}
+
+/// One player's replacement serialization, plus the supersession signal that
+/// keeps a newer open from queueing behind an abandoned one.
+///
+/// The lock alone was the whole gate until 2026-09-21, and a `tokio::sync::
+/// Mutex` has no timeout, no poisoning, and no owner the outside world can
+/// reach. Every production holder is a detached task — the activation task,
+/// the armed handoff, the takeover supervisor, the cleanup spawned by
+/// `StartedSessionGuard`'s `Drop` — so the request that began a replacement
+/// returns, or is cancelled, while its guard lives on, and nothing aged,
+/// expired or force-released the registry. One holder parked on an unbounded
+/// await therefore turned its player's key into a three-second refusal for the
+/// life of the process: observed on m6 on 2026-09-21, where a start blocked on
+/// a 402-second subtitle sidecar extraction refused the viewer's own reopen of
+/// the title they were watching.
+struct ReplacementGate {
+    lock: Arc<tokio::sync::Mutex<()>>,
+    /// Ticket of the newest arrival for this key. A holder whose own ticket is
+    /// older has been superseded: a later open wants this player, and this
+    /// holder is no longer that player's future.
+    wanted: AtomicU64,
+    /// Every session id this key's current holder has published. A
+    /// supersession fences these before moving the key, so a worker the
+    /// abandoned holder registers afterwards is reaped rather than served.
+    fenceable: std::sync::Mutex<Vec<String>>,
+}
+
+impl ReplacementGate {
+    fn new(ticket: u64) -> Self {
+        Self {
+            lock: Arc::new(tokio::sync::Mutex::new(())),
+            wanted: AtomicU64::new(ticket),
+            fenceable: std::sync::Mutex::new(Vec::new()),
+        }
+    }
 }
 
 struct SessionReleaseGate {
@@ -18919,6 +19000,14 @@ impl TranscodeManager {
                 "the replacement start expired before it could finish provisional work",
             ));
         }
+        // Cheapest checkpoint there is: a start that was superseded while it
+        // waited has no viewer, and spending an encoder slot on it only delays
+        // the open that does.
+        if replacement.is_superseded() {
+            return Err(superseded_error(
+                "a newer open for this player arrived before this start began",
+            ));
+        }
         self.require_cluster_serving_authority(serving_admission)?;
         let creation = self
             .create_session_inner(
@@ -18932,6 +19021,7 @@ impl TranscodeManager {
                 priority,
             )
             .await?;
+        replacement.publish_fenceable(&creation.info.session_id);
         Ok(ClusterSessionStart {
             info: creation.info,
             replacement,
@@ -19017,6 +19107,11 @@ impl TranscodeManager {
         predecessor_session_id: Option<&str>,
         deadline: tokio::time::Instant,
     ) -> Result<ClusterReplacementGuard, String> {
+        let ticket = self
+            .cluster_replacement_gates
+            .tickets
+            .fetch_add(1, AcqRel)
+            + 1;
         let gate = {
             let mut entries = self
                 .cluster_replacement_gates
@@ -19032,23 +19127,45 @@ impl TranscodeManager {
                         "too many player replacements are active on this worker",
                     ));
                 }
-                let gate = Arc::new(tokio::sync::Mutex::new(()));
+                let gate = Arc::new(ReplacementGate::new(ticket));
                 entries.insert(key.clone(), Arc::downgrade(&gate));
                 gate
             }
         };
-        let gate_deadline = std::cmp::min(
-            deadline,
-            tokio::time::Instant::now() + CLUSTER_REPLACEMENT_GATE_WAIT,
-        );
-        let permit = tokio::time::timeout_at(gate_deadline, gate.lock_owned())
-            .await
-            .map_err(|_| {
-                capacity_error("another replacement for this player is still being committed")
-            })?;
+        let cooperative = tokio::time::Instant::now() + CLUSTER_REPLACEMENT_GATE_WAIT;
+        let gate_deadline = std::cmp::min(deadline, cooperative);
+        // A start whose own budget expires before the cooperative window does
+        // is out of time, not stuck behind a wedged holder. It neither takes
+        // the key nor announces itself: telling a healthy holder it lost the
+        // player would end a replacement that is doing nothing wrong, on
+        // behalf of a start that could not have used the key anyway.
+        let entitled = gate_deadline >= cooperative;
+        if entitled {
+            // Announced before waiting, not after acquiring. A holder about to
+            // be replaced should learn it while it still has work in flight to
+            // abandon, and the announcement is also what entitles this arrival
+            // to take the key if the holder never yields.
+            gate.wanted.fetch_max(ticket, AcqRel);
+        }
+        let (gate, permit) =
+            match tokio::time::timeout_at(gate_deadline, Arc::clone(&gate.lock).lock_owned()).await
+            {
+                Ok(permit) => (gate, permit),
+                Err(_) if !entitled => {
+                    return Err(capacity_error(
+                        "another replacement for this player is still releasing",
+                    ))
+                }
+                Err(_) => {
+                    self.supersede_cluster_replacement_gate(&key, &gate, ticket)
+                        .await?
+                }
+            };
         Ok(ClusterReplacementGuard {
             registry: Arc::clone(&self.cluster_replacement_gates),
             key,
+            gate,
+            ticket,
             permit: Some(permit),
             // Acquired after serialization and retained across provisional
             // creation plus the durable activation verdict. The lease tick
@@ -19057,6 +19174,76 @@ impl TranscodeManager {
             // successor remains make-before-break provisional.
             _predecessor_settlement: predecessor_session_id.map(SessionSettlementGuard::begin),
         })
+    }
+
+    /// Take a player's key from a holder that did not yield inside the
+    /// cooperative window.
+    ///
+    /// The gate serializes one player's replacements; it is not what decides
+    /// which worker wins. That is the durable activation CAS, and the loser of
+    /// it already tears itself down through `StartedSessionGuard`. So the cost
+    /// of moving the key early is bounded to "two provisional workers exist for
+    /// a moment", which is the state cluster make-before-break is built for —
+    /// whereas the cost of not moving it is that an abandoned holder refuses
+    /// this player every open, forever, with no path back short of a restart.
+    ///
+    /// Fencing first is what keeps the early take exact: every session the
+    /// holder has published is fenced before the key moves, so a registration
+    /// the holder completes afterwards is reaped rather than served. Installing
+    /// a fresh gate rather than stealing the old one is what keeps the
+    /// abandoned holder harmless — it keeps its own `Arc` and its own lock, and
+    /// releasing it later touches nothing this key now uses.
+    async fn supersede_cluster_replacement_gate(
+        &self,
+        key: &str,
+        gate: &Arc<ReplacementGate>,
+        ticket: u64,
+    ) -> Result<(Arc<ReplacementGate>, tokio::sync::OwnedMutexGuard<()>), String> {
+        // Only the newest arrival may move the key. An older waiter that also
+        // timed out would otherwise hand the player to a start that a still
+        // newer open has already superseded.
+        if gate.wanted.load(Acquire) != ticket {
+            return Err(superseded_error(
+                "a newer open for this player arrived while this one waited",
+            ));
+        }
+        let fenceable = gate
+            .fenceable
+            .lock()
+            .map(|ids| ids.clone())
+            .unwrap_or_default();
+        if !fenceable.is_empty() {
+            self.fence_sessions(&fenceable).await;
+        }
+        let successor = Arc::new(ReplacementGate::new(ticket));
+        {
+            let mut entries = self
+                .cluster_replacement_gates
+                .entries
+                .lock()
+                .map_err(|_| "cluster replacement gate registry was poisoned".to_owned())?;
+            // Re-read under the registry lock: another supersession may have
+            // installed its own successor between the fence and here.
+            if entries
+                .get(key)
+                .and_then(Weak::upgrade)
+                .is_some_and(|current| !Arc::ptr_eq(&current, gate))
+            {
+                return Err(superseded_error(
+                    "a newer open for this player already took the key",
+                ));
+            }
+            entries.insert(key.to_owned(), Arc::downgrade(&successor));
+        }
+        tracing::warn!(
+            fenced = fenceable.len(),
+            "a replacement did not release its player inside the cooperative window; \
+             the next open fenced it and took the key"
+        );
+        crate::playback_control::record_replacement_superseded(!fenceable.is_empty());
+        // Uncontended by construction — nothing else has reached this gate yet.
+        let permit = Arc::clone(&successor.lock).lock_owned().await;
+        Ok((successor, permit))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -46714,6 +46901,123 @@ pub(crate) mod tests {
             .await
             .expect("a live retry acquires the released gate");
         drop(reacquired);
+    }
+
+    /// A replacement that is abandoned — its request long since answered, its
+    /// guard living on inside a detached cleanup nothing can reach — used to
+    /// own its player's key for the life of the process. Every later open then
+    /// waited the cooperative window and was refused, so a viewer could not
+    /// restart the title they had been watching.
+    ///
+    /// Reproduced from m6, 2026-09-21 22:55 UTC, file 5208: a start blocked
+    /// under the gate on a 402-second subtitle sidecar extraction, answered
+    /// 503 at its own deadline, and its cleanup still held the key four
+    /// seconds later when the viewer pressed Retry.
+    #[tokio::test(start_paused = true)]
+    async fn an_abandoned_replacement_cannot_hold_its_player_against_the_next_open() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let key = r#"[["user_id",42],"abandoned-player"]"#.to_owned();
+
+        // The abandoned holder: acquired, never released, and — as every
+        // production holder is — unreachable from the request that made it.
+        let stuck = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(600),
+            )
+            .await
+            .expect("the first replacement owns its gate");
+        stuck.publish_fenceable("abandoned-provisional-session");
+
+        let opened = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            )
+            .await
+            .expect("a later open takes the player's key from an abandoned replacement");
+        assert!(
+            stuck.is_superseded(),
+            "the abandoned holder is told it is no longer this player's future"
+        );
+
+        // The key really moved, rather than being shared: a third open must now
+        // serialize behind the OPEN replacement, not behind the abandoned one.
+        drop(stuck);
+        let third = tokio::time::timeout(
+            Duration::from_secs(2),
+            mgr.acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            ),
+        )
+        .await;
+        assert!(
+            third.is_err(),
+            "the live replacement still serializes its player"
+        );
+
+        drop(opened);
+        let reacquired = mgr
+            .acquire_cluster_replacement_gate(
+                key,
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("a released gate is acquirable again");
+        drop(reacquired);
+    }
+
+    /// A start with no budget left is out of time, not stuck behind a wedged
+    /// holder. It must keep refusing rather than take a key it cannot use —
+    /// otherwise every expired start would evict a healthy replacement.
+    #[tokio::test]
+    async fn a_replacement_out_of_budget_refuses_instead_of_taking_the_key() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let key = r#"[["user_id",42],"out-of-budget-player"]"#.to_owned();
+        let held = mgr
+            .acquire_cluster_replacement_gate(
+                key.clone(),
+                None,
+                tokio::time::Instant::now() + Duration::from_secs(60),
+            )
+            .await
+            .expect("the first replacement owns its gate");
+        let error = match mgr
+            .acquire_cluster_replacement_gate(key, None, tokio::time::Instant::now())
+            .await
+        {
+            Ok(_) => panic!("an expired start must not evict a live replacement"),
+            Err(error) => error,
+        };
+        assert!(is_retryable_capacity_error(&error), "{error}");
+        assert!(
+            !held.is_superseded(),
+            "a start that could not have used the key must not tell a healthy              replacement it lost the player"
+        );
+        drop(held);
     }
 
     /// The cluster replacement guard already spans provisional worker creation

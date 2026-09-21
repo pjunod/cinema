@@ -356,7 +356,7 @@ pub(crate) async fn start(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map_err(|error| {
-            if error.contains("already used") {
+            if error.contains("already used") || crate::transcode::is_superseded_error(&error) {
                 StatusCode::CONFLICT
             } else if crate::transcode::is_serving_fence_error(&error)
                 || crate::transcode::is_start_infrastructure_error(&error)
