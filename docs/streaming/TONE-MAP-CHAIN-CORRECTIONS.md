@@ -1,6 +1,6 @@
 # Tone-map chain corrections — an explicit peak, primaries before the curve, dither
 
-**Status:** implementation in progress; M0 measured · **Executes:** Q3 / F-stream-3 from
+**Status:** M0–M2 implemented; M3 post-deploy fleet evidence pending · **Executes:** Q3 / F-stream-3 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -226,6 +226,16 @@ PQ produced `peak=100`, matching FFmpeg's documented fallback.
 
 ### 3.2 M1 — peak luminance facts at scan
 
+**Implemented 2026-09-21.** SQLite v64 and replicated schema v43 add the
+four nullable columns below. Current scans read stream side data and, for a
+PQ/HLG stream with no luminance record, make one process-group-owned,
+30-second/256-KiB first-playable-frame probe. The retained document remains
+the primary probe document; the additional frame observation is stored only
+in typed columns. The bounded backfill reads retained JSON in pages of 256,
+never opens media, and fences each write by id/path/size/mtime/probe JSON.
+The held decode probe, catalog digest, facts digest and cache schema version
+all carry the same facts. `FileDto` exposes them read-only.
+
 New nullable columns on `files`: `max_cll INTEGER` (cd/m², from
 `max_content`), `max_fall INTEGER`, `mastering_max_luminance INTEGER`
 (cd/m², from `max_luminance` rational × 1/10000), `luminance_source TEXT`
@@ -276,6 +286,13 @@ argument list is never read as "no luminance". The in-memory LRU
 the persisted attestation F-stream-9 is designing.
 
 ### 3.3 M2 — the chain
+
+**Implemented and measured 2026-09-21.** The CPU recipe now chooses CLL,
+then mastering maximum luminance, then the documented 1,000-nit policy
+default. Peak value and `cll`/`mdcv`/`default` provenance enter the plan
+digest, session log and fixed-cardinality metric. The boot probe's CPU
+reference moved with the production chain; no GPU operator or qualification
+tolerance changed.
 
 ```text
 scale=-2:'min({h},ih)',
@@ -450,6 +467,20 @@ Acceptance: the PR carries the stills, the level counts (after > before on
 the ramp), `psnr` numbers, the cost delta, and `cargo test -p plurx-core
 transcode` green.
 
+The generated narrow 10-bit ramp was compared inside media1's shipped
+FFmpeg 8.1.2-Jellyfin, without deploying branch code. The production-before
+chain produced YMIN/YAVG/YMAX `100/110.981/122`; the corrected chain produced
+`93/103.320/114`. Before/after PSNR was `26.920256` average and SSIM was
+`0.996295` on the first broad-gradient reading; the deterministic narrow ramp
+measured PSNR `32.167303` and SSIM `0.996437`. The corrected ramp without
+dither carried 20 distinct 8-bit luma levels; error diffusion carried 21.
+One-second/24-frame wall readings were 0.479 s before, 0.510 s corrected
+without dither and 0.488 s corrected with dither. That single bounded sample
+puts the complete corrected chain at +1.9% versus before and dither at -4.3%
+versus the otherwise identical corrected graph; the negative delta is timer
+noise, not a speed claim. All temporary fixtures and raw frames were removed
+by the command trap.
+
 ### 5.4 M3 — boot-probe re-qualification
 
 Deploy M2 to media1 only; capture `GET /api/v1/system` `pipeline` report
@@ -486,7 +517,8 @@ served it.
 - Settings: none new. The 1,000-nit default is code policy, printed as such.
 - Rollout: M0 (docs) → M1 (schema, both backends, coordinated deploy as
   every schema change is) → M2 (media1 first, then fleet) → M3 verdict
-  record. One PR each.
+  record. One implementation PR owns M0–M3; post-merge-only evidence returns
+  through the board's evidence-doc procedure.
 - Rollback for M2: revert the filter string; recipe keys return to their
   previous values.
 
@@ -504,6 +536,13 @@ served it.
    order: it is deliberately out of scope; note it if the M2 stills show
    hue shifts that gamut-before-curve does not remove.
 
+Execution decisions: HLG receives the same explicit source-fact/default peak
+contract; a `none` observation is retried only when a normal scan produces a
+new probe document; and `desat=0` remains unchanged. These choices preserve
+FFmpeg's 1,000-nit HLG reference, avoid repeatedly decoding an unchanged file
+during the JSON-only backfill, and keep curve/desaturation policy outside this
+correction.
+
 ---
 
 ## Execution log
@@ -517,3 +556,6 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [#416](http://192.168.4.7:3000/noirr/plurx/pulls/416) / this commit | On media1's shipped FFmpeg 8.1.2-Jellyfin, QSV and VA-API retained MDCV/CLL through hardware download; the linearising zscale dropped both. Hardware and software produced the same effective peak and YAVG per fixture. MaxCLL 4,000 still reached tonemap as `peak=10`, so M1/M2 are corrective. Temporary fixtures were removed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [#416](http://192.168.4.7:3000/noirr/plurx/pulls/416) / this commit | Added bounded stream/frame luminance collection, SQLite v64 and replicated v43 storage, exact-snapshot backfill, decode/cache identity and read-only DTO fields. Parser/facts/schema/store-contract regressions pass, including the actual Hiqlite contract path. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | [#416](http://192.168.4.7:3000/noirr/plurx/pulls/416) / this commit | Added explicit peak/provenance, gamut-before-curve, final error-diffusion dither, log/metric/recipe identity and matching boot-probe reference. On the generated narrow ramp, dither increased distinct 8-bit luma levels 20→21; corrected wall time was 0.488 s versus 0.479 s before (+1.9%). Temporary media removed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [#416](http://192.168.4.7:3000/noirr/plurx/pulls/416) / pending | Needs the merged/coordinated schema build deployed to media1, before/after `/api/v1/system` pipeline verdicts, and the named real-title Apple TV/Chrome playback observations. No branch build was deployed from this draft. |
