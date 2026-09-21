@@ -64,10 +64,11 @@ failure it prevents.
    (waiting on a fleet measurement, a device test, or a decision that is
    Paul's — say which) ·
    `in-review` (adversarial review requested; name the reviewer session) ·
-   `merged` (the one implementation PR landed, but post-merge evidence is
-   still owed) · `done` (every milestone landed and its acceptance evidence
-   is recorded in the plan) · `abandoned: <reason>` (release the row back to
-   `unclaimed` in the same edit, keeping the reason in Notes).
+   `merged: <landed milestones>` (the one implementation PR landed, but
+   post-merge evidence is still owed; name the logical milestones without
+   implying separate PRs) · `done` (every milestone landed and its acceptance
+   evidence is recorded in the plan) · `abandoned: <reason>` (release the row
+   back to `unclaimed` in the same edit, keeping the reason in Notes).
 6. **Release what you cannot finish.** If your session is ending with a
    milestone unfinished, set `blocked:` or `abandoned:` with a one-line
    handover in Notes (branch, what is done, what is next, what is broken)
@@ -129,7 +130,7 @@ document (the twelve written second landed on 2026-09-20 as well).
 | K-06 | [CLOCK-SKEW-GUARD-DESIGN](../cluster/CLOCK-SKEW-GUARD-DESIGN.md) | S9 | design | unclaimed | | | | 2026-09-20 | Half the exchange exists (`x-plurx-cluster-time-ms`); auth windows already assume ≤5 s |
 | K-07 | [STORE-CONTRACT-COVERAGE-AND-PLACEHOLDER-VALIDATION](../cluster/STORE-CONTRACT-COVERAGE-AND-PLACEHOLDER-VALIDATION.md) | S10 | week | unclaimed | | | | 2026-09-20 | Selector output confirmed 3/16 + 7/24; 29 discarded store results, not 13 |
 | K-08 | [HIQLITE-FORK-AND-DEPENDENCY-CLEANUP](../cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md) | §4.3 | month | unclaimed | | | | 2026-09-20 | Do not rename (patch-by-name); three edges reach aws-lc, cryptr fix removes one |
-| C-01 | [HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY](../server/HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY.md) | §2.5, W1, W2, W5, W6 | week | in-review | gpt-5.6-sol | agent:/root/c01_builder | `server/http-listener-timeouts` / #395 | 2026-09-20 | M1–M3 remain one plan PR under the current protocol. Adversarial finding #3067 is addressed after merging current `main`: accept-error backoff, wildcard validators, exact production HLS classification, and a real authenticated logout-fence regression. The one permitted broad-unit run passed all reached C-01 regressions but was stopped after four untouched transcode tests wedged; exact partial evidence is in plan log comment #3085. Post-merge still needs the §6.2–§6.4 lab soak, waterfall, and device-reader evidence. |
+| C-01 | [HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY](../server/HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY.md) | §2.5, W1, W2, W5, W6 | week | merged: M1-M3 | gpt-5.6-sol | agent:/root/c01_builder | [PR #395](http://192.168.4.7:3000/noirr/plurx/pulls/395) | 2026-09-20 | One plan PR merged as `79113254`; §6.2–§6.4 lab soak, HAR/waterfall, and device-reader evidence remains pending, so this row is not done. |
 | C-02 | [SCAN-AND-ENRICHMENT-HYGIENE](../server/SCAN-AND-ENRICHMENT-HYGIENE.md) | C3, C5 | week | unclaimed | | | | 2026-09-20 | |
 | C-03 | [IMAGE-SERVING-AND-DERIVATIVES](../server/IMAGE-SERVING-AND-DERIVATIVES.md) | C6 | month | unclaimed | | | | 2026-09-20 | Keep `original` backdrops |
 | C-04 | [AUTH-HARDENING](../server/AUTH-HARDENING.md) | C7, C8 | month | unclaimed | | | | 2026-09-20 | Fence kept; token expiry is Paul's call |
@@ -165,8 +166,9 @@ C-01, C-02, K-03, K-07, P-04, then the client `week` items. A row in
 `blocked: fleet evidence` is not free work for a session without device or
 fleet access — leave it. A row in `in-review` is waiting on the named
 reviewer, not on a builder. `in-progress` always names one plan PR, never a
-set of milestone PRs; `merged` means its implementation landed and only the
-post-merge evidence recorded under rule 4 remains.
+set of milestone PRs; `merged: <landed milestones>` means its one
+implementation PR landed and only the post-merge evidence recorded under
+rule 4 remains.
 
 This file is kept honest by `tests/operations/test_docs_index.py` (every
 linked plan must exist) and by rule 2 above (a claim without a PR is not a
