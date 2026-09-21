@@ -1,6 +1,6 @@
 # HEVC sample-entry admission — software qualification receipt
 
-**Status:** focused software evidence green; Forgejo promotion gate pending ·
+**Status:** built — focused software evidence green; Forgejo promotion gate pending ·
 **Recorded:** 2026-09-16 · **PR:** `#337` · **Base:**
 `df3721320a8efe5967d95ce331cc30ccf6f0e3ea` · **Qualified code:**
 `b4a6d59c`
