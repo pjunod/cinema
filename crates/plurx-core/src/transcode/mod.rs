@@ -1008,11 +1008,27 @@ fn video_filters_for_contract(
     // Always give GPU scalers the same explicit even, no-upscale dimensions
     // the CPU path promises. `w=-1` can resolve to an odd NV12 width.
     let gpu_size = output_size;
-    if let Some(gpu) = opts.pipeline.filters(
+    if let Some(mut gpu) = opts.pipeline.filters(
         gpu_size.map(|(w, _)| w),
         gpu_size.map_or(opts.target_height, |(_, h)| h),
         input_dynamic_range,
     ) {
+        // The Dolby Vision and HDR10 software renderers own their entire
+        // colour graph, so they do not fall through to the generic CPU chain
+        // below. Insert bwdif immediately before their scale step: Dolby
+        // Vision still reshapes before resizing, while every special graph
+        // actually applies the deinterlace decision carried by the plan.
+        if deinterlace == Deinterlace::BwdifSendFrame
+            && matches!(
+                opts.pipeline,
+                Pipeline::DoviTonemapx | Pipeline::DoviPassthrough | Pipeline::Hdr10Passthrough
+            )
+        {
+            let scale = gpu
+                .find("scale=")
+                .expect("special software renderers always contain a scale step");
+            gpu.insert_str(scale, "bwdif=mode=send_frame:parity=auto:deint=interlaced,");
+        }
         if (bitmap_burn || text_burn)
             && matches!(opts.pipeline, Pipeline::VppQsv | Pipeline::TonemapVaapi)
         {
@@ -2839,6 +2855,50 @@ mod tests {
         )
         .join(" ");
         assert!(!joined.contains("bwdif="), "{joined}");
+    }
+
+    #[test]
+    fn interlaced_special_renderers_apply_bwdif_without_breaking_dolby_vision_order() {
+        for (pipeline, hdr) in [
+            (Pipeline::DoviTonemapx, "dolby_vision"),
+            (Pipeline::DoviPassthrough, "dolby_vision"),
+            (Pipeline::Hdr10Passthrough, "hdr10"),
+        ] {
+            let mut source = file(Some(hdr));
+            source.field_order = Some("tt".into());
+            let joined = hls_args(
+                &source,
+                Encoder::Software,
+                &TranscodeOptions {
+                    pipeline,
+                    ..TranscodeOptions::default()
+                },
+                Pacing::unpaced(),
+                "/tmp/s",
+            )
+            .join(" ");
+            let bwdif = joined
+                .find("bwdif=mode=send_frame:parity=auto:deint=interlaced")
+                .unwrap_or_else(|| panic!("{pipeline:?} omitted bwdif: {joined}"));
+            let scale = joined
+                .find("scale=")
+                .unwrap_or_else(|| panic!("{pipeline:?} omitted scale: {joined}"));
+            assert!(bwdif < scale, "{pipeline:?} scaled before bwdif: {joined}");
+            assert_eq!(
+                joined.matches("bwdif=").count(),
+                1,
+                "{pipeline:?}: {joined}"
+            );
+            if matches!(pipeline, Pipeline::DoviTonemapx | Pipeline::DoviPassthrough) {
+                let reshape = joined
+                    .find("tonemapx=")
+                    .unwrap_or_else(|| panic!("{pipeline:?} omitted reshape: {joined}"));
+                assert!(
+                    reshape < bwdif,
+                    "{pipeline:?} must reshape Dolby Vision before deinterlacing: {joined}"
+                );
+            }
+        }
     }
 
     #[test]
