@@ -13,7 +13,8 @@ and "Audio owns a global sample lattice" in
 AAC-specific in a way that bounds what this plan may change there. Work
 the milestones in order; one draft PR each into `main` under the fast lane.
 Every `file:line` was read at `88a3957a` and is marked **re-verify at build
-time**. If a step seems to require changing the VOD audio lattice
+time**. All milestones remain logical commits in one draft plan PR, per the
+work-board protocol. If a step seems to require changing the VOD audio lattice
 (`aresample=48000`, AAC 1024-sample frames, film-global phase), the copy
 path's `-channel_layout:a 5.1` for six channels, or the meaning of the
 `aaction` recipe field for existing keys, stop and flag it.
@@ -396,4 +397,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) | Claimed `plan/S-09` from `665b8b5c`; M3–M5 remain evidence-gated. |
