@@ -147,8 +147,9 @@ A request-scoped counter set on `AppState` incremented by the store wrapper
   `settings`, `cluster`, `other`} — mapped from axum's `MatchedPath` through
   a fixed table (bounded; unknown → `other`);
 - `class` ∈ {`local_read`, `authority_read`, `write`};
-- `role` ∈ {`standalone`, `voter`, `learner`, `remote_authority`} from the
-  process's selected backend and committed role.
+- `role` ∈ {`standalone`, `voter`, `learner`, `remote_authority`, `fenced`,
+  `unknown`} from the process's selected backend and committed role. A failed
+  role lookup and a fail-closed fenced node never contaminate the voter series.
 
 Plus `plurx_http_route_seconds{route_group,role}` (histogram, same buckets
 as `plurx_store_operation_seconds`) so store time and page time are read
@@ -340,11 +341,13 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | [#428](http://192.168.4.7:3000/noirr/plurx/pulls/428) · pending | Blocked: M0 fleet evidence is required before widening the rollout. The vendored `Client::execute` also exposes rows affected, not the acknowledged Raft log index; deriving a fence from a later quorum sample would add a second round trip and would not be the write response contract this milestone specifies. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [#428](http://192.168.4.7:3000/noirr/plurx/pulls/428) · pending | Blocked behind M2: watch-state reads stay Authority until the revision fence is real. No combined-query claim or authority-read reduction is recorded. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M4 | [#428](http://192.168.4.7:3000/noirr/plurx/pulls/428) · pending | Blocked on M0–M3 and three-voter paused/partition evidence. `bounded_replica_reads` remains false; the lag budget remains 64; no enablement gate or auth cache was added. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | Review disposition | [#428 comment #3344](http://192.168.4.7:3000/noirr/plurx/pulls/428#issuecomment-3344) | Replaced substring attribution with an exact registered-`MatchedPath` table, exercised every non-`other` family through the production middleware and the `TimedClient` operation-timer path, added explicit `fenced`/`unknown` roles, and made the M1 five-surface inventory an exact per-function call multiset. Focused tests named in the PR disposition passed. |
 
 Implementation decisions recorded for this run: retain the proposed nine route
-groups (reader traffic remains `other` until evidence justifies another label),
-retain the proposed 60-second fence/header lifetime when M2 becomes executable,
-and refuse both an ordinary-auth cache and a fabricated write revision. Route
-attribution uses a Tokio request scope rather than a field copied through every
-`AppState` constructor; the scope is installed once around the matched request,
-and `TimedClient` remains the only recorder of physical replicated Store calls.
+groups and classify every registered route pattern explicitly (`other` is only
+the unknown fallback), retain the proposed 60-second fence/header lifetime when
+M2 becomes executable, and refuse both an ordinary-auth cache and a fabricated
+write revision. Route attribution uses a Tokio request scope rather than a field
+copied through every `AppState` constructor; the scope is installed once around
+the matched request, and `TimedClient` remains the only production recorder of
+physical replicated Store calls.

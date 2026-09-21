@@ -90,7 +90,14 @@ const HTTP_ROUTE_GROUPS: [&str; 9] = [
     "auth", "home", "library", "item", "search", "playback", "settings", "cluster", "other",
 ];
 const HTTP_STORE_CLASSES: [&str; 3] = ["local_read", "authority_read", "write"];
-const HTTP_NODE_ROLES: [&str; 4] = ["standalone", "voter", "learner", "remote_authority"];
+const HTTP_NODE_ROLES: [&str; 6] = [
+    "standalone",
+    "voter",
+    "learner",
+    "remote_authority",
+    "fenced",
+    "unknown",
+];
 const HTTP_ROUTE_BUCKETS: [(u64, &str); 12] = [
     (1_000_000, "0.001"),
     (5_000_000, "0.005"),
@@ -114,8 +121,8 @@ struct HttpRouteCell {
 }
 
 struct HttpRouteMetrics {
-    store_reads: [AtomicU64; 9 * 3 * 4],
-    routes: [HttpRouteCell; 9 * 4],
+    store_reads: [AtomicU64; 9 * 3 * HTTP_NODE_ROLES.len()],
+    routes: [HttpRouteCell; 9 * HTTP_NODE_ROLES.len()],
 }
 
 impl Default for HttpRouteMetrics {
@@ -215,29 +222,257 @@ impl HttpRouteMetrics {
 static HTTP_ROUTE_METRICS: LazyLock<HttpRouteMetrics> = LazyLock::new(HttpRouteMetrics::default);
 
 fn http_route_group(path: &str) -> usize {
-    if path.contains("/auth/") || path.ends_with("/me") {
-        0
-    } else if path.contains("/home") || path.ends_with("/hubs") {
-        1
-    } else if path.contains("/libraries") || path.contains("/library/sections") {
-        2
-    } else if path.contains("/items/") || path.contains("/library/metadata/") {
+    // Axum supplies the registered MatchedPath, never the credential-bearing
+    // request URI. Keep this exhaustive and exact: a new route is `other`
+    // until its owner adds one fixed-cardinality entry here and the route
+    // inventory test fails if a registered pattern is left unclassified.
+    match path {
+        // Authentication and identity administration.
+        "/api/v1/me"
+        | "/api/v1/setup"
+        | "/api/v1/auth/login"
+        | "/api/v1/auth/logout"
+        | "/api/v1/users"
+        | "/api/v1/users/{id}"
+        | "/api/v1/keys"
+        | "/api/v1/keys/{id}" => 0,
+
+        // Home projections.
+        "/api/v1/home/previews" | "/api/v1/hubs" | "/hubs/search" => 1,
+
+        // Library management, catalogue pages and schedules.
+        "/api/v1/libraries"
+        | "/api/v1/libraries/{id}"
+        | "/api/v1/libraries/{id}/items"
+        | "/api/v1/libraries/{id}/schedule"
+        | "/api/v1/libraries/{id}/scan"
+        | "/api/v1/libraries/{id}/refresh"
+        | "/api/v1/libraries/{id}/dv-conversion"
+        | "/api/v1/libraries/{id}/dv-conversions"
+        | "/api/v1/libraries/{id}/root-identity/reset"
+        | "/api/v1/libraries/{id}/identity-repairs/preview"
+        | "/api/v1/libraries/{id}/identity-repairs/{plan_id}"
+        | "/api/v1/libraries/{id}/identity-repairs/{plan_id}/apply"
+        | "/api/v1/library-channels"
+        | "/api/v1/library-channels/"
+        | "/api/v1/library-channels/preview"
+        | "/api/v1/library-channels/guide"
+        | "/api/v1/library-channels/{id}"
+        | "/api/v1/library-channels/{id}/rebuild"
+        | "/api/v1/library-channels/{id}/build"
+        | "/api/v1/library-channels/{id}/favourite"
+        | "/api/v1/library-channels/{id}/resolve"
+        | "/api/v1/library-channels/{id}/sessions"
+        | "/library"
+        | "/library/sections"
+        | "/library/sections/{id}/all" => 2,
+
+        // Item metadata, artwork, reading, analysis and DVR catalogue rows.
+        "/api/v1/items/{id}"
+        | "/api/v1/items/{id}/classification"
+        | "/api/v1/items/{id}/photo"
+        | "/api/v1/items/{id}/reanalyze"
+        | "/api/v1/items/{id}/refresh-artwork"
+        | "/api/v1/items/{id}/reading-state"
+        | "/api/v1/files/{id}/analysis"
+        | "/api/v1/files/{id}/dv-conversion"
+        | "/api/v1/files/{id}/timeline-annotations/{kind}"
+        | "/api/v1/dv-conversions"
+        | "/api/v1/analysis/summary"
+        | "/api/v1/analysis/jobs"
+        | "/api/v1/analysis/jobs/{id}"
+        | "/api/v1/analysis/jobs/{id}/retry"
+        | "/api/v1/analysis/reopen"
+        | "/api/v1/dvr/status"
+        | "/api/v1/dvr/overview"
+        | "/api/v1/dvr/recordings"
+        | "/api/v1/dvr/recordings/{id}"
+        | "/api/v1/dvr/recordings/{id}/events"
+        | "/api/v1/dvr/recordings/{id}/attention/ack"
+        | "/api/v1/dvr/recordings/{id}/restore"
+        | "/api/v1/dvr/attention"
+        | "/api/v1/dvr/schedule"
+        | "/api/v1/dvr/rules"
+        | "/api/v1/dvr/rules/order"
+        | "/api/v1/dvr/rules/{id}"
+        | "/api/v1/dvr/reminders"
+        | "/api/v1/dvr/reminders/{id}"
+        | "/api/v1/dvr/reminders/{id}/ack"
+        | "/library/metadata/{key}"
+        | "/library/metadata/{key}/children"
+        | "/library/metadata/{key}/{kind}"
+        | "/api/v1/images/{filename}" => 3,
+
+        // Search only; maintenance of the search index is a settings action.
+        "/api/v1/search" | "/api/v1/search/related" | "/api/v1/search/settings" | "/search" => 4,
+
+        // Playback decisions, control, media bodies and watch state.
+        "/api/v1/items/{id}/progress"
+        | "/api/v1/items/{id}/scrobble"
+        | "/api/v1/items/{id}/unscrobble"
+        | "/api/v1/files/{id}/decision"
+        | "/api/v1/files/{id}/audio-offset"
+        | "/api/v1/files/{id}/offline-options"
+        | "/api/v1/files/{id}/offline-packages"
+        | "/api/v1/files/{id}/publication"
+        | "/api/v1/files/{id}/direct"
+        | "/api/v1/files/{id}/download"
+        | "/api/v1/files/{id}/content"
+        | "/api/v1/files/{id}/stream.mp4"
+        | "/api/v1/files/{id}/subs/{subtitle}"
+        | "/api/v1/files/{id}/subs/{index}/overlay.json"
+        | "/api/v1/files/{id}/subs/{index}/overlay/{generation}/objects/{object}"
+        | "/api/v1/files/{id}/hls/sessions"
+        | "/api/v1/files/{id}/hls/start"
+        | "/api/v1/offline/packages/{id}"
+        | "/api/v1/offline/packages/{id}/lease"
+        | "/api/v1/offline/packages/{id}/complete"
+        | "/api/v1/offline/media/{token}/master.m3u8"
+        | "/api/v1/offline/media/{token}/index.m3u8"
+        | "/api/v1/offline/media/{token}/subs/{index}/{segment}"
+        | "/api/v1/offline/media/{token}/{segment}"
+        | "/api/v1/publication/{session}"
+        | "/api/v1/publication/{session}/{*resource}"
+        | "/api/v1/stream/{id}/status"
+        | "/api/v1/hls/{session}/master.m3u8"
+        | "/api/v1/hls/{session}/index.m3u8"
+        | "/api/v1/hls/{session}/video.m3u8"
+        | "/api/v1/hls/{session}/subs/{index}/index.m3u8"
+        | "/api/v1/hls/{session}/subs/{index}/{segment}"
+        | "/api/v1/hls/{session}/status"
+        | "/api/v1/hls/{session}/control"
+        | "/api/v1/hls/{session}"
+        | "/api/v1/hls/{session}/{segment}"
+        | "/api/v1/live-tv/readiness"
+        | "/api/v1/live-tv/readiness/refresh"
+        | "/api/v1/live-tv/channels"
+        | "/api/v1/live-tv/channels/{channel}/sessions"
+        | "/api/v1/live-tv/guide"
+        | "/api/v1/live-tv/guide/readiness"
+        | "/api/v1/live-tv/guide/refresh"
+        | "/api/v1/live-tv/sessions/{capability}/index.m3u8"
+        | "/api/v1/live-tv/sessions/{capability}/status"
+        | "/api/v1/live-tv/sessions/{capability}/keepalive"
+        | "/api/v1/live-tv/sessions/{capability}/{segment}"
+        | "/api/v1/live-tv/sessions/{capability}"
+        | "/api/v1/live-tv/starts/{request_id}"
+        | "/api/v1/live-tv/starts/{request_id}/resume"
+        | "/library/parts/{file_id}/{mtime}/{name}"
+        | "/photo/:/transcode"
+        | "/:/timeline"
+        | "/:/scrobble"
+        | "/:/unscrobble" => 5,
+
+        // Configuration, diagnostics, scans, public shell and maintenance.
+        "/"
+        | "/api/v1/server"
+        | "/api/v1/settings"
+        | "/api/v1/developer/readiness"
+        | "/api/v1/scan"
+        | "/api/v1/scan/status"
+        | "/api/v1/scan/requests/{id}"
+        | "/api/v1/activity"
+        | "/api/v1/activity/detail"
+        | "/api/v1/activity/sessions/{id}"
+        | "/api/v1/activity/offline/{id}"
+        | "/api/v1/activity/producer"
+        | "/api/v1/trakt/status"
+        | "/api/v1/trakt/link"
+        | "/api/v1/trakt/sync"
+        | "/api/v1/system"
+        | "/api/v1/system/logs"
+        | "/api/v1/system/playback-events"
+        | "/api/v1/system/library-shape"
+        | "/api/v1/system/storage"
+        | "/api/v1/system/search-index/rebuild"
+        | "/api/v1/client-log"
+        | "/api/v1/coming-soon"
+        | "/api/v1/monarr/status"
+        | "/assets/cluster-panel.js"
+        | "/assets/playback-policy.js"
+        | "/assets/playback-control.js"
+        | "/assets/live-tv.js"
+        | "/assets/library-channels.js"
+        | "/assets/reader.js"
+        | "/assets/reader.css"
+        | "/assets/{*path}"
+        | "/connect.svg"
+        | "/manifest.webmanifest"
+        | "/icons/{file}"
+        | "/healthz"
+        | "/readyz"
+        | "/metrics"
+        | "/download/plurx-android.apk"
+        | "/identity" => 6,
+
+        // Cluster administration and authenticated internal transport.
+        "/api/v1/cluster/nodes"
+        | "/api/v1/cluster/status"
+        | "/api/v1/cluster/ingress"
+        | "/api/v1/cluster/media"
+        | "/api/v1/cluster/media/offers"
+        | "/api/v1/cluster/artwork/{filename}"
+        | "/api/v1/cluster/join-tokens"
+        | "/api/v1/cluster/learner-join-tokens"
+        | "/api/v1/cluster/support-bundle"
+        | "/api/v1/cluster/nodes/{node_id}/restart-preparation"
+        | "/api/v1/cluster/nodes/{node_id}/promote"
+        | "/api/v1/cluster/nodes/{node_id}/maintenance"
+        | "/api/v1/cluster/election"
+        | "/api/v1/cluster/leave"
+        | "/api/v1/cluster/protocol/learner/activate"
+        | "/api/v1/cluster/protocol/learner/deactivate"
+        | "/api/v1/cluster/nodes/{node_id}"
+        | "/api/v1/cluster/join/redeem"
+        | "/api/v1/cluster/join/finalize"
+        | "/api/v1/cluster/learner/join/redeem"
+        | "/api/v1/cluster/learner/join/finalize"
+        | "/internal/media/fragment-index/{cache_key}" => 7,
+        internal_activity::PATH
+        | cluster_operations::INTERNAL_PATH
+        | internal_auth_revocation::PATH
+        | crate::media_pool::SNAPSHOT_PATH
+        | crate::media_pool::OFFERS_PATH
+        | crate::shared_cache::CANARY_PATH
+        | crate::live_tv::SNAPSHOT_PATH
+        | crate::live_tv::START_PATH
+        | crate::live_tv::START_V2_PATH
+        | crate::live_tv::ACTIVATE_PATH
+        | crate::live_tv::RESOURCE_PATH
+        | crate::live_tv::STOP_PATH
+        | crate::live_tv::RETIRE_PATH
+        | crate::live_tv::RESUME_PATH
+        | crate::live_tv::START_STATE_PATH
+        | crate::live_tv::DRAIN_PATH
+        | crate::live_tv::GUIDE_PATH
+        | crate::media_sessions::START_PATH
+        | crate::media_sessions::ACTIVATE_PATH
+        | crate::media_sessions::PREPARE_PATH
+        | crate::media_sessions::ABORT_PATH
+        | crate::media_sessions::RELAY_PATH
+        | crate::media_sessions::CONTROL_PATH => 7,
+        _ => 8,
+    }
+}
+
+fn http_node_role(
+    local_source: bool,
+    watermark_source: bool,
+    serving_role: Result<LocalServingRole, ()>,
+) -> usize {
+    if !local_source && watermark_source {
         3
-    } else if path.contains("/search") {
-        4
-    } else if path.contains("/hls/")
-        || path.contains("/stream")
-        || path.contains("/live-tv/")
-        || path.contains("/publication/")
-        || path.contains("/offline/")
-    {
-        5
-    } else if path.contains("/settings") || path.contains("/developer/") {
-        6
-    } else if path.contains("/cluster/") || path.contains("/internal/") {
-        7
+    } else if !local_source {
+        0
     } else {
-        8
+        match serving_role {
+            Ok(LocalServingRole::Voter) => 1,
+            Ok(LocalServingRole::Learner) => 2,
+            Ok(LocalServingRole::Unclustered) if !watermark_source => 0,
+            Ok(LocalServingRole::Unclustered) => 5,
+            Ok(LocalServingRole::Fenced) => 4,
+            Err(()) => 5,
+        }
     }
 }
 
@@ -251,20 +486,11 @@ async fn http_store_attribution(
         .get::<MatchedPath>()
         .map_or(8, |path| http_route_group(path.as_str()));
     let raft = state.replication.metrics_handle().snapshot();
-    let role = if !raft.local_source && raft.watermark_source {
-        3
-    } else if !raft.local_source {
-        0
-    } else {
-        match state.membership.local_serving_role().await {
-            Ok(LocalServingRole::Learner) => 2,
-            Ok(LocalServingRole::Unclustered) if !raft.watermark_source => 0,
-            Ok(
-                LocalServingRole::Unclustered | LocalServingRole::Voter | LocalServingRole::Fenced,
-            )
-            | Err(_) => 1,
-        }
-    };
+    let role = http_node_role(
+        raft.local_source,
+        raft.watermark_source,
+        state.membership.local_serving_role().await.map_err(|_| ()),
+    );
     let counts = plurx_core::store::HttpStoreOperationCounts::default();
     let started_at = Instant::now();
     let response =
@@ -1432,33 +1658,50 @@ mod tests {
         "ok"
     }
 
+    async fn recorded_store_handler() -> &'static str {
+        for class in 0..3 {
+            plurx_core::store::validation_time_http_store_operation(class).await;
+        }
+        "ok"
+    }
+
     #[tokio::test]
     async fn metrics_route_attribution_renders_fixed_labels_and_scoped_store_counts() {
-        let counts = plurx_core::store::HttpStoreOperationCounts::default();
-        plurx_core::store::scope_http_store_operations(counts.clone(), async {
-            plurx_core::store::validation_record_http_store_operation(0);
-            plurx_core::store::validation_record_http_store_operation(1);
-            plurx_core::store::validation_record_http_store_operation(1);
-            plurx_core::store::validation_record_http_store_operation(2);
-        })
-        .await;
-
-        let metrics = HttpRouteMetrics::default();
-        metrics.record(1, 1, counts.snapshot(), Duration::from_millis(25));
-        let exposition = metrics.render();
+        let (_, state) = test_app_with_state();
+        let app = Router::new()
+            .route(
+                "/api/v1/home/previews",
+                axum::routing::get(recorded_store_handler),
+            )
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                http_store_attribution,
+            ))
+            .with_state(state);
+        let before = HTTP_ROUTE_METRICS.render();
+        assert_eq!(
+            app.oneshot(get("/api/v1/home/previews", None))
+                .await
+                .expect("attributed request")
+                .status(),
+            StatusCode::OK
+        );
+        let exposition = HTTP_ROUTE_METRICS.render();
         assert!(exposition.contains("# TYPE plurx_http_store_reads_total counter"));
         assert!(exposition.contains("# TYPE plurx_http_route_seconds histogram"));
-        assert!(exposition.contains(
-            "plurx_http_store_reads_total{route_group=\"home\",class=\"local_read\",role=\"voter\"} 1"
-        ));
-        assert!(exposition.contains(
-            "plurx_http_store_reads_total{route_group=\"home\",class=\"authority_read\",role=\"voter\"} 2"
-        ));
-        assert!(exposition.contains(
-            "plurx_http_store_reads_total{route_group=\"home\",class=\"write\",role=\"voter\"} 1"
-        ));
-        assert!(exposition
-            .contains("plurx_http_route_seconds_count{route_group=\"home\",role=\"voter\"} 1"));
+        for class in HTTP_STORE_CLASSES {
+            let prefix = format!(
+                "plurx_http_store_reads_total{{route_group=\"home\",class=\"{class}\",role=\"standalone\"}} "
+            );
+            let value = |text: &str| {
+                text.lines()
+                    .find_map(|line| line.strip_prefix(&prefix))
+                    .expect("fixed Store metric cell")
+                    .parse::<u64>()
+                    .expect("counter")
+            };
+            assert_eq!(value(&exposition), value(&before) + 1, "class {class}");
+        }
         assert_eq!(
             exposition
                 .lines()
@@ -1466,9 +1709,67 @@ mod tests {
                 .count(),
             HTTP_ROUTE_GROUPS.len() * HTTP_STORE_CLASSES.len() * HTTP_NODE_ROLES.len()
         );
-        assert_eq!(http_route_group("/api/v1/home/previews"), 1);
-        assert_eq!(http_route_group("/api/v1/search"), 4);
+        for (path, expected) in [
+            ("/api/v1/auth/login", 0),
+            ("/api/v1/home/previews", 1),
+            ("/api/v1/libraries", 2),
+            ("/api/v1/items/{id}", 3),
+            ("/api/v1/search", 4),
+            ("/api/v1/files/{id}/decision", 5),
+            ("/api/v1/files/{id}/direct", 5),
+            ("/api/v1/files/{id}/download", 5),
+            ("/api/v1/files/{id}/content", 5),
+            ("/api/v1/files/{id}/subs/{subtitle}", 5),
+            ("/library/parts/{file_id}/{mtime}/{name}", 5),
+            ("/api/v1/system/search-index/rebuild", 6),
+            ("/api/v1/cluster/status", 7),
+        ] {
+            assert_eq!(http_route_group(path), expected, "{path}");
+        }
         assert_eq!(http_route_group("/unmatched"), 8);
+
+        assert_eq!(http_node_role(true, true, Ok(LocalServingRole::Voter)), 1);
+        assert_eq!(http_node_role(true, true, Ok(LocalServingRole::Learner)), 2);
+        assert_eq!(http_node_role(true, true, Ok(LocalServingRole::Fenced)), 4);
+        assert_eq!(http_node_role(true, true, Err(())), 5);
+        assert_eq!(http_node_role(false, true, Err(())), 3);
+    }
+
+    #[tokio::test]
+    async fn registered_routes_reach_every_non_other_attribution_family() {
+        let app = test_app();
+        for (group, method, path) in [
+            (0, Method::POST, "/api/v1/auth/login"),
+            (1, Method::GET, "/api/v1/home/previews"),
+            (2, Method::GET, "/api/v1/libraries"),
+            (3, Method::GET, "/api/v1/items/1"),
+            (4, Method::GET, "/api/v1/search"),
+            (5, Method::GET, "/api/v1/files/1/direct"),
+            (6, Method::GET, "/api/v1/settings"),
+            (7, Method::GET, "/api/v1/cluster/status"),
+        ] {
+            let before = HTTP_ROUTE_METRICS.routes
+                [group * HTTP_NODE_ROLES.len()..(group + 1) * HTTP_NODE_ROLES.len()]
+                .iter()
+                .map(|cell| cell.count.load(Ordering::Relaxed))
+                .sum::<u64>();
+            let request = Request::builder()
+                .method(method)
+                .uri(path)
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .expect("request");
+            let _ = app.clone().oneshot(request).await.expect("route response");
+            let after = HTTP_ROUTE_METRICS.routes
+                [group * HTTP_NODE_ROLES.len()..(group + 1) * HTTP_NODE_ROLES.len()]
+                .iter()
+                .map(|cell| cell.count.load(Ordering::Relaxed))
+                .sum::<u64>();
+            assert!(
+                after > before,
+                "registered route did not reach group {group}: {path}"
+            );
+        }
     }
 
     async fn ten_ms_short_deadline(request: Request<axum::body::Body>, next: Next) -> Response {
@@ -1622,6 +1923,98 @@ mod tests {
             "the production HLS body route must remain deadline-free"
         );
         let _ = test_app();
+    }
+
+    fn literal_route_patterns(source: &str) -> Vec<&str> {
+        let mut routes = Vec::new();
+        let mut cursor = 0;
+        while let Some(relative) = source[cursor..].find(".route") {
+            let after_name = cursor + relative + ".route".len();
+            let Some(open_relative) = source[after_name..].find('(') else {
+                break;
+            };
+            let mut value = after_name + open_relative + 1;
+            while source
+                .as_bytes()
+                .get(value)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                value += 1;
+            }
+            if source.as_bytes().get(value) == Some(&b'"') {
+                let value_start = value + 1;
+                let value_end = source[value_start..]
+                    .find('"')
+                    .map(|offset| value_start + offset)
+                    .expect("route literal terminates");
+                routes.push(&source[value_start..value_end]);
+                cursor = value_end + 1;
+            } else {
+                // Constant paths are covered by exact guards in
+                // `http_route_group`; this inventory's job is to make every
+                // newly registered literal fail closed.
+                cursor = value;
+            }
+        }
+        routes
+    }
+
+    #[test]
+    fn every_registered_literal_route_has_an_explicit_group() {
+        let source = include_str!("mod.rs");
+        let router = source
+            .split_once("pub fn router(state: AppState) -> Router {")
+            .expect("router start")
+            .1
+            .split_once("const LEARNER_ROUTE_INELIGIBLE_JSON")
+            .expect("router end")
+            .0;
+        let spans = [
+            ("let json_short", "let json_long", "/api/v1"),
+            ("let json_long", "let media", "/api/v1"),
+            ("let media", "let api", "/api/v1"),
+            ("let plex_short", "let plex_media", ""),
+            ("let plex_media", "let plex_routes", ""),
+            ("let public_short", "let public_media", ""),
+            ("let public_media", "Router::new()", ""),
+        ];
+        for (start, end, prefix) in spans {
+            let block = router
+                .split_once(start)
+                .unwrap_or_else(|| panic!("missing route group {start}"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("missing route group end {end}"))
+                .0;
+            for route in literal_route_patterns(block) {
+                let matched = format!("{prefix}{route}");
+                assert_ne!(
+                    http_route_group(&matched),
+                    8,
+                    "registered MatchedPath is unclassified: {matched}"
+                );
+            }
+        }
+        for (source, prefix) in [
+            (include_str!("dvr.rs"), "/api/v1/dvr"),
+            (
+                include_str!("library_channels.rs"),
+                "/api/v1/library-channels",
+            ),
+        ] {
+            for route in literal_route_patterns(source) {
+                let matched = if route.starts_with("/library-channels") {
+                    format!("/api/v1{route}")
+                } else {
+                    format!("{prefix}{route}")
+                };
+                assert_ne!(
+                    http_route_group(&matched),
+                    8,
+                    "nested registered MatchedPath is unclassified: {matched}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2017,6 +2410,80 @@ mod tests {
         }
     }
 
+    fn async_store_call_inventory(source: &str) -> Vec<String> {
+        let source = source
+            .split("\n#[cfg(test)]\nmod tests")
+            .next()
+            .unwrap_or(source);
+        let mut inventory = Vec::new();
+        let mut cursor = 0;
+        while let Some(relative) = source[cursor..].find("async fn ") {
+            let function_start = cursor + relative + "async fn ".len();
+            let name_end = source[function_start..]
+                .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                .map(|offset| function_start + offset)
+                .expect("async function name terminates");
+            let name = &source[function_start..name_end];
+            let body_start = source[name_end..]
+                .find('{')
+                .map(|offset| name_end + offset)
+                .expect("async function has a body");
+            let mut depth = 0_u32;
+            let mut body_end = None;
+            for (offset, byte) in source.as_bytes()[body_start..].iter().enumerate() {
+                match byte {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            body_end = Some(body_start + offset + 1);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let body_end = body_end.expect("async function braces balance");
+            let compact = source[body_start..body_end]
+                .chars()
+                .filter(|character| !character.is_whitespace())
+                .collect::<String>();
+            let mut call_cursor = 0;
+            while let Some(relative) = compact[call_cursor..].find("state.") {
+                let start = call_cursor + relative + "state.".len();
+                let Some((owner, method_start)) =
+                    ["store.", "catalogue."].into_iter().find_map(|owner| {
+                        compact[start..]
+                            .starts_with(owner)
+                            .then_some((owner, start + owner.len()))
+                    })
+                else {
+                    call_cursor = start;
+                    continue;
+                };
+                let method_end = compact[method_start..]
+                    .find(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+                    .map_or(compact.len(), |offset| method_start + offset);
+                inventory.push(format!(
+                    "{name}:{}.{method}",
+                    owner.trim_end_matches('.'),
+                    method = &compact[method_start..method_end]
+                ));
+                call_cursor = method_end;
+            }
+            cursor = body_end;
+        }
+        inventory
+    }
+
+    fn assert_exact_store_inventory(source: &str, expected: &[&str]) {
+        assert_eq!(
+            async_store_call_inventory(source),
+            expected,
+            "every Store/Catalogue call must be assigned to an exact handler/helper and consistency role"
+        );
+    }
+
     #[test]
     fn bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate() {
         let browse = include_str!("browse.rs");
@@ -2138,52 +2605,117 @@ mod tests {
         assert!(plex_search.contains("state.catalogue.search_items"));
         assert!(!plex_search.contains("state.store.search_items"));
 
-        // Media delivery and write-validation helpers intentionally remain
-        // Authority. The same `book_file` check is shared by GET and the two
-        // reading-state mutations, so moving it would weaken a pre-mutation
-        // read merely to optimize the GET path.
-        let photos = include_str!("photos.rs")
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect::<String>();
-        for method in ["get_item", "files_for_item"] {
-            assert!(photos.contains(&format!("state.store.{method}")));
-            assert!(!photos.contains(&format!("state.catalogue.{method}")));
-        }
-        let reading = compact_handler(
-            include_str!("reading.rs"),
-            "async fn book_file",
-            "fn validate_href",
+        // Fail closed over the full production async-function boundary for
+        // every M1-added surface. A new Store/Catalogue call, a moved call, a
+        // duplicate call or a consistency-role change all alter this exact
+        // ordered multiset and require an explicit classification here.
+        assert_exact_store_inventory(
+            include_str!("photos.rs"),
+            &["serve:store.get_item", "serve:store.files_for_item"],
         );
-        for method in ["get_item", "get_file"] {
-            assert!(reading.contains(&format!("state.store.{method}")));
-            assert!(!reading.contains(&format!("state.catalogue.{method}")));
-        }
-
-        // These surfaces have no eligible catalogue Store call: image bytes
-        // are node-local/peer-fetched, while DVR and library-channel reads are
-        // settings, ownership, schedule, or coherent recipe snapshots.
-        let images = compact_handler(
+        assert_exact_store_inventory(
             include_str!("images.rs"),
-            "pub async fn serve",
-            "pub async fn serve_peer",
+            &[
+                "sweep_content_orphans:store.referenced_artwork_filenames",
+                "sweep_content_orphans:store.artwork_filename_is_referenced",
+                "sweep_content_orphans:store.prune_unreferenced_book_cover_origins",
+                "materialize_once:store.items_with_artwork_page",
+            ],
         );
-        assert!(!images.contains("state.store."));
-        assert!(!images.contains("state.catalogue."));
-        let dvr = include_str!("dvr.rs")
-            .chars()
-            .filter(|c| !c.is_whitespace())
-            .collect::<String>();
-        assert!(dvr.contains("state.store.settings_snapshot"));
-        assert!(dvr.contains("state.store.list_dvr_rules"));
-        assert!(!dvr.contains("state.catalogue."));
-        let library_channels = compact_handler(
+        assert_exact_store_inventory(
+            include_str!("reading.rs"),
+            &[
+                // `book_file` is shared by GET and mutations: these are
+                // authority pre-mutation/ownership reads, not candidates.
+                "book_file:store.get_item",
+                "book_file:store.get_file",
+                "get_state:store.reading_state",
+                "put_state:store.put_reading_state",
+                "delete_state:store.delete_reading_state",
+            ],
+        );
+        assert_exact_store_inventory(
+            include_str!("dvr.rs"),
+            &[
+                "collect_overview:store.settings_snapshot",
+                "collect_overview:store.dvr_overview_rows",
+                "collect_overview:store.list_dvr_rules",
+                "collect_overview:store.list_dvr_attention",
+                "collect_overview:store.list_dvr_attention",
+                "overview:store.settings_snapshot",
+                "configs:store.settings_snapshot",
+                "status:store.list_dvr_recordings_in",
+                "list_recordings:store.list_dvr_recordings",
+                "create_recording:store.insert_dvr_airing_with_event",
+                "create_recording:store.get_dvr_recording_for_airing",
+                "get_recording:store.get_dvr_recording",
+                "recording_events:store.get_dvr_recording",
+                "recording_events:store.list_dvr_events",
+                "acknowledge_attention:store.acknowledge_dvr_attention",
+                "attention:store.list_dvr_attention",
+                "attention:store.list_dvr_attention",
+                "attention:store.list_dvr_attention",
+                "attention:store.list_dvr_attention",
+                "attention:store.list_dvr_attention",
+                "delete_recording:store.get_dvr_recording",
+                "delete_recording:store.transition_dvr_recording_with_event",
+                "delete_recording:store.request_dvr_stop_with_event",
+                "delete_recording:store.transition_dvr_recording_with_event",
+                "delete_recording:store.get_dvr_recording",
+                "restore_recording:store.get_dvr_recording",
+                "restore_recording:store.transition_dvr_recording_with_event",
+                "restore_recording:store.get_dvr_recording",
+                "schedule:store.list_dvr_schedule_window",
+                "list_rules:store.list_dvr_rules",
+                "create_rule:store.list_dvr_rules",
+                "create_rule:store.put_dvr_rule",
+                "update_rule:store.get_dvr_rule",
+                "update_rule:store.put_dvr_rule",
+                "delete_rule:store.get_dvr_rule",
+                "delete_rule:store.delete_dvr_rule",
+                "reorder_rules:store.reorder_dvr_rules",
+                "reorder_rules:store.list_dvr_rules",
+                "list_reminders:store.list_dvr_reminders",
+                "list_reminders:store.list_dvr_recordings_in",
+                "create_reminder:store.list_dvr_reminders",
+                "create_reminder:store.list_dvr_reminders",
+                "create_reminder:store.put_dvr_reminder",
+                "delete_reminder:store.delete_dvr_reminder",
+                "ack_reminder:store.set_dvr_reminder_state",
+            ],
+        );
+        assert_exact_store_inventory(
             include_str!("library_channels.rs"),
-            "async fn matching_catalogue",
-            "async fn preferred_generation_files",
+            &[
+                "list:store.list_library_channels",
+                "list:store.item_titles",
+                "create:store.create_library_channel",
+                "create:store.get_library_channel",
+                "publish_subject:store.get_user",
+                "update:store.update_library_channel",
+                "delete_one:store.delete_library_channel",
+                "favourite:store.set_library_channel_favourite",
+                "rebuild:store.update_library_channel",
+                "guide:store.item_titles",
+                "start_session:store.item_titles",
+                "cached_generation:store.read_library_channel_generation",
+                "matching_catalogue:store.library_channel_catalog_snapshot",
+                "build_channel_inner:store.read_library_channel_generation",
+                "build_channel_inner:store.complete_library_channel_build_without_publication",
+                "build_channel_inner:store.claim_library_channel_build",
+                "build_channel_inner:store.renew_library_channel_build",
+                "build_channel_inner:store.stage_library_channel_entries",
+                "build_channel_inner:store.publish_library_channel_generation",
+                "reconcile_once:store.prune_library_channel_state",
+                "reconcile_once:store.list_library_channel_refresh_candidates",
+                "reconcile_once:store.get_user",
+                "visible_channel:store.get_library_channel",
+                "editable_channel:store.get_library_channel",
+                "require_runtime_enabled:store.get_setting",
+                "validate_file:store.get_file",
+                "record_build_failure:store.fail_library_channel_build",
+            ],
         );
-        assert!(library_channels.contains("state.store.library_channel_catalog_snapshot"));
-        assert!(!library_channels.contains("state.catalogue."));
 
         let system = include_str!("system.rs");
         assert_catalogue_methods(

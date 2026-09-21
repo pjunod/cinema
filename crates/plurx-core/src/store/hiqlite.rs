@@ -840,6 +840,29 @@ async fn time_store_operation<T>(
     }
 }
 
+/// Drive the exact production Store-operation timer from an HTTP integration
+/// test without constructing a Raft client. Unlike the old counter hook this
+/// runs the same completion path every `TimedClient` query/execute uses, so a
+/// route test proves the request-local scope reaches the physical-operation
+/// recorder rather than merely seeding the resulting array.
+#[doc(hidden)]
+pub async fn validation_time_http_store_operation(class_index: usize) {
+    let class = match class_index {
+        0 => StoreOperationClass::LocalRead,
+        1 => StoreOperationClass::AuthorityRead,
+        2 => StoreOperationClass::Write,
+        _ => panic!("Store operation class index must be fixed"),
+    };
+    time_store_operation(
+        &STORE_OPERATION_METRICS,
+        class,
+        async { Ok::<_, StoreError>(()) },
+        |_| true,
+    )
+    .await
+    .expect("validation operation succeeds");
+}
+
 #[cfg(feature = "cluster-read-cost-validation")]
 async fn time_store_operation_controlled<T>(
     metrics: &'static StoreOperationMetrics,

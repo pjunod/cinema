@@ -42,6 +42,9 @@ pub use scan_identity_repair::{
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite;
 #[cfg(feature = "hiqlite-store")]
+#[doc(hidden)]
+pub use hiqlite::validation_time_http_store_operation;
+#[cfg(feature = "hiqlite-store")]
 mod hiqlite_catalog;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_coordination;
@@ -5008,14 +5011,6 @@ pub async fn scope_http_store_operations<T>(
 
 pub(super) fn record_http_store_operation(class_index: usize) {
     let _ = HTTP_STORE_OPERATION_COUNTS.try_with(|counts| counts.record(class_index));
-}
-
-/// Exercise the same request-local recording boundary without a live Hiqlite
-/// client. Numeric input keeps one consistency-class vocabulary in production.
-#[doc(hidden)]
-pub fn validation_record_http_store_operation(class_index: usize) {
-    assert!(class_index < 3, "Store operation class index must be fixed");
-    record_http_store_operation(class_index);
 }
 
 /// The only application-facing boundary for catalogue consistency choices.
