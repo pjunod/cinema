@@ -6,17 +6,29 @@
 //! generation. No type in this module grants permission to open a path.
 
 mod capability;
+mod host;
 mod input;
 mod inspector;
+mod lifecycle;
+mod service;
 mod session;
 pub(crate) mod store;
 
 pub use capability::{classify_help_output, OpticalCapabilities, OpticalCapability};
+pub use host::{
+    HostRequirement, HostRequirementStatus, OpticalHostAdapter, OpticalHostError, SystemOpticalHost,
+};
 pub use input::{InputBuildError, OpticalTitleLocator, ResolvedInput};
 pub use inspector::{
-    validate_inspection, FingerprintEvidence, InspectedChapter, InspectedDisc, InspectedStream,
-    InspectedTitle, InspectionError, InspectionResponse, ProtectionFacts, INSPECTION_SCHEMA_V1,
+    inspection_to_store, validate_inspection, FingerprintEvidence, InspectedChapter, InspectedDisc,
+    InspectedStream, InspectedTitle, InspectionError, InspectionResponse, ProtectionFacts,
+    INSPECTION_SCHEMA_V1,
 };
+pub use lifecycle::{
+    OpticalDriveManager, OpticalDriveSnapshot, OpticalDriveState, OpticalLifecycleError,
+    OpticalReadPermit,
+};
+pub use service::{OpticalService, OpticalServiceError};
 pub use session::{
     optical_output_identity, DurableOpticalSessionSource, OpticalSessionPayloadError,
     OPTICAL_SESSION_PAYLOAD_V1,

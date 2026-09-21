@@ -42,9 +42,45 @@ const DEFAULT_CONFIG_PATHS: &[&str] = &["plurx.toml", "/etc/plurx/plurx.toml"];
 pub struct Config {
     pub server: ServerConfig,
     pub storage: StorageConfig,
+    /// Node-local physical drive declarations. Runtime enablement is a Store
+    /// setting, not startup configuration; an empty list means no probe work.
+    pub optical: OpticalConfig,
     /// Forward-compatible cluster settings. M0 reads these without changing
     /// the production SQLite backend; later clustering releases activate them.
     pub cluster: ClusterConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct OpticalConfig {
+    pub drives: Vec<OpticalDriveConfig>,
+    /// Narrow helper executable used for inspection and eject. It receives
+    /// only paths from this trusted node-local configuration.
+    pub helper_path: PathBuf,
+    /// Fallback observation cadence when the host adapter has no event source.
+    pub poll_interval_secs: u64,
+}
+
+impl Default for OpticalConfig {
+    fn default() -> Self {
+        Self {
+            drives: Vec::new(),
+            helper_path: PathBuf::from("plurx-optical-helper"),
+            poll_interval_secs: 5,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default, deny_unknown_fields)]
+pub struct OpticalDriveConfig {
+    /// Stable operator-selected identifier, scoped to this node.
+    pub id: String,
+    pub label: String,
+    /// Block-device path used for drive control and DVD title reads.
+    pub device_path: PathBuf,
+    /// Read-only mounted filesystem root used for Blu-ray inspection/reads.
+    pub mount_path: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -212,6 +248,57 @@ impl Config {
                 key: "storage.scan_prune_percent".to_owned(),
                 message: "must be between 0 and 100".to_owned(),
             });
+        }
+        if !(1..=300).contains(&config.optical.poll_interval_secs) {
+            return Err(ConfigError::Value {
+                key: "optical.poll_interval_secs".to_owned(),
+                message: "must be between 1 and 300 seconds".to_owned(),
+            });
+        }
+        if config.optical.helper_path.as_os_str().is_empty() {
+            return Err(ConfigError::Value {
+                key: "optical.helper_path".to_owned(),
+                message: "must not be empty".to_owned(),
+            });
+        }
+        let mut drive_ids = std::collections::BTreeSet::new();
+        for drive in &config.optical.drives {
+            if drive.id.is_empty()
+                || drive.id.len() > 64
+                || !drive
+                    .id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            {
+                return Err(ConfigError::Value {
+                    key: "optical.drives.id".to_owned(),
+                    message: "must be 1-64 ASCII letters, digits, dashes, or underscores"
+                        .to_owned(),
+                });
+            }
+            if !drive_ids.insert(drive.id.as_str()) {
+                return Err(ConfigError::Value {
+                    key: "optical.drives.id".to_owned(),
+                    message: format!("duplicate drive id {:?}", drive.id),
+                });
+            }
+            if drive.label.trim().is_empty() || drive.label.len() > 128 {
+                return Err(ConfigError::Value {
+                    key: "optical.drives.label".to_owned(),
+                    message: "must contain 1-128 bytes".to_owned(),
+                });
+            }
+            if drive.device_path.as_os_str().is_empty()
+                || !drive.device_path.is_absolute()
+                || (!drive.mount_path.as_os_str().is_empty() && !drive.mount_path.is_absolute())
+            {
+                return Err(ConfigError::Value {
+                    key: "optical.drives".to_owned(),
+                    message:
+                        "device_path must be absolute and mount_path must be empty or absolute"
+                            .to_owned(),
+                });
+            }
         }
         let shared_dir_set = !config.cluster.shared_cache_dir.as_os_str().is_empty();
         let shared_id_set = !config.cluster.shared_cache_id.is_empty();
@@ -442,6 +529,11 @@ mod tests {
             config.storage.scan_prune_percent,
             DEFAULT_SCAN_PRUNE_PERCENT
         );
+        assert!(config.optical.drives.is_empty());
+        assert_eq!(
+            config.optical.helper_path,
+            PathBuf::from("plurx-optical-helper")
+        );
         assert_eq!(config.cluster.raft_bind.port(), DEFAULT_RAFT_PORT);
         assert_eq!(config.cluster.api_bind.port(), DEFAULT_CLUSTER_API_PORT);
         assert!(config.cluster.join_url.is_empty());
@@ -529,6 +621,44 @@ mod tests {
         assert!(matches!(
             Config::load(Some(&path)),
             Err(ConfigError::Value { key, .. }) if key == "storage.scan_prune_percent"
+        ));
+    }
+
+    #[test]
+    fn optical_drives_are_explicit_unique_and_path_bounded() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("plurx.toml");
+        std::fs::write(
+            &path,
+            "[optical]\nhelper_path = \"/usr/libexec/plurx-optical-helper\"\n\
+             poll_interval_secs = 10\n\
+             [[optical.drives]]\nid = \"media-room\"\nlabel = \"Media room\"\n\
+             device_path = \"/dev/sr0\"\nmount_path = \"/media/disc\"\n",
+        )
+        .expect("write optical config");
+        let config = Config::load(Some(&path)).expect("load optical config");
+        assert_eq!(config.optical.drives.len(), 1);
+        assert_eq!(config.optical.drives[0].id, "media-room");
+
+        std::fs::write(
+            &path,
+            "[[optical.drives]]\nid = \"same\"\nlabel = \"One\"\ndevice_path = \"/dev/sr0\"\n\
+             [[optical.drives]]\nid = \"same\"\nlabel = \"Two\"\ndevice_path = \"/dev/sr1\"\n",
+        )
+        .expect("write duplicate optical config");
+        assert!(matches!(
+            Config::load(Some(&path)),
+            Err(ConfigError::Value { key, .. }) if key == "optical.drives.id"
+        ));
+
+        std::fs::write(
+            &path,
+            "[[optical.drives]]\nid = \"drive\"\nlabel = \"Drive\"\ndevice_path = \"relative\"\n",
+        )
+        .expect("write relative optical config");
+        assert!(matches!(
+            Config::load(Some(&path)),
+            Err(ConfigError::Value { key, .. }) if key == "optical.drives"
         ));
     }
 

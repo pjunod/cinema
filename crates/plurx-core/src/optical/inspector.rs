@@ -1,6 +1,10 @@
 use serde::{Deserialize, Serialize};
 
-use super::{OpticalFormat, OpticalTitleLocator, MAX_OPTICAL_ID_BYTES};
+use super::{
+    OpticalDisc, OpticalFormat, OpticalInspection, OpticalTitle, OpticalTitleLocator,
+    MAX_OPTICAL_ID_BYTES,
+};
+use crate::playback::{PlaybackMediaFacts, SourceDelivery};
 
 pub const INSPECTION_SCHEMA_V1: u32 = 1;
 const MAX_TITLES: usize = 512;
@@ -44,19 +48,20 @@ pub struct InspectedChapter {
     pub accurate: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InspectedTitle {
     pub title_id: String,
     pub locator: OpticalTitleLocator,
     pub duration_ms: Option<u64>,
     pub angles: u32,
+    pub facts: PlaybackMediaFacts,
     pub streams: Vec<InspectedStream>,
     pub chapters: Vec<InspectedChapter>,
     pub suggested_feature_score: Option<u16>,
     pub suggestion_reasons: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InspectedDisc {
     pub format: OpticalFormat,
     pub volume_label: Option<String>,
@@ -65,7 +70,7 @@ pub struct InspectedDisc {
     pub titles: Vec<InspectedTitle>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InspectionResponse {
     pub schema_version: u32,
     pub expected_generation: String,
@@ -91,6 +96,16 @@ pub enum InspectionError {
     Chapters,
     #[error("inspection diagnostics exceed the bounded limit")]
     Diagnostics,
+    #[error("inspection fingerprint is malformed")]
+    Fingerprint,
+    #[error("inspection contains duplicate title ids")]
+    DuplicateTitle,
+    #[error("inspection title locator does not match the disc format")]
+    Locator,
+    #[error("inspection title media facts are invalid")]
+    Facts,
+    #[error("inspection timestamp is invalid")]
+    Timestamp,
 }
 
 pub fn validate_inspection(response: &InspectionResponse) -> Result<(), InspectionError> {
@@ -108,12 +123,50 @@ pub fn validate_inspection(response: &InspectionResponse) -> Result<(), Inspecti
     if response.diagnostics.len() > MAX_DIAGNOSTIC_BYTES {
         return Err(InspectionError::Diagnostics);
     }
+    if response.disc.fingerprint.version == 0
+        || response.disc.fingerprint.digest.len() != 64
+        || !response
+            .disc
+            .fingerprint
+            .digest
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(InspectionError::Fingerprint);
+    }
+    let mut title_ids = std::collections::BTreeSet::new();
     for title in &response.disc.titles {
         if title.title_id.is_empty() || title.title_id.len() > MAX_OPTICAL_ID_BYTES {
             return Err(InspectionError::TitleId);
         }
         if title.angles == 0 {
             return Err(InspectionError::Angles);
+        }
+        if !title_ids.insert(title.title_id.as_str()) {
+            return Err(InspectionError::DuplicateTitle);
+        }
+        if !matches!(
+            (response.disc.format, title.locator),
+            (
+                OpticalFormat::Dvd,
+                OpticalTitleLocator::Dvd { title_number: 1.. }
+            ) | (
+                OpticalFormat::Bluray,
+                OpticalTitleLocator::Bluray {
+                    playlist_number: 1..
+                }
+            )
+        ) {
+            return Err(InspectionError::Locator);
+        }
+        if title.facts.source_delivery != SourceDelivery::ManagedOpticalTitle
+            || title.facts.learned_limit_identity.is_some()
+            || title
+                .duration_ms
+                .zip(title.facts.duration_ms)
+                .is_some_and(|(inspected, facts)| i64::try_from(inspected).ok() != Some(facts))
+        {
+            return Err(InspectionError::Facts);
         }
         if title.streams.len() > MAX_STREAMS_PER_TITLE {
             return Err(InspectionError::Streams);
@@ -123,6 +176,74 @@ pub fn validate_inspection(response: &InspectionResponse) -> Result<(), Inspecti
         }
     }
     Ok(())
+}
+
+/// Convert a validated helper reply into the backend-neutral durable record.
+/// Incomplete fingerprints stay insertion-scoped and therefore cannot inherit
+/// progress when the media is later reinserted.
+pub fn inspection_to_store(
+    response: &InspectionResponse,
+    now_ms: i64,
+) -> Result<OpticalInspection, InspectionError> {
+    validate_inspection(response)?;
+    if now_ms < 0 {
+        return Err(InspectionError::Timestamp);
+    }
+    let disc_id = if response.disc.fingerprint.complete {
+        format!(
+            "optical-v{}:{}:{}",
+            response.disc.fingerprint.version,
+            response.disc.format.as_str(),
+            response.disc.fingerprint.digest.to_ascii_lowercase()
+        )
+    } else {
+        format!("optical-insertion:{}", response.expected_generation)
+    };
+    let fingerprint_evidence_json = serde_json::to_string(&response.disc.fingerprint)
+        .map_err(|_| InspectionError::Fingerprint)?;
+    let metadata_json = serde_json::to_string(&serde_json::json!({
+        "protection": response.disc.protection,
+        "diagnostics": response.diagnostics,
+    }))
+    .map_err(|_| InspectionError::Facts)?;
+    let titles = response
+        .disc
+        .titles
+        .iter()
+        .map(|title| {
+            let duration_ms = title
+                .duration_ms
+                .map(i64::try_from)
+                .transpose()
+                .map_err(|_| InspectionError::Facts)?;
+            let chapters_json =
+                serde_json::to_string(&title.chapters).map_err(|_| InspectionError::Facts)?;
+            Ok(OpticalTitle {
+                disc_id: disc_id.clone(),
+                title_id: title.title_id.clone(),
+                locator: title.locator,
+                facts: title.facts.clone(),
+                chapters_json,
+                duration_ms,
+                matched_item_id: None,
+                match_kind: None,
+            })
+        })
+        .collect::<Result<Vec<_>, InspectionError>>()?;
+    Ok(OpticalInspection {
+        disc: OpticalDisc {
+            disc_id,
+            fingerprint_version: response.disc.fingerprint.version,
+            fingerprint_evidence_json,
+            format: response.disc.format,
+            volume_label: response.disc.volume_label.clone(),
+            display_title: None,
+            metadata_json,
+            created_at_ms: now_ms,
+            updated_at_ms: now_ms,
+        },
+        titles,
+    })
 }
 
 #[cfg(test)]
@@ -154,6 +275,14 @@ mod tests {
                     locator: OpticalTitleLocator::Dvd { title_number: 1 },
                     duration_ms: Some(60_000),
                     angles: 1,
+                    facts: PlaybackMediaFacts {
+                        duration_ms: Some(60_000),
+                        container: Some("mpeg".to_owned()),
+                        video_codec: Some("mpeg2video".to_owned()),
+                        source_delivery: SourceDelivery::ManagedOpticalTitle,
+                        probed: true,
+                        ..PlaybackMediaFacts::default()
+                    },
                     streams: Vec::new(),
                     chapters: Vec::new(),
                     suggested_feature_score: None,
@@ -173,5 +302,17 @@ mod tests {
             validate_inspection(&oversized),
             Err(InspectionError::Diagnostics)
         );
+    }
+
+    #[test]
+    fn optical_incomplete_fingerprint_is_scoped_to_the_insertion() {
+        let mut response = response();
+        response.disc.fingerprint.complete = false;
+        let stored = inspection_to_store(&response, 100).expect("stored inspection");
+        assert_eq!(
+            stored.disc.disc_id,
+            format!("optical-insertion:{}", response.expected_generation)
+        );
+        assert_eq!(stored.titles[0].disc_id, stored.disc.disc_id);
     }
 }
