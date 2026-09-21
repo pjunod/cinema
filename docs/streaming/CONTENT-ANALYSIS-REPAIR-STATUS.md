@@ -1,6 +1,6 @@
 # Content analysis repair — implementation status
 
-**Status:** merge authorized after current-main integration · **Updated:** 2026-09-17 UTC ·
+**Status:** open — merge authorized; fleet recovery and deployment remain pending · **Updated:** 2026-09-17 UTC ·
 **Base:** `8232d1b6b7fe0848df009709a27f2a28bdae3f60` · **Effort:**
 `effort/content-analysis-repair`
 

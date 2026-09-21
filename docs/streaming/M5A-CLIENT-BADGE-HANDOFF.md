@@ -1,6 +1,6 @@
 # M5a — the `DV P7 → DV P8` badge in the Apple and Android clients
 
-**Status:** built — ready to build · **Executes:** PLAYBACK-CAPS-V2-PLAN.md milestone
+**Status:** built — Apple and Android badge states implemented · **Executes:** PLAYBACK-CAPS-V2-PLAN.md milestone
 M5a's client half, and MEDIA-BADGES-PLAN.md §2.3 · **Written:** 2026-08-31 ·
 **Server and web are done** (PR #716); this is the last thing between M5a and
 "finished".

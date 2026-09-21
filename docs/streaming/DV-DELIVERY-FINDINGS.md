@@ -1,6 +1,6 @@
 # Dolby Vision delivery — why DV titles arrive as HDR10 or lower
 
-**Status:** findings only, no code changed · **Analysed:** `main` @ `3a056dc4`
+**Status:** open — findings recorded; no implementation started · **Analysed:** `main` @ `3a056dc4`
 (2026-08-28 19:21 -0400) · **Written:** 2026-08-29 · **For:** fable review
 
 Read §2 first — it is the whole answer in one page. §3–§5 are the evidence
