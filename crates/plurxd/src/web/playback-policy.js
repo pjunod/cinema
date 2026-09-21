@@ -920,6 +920,57 @@
     per_attach: 1,
   });
 
+  // Media recovery spends the same per-attach budget as network startLoad.
+  // The item bound survives internal reopens, so a decoder that repeatedly
+  // rejects the same title cannot acquire a fresh rescue on every attachment.
+  const HLS_MEDIA_RECOVERY = Object.freeze({
+    per_item: 2,
+    settle_ms: 4_000,
+  });
+
+  // A local rolling/progressive seek gets one short chance to land. The
+  // transport owns the timer; this policy owns the frozen bound and route.
+  const SEEK_LOCAL_SETTLE_MS = 3_000;
+
+  function seekRoute({
+    method,
+    copyHls = false,
+    vod = false,
+    forceReopen = false,
+    changing = false,
+    targetMs,
+    bufferedMs = [],
+    publishedMs = null,
+    holdbackMs = 0,
+  } = {}) {
+    const target = Number(targetMs);
+    if (!Number.isFinite(target) || target < 0 || forceReopen || changing) {
+      return { route: "reopen" };
+    }
+    if (method === "direct_play") return { route: "local", atMs: target, basis: "direct" };
+    if (vod) return { route: "local", atMs: target, basis: "vod" };
+    const rolling = Boolean(copyHls) || method === "transcode";
+    if (!rolling && method !== "remux") return { route: "reopen" };
+    for (const range of Array.isArray(bufferedMs) ? bufferedMs : []) {
+      const from = Number(range && range.from);
+      const through = Number(range && range.through);
+      if (Number.isFinite(from) && Number.isFinite(through)
+          && target >= from && target <= through) {
+        return { route: "local", atMs: target, basis: "buffered" };
+      }
+    }
+    if (rolling && publishedMs) {
+      const from = Number(publishedMs.from);
+      const through = Number(publishedMs.through);
+      const holdback = Math.max(0, Number(holdbackMs) || 0);
+      if (Number.isFinite(from) && Number.isFinite(through)
+          && target >= from && target <= through - holdback) {
+        return { route: "local", atMs: target, basis: "published" };
+      }
+    }
+    return { route: "reopen" };
+  }
+
   // One absolute startup policy for the web HLS attachment. hls.js owns the
   // retry ladder inside a source-load cycle; the application owns one
   // corrective cycle and the ceiling across both. Keeping the numbers here
@@ -997,6 +1048,39 @@
   // that schedules the retry cannot disagree with the test that pins it.
   function hlsRetryAllowed({ used = 0 } = {}) {
     return (Number(used) || 0) < HLS_RETRY.per_attach;
+  }
+
+  function hlsMediaFatalAction({
+    type,
+    details,
+    sourceBufferName = null,
+    retryUsed = 0,
+    itemRecoveries = 0,
+    recoveredAtMs = null,
+    nowMs = 0,
+  } = {}) {
+    if (type !== "mediaError") return "none";
+    if (
+      details === "bufferIncompatibleCodecsError" ||
+      details === "bufferAddCodecError"
+    ) {
+      return "fallback";
+    }
+    if (!hlsRetryAllowed({ used: retryUsed })) return "fallback";
+    if (itemRecoveries >= HLS_MEDIA_RECOVERY.per_item) return "fallback";
+    if (
+      recoveredAtMs != null &&
+      Number(nowMs) - Number(recoveredAtMs) < HLS_MEDIA_RECOVERY.settle_ms
+    ) {
+      return "fallback";
+    }
+    if (itemRecoveries > 0) {
+      return (details === "bufferAppendError" || details === "bufferAppendingError") &&
+        sourceBufferName === "audio"
+        ? "swap_audio"
+        : "fallback";
+    }
+    return "recover";
   }
 
   // Android's `BEHIND_LIVE_WINDOW` recovery (M5 addition 3). Finite timelines
@@ -1952,6 +2036,10 @@
     createRetryStep,
     HLS_RETRY,
     hlsRetryAllowed,
+    HLS_MEDIA_RECOVERY,
+    hlsMediaFatalAction,
+    SEEK_LOCAL_SETTLE_MS,
+    seekRoute,
     HLS_STARTUP,
     HLS_STARTUP_TERMINAL_CODES,
     STREAM_FAILURE_BODY_MAX_CHARS,
