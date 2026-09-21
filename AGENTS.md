@@ -22,7 +22,7 @@ test refuses any reference in the repo to a `docs/` path that does not exist.
 ## Where the web app is
 
 `crates/plurxd/src/web/index.html` is a 97-line shell of markup and tags. The
-app itself is the sixty-two files
+app itself is the sixty-six files
 [docs/clients/WEB-SHELL-LAYOUT.md](docs/clients/WEB-SHELL-LAYOUT.md) maps —
 open that before grepping the shell for a function that is not in it. Adding a
 file means the file, a row in `WEB_ASSETS`, a tag in the shell and a row in

@@ -44,7 +44,7 @@ Three independent behaviour changes to `crates/plurxd/src/web/player/`:
    spending the attach's existing retry budget. `swapAudioCodec()` is called
    only when the fault is an append to the audio SourceBuffer.
 2. **W7.** A load-time throw or an unhandled rejection anywhere in the
-   sixty-four-file shell reaches `/client-log`, redacted, capped and
+   sixty-five-script shell reaches `/client-log`, redacted, capped and
    de-duplicated, and a viewer looking at a page that never booted is told
    whether it is slow, crashed, or timed out — not one banner for all three.
 3. **W3 / F-web-5.** A seek on a rolling HLS session or a progressive remux
