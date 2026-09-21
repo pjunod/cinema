@@ -767,6 +767,7 @@ pub async fn enrich_library_for_targets_with_publication(
         routes,
         repairs,
         repair_fence,
+        ITEM_ENRICH_DEADLINE,
     )
     .await
 }
@@ -781,6 +782,7 @@ async fn enrich_library_for_targets_inner(
     routes: Option<&[i64]>,
     repairs: Option<&[i64]>,
     repair_fence: Option<&ArtworkRepairFence>,
+    item_deadline: Duration,
 ) -> EnrichReport {
     let mut report = EnrichReport::default();
     if let Err(e) = tokio::fs::create_dir_all(artwork_dir).await {
@@ -1002,7 +1004,7 @@ async fn enrich_library_for_targets_inner(
                 _ => {}
             }
         };
-        if tokio::time::timeout(ITEM_ENRICH_DEADLINE, item_work)
+        if tokio::time::timeout(item_deadline, item_work)
             .await
             .is_err()
         {
@@ -1129,6 +1131,7 @@ pub async fn enrich_anime_library_with_publication(
         force,
         only,
         repair_fence,
+        ITEM_ENRICH_DEADLINE,
     )
     .await
 }
@@ -1141,6 +1144,7 @@ async fn enrich_anime_library_inner(
     force: bool,
     only: Option<&[i64]>,
     repair_fence: Option<&ArtworkRepairFence>,
+    item_deadline: Duration,
 ) -> EnrichReport {
     let mut report = EnrichReport::default();
     if let Err(e) = tokio::fs::create_dir_all(artwork_dir).await {
@@ -1219,7 +1223,7 @@ async fn enrich_anime_library_inner(
                 }
             }
         };
-        if tokio::time::timeout(ITEM_ENRICH_DEADLINE, item_work)
+        if tokio::time::timeout(item_deadline, item_work)
             .await
             .is_err()
         {
@@ -1820,6 +1824,108 @@ mod tests {
         // A second run has nothing left needing metadata.
         let again = enrich_library(&store, &tmdb, art.path(), Some(lib.id), false, None).await;
         assert_eq!(again.matched, 0);
+    }
+
+    #[tokio::test]
+    async fn an_item_that_exceeds_its_deadline_is_retryable_and_the_loop_continues() {
+        use axum::routing::get;
+        use axum::Json;
+
+        let store = SqliteStore::open_in_memory().expect("open");
+        let lib = store
+            .create_library(&NewLibrary {
+                name: "Deadline".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        let slow = store
+            .insert_item(&NewItem {
+                library_id: lib.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Slow".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("slow item");
+        let quick = store
+            .insert_item(&NewItem {
+                library_id: lib.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Quick".into(),
+                year: None,
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .expect("quick item");
+        for (item, tmdb_id) in [(slow, 1), (quick, 2)] {
+            store
+                .apply_metadata(
+                    item,
+                    &MetadataPatch {
+                        tmdb_id: Some(tmdb_id),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("seed provider id");
+        }
+
+        let base = serve(
+            axum::Router::new()
+                .route(
+                    "/movie/1",
+                    get(|| async { std::future::pending::<Json<serde_json::Value>>().await }),
+                )
+                .route(
+                    "/movie/2",
+                    get(|| async {
+                        Json(json!({
+                            "id": 2,
+                            "title": "Quick enriched",
+                            "release_date": "2026-09-20",
+                            "runtime": 90
+                        }))
+                    }),
+                ),
+        )
+        .await;
+        let tmdb = TmdbClient::new("k").with_base(&base, &base);
+        let artwork = canonical_tempdir();
+        let publisher = PublicationStore::unfenced(&store);
+
+        let report = enrich_library_for_targets_inner(
+            &publisher,
+            &tmdb,
+            artwork.path(),
+            Some(lib.id),
+            false,
+            None,
+            None,
+            None,
+            Duration::from_millis(50),
+        )
+        .await;
+
+        assert_eq!(report.errors, 1);
+        assert_eq!(report.matched, 1, "the item after the timeout still runs");
+        assert!(report.problems.iter().any(|problem| {
+            problem.contains("deadline exceeded for `Slow`")
+                && problem.contains("will retry on the next scan")
+        }));
+        let retryable = store
+            .items_needing_metadata(Some(lib.id), false, None)
+            .await
+            .expect("retry candidates");
+        assert!(retryable.iter().any(|item| item.id == slow));
+        assert!(!retryable.iter().any(|item| item.id == quick));
     }
 
     /// A healthy show can be only the route to one blank season. If that show
