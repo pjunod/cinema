@@ -1763,6 +1763,11 @@ pub struct SettingsDto {
     /// admits one sequential-I/O worker cluster-wide unless changed.
     pub dv_disk_keep_original: bool,
     pub dv_disk_convert_parallel: i64,
+    /// Portable cluster backup scheduling. An empty destination is the only
+    /// off state; readiness remains advisory and never rewrites these values.
+    pub backup_destination: String,
+    pub backup_schedule_utc: String,
+    pub backup_keep: i64,
     /// Is the one-off genre backfill armed? It disarms itself when it reaches
     /// the end of the catalogue, so this reads `false` again afterwards.
     ///
@@ -2074,6 +2079,13 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         scan_on_startup,
         dv_disk_keep_original,
         dv_disk_convert_parallel,
+        backup_destination: setting(keys::BACKUP_DESTINATION).unwrap_or_default(),
+        backup_schedule_utc: setting(keys::BACKUP_SCHEDULE_UTC)
+            .unwrap_or_else(|| "02:30".to_owned()),
+        backup_keep: setting(keys::BACKUP_KEEP)
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(14)
+            .clamp(1, 365),
         genre_backfill,
         genre_backfill_last: state.jobs.last_genre_backfill().await,
     })
@@ -2232,6 +2244,9 @@ pub struct UpdateSettings {
     pub dvr_reminder_lead_s: Option<i64>,
     /// Empty string clears it, as the other outbound-endpoint settings do.
     pub dvr_webhook_url: Option<String>,
+    pub backup_destination: Option<String>,
+    pub backup_schedule_utc: Option<String>,
+    pub backup_keep: Option<i64>,
     /// Explicit admin attestation, never an automatic timeout override.
     pub live_tv_fenced_owner: Option<LiveTvFencedOwner>,
     /// Set the TMDB API key. Empty string clears it. Absent leaves it as-is.
@@ -3311,6 +3326,40 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::DVR_WEBHOOK_URL, url.trim())
+            .await?;
+    }
+    if let Some(destination) = &req.backup_destination {
+        let destination = destination.trim();
+        if !destination.is_empty() && !std::path::Path::new(destination).is_absolute() {
+            return Err(ApiError::BadRequest(
+                "backup.destination must be empty or an absolute directory".to_owned(),
+            ));
+        }
+        state
+            .store
+            .put_setting(keys::BACKUP_DESTINATION, destination)
+            .await?;
+    }
+    if let Some(schedule) = &req.backup_schedule_utc {
+        if crate::backup::parse_schedule_minute(schedule).is_none() {
+            return Err(ApiError::BadRequest(
+                "backup.schedule_utc must be HH:MM in UTC".to_owned(),
+            ));
+        }
+        state
+            .store
+            .put_setting(keys::BACKUP_SCHEDULE_UTC, schedule.trim())
+            .await?;
+    }
+    if let Some(keep) = req.backup_keep {
+        if !(1..=365).contains(&keep) {
+            return Err(ApiError::BadRequest(
+                "backup.keep must be between 1 and 365".to_owned(),
+            ));
+        }
+        state
+            .store
+            .put_setting(keys::BACKUP_KEEP, &keep.to_string())
             .await?;
     }
     if let Some(on) = req.library_channel_subject_matching_enabled {
@@ -4609,6 +4658,7 @@ pub(crate) struct MetricsState {
     passive_membership: plurx_core::cluster::membership::PassiveMembershipMetrics,
     blocked_gets: Arc<crate::waitpool::BlockedGetMetrics>,
     live_tv: Arc<crate::live_tv::LiveTvMetrics>,
+    backup: Arc<crate::backup::BackupMetrics>,
 }
 
 impl FromRef<AppState> for MetricsState {
@@ -4627,6 +4677,7 @@ impl FromRef<AppState> for MetricsState {
             // this node is actually serving from.
             blocked_gets: state.transcode.blocked_get_metrics_handle(),
             live_tv: state.live_tv.metrics_handle(),
+            backup: state.backup.metrics(),
         }
     }
 }
@@ -5035,6 +5086,7 @@ pub(crate) async fn metrics(
     );
     let analysis_runtime_metrics = state.analysis.prometheus(&state.node_id);
     let live_tv_metrics = state.live_tv.prometheus();
+    let backup_metrics = state.backup.prometheus();
 
     // Integration counters (plan P6). Scans by what asked for them, and how
     // many times another application has called in at all — the pair that
@@ -5067,7 +5119,7 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{live_tv_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}",
+        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{live_tv_metrics}{backup_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         takeover_metrics = crate::media_sessions::prometheus(),

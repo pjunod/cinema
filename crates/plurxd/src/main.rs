@@ -1,5 +1,6 @@
 mod admission;
 use plurx_core::process::bounded as bounded_process;
+mod backup;
 mod cachekeep;
 mod channel_subjects;
 mod copyseg;
@@ -173,6 +174,27 @@ enum Command {
         #[command(subcommand)]
         command: ClusterCommand,
     },
+    /// Verify or restore a portable cluster archive while the daemon is stopped.
+    Restore {
+        /// Existing portable backup directory.
+        #[arg(long)]
+        archive: PathBuf,
+        /// Fresh data directory to populate. Not used with --verify.
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        /// Verify checksums, integrity, identity, and credential key without writes.
+        #[arg(long)]
+        verify: bool,
+        /// Rewrite an absolute path prefix, in OLD=NEW form. May be repeated.
+        #[arg(long)]
+        remap: Vec<String>,
+        /// Credential key from a separate secret store instead of the archived key.
+        #[arg(long)]
+        credential_key: Option<PathBuf>,
+        /// Host or IP the restored first voter advertises to later joiners.
+        #[arg(long)]
+        advertise_host: Option<String>,
+    },
     /// Inspect or back up a stopped local Raft WAL. No source mutation is implemented.
     Wal {
         #[command(subcommand)]
@@ -194,6 +216,17 @@ enum WindowsServiceCommand {
 
 #[derive(Subcommand)]
 enum ClusterCommand {
+    /// Build one portable, checksummed cluster backup on the running voter.
+    Backup {
+        #[arg(long, default_value = "http://127.0.0.1:32400")]
+        server: String,
+        /// Owner-only file containing the admin bearer token.
+        #[arg(long, env = "PLURX_ADMIN_TOKEN_FILE")]
+        token_file: Option<PathBuf>,
+        /// Existing absolute destination directory; overrides the saved setting.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Print the same versioned aggregate and rollout verdict as the Cluster tab.
     Status {
         #[arg(long, default_value = "http://127.0.0.1:32400")]
@@ -302,6 +335,7 @@ async fn dispatch(
         Command::Healthcheck
         | Command::Advertise { .. }
         | Command::Cluster { .. }
+        | Command::Restore { .. }
         | Command::Wal { .. } => {}
     }
     match command {
@@ -330,12 +364,75 @@ async fn dispatch(
         }
         Command::RefreshMetadata { library } => refresh_metadata(&mut config, library).await,
         Command::Cluster { command } => cluster_command(command).await,
+        Command::Restore {
+            archive,
+            data_dir,
+            verify,
+            remap,
+            credential_key,
+            advertise_host,
+        } => {
+            if verify {
+                if data_dir.is_some() || !remap.is_empty() || advertise_host.is_some() {
+                    anyhow::bail!(
+                        "--verify cannot be combined with --data-dir, --remap, or --advertise-host"
+                    );
+                }
+                let report = plurx_core::cluster::migration::verify_cluster_backup_archive(
+                    &archive,
+                    credential_key.as_deref(),
+                )?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                Ok(())
+            } else {
+                let data_dir = data_dir.ok_or_else(|| {
+                    anyhow::anyhow!("--data-dir is required unless --verify is used")
+                })?;
+                config.storage.data_dir = data_dir;
+                if let Some(host) = advertise_host {
+                    config.cluster.advertise_host = host;
+                }
+                let remaps = parse_restore_remaps(&remap)?;
+                let report = plurx_core::cluster::migration::restore_cluster_backup_archive(
+                    &archive,
+                    &config,
+                    &remaps,
+                    credential_key.as_deref(),
+                )
+                .await?;
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                eprintln!(
+                    "restore created a fenced first voter; stop every surviving old voter and rename its hiqlite directory before directing clients here"
+                );
+                Ok(())
+            }
+        }
         Command::Wal { command } => crate::wal_cli::run(command, &config).await,
     }
 }
 
+fn parse_restore_remaps(values: &[String]) -> anyhow::Result<Vec<(PathBuf, PathBuf)>> {
+    values
+        .iter()
+        .map(|value| {
+            let (from, to) = value
+                .split_once('=')
+                .ok_or_else(|| anyhow::anyhow!("restore remap {value:?} must be OLD=NEW"))?;
+            if from.is_empty() || to.is_empty() {
+                anyhow::bail!("restore remap {value:?} must have non-empty OLD and NEW paths");
+            }
+            Ok((PathBuf::from(from), PathBuf::from(to)))
+        })
+        .collect()
+}
+
 async fn cluster_command(command: ClusterCommand) -> anyhow::Result<()> {
     match command {
+        ClusterCommand::Backup {
+            server,
+            token_file,
+            output,
+        } => cluster_backup_command(&server, token_file.as_deref(), output.as_deref()).await,
         ClusterCommand::Status {
             server,
             token_file,
@@ -362,6 +459,32 @@ async fn cluster_command(command: ClusterCommand) -> anyhow::Result<()> {
             cluster_cancel_restart_command(&server, token_file.as_deref(), node_id.as_deref()).await
         }
     }
+}
+
+async fn cluster_backup_command(
+    server: &str,
+    token_file: Option<&std::path::Path>,
+    output: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let body = serde_json::to_vec(&serde_json::json!({ "output": output }))
+        .map_err(|_| cli_exit(2, "cluster backup request could not be encoded"))?;
+    let response = cluster_api_request_method(
+        server,
+        token_file,
+        "/api/v1/cluster/backups",
+        reqwest::Method::POST,
+        Some(body),
+    )
+    .await?;
+    let body = bounded_cli_response(response, 1024 * 1024).await?;
+    let response: serde_json::Value = serde_json::from_slice(&body)
+        .map_err(|_| cli_exit(3, "cluster backup returned an invalid response"))?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&response)
+            .map_err(|_| cli_exit(3, "cluster backup response could not be encoded"))?
+    );
+    Ok(())
 }
 
 async fn cluster_status_command(
@@ -1392,6 +1515,7 @@ async fn run(config: Config) -> anyhow::Result<()> {
             catalogue,
             identity: selected.identity.clone(),
             credential_key: Arc::clone(&selected.credential_key),
+            backup_client: selected.local_client(),
             dirs,
             encoder_caps,
             system,
@@ -1417,6 +1541,7 @@ struct Boot {
     /// Resolved before the store is handed on, so a node that cannot open its
     /// existing Trakt rows fails here rather than at the first sync.
     credential_key: Arc<plurx_core::secrets::CredentialKey>,
+    backup_client: Option<hiqlite::Client>,
     dirs: crate::state::Dirs,
     encoder_caps: plurx_core::transcode::EncoderCaps,
     system: SystemInfo,
@@ -1443,6 +1568,7 @@ async fn boot(
         catalogue,
         identity,
         credential_key,
+        backup_client,
         dirs,
         encoder_caps,
         system,
@@ -1465,6 +1591,7 @@ async fn boot(
         node_id.clone(),
         instance_id.clone(),
         credential_key,
+        backup_client,
         replication,
         membership,
         catalogue,
@@ -2151,6 +2278,7 @@ fn build_state(
     node_id: String,
     cluster_id: String,
     credential_key: Arc<plurx_core::secrets::CredentialKey>,
+    backup_client: Option<hiqlite::Client>,
     replication: plurx_core::cluster::migration::status::ReplicationMonitor,
     membership: plurx_core::cluster::membership::MembershipManager,
     catalogue: plurx_core::store::CatalogueReader,
@@ -2178,6 +2306,9 @@ fn build_state(
                 transfer_secs: config.cluster.snapshot_transfer_timeout_secs,
                 install_secs: config.cluster.install_snapshot_timeout_secs,
             },
+            data_dir: config.storage.data_dir.clone(),
+            credential_key_path: config.cluster.credential_key_path(&config.storage.data_dir),
+            backup_client,
         },
         store,
         dirs,
@@ -2252,6 +2383,7 @@ fn spawn_background_loops(
     background_shutdown: tokio_util::sync::CancellationToken,
 ) {
     tokio::spawn(state.clone().store_metrics_loop());
+    tokio::spawn(Arc::clone(&state.backup).schedule_loop(background_shutdown.clone()));
     tokio::spawn(
         crate::http::cluster_operations::membership_status_cache_loop(
             state.clone(),
@@ -5208,6 +5340,7 @@ mod startup_tests {
             "test-node".to_owned(),
             "test-cluster".to_owned(),
             Arc::new(plurx_core::secrets::CredentialKey::generate()),
+            None,
             plurx_core::cluster::migration::status::ReplicationMonitor::sqlite(),
             plurx_core::cluster::membership::MembershipManager::unavailable(),
             catalogue,
@@ -5501,6 +5634,7 @@ mod startup_tests {
                 membership: plurx_core::cluster::membership::MembershipManager::unavailable(),
                 identity: handle.identity,
                 credential_key: handle.credential_key,
+                backup_client: None,
                 dirs: create_dirs(tmp.path()).expect("dirs"),
                 encoder_caps: Default::default(),
                 system: Default::default(),
