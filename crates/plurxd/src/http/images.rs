@@ -5,13 +5,14 @@
 //! atomically materializes them. A short-lived HMAC proves that the caller is
 //! an admitted node; reusable user tokens never cross between peers.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::path::Path as FsPath;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use axum::extract::{Path, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures_util::{stream, StreamExt};
 use plurx_core::cluster::membership::{ArtworkPeerAuth, MembershipManager};
@@ -30,7 +31,11 @@ const NODE_ID_HEADER: &str = "x-plurx-node-id";
 const TIMESTAMP_HEADER: &str = "x-plurx-artwork-time";
 const SIGNATURE_HEADER: &str = "x-plurx-artwork-signature";
 const MAX_ARTWORK_BYTES: u64 = plurx_core::metadata::MAX_ARTWORK_BYTES;
-const MATERIALIZE_CONCURRENCY: usize = 8;
+const PEER_FETCH_CONCURRENCY: usize = 8;
+const LOCAL_READ_BUDGET_KIB: usize = 65_536;
+const LOCAL_READ_ADMISSION_WAIT: Duration = Duration::from_millis(250);
+const VERIFIED_ARTWORK_CACHE: usize = 4_096;
+const VERIFIED_ARTWORK_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const PEER_RACE_CONCURRENCY: usize = 3;
 const PEER_RACE_DEADLINE: Duration = Duration::from_millis(3_250);
 const SOURCE_REPAIRS_PER_PASS: usize = 4;
@@ -52,16 +57,24 @@ const ORPHAN_REMOVE_LIMIT: usize = 256;
 #[derive(Debug)]
 pub(crate) struct ArtworkCoordinator {
     client: Result<reqwest::Client, String>,
-    permits: Arc<Semaphore>,
+    peer_permits: Arc<Semaphore>,
+    local_bytes: Arc<Semaphore>,
     filenames: Mutex<HashMap<String, Weak<Mutex<()>>>>,
+    verified: Mutex<VerifiedArtworkCache>,
+    #[cfg(test)]
+    hashes: AtomicU64,
 }
 
 impl ArtworkCoordinator {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             client: artwork_client().map_err(|error| error.to_string()),
-            permits: Arc::new(Semaphore::new(MATERIALIZE_CONCURRENCY)),
+            peer_permits: Arc::new(Semaphore::new(PEER_FETCH_CONCURRENCY)),
+            local_bytes: Arc::new(Semaphore::new(LOCAL_READ_BUDGET_KIB)),
             filenames: Mutex::new(HashMap::new()),
+            verified: Mutex::new(VerifiedArtworkCache::default()),
+            #[cfg(test)]
+            hashes: AtomicU64::new(0),
         })
     }
 
@@ -84,12 +97,118 @@ impl ArtworkCoordinator {
         lock.lock_owned().await
     }
 
-    async fn permit(&self) -> Option<OwnedSemaphorePermit> {
-        Arc::clone(&self.permits).try_acquire_owned().ok()
+    fn peer_permit(&self) -> Option<OwnedSemaphorePermit> {
+        Arc::clone(&self.peer_permits).try_acquire_owned().ok()
+    }
+
+    async fn local_permit(&self, bytes: u64) -> Option<OwnedSemaphorePermit> {
+        let kib = bytes.div_ceil(1024);
+        let permits = u32::try_from(kib).ok()?;
+        tokio::time::timeout(
+            LOCAL_READ_ADMISSION_WAIT,
+            Arc::clone(&self.local_bytes).acquire_many_owned(permits),
+        )
+        .await
+        .ok()?
+        .ok()
+    }
+
+    async fn verified_digest(
+        &self,
+        filename: &str,
+        identity: ArtworkFileIdentity,
+    ) -> Option<[u8; 32]> {
+        let mut verified = self.verified.lock().await;
+        match verified.get(filename, identity, Instant::now()) {
+            VerifiedLookup::Hit(digest) => Some(digest),
+            VerifiedLookup::Invalidated => {
+                record_verification(ArtworkVerification::Invalidated);
+                None
+            }
+            VerifiedLookup::Miss => None,
+        }
+    }
+
+    async fn remember(&self, filename: &str, identity: ArtworkFileIdentity, digest: [u8; 32]) {
+        self.verified.lock().await.insert(
+            filename.to_owned(),
+            VerifiedArtwork {
+                identity,
+                digest,
+                verified_at: Instant::now(),
+            },
+        );
+    }
+
+    async fn forget(&self, filename: &str) {
+        if self.verified.lock().await.remove(filename) {
+            record_verification(ArtworkVerification::Invalidated);
+        }
     }
 
     fn client(&self) -> Option<reqwest::Client> {
         self.client.as_ref().ok().cloned()
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct VerifiedArtwork {
+    identity: ArtworkFileIdentity,
+    digest: [u8; 32],
+    verified_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct VerifiedArtworkCache {
+    entries: BTreeMap<String, VerifiedArtwork>,
+    order: VecDeque<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VerifiedLookup {
+    Hit([u8; 32]),
+    Invalidated,
+    Miss,
+}
+
+impl VerifiedArtworkCache {
+    fn get(
+        &mut self,
+        filename: &str,
+        identity: ArtworkFileIdentity,
+        now: Instant,
+    ) -> VerifiedLookup {
+        let Some(entry) = self.entries.get(filename).copied() else {
+            return VerifiedLookup::Miss;
+        };
+        if entry.identity != identity
+            || now.saturating_duration_since(entry.verified_at) >= VERIFIED_ARTWORK_TTL
+        {
+            self.remove(filename);
+            return VerifiedLookup::Invalidated;
+        }
+        self.touch(filename);
+        VerifiedLookup::Hit(entry.digest)
+    }
+
+    fn insert(&mut self, filename: String, entry: VerifiedArtwork) {
+        self.entries.insert(filename.clone(), entry);
+        self.touch(&filename);
+        while self.entries.len() > VERIFIED_ARTWORK_CACHE {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    fn remove(&mut self, filename: &str) -> bool {
+        self.order.retain(|key| key != filename);
+        self.entries.remove(filename).is_some()
+    }
+
+    fn touch(&mut self, filename: &str) {
+        self.order.retain(|key| key != filename);
+        self.order.push_back(filename.to_owned());
     }
 }
 
@@ -98,8 +217,9 @@ pub async fn serve(
     _user: AuthUser,
     State(state): State<AppState>,
     Path(filename): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Response, ApiError> {
-    serve_cluster_artwork(&state, &filename).await
+    serve_cluster_artwork_with_headers(&state, &filename, &headers, ArtworkRoute::User).await
 }
 
 /// GET /api/v1/cluster/artwork/:filename
@@ -125,7 +245,14 @@ pub async fn serve_peer(
     if !verified {
         return Err(ApiError::Unauthorized);
     }
-    serve_local_artwork(&state.artwork_fetch, &state.artwork_dir, safe_name).await
+    serve_local_artwork(
+        &state.artwork_fetch,
+        &state.artwork_dir,
+        safe_name,
+        &headers,
+        ArtworkRoute::Peer,
+    )
+    .await
 }
 
 /// Serve local artwork, or retrieve it from a reachable voter and materialize
@@ -135,10 +262,37 @@ pub(crate) async fn serve_cluster_artwork(
     state: &AppState,
     filename: &str,
 ) -> Result<Response, ApiError> {
+    serve_cluster_artwork_with_headers(state, filename, &HeaderMap::new(), ArtworkRoute::User).await
+}
+
+pub(crate) async fn serve_plex_artwork(
+    state: &AppState,
+    filename: &str,
+) -> Result<Response, ApiError> {
+    serve_cluster_artwork_with_headers(state, filename, &HeaderMap::new(), ArtworkRoute::Plex).await
+}
+
+async fn serve_cluster_artwork_with_headers(
+    state: &AppState,
+    filename: &str,
+    headers: &HeaderMap,
+    route: ArtworkRoute,
+) -> Result<Response, ApiError> {
     let safe_name = safe_artwork_name(filename)?;
-    match serve_local_artwork(&state.artwork_fetch, &state.artwork_dir, safe_name).await {
+    match serve_local_artwork(
+        &state.artwork_fetch,
+        &state.artwork_dir,
+        safe_name,
+        headers,
+        route,
+    )
+    .await
+    {
         Ok(response) => return Ok(response),
-        Err(error) if is_artwork_capacity_error(&error) => return Err(error),
+        Err(error) if is_artwork_capacity_error(&error) => {
+            record_request(route, ArtworkOutcome::Capacity);
+            return Err(error);
+        }
         Err(_) => {}
     }
 
@@ -161,11 +315,14 @@ pub(crate) async fn serve_cluster_artwork(
     .await
     .map_err(|_| artwork_capacity_error())?
     else {
+        record_request(route, ArtworkOutcome::Miss);
         return Err(ApiError::NotFound("image"));
     };
+    record_request(route, ArtworkOutcome::Peer);
     Ok(admitted_artwork_response(
         &state.artwork_dir.join(safe_name),
         bytes,
+        None,
     ))
 }
 
@@ -173,6 +330,71 @@ pub(crate) async fn serve_cluster_artwork(
 struct ArtworkCapacity;
 
 const ARTWORK_CAPACITY_CODE: &str = "artwork_response_capacity";
+
+#[derive(Clone, Copy, Debug)]
+enum ArtworkRoute {
+    User = 0,
+    Peer = 1,
+    Plex = 2,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ArtworkOutcome {
+    Hit = 0,
+    NotModified = 1,
+    Peer = 2,
+    Miss = 3,
+    Capacity = 4,
+    Corrupt = 5,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ArtworkVerification {
+    Cached = 0,
+    Hashed = 1,
+    Invalidated = 2,
+}
+
+static ARTWORK_REQUESTS: [AtomicU64; 18] = [const { AtomicU64::new(0) }; 18];
+static ARTWORK_VERIFICATIONS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
+fn record_request(route: ArtworkRoute, outcome: ArtworkOutcome) {
+    ARTWORK_REQUESTS[route as usize * 6 + outcome as usize].fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_verification(result: ArtworkVerification) {
+    ARTWORK_VERIFICATIONS[result as usize].fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn prometheus() -> String {
+    let mut out = String::from(
+        "# HELP plurx_artwork_requests_total Artwork request outcomes by bounded route and result.\n\
+         # TYPE plurx_artwork_requests_total counter\n",
+    );
+    for (route_index, route) in ["user", "peer", "plex"].into_iter().enumerate() {
+        for (outcome_index, outcome) in
+            ["hit", "not_modified", "peer", "miss", "capacity", "corrupt"]
+                .into_iter()
+                .enumerate()
+        {
+            out.push_str(&format!(
+                "plurx_artwork_requests_total{{route=\"{route}\",outcome=\"{outcome}\"}} {}\n",
+                ARTWORK_REQUESTS[route_index * 6 + outcome_index].load(Ordering::Relaxed)
+            ));
+        }
+    }
+    out.push_str(
+        "# HELP plurx_artwork_verifications_total Artwork digest verification decisions.\n\
+         # TYPE plurx_artwork_verifications_total counter\n",
+    );
+    for (index, result) in ["cached", "hashed", "invalidated"].into_iter().enumerate() {
+        out.push_str(&format!(
+            "plurx_artwork_verifications_total{{result=\"{result}\"}} {}\n",
+            ARTWORK_VERIFICATIONS[index].load(Ordering::Relaxed)
+        ));
+    }
+    out
+}
 
 fn artwork_capacity_error() -> ApiError {
     ApiError::typed(
@@ -218,29 +440,25 @@ where
     Fut: std::future::Future<Output = Option<Vec<u8>>>,
 {
     let _filename = coordinator.filename(filename).await;
-    // This permit covers both the bounded local recheck and any peer response
-    // buffer. Local hits and misses therefore share one process-wide memory
-    // envelope instead of only limiting the network side of the operation.
-    let permit = coordinator.permit().await.ok_or(ArtworkCapacity)?;
-    match read_bounded_local_artwork(artwork_dir.join(filename)).await {
-        Some((bytes, _)) if artwork_bytes_match_name(filename, &bytes) => {
-            return Ok(Some(AdmittedArtworkBytes {
-                bytes,
-                _permit: permit,
-            }));
+    match read_verified_local_artwork(coordinator, artwork_dir.join(filename), filename).await {
+        LocalArtworkRead::Verified(bytes) => {
+            return Ok(Some(bytes));
         }
-        Some((_, identity)) if content_addressed_artwork_name(filename) => {
-            quarantine_corrupt_artwork(artwork_dir, filename, identity).await;
+        LocalArtworkRead::Corrupt(identity) => {
+            quarantine_corrupt_artwork(coordinator, artwork_dir, filename, identity).await;
         }
-        _ => {}
+        LocalArtworkRead::Capacity => return Err(ArtworkCapacity),
+        LocalArtworkRead::Missing => {}
     }
+    let permit = coordinator.peer_permit().ok_or(ArtworkCapacity)?;
     let Some(client) = coordinator.client() else {
         return Ok(None);
     };
     let Some(bytes) = fetch(client).await else {
         return Ok(None);
     };
-    if let Err(error) = install_artwork(artwork_dir, filename, &bytes).await {
+    let digest: [u8; 32] = Sha256::digest(&bytes).into();
+    if let Err(error) = install_artwork(coordinator, artwork_dir, filename, &bytes).await {
         // The caller can still use the complete peer response. Log the failed
         // materialization so a read-only or full data directory is visible,
         // but do not turn working peer failover into another broken image.
@@ -248,6 +466,7 @@ where
     }
     Ok(Some(AdmittedArtworkBytes {
         bytes,
+        digest,
         _permit: permit,
     }))
 }
@@ -256,28 +475,148 @@ async fn serve_local_artwork(
     coordinator: &ArtworkCoordinator,
     artwork_dir: &FsPath,
     filename: &str,
+    headers: &HeaderMap,
+    route: ArtworkRoute,
 ) -> Result<Response, ApiError> {
-    let permit = coordinator
-        .permit()
-        .await
-        .ok_or_else(artwork_capacity_error)?;
     let path = artwork_dir.join(filename);
-    match read_bounded_local_artwork(path.clone()).await {
-        Some((bytes, _)) if artwork_bytes_match_name(filename, &bytes) => {
-            Ok(admitted_artwork_response(
-                &path,
-                AdmittedArtworkBytes {
-                    bytes,
-                    _permit: permit,
-                },
-            ))
+    if let Some(digest) = cached_not_modified(coordinator, &path, filename, headers).await {
+        record_request(route, ArtworkOutcome::NotModified);
+        record_verification(ArtworkVerification::Cached);
+        return Ok(not_modified_artwork_response(digest));
+    }
+    match read_verified_local_artwork(coordinator, path.clone(), filename).await {
+        LocalArtworkRead::Verified(bytes) => {
+            record_request(route, ArtworkOutcome::Hit);
+            Ok(admitted_artwork_response(&path, bytes, None))
         }
-        Some((_, identity)) if content_addressed_artwork_name(filename) => {
-            quarantine_corrupt_artwork(artwork_dir, filename, identity).await;
+        LocalArtworkRead::Corrupt(identity) => {
+            coordinator.forget(filename).await;
+            quarantine_corrupt_artwork(coordinator, artwork_dir, filename, identity).await;
+            record_request(route, ArtworkOutcome::Corrupt);
             Err(ApiError::NotFound("image"))
         }
-        _ => Err(ApiError::NotFound("image")),
+        LocalArtworkRead::Capacity => Err(artwork_capacity_error()),
+        LocalArtworkRead::Missing => Err(ApiError::NotFound("image")),
     }
+}
+
+struct OpenedLocalArtwork {
+    file: std::fs::File,
+    identity: ArtworkFileIdentity,
+}
+
+enum LocalArtworkRead {
+    Verified(AdmittedArtworkBytes),
+    Corrupt(ArtworkFileIdentity),
+    Capacity,
+    Missing,
+}
+
+async fn open_local_artwork(path: std::path::PathBuf) -> Option<OpenedLocalArtwork> {
+    tokio::task::spawn_blocking(move || {
+        let file = plurx_core::fs_secure::open_read_nofollow_blocking(&path).ok()?;
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_ARTWORK_BYTES {
+            return None;
+        }
+        Some(OpenedLocalArtwork {
+            identity: artwork_file_identity(&metadata),
+            file,
+        })
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn read_verified_local_artwork(
+    coordinator: &ArtworkCoordinator,
+    path: std::path::PathBuf,
+    filename: &str,
+) -> LocalArtworkRead {
+    let Some(opened) = open_local_artwork(path).await else {
+        return LocalArtworkRead::Missing;
+    };
+    let identity = opened.identity;
+    let Some(permit) = coordinator.local_permit(identity.bytes).await else {
+        return LocalArtworkRead::Capacity;
+    };
+    let cached = coordinator.verified_digest(filename, identity).await;
+    let Some((bytes, digest)) = tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+
+        let mut file = opened.file;
+        let mut bytes = Vec::with_capacity(identity.bytes as usize);
+        (&mut file)
+            .take(identity.bytes.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 != identity.bytes {
+            return None;
+        }
+        let digest = cached.unwrap_or_else(|| Sha256::digest(&bytes).into());
+        Some((bytes, digest))
+    })
+    .await
+    .ok()
+    .flatten() else {
+        return LocalArtworkRead::Missing;
+    };
+
+    #[cfg(test)]
+    if cached.is_none() {
+        coordinator.hashes.fetch_add(1, Ordering::SeqCst);
+    }
+    if !artwork_digest_matches_name(filename, digest) {
+        return LocalArtworkRead::Corrupt(identity);
+    }
+    if cached.is_some() {
+        record_verification(ArtworkVerification::Cached);
+    } else {
+        coordinator.remember(filename, identity, digest).await;
+        record_verification(ArtworkVerification::Hashed);
+    }
+    LocalArtworkRead::Verified(AdmittedArtworkBytes {
+        bytes,
+        digest,
+        _permit: permit,
+    })
+}
+
+async fn cached_not_modified(
+    coordinator: &ArtworkCoordinator,
+    path: &FsPath,
+    filename: &str,
+    headers: &HeaderMap,
+) -> Option<[u8; 32]> {
+    let validators = headers.get_all(header::IF_NONE_MATCH);
+    if validators.iter().next().is_none() {
+        return None;
+    }
+    let opened = open_local_artwork(path.to_path_buf()).await?;
+    let digest = coordinator
+        .verified_digest(filename, opened.identity)
+        .await?;
+    if if_none_match_matches(headers, digest) {
+        Some(digest)
+    } else {
+        None
+    }
+}
+
+fn if_none_match_matches(headers: &HeaderMap, digest: [u8; 32]) -> bool {
+    let etag = format!("\"{}\"", hex::encode(digest));
+    headers
+        .get_all(header::IF_NONE_MATCH)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .any(|candidate| {
+            candidate == "*"
+                || candidate == etag
+                || candidate.strip_prefix("W/") == Some(etag.as_str())
+        })
 }
 
 async fn read_bounded_local_artwork(
@@ -311,21 +650,24 @@ async fn valid_materialized_artwork(artwork_dir: &FsPath, filename: &str) -> boo
 }
 
 async fn quarantine_corrupt_artwork(
+    coordinator: &ArtworkCoordinator,
     artwork_dir: &FsPath,
     filename: &str,
     expected: ArtworkFileIdentity,
 ) {
-    quarantine_corrupt_artwork_with(artwork_dir, filename, expected, None).await;
+    quarantine_corrupt_artwork_with(coordinator, artwork_dir, filename, expected, None).await;
 }
 
 type AfterCorruptQuarantineRename = Option<Box<dyn FnOnce(&str) + Send + 'static>>;
 
 async fn quarantine_corrupt_artwork_with(
+    coordinator: &ArtworkCoordinator,
     artwork_dir: &FsPath,
     filename: &str,
     expected: ArtworkFileIdentity,
     after_rename: AfterCorruptQuarantineRename,
 ) {
+    coordinator.forget(filename).await;
     let quarantine = format!(".{filename}.corrupt-{}", uuid::Uuid::new_v4().simple());
     if plurx_core::fs_secure::rename_child(artwork_dir, filename, &quarantine)
         .await
@@ -374,6 +716,7 @@ fn safe_artwork_name(filename: &str) -> Result<&str, ApiError> {
 
 struct AdmittedArtworkBytes {
     bytes: Vec<u8>,
+    digest: [u8; 32],
     _permit: OwnedSemaphorePermit,
 }
 
@@ -383,20 +726,31 @@ impl AsRef<[u8]> for AdmittedArtworkBytes {
     }
 }
 
-fn admitted_artwork_response(path: &FsPath, bytes: AdmittedArtworkBytes) -> Response {
-    artwork_response_bytes(path, bytes::Bytes::from_owner(bytes))
+fn admitted_artwork_response(
+    path: &FsPath,
+    bytes: AdmittedArtworkBytes,
+    extra_header: Option<(&'static str, &'static str)>,
+) -> Response {
+    let digest = bytes.digest;
+    artwork_response_bytes(path, bytes::Bytes::from_owner(bytes), digest, extra_header)
 }
 
 #[cfg(test)]
 fn artwork_response(path: &FsPath, bytes: Vec<u8>) -> Response {
-    artwork_response_bytes(path, bytes.into())
+    let digest = Sha256::digest(&bytes).into();
+    artwork_response_bytes(path, bytes.into(), digest, None)
 }
 
-fn artwork_response_bytes(path: &FsPath, bytes: bytes::Bytes) -> Response {
+fn artwork_response_bytes(
+    path: &FsPath,
+    bytes: bytes::Bytes,
+    digest: [u8; 32],
+    extra_header: Option<(&'static str, &'static str)>,
+) -> Response {
     let mime = mime_guess::from_path(path)
         .first_or_octet_stream()
         .to_string();
-    (
+    let mut response = (
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, mime),
@@ -407,7 +761,33 @@ fn artwork_response_bytes(path: &FsPath, bytes: bytes::Bytes) -> Response {
         ],
         bytes,
     )
-        .into_response()
+        .into_response();
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{}\"", hex::encode(digest)))
+            .expect("SHA-256 ETag is a valid header"),
+    );
+    if let Some((name, value)) = extra_header {
+        response.headers_mut().insert(
+            axum::http::HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        );
+    }
+    response
+}
+
+fn not_modified_artwork_response(digest: [u8; 32]) -> Response {
+    let mut response = StatusCode::NOT_MODIFIED.into_response();
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, max-age=604800, immutable"),
+    );
+    response.headers_mut().insert(
+        header::ETAG,
+        HeaderValue::from_str(&format!("\"{}\"", hex::encode(digest)))
+            .expect("SHA-256 ETag is a valid header"),
+    );
+    response
 }
 
 fn artwork_client() -> Result<reqwest::Client, reqwest::Error> {
@@ -538,6 +918,7 @@ fn peer_artwork_url(peer: &str, filename: &str) -> Option<reqwest::Url> {
 }
 
 async fn install_artwork(
+    coordinator: &ArtworkCoordinator,
     artwork_dir: &FsPath,
     filename: &str,
     bytes: &[u8],
@@ -548,6 +929,7 @@ async fn install_artwork(
             "artwork bytes disagree with the content-addressed filename",
         ));
     }
+    coordinator.forget(filename).await;
     plurx_core::fs_secure::atomic_write_child(artwork_dir, filename, bytes).await
 }
 
@@ -836,10 +1218,14 @@ fn temporary_artwork_orphan_name(filename: &str) -> bool {
 }
 
 fn artwork_bytes_match_name(filename: &str, bytes: &[u8]) -> bool {
+    artwork_digest_matches_name(filename, Sha256::digest(bytes).into())
+}
+
+fn artwork_digest_matches_name(filename: &str, digest: [u8; 32]) -> bool {
     let Some(expected) = content_addressed_artwork_digest(filename) else {
         return true;
     };
-    let actual = hex::encode(Sha256::digest(bytes));
+    let actual = hex::encode(digest);
     match expected {
         ArtworkContentDigest::Prefix16(expected) => actual[..16].eq_ignore_ascii_case(expected),
         ArtworkContentDigest::Full64(expected) => actual.eq_ignore_ascii_case(expected),
@@ -1149,7 +1535,7 @@ async fn materialize_once(
             (reference, outcome)
         }
     }))
-    .buffer_unordered(MATERIALIZE_CONCURRENCY);
+    .buffer_unordered(PEER_FETCH_CONCURRENCY);
 
     let now = Instant::now();
     let mut unresolved_by_item = BTreeMap::<i64, Vec<String>>::new();
@@ -1524,6 +1910,152 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn a_verified_hit_is_not_rehashed_and_a_validator_skips_the_read() {
+        let coordinator = ArtworkCoordinator::new();
+        let directory = crate::test_tempdir().expect("artwork");
+        let filename = "84-poster.jpg";
+        tokio::fs::write(directory.path().join(filename), b"legacy artwork")
+            .await
+            .expect("artwork");
+
+        let first = serve_local_artwork(
+            &coordinator,
+            directory.path(),
+            filename,
+            &HeaderMap::new(),
+            ArtworkRoute::User,
+        )
+        .await
+        .expect("first response");
+        let etag = first.headers()[header::ETAG].clone();
+        assert_eq!(coordinator.hashes.load(Ordering::SeqCst), 1);
+        drop(first);
+
+        let second = serve_local_artwork(
+            &coordinator,
+            directory.path(),
+            filename,
+            &HeaderMap::new(),
+            ArtworkRoute::User,
+        )
+        .await
+        .expect("cached response");
+        assert_eq!(coordinator.hashes.load(Ordering::SeqCst), 1);
+        drop(second);
+
+        let mut conditional = HeaderMap::new();
+        conditional.insert(header::IF_NONE_MATCH, etag.clone());
+        let response = serve_local_artwork(
+            &coordinator,
+            directory.path(),
+            filename,
+            &conditional,
+            ArtworkRoute::User,
+        )
+        .await
+        .expect("conditional response");
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers()[header::ETAG], etag);
+        assert_eq!(coordinator.hashes.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            coordinator.local_bytes.available_permits(),
+            LOCAL_READ_BUDGET_KIB
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_in_place_rewrite_with_a_new_ctime_is_reverified_and_quarantined() {
+        let coordinator = ArtworkCoordinator::new();
+        let directory = crate::test_tempdir().expect("artwork");
+        let original = b"authenticated artwork";
+        let digest = hex::encode(Sha256::digest(original));
+        let filename = format!("84-poster-{digest}.webp");
+        let path = directory.path().join(&filename);
+        tokio::fs::write(&path, original).await.expect("original");
+        let first = serve_local_artwork(
+            &coordinator,
+            directory.path(),
+            &filename,
+            &HeaderMap::new(),
+            ArtworkRoute::User,
+        )
+        .await
+        .expect("verified original");
+        drop(first);
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        tokio::fs::write(&path, b"corrupted artwork!!!!")
+            .await
+            .expect("in-place replacement");
+
+        let error = serve_local_artwork(
+            &coordinator,
+            directory.path(),
+            &filename,
+            &HeaderMap::new(),
+            ArtworkRoute::User,
+        )
+        .await
+        .expect_err("corrupt rewrite is refused");
+        assert!(matches!(error, ApiError::NotFound("image")));
+        assert!(!path.exists());
+        assert_eq!(coordinator.hashes.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_replaced_inode_is_reverified_and_install_evicts_the_entry() {
+        let coordinator = ArtworkCoordinator::new();
+        let directory = crate::test_tempdir().expect("artwork");
+        let filename = "84-poster.jpg";
+        tokio::fs::write(directory.path().join(filename), b"old legacy artwork")
+            .await
+            .expect("old artwork");
+        let first = serve_local_artwork(
+            &coordinator,
+            directory.path(),
+            filename,
+            &HeaderMap::new(),
+            ArtworkRoute::User,
+        )
+        .await
+        .expect("old response");
+        let old_etag = first.headers()[header::ETAG].clone();
+        drop(first);
+        assert!(coordinator
+            .verified
+            .lock()
+            .await
+            .entries
+            .contains_key(filename));
+
+        install_artwork(
+            &coordinator,
+            directory.path(),
+            filename,
+            b"new legacy artwork",
+        )
+        .await
+        .expect("new artwork");
+        assert!(!coordinator
+            .verified
+            .lock()
+            .await
+            .entries
+            .contains_key(filename));
+        let second = serve_local_artwork(
+            &coordinator,
+            directory.path(),
+            filename,
+            &HeaderMap::new(),
+            ArtworkRoute::User,
+        )
+        .await
+        .expect("new response");
+        assert_ne!(second.headers()[header::ETAG], old_etag);
+        assert_eq!(coordinator.hashes.load(Ordering::SeqCst), 2);
+    }
+
     #[test]
     fn orphan_classifier_only_accepts_exact_corrupt_quarantine_shape() {
         let digest = "a".repeat(64);
@@ -1542,6 +2074,7 @@ mod tests {
 
     #[tokio::test]
     async fn failed_corruption_restore_leaves_a_sweep_eligible_quarantine() {
+        let coordinator = ArtworkCoordinator::new();
         let directory = crate::test_tempdir().expect("artwork");
         let digest = hex::encode(Sha256::digest(b"authenticated artwork"));
         let filename = format!("84-poster-{digest}.webp");
@@ -1552,6 +2085,7 @@ mod tests {
         let swap_filename = filename.clone();
 
         quarantine_corrupt_artwork_with(
+            &coordinator,
             directory.path(),
             &filename,
             expected,
@@ -1687,7 +2221,7 @@ mod tests {
         let directory = Arc::new(crate::test_tempdir().expect("artwork directory"));
         let hits = Arc::new(AtomicUsize::new(0));
         let mut tasks = Vec::new();
-        for _ in 0..MATERIALIZE_CONCURRENCY {
+        for _ in 0..PEER_FETCH_CONCURRENCY {
             let coordinator = Arc::clone(&coordinator);
             let directory = Arc::clone(&directory);
             let hits = Arc::clone(&hits);
@@ -1757,63 +2291,40 @@ mod tests {
                 Err(ArtworkCapacity) => rejected += 1,
             }
         }
-        assert_eq!(maximum.load(Ordering::SeqCst), MATERIALIZE_CONCURRENCY);
-        assert_eq!(admitted, MATERIALIZE_CONCURRENCY);
-        assert_eq!(rejected, 24 - MATERIALIZE_CONCURRENCY);
+        assert_eq!(maximum.load(Ordering::SeqCst), PEER_FETCH_CONCURRENCY);
+        assert_eq!(admitted, PEER_FETCH_CONCURRENCY);
+        assert_eq!(rejected, 24 - PEER_FETCH_CONCURRENCY);
     }
 
     #[tokio::test]
-    async fn local_artwork_hits_share_the_global_buffer_bound() {
+    async fn local_reads_are_bounded_by_bytes_not_count() {
         let coordinator = ArtworkCoordinator::new();
-        let directory = Arc::new(crate::test_tempdir().expect("artwork directory"));
-        tokio::fs::write(directory.path().join("bounded-local.jpg"), b"local artwork")
-            .await
-            .expect("local artwork");
-        let mut held = Vec::new();
-        for _ in 0..MATERIALIZE_CONCURRENCY {
-            held.push(coordinator.permit().await.expect("admission permit"));
+        let mut small = Vec::new();
+        for _ in 0..12 {
+            small.push(
+                coordinator
+                    .local_permit(100 * 1024)
+                    .await
+                    .expect("twelve small reads fit the byte budget"),
+            );
         }
+        drop(small);
 
-        let request_coordinator = Arc::clone(&coordinator);
-        let request_directory = Arc::clone(&directory);
-        let mut request = tokio::spawn(async move {
-            serve_local_artwork(
-                &request_coordinator,
-                request_directory.path(),
-                "bounded-local.jpg",
-            )
-            .await
-        });
-        let response = tokio::time::timeout(Duration::from_millis(20), &mut request)
-            .await
-            .expect("capacity rejection must be prompt")
-            .expect("local request task")
-            .expect_err("full response-buffer budget must reject admission");
-        assert!(is_artwork_capacity_error(&response));
-        drop(held);
-        let response = serve_local_artwork(&coordinator, directory.path(), "bounded-local.jpg")
-            .await
-            .expect("local response after capacity release");
-        assert_eq!(response.status(), StatusCode::OK);
-
-        let mut retained = Vec::new();
-        for _ in 1..MATERIALIZE_CONCURRENCY {
-            retained.push(coordinator.permit().await.expect("remaining permit"));
+        let mut large = Vec::new();
+        for _ in 0..4 {
+            large.push(
+                coordinator
+                    .local_permit(MAX_ARTWORK_BYTES)
+                    .await
+                    .expect("four maximum-size reads fit"),
+            );
         }
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), coordinator.permit())
-                .await
-                .expect("capacity result must be prompt")
-                .is_none(),
-            "the response body must retain admission until the client drops it"
+            coordinator.local_permit(MAX_ARTWORK_BYTES).await.is_none(),
+            "the fifth maximum-size read must time out at the byte budget"
         );
-        drop(response);
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), coordinator.permit())
-                .await
-                .expect("released response permit")
-                .is_some()
-        );
+        drop(large.pop());
+        assert!(coordinator.local_permit(MAX_ARTWORK_BYTES).await.is_some());
     }
 
     #[tokio::test]
@@ -1821,9 +2332,22 @@ mod tests {
         let coordinator = ArtworkCoordinator::new();
         let directory = crate::test_tempdir().expect("artwork directory");
         let mut held = Vec::new();
-        for _ in 0..MATERIALIZE_CONCURRENCY {
-            held.push(coordinator.permit().await.expect("hold response permit"));
+        for _ in 0..PEER_FETCH_CONCURRENCY {
+            held.push(coordinator.peer_permit().expect("hold peer permit"));
         }
+        tokio::fs::write(directory.path().join("local.jpg"), b"local")
+            .await
+            .expect("local artwork");
+        let local = serve_local_artwork(
+            &coordinator,
+            directory.path(),
+            "local.jpg",
+            &HeaderMap::new(),
+            ArtworkRoute::User,
+        )
+        .await
+        .expect("peer saturation must not refuse local bytes");
+        drop(local);
         let outcome = artwork_pull_outcome(
             fetch_and_materialize(&coordinator, directory.path(), "capacity.jpg", |_| async {
                 Some(b"peer bytes".to_vec())
@@ -1926,6 +2450,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_peer_miss_sends_node_proof_and_materializes_complete_bytes() {
+        let coordinator = ArtworkCoordinator::new();
         async fn peer(
             Path(filename): Path<String>,
             headers: HeaderMap,
@@ -1983,7 +2508,7 @@ mod tests {
         assert_eq!(bytes, b"\xff\xd8\xff peer artwork");
 
         let directory = crate::test_tempdir().expect("artwork directory");
-        install_artwork(directory.path(), "poster one.jpg", &bytes)
+        install_artwork(&coordinator, directory.path(), "poster one.jpg", &bytes)
             .await
             .expect("materialize");
         assert_eq!(

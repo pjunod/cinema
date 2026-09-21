@@ -1,6 +1,6 @@
 # Image serving and derivatives — verify once, remember the proof, serve the size the grid asked for
 
-**Status:** ready for review · **Executes:** C6 / F-core-7 from
+**Status:** implementation in progress · **Executes:** C6 / F-core-7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 (assessment rows C6, F-core-7 and correction 9 in
 [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md))
@@ -471,3 +471,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#431](http://192.168.4.7:3000/noirr/plurx/pulls/431) | Claimed `plan/C-03` from `main` @ `9deb58a2`; M1-M2 remain pending. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#431](http://192.168.4.7:3000/noirr/plurx/pulls/431) | Identity-bound digest cache, separate local-byte/peer-fetch permits, authenticated 304, strong ETag and bounded metrics implemented; `cargo test -p plurxd http::images -- --test-threads=1` passed 25 tests. Lab and device observations remain pending. |
