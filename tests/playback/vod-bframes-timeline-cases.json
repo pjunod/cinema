@@ -1,11 +1,13 @@
 {
-  "schema": "plurx-vod-presentation-grid-v1",
+  "schema": "plurx-vod-presentation-grid-v2",
   "units": "video-track ticks",
   "box_contract": {
     "base_decode_time": "resolved tfdt value; unsigned and relative to the generation origin",
     "sample_duration": "resolved trun/tfhd/trex duration",
     "composition_offset": "resolved trun sample_composition_time_offset; signed when trun version is 1",
-    "reordered_trun_version": 1,
+    "track_timescale": "video mdhd timescale; must equal generation.plan.timescale",
+    "has_edit_list": "structural presence of video-track edts/elst; must be false",
+    "reordered_trun_version": "B0 producer evidence only; current runtime parser does not retain trun version",
     "edit_list_allowed": false
   },
   "cases": [
@@ -14,6 +16,9 @@
       "entry_start": 0,
       "entry_duration": 4,
       "frame_ticks": 1,
+      "track_timescale": 24,
+      "plan_timescale": 24,
+      "has_edit_list": false,
       "base_decode_time": 0,
       "clean_random_access": true,
       "trun_version": 0,
@@ -30,6 +35,9 @@
       "entry_start": 0,
       "entry_duration": 4,
       "frame_ticks": 1,
+      "track_timescale": 24,
+      "plan_timescale": 24,
+      "has_edit_list": false,
       "base_decode_time": 0,
       "clean_random_access": true,
       "trun_version": 1,
@@ -46,6 +54,9 @@
       "entry_start": 0,
       "entry_duration": 4,
       "frame_ticks": 1,
+      "track_timescale": 24,
+      "plan_timescale": 24,
+      "has_edit_list": false,
       "base_decode_time": 0,
       "clean_random_access": true,
       "trun_version": 0,
@@ -55,13 +66,16 @@
         {"duration": 1, "cto": 1},
         {"duration": 1, "cto": 1}
       ],
-      "expect": {"accepted": false, "reason": "trun_version"}
+      "expect": {"accepted": false, "reason": "presentation_start"}
     },
     {
       "name": "leading-picture-precedes-entry",
       "entry_start": 0,
       "entry_duration": 4,
       "frame_ticks": 1,
+      "track_timescale": 24,
+      "plan_timescale": 24,
+      "has_edit_list": false,
       "base_decode_time": 0,
       "clean_random_access": true,
       "trun_version": 1,
@@ -78,6 +92,9 @@
       "entry_start": 0,
       "entry_duration": 4,
       "frame_ticks": 1,
+      "track_timescale": 24,
+      "plan_timescale": 24,
+      "has_edit_list": false,
       "base_decode_time": 0,
       "clean_random_access": true,
       "trun_version": 1,
@@ -94,6 +111,9 @@
       "entry_start": 0,
       "entry_duration": 4,
       "frame_ticks": 1,
+      "track_timescale": 24,
+      "plan_timescale": 24,
+      "has_edit_list": false,
       "base_decode_time": 0,
       "clean_random_access": true,
       "trun_version": 1,
@@ -109,6 +129,9 @@
       "entry_start": 4,
       "entry_duration": 4,
       "frame_ticks": 1,
+      "track_timescale": 24,
+      "plan_timescale": 24,
+      "has_edit_list": false,
       "base_decode_time": 5,
       "clean_random_access": true,
       "trun_version": 1,
@@ -125,6 +148,9 @@
       "entry_start": 0,
       "entry_duration": 4,
       "frame_ticks": 1,
+      "track_timescale": 24,
+      "plan_timescale": 24,
+      "has_edit_list": false,
       "base_decode_time": 0,
       "clean_random_access": true,
       "trun_version": 1,
@@ -140,6 +166,9 @@
       "entry_start": 0,
       "entry_duration": 4,
       "frame_ticks": 1,
+      "track_timescale": 24,
+      "plan_timescale": 24,
+      "has_edit_list": false,
       "base_decode_time": 0,
       "clean_random_access": false,
       "trun_version": 1,
@@ -156,6 +185,9 @@
       "entry_start": 0,
       "entry_duration": 4,
       "frame_ticks": 1,
+      "track_timescale": 24,
+      "plan_timescale": 24,
+      "has_edit_list": false,
       "base_decode_time": 0,
       "clean_random_access": true,
       "trun_version": 1,
@@ -165,7 +197,45 @@
         {"duration": 1, "cto": -1},
         {"duration": 1, "cto": -1}
       ],
-      "expect": {"accepted": false, "reason": "box_value"}
+      "expect": {"accepted": false, "reason": "presentation_end"}
+    },
+    {
+      "name": "track-timescale-does-not-match-plan",
+      "entry_start": 0,
+      "entry_duration": 4,
+      "frame_ticks": 1,
+      "track_timescale": 90000,
+      "plan_timescale": 24000,
+      "has_edit_list": false,
+      "base_decode_time": 0,
+      "clean_random_access": true,
+      "trun_version": 1,
+      "samples": [
+        {"duration": 1, "cto": 0},
+        {"duration": 1, "cto": 2},
+        {"duration": 1, "cto": -1},
+        {"duration": 1, "cto": -1}
+      ],
+      "expect": {"accepted": false, "reason": "timescale"}
+    },
+    {
+      "name": "edit-list-shifts-presentation",
+      "entry_start": 0,
+      "entry_duration": 4,
+      "frame_ticks": 1,
+      "track_timescale": 24,
+      "plan_timescale": 24,
+      "has_edit_list": true,
+      "base_decode_time": 0,
+      "clean_random_access": true,
+      "trun_version": 1,
+      "samples": [
+        {"duration": 1, "cto": 0},
+        {"duration": 1, "cto": 2},
+        {"duration": 1, "cto": -1},
+        {"duration": 1, "cto": -1}
+      ],
+      "expect": {"accepted": false, "reason": "edit_list"}
     }
   ]
 }

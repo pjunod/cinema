@@ -112,6 +112,13 @@ The four arguments that carry the timeline contract, and what each buys:
 
 ### 2.2 The landing check refuses any composition offset
 
+Before fragment validation, the encoded landing path already refuses a served
+init whose selected video-track timescale differs from
+`generation.plan.timescale`
+([`vodgen.rs:503-514`](../../crates/plurxd/src/vodgen.rs)). That existing gate
+must remain exact; the design oracle now carries the same fact so it cannot
+silently compare track ticks with plan ticks from another clock.
+
 [`crates/plurxd/src/vodgen.rs:376-406`](../../crates/plurxd/src/vodgen.rs):
 
 ```rust
@@ -179,8 +186,13 @@ pub struct Sample {
 ```
 
 and `parse_trun` ([`fmp4.rs:3117-3123`](../../crates/plurx-core/src/fmp4.rs))
-reads a version-1 `trun`'s offset as `raw as i32 as i64`. So the parser is
-not the obstacle. `classify` ([`fmp4.rs:3180-3232`](../../crates/plurx-core/src/fmp4.rs))
+reads a version-1 `trun`'s offset as `raw as i32 as i64`. The resolved CTO is
+therefore available, but the parser intentionally discards the raw `trun`
+version and sample-composition-time-offset-present flag. `Track.timescale` is
+available; structural video-track `edts`/`elst` presence is not represented by
+`Init`. Those representation limits define the parser work required before a
+runtime validator can claim the whole contract below. `classify`
+([`fmp4.rs:3180-3232`](../../crates/plurx-core/src/fmp4.rs))
 returns `CleanIdr` for H.264 NAL 5 and HEVC NAL 19/20 *without* looking at
 the sample timeline; only HEVC CRA/BLA (16–18, 21) consults
 `has_leading_picture` ([`fmp4.rs:3271-3285`](../../crates/plurx-core/src/fmp4.rs)),
@@ -394,23 +406,34 @@ live. A future implementation must port the same checks into
 `validate_encoded_fragment` and then exercise them with parser-produced
 fragments.
 
-The candidate's box contract is:
+The candidate producer's box contract is:
 
-1. `tfdt` owns decode time. Its resolved unsigned base-media-decode-time,
+1. The selected video track's `mdhd` timescale equals
+   `generation.plan.timescale`. All plan starts, durations, resolved sample
+   durations, DTS values and PTS values below are in that one unit. A mismatch
+   is a typed refusal; the validator never compares numerically equal ticks
+   from different clocks.
+2. `tfdt` owns decode time. Its resolved unsigned base-media-decode-time,
    whether encoded as version 0 or 1, equals the planned entry start relative
    to the generation origin. It is never shifted to hide reorder delay.
-2. `trun` owns composition time. Any fragment with a nonzero composition
+3. `trun` owns composition time. Any fragment with a nonzero composition
    offset uses version 1 and the sample-composition-time-offset-present flag;
    each on-wire offset is a signed 32-bit `pts - dts`. Today's all-zero output
    may remain version 0. No `ctts` or per-generation init state is introduced.
-3. `tfhd` and `trex` defaults remain legal. The validator operates on the
+   This raw wire-shape rule is proved at B0 by direct box inspection. It is not
+   a runtime-validator claim while `Sample`/`Run` retain only the resolved CTO
+   and discard the raw `trun` version and presence flag.
+4. `tfhd` and `trex` defaults remain legal. The validator operates on the
    parser's resolved sample durations, regardless of which box supplied each
    value. Every resolved video-sample duration must equal
    `Encoding.grid.denominator`; the output may not define its own grid.
-4. `-use_editlist 0` remains, so neither `elst` nor any other presentation
-   shift may repair a fragment after the fact. `moof`/`traf` are self-contained
-   against the recipe's immutable `moov`.
-5. All arithmetic is checked after widening to a signed type able to represent
+5. `-use_editlist 0` remains. The selected video track must structurally lack
+   `edts`/`elst`, so no presentation shift may repair a fragment after the
+   fact. `moof`/`traf` are self-contained against the recipe's immutable
+   `moov`. Because current `Init` does not expose this fact, B2 must first add
+   parser-retained edit-list state and parser-produced positive and negative
+   tests; absence may not be inferred from argv.
+6. All arithmetic is checked after widening to a signed type able to represent
    `u64 + u32 + i32` (an `i128` in the proposed Rust implementation). Overflow,
    a negative PTS, or a value outside the planned interval is a typed landing
    refusal, never a wrap or clamp.
@@ -422,11 +445,12 @@ dts_i = tfdt + Σ(j < i) D_j
 pts_i = dts_i + C_i
 ```
 
-The fragment is accepted only when the existing clean-random-access check
-passes, `tfdt == planned_start`, every `D_i == frame_ticks`, the entry duration
-is divisible by `frame_ticks`, the sample count is exactly that quotient, the
-decode duration equals the entry duration, and the sorted PTS multiset is
-exactly:
+The fragment is accepted only when the video-track timescale equals the plan
+timescale, the selected video track has no edit list, the existing
+clean-random-access check passes, `tfdt == planned_start`, every
+`D_i == frame_ticks`, the entry duration is divisible by `frame_ticks`, the
+sample count is exactly that quotient, the decode duration equals the entry
+duration, and the sorted PTS multiset is exactly:
 
 ```text
 planned_start, planned_start + frame_ticks, …, planned_end - frame_ticks
@@ -436,10 +460,17 @@ This single exact-multiset comparison proves interval start and end, rejects
 leading pictures, and rejects duplicated or missing presentation slots. The
 implementation should retain named refusal reasons for the individual
 preconditions and interval diagnostics; a generic boolean would make a fleet
-regression needlessly opaque. The fixture includes the current zero-CTO form,
-a valid `I0 P3 B1 B2` version-1 form, unsigned shifted offsets, a leading
-picture, a duplicate slot, a missing slot, a wrong `tfdt`, a nonuniform
-duration, a non-clean first sample and an out-of-range signed CTO.
+regression needlessly opaque. The 12-case fixture includes the current
+zero-CTO form, a valid `I0 P3 B1 B2` version-1 form, unsigned shifted offsets,
+a leading picture, a duplicate slot, a missing slot, a wrong `tfdt`, a
+nonuniform duration, a non-clean first sample, an out-of-range signed CTO, a
+mismatched track/plan timescale and a forbidden edit list. Its runtime-shaped
+`judge` consumes only parser-retained resolved facts. Its separate
+`judge_candidate_wire_shape` checks the raw `trun` version/range portion of B0
+producer evidence and is deliberately not represented as something today's
+runtime parser can enforce. B0's real-box inspection must additionally assert
+the composition-offset-present flag; the data-only fixture does not pretend to
+be a box parser.
 
 ### 3.5 Compatibility decision
 
@@ -469,14 +500,14 @@ Each is a test or a device observation, named in §6. None is satisfied by
 
 | # | Obligation | Proven by |
 |---|---|---|
-| P1 | Random access at every entry: each segment decodes standalone from the served init; first VCL is IDR; presentation interval and grid per §3.3 (a)–(c) | validator table test + real-ffmpeg fixture decode of every entry independently (`ffmpeg -i init+seg -f framemd5`) |
+| P1 | Random access at every entry: each segment decodes standalone from the served init; first VCL is IDR; selected video-track timescale equals the plan, it has no edit list, and presentation interval/grid obey §3.4 | validator table test + real-ffmpeg fixture decode of every entry independently (`ffmpeg -i init+seg -f framemd5`) |
 | P2 | Init identity across generations: `MuxerDrift` never fires for generations started at entries 0, 1, mid-film, last | extend `encoded_vod_ntsc_gets_decode_after_forward_and_backward_restarts` (`vodencode_tests.rs:1090`) and `encoded_vod_manual_audio_correction_keeps_restart_init_stable` (`:1614`) to the reorder recipe |
 | P3 | Restart splice: entry `k−1` from generation A followed by entry `k` from generation B decodes with no dropped/duplicated presentation slot | the same restart tests, asserting decoded frame count and `framemd5` continuity across the splice |
 | P4 | Prepared handoff: a viewer switched from a no-reorder rendition to a reorder rendition (and back) at a segment boundary sees no gap on web (hls.js/MSE), Apple (native HLS), Android (Media3) | device runs (§6.3 GPT prompt); the server side is unchanged because each rendition has its own init and playlist |
 | P5 | Audio lattice unchanged: `place_encoded_audio` accepts every generation; A/V offset at entry boundaries measured ≤ 1 audio frame | `encoded_vod_two_hour_audio_restart_budget` (`:1102`) run against the reorder recipe |
 | P6 | Per family: x264 (SDR), x265 and `hevc_qsv` (HDR10 Main10), `h264_qsv`; NVENC/VAAPI/VideoToolbox only if a fleet node uses them (review §8 open question) | fixture matrix per family on the node that runs it |
 | P7 | The three clients plus Safari native HLS decode version-1 `trun` offsets correctly at a cold start on a mid-film segment (not entry 0) | device runs (§6.3) |
-| P8 | Fallback is typed: a family whose first fragment fails conjunct (2) or (a)–(c) ends the generation `landing_failed` and the rendition is not published | existing `a_refusal_after_the_landing_fails_the_generation` (`vodgen.rs:988`) with a reorder fixture |
+| P8 | Fallback is typed: a family whose first fragment fails the timescale, no-edit-list, decode-anchor, duration or exact-presentation-grid checks in §3.4 ends the generation `landing_failed` and the rendition is not published | existing `a_refusal_after_the_landing_fails_the_generation` (`vodgen.rs:988`) with a reorder fixture |
 
 ## 4. Guardrails (non-goals)
 
@@ -545,9 +576,14 @@ timeline policy, and §3.5 treats every unknown compatibility row as refused.
 
 Keep the data-only fixture at
 `tests/playback/vod-bframes-timeline-cases.json` and the independent judge at
-`tests/operations/test_vod_bframes_timeline_design.py`. They cover valid
-zero-offset and signed-reordered fragments plus the fail-closed cases listed
-in §3.4. This is a design oracle, not a substitute for a parser-produced Rust
+`tests/operations/test_vod_bframes_timeline_design.py`. The v2 fixture covers
+valid zero-offset and signed-reordered fragments plus every fail-closed case
+listed in §3.4, including mismatched track/plan timescales and a selected
+video-track edit list. The runtime-shaped judge uses only resolved facts that
+the intended validator can receive. The separate wire-shape judge records the
+raw version-1/range portion of the producer requirement for B0 without
+pretending current `Sample`/`Run` retain it. B0 separately inspects the real
+box flag. This is a design oracle, not a substitute for a parser-produced Rust
 test.
 
 Acceptance: the focused Python test passes and would fail if the valid reorder
@@ -564,15 +600,23 @@ one-plan/one-PR protocol:
 1. **B0 — measure and capture real boxes.** Run `scripts/bench rate-control`
    on the existing corpus plus animation and grain-heavy clips, report bitrate
    at equal VMAF and VMAF at equal bitrate per family/model, and produce
-   parser-backed fragments on CI ffmpeg 6 and media1 jellyfin-ffmpeg 8. Assert
-   signed version-1 offsets, exact PTS grid, independent entry decode and
-   generation-stable init digests.
+   parser-backed fragments on CI ffmpeg 6 and media1 jellyfin-ffmpeg 8. Inspect
+   the raw boxes to assert nonzero CTO output uses `trun` version 1 with the
+   sample-composition-time-offset-present flag and signed-i32 values; separately
+   assert exact PTS grid, track/plan timescale equality, absence of video
+   `edts`/`elst`, independent entry decode and generation-stable init digests.
 2. **B1 — deployment decision.** Record B0's numbers and Paul's dated A-or-C
    decision in VOD-ENCODING.md. If C wins, stop.
-3. **B2 — validator first.** Port §3.4 into
-   `validate_encoded_fragment` while the recipe remains `-bf 0`; add
-   parser-produced table cases and named refusals. Observe fleet refusals
-   before changing output.
+3. **B2 — parser state, then validator.** While the recipe remains `-bf 0`,
+   first extend `Init`/the selected video-track representation to retain
+   structural `edts`/`elst` presence, with parser-produced positive and
+   negative tests. Preserve and directly test the existing exact
+   track/plan-timescale landing gate, then port the remaining
+   runtime-enforceable §3.4 checks into `validate_encoded_fragment`: no edit
+   list, decode anchor/duration and the resolved presentation grid, each with
+   a named refusal. Do not claim enforcement of raw `trun` version or flag
+   unless a later parser change explicitly retains them. Observe fleet
+   refusals before changing output.
 4. **B3 — qualified recipes only.** For each family proven by P1–P3, P5, P6
    and P8, add signed-offset reorder args and an identity-bearing control. Any
    Developer surface is advisory-only and shows readiness; it never gates
