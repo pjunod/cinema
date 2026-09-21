@@ -3744,6 +3744,19 @@ test("playback-info row builders follow the shared web field list in fixture ord
   }
 });
 
+test("playback info labels tone-map peak provenance without calling policy source truth", () => {
+  const summarize = new Function(`${shippedSource("statsToneMapPeak")}\nreturn statsToneMapPeak;`)();
+  assert.equal(
+    summarize({tone_map_peak_nits: 4000, tone_map_peak_source: "cll"}),
+    "Tone-map peak 4,000 nits · source MaxCLL",
+  );
+  assert.equal(
+    summarize({tone_map_peak_nits: 1000, tone_map_peak_source: "default"}),
+    "Tone-map peak 1,000 nits · policy default",
+  );
+  assert.equal(summarize({tone_map_peak_nits: 1000}), null);
+});
+
 // A section in the shared field list that no column renders is a row nobody
 // can read: the SURFACE section is the ledger half of the surface contract's
 // attributability (§5), and it had to be added to a hand-written column list

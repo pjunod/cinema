@@ -15258,6 +15258,8 @@ mod tests {
             file_id: 7,
             target_height: 1080,
             encoder: "vod",
+            tone_map_peak_nits: None,
+            tone_map_peak_source: None,
             playlist_shape: "vod",
             producer_state: "held",
             producer_hold: Some("working_set"),

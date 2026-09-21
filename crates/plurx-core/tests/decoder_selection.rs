@@ -2030,6 +2030,73 @@ fn planned_command_uses_actual_decoder_and_absolute_video_stream() {
 }
 
 #[test]
+fn descriptor_luminance_refines_the_filter_not_only_the_facts_digest() {
+    let mut stream = video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p10le"),
+        "24/1",
+        "24/1",
+        Some("smpte2084"),
+    );
+    stream["side_data_list"] = json!([{
+        "side_data_type": "Content light level metadata",
+        "max_content": 4000,
+        "max_average": 1000
+    }]);
+    let input = facts(stream);
+    let file = execution_file("/fixture/source.mkv");
+    let options = execution_options();
+    let media = TranscodeMediaOptions::from_options_with_facts(&file, &options, &input);
+    assert_eq!(media.tone_map_peak_nits, 4000);
+    assert_eq!(media.tone_map_peak_source.name(), "cll");
+
+    let plan = resolve_with_options(
+        Encoder::Software,
+        media,
+        &input,
+        &software_capabilities("h264", "h264"),
+        DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, None),
+    )
+    .expect("descriptor facts resolve");
+    let execution =
+        TranscodeExecution::from_options(&file, &options, Pacing::unpaced(), "/fixture/out")
+            .expect("valid execution");
+    let args = hls_args(&plan, &execution);
+    let filter = args
+        .windows(2)
+        .find(|pair| pair[0] == "-vf")
+        .map(|pair| pair[1].as_str())
+        .expect("video filter");
+    assert!(filter.contains("peak=40"), "{filter}");
+}
+
+#[test]
+fn absent_descriptor_luminance_keeps_the_catalog_peak() {
+    let input = facts(video(
+        0,
+        Some("h264"),
+        Some("high"),
+        1920,
+        1080,
+        Some("yuv420p10le"),
+        "24/1",
+        "24/1",
+        Some("smpte2084"),
+    ));
+    let mut file = execution_file("/fixture/source.mkv");
+    file.max_cll = Some(2000);
+    file.luminance_source = Some("stream".to_owned());
+
+    let media = TranscodeMediaOptions::from_options_with_facts(&file, &execution_options(), &input);
+    assert_eq!(media.tone_map_peak_nits, 2000);
+    assert_eq!(media.tone_map_peak_source.name(), "cll");
+}
+
+#[test]
 fn plan_digest_and_command_are_stable_after_environment_mutation() {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = ENV_LOCK.lock().expect("environment lock");

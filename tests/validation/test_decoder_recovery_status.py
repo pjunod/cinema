@@ -349,7 +349,7 @@ class DecoderRecoveryStatusContract(unittest.TestCase):
     def test_m2_working_tree_binds_arguments_and_identity_to_one_plan(self) -> None:
         self.assertRegex(
             self.core_decode,
-            r"(?m)^pub const RESOLVED_TRANSCODE_PLAN_VERSION: u32 = 1;$",
+            r"(?m)^pub const RESOLVED_TRANSCODE_PLAN_VERSION: u32 = 2;$",
         )
         self.assertRegex(
             self.core_decode,

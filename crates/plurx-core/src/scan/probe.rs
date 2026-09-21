@@ -292,9 +292,11 @@ pub async fn probe(path: &Path) -> Result<ProbeResult, ProbeError> {
         }
     }
     let mut result = parse_probe_json(&json);
-    if matches!(result.hdr.as_deref(), Some("hdr10" | "hlg"))
-        && result.luminance_source.as_deref() == Some("none")
-    {
+    // `luminance_source` is set from the selected stream's transfer rather
+    // than its display label. A Dolby Vision stream can still carry a PQ or
+    // HLG base layer; `detect_hdr` intentionally labels that stream DOVI first,
+    // but that label must not suppress the bounded frame observation.
+    if result.luminance_source.as_deref() == Some("none") {
         if let Some(frame) = probe_first_frame_luminance(path).await {
             apply_frame_luminance(&mut result, &frame);
         }
@@ -421,7 +423,10 @@ fn apply_stream_luminance(result: &mut ProbeResult, stream: &Value) {
     let found = side_data
         .map(|entries| apply_luminance_entries(result, entries))
         .unwrap_or(false);
-    if matches!(result.hdr.as_deref(), Some("hdr10" | "hlg")) {
+    if matches!(
+        stream.get("color_transfer").and_then(Value::as_str),
+        Some("smpte2084" | "arib-std-b67")
+    ) {
         result.luminance_source = Some(if found { "stream" } else { "none" }.to_owned());
     }
 }
@@ -1044,6 +1049,33 @@ pub(crate) mod tests {
         );
         assert_eq!(result.max_cll, Some(1000));
         assert_eq!(result.max_fall, Some(400));
+        assert_eq!(result.luminance_source.as_deref(), Some("frame"));
+    }
+
+    #[test]
+    fn frame_luminance_upgrades_dolby_vision_with_a_pq_base_layer() {
+        let mut result = parse_probe_json(&json!({"streams": [{
+            "codec_type": "video",
+            "color_transfer": "smpte2084",
+            "side_data_list": [{
+                "side_data_type": "DOVI configuration record",
+                "dv_profile": 7,
+                "dv_bl_signal_compatibility_id": 1
+            }]
+        }]}));
+        assert_eq!(result.hdr.as_deref(), Some("dolby_vision"));
+        assert_eq!(result.luminance_source.as_deref(), Some("none"));
+
+        apply_frame_luminance(
+            &mut result,
+            &json!({"frames": [{"side_data_list": [{
+                "side_data_type": "Content light level metadata",
+                "max_content": "4000",
+                "max_average": "1000"
+            }]}]}),
+        );
+        assert_eq!(result.max_cll, Some(4000));
+        assert_eq!(result.max_fall, Some(1000));
         assert_eq!(result.luminance_source.as_deref(), Some("frame"));
     }
 

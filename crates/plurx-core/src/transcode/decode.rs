@@ -28,7 +28,7 @@ pub const LEGACY_DECODE_POLICY_REVISION: u32 = 1;
 
 /// Stable serialization contract for [`ResolvedTranscode::plan_digest`].
 /// Changing the meaning or order of any fed field requires a revision bump.
-pub const RESOLVED_TRANSCODE_PLAN_VERSION: u32 = 1;
+pub const RESOLVED_TRANSCODE_PLAN_VERSION: u32 = 2;
 
 /// Where a plan's artifacts live when nothing enforces a health receipt over
 /// them. Observation-only rollout keeps this identity, so a node that is
@@ -1833,6 +1833,29 @@ impl TranscodeMediaOptions {
             subtitle_burn: options.subtitle_burn.clone(),
             cache_identity: DecodeCacheIdentity::from_media_file(source),
         }
+    }
+
+    /// Copy media semantics while preferring facts observed from the exact
+    /// descriptor that the encoder will inherit.
+    ///
+    /// A retained catalog row can predate luminance collection. When the held
+    /// probe sees stream-level CLL/MDCV, keeping the catalog-derived default in
+    /// the filter would make the digest describe a fact the argv ignored. The
+    /// decoder collector already merges and rejects contradictions, so its
+    /// values are the authoritative refinement here.
+    pub fn from_options_with_facts(
+        source: &MediaFile,
+        options: &TranscodeOptions,
+        facts: &DecodeFacts,
+    ) -> Self {
+        let mut media = Self::from_options(source, options);
+        if let Some(nits) = facts.max_cll() {
+            (media.tone_map_peak_nits, media.tone_map_peak_source) = (nits, ToneMapPeakSource::Cll);
+        } else if let Some(nits) = facts.mastering_max_luminance() {
+            (media.tone_map_peak_nits, media.tone_map_peak_source) =
+                (nits, ToneMapPeakSource::Mdcv);
+        }
+        media
     }
 }
 

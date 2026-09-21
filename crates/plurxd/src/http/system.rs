@@ -6199,6 +6199,8 @@ mod tests {
             user_name: "not persisted".into(),
             target_height: 1080,
             encoder: "qsv",
+            tone_map_peak_nits: None,
+            tone_map_peak_source: None,
             started_unix: 0,
             idle_seconds: 0,
             last_request: "segment",

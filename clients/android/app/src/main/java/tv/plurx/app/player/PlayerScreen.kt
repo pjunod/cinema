@@ -2308,7 +2308,15 @@ internal fun playbackInfoRows(
         InfoRow("decode_resolution", "Playing resolution", "NOW DECODING", AllInfoModes, details.decodeResolution ?: "Not reported"),
         InfoRow("stream_format", "Stream format", "NOW DECODING", StandardAndDebug, details.playingVideo ?: "Not reported"),
         InfoRow("device_audio", "Device audio output", "NOW DECODING", StandardAndDebug, "Not reported"),
-        InfoRow("dynamic_range", "Dynamic range", "NOW DECODING", StandardAndDebug, details.dynamicRange, placement = "notes"),
+        InfoRow(
+            "dynamic_range",
+            "Dynamic range",
+            "NOW DECODING",
+            StandardAndDebug,
+            details.dynamicRange,
+            note = toneMapPeakSummary(status),
+            placement = "notes",
+        ),
         InfoRow("decode_audio", "Stream audio track", "NOW DECODING", StandardAndDebug, details.playingAudio, placement = "notes"),
         InfoRow("frames", "Frames", "NOW DECODING", StandardAndDebug, details.frames, tone = videoHealthTone(details.videoHealth)),
         InfoRow(
@@ -2721,6 +2729,17 @@ internal fun dynamicRangeSummary(
             reason.contains("tone", ignoreCase = true)
     } ?: "${dynamicRangeLabel(source)} source is not what this session is putting on screen"
     return "${dynamicRangeLabel(onScreen)} — $why"
+}
+
+internal fun toneMapPeakSummary(status: PlaybackSessionStatus?): String? {
+    val nits = status?.tone_map_peak_nits?.takeIf { it > 0 } ?: return null
+    val provenance = when (status.tone_map_peak_source?.lowercase(Locale.US)) {
+        "cll" -> "source MaxCLL"
+        "mdcv" -> "source mastering metadata"
+        "default" -> "policy default"
+        else -> return null
+    }
+    return "Tone-map peak ${String.format(Locale.US, "%,d", nits)} nits · $provenance"
 }
 
 private fun videoFormatSummary(format: Format?): String? {
