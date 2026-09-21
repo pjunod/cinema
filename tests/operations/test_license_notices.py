@@ -33,7 +33,7 @@ IMAGE_COPIES = (
 
 # Vendored under vendor/, so they carry no `source` key in the lockfile and are
 # attributed in section 3 rather than in the resolved-dependency table.
-VENDORED = {"hiqlite", "hiqlite-wal", "rust_decimal", "s3-simple"}
+VENDORED = {"hiqlite", "hiqlite-wal", "rust_decimal"}
 
 
 def lockfile_externals() -> set[tuple[str, str]]:

@@ -179,7 +179,7 @@ cargo test -p plurxd --bin plurxd
 Add the smallest focused regression for the changed behavior; these commands
 are the broad local backstop, not a substitute for the test that rejects the
 old behavior. Dependencies resolve from the registry, while the awkward
-dependencies (`hiqlite`, `rust_decimal`, and `s3-simple`) are vendored.
+dependencies (`hiqlite` and `rust_decimal`) are vendored.
 
 Measured on the proved session:
 

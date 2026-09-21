@@ -173,9 +173,8 @@ tasks, retained reset notification, and more. Its exit condition:
 — 3 restart-recovery patches: `last_purged_log_id` reconstruction, atomic
 `meta.hql` replacement, WAL incarnation guard. Same exit condition shape.
 
-[vendor/s3-simple/PLURX-PATCH.md](../../vendor/s3-simple/PLURX-PATCH.md) —
-one dependency-only patch, and it states this plan's premise in its own
-words:
+Before M1, `vendor/s3-simple/PLURX-PATCH.md` carried one dependency-only
+patch and stated this plan's premise in its own words:
 
 > Hiqlite 0.14 enables cryptr's S3 feature even when plurx builds hiqlite
 > with only `macros` and `sqlite`. That makes this otherwise unused package

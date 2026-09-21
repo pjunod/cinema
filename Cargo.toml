@@ -11,7 +11,6 @@ exclude = [
     "vendor/hiqlite",
     "vendor/hiqlite-wal",
     "vendor/rust_decimal",
-    "vendor/s3-simple",
 ]
 
 [workspace.package]
@@ -141,12 +140,11 @@ overflow-checks = true
 lto = "thin"
 strip = "symbols"
 
-# Patch Hiqlite's sparse-membership and WAL-recovery compatibility plus unused
-# optional dependency edges without advisory ignores. Path packages are
+# Patch Hiqlite's sparse-membership, WAL-recovery, and optional-dependency
+# compatibility without advisory ignores. Path packages are
 # skipped by cargo-audit, so rust-audit.yml also scans a synthesized
 # registry-provenance lockfile built by scripts/vendor-audit-lock.
 [patch.crates-io]
 hiqlite = { path = "vendor/hiqlite" }
 hiqlite-wal = { path = "vendor/hiqlite-wal" }
-s3-simple = { path = "vendor/s3-simple" }
 rust_decimal = { path = "vendor/rust_decimal" }

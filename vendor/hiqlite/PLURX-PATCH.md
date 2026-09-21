@@ -1,8 +1,31 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries fifteen compatibility patches for clustered
+Apache-2.0. Plurx carries sixteen compatibility patches for clustered
 deployments:
+
+**Owner:** Paul Junod (repository owner). `pending M6` means the generic fix
+still needs a public upstream issue or pull request; it is deliberately not a
+made-up URL and prevents the fork from being declared fully tracked.
+
+| # | Patch | Kind | Upstream | Drop condition |
+|---:|---|---|---|---|
+| 1 | `NodeConfig` duplicate-id rejection | generic bug | pending M6 | Upstream release selects by id and rejects duplicate durable ids. |
+| 2 | Split-brain probe TLS policy | plurx policy | — | Never; self-signed cluster TLS is a Plurx deployment requirement. |
+| 3 | Concurrent TLS key publication | plurx policy | — | Never; shared embedded-node startup is a Plurx lifecycle requirement. |
+| 4 | OpenRaft election trigger | plurx policy | — | Never; graceful voter removal depends on this OpenRaft 0.9 bridge. |
+| 5 | Local Raft metrics wrapper | plurx policy | — | Never; Plurx readiness owns this deliberately bounded view. |
+| 6 | Quorum watermark wrapper | plurx policy | — | Never; bounded local reads require this proof shape and version. |
+| 7 | Snapshot duration metrics | plurx policy | — | Never; fixed-cardinality snapshot observability is a Plurx contract. |
+| 8 | Snapshot `RemoteError` preservation | generic bug | pending M6 | Upstream release preserves mismatch errors on SQLite and cache snapshot RPCs. |
+| 9 | WebSocket write-and-flush budget | generic bug | pending M6 | Upstream release flushes every frame within one bounded write budget. |
+| 10 | Connection-supervisor socket ownership | generic bug | pending M6 | Upstream release owns and joins both socket tasks across every terminal path. |
+| 11 | Retained reset notification | generic bug | pending M6 | Upstream release cannot lose reset behind a saturated request queue. |
+| 12 | Durable snapshot-generation ownership | plurx policy | — | Never; Plurx requires its documented crash-recovery and publication boundary. |
+| 13 | Proxy endpoint trust boundary | plurx policy | — | Never; Plurx remote clients must remain inside the configured proxy set. |
+| 14 | Bounded definitive-forward recovery | plurx policy | — | Never; Plurx owns the attempt and replay limits plus backup leader attribution. |
+| 15 | Validation apply counters and controls | plurx policy | — | Never; Plurx's separate-process validation harness consumes this surface. |
+| 16 | Gate `cryptr/s3` behind Hiqlite `s3` | generic bug | pending M6 | Upstream release no longer enables S3 dependencies when backup and S3 are off. |
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -129,8 +152,13 @@ deployments:
   additionally logs each applied entry's index and payload to stderr, which
   is how a contaminating entry is identified down to its SQL. Production
   binaries compile none of it.
+- The optional `cryptr` dependency no longer enables its S3 client
+  unconditionally. Hiqlite's `s3` feature enables `cryptr/s3` instead, so
+  downstream users that select `backup` or `s3` retain the same backend while
+  builds such as Plurx that select neither do not compile an unused S3, QUIC,
+  and second aws-lc stack.
 
-Remove this vendor when an upstream Hiqlite release contains all fifteen patches
+Remove this vendor when an upstream Hiqlite release contains all sixteen patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing,
 and the snapshot RPC error-boundary plus queue-saturated reset tests above keep
