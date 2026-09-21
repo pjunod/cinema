@@ -1,6 +1,6 @@
 # Apple TV forward skips — implementation and promotion ledger
 
-**Status:** implementation in progress · **Started:** 2026-09-20 ·
+**Status:** promotion qualified · **Started:** 2026-09-20 ·
 **Branch:** `codex/apple-tv-forward-skips` · **Base:** `79113254`
 
 Companion to
@@ -38,8 +38,8 @@ failure checks remain authoritative.
 | Focused regression set | passed | 13/13 `rolling_publication_budget*` and 4/4 `mkv_hls_schedule*` tests passed on code candidate `7654a184` |
 | Documentation and validation catalog | implemented | This page, `docs/README.md`, the `playback.pipeline` contract, and exact `6f4e279e`/`a157179a`/`5a387be6` regression mappings |
 | Adversarial implementation review | complete and addressed | The single review found a variable-duration legacy bootstrap deadlock, backdated commit deadlines and three weak proof seams; commit `5a387be6` addresses all findings |
-| Final focused and fast-lane proof | local proof passed; Forgejo rerun pending | Rust 1.97.1 check/clippy/format, both focused filters, four docs-index tests, 199 validation tests, history/catalog audits and `git diff --check` passed; runs 2376/2380 found metadata inventories now corrected locally |
-| Merge to `main` | not started | only after the current fast lane is green |
+| Final focused and fast-lane proof | passed | Local proof is green; Forgejo run 2390 passed policy preflight, Rust, Windows and the Main promotion gate on `a55d59f2` |
+| Merge to `main` | authorized | PR #404 carries this implementation and ledger; its green qualification authorizes merge after this documentation-only status update passes its applicable gate |
 
 ## Evidence rules — make every green claim reproducible
 
@@ -123,6 +123,12 @@ those three shapes; its focused seven-test inventory, the 2,040-file catalog
 lint and the complete 199-test validation suite all pass locally. The suite's
 six process-cleanup cases required ordinary `/bin/ps` access outside the
 workspace sandbox; the permitted rerun passed with one pre-existing skip.
+
+Run 2390 passed the corrected exact head: validation scope in 5 seconds,
+policy and contract preflight in 1 minute 41 seconds, Rust in 1 minute 33
+seconds, Windows cross-compilation in 5 minutes 14 seconds, and the Main
+promotion gate in 5 seconds. Web, Apple and Android were correctly skipped by
+the changed-surface selector. No feature flag or settings gate was introduced.
 
 ## Decisions to revisit — only if evidence forces them
 
