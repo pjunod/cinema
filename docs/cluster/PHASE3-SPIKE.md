@@ -1,5 +1,7 @@
 # Phase 3 — Cluster Spike & Decision
 
+**Status:** done · **Reconciled:** 2026-09-20
+
 Phase 3 is a decision gate, not a feature phase. Two HA risks were spiked with
 real experiments; this document records the measurements and the decisions
 that Phase 4 builds on. Experiments run 2026-07-19 in the dev sandbox
