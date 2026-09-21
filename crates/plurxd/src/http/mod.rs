@@ -5849,6 +5849,7 @@ mod tests {
             vec![
                 "authoritative_store",
                 "durable_queue",
+                "rolling_contract_built",
                 "runtime",
                 "server_preparation_is_real",
                 "source_fencing",
@@ -10306,11 +10307,12 @@ mod tests {
         );
         assert_eq!(audio_only["selection"]["audio_index"], 0, "{audio_only}");
         assert_eq!(
-            audio_only["selection"]["subtitle_index"], 0,
-            "the effective policy subtitle remains visible without changing delivery: {audio_only}"
+            audio_only["selection"]["subtitle_index"],
+            serde_json::Value::Null,
+            "an explicit audio-only request does not implicitly select a subtitle: {audio_only}"
         );
         assert_eq!(
-            audio_only["selection"]["subtitle_requires_burn_in"], true,
+            audio_only["selection"]["subtitle_requires_burn_in"], false,
             "{audio_only}"
         );
     }
@@ -14304,11 +14306,8 @@ mod tests {
             ),
         )
         .await;
-        assert!(
-            status == StatusCode::UNPROCESSABLE_ENTITY
-                || negotiated["code"] == "hdr_subtitle_burn_refused",
-            "an HDR10 transcode is an HDR delivery: {status} {negotiated}"
-        );
+        assert_eq!(status, StatusCode::CONFLICT, "{negotiated}");
+        assert_eq!(negotiated["code"], "vod_source_rescan_required");
 
         // And the population the old guard over-refused: a client asking for
         // a transcode at a height, with no HDR10 negotiated. That body

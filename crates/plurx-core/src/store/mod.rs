@@ -29,6 +29,7 @@ mod timeline_annotations;
 
 mod publication;
 mod scan_identity_repair;
+mod sql_source;
 pub use scan_identity_repair::{
     plan_identity_repair, IdentityRepairBlocker, IdentityRepairCounts, IdentityRepairFile,
     IdentityRepairFileMove, IdentityRepairItem, IdentityRepairItemMove, IdentityRepairOutcome,
@@ -4947,6 +4948,21 @@ impl<T> Store for T where
         + Sync
         + 'static
 {
+}
+
+/// Reopen the immutable fragment-index generation selected by the daemon
+/// after every advertised holder failed to supply a valid blob.
+///
+/// This named boundary is the exact transition used by the VOD no-holder
+/// arm. Keeping it in `plurx-core` lets the backend-neutral contract execute
+/// that production transition against both SQLite and the three-voter store,
+/// instead of testing only the lower-level primitive and assuming the daemon
+/// calls it the same way.
+pub async fn requeue_cluster_fragment_index_after_no_holder(
+    store: &dyn Store,
+    replacement: &NewClusterFragmentIndexJob,
+) -> Result<bool, StoreError> {
+    store.requeue_cluster_fragment_index(replacement).await
 }
 
 /// The only application-facing boundary for catalogue consistency choices.

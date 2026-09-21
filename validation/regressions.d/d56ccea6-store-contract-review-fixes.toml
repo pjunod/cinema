@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["d56ccea6"]
+points = ["core.media", "cluster.auth", "playback.pipeline", "offline.viewing"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+reason = "The K-07 review fix makes the discarded-Store-result guard syntax-aware across direct, nested, wrapped, and UFCS calls; exercises every fixed-cardinality operation/severity metric cell including inner Store errors hidden by an outer timeout; and runs the production no-holder transition through in-memory SQLite, file SQLite, and a three-voter Hiqlite store. The fast Rust lanes retain the repository guard, metric contracts, whole VOD no-holder arm, and backend-neutral Store contract, while cluster-auth retains the replicated backend proof."

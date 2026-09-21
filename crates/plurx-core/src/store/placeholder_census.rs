@@ -77,6 +77,50 @@ const STORE_SOURCES: &[(&str, &str)] = &[
     ),
 ];
 
+/// Every standalone SQLite store slice, by file name and source text.
+///
+/// SQLite's `?N` indices are numeric rather than first-appearance names, so
+/// this list feeds a separate validator below. The directory equality test
+/// makes adding a module without adding its SQL to the census impossible.
+const SQLITE_SOURCES: &[(&str, &str)] = &[
+    ("apikeys.rs", include_str!("sqlite/apikeys.rs")),
+    ("cache.rs", include_str!("sqlite/cache.rs")),
+    (
+        "classification.rs",
+        include_str!("sqlite/classification.rs"),
+    ),
+    ("coordination.rs", include_str!("sqlite/coordination.rs")),
+    ("dv_conversion.rs", include_str!("sqlite/dv_conversion.rs")),
+    ("dvr.rs", include_str!("sqlite/dvr.rs")),
+    ("fragindex.rs", include_str!("sqlite/fragindex.rs")),
+    (
+        "fragment_index_cluster.rs",
+        include_str!("sqlite/fragment_index_cluster.rs"),
+    ),
+    ("library.rs", include_str!("sqlite/library.rs")),
+    (
+        "library_channels.rs",
+        include_str!("sqlite/library_channels.rs"),
+    ),
+    ("media.rs", include_str!("sqlite/media.rs")),
+    ("mod.rs", include_str!("sqlite/mod.rs")),
+    ("offline.rs", include_str!("sqlite/offline.rs")),
+    ("outbox.rs", include_str!("sqlite/outbox.rs")),
+    ("pretranscode.rs", include_str!("sqlite/pretranscode.rs")),
+    ("publication.rs", include_str!("sqlite/publication.rs")),
+    ("reading.rs", include_str!("sqlite/reading.rs")),
+    ("sessions.rs", include_str!("sqlite/sessions.rs")),
+    ("shared_cache.rs", include_str!("sqlite/shared_cache.rs")),
+    ("telemetry.rs", include_str!("sqlite/telemetry.rs")),
+    (
+        "timeline_annotations.rs",
+        include_str!("sqlite/timeline_annotations.rs"),
+    ),
+    ("trakt.rs", include_str!("sqlite/trakt.rs")),
+    ("users.rs", include_str!("sqlite/users.rs")),
+    ("watch.rs", include_str!("sqlite/watch.rs")),
+];
+
 /// The shared store modules a replicated slice splices `const` SQL from.
 ///
 /// `hiqlite_fragment_index_cluster.rs` builds its history statements around
@@ -113,11 +157,13 @@ const STATEMENT_KEYWORDS: [&str; 5] = ["UPDATE", "INSERT", "SELECT", "DELETE", "
 /// forbidden — it has to be looked at, and this number updated, which is what
 /// stops a whole statement from disappearing behind an interpolation.
 ///
-/// The five today, each spliced into a host this census does judge:
+/// The seven today, each spliced into a host this census does judge:
 /// `hiqlite_media.rs`'s two `GENRE` predicates (into the item count and the
 /// item page), `hiqlite_durable.rs`'s two membership tombstone arms (into the
 /// offline-package insert, once per arm), and `hiqlite.rs`'s
-/// `CANONICAL_SETTINGS_GENERATION_PREDICATE`.
+/// `CANONICAL_SETTINGS_GENERATION_PREDICATE`, `hiqlite_library_channels.rs`'s
+/// completed-request guard, and `hiqlite_publication.rs`'s artwork-repair
+/// exclusion.
 ///
 /// That last one opens on `$4` because it is the tail of the statement it is
 /// spliced into: `put_settings_if_generation` selects `$1, $2, $3` and then
@@ -129,12 +175,13 @@ const STATEMENT_KEYWORDS: [&str; 5] = ["UPDATE", "INSERT", "SELECT", "DELETE", "
 /// `SELECT {…}`, by `replicated_generation_guard_matches_only_canonical_integer_state`;
 /// that is a `#[cfg(test)]` fixture bound by rusqlite's positional `params!`,
 /// stripped before this census runs, and not a replicated statement.
-const EXPECTED_FRAGMENTS: usize = 6;
+const EXPECTED_FRAGMENTS: usize = 7;
 
 /// One Rust string literal, with its escapes decoded.
 struct Literal {
     line: usize,
     start: usize,
+    end: usize,
     text: String,
 }
 
@@ -187,12 +234,13 @@ fn literals_and_code_mask(source: &str) -> (Vec<Literal>, Vec<bool>) {
                 let end = source[content..]
                     .find(&terminator)
                     .map_or(bytes.len(), |offset| content + offset);
+                let after = (end + terminator.len()).min(bytes.len());
                 literals.push(Literal {
                     line: line_of(source, index),
                     start: index,
+                    end: after,
                     text: source[content..end.min(bytes.len())].to_owned(),
                 });
-                let after = (end + terminator.len()).min(bytes.len());
                 blank(&mut is_code, index, after);
                 index = after;
             }
@@ -201,6 +249,7 @@ fn literals_and_code_mask(source: &str) -> (Vec<Literal>, Vec<bool>) {
                 literals.push(Literal {
                     line: line_of(source, index),
                     start: index,
+                    end,
                     text,
                 });
                 blank(&mut is_code, index, end);
@@ -474,7 +523,11 @@ fn string_bindings(
         let arms = literals
             .iter()
             .filter(|literal| literal.start > start && literal.start < index)
-            .filter(|literal| literal.text.trim().is_empty() || is_sql_shaped(&literal.text))
+            .filter(|literal| {
+                literal.text.trim().is_empty()
+                    || is_sql_shaped(&literal.text)
+                    || literal.text.contains('?')
+            })
             .map(|literal| literal.text.clone())
             .take(MAX_BINDING_ARMS)
             .collect::<Vec<_>>();
@@ -596,6 +649,273 @@ fn constants_for(name: &str, source: &str, literals: &[Literal]) -> Vec<(String,
     constants
 }
 
+/// Validate SQLite's numeric `?N` dialect and return its highest index.
+///
+/// Unlike `$N`, first appearance does not define the binding slot. Requiring
+/// the complete `1..=max` set prevents a gap from silently shifting a
+/// `params!` list written in appearance order, while rejecting a mixed bare
+/// `?` keeps the assignment independent of the text that precedes it.
+pub(super) fn validate_sqlite_placeholders(sql: &str) -> Result<usize, String> {
+    let bytes = sql.as_bytes();
+    let mut index = 0_usize;
+    let mut numbered = std::collections::BTreeSet::new();
+    let mut bare = false;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                index = sql[index..]
+                    .find('\n')
+                    .map_or(bytes.len(), |offset| index + offset + 1);
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index = sql[index + 2..]
+                    .find("*/")
+                    .map_or(bytes.len(), |offset| index + 2 + offset + 2);
+            }
+            b'\'' | b'"' | b'`' => {
+                let quote = bytes[index];
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == quote {
+                        if bytes.get(index + 1) == Some(&quote) {
+                            index += 2;
+                        } else {
+                            index += 1;
+                            break;
+                        }
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            b'[' => {
+                index += 1;
+                while index < bytes.len() {
+                    if bytes[index] == b']' {
+                        if bytes.get(index + 1) == Some(&b']') {
+                            index += 2;
+                        } else {
+                            index += 1;
+                            break;
+                        }
+                    } else {
+                        index += 1;
+                    }
+                }
+            }
+            b'?' => {
+                let start = index + 1;
+                index = start;
+                while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                    index += 1;
+                }
+                if index == start {
+                    bare = true;
+                } else {
+                    let number = sql[start..index]
+                        .parse::<usize>()
+                        .map_err(|error| format!("invalid ?N placeholder: {error}"))?;
+                    if number == 0 {
+                        return Err("placeholder indices start at ?1, not ?0".to_owned());
+                    }
+                    numbered.insert(number);
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    if bare && !numbered.is_empty() {
+        return Err("bare ? cannot be mixed with indexed ?N placeholders".to_owned());
+    }
+    let max = numbered.last().copied().unwrap_or(0);
+    if let Some(missing) = (1..=max).find(|number| !numbered.contains(number)) {
+        return Err(format!(
+            "indexed placeholders must cover ?1..?{max}; missing ?{missing}"
+        ));
+    }
+    Ok(max)
+}
+
+/// Literal binding arity when the SQL and arguments share one Rust statement.
+///
+/// A semicolon before `params![…]`/`&[…]` means the SQL escaped into a local or
+/// prepared statement and is deliberately counted as unchecked. This is a
+/// conservative syntactic proof: it never guesses across statements.
+fn same_statement_binding_arity(
+    source: &str,
+    is_code: &[bool],
+    literal_end: usize,
+) -> Option<usize> {
+    let mut candidate = None;
+    let bytes = source.as_bytes();
+    let mut cursor = literal_end;
+    while cursor < bytes.len() {
+        if !is_code.get(cursor).copied().unwrap_or(false) {
+            cursor += 1;
+            continue;
+        }
+        if matches!(bytes[cursor], b';' | b'}') {
+            break;
+        }
+        let prefix_len = if source[cursor..].starts_with("params![") {
+            Some("params![".len())
+        } else if source[cursor..].starts_with("&[") {
+            Some("&[".len())
+        } else if bytes[cursor] == b'[' {
+            Some(1)
+        } else {
+            None
+        };
+        if let Some(prefix_len) = prefix_len {
+            candidate = Some((cursor, prefix_len));
+            break;
+        }
+        cursor += 1;
+    }
+    let (start, prefix_len) = candidate?;
+    let open = start + prefix_len - 1;
+    let mut index = open + 1;
+    let mut square = 1_usize;
+    let mut round = 0_usize;
+    let mut curly = 0_usize;
+    let mut values = 0_usize;
+    let mut current_value = false;
+    while index < bytes.len() {
+        if !is_code.get(index).copied().unwrap_or(false) {
+            index += 1;
+            continue;
+        }
+        match bytes[index] {
+            b'[' => square += 1,
+            b']' => {
+                square = square.saturating_sub(1);
+                if square == 0 {
+                    return Some(values + usize::from(current_value));
+                }
+            }
+            b'(' => round += 1,
+            b')' => round = round.saturating_sub(1),
+            b'{' => curly += 1,
+            b'}' => curly = curly.saturating_sub(1),
+            b',' if square == 1 && round == 0 && curly == 0 => {
+                if current_value {
+                    values += 1;
+                    current_value = false;
+                }
+            }
+            byte if square == 1 && round == 0 && curly == 0 && !byte.is_ascii_whitespace() => {
+                current_value = true;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn is_sqlite_candidate(text: &str) -> bool {
+    text.contains('?') && is_sql_shaped(text)
+}
+
+/// Current number of SQLite statement variants whose binding list is built in
+/// another statement or dynamically. This is measured by the census and may
+/// only fall unless a reviewer accepts a new non-local binding shape.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 90;
+
+#[test]
+fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
+    let mut offenders = Vec::new();
+    let mut scanned = 0_usize;
+    let mut unchecked = 0_usize;
+    for (name, source) in SQLITE_SOURCES {
+        let (literals, is_code) = literals_and_code_mask(source);
+        let test_ranges = test_item_ranges(source, &is_code);
+        let constants = constants_for(name, source, &literals);
+        let bindings = string_bindings(source, &literals, &is_code);
+        for literal in &literals {
+            if test_ranges
+                .iter()
+                .any(|(start, end)| literal.start >= *start && literal.start < *end)
+                || !is_sqlite_candidate(&literal.text)
+            {
+                continue;
+            }
+            for statement in resolve_template(&literal.text, &constants, &bindings) {
+                if !is_statement(&statement) {
+                    continue;
+                }
+                scanned += 1;
+                match validate_sqlite_placeholders(&statement) {
+                    Ok(max) if max > 0 => {
+                        if let Some(arity) =
+                            same_statement_binding_arity(source, &is_code, literal.end)
+                        {
+                            if arity != max {
+                                offenders.push(format!(
+                                    "{name}:{}: binds {arity} values for ?1..?{max}\n    {}",
+                                    literal.line,
+                                    statement.split_whitespace().collect::<Vec<_>>().join(" ")
+                                ));
+                            }
+                        } else {
+                            unchecked += 1;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => offenders.push(format!(
+                        "{name}:{}: {error}\n    {}",
+                        literal.line,
+                        statement.split_whitespace().collect::<Vec<_>>().join(" ")
+                    )),
+                }
+            }
+        }
+    }
+    assert!(
+        scanned > 300,
+        "the SQLite census found only {scanned} statements; the scanner is broken"
+    );
+    assert!(
+        offenders.is_empty(),
+        "SQLite indexed placeholders or local binding arities are invalid:\n{}",
+        offenders.join("\n")
+    );
+    assert_eq!(
+        unchecked, EXPECTED_UNCHECKED_SQLITE_ARITY,
+        "the statically unchecked SQLite arity set changed; inspect every new site"
+    );
+}
+
+#[test]
+fn sqlite_module_list_matches_the_directory() {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/store/sqlite");
+    let mut present = std::fs::read_dir(&directory)
+        .expect("the SQLite module directory is readable from the source tree")
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| name.ends_with(".rs"))
+        .collect::<Vec<_>>();
+    present.sort();
+    let mut censused = SQLITE_SOURCES
+        .iter()
+        .map(|(name, _)| (*name).to_owned())
+        .collect::<Vec<_>>();
+    censused.sort();
+    assert_eq!(
+        present, censused,
+        "every SQLite store slice must be censused"
+    );
+    for (name, source) in SQLITE_SOURCES {
+        let on_disk = std::fs::read_to_string(directory.join(name))
+            .unwrap_or_else(|error| panic!("{name} is readable: {error}"));
+        assert_eq!(
+            on_disk.len(),
+            source.len(),
+            "{name} is paired with the wrong source"
+        );
+    }
+}
+
 /// Every replicated statement in the store must pass the validator the store
 /// applies at runtime.
 ///
@@ -706,8 +1026,9 @@ fn the_census_covers_every_slice_exactly_once() {
 
 mod scanner {
     use super::{
-        is_sql_candidate, is_statement, literals_and_code_mask, resolve_template, string_bindings,
-        string_constants, test_item_ranges, validate_sql,
+        is_sql_candidate, is_statement, literals_and_code_mask, resolve_template,
+        same_statement_binding_arity, string_bindings, string_constants, test_item_ranges,
+        validate_sql, validate_sqlite_placeholders,
     };
 
     /// A statement inside a `#[cfg(test)]` module is a fixture, not a
@@ -892,6 +1213,39 @@ fn production() { let _ = "SELECT $1 FROM b"; }
         assert!(
             error.to_string().contains("expected $4, found $6"),
             "the error names the ordinal it expected: {error}"
+        );
+    }
+
+    #[test]
+    fn sqlite_rejects_gaps_mixed_spelling_and_out_of_range_arity() {
+        let gap = validate_sqlite_placeholders("SELECT ?1, ?2, ?4")
+            .expect_err("an indexed gap is silent at runtime and must fail the census");
+        assert!(gap.contains("missing ?3"), "the error names the gap: {gap}");
+
+        let mixed = validate_sqlite_placeholders("SELECT ?, ?1")
+            .expect_err("anonymous and indexed parameters cannot share a statement");
+        assert!(mixed.contains("bare ? cannot be mixed"));
+
+        let source = r#"conn.execute("SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13", params![
+            one, two, three, four, five, six, seven, eight, nine, ten, eleven, twelve,
+        ])"#;
+        let (literals, is_code) = literals_and_code_mask(source);
+        let literal = literals.first().expect("the SQL literal is scanned");
+        assert_eq!(validate_sqlite_placeholders(&literal.text), Ok(13));
+        assert_eq!(
+            same_statement_binding_arity(source, &is_code, literal.end),
+            Some(12),
+            "a trailing macro comma is not a thirteenth binding"
+        );
+    }
+
+    #[test]
+    fn sqlite_ignores_placeholder_spelling_in_literals_comments_and_identifiers() {
+        assert_eq!(
+            validate_sqlite_placeholders(
+                "SELECT '?9', \"?8\", `[?7]`, [?6] FROM t WHERE id = ?1 -- ?5\n/* ?4 */"
+            ),
+            Ok(1)
         );
     }
 }

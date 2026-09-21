@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9d766cf9"]
+points = ["metadata.enrichment"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The Rust gates run denied-warning Clippy over the private production enrichment helpers, retaining the explicit reviewed allowance for the deadline-injected AniList helper without weakening workspace lint policy."

@@ -1076,15 +1076,21 @@ async fn package_dir(
             };
             match validate_shared_package_candidate(state, package, recipe, candidate).await {
                 Ok(location) => {
-                    let _ = state
-                        .store
-                        .touch_shared_cache_entry(
-                            recipe,
-                            &storage_id,
-                            &generation_id,
-                            now_unix().saturating_mul(1_000),
-                        )
-                        .await;
+                    // Best effort: serving this verified immutable package
+                    // does not depend on its LRU timestamp advancing.
+                    crate::store_result::observe(
+                        crate::store_result::Operation::TouchSharedOfflineCacheEntry,
+                        crate::store_result::Discard::BestEffort,
+                        state
+                            .store
+                            .touch_shared_cache_entry(
+                                recipe,
+                                &storage_id,
+                                &generation_id,
+                                now_unix().saturating_mul(1_000),
+                            )
+                            .await,
+                    );
                     return Ok(location);
                 }
                 Err(_) => shared_failed = true,

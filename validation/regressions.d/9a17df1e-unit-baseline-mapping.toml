@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9a17df1e"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The history audit parses every regression fragment and proves the unit-baseline repair mapping remains bound to one audited commit and runnable evidence."

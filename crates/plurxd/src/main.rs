@@ -1,5 +1,5 @@
 mod admission;
-mod bounded_process;
+use plurx_core::process::bounded as bounded_process;
 mod cachekeep;
 mod channel_subjects;
 mod copyseg;
@@ -40,6 +40,7 @@ mod scratch_ledger;
 mod serving_fence;
 mod shared_cache;
 mod state;
+mod store_result;
 mod storeprobe;
 mod subtitles;
 mod telemetry;

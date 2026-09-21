@@ -57,6 +57,12 @@ pub enum ProbeError {
     #[error("could not run ffprobe: {0}")]
     Spawn(String),
 
+    /// The process did not complete its bounded inspection. Unlike a media
+    /// refusal, this can recover when a mount or host does, so scans retain the
+    /// file as unprobed and try it again.
+    #[error("ffprobe did not finish for {path}: {reason}")]
+    Transient { path: String, reason: String },
+
     /// `reason` is ffprobe's own stderr — "Permission denied", "Invalid data
     /// found when processing input". Without it the operator gets an exit code
     /// and has to rerun the command by hand to learn whether the file is
@@ -87,6 +93,12 @@ pub enum AuthError {
 pub enum MetadataError {
     #[error("http error: {0}")]
     Http(String),
+
+    #[error("provider request timed out: {0}")]
+    Timeout(String),
+
+    #[error("provider response exceeded its body limit of {0} bytes")]
+    BodyBound(u64),
 
     #[error("provider returned status {0}")]
     Status(u16),
