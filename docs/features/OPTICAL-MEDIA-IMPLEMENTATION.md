@@ -1,7 +1,7 @@
 # Optical media — Sol's build contract for DVD and Blu-ray playback
 
-**Status:** executing on `effort/optical-media`; M0 feasibility and foundations
-in progress; no optical code or hardware acceptance exists · **Written:**
+**Status:** executing on `effort/optical-media`; M0–M4 foundations and local
+managed VOD are in progress; no physical hardware acceptance exists · **Written:**
 2026-09-20 · **Rebased:** 2026-09-20 · **Implementer:** Codex · **Original
 inspected checkout:** `0afefd92a` · **Implementation base:** `7911325407b9`.
 
@@ -1036,7 +1036,7 @@ compiles when its acceptance cases remain unexecuted.
 | M0 source/VOD proof | partial | [2026-09-20 evidence](../evidence/OPTICAL-M0-2026-09-20.md): pinned compiler and typed source/helper contracts established. Commit `05c7bb18` adds reusable DVD/Blu-ray logical folder fixtures and a scripted, call-traced fake host; marker fixtures are not physical demux/seek evidence. Local FFmpeg lacks both optical inputs, lab nodes were unreachable, and no identified drive exists on the reachable host. Physical DVD/Blu-ray VOD proof remains open. |
 | M1 domain/Store | built | Commit `b9032504`; [M1 evidence](../evidence/OPTICAL-M1-2026-09-20.md). Common source facts, managed optical decision constraints, versioned session/output identity, both Store backends, per-user progress, matching cleanup and explicit `optical.play` grants are implemented. A live multi-node Hiqlite round trip remains M4 acceptance, not a claim of this focused receipt. |
 | M2 device lifecycle | built; physical acceptance open | Commit `fbbf1e25` establishes configured-drive admission and the current follow-up wires conditional runtime observation, path-free readiness, authoritative enable/disable transitions and HTTP-facing state. See [M2 evidence](../evidence/OPTICAL-M2-2026-09-20.md). No reachable identified drive exists, so physical lifecycle acceptance remains open. |
-| M3 playback/API | partial | Authenticated drive/disc/title reads, managed-source decisions, session-bound progress, admin match and generation-checked eject are implemented without device paths. Commits through `6e80c5fe` retain bounded per-title probe evidence, revalidate the canonical read-only mount at admission, hold one generation-fenced playback lease, lower typed DVD/Blu-ray arguments through shared encoded VOD, and avoid a competing audio reopen. Registration in the existing VOD session controller, copy indexing, removal teardown and the physical seek proof remain open; no production playback route is advertised yet. |
+| M3 playback/API | partial | Authenticated drive/disc/title reads, managed-source decisions, local session start, session-bound progress, admin match and generation-checked eject are implemented without device paths. Commit `07402331` registers managed encoded titles in the existing immutable VOD controller without fictitious file/item IDs; the exact drive lease survives until terminal reader/process cleanup, active request IDs replay idempotently, conflicts fail typed, and a revoked insertion/lease terminates its producer. Copy indexing, durable cluster routing, client integration and the physical seek proof remain open; no release claim is made. |
 | M4 cluster | partial | Protocol 7 advertises bounded path-free drive ownership and remote discovery. Commit `a59d1429` adds bounded exact-auth owner forwarding and signed responses for remote disc reads, decisions and eject; [M4 evidence](../evidence/OPTICAL-M4-2026-09-21.md). Start/seek/stop relay, owner-only session placement and owner-loss playback acceptance remain open. |
 | M5 web | open | Concept only; full UI contract is in §8 |
 | M6 native | open | No implementation |
