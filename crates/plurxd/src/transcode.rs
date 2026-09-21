@@ -21554,6 +21554,12 @@ impl TranscodeManager {
                 .map_err(|error| error.to_string())?
                 .observing_qualified_grammar(observation.qualified_logging());
         let args = transcode::hls_args(&plan, &execution);
+        if plan.input_is_hdr()
+            && plan.options().pipeline == Pipeline::Cpu
+            && plan.options().tone_map == ToneMap::Zscale
+        {
+            crate::telemetry::record_tone_map_peak(plan.options().tone_map_peak_source);
+        }
         // Log the exact command — the single most useful diagnostic. It reveals
         // the decode/filter/encode pipeline actually used (e.g. whether heavy
         // HEVC is being hardware-decoded), and confirms which build is running.
@@ -21572,6 +21578,8 @@ impl TranscodeManager {
         tracing::info!(
             session = %session_log_id(&session_id), encoder = encoder.label(), pipeline = opts.pipeline.name(),
             proven = self.pipeline.name(), hdr = file.hdr.as_deref().unwrap_or("sdr"),
+            peak_nits = plan.options().tone_map_peak_nits,
+            peak_source = plan.options().tone_map_peak_source.name(),
             declined = declined.unwrap_or(""),
             build = crate::version::BUILD,
             "{}", ffmpeg_args_log_message("transcode ffmpeg args", &args, &session_id)
@@ -30484,6 +30492,10 @@ pub(crate) mod tests {
             bit_depth: Some(10),
             hdr: Some("dolby_vision".into()),
             hdr_format: Some("Dolby Vision · Profile 5".into()),
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(20_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -40251,6 +40263,10 @@ pub(crate) mod tests {
             bit_depth: Some(10),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(20_000_000),
             audio_streams: vec![],
             subtitle_streams: vec![],
@@ -49183,6 +49199,10 @@ scope = "test"
                 bit_depth: Some(if hdr.is_some() { 10 } else { 8 }),
                 hdr: hdr.map(str::to_owned),
                 hdr_format: hdr.map(str::to_owned),
+                max_cll: None,
+                max_fall: None,
+                mastering_max_luminance: None,
+                luminance_source: None,
                 bitrate: Some(8_000_000),
                 audio_streams: vec![
                     plurx_core::domain::AudioStream {

@@ -719,6 +719,13 @@ pub struct AppState {
     pub started_at: Instant,
 }
 
+fn stored_luminance(probe_json: &str) -> plurx_core::domain::ProbeResult {
+    serde_json::from_str::<serde_json::Value>(probe_json)
+        .ok()
+        .map(|document| plurx_core::scan::probe::parse_probe_json(&document))
+        .unwrap_or_default()
+}
+
 impl AppState {
     /// Whether PGS subtitle tracks are served through the `pgs-v1` overlay.
     ///
@@ -5634,6 +5641,10 @@ impl JobManager {
             let state = Arc::clone(self);
             tokio::spawn(async move { state.backfill_video_codec_tags().await });
         }
+        {
+            let state = Arc::clone(self);
+            tokio::spawn(async move { state.backfill_luminance_facts().await });
+        }
         Ok(())
     }
 
@@ -6390,6 +6401,104 @@ impl JobManager {
             fenced,
             cursor = walked,
             "video codec tag backfill: considered stored probe rows"
+        );
+    }
+
+    /// Classify existing HDR rows from their retained stream document. This
+    /// never opens media: SEI-only rows are stamped `none` and the next normal
+    /// scan/decode probe may upgrade them from a bounded first-frame read.
+    async fn backfill_luminance_facts(self: Arc<Self>) {
+        const BACKFILL_PER_TICK: i64 = 256;
+        if !matches!(
+            self.store
+                .get_setting(keys::JOB_LUMINANCE_BACKFILL_DONE)
+                .await,
+            Ok(None)
+        ) {
+            return;
+        }
+        let Ok(Some(_lease)) = self.acquire_job("catalogue:luminance".to_owned()).await else {
+            return;
+        };
+        let cursor_key = self.local_job_key(keys::JOB_LUMINANCE_BACKFILL_CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0);
+        let pending = match self
+            .store
+            .files_missing_luminance(cursor, BACKFILL_PER_TICK)
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, "listing files for the luminance backfill");
+                return;
+            }
+        };
+        if pending.is_empty() {
+            match self
+                .store
+                .put_setting(keys::JOB_LUMINANCE_BACKFILL_DONE, "1")
+                .await
+            {
+                Ok(()) => tracing::info!("luminance backfill: complete"),
+                Err(error) => tracing::warn!(%error, "stamping the luminance backfill complete"),
+            }
+            return;
+        }
+        let mut walked = cursor;
+        let mut updated = 0usize;
+        let mut fenced = 0usize;
+        for candidate in pending {
+            walked = walked.max(candidate.id);
+            let recovered = stored_luminance(&candidate.probe_json);
+            let source = if recovered.max_cll.is_some()
+                || recovered.max_fall.is_some()
+                || recovered.mastering_max_luminance.is_some()
+            {
+                "stream"
+            } else {
+                "none"
+            };
+            match self
+                .store
+                .set_file_luminance(
+                    &candidate,
+                    recovered.max_cll,
+                    recovered.max_fall,
+                    recovered.mastering_max_luminance,
+                    source,
+                )
+                .await
+            {
+                Ok(true) => updated += 1,
+                Ok(false) => fenced += 1,
+                Err(error) => {
+                    tracing::warn!(file_id = candidate.id, %error, "writing backfilled luminance facts");
+                    walked = walked.min(candidate.id.saturating_sub(1));
+                    break;
+                }
+            }
+        }
+        if walked > cursor {
+            if let Err(error) = self
+                .store
+                .put_setting(&cursor_key, &walked.to_string())
+                .await
+            {
+                tracing::warn!(%error, "advancing the luminance backfill cursor");
+            }
+        }
+        tracing::info!(
+            updated,
+            fenced,
+            cursor = walked,
+            "luminance backfill: considered stored probe rows"
         );
     }
 
@@ -9098,6 +9207,18 @@ mod tests {
     use plurx_core::domain::{
         DolbyVisionFacts, ItemEdit, ItemKind, NewItem, NewLibrary, PlaybackEventQuery, ProbeResult,
     };
+
+    #[test]
+    fn luminance_backfill_reads_stream_facts_without_opening_media() {
+        let recovered = stored_luminance(
+            r#"{"streams":[{"codec_type":"video","color_transfer":"smpte2084","side_data_list":[{"side_data_type":"Content light level metadata","max_content":4000,"max_average":1000},{"side_data_type":"Mastering display metadata","max_luminance":"40000000/10000"}]}]}"#,
+        );
+        assert_eq!(recovered.max_cll, Some(4000));
+        assert_eq!(recovered.max_fall, Some(1000));
+        assert_eq!(recovered.mastering_max_luminance, Some(4000));
+        assert_eq!(recovered.luminance_source.as_deref(), Some("stream"));
+        assert_eq!(stored_luminance("not json").luminance_source, None);
+    }
 
     #[tokio::test]
     async fn playback_preparation_is_durable_exact_and_independent_of_discovery() {

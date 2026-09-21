@@ -519,6 +519,10 @@ const TABLES: &[TablePlan] = &[
             "dv_el_present",
             "dv_rpu_present",
             "video_codec_tag",
+            "max_cll",
+            "max_fall",
+            "mastering_max_luminance",
+            "luminance_source",
         ],
         order_by: "id",
         minimum_schema: 5,
@@ -2522,6 +2526,14 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 // The source is opened read-only and cannot be migrated. Its
                 // stored probe JSON crosses with the row and the destination's
                 // bounded backfill recovers a valid tag afterward.
+                "NULL".to_owned()
+            } else if table.name == "files"
+                && matches!(
+                    *column,
+                    "max_cll" | "max_fall" | "mastering_max_luminance" | "luminance_source"
+                )
+                && schema_version < 64
+            {
                 "NULL".to_owned()
             } else if table.name == "cluster_fragment_index_jobs"
                 && *column == "attempt_errors"

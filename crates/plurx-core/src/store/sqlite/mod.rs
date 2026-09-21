@@ -1125,6 +1125,8 @@ pub(crate) const MIGRATIONS: &[&str] = &[
     // v63: mirror typed retry disposition and diagnostics in the standalone
     // node-local refusal store.
     crate::store::fragindex::FRAGMENT_INDEX_TYPED_OUTCOMES_SCHEMA,
+    // v64: retained source luminance facts for deterministic CPU tone maps.
+    super::FILES_LUMINANCE_COLUMNS_BATCH,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1220,7 +1222,7 @@ const FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container,
      subtitle_streams, scanned_at, hdr_format, audio_offset_ms, \
      (probe_json IS NOT NULL), \
      dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, \
-     video_codec_tag";
+     video_codec_tag, max_cll, max_fall, mastering_max_luminance, luminance_source";
 
 fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
     let path: String = row.get(2)?;
@@ -1257,6 +1259,10 @@ fn file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> {
             el_present: row.get::<_, Option<i64>>(23)?.map(|value| value != 0),
             rpu_present: row.get::<_, Option<i64>>(24)?.map(|value| value != 0),
         },
+        max_cll: row.get(26)?,
+        max_fall: row.get(27)?,
+        mastering_max_luminance: row.get(28)?,
+        luminance_source: row.get(29)?,
     })
 }
 
@@ -2531,7 +2537,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 63,
+            version, 64,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -2570,6 +2576,23 @@ mod tests {
                  so nothing has to read a profile number back out of a display \
                  label: {files}"
             );
+        }
+        assert_eq!(
+            super::super::FILES_LUMINANCE_COLUMNS
+                .iter()
+                .map(|statement| format!("{statement};"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            super::super::FILES_LUMINANCE_COLUMNS_BATCH.trim(),
+            "the per-statement and batch spellings of the luminance migration have drifted"
+        );
+        for column in [
+            "max_cll",
+            "max_fall",
+            "mastering_max_luminance",
+            "luminance_source",
+        ] {
+            assert!(files.contains(column), "v64 carries {column}: {files}");
         }
         let fragment_indexes: String = conn
             .query_row(

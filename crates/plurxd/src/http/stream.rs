@@ -3448,6 +3448,10 @@ mod tests {
             bit_depth: Some(10),
             hdr: hdr.map(str::to_owned),
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(20_000_000),
             audio_streams: Vec::new(),
             subtitle_streams: Vec::new(),
@@ -4260,6 +4264,10 @@ mod tests {
             bit_depth: Some(10),
             hdr: Some("dolby_vision".into()),
             hdr_format: Some("Dolby Vision · Profile 7 (HDR10-compatible)".into()),
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(90_892_368),
             // The columns, not only the label. The conversion needs the level
             // and the compatibility id as numbers to build the configuration
@@ -5660,6 +5668,10 @@ mod tests {
             bit_depth: Some(8),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(1_000),
             audio_streams: vec![],
             subtitle_streams: vec![
@@ -5784,6 +5796,10 @@ mod tests {
             bit_depth: Some(8),
             hdr: None,
             hdr_format: None,
+            max_cll: None,
+            max_fall: None,
+            mastering_max_luminance: None,
+            luminance_source: None,
             bitrate: Some(1_000),
             audio_streams: vec![],
             subtitle_streams: [

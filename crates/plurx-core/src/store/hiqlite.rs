@@ -61,7 +61,8 @@ use crate::error::StoreError;
 // offline package claims; v35-v40 add library channels, DVR, subject matching,
 // DVR event history, and the source video sample-entry fact; v41 adds typed
 // content-analysis diagnostics, fixed retry deadlines, identity-aware request
-// indexes, and durable repair receipts. Every additive step is applied through Raft before
+// indexes, and durable repair receipts; v43 retains source luminance facts.
+// Every additive step is applied through Raft before
 // the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
@@ -99,7 +100,8 @@ const DVR_EVENT_SCHEMA_VERSION: i64 = 39;
 const VIDEO_CODEC_TAG_SCHEMA_VERSION: i64 = 40;
 const CLASSIFICATION_SCHEMA_VERSION: i64 = 41;
 const CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION: i64 = 42;
-pub const AUTH_SCHEMA_VERSION: i64 = CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION;
+const LUMINANCE_SCHEMA_VERSION: i64 = 43;
+pub const AUTH_SCHEMA_VERSION: i64 = LUMINANCE_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -141,6 +143,7 @@ const DVR_SCHEMA_MIGRATION_SOURCE: i64 = LIBRARY_CHANNEL_BUILD_STATE_SCHEMA_VERS
 const DVR_EVENT_SCHEMA_MIGRATION_SOURCE: i64 = SUBJECT_SCHEMA_VERSION;
 const VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE: i64 = DVR_EVENT_SCHEMA_VERSION;
 const CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE: i64 = CLASSIFICATION_SCHEMA_VERSION;
+const LUMINANCE_SCHEMA_MIGRATION_SOURCE: i64 = CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -2531,6 +2534,26 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(LUMINANCE_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements = super::FILES_LUMINANCE_COLUMNS
+                        .iter()
+                        .map(|sql| ((*sql).to_owned(), params!()))
+                        .collect::<Vec<_>>();
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            LUMINANCE_SCHEMA_VERSION,
+                            now,
+                            LUMINANCE_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(LUMINANCE_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -4320,7 +4343,8 @@ fn schema_migration_action(
         | DVR_EVENT_SCHEMA_MIGRATION_SOURCE
         | VIDEO_CODEC_TAG_SCHEMA_MIGRATION_SOURCE
         | VIDEO_CODEC_TAG_SCHEMA_VERSION
-        | CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE => {
+        | CONTENT_ANALYSIS_REPAIR_SCHEMA_MIGRATION_SOURCE
+        | LUMINANCE_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -6244,9 +6268,18 @@ mod tests {
             "v41 must advance exactly one step to the content-analysis repair schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 37,
+            LUMINANCE_SCHEMA_MIGRATION_SOURCE, CONTENT_ANALYSIS_REPAIR_SCHEMA_VERSION,
+            "the luminance migration must start from the exact v42 shape"
+        );
+        assert_eq!(
+            LUMINANCE_SCHEMA_MIGRATION_SOURCE + 1,
+            LUMINANCE_SCHEMA_VERSION,
+            "v42 must advance exactly one step to the luminance schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 38,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v42 step"
+            "this implementation contains every additive v5→v43 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

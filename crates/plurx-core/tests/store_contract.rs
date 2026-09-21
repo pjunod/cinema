@@ -386,6 +386,8 @@ const MEDIA_METHODS: &[&str] = &[
     "files_missing_dolby_vision",
     "files_missing_video_codec_tag",
     "set_file_video_codec_tag",
+    "files_missing_luminance",
+    "set_file_luminance",
     "set_file_dolby_vision",
     "get_file_probe_json",
     "get_file_probe_chapters_json",
@@ -16409,7 +16411,7 @@ fn contract_inventory_matches_every_store_method() {
     // Both independently reviewed method sets survive this integration. Read
     // the total from the merged trait rather than carrying either parent's
     // count across the promotion merge.
-    assert_eq!(declared.len(), 375, "review the Store method count");
+    assert_eq!(declared.len(), 377, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -16795,6 +16797,82 @@ async fn video_codec_tag_round_trips_and_backfill_updates_are_exactly_fenced() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: second bounded page: {error}"));
         assert_eq!(second.len(), 1, "{backend}: row 257 remains reachable");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn luminance_round_trips_and_backfill_updates_are_exactly_fenced() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "HDR luminance".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/hdr".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "HDR fixture".into(),
+                year: Some(2026),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+        let probe_json = r#"{"streams":[{"codec_type":"video","color_transfer":"smpte2084"}]}"#;
+        let file_id = store
+            .upsert_file(
+                item,
+                "/hdr/fixture.mkv",
+                10,
+                20,
+                &ProbeResult {
+                    hdr: Some("hdr10".into()),
+                    raw_json: Some(probe_json.into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: file: {error}"));
+        let candidate = store
+            .files_missing_luminance(0, 256)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: pending: {error}"))
+            .into_iter()
+            .next()
+            .expect("pending luminance");
+        assert_eq!(candidate.id, file_id);
+        assert!(store
+            .set_file_luminance(&candidate, Some(4000), Some(1000), Some(4000), "stream")
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: write: {error}")));
+        let stored = store
+            .get_file(file_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+            .expect("stored file");
+        assert_eq!(
+            (
+                stored.max_cll,
+                stored.max_fall,
+                stored.mastering_max_luminance
+            ),
+            (Some(4000), Some(1000), Some(4000))
+        );
+        assert_eq!(stored.luminance_source.as_deref(), Some("stream"));
+        assert!(
+            !store
+                .set_file_luminance(&candidate, None, None, None, "none")
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale write: {error}")),
+            "{backend}: a classified row refuses a repeated stale update"
+        );
     })
     .await;
 }

@@ -29,6 +29,7 @@ const IDENTITY_DEADLINE: Duration = Duration::from_secs(10);
 const VERSION_DEADLINE: Duration = Duration::from_secs(5);
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 const MAX_CACHE_ENTRIES: usize = 256;
+const PROBE_SCHEMA_VERSION: u8 = 2;
 #[cfg(unix)]
 const HELD_PROBE_FD: std::os::fd::RawFd = 4;
 
@@ -50,6 +51,7 @@ fn test_discovery_gate() -> Arc<tokio::sync::Semaphore> {
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct CacheKey {
+    probe_schema_version: u8,
     source: DecodeSourceIdentity,
     ffprobe_build_digest: String,
     catalog_digest: Option<String>,
@@ -2938,6 +2940,7 @@ impl DecodeFactCache {
         .await?;
         let bound_identity = bound_source.identity.clone();
         let key = CacheKey {
+            probe_schema_version: PROBE_SCHEMA_VERSION,
             source: bound_identity.clone(),
             ffprobe_build_digest: probe.build_digest().to_owned(),
             catalog_digest: catalog.map(|metadata| metadata.digest().to_owned()),
@@ -3340,7 +3343,7 @@ async fn collect(
         "-print_format",
         "json",
         "-show_entries",
-        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,bits_per_raw_sample,avg_frame_rate,r_frame_rate,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_side_data=side_data_type",
+        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,bits_per_raw_sample,avg_frame_rate,r_frame_rate,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_side_data=side_data_type,max_content,max_average,max_luminance",
         "-show_streams",
         "/dev/fd/3",
     ]
@@ -3614,7 +3617,7 @@ async fn collect(
         "-print_format",
         "json",
         "-show_entries",
-        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,bits_per_raw_sample,avg_frame_rate,r_frame_rate,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_side_data=side_data_type",
+        "stream=index,codec_type,codec_name,profile,pix_fmt,width,height,bits_per_raw_sample,avg_frame_rate,r_frame_rate,color_range,color_space,color_transfer,color_primaries:stream_disposition=attached_pic:stream_side_data=side_data_type,max_content,max_average,max_luminance",
         "-show_streams",
     ];
     let mut command =
