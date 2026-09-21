@@ -389,7 +389,7 @@ The test harness captures its own stdout, which is why the child is run
 with `--nocapture`; the parent reads the pipe, not the harness. The child
 test's name is stable because `--exact` matches it.
 
-Acceptance: `cargo test -p plurxd process_control` green on Linux, and
+Acceptance: `cargo test -p plurx-core process::` green on Linux, and
 `cargo check -p plurxd --tests --target x86_64-pc-windows-msvc` compiles
 (run through the same `cargo xwin` toolchain `ci.yml:206` installs; the
 release lane does not build tests, so this check is the PR author's, in
@@ -464,7 +464,7 @@ Acceptance: the three observations, recorded in the PR's status note.
 
 ## 6. Verification and rollout
 
-- Focused: `cargo test -p plurxd process_control` (M1), `cargo test -p plurxd
+- Focused: `cargo test -p plurx-core process::` (M1), `cargo test -p plurxd
   dovi_probe_output media_origin -- --ignored` (M2, ffmpeg host), `cargo
   test -p plurx-core scan::probe` (M3).
 - Lane: `make unit` for every PR; `cargo check -p plurxd --tests --target
@@ -472,7 +472,7 @@ Acceptance: the three observations, recorded in the PR's status note.
   release only.
 - Windows execution of the M1 tests: not provable in CI or on the named
   fleet (no Windows host). GPT prompt: "On a Windows machine with the
-  repo's toolchain, run `cargo test -p plurxd process_control` and paste
+  repo's toolchain, run `cargo test -p plurx-core process::` and paste
   the output." If none is available, the PR says so; the compile check and
   the Linux run are the evidence.
 - Rollout: one draft PR into `main` under the fast lane. The commits preserve
@@ -552,4 +552,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
 | 2026-09-20 | gpt-5.6-sol | agent:/root/s01_builder | M1-M3 | [#396](http://192.168.4.7:3000/noirr/plurx/pulls/396) | Implemented in one draft PR: output capture restored; bounded process ownership moved to `plurx-core`; scan probes have 60 s / 16 MiB bounds, typed retryable failure and four fixed-label metrics. Portable process/probe regressions, generated ffmpeg proofs, pinned 1.97.1 checks and Windows test compilation are recorded in the PR. Broad `make unit` remains intentionally deferred until adversarial review. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/s01_builder | Review repair | [#396 finding #3080](http://192.168.4.7:3000/noirr/plurx/pulls/396#issuecomment-3080) | The structural inventory now scans `plurxd/src`, the shared `plurx-core/src/process` owner and its `plurx-core/src/scan` consumer; all eight affected counts were remeasured and the seven-test inventory gate passes. The final-tree M1 command is `cargo test -p plurx-core process::` (9 passed), replacing the stale `plurxd process_control` filter that ran no tests. Pinned 1.97.1 focused M2/M3 regressions, formatting, checks, scoped Clippy, Windows test compilation and docs validation were rerun after merging `main` at `94e36750`. Broad `make unit` remains held until P-01 #401 lands. |
 | 2026-09-20 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [#396](http://192.168.4.7:3000/noirr/plurx/pulls/396) | needs: merged image deployed by Ansible to media1 and lab1-lab6, then the three observations in §5.4. Branch-artifact deployment was rejected as unsafe fleet evidence. |

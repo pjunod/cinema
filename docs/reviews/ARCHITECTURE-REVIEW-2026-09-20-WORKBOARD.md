@@ -108,7 +108,7 @@ document (the twelve written second landed on 2026-09-20 as well).
 
 | Id | Plan | Executes | Priority | Status | Model | Session | Branch / PR | Last update | Notes |
 |---|---|---|---|---|---|---|---|---|---|
-| S-01 | [PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS](../streaming/PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md) | §2.1, C12 | week | in-progress | gpt-5.6-sol | agent:/root/s01_builder | [`plan/S-01` · draft #396](http://192.168.4.7:3000/noirr/plurx/pulls/396) | 2026-09-20 | M1-M3 implemented with focused pinned-toolchain evidence; broad unit waits for adversarial review. M4 needs the merged image deployed, then §5.4 fleet evidence. |
+| S-01 | [PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS](../streaming/PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md) | §2.1, C12 | week | blocked: P-01 #401 | gpt-5.6-sol | agent:/root/s01_builder | [`plan/S-01` · draft #396](http://192.168.4.7:3000/noirr/plurx/pulls/396) | 2026-09-20 | Adversarial finding #3080 addressed; focused exact-head evidence is current. Broad unit and ready-for-review transition wait for P-01 #401. M4 needs the merged image deployed, then §5.4 fleet evidence. |
 | S-02 | [MEDIA-BODY-BUFFERS](../streaming/MEDIA-BODY-BUFFERS.md) | §2.4, C1 | week | unclaimed | | | | 2026-09-20 | M1 only this week; M2 (ack batching) after measurement |
 | S-03 | [ENCODED-VOD-HOLD-AND-RELEASE](../streaming/ENCODED-VOD-HOLD-AND-RELEASE.md) | §2.6 | week | unclaimed | | | | 2026-09-20 | M0 fleet count first |
 | S-04 | [FONT-ATTESTATION-AND-BLOCKING-IO](../streaming/FONT-ATTESTATION-AND-BLOCKING-IO.md) | §2.7 | week (M1) / month (M2) | unclaimed | | | | 2026-09-20 | Needs `ldd \| grep fontconfig` on media1 before M2 |
