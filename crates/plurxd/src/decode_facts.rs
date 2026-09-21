@@ -3448,6 +3448,30 @@ pub(crate) enum DecodeFactError {
     UnsupportedPlatform,
 }
 
+impl DecodeFactError {
+    pub(crate) const fn fallback_reason(&self) -> DecodePlanFallbackReason {
+        match self {
+            Self::Deadline => DecodePlanFallbackReason::Deadline,
+            Self::Cancelled => DecodePlanFallbackReason::Cancelled,
+            Self::ProbeChanged => DecodePlanFallbackReason::ProbeChanged,
+            Self::SourceChanged => DecodePlanFallbackReason::RefusedSourceChanged,
+            Self::Spawn(_)
+            | Self::MissingPipe
+            | Self::Read(_)
+            | Self::OversizedOutput
+            | Self::Failed(_, _)
+            | Self::InvalidJson(_)
+            | Self::InvalidFacts(_) => DecodePlanFallbackReason::ProbeFailed,
+            Self::ProbeIdentity(_) | Self::SourceMetadata(_) => {
+                DecodePlanFallbackReason::IdentityIo
+            }
+            Self::CacheInvariant => DecodePlanFallbackReason::Invariant,
+            #[cfg(not(target_os = "linux"))]
+            Self::UnsupportedPlatform => DecodePlanFallbackReason::Invariant,
+        }
+    }
+}
+
 impl std::fmt::Display for DecodeFactError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
