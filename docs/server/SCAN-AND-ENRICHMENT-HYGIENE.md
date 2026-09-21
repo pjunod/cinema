@@ -1,6 +1,6 @@
 # Scan and enrichment hygiene — walk off the runtime, deadlines on every provider call
 
-**Status:** ready for review · **Executes:** C3 / F-core-3 and C5 / F-core-6
+**Status:** implementation in progress · **Executes:** C3 / F-core-3 and C5 / F-core-6
 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 (assessment rows C3, F-core-3, C5, F-core-6 in
@@ -12,10 +12,10 @@ from
 Read §2 first: it quotes the walk, the per-file stat, the two provider
 clients and the join request as they are, and states what the job lease
 does and does not do when one of them hangs. Then build §5 in order — M1
-(the scanner) and M2 (provider deadlines) are independent and may run in
-parallel sessions; M3 (`post_join_request`) is small and depends on
-neither. One draft PR per milestone into `main` under the fast lane.
-Every `file:line` is from `88a3957a`; re-verify by function name.
+(the scanner), M2 (provider deadlines), then M3 (`post_join_request`). The
+current workboard protocol keeps all three logical milestone commits in one
+draft implementation PR into `main`. Every `file:line` is from `88a3957a`;
+re-verify by function name.
 
 **If a step seems to require changing candidate order, the reconcile
 guard (`walk_errors == 0`), the size+mtime unchanged short-circuit, the
@@ -542,7 +542,7 @@ stop, paste the last 50 lines of journalctl -u plurxd, and do not restart.
 
 ## Execution log
 
-Executing sessions append one row per milestone PR (see the
+Executing sessions append one row per milestone (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
@@ -550,4 +550,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M1 | #400 | Commit `6412f1fbf7d8`: bounded four-page walker shared by full and targeted scans; async file stat and root canonicalization; walk/process histogram. `cargo test -p plurx-core scan::` (106 passed), `cargo test -p plurxd scan` (19 passed), pinned 1.97.1 checks and scoped Clippy passed. Fleet NAS timing remains post-merge evidence. |
