@@ -1,0 +1,438 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Architecture review implementation status</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f4f6f8;
+      --panel: #ffffff;
+      --text: #17212b;
+      --muted: #617080;
+      --line: #d8dee5;
+      --link: #174da1;
+      --accent: #243b53;
+      --unclaimed: #68737d;
+      --active: #8a5400;
+      --blocked: #a22b2b;
+      --merged: #17633a;
+      --done: #136c34;
+      --abandoned: #6c4a72;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.5 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        sans-serif;
+    }
+
+    main {
+      width: min(1500px, 100%);
+      margin: 0 auto;
+      padding: 40px 24px 64px;
+    }
+
+    h1 { margin: 0 0 8px; font-size: clamp(1.9rem, 4vw, 2.8rem); }
+    h2 { margin: 36px 0 12px; font-size: 1.3rem; }
+    p { max-width: 78ch; }
+    a { color: var(--link); }
+    code { font-size: 0.88em; }
+
+    .source-note {
+      margin: 18px 0 24px;
+      padding: 16px 18px;
+      border-left: 5px solid var(--accent);
+      background: var(--panel);
+    }
+
+    .source-note p { margin: 0; }
+    .source-note p + p { margin-top: 6px; }
+    .muted { color: var(--muted); }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+      gap: 12px;
+      margin: 24px 0;
+    }
+
+    .metric {
+      min-height: 92px;
+      padding: 15px 16px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+    }
+
+    .metric strong { display: block; font-size: 1.8rem; line-height: 1.15; }
+    .metric span { color: var(--muted); font-size: 0.9rem; }
+
+    .controls {
+      display: grid;
+      grid-template-columns: minmax(220px, 2fr) repeat(2, minmax(150px, 1fr));
+      gap: 12px;
+      align-items: end;
+      margin: 24px 0 16px;
+    }
+
+    label { color: var(--muted); font-size: 0.85rem; font-weight: 650; }
+    input, select, button {
+      width: 100%;
+      min-height: 42px;
+      margin-top: 5px;
+      padding: 9px 11px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel);
+      color: var(--text);
+      font: inherit;
+    }
+
+    button { width: auto; cursor: pointer; }
+    button:hover { border-color: var(--accent); }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+    }
+
+    table { width: 100%; min-width: 1120px; border-collapse: collapse; }
+    th, td {
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      background: var(--accent);
+      color: #fff;
+      font-size: 0.82rem;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: color-mix(in srgb, var(--panel) 90%, var(--link)); }
+    td:nth-child(1) { white-space: nowrap; font-weight: 700; }
+    td:nth-child(4), td:nth-child(9) { white-space: nowrap; }
+    td:nth-child(5) { min-width: 165px; }
+    td:nth-child(10) { min-width: 260px; }
+
+    .status {
+      display: inline-block;
+      padding: 2px 8px;
+      border: 1px solid currentColor;
+      border-radius: 999px;
+      font-size: 0.82rem;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+
+    .status-unclaimed { color: var(--unclaimed); }
+    .status-active { color: var(--active); }
+    .status-blocked { color: var(--blocked); }
+    .status-merged { color: var(--merged); }
+    .status-done { color: var(--done); }
+    .status-abandoned { color: var(--abandoned); }
+
+    .message {
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--panel);
+    }
+
+    .error { border-color: var(--blocked); color: var(--blocked); }
+    .hidden { display: none; }
+
+    @media (max-width: 760px) {
+      main { padding: 24px 14px 48px; }
+      .controls { grid-template-columns: 1fr; }
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #10151b;
+        --panel: #18212a;
+        --text: #edf2f7;
+        --muted: #a8b4c0;
+        --line: #344150;
+        --link: #8ab4f8;
+        --accent: #314b66;
+        --unclaimed: #a8b4c0;
+        --active: #f0b35b;
+        --blocked: #ff8585;
+        --merged: #6dd39a;
+        --done: #77dba2;
+        --abandoned: #d5a4dd;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Architecture review status — one view of the canonical workboard</h1>
+    <p>
+      One view of every plan produced by the 2026-09-20 architecture review.
+      Search and filter here; claim and update work only in the canonical
+      workboard.
+    </p>
+
+    <div class="source-note">
+      <p>
+        <strong>Source of truth:</strong>
+        <a id="source-link"
+           href="ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md">architecture
+        review workboard</a>. This page fetches and parses that table; it does
+        not keep a second copy of its rows.
+      </p>
+      <p class="muted" id="freshness" aria-live="polite">Loading workboard…</p>
+    </div>
+
+    <section aria-labelledby="summary-heading">
+      <h2 id="summary-heading">At a glance</h2>
+      <div class="summary" id="summary" aria-live="polite"></div>
+    </section>
+
+    <section aria-labelledby="plans-heading">
+      <h2 id="plans-heading">Plans</h2>
+      <div class="controls">
+        <label>
+          Search
+          <input id="search" type="search"
+                 placeholder="Id, plan, owner, branch, note…">
+        </label>
+        <label>
+          Status
+          <select id="status-filter">
+            <option value="all">All statuses</option>
+            <option value="unclaimed">Unclaimed</option>
+            <option value="active">Active</option>
+            <option value="blocked">Blocked</option>
+            <option value="merged">Merged</option>
+            <option value="done">Done</option>
+            <option value="abandoned">Abandoned</option>
+          </select>
+        </label>
+        <label>
+          Priority
+          <select id="priority-filter">
+            <option value="all">All priorities</option>
+            <option value="week">Week</option>
+            <option value="month">Month</option>
+            <option value="quarter">Quarter</option>
+            <option value="design">Design</option>
+          </select>
+        </label>
+      </div>
+
+      <p class="muted" id="result-count"></p>
+      <div class="message" id="loading">Reading the canonical table…</div>
+      <div class="message error hidden" id="error" role="alert"></div>
+      <div class="table-wrap hidden" id="table-wrap">
+        <table>
+          <thead id="table-head"></thead>
+          <tbody id="table-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <p>
+      <button type="button" id="refresh">Refresh from workboard</button>
+      · <a href="ARCHITECTURE-REVIEW-2026-09-20.md">Review</a>
+      · <a href="../README.md">Documentation index</a>
+    </p>
+  </main>
+
+  <script src="ARCHITECTURE-REVIEW-2026-09-20-STATUS.js"></script>
+  <script>
+    "use strict";
+
+    const WORKBOARD = "ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md";
+    const { EXPECTED_COLUMNS, parseBoard } =
+      globalThis.ArchitectureReviewStatusParser;
+    const REFRESH_MS = 60_000;
+
+    const state = { rows: [] };
+    const elements = {
+      error: document.querySelector("#error"),
+      freshness: document.querySelector("#freshness"),
+      loading: document.querySelector("#loading"),
+      priority: document.querySelector("#priority-filter"),
+      refresh: document.querySelector("#refresh"),
+      resultCount: document.querySelector("#result-count"),
+      search: document.querySelector("#search"),
+      status: document.querySelector("#status-filter"),
+      summary: document.querySelector("#summary"),
+      tableBody: document.querySelector("#table-body"),
+      tableHead: document.querySelector("#table-head"),
+      tableWrap: document.querySelector("#table-wrap"),
+    };
+
+    function statusGroup(status) {
+      const normalized = status.trim().toLowerCase();
+      if (normalized === "unclaimed") return "unclaimed";
+      if (["claimed", "in-progress", "in-review"].includes(normalized)) return "active";
+      if (normalized.startsWith("blocked:")) return "blocked";
+      if (normalized === "merged") return "merged";
+      if (normalized === "done") return "done";
+      if (normalized.startsWith("abandoned:")) return "abandoned";
+      return "active";
+    }
+
+    function safeHref(href) {
+      if (/^(?:https?:|#|\.\.?\/)/.test(href)) return href;
+      return "#";
+    }
+
+    function appendInlineMarkdown(target, markdown) {
+      const pattern = /(\[[^\]]+\]\([^)]+\)|`[^`]+`|\*\*[^*]+\*\*)/g;
+      let cursor = 0;
+      for (const match of markdown.matchAll(pattern)) {
+        target.append(document.createTextNode(markdown.slice(cursor, match.index)));
+        const token = match[0];
+        if (token.startsWith("[")) {
+          const parts = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+          const link = document.createElement("a");
+          link.textContent = parts[1];
+          link.href = safeHref(parts[2]);
+          target.append(link);
+        } else if (token.startsWith("`")) {
+          const code = document.createElement("code");
+          code.textContent = token.slice(1, -1);
+          target.append(code);
+        } else {
+          const strong = document.createElement("strong");
+          strong.textContent = token.slice(2, -2);
+          target.append(strong);
+        }
+        cursor = match.index + token.length;
+      }
+      target.append(document.createTextNode(markdown.slice(cursor)));
+    }
+
+    function metric(label, value) {
+      const card = document.createElement("div");
+      card.className = "metric";
+      const number = document.createElement("strong");
+      number.textContent = value;
+      const caption = document.createElement("span");
+      caption.textContent = label;
+      card.append(number, caption);
+      return card;
+    }
+
+    function renderSummary() {
+      const counts = Object.fromEntries(
+        ["unclaimed", "active", "blocked", "merged", "done", "abandoned"]
+          .map((group) => [group, 0]),
+      );
+      for (const row of state.rows) counts[statusGroup(row.Status)] += 1;
+
+      elements.summary.replaceChildren(
+        metric("Total plans", state.rows.length),
+        metric("Unclaimed", counts.unclaimed),
+        metric("Active", counts.active),
+        metric("Blocked", counts.blocked),
+        metric("Merged", counts.merged),
+        metric("Done", counts.done),
+        metric("Abandoned", counts.abandoned),
+      );
+    }
+
+    function filteredRows() {
+      const query = elements.search.value.trim().toLowerCase();
+      return state.rows.filter((row) => {
+        const matchesSearch = !query || Object.values(row).join(" ").toLowerCase().includes(query);
+        const matchesStatus = elements.status.value === "all" ||
+          statusGroup(row.Status) === elements.status.value;
+        const matchesPriority = elements.priority.value === "all" ||
+          row.Priority.toLowerCase().includes(elements.priority.value);
+        return matchesSearch && matchesStatus && matchesPriority;
+      });
+    }
+
+    function renderTable() {
+      const rows = filteredRows();
+      elements.tableHead.replaceChildren();
+      const headerRow = document.createElement("tr");
+      for (const column of EXPECTED_COLUMNS) {
+        const heading = document.createElement("th");
+        heading.scope = "col";
+        heading.textContent = column;
+        headerRow.append(heading);
+      }
+      elements.tableHead.append(headerRow);
+
+      elements.tableBody.replaceChildren();
+      for (const row of rows) {
+        const tableRow = document.createElement("tr");
+        for (const column of EXPECTED_COLUMNS) {
+          const cell = document.createElement("td");
+          if (column === "Status") {
+            const status = document.createElement("span");
+            status.className = `status status-${statusGroup(row.Status)}`;
+            status.textContent = row.Status;
+            cell.append(status);
+          } else {
+            appendInlineMarkdown(cell, row[column]);
+          }
+          tableRow.append(cell);
+        }
+        elements.tableBody.append(tableRow);
+      }
+      elements.resultCount.textContent = `Showing ${rows.length} of ${state.rows.length} plans.`;
+    }
+
+    async function loadBoard() {
+      elements.refresh.disabled = true;
+      elements.error.classList.add("hidden");
+      try {
+        const response = await fetch(WORKBOARD, { cache: "no-store" });
+        if (!response.ok) throw new Error(`Workboard request returned HTTP ${response.status}.`);
+        state.rows = parseBoard(await response.text());
+        renderSummary();
+        renderTable();
+
+        const newest = state.rows.map((row) => row["Last update"]).sort().at(-1);
+        const loaded = new Intl.DateTimeFormat(undefined, {
+          dateStyle: "medium", timeStyle: "medium",
+        }).format(new Date());
+        elements.freshness.textContent =
+          `Loaded ${state.rows.length} plans at ${loaded}; newest recorded update ${newest}. ` +
+          "Refreshes every 60 seconds.";
+        elements.loading.classList.add("hidden");
+        elements.tableWrap.classList.remove("hidden");
+      } catch (error) {
+        elements.loading.classList.add("hidden");
+        elements.tableWrap.classList.add("hidden");
+        elements.freshness.textContent = "The canonical workboard could not be loaded.";
+        elements.error.textContent =
+          `${error.message} Serve the docs directory over HTTP so the browser can fetch the sibling Markdown file.`;
+        elements.error.classList.remove("hidden");
+      } finally {
+        elements.refresh.disabled = false;
+      }
+    }
+
+    for (const control of [elements.search, elements.status, elements.priority]) {
+      control.addEventListener("input", renderTable);
+    }
+    elements.refresh.addEventListener("click", loadBoard);
+    loadBoard();
+    window.setInterval(loadBoard, REFRESH_MS);
+  </script>
+</body>
+</html>
