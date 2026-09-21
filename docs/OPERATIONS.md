@@ -4611,6 +4611,18 @@ Hiqlite operation.
 | `plurx_raft_current_term`, `plurx_raft_leader_known`, `plurx_raft_is_leader` | Local Raft leadership state from the cached watch. A known leader is required but does not by itself prove this node is caught up. |
 | `plurx_raft_applied_index`, `plurx_raft_commit_index`, `plurx_raft_apply_lag_entries` | Local apply progress against the quorum-confirmed commit watermark. Healthy readiness requires zero lag. |
 
+Playback telemetry writer metrics are also node-local and fixed-cardinality;
+they never label a session, file, user, network, or path.
+
+| Metric | How to read it |
+|---|---|
+| `plurx_telemetry_enqueued_total{class="terminal|lifecycle|sample"}` | Jobs admitted to the bounded 1,024-slot writer queue. |
+| `plurx_telemetry_dropped_total{reason="queue_full|coalesced|writer_degraded|shutdown"}` | Work deliberately discarded by the bounded policy. A growing `queue_full` or `writer_degraded` series needs the daemon log and sidecar health inspected; `coalesced` is expected snapshot replacement. |
+| `plurx_telemetry_written_total{outcome="ok|error"}` | Raw rows offered successfully or unsuccessfully to the node-local Store batch path. |
+| `plurx_telemetry_queue_depth` | Current queue occupancy; non-terminal work stops at 896 so 128 slots remain reserved for terminal outcomes. |
+| `plurx_telemetry_batch_size`, `plurx_telemetry_batch_seconds` | Fixed-bucket histograms for batch occupancy and processing time. Use them to decide whether a second sidecar connection or different batch constants are warranted; do not infer that from queue depth alone. |
+| `plurx_telemetry_setting_refresh_failures_total` | Paired effective-setting refreshes that failed while the last good values remained active. |
+
 The compact Prometheus alert shape is: membership sample valid · leader known ·
 heartbeat quorum available · apply lag zero. `/readyz` remains the final active
 serving check because the metrics are deliberately passive and cached.

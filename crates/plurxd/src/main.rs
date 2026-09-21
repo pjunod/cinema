@@ -1495,6 +1495,7 @@ async fn boot(
     spawn_background_loops(&state, background_loops.token());
 
     let progress = Arc::clone(&state.progress);
+    let telemetry_store = Arc::clone(&state.store);
     let leave_shutdown = state.shutdown.clone();
     let live_tv_shutdown = Arc::clone(&state.live_tv);
     let serving_shutdown = state.serving.clone();
@@ -1527,6 +1528,7 @@ async fn boot(
         let _ = serving_shutdown
             .begin_restart_preparation_until(expires)
             .await;
+        crate::telemetry::drain_for_shutdown(&telemetry_store).await;
         if let Err(error) = live_tv_shutdown.shutdown().await {
             tracing::warn!(%error, "Live TV shutdown could not confirm complete cleanup");
         }

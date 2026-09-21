@@ -11,6 +11,8 @@ use plurx_core::domain::{CredentialGeneration, NetworkPriorObservation, Playback
 use plurx_core::error::StoreError;
 use plurx_core::store::{keys, Store};
 use tokio::sync::mpsc;
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 const TTFF_BUCKETS: [i64; 8] = [100, 250, 500, 1_000, 2_500, 5_000, 10_000, 30_000];
 const METHODS: [&str; 4] = ["direct_play", "remux", "transcode", "unknown"];
@@ -31,10 +33,22 @@ const ENCODERS: [&str; 8] = [
 const MARKER_ACTIONS: [&str; 4] = ["offer", "manual_skip", "automatic_skip", "undo_seek_back"];
 const MARKER_PREWARM_RESULTS: [&str; 2] = ["hit", "miss"];
 const QUEUE: usize = 1_024;
+const TERMINAL_RESERVE: usize = 128;
 const BATCH: usize = 64;
 const BATCH_WINDOW: Duration = Duration::from_millis(200);
+const DRAIN: Duration = Duration::from_secs(2);
 const WRITER_RESTARTS_PER_HOUR: usize = 6;
 const SETTINGS_REFRESH: Duration = Duration::from_secs(30);
+const BATCH_SIZE_BUCKETS: [u64; 7] = [1, 2, 4, 8, 16, 32, 64];
+const BATCH_SECONDS_BUCKETS_US: [u64; 7] = [
+    1_000,
+    10_000,
+    50_000,
+    250_000,
+    1_000_000,
+    5_000_000,
+    u64::MAX,
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum EventClass {
@@ -63,11 +77,16 @@ struct Job {
 struct QueueMetrics {
     enqueued: [AtomicU64; 3],
     dropped_queue_full: AtomicU64,
+    dropped_coalesced: AtomicU64,
     dropped_writer_degraded: AtomicU64,
+    dropped_shutdown: AtomicU64,
     written_ok: AtomicU64,
     written_error: AtomicU64,
     queue_depth: AtomicU64,
     setting_refresh_failures: AtomicU64,
+    batch_sizes: [AtomicU64; BATCH_SIZE_BUCKETS.len()],
+    batch_seconds: [AtomicU64; BATCH_SECONDS_BUCKETS_US.len()],
+    batch_seconds_sum_us: AtomicU64,
 }
 
 impl QueueMetrics {
@@ -75,11 +94,16 @@ impl QueueMetrics {
         Self {
             enqueued: [const { AtomicU64::new(0) }; 3],
             dropped_queue_full: AtomicU64::new(0),
+            dropped_coalesced: AtomicU64::new(0),
             dropped_writer_degraded: AtomicU64::new(0),
+            dropped_shutdown: AtomicU64::new(0),
             written_ok: AtomicU64::new(0),
             written_error: AtomicU64::new(0),
             queue_depth: AtomicU64::new(0),
             setting_refresh_failures: AtomicU64::new(0),
+            batch_sizes: [const { AtomicU64::new(0) }; BATCH_SIZE_BUCKETS.len()],
+            batch_seconds: [const { AtomicU64::new(0) }; BATCH_SECONDS_BUCKETS_US.len()],
+            batch_seconds_sum_us: AtomicU64::new(0),
         }
     }
 
@@ -101,7 +125,9 @@ impl QueueMetrics {
             "# HELP plurx_telemetry_dropped_total Playback telemetry jobs discarded by bounded policy.\n\
              # TYPE plurx_telemetry_dropped_total counter\n\
              plurx_telemetry_dropped_total{{reason=\"queue_full\"}} {}\n\
+             plurx_telemetry_dropped_total{{reason=\"coalesced\"}} {}\n\
              plurx_telemetry_dropped_total{{reason=\"writer_degraded\"}} {}\n\
+             plurx_telemetry_dropped_total{{reason=\"shutdown\"}} {}\n\
              # HELP plurx_telemetry_written_total Playback telemetry rows offered to node-local storage.\n\
              # TYPE plurx_telemetry_written_total counter\n\
              plurx_telemetry_written_total{{outcome=\"ok\"}} {}\n\
@@ -113,14 +139,80 @@ impl QueueMetrics {
              # TYPE plurx_telemetry_setting_refresh_failures_total counter\n\
              plurx_telemetry_setting_refresh_failures_total {}\n",
             self.dropped_queue_full.load(Ordering::Relaxed),
+            self.dropped_coalesced.load(Ordering::Relaxed),
             self.dropped_writer_degraded.load(Ordering::Relaxed),
+            self.dropped_shutdown.load(Ordering::Relaxed),
             self.written_ok.load(Ordering::Relaxed),
             self.written_error.load(Ordering::Relaxed),
             self.queue_depth.load(Ordering::Relaxed),
             self.setting_refresh_failures.load(Ordering::Relaxed),
         ));
+        render_histogram(
+            &mut out,
+            "plurx_telemetry_batch_size",
+            "Playback telemetry jobs handled per storage batch.",
+            &BATCH_SIZE_BUCKETS,
+            &self.batch_sizes,
+            1.0,
+            None,
+        );
+        render_histogram(
+            &mut out,
+            "plurx_telemetry_batch_seconds",
+            "Wall time spent processing playback telemetry batches.",
+            &BATCH_SECONDS_BUCKETS_US,
+            &self.batch_seconds,
+            1_000_000.0,
+            Some(self.batch_seconds_sum_us.load(Ordering::Relaxed) as f64 / 1_000_000.0),
+        );
         out
     }
+
+    fn record_batch(&self, size: usize, elapsed: Duration) {
+        let size = size as u64;
+        let size_bucket = BATCH_SIZE_BUCKETS
+            .iter()
+            .position(|upper| size <= *upper)
+            .unwrap_or(BATCH_SIZE_BUCKETS.len() - 1);
+        self.batch_sizes[size_bucket].fetch_add(1, Ordering::Relaxed);
+        let micros = elapsed.as_micros().min(u64::MAX as u128) as u64;
+        let time_bucket = BATCH_SECONDS_BUCKETS_US
+            .iter()
+            .position(|upper| micros <= *upper)
+            .unwrap_or(BATCH_SECONDS_BUCKETS_US.len() - 1);
+        self.batch_seconds[time_bucket].fetch_add(1, Ordering::Relaxed);
+        self.batch_seconds_sum_us
+            .fetch_add(micros, Ordering::Relaxed);
+    }
+}
+
+fn render_histogram<const N: usize>(
+    out: &mut String,
+    name: &str,
+    help: &str,
+    buckets: &[u64; N],
+    counts: &[AtomicU64; N],
+    divisor: f64,
+    sum: Option<f64>,
+) {
+    out.push_str(&format!("# HELP {name} {help}\n# TYPE {name} histogram\n"));
+    let mut cumulative = 0;
+    for (index, (upper, count)) in buckets.iter().zip(counts).enumerate() {
+        cumulative += count.load(Ordering::Relaxed);
+        let upper = if index + 1 == N && *upper == u64::MAX {
+            "+Inf".to_owned()
+        } else {
+            format!("{}", *upper as f64 / divisor)
+        };
+        out.push_str(&format!("{name}_bucket{{le=\"{upper}\"}} {cumulative}\n"));
+    }
+    if buckets.last().is_some_and(|upper| *upper != u64::MAX) {
+        out.push_str(&format!("{name}_bucket{{le=\"+Inf\"}} {cumulative}\n"));
+    }
+    if let Some(sum) = sum {
+        out.push_str(&format!("{name}_sum {sum:.6}\n"));
+    }
+    out.push_str(&format!("{name}_count {cumulative}\n"));
 }
 
 static QUEUE_METRICS: QueueMetrics = QueueMetrics::new();
@@ -425,6 +517,9 @@ pub(crate) struct NetworkIdentity {
 struct TelemetrySink {
     sender: mpsc::Sender<Job>,
     degraded: AtomicBool,
+    draining: AtomicBool,
+    shutdown: CancellationToken,
+    stopped: Notify,
     settings: RwLock<EffectiveSettings>,
 }
 
@@ -455,6 +550,9 @@ fn ensure_sink(store: Arc<dyn Store>) -> Arc<TelemetrySink> {
     let sink = Arc::new(TelemetrySink {
         sender,
         degraded: AtomicBool::new(false),
+        draining: AtomicBool::new(false),
+        shutdown: CancellationToken::new(),
+        stopped: Notify::new(),
         settings: RwLock::new(EffectiveSettings {
             retain: true,
             priors: false,
@@ -565,7 +663,10 @@ async fn supervise_writer(
             .catch_unwind()
             .await;
         match outcome {
-            Ok(()) => return,
+            Ok(()) => {
+                sink.stopped.notify_one();
+                return;
+            }
             Err(_) => {
                 let now = Instant::now();
                 restarts.retain(|at| now.duration_since(*at) < Duration::from_secs(3_600));
@@ -591,13 +692,37 @@ async fn writer_loop(
     sink: &TelemetrySink,
 ) {
     let mut batch = Vec::with_capacity(BATCH);
+    let mut drain_deadline = None;
     loop {
         batch.clear();
-        let received = tokio::time::timeout(BATCH_WINDOW, receiver.recv_many(&mut batch, BATCH))
-            .await
-            .unwrap_or_default();
+        let wait = async {
+            tokio::time::timeout(BATCH_WINDOW, receiver.recv_many(&mut batch, BATCH))
+                .await
+                .unwrap_or_default()
+        };
+        let received = if drain_deadline.is_some() {
+            wait.await
+        } else {
+            tokio::select! {
+                received = wait => received,
+                () = sink.shutdown.cancelled() => {
+                    drain_deadline = Some(Instant::now() + DRAIN);
+                    continue;
+                }
+            }
+        };
         if received == 0 {
             if receiver.is_closed() {
+                return;
+            }
+            if drain_deadline.is_some_and(|deadline| Instant::now() >= deadline)
+                || (drain_deadline.is_some() && receiver.is_empty())
+            {
+                let remaining = receiver.len() as u64;
+                QUEUE_METRICS
+                    .dropped_shutdown
+                    .fetch_add(remaining, Ordering::Relaxed);
+                receiver.close();
                 return;
             }
             continue;
@@ -605,6 +730,8 @@ async fn writer_loop(
         QUEUE_METRICS
             .queue_depth
             .store(receiver.len() as u64, Ordering::Relaxed);
+        let batch_started = Instant::now();
+        coalesce_samples(&mut batch);
         if let Err(error) = sink.refresh_settings(&store, false).await {
             tracing::warn!(%error, "refreshing playback telemetry settings failed; keeping cached values");
         }
@@ -640,6 +767,64 @@ async fn writer_loop(
                 }
             }
         }
+        QUEUE_METRICS.record_batch(batch.len(), batch_started.elapsed());
+        if drain_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            let remaining = receiver.len() as u64;
+            QUEUE_METRICS
+                .dropped_shutdown
+                .fetch_add(remaining, Ordering::Relaxed);
+            receiver.close();
+            return;
+        }
+    }
+}
+
+fn coalesce_samples(batch: &mut Vec<Job>) {
+    let mut retained: Vec<Job> = Vec::with_capacity(batch.len());
+    for job in batch.drain(..) {
+        let replace = retained.last().is_some_and(|previous| {
+            previous.class == EventClass::Sample
+                && job.class == EventClass::Sample
+                && previous.event.session_id == job.event.session_id
+                && previous.event.event == job.event.event
+        });
+        if replace {
+            *retained.last_mut().expect("checked above") = job;
+            QUEUE_METRICS
+                .dropped_coalesced
+                .fetch_add(1, Ordering::Relaxed);
+        } else {
+            retained.push(job);
+        }
+    }
+    *batch = retained;
+}
+
+pub(crate) async fn drain_for_shutdown(store: &Arc<dyn Store>) {
+    let key = store_key(store);
+    let sink = SINKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&key)
+        .cloned();
+    let Some(sink) = sink else {
+        return;
+    };
+    sink.draining.store(true, Ordering::Release);
+    let stopped = sink.stopped.notified();
+    sink.shutdown.cancel();
+    if tokio::time::timeout(DRAIN, stopped).await.is_err() {
+        let remaining = sink
+            .sender
+            .max_capacity()
+            .saturating_sub(sink.sender.capacity()) as u64;
+        QUEUE_METRICS
+            .dropped_shutdown
+            .fetch_add(remaining, Ordering::Relaxed);
+        tracing::warn!(
+            remaining,
+            "playback telemetry drain reached its two-second bound"
+        );
     }
 }
 
@@ -657,6 +842,10 @@ fn classify(event: &PlaybackEvent) -> EventClass {
         }
         _ => EventClass::Sample,
     }
+}
+
+fn admission_allowed(class: EventClass, depth: usize) -> bool {
+    class == EventClass::Terminal || depth < QUEUE - TERMINAL_RESERVE
 }
 
 /// Record metrics and persist an event without delaying the caller. The
@@ -680,9 +869,25 @@ pub(crate) fn emit_with_network(
     METRICS.record(&event);
     let sink = sink_for(store);
     let class = classify(&event);
+    if sink.draining.load(Ordering::Acquire) && class == EventClass::Sample {
+        QUEUE_METRICS
+            .dropped_shutdown
+            .fetch_add(1, Ordering::Relaxed);
+        return;
+    }
     if sink.degraded.load(Ordering::Acquire) && class != EventClass::Terminal {
         QUEUE_METRICS
             .dropped_writer_degraded
+            .fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let depth = sink
+        .sender
+        .max_capacity()
+        .saturating_sub(sink.sender.capacity());
+    if !admission_allowed(class, depth) {
+        QUEUE_METRICS
+            .dropped_queue_full
             .fetch_add(1, Ordering::Relaxed);
         return;
     }
@@ -803,6 +1008,105 @@ mod tests {
             .await
             .expect("retained events")
             .is_empty());
+    }
+
+    fn job(event: &str, session_id: &str, level: Option<&str>) -> Job {
+        let event = PlaybackEvent {
+            event: event.to_owned(),
+            session_id: Some(session_id.to_owned()),
+            level: level.map(str::to_owned),
+            ..Default::default()
+        };
+        Job {
+            class: classify(&event),
+            event,
+            network: None,
+        }
+    }
+
+    #[test]
+    fn durable_outcomes_and_error_levels_are_terminal() {
+        for event in [
+            "control_terminal",
+            "control_retry_resource",
+            "control_hold_withheld",
+            "control_action_suppressed",
+        ] {
+            assert_eq!(classify(&job(event, "s", None).event), EventClass::Terminal);
+        }
+        assert_eq!(
+            classify(&job("future_outcome", "s", Some("error")).event),
+            EventClass::Terminal
+        );
+    }
+
+    #[test]
+    fn nonterminal_admission_preserves_the_terminal_reserve() {
+        assert!(admission_allowed(
+            EventClass::Sample,
+            QUEUE - TERMINAL_RESERVE - 1
+        ));
+        assert!(!admission_allowed(
+            EventClass::Sample,
+            QUEUE - TERMINAL_RESERVE
+        ));
+        assert!(!admission_allowed(
+            EventClass::Lifecycle,
+            QUEUE - TERMINAL_RESERVE
+        ));
+        assert!(admission_allowed(
+            EventClass::Terminal,
+            QUEUE - TERMINAL_RESERVE
+        ));
+        assert!(admission_allowed(EventClass::Terminal, QUEUE - 1));
+    }
+
+    #[test]
+    fn only_consecutive_samples_for_the_same_session_and_name_coalesce() {
+        let before = QUEUE_METRICS.dropped_coalesced.load(Ordering::Relaxed);
+        let mut jobs = vec![
+            job("producer_pass", "one", None),
+            job("producer_pass", "one", None),
+            job("stall", "one", None),
+            job("producer_pass", "one", None),
+            job("producer_pass", "two", None),
+            job("control_terminal", "one", None),
+            job("control_terminal", "one", None),
+        ];
+
+        coalesce_samples(&mut jobs);
+
+        assert_eq!(jobs.len(), 6);
+        assert_eq!(
+            QUEUE_METRICS.dropped_coalesced.load(Ordering::Relaxed),
+            before + 1
+        );
+        assert_eq!(
+            jobs.iter()
+                .filter(|job| job.class == EventClass::Terminal)
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_drain_returns_inside_its_bound() {
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("telemetry store"));
+        initialize(Arc::clone(&store)).await.expect("seed settings");
+        for index in 0..16 {
+            emit(
+                Arc::clone(&store),
+                PlaybackEvent {
+                    event: "producer_pass".into(),
+                    session_id: Some(format!("session-{index}")),
+                    ..Default::default()
+                },
+            );
+        }
+        let started = Instant::now();
+        drain_for_shutdown(&store).await;
+        assert!(started.elapsed() <= DRAIN + Duration::from_millis(250));
     }
 
     #[tokio::test]

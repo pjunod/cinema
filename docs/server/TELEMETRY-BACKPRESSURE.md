@@ -15,9 +15,9 @@ everything else attaches to it; M2 (cached settings) cannot land first
 because it needs a task to own the refresh; M3 (counters out of the
 retention branch) is two lines and one test but must come **after** M1 so
 that the metric is recorded on the emit side of the queue; M4 (policy,
-drops, drain) closes it. One draft PR per milestone into `main` under the
-fast lane. Every `file:line` is from `0f02b7ea`; re-verify by function
-name.
+drops, drain) closes it. One draft PR owns the full plan, with one logical
+commit and Execution-log row per milestone, under the fast lane. Every
+`file:line` is from `0f02b7ea`; re-verify by function name.
 
 **If a step seems to require replicating a playback event, making `emit`
 async or fallible at its call sites, letting a terminal outcome be
@@ -610,7 +610,7 @@ lines of journalctl -u plurxd.
 
 ## Execution log
 
-Executing sessions append one row per milestone PR (see the
+Executing sessions append one row per logical milestone in the plan PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
@@ -622,3 +622,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [PR #434](http://192.168.4.7:3000/noirr/plurx/pulls/434) | Added the 1,024-slot synchronous admission path, single supervised batching writer, one-transaction batch Store contract on both backends, bounded fixed-label queue metrics, boot registration, and an executable 64-row sidecar batch regression. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | [PR #434](http://192.168.4.7:3000/noirr/plurx/pulls/434) | Seeded the paired effective settings before listener acceptance, cached them for 30 seconds, preserved the last good values on refresh failure, and invalidated the cache immediately after either local telemetry setting changes; focused tests cover seed, cache window, and invalidation. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [PR #434](http://192.168.4.7:3000/noirr/plurx/pulls/434) | Moved bounded playback metric recording ahead of queue admission and retention decisions. The focused regression disables retention, emits TTFF, proves the metric rises, and proves no raw playback row is stored. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M4 | [PR #434](http://192.168.4.7:3000/noirr/plurx/pulls/434) | Added the 128-slot terminal reserve, exhaustive current durable-outcome/error classification, consecutive-sample coalescing, all four fixed drop reasons, and a two-second shutdown drain wired before Live TV cleanup. Focused tests cover classification, terminal non-coalescing, sample replacement, and the drain bound. Fleet restart timing and injected real-playback sidecar-stall evidence remain pending under §6.3. |
