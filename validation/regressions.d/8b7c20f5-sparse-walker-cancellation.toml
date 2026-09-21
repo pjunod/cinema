@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["8b7c20f5"]
+points = ["library.catalog"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The retained sparse-walker regression fills a directory with non-media entries, drops the receiver after traversal starts, and requires the blocking walker to observe closure and exit before it can walk the tree. This pins cancellation independently of matching-event page sends so repeated cancelled scans cannot retain orphan workers."

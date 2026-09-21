@@ -1693,6 +1693,8 @@ assert.equal(context.ACT_TIMER, null);
         effort = read(".github/workflows/effort-ci.yml")
         effort_jobs = workflow_job_blocks(".github/workflows/effort-ci.yml")
         effort_rust_steps = workflow_step_blocks(effort_jobs["rust_compile"])
+        fast_jobs = workflow_job_blocks(".github/workflows/main-fast-lane.yml")
+        fast_rust_steps = workflow_step_blocks(fast_jobs["rust_compile"])
         lint = read(".github/workflows/lint.yml")
         makefile = read("Makefile")
         precommit = read("scripts/pre-commit")
@@ -1741,6 +1743,46 @@ assert.equal(context.ACT_TIMER, null);
             ["make effort-rust-check", "make hiqlite-vendor-clippy"],
         )
         self.assertEqual(
+            list(fast_rust_steps),
+            [
+                "Install Rust gate prerequisites",
+                "Check out the candidate",
+                "Install the pinned Rust toolchain",
+                "Install the pinned FFmpeg",
+                "Restore the main fast Rust cache",
+                "Compile every Rust target without executing tests",
+                "Lint the workspace",
+                "Run the fast Rust unit and SQLite contract lane",
+                "Enforce persistent Cargo bounds",
+                "Restore persistent runner workspace ownership",
+            ],
+        )
+        self.assertIn("container: ubuntu:24.04", fast_jobs["rust_compile"])
+        prerequisites = workflow_step_literal(
+            fast_rust_steps["Install Rust gate prerequisites"], "run"
+        )
+        self.assertTrue(any("python3" in line for line in prerequisites))
+        self.assertTrue(any("nodejs" in line for line in prerequisites))
+        self.assertEqual(
+            workflow_step_literal(fast_rust_steps["Lint the workspace"], "run"),
+            ["make lint"],
+        )
+        self.assertEqual(
+            workflow_step_literal(
+                fast_rust_steps["Run the fast Rust unit and SQLite contract lane"],
+                "run",
+            ),
+            ["make unit"],
+        )
+        self.assertIn('major: "6"', fast_rust_steps["Install the pinned FFmpeg"])
+        self.assertIn("timeout-minutes: 30", fast_jobs["rust_compile"])
+        fast_preflight = workflow_step_blocks(fast_jobs["preflight"])
+        playback_contracts = workflow_step_literal(
+            fast_preflight["Check the shared player input contract"], "run"
+        )
+        self.assertIn("node tests/playback/web-policy.test.js", playback_contracts)
+        self.assertIn("node tests/playback/web-control.test.js", playback_contracts)
+        self.assertEqual(
             make_dry_run_commands("hiqlite-vendor-clippy"),
             [
                 "cargo clippy --locked --manifest-path vendor/hiqlite/Cargo.toml "
@@ -1768,6 +1810,23 @@ assert.equal(context.ACT_TIMER, null);
                 "timeout_seconds": 1800,
             },
         )
+        unit_core = next(
+            check for check in catalog["checks"] if check["id"] == "unit-core"
+        )
+        self.assertEqual(unit_core["expect_at_least"], 1100)
+        self.assertEqual(
+            unit_core["command"],
+            "PLURX_EXPECT_TEST_COUNT_AT_LEAST=1100 make unit-core",
+        )
+        self.assertIn(
+            "$(CARGO) test --locked -p plurx-core --features hiqlite-store --lib",
+            makefile,
+        )
+        self.assertIn("PLURX_EXPECT_TEST_COUNT_AT_LEAST", makefile)
+        core_point = next(
+            point for point in catalog["points"] if point["id"] == "core.media"
+        )
+        self.assertIn("unit-core", core_point["checks"])
         cluster_point = next(
             point for point in catalog["points"] if point["id"] == "cluster.auth"
         )

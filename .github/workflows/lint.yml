@@ -12,8 +12,8 @@ concurrency:
   group: lint-${{ github.ref }}
   cancel-in-progress: false
 
-# Release-tag and manual badge workflow. Main pull requests run Clippy in
-# main-fast-lane.yml after the one adversarial review.
+# Release-tag and manual badge workflow. Ready main pull requests run workspace
+# Clippy in main-fast-lane.yml (`make lint`) after the one adversarial review.
 jobs:
   lint:
     name: rustfmt + clippy

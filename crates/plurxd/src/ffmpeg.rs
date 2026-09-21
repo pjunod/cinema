@@ -2871,6 +2871,33 @@ mod tests {
         Ok(super::compare_probe_documents(stored, held)?.same)
     }
 
+    /// The Dolby Vision proof consumes non-comment frame hashes from stdout.
+    /// Keep the fixture independent of private media while exercising the
+    /// same ffmpeg output shape and the production process helper.
+    #[tokio::test]
+    #[ignore = "needs ffmpeg"]
+    async fn dovi_probe_output_receives_frame_hashes() {
+        let mut command = tokio::process::Command::new(super::ffmpeg_bin());
+        command
+            .args(["-hide_banner", "-loglevel", "error"])
+            .args(["-f", "lavfi", "-i", "testsrc=size=64x64:rate=1:duration=2"])
+            .args(["-frames:v", "2", "-an", "-f", "framemd5", "-"]);
+        let output = crate::process_control::output_job_owned(&mut command)
+            .await
+            .expect("framemd5 probe output");
+        assert!(
+            output.status.success(),
+            "framemd5 probe failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let hashes: Vec<_> = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+            .map(str::to_owned)
+            .collect();
+        assert!(!hashes.is_empty(), "framemd5 stdout had no frame hashes");
+    }
+
     /// A production file on `media1`: 4K HEVC Dolby Vision Profile 8 in MP4
     /// with E-AC-3 Atmos, scanned by the reporter the daemon used then —
     /// which is not the one it probes the held descriptor with now.

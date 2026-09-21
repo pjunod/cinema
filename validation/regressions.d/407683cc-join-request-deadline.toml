@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["407683cc"]
+points = ["persistence.upgrades", "cluster.membership"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+reason = "The retained migration regression accepts a join request and then withholds the response, requiring a bounded distinct ambiguous result with the staged-join recovery instruction, while the membership contract pins idempotent same-node redemption after token reservation."

@@ -60,7 +60,13 @@ pub async fn worker(state: AppState, shutdown: CancellationToken) {
                 return Ok(());
             };
             let result = classify_page(&state, &mut cursor).await;
-            let _ = state.store.release_lease(&lease, now() * 1000).await;
+            // Best-effort: the lease has a bounded expiry and a failed early
+            // release delays, but cannot lose, the next classification pass.
+            crate::store_result::observe(
+                crate::store_result::Operation::ReleaseClassificationLease,
+                crate::store_result::Discard::BestEffort,
+                state.store.release_lease(&lease, now() * 1000).await,
+            );
             result
         }
         .await;
