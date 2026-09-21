@@ -11875,22 +11875,15 @@ async fn exact_hls_context_at(
         "dvh1" | "dvhe" => init
             .windows(4)
             .any(|window| window == b"dvcC" || window == b"dvvC"),
-        "avc1" => init.windows(4).any(|window| window == b"avcC"),
+        // AVC is resolved structurally from the selected video track below;
+        // a raw byte occurrence is not evidence that an avcC belongs to it.
+        "avc1" => true,
         _ => init.windows(4).any(|window| window == b"hvcC"),
     };
     if !required_box {
         return Err(HlsInitInspectionError::invalid());
     }
-    if sample_entry == "avc1" {
-        if !matches!(
-            parsed.video(),
-            Some(video)
-                if video.codec == Some(plurx_core::fmp4::VideoCodec::H264)
-                    && video.nal_length_size > 0
-        ) {
-            return Err(HlsInitInspectionError::invalid());
-        }
-    } else if matches!(sample_entry, "hvc1" | "dvh1") {
+    if matches!(sample_entry, "hvc1" | "dvh1") {
         match plurx_core::fmp4::hevc_parameter_sets_complete(&parsed) {
             Ok(true) => {}
             Ok(false) | Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
@@ -11918,10 +11911,19 @@ async fn exact_hls_context_at(
             ) => return Err(HlsInitInspectionError::unsupported()),
         }
     }
-    let derived = if matches!(sample_entry, "dvh1" | "dvhe") {
+    let derived = if sample_entry == "avc1" {
+        match plurx_core::fmp4::avc_rfc6381_codec(&parsed) {
+            Ok(Some(codec)) => Some(codec),
+            Ok(None) | Err(plurx_core::fmp4::Fmp4Error::Malformed(_)) => {
+                return Err(HlsInitInspectionError::invalid());
+            }
+            Err(
+                plurx_core::fmp4::Fmp4Error::Unsupported(_)
+                | plurx_core::fmp4::Fmp4Error::MultipleHevcSampleEntries { .. },
+            ) => return Err(HlsInitInspectionError::unsupported()),
+        }
+    } else if matches!(sample_entry, "dvh1" | "dvhe") {
         dolby_vision_codec_from_init(&init, sample_entry)
-    } else if sample_entry == "avc1" {
-        avc_codec_from_init(&init)
     } else {
         hevc_codec_from_init(&init, sample_entry)
     };
@@ -12014,25 +12016,6 @@ fn hevc_codec_from_init(init: &[u8], sample_entry: &str) -> Option<String> {
         codec.push_str(&constraints);
     }
     Some(codec)
-}
-
-/// RFC 6381 identifier from the AVCDecoderConfigurationRecord in `avcC`.
-fn avc_codec_from_init(init: &[u8]) -> Option<String> {
-    let type_at = init.windows(4).position(|window| window == b"avcC")?;
-    let box_start = type_at.checked_sub(4)?;
-    let box_size = u32::from_be_bytes(init.get(box_start..type_at)?.try_into().ok()?) as usize;
-    let box_end = box_start.checked_add(box_size)?;
-    if box_size < 12 || box_end > init.len() {
-        return None;
-    }
-    let payload = init.get(type_at + 4..box_end)?;
-    let [1, profile, compatibility, level, ..] = payload else {
-        return None;
-    };
-    if *profile == 0 || *level == 0 {
-        return None;
-    }
-    Some(format!("avc1.{profile:02X}{compatibility:02X}{level:02X}"))
 }
 
 /// Whether an Apple HDR master should collapse to its media rendition.
@@ -28200,32 +28183,83 @@ mod tests {
 
     #[test]
     fn avc_codec_from_init_reads_the_avcc_triplet() {
-        let mut init = vec![0, 0, 0, 12];
-        init.extend_from_slice(b"avcC");
-        init.extend_from_slice(&[1, 0x64, 0x00, 0x28]);
+        let mut init = valid_avc_init();
+        let avc1 = plurx_core::fmp4::avc_rfc6381_codec(&init)
+            .expect("valid sample-entry layout")
+            .expect("AVC codec");
+        assert!(avc1.starts_with("avc1."));
 
-        assert_eq!(avc_codec_from_init(&init).as_deref(), Some("avc1.640028"));
+        plurx_core::testfixtures::replace_avc_sample_entry(&mut init, *b"avc3");
+        assert_eq!(
+            plurx_core::fmp4::avc_rfc6381_codec(&init)
+                .expect("valid avc3 layout")
+                .expect("AVC codec"),
+            avc1.replacen("avc1.", "avc3.", 1)
+        );
+    }
+
+    #[test]
+    fn avc_codec_from_init_ignores_an_earlier_decoy_box() {
+        let mut init = valid_avc_init();
+        let expected = plurx_core::fmp4::avc_rfc6381_codec(&init).expect("valid AVC layout");
+        let ftyp_size =
+            u32::from_be_bytes(init.bytes[0..4].try_into().expect("ftyp size")) as usize;
+        let mut decoy = 20_u32.to_be_bytes().to_vec();
+        decoy.extend_from_slice(b"free");
+        decoy.extend_from_slice(&[0, 0, 0, 12]);
+        decoy.extend_from_slice(b"avcC");
+        decoy.extend_from_slice(&[1, 0x4D, 0, 0x1F]);
+        init.bytes.splice(ftyp_size..ftyp_size, decoy);
+        let init = parse_avc_init(&init.bytes);
+
+        assert_eq!(
+            plurx_core::fmp4::avc_rfc6381_codec(&init).expect("decoy init remains valid"),
+            expected
+        );
+    }
+
+    #[test]
+    fn avc_codec_from_init_rejects_ambiguous_sample_descriptions() {
+        let mut init = valid_avc_init();
+        let expected = plurx_core::fmp4::avc_rfc6381_codec(&init).expect("valid AVC layout");
+        plurx_core::testfixtures::duplicate_avc_sample_entry(&mut init);
+        assert_eq!(
+            plurx_core::fmp4::avc_rfc6381_codec(&init)
+                .expect("matching duplicate descriptions remain valid"),
+            expected
+        );
+
+        plurx_core::testfixtures::replace_second_avc_triplet(&mut init, 0x4D, 0, 0x1F);
+        assert!(matches!(
+            plurx_core::fmp4::avc_rfc6381_codec(&init),
+            Err(plurx_core::fmp4::Fmp4Error::Unsupported(_))
+        ));
     }
 
     #[test]
     fn avc_codec_from_init_refuses_a_truncated_box() {
-        let mut init = vec![0, 0, 0, 12];
-        init.extend_from_slice(b"avcC");
-        init.extend_from_slice(&[1, 0x64, 0x00, 0x28]);
+        let mut init = valid_avc_init();
+        init.bytes.truncate(init.bytes.len() - 1);
 
-        assert!(avc_codec_from_init(&init[..10]).is_none());
-        assert!(avc_codec_from_init(b"not an init").is_none());
+        assert!(matches!(
+            plurx_core::fmp4::avc_rfc6381_codec(&init),
+            Err(plurx_core::fmp4::Fmp4Error::Malformed(_))
+        ));
     }
 
-    fn valid_avc_init() -> Vec<u8> {
+    fn parse_avc_init(bytes: &[u8]) -> plurx_core::fmp4::Init {
         use plurx_core::fmp4::{FragmentReader, Unit};
-        let feed = plurx_core::testfixtures::pipe("h264");
         let mut reader = FragmentReader::new();
-        reader.push(&feed);
+        reader.push(bytes);
         let Some(Unit::Init(init)) = reader.next_unit().expect("fixture init parses") else {
             panic!("the fixture opens with an init");
         };
-        init.bytes
+        init
+    }
+
+    fn valid_avc_init() -> plurx_core::fmp4::Init {
+        let feed = plurx_core::testfixtures::pipe("h264");
+        parse_avc_init(&feed)
     }
 
     #[tokio::test]
@@ -28234,8 +28268,10 @@ mod tests {
         let fixture = HlsDeliveryFixture::publish(dir.path(), "avc-init").await;
         fixture.make_segment_window_servable().await;
         let init = valid_avc_init();
-        let expected = avc_codec_from_init(&init).expect("fixture carries avcC");
-        tokio::fs::write(dir.path().join("init.mp4"), &init)
+        let expected = plurx_core::fmp4::avc_rfc6381_codec(&init)
+            .expect("valid sample-entry layout")
+            .expect("fixture carries avcC");
+        tokio::fs::write(dir.path().join("init.mp4"), &init.bytes)
             .await
             .expect("AVC init");
 
@@ -28252,6 +28288,38 @@ mod tests {
             .expect("valid AVC init is supported");
 
         assert_eq!(resolved.codecs, format!("{expected},mp4a.40.2"));
+    }
+
+    #[tokio::test]
+    async fn an_fmp4_avc_session_refuses_ambiguous_sample_descriptions() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "ambiguous-avc-init").await;
+        fixture.make_segment_window_servable().await;
+        let mut init = valid_avc_init();
+        plurx_core::testfixtures::duplicate_avc_sample_entry(&mut init);
+        plurx_core::testfixtures::replace_second_avc_triplet(&mut init, 0x4D, 0, 0x1F);
+        tokio::fs::write(dir.path().join("init.mp4"), &init.bytes)
+            .await
+            .expect("ambiguous AVC init");
+        let context = crate::transcode::HlsContext {
+            file_id: 1,
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            codecs: "avc1.640034,mp4a.40.2".to_owned(),
+            supplemental_codecs: None,
+            frame_rate: None,
+        };
+
+        let error = exact_hls_context(&fixture.state, "ambiguous-avc-init", context)
+            .await
+            .expect_err("ambiguous AVC identity must not be published");
+        assert!(matches!(
+            error,
+            HlsInitInspectionError::Response {
+                code: "hls_init_unsupported",
+                ..
+            }
+        ));
     }
 
     #[tokio::test]

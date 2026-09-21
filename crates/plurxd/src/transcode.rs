@@ -5672,6 +5672,34 @@ impl FrozenHlsPresentation {
     }
 }
 
+/// Shape the source row into the bytes an encoded-VOD recipe emits.
+///
+/// Width and height come from the same `output_size` decision. Carrying one
+/// resolved coordinate with the requested height would advertise an aspect
+/// ratio the encoder never produced, and an unprobed source must omit both.
+fn encoded_vod_presentation_file(
+    mut file: plurx_core::domain::MediaFile,
+    target_height: i64,
+    grade: OutputGrade,
+) -> plurx_core::domain::MediaFile {
+    let geometry = plurx_core::transcode::output_size(&file, target_height);
+    file.width = geometry.map(|(width, _)| width);
+    file.height = geometry.map(|(_, height)| height);
+    file.hdr = (grade == OutputGrade::Hdr10).then(|| "hdr10".to_owned());
+    file.hdr_format = (grade == OutputGrade::Hdr10).then(|| "HDR10".to_owned());
+    file.dolby_vision = Default::default();
+    file.bit_depth = Some(if grade == OutputGrade::Hdr10 { 10 } else { 8 });
+    file.video_codec = Some(
+        if grade == OutputGrade::Hdr10 {
+            "hevc"
+        } else {
+            "h264"
+        }
+        .to_owned(),
+    );
+    file
+}
+
 fn frozen_video_frame_rate(probe_json: Option<&str>) -> Option<f64> {
     fn fraction(raw: &str) -> Option<f64> {
         let (numerator, denominator) = raw.split_once('/')?;
@@ -25469,22 +25497,7 @@ impl TranscodeManager {
             if let Some(encoding) = &facts.encoding {
                 let height = encoding.options.target_height;
                 let grade = encoding.options.pipeline.output_grade();
-                let mut file = facts.file;
-                file.width =
-                    plurx_core::transcode::output_size(&file, height).map(|(width, _)| width);
-                file.height = Some(height);
-                file.hdr = (grade == OutputGrade::Hdr10).then(|| "hdr10".to_owned());
-                file.hdr_format = (grade == OutputGrade::Hdr10).then(|| "HDR10".to_owned());
-                file.dolby_vision = Default::default();
-                file.bit_depth = Some(if grade == OutputGrade::Hdr10 { 10 } else { 8 });
-                file.video_codec = Some(
-                    if grade == OutputGrade::Hdr10 {
-                        "hevc"
-                    } else {
-                        "h264"
-                    }
-                    .to_owned(),
-                );
+                let file = encoded_vod_presentation_file(facts.file, height, grade);
                 let mut codecs = transcoded_hls_codecs(grade, height);
                 if file.audio_streams.is_empty() {
                     codecs.truncate(codecs.find(',').unwrap_or(codecs.len()));
@@ -30708,6 +30721,30 @@ pub(crate) mod tests {
 
         assert_eq!(presentation.file.width, Some(640));
         assert_eq!(presentation.file.height, Some(360));
+    }
+
+    #[test]
+    fn encoded_vod_presentation_never_mixes_source_width_with_requested_height() {
+        let mut file = profile5_file();
+        file.width = Some(640);
+        file.height = Some(360);
+
+        let presented = encoded_vod_presentation_file(file, 1080, OutputGrade::Sdr);
+
+        assert_eq!(presented.width, Some(640));
+        assert_eq!(presented.height, Some(360));
+    }
+
+    #[test]
+    fn encoded_vod_presentation_omits_both_unprobed_dimensions() {
+        let mut file = profile5_file();
+        file.width = None;
+        file.height = None;
+
+        let presented = encoded_vod_presentation_file(file, 1080, OutputGrade::Sdr);
+
+        assert_eq!(presented.width, None);
+        assert_eq!(presented.height, None);
     }
 
     #[test]

@@ -366,9 +366,12 @@ because the bytes are the source's.
 ### 3.2 An exact codec string, from the bytes for fMP4
 
 Extend `exact_hls_context_at` to `avc1`. The sample-entry list becomes
-`["hvc1", "hev1", "dvh1", "dvhe", "avc1"]`, and a new
-`avc_codec_from_init(&init) -> Option<String>` walks to the `avcC` box and
-reads three bytes:
+`["hvc1", "hev1", "dvh1", "dvhe", "avc1"]`. The AVC identity comes from a
+structural walk through the parsed video track's
+`trak/mdia/minf/stbl/stsd/avc1|avc3/avcC` chain, never from a raw `avcC` byte
+occurrence. A `free`/`uuid` payload is irrelevant. Multiple descriptions are
+accepted only when their sample-entry fourcc and three-byte identity agree;
+mixed or disagreeing descriptions are an unsupported layout. The record is:
 
 ```text
   avcC: configurationVersion(1) AVCProfileIndication profile_compatibility
@@ -377,10 +380,10 @@ reads three bytes:
                     profile_indication, profile_compatibility, level_indication)
 ```
 
-This is the same shape as `hevc_codec_from_init`
-(`hls.rs`, tested at `hls.rs:27995`), so it gets the same treatment: a unit
-test over a hand-built box, and the same `HlsInitInspectionError`
-pending/invalid/unavailable classification on a short or malformed init.
+The selected entry's actual `avc1`/`avc3` fourcc prefixes the result. The same
+`HlsInitInspectionError` pending/invalid/unavailable/unsupported split applies
+to a short, malformed or ambiguous init, and the valid-init tests carry an
+earlier decoy plus agreeing and disagreeing duplicate descriptions.
 The existing `INIT_INSPECTION_LIMIT_BYTES` bound applies unchanged.
 
 The fallback when the init cannot be read stays what it is today for HEVC:
@@ -399,25 +402,27 @@ both in `plurx-core`:
    family gets a flag its driver refuses — §5.3's probe decides that before
    the flag ships, and a family that refuses keeps today's argv **and**
    today's declaration-free master.
-2. **Derive the string from the rung.** Replace the SDR arm of
-   `transcoded_hls_codecs` with a function of the forced profile and level:
+2. **Derive the string from rung and cadence.** The safe candidate below is
+   deliberately sized for every resolved cadence up to and including 60 fps;
+   a 23.976/30 fps observation cannot qualify it. A source above 60 fps stays
+   declaration-free until its own Annex A bound and encoder evidence exist.
 
-   | Rung (`output_size` height) | Max luma samples/s at 60 fps | H.264 level | `CODECS` |
-   |---|---|---|---|
-   | 360 | 0.31 M/frame | 3.0 (`0x1E`) | `avc1.64001E` |
-   | 480 | 0.41 M/frame | 3.1 (`0x1F`) | `avc1.64001F` |
-   | 720 | 0.92 M/frame | 3.2 (`0x20`) | `avc1.640020` |
-   | 1080 | 2.07 M/frame | 4.0 (`0x28`) | `avc1.640028` |
-   | above 1080 (Original-class) | 8.29 M/frame | 5.1 (`0x33`) | `avc1.640033` |
+   | Rung (`output_size` height) | Macroblocks/frame | MB/s at 60 fps | H.264 level | `CODECS` |
+   |---|---:|---:|---|---|
+   | 360 (640x360) | 920 | 55,200 | 3.1 (`0x1F`) | `avc1.64001F` |
+   | 480 (854x480) | 1,620 | 97,200 | 3.1 (`0x1F`) | `avc1.64001F` |
+   | 720 (1280x720) | 3,600 | 216,000 | 3.2 (`0x20`) | `avc1.640020` |
+   | 1080 (1920x1080) | 8,160 | 489,600 | 4.2 (`0x2A`) | `avc1.64002A` |
+   | 2160 (3840x2160) | 32,400 | 1,944,000 | 5.2 (`0x34`) | `avc1.640034` |
 
-   The levels above are the **proposed** mapping, not a measured one. They
-   are derived from H.264 Annex A's MaxMbPS/MaxDpbMbs bounds at the rung's
-   frame size and this ladder's bitrates; the *acceptance* is that the
-   encoded bitstream's SPS `level_idc` equals the declared one on every
-   enabled family (§5.3), not that the table looks right. Where a family's
-   driver refuses `-level` or emits a different `level_idc`, the table
-   takes the measured value for that family, and the function becomes a
-   function of `(Encoder, height)` rather than of `height` alone.
+   These are still **proposed** values, not fleet evidence. They correct the
+   earlier 30-fps-like table by applying H.264 Annex A MaxMBPS to the coded
+   macroblock dimensions. Qualification runs 23.976, 29.97, 59.94 and 60 fps
+   at every affected rung/family and reads the emitted SPS `level_idc`.
+   A driver that refuses the flag or rounds up keeps today's argv and a
+   declaration-free master. If accepted values differ by family or cadence,
+   the identity and declaration become a function of `(Encoder, height,
+   resolved frame grid)`; they are never selected from height alone.
 
 The constraint-flags byte stays `0x00`: High profile with no constraint set
 is what `-profile:v high` produces, and a nonzero byte would be a claim
@@ -486,11 +491,14 @@ of every corpus fixture at every rung; if a 2 s segment bursts past
 `maxrate + audio + overhead`, the declared peak rises to the measurement and
 the plan says so in the PR body rather than quietly clamping.
 
-Copy sessions keep `file.bitrate` for `AVERAGE-BANDWIDTH` — for copied bytes
-that *is* the average — and take their peak from the probe's per-stream
-`max_bit_rate` when present, otherwise `file.bitrate` scaled by the same
-measured factor. That is §7's open question 2, not a decision this document
-takes.
+Copy/remux sessions do not use `file.bitrate` or ffprobe `max_bit_rate` as a
+peak. M5 reads the output fragment index's exact segment byte ranges and
+durations and computes both attributes from the same bytes the playlist names;
+that naturally includes remux/container overhead. A prepared copy successor
+uses its own frozen index facts. There is no scaled-average fallback: if the
+index cannot provide a complete bound before master publication, M5 remains
+blocked and the path is not claimed honest. This is the concrete decision for
+§7's former open question 2.
 
 ### 3.5 Where the numbers live
 
@@ -609,6 +617,8 @@ Tests, in `transcode.rs`'s existing module:
 | `a_rolling_transcode_freezes_the_rung_geometry` | 3840x2160 source at the 720 rung freezes 1280x720; aspect preserved, both sides even |
 | `a_rolling_transcode_of_an_unprobed_source_freezes_no_geometry` | `width`/`height` stay `None`; master omits `RESOLUTION` |
 | `a_rolling_transcode_never_upscales_its_declaration` | 640x360 source at the 1080 rung freezes 640x360 |
+| `encoded_vod_presentation_never_mixes_source_width_with_requested_height` | encoded VOD at a higher requested rung uses the one 640x360 `output_size` tuple, never 640x1080 |
+| `encoded_vod_presentation_omits_both_unprobed_dimensions` | an unprobed encoded-VOD source carries neither coordinate |
 | `a_probe_refresh_keeps_the_frozen_rung_geometry` | `refresh_frozen_presentation_from_store` after a store row change still reports the rung's geometry |
 | `a_prepared_successor_declares_its_own_rung` | prepared 480 successor to a 1080 incumbent: the successor's master says 854x480 (or the source-aspect equivalent) |
 
@@ -618,9 +628,10 @@ session on a 4K fixture prints `RESOLUTION=1280x720`.
 
 Implemented in the shared `FrozenHlsPresentation` constructor so cached
 starts, live starts, takeovers, prepared successors and test probe refreshes
-cannot drift. The constructor reshapes only `SessionKind::Transcode`; copy
+cannot drift. The encoded-VOD resolver now applies that same coherent
+`output_size` tuple to both dimensions before adding recipe facts; copy
 sessions retain source geometry. Focused tests pin 4K-to-720 output, unprobed
-omission, no upscaling and unchanged copy dimensions.
+omission, no upscaling on both transcode paths and unchanged copy dimensions.
 
 ### 5.2 M2 — the AVC string from `init.mp4`, for fMP4 sessions
 
@@ -633,9 +644,12 @@ Tests:
 
 | Test | Asserts |
 |---|---|
-| `avc_codec_from_init_reads_the_avcc_triplet` | hand-built `avcC` with 0x64/0x00/0x28 -> `avc1.640028` |
-| `avc_codec_from_init_refuses_a_truncated_box` | short box -> `None`, not a panic or a partial string |
+| `avc_codec_from_init_reads_the_avcc_triplet` | valid parsed init returns its exact triplet and changing the selected entry to `avc3` changes the prefix |
+| `avc_codec_from_init_ignores_an_earlier_decoy_box` | an earlier valid-looking `avcC` payload in `free` cannot become identity |
+| `avc_codec_from_init_rejects_ambiguous_sample_descriptions` | matching duplicates agree; a different second triplet is unsupported |
+| `avc_codec_from_init_refuses_a_truncated_box` | truncated structural init is malformed, not a partial string |
 | `an_fmp4_avc_session_normalises_its_codec_from_the_init` | `exact_hls_context_at` returns the init's string, not `transcoded_hls_codecs`'s |
+| `an_fmp4_avc_session_refuses_ambiguous_sample_descriptions` | the publication path returns typed `hls_init_unsupported` for conflicting entries |
 | `an_mpegts_session_keeps_its_static_codec_string` | rolling session: no init read attempted, context unchanged |
 | `an_fmp4_avc_master_is_attempt_media_not_generation_metadata` | `sealed_stable_master_contract` is `None` for an `avc1` context |
 
@@ -672,12 +686,13 @@ Tests:
 | Test | Asserts |
 |---|---|
 | `every_sdr_family_forces_a_profile` | `encode_args_for(Sdr, ..)` contains `-profile:v high` for all five families |
-| `the_declared_level_follows_the_rung` | 360/480/720/1080/2160 map to the §3.3 table |
+| `the_declared_level_covers_the_resolved_grid` | 360/480/720/1080/2160 at 59.94/60 map to §3.3; >60 stays unqualified |
 | `a_family_that_refused_the_probe_keeps_its_old_arguments` | caps with the new verdict false -> argv identical to `0f02b7ea`'s |
 | `the_recipe_hash_changes_for_a_family_that_gained_the_flags` | two hashes differ; a software recipe's hash does not |
 
 Bitstream acceptance — the level in the argv must equal the level in the
-SPS. Per enabled family on a node that has it, for each rung:
+SPS. Per enabled family on a node that has it, for every rung at 23.976,
+29.97, 59.94 and 60 fps:
 
 ```bash
 # one 20 s rolling session per rung, then read the SPS the encoder emitted
@@ -686,7 +701,7 @@ ffprobe -v error -select_streams v:0 \
   -of default=nw=1 seg00003.ts
 ```
 
-`level` must equal the declared `0xLL` as a decimal (e.g. `40` for `0x28`),
+`level` must equal the declared `0xLL` as a decimal (e.g. `42` for `0x2A`),
 `profile` must be `High`, and `width`x`height` must equal the master's
 `RESOLUTION`. A mismatch on any family replaces that family's row in the
 §3.3 table with the measured value before the PR merges.
@@ -761,10 +776,23 @@ takes the **maximum** observed overhead across the corpus, per container,
 and the constant's doc comment records the corpus, the date and the node,
 the way `HDR10_HLS_CODEC`'s does.
 
-Acceptance: declared `BANDWIDTH >= measured peak` for every segment of
-every fixture and rung; declared `AVERAGE-BANDWIDTH` within +/-5 % of the
-measured average and never below it; `cargo test -p plurxd
-master_bandwidth` green; `make unit` green; the table in the PR body.
+Run a second matrix over representative source-copy and remux sessions:
+H.264/AAC fMP4 copy, HEVC/AAC fMP4 copy, an audio-remux case, and a prepared
+copy successor after handoff. Include at least one sparse-GOP and one
+high-bitrate source. Measure the output fragments named by each session's
+playlist—not the source container—and compare the result with the fragment
+index's `(bytes, duration)` peak and average. Record source container, output
+container, whether audio was copied or transcoded, source `bitrate` and
+`max_bit_rate`, indexed peak/average, fetched peak/average, and declared
+attributes. A missing probe `max_bit_rate` is an ordinary required row, not a
+reason to substitute the average.
+
+Acceptance: declared `BANDWIDTH >= measured peak` for every segment of every
+transcode fixture/rung and every copy/remux/handoff row; declared
+`AVERAGE-BANDWIDTH` within +/-5 % of the measured average and never below it;
+the fragment-index calculation equals the fetched copy/remux result; no copy
+path falls back to `file.bitrate` as peak; `cargo test -p plurxd
+master_bandwidth` green; `make unit` green; both tables in the PR body.
 
 ### 5.6 M6 — reproduce the Apple panel consequence, before and after
 
@@ -821,17 +849,22 @@ running:
    videotoolbox), the encoder the server says it will select, and the
    PLURX_HWACCEL preference.
 2. For each node whose selected encoder is NOT software: start a 720p
-   transcode session of a 4K SDR fixture, wait 30 s, find the session's
+   transcode session of each 4K SDR cadence fixture (23.976, 29.97, 59.94
+   and 60 fps), wait 30 s, find the session's
    scratch directory under the transcode root, and run
    `ffprobe -v error -select_streams v:0 -show_entries
     stream=profile,level,width,height -of default=nw=1 <seg00003.ts>`.
    Report profile, level, width, height, and the node's encoder.
-3. Repeat step 2 at the 360, 480 and 1080 rungs.
+3. Repeat step 2 at the 360, 480, 1080 and 2160 rungs. If a node or family
+   cannot produce a row, mark that exact family/rung/cadence unqualified;
+   do not inherit the nearest cadence's result.
 4. Also fetch that session's master playlist
    (`curl -s http://<host>:32400/hls/<session>/master.m3u8`) and paste the
    `#EXT-X-STREAM-INF` line beside each ffprobe row.
-Report one table per node: rung, encoder, declared RESOLUTION, actual
-width x height, declared CODECS, actual profile/level.
+Report one table per node: cadence, rung, encoder, declared RESOLUTION,
+actual width x height, declared CODECS, actual profile/level. Include one
+>60 fps control if the fleet admits such a source and confirm it remains
+declaration-free until separately qualified.
 ```
 
 **GPT prompt — SDR CODECS device re-qualification (M4):**
@@ -877,19 +910,16 @@ fleet.
 
 ## 7. Open questions
 
-1. **Is a per-family `CODECS` function needed, or does `-level` hold?**
-   §3.3 assumes every enabled family honours `-level` and emits the
-   `level_idc` it was given. If QSV or VideoToolbox rounds up, the string
-   becomes a function of `(Encoder, height)` and the frozen presentation
-   must then carry the encoder, which it does not today. M3's bitstream
-   acceptance decides this; if it goes the wrong way, M3 is two PRs.
-2. **Copy sessions' peak.** §3.4 leaves copy on `file.bitrate` for both
-   attributes. The probe's per-stream `max_bit_rate` is often absent in
-   MKV. Options: leave copy alone (honest-ish, understates burst), scale by
-   the measured container factor, or compute a real peak at scan time from
-   the fragment index the store already builds. The third is the only
-   correct one and it is the most work; decide after M5's numbers show how
-   badly a remux's peak exceeds its average.
+1. **Which families honour the cadence-safe `-level`?** §3.3 makes no
+   inheritance across cadence. If QSV or VideoToolbox rounds up, identity and
+   declaration become a function of `(Encoder, height, resolved frame grid)`;
+   the frozen presentation must then carry that qualified result. M3's full
+   23.976/29.97/59.94/60 matrix decides it.
+2. **Copy peak implementation seam.** The policy is decided in §3.4: exact
+   output-fragment-index bytes and durations, with no average-as-peak fallback.
+   M5 still has to identify whether the existing index can freeze that answer
+   before the first master for every copy/remux/prepared-successor path; until
+   it can, M5 is blocked rather than partially complete.
 3. **Does `FRAME-RATE` need the same treatment?** For rolling it comes from
    the frozen source probe, which is right today because no filter changes
    the cadence — but Q4's deinterlacer would, if field output is ever
