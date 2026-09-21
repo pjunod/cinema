@@ -1,6 +1,6 @@
 # G3 — did the layout abstraction pay for itself?
 
-**Status:** decided · **Verdict: revise the contract, then continue** ·
+**Status:** done — G3 decision recorded · **Verdict: revise the contract, then continue** ·
 **Gate:** G3 of [UI-LAYOUTS-IMPLEMENTATION.md](UI-LAYOUTS-IMPLEMENTATION.md)
 · **Measured against:** `crates/plurxd/src/web/index.html` at 693,806 bytes ·
 **Written:** 2026-08-03

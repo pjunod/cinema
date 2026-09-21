@@ -1,6 +1,6 @@
 # Playback surface review response — the presenter gives up the player
 
-**Status:** answered 2026-09-13 · **Answers:**
+**Status:** done — review answered and contract v2 produced 2026-09-13 · **Answers:**
 [PLAYBACK-SURFACE-CONTRACT-REVIEW.md](PLAYBACK-SURFACE-CONTRACT-REVIEW.md)
 (PR #274 @ `c2deda1`) · **Produces:** contract v2 in
 [PLAYBACK-SURFACE-CONTRACT.md](PLAYBACK-SURFACE-CONTRACT.md)
