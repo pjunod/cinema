@@ -55,6 +55,7 @@ pub struct InspectedTitle {
     pub duration_ms: Option<u64>,
     pub angles: u32,
     pub facts: PlaybackMediaFacts,
+    pub probe_json: String,
     pub streams: Vec<InspectedStream>,
     pub chapters: Vec<InspectedChapter>,
     pub suggested_feature_score: Option<u16>,
@@ -168,6 +169,11 @@ pub fn validate_inspection(response: &InspectionResponse) -> Result<(), Inspecti
         {
             return Err(InspectionError::Facts);
         }
+        if title.probe_json.len() > 1024 * 1024
+            || serde_json::from_str::<serde_json::Value>(&title.probe_json).is_err()
+        {
+            return Err(InspectionError::Facts);
+        }
         if title.streams.len() > MAX_STREAMS_PER_TITLE {
             return Err(InspectionError::Streams);
         }
@@ -224,6 +230,7 @@ pub fn inspection_to_store(
                 locator: title.locator,
                 angles: title.angles,
                 facts: title.facts.clone(),
+                probe_json: title.probe_json.clone(),
                 chapters_json,
                 duration_ms,
                 matched_item_id: None,
@@ -284,6 +291,7 @@ mod tests {
                         probed: true,
                         ..PlaybackMediaFacts::default()
                     },
+                    probe_json: r#"{"streams":[]}"#.to_owned(),
                     streams: Vec::new(),
                     chapters: Vec::new(),
                     suggested_feature_score: None,

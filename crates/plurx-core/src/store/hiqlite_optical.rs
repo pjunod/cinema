@@ -85,6 +85,7 @@ struct TitleRow {
     locator_json: String,
     angles: i64,
     facts_json: String,
+    probe_json: String,
     chapters_json: String,
     duration_ms: Option<i64>,
     matched_item_id: Option<i64>,
@@ -99,6 +100,7 @@ impl From<&mut Row<'_>> for TitleRow {
             locator_json: row.get("locator_json"),
             angles: row.get("angles"),
             facts_json: row.get("facts_json"),
+            probe_json: row.get("probe_json"),
             chapters_json: row.get("chapters_json"),
             duration_ms: row.get("duration_ms"),
             matched_item_id: row.get("matched_item_id"),
@@ -124,6 +126,7 @@ impl TryFrom<TitleRow> for OpticalTitle {
             facts: serde_json::from_str(&row.facts_json).map_err(|error| {
                 StoreError::Database(format!("invalid optical media facts: {error}"))
             })?,
+            probe_json: row.probe_json,
             chapters_json: row.chapters_json,
             duration_ms: row.duration_ms,
             matched_item_id: row.matched_item_id,
@@ -190,7 +193,8 @@ impl TryFrom<ProgressRow> for OpticalProgress {
 
 const DISC_COLUMNS: &str = "disc_id, fingerprint_version, fingerprint_evidence_json, format, \
     volume_label, display_title, metadata_json, created_at_ms, updated_at_ms";
-const TITLE_COLUMNS: &str = "disc_id, title_id, locator_json, angles, facts_json, chapters_json, \
+const TITLE_COLUMNS: &str =
+    "disc_id, title_id, locator_json, angles, facts_json, probe_json, chapters_json, \
     duration_ms, matched_item_id, match_kind";
 const PROGRESS_COLUMNS: &str = "user_id, disc_id, title_id, angle, position_ms, duration_ms, \
     watched, audio_selection_json, subtitle_selection_json, updated_at_ms";
@@ -240,13 +244,14 @@ impl OpticalStore for HiqliteAuthStore {
                 .map_err(|error| StoreError::Database(error.to_string()))?;
             statements.push((
                 "INSERT INTO optical_titles
-                     (disc_id, title_id, locator_json, angles, facts_json, chapters_json,
-                      duration_ms, matched_item_id, match_kind)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                     (disc_id, title_id, locator_json, angles, facts_json, probe_json,
+                      chapters_json, duration_ms, matched_item_id, match_kind)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                  ON CONFLICT(disc_id, title_id) DO UPDATE SET
                      locator_json = excluded.locator_json,
                      angles = excluded.angles,
                      facts_json = excluded.facts_json,
+                     probe_json = excluded.probe_json,
                      chapters_json = excluded.chapters_json,
                      duration_ms = excluded.duration_ms"
                     .to_owned(),
@@ -256,6 +261,7 @@ impl OpticalStore for HiqliteAuthStore {
                     locator_json,
                     title.angles,
                     facts_json,
+                    &title.probe_json,
                     &title.chapters_json,
                     title.duration_ms,
                     title.matched_item_id,

@@ -5,6 +5,7 @@ use super::{
     inspection_to_store, OpticalDriveManager, OpticalDriveSnapshot, OpticalHostAdapter,
     OpticalHostError, OpticalLifecycleError, OpticalMediaPresence, OpticalReadPermit,
 };
+use super::{OpticalTitle, PlaybackSourceRef, ResolvedInput};
 use crate::config::OpticalDriveConfig;
 use crate::error::StoreError;
 use crate::store::OpticalStore;
@@ -35,6 +36,14 @@ pub struct OpticalService<S: ?Sized, H> {
     store: Arc<S>,
     host: Arc<H>,
     poll_interval: std::time::Duration,
+}
+
+/// Full capability handed to the playback controller. Dropping it releases
+/// the exclusive physical reader and returns the drive to ready.
+pub struct OpticalPlaybackLease {
+    pub source: PlaybackSourceRef,
+    pub input: ResolvedInput,
+    pub permit: OpticalReadPermit,
 }
 
 impl<S, H> OpticalService<S, H>
@@ -187,6 +196,39 @@ where
             title_id,
             session_id,
         )?)
+    }
+
+    pub fn claim_playback_title(
+        &self,
+        drive_id: &str,
+        expected_generation: &str,
+        expected_disc_id: &str,
+        title: &OpticalTitle,
+        angle: u32,
+        session_id: &str,
+    ) -> Result<OpticalPlaybackLease, OpticalServiceError> {
+        if title.disc_id != expected_disc_id || angle == 0 || angle > title.angles {
+            return Err(OpticalLifecycleError::InvalidIdentity.into());
+        }
+        let drive = self
+            .drives
+            .get(drive_id)
+            .ok_or(OpticalServiceError::UnknownDrive)?;
+        let permit = self.claim_playback(
+            drive_id,
+            expected_generation,
+            expected_disc_id,
+            &title.title_id,
+            session_id,
+        )?;
+        let source =
+            permit.playback_source(expected_disc_id.to_owned(), title.title_id.clone(), angle)?;
+        let input = self.host.resolve_input(drive, title.locator, angle)?;
+        Ok(OpticalPlaybackLease {
+            source,
+            input,
+            permit,
+        })
     }
 
     /// Execute a previously authenticated/authorized eject against the exact

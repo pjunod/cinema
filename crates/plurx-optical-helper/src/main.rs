@@ -636,6 +636,7 @@ mod linux {
                 source_delivery: SourceDelivery::ManagedOpticalTitle,
                 learned_limit_identity: None,
             },
+            probe_json: serde_json::to_string(document).map_err(|error| error.to_string())?,
             streams: inspected_streams,
             chapters,
             suggested_feature_score: duration_ms.map(|duration| {

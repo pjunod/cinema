@@ -772,6 +772,10 @@ pub enum TranscodeExecutionError {
 
 #[derive(Debug, Clone)]
 pub struct TranscodeExecution {
+    /// Validated source input for every open performed by this attempt. File
+    /// playback retains its exact argv; optical playback carries selection
+    /// options as typed, input-local arguments rather than a stringly path.
+    pub source_input: crate::optical::ResolvedInput,
     pub source_path: PathBuf,
     pub start_seconds: f64,
     pub start_number: i64,
@@ -859,6 +863,9 @@ impl TranscodeExecution {
             ));
         }
         Ok(Self {
+            source_input: crate::optical::ResolvedInput::File {
+                path: source.path.clone(),
+            },
             source_path: source.path.clone(),
             start_seconds: options.start_seconds,
             start_number: options.start_number,
@@ -869,6 +876,22 @@ impl TranscodeExecution {
             out_dir: out_dir.to_owned(),
             diagnostics: DiagnosticLogging::Legacy,
         })
+    }
+
+    /// Replace the default file input with an already-authorized source.
+    ///
+    /// `source_path` remains the legacy text-subtitle filter path. Callers
+    /// using a non-file input must not request an embedded text-subtitle burn;
+    /// sidecars and bitmap streams are opened through their own typed inputs.
+    pub fn with_source_input(
+        mut self,
+        source_input: crate::optical::ResolvedInput,
+    ) -> Result<Self, TranscodeExecutionError> {
+        source_input
+            .validate()
+            .map_err(|_| TranscodeExecutionError::Invalid("source input is invalid"))?;
+        self.source_input = source_input;
+        Ok(self)
     }
 
     /// Ask this attempt's child for the diagnostics a qualified grammar reads.
@@ -1366,6 +1389,7 @@ pub fn hls_args_for_plan(plan: &ResolvedTranscode, execution: &TranscodeExecutio
     hls_args_inner(
         None,
         &execution.source_path.to_string_lossy(),
+        Some(&execution.source_input),
         plan.encoder(),
         &options,
         execution.pacing,
@@ -1388,6 +1412,7 @@ fn hls_args_with_compatibility(
     hls_args_inner(
         Some(source),
         &source.path.to_string_lossy(),
+        None,
         encoder,
         opts,
         pacing,
@@ -1402,6 +1427,7 @@ fn hls_args_with_compatibility(
 fn hls_args_inner(
     legacy_source: Option<&MediaFile>,
     source_path: &str,
+    source_input: Option<&crate::optical::ResolvedInput>,
     encoder: Encoder,
     opts: &TranscodeOptions,
     pacing: Pacing,
@@ -1494,8 +1520,20 @@ fn hls_args_inner(
     // realtime otherwise writes the whole film ahead of a playhead that will
     // never reach most of it.
     pacing.push(&mut args);
-    args.push("-i".into());
-    args.push(source_path.clone());
+    if let Some(source_input) = source_input {
+        let mut input_args = Vec::new();
+        source_input
+            .append_input_args(&mut input_args)
+            .expect("transcode execution contains a validated input");
+        args.extend(
+            input_args
+                .into_iter()
+                .map(|argument| argument.to_string_lossy().into_owned()),
+        );
+    } else {
+        args.push("-i".into());
+        args.push(source_path.clone());
+    }
 
     // A per-file A/V sync correction. The audio on this path is ALWAYS
     // re-encoded (AAC below), so the correction is an audio filter on the one

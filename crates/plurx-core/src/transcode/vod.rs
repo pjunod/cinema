@@ -156,19 +156,22 @@ pub fn vod_pipe_args(
             .iter()
             .position(|arg| arg == "-map")
             .expect("video map");
+        let mut audio_input = vec!["-ss".to_owned(), format!("{audio_seek:.9}")];
+        let mut typed_input = Vec::new();
+        execution
+            .source_input
+            .append_input_args(&mut typed_input)
+            .expect("VOD execution contains a validated input");
+        audio_input.extend(
+            typed_input
+                .into_iter()
+                .map(|argument| argument.to_string_lossy().into_owned()),
+        );
         // The demux seek may land on either side of its requested timestamp.
         // Rebase the decoded PTS to the exact requested AAC lattice below,
         // then trim on a sample count; this keeps every generation on one
         // global phase without decoding the soundtrack from film zero.
-        args.splice(
-            before_map..before_map,
-            [
-                "-ss".into(),
-                format!("{audio_seek:.9}"),
-                "-i".into(),
-                execution.source_path.to_string_lossy().into_owned(),
-            ],
-        );
+        args.splice(before_map..before_map, audio_input);
         for argument in &mut args {
             if argument.starts_with("0:a:") {
                 *argument = argument.replacen("0:a:", "1:a:", 1);

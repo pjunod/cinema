@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
 use tokio::io::AsyncReadExt;
 
-use super::InspectionResponse;
 #[cfg(target_os = "linux")]
 use super::{validate_inspection, INSPECTION_SCHEMA_V1};
+use super::{InspectionResponse, OpticalTitleLocator, ResolvedInput};
 use crate::config::OpticalDriveConfig;
 
 #[cfg(target_os = "linux")]
@@ -69,6 +69,8 @@ pub enum OpticalHostError {
     InvalidReply(String),
     #[error("the optical helper answered for a stale insertion")]
     StaleGeneration,
+    #[error("the configured optical mount is not a canonical read-only directory")]
+    InvalidMount,
 }
 
 #[async_trait]
@@ -86,6 +88,16 @@ pub trait OpticalHostAdapter: Send + Sync + 'static {
         drive: &OpticalDriveConfig,
         expected_generation: &str,
     ) -> Result<InspectionResponse, OpticalHostError>;
+
+    /// Resolve a trusted configured mount plus inspected locator into one
+    /// execution input. This is repeated at playback admission so replacing a
+    /// mount after inspection cannot redirect an already-authorized title.
+    fn resolve_input(
+        &self,
+        drive: &OpticalDriveConfig,
+        locator: OpticalTitleLocator,
+        angle: u32,
+    ) -> Result<ResolvedInput, OpticalHostError>;
 
     async fn eject(&self, drive: &OpticalDriveConfig) -> Result<(), OpticalHostError>;
 }
@@ -286,6 +298,60 @@ impl OpticalHostAdapter for SystemOpticalHost {
         #[cfg(not(target_os = "linux"))]
         {
             let _ = (drive, expected_generation);
+            Err(OpticalHostError::UnsupportedHost)
+        }
+    }
+
+    fn resolve_input(
+        &self,
+        drive: &OpticalDriveConfig,
+        locator: OpticalTitleLocator,
+        angle: u32,
+    ) -> Result<ResolvedInput, OpticalHostError> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::ffi::OsStrExt;
+
+            if drive.mount_path.as_os_str().is_empty() || angle == 0 {
+                return Err(OpticalHostError::InvalidMount);
+            }
+            let mount = std::fs::canonicalize(&drive.mount_path)
+                .map_err(|_| OpticalHostError::InvalidMount)?;
+            if !mount.is_dir() {
+                return Err(OpticalHostError::InvalidMount);
+            }
+            let bytes = mount.as_os_str().as_bytes();
+            let path = std::ffi::CString::new(bytes).map_err(|_| OpticalHostError::InvalidMount)?;
+            let mut facts = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+            let result = unsafe { libc::statvfs(path.as_ptr(), facts.as_mut_ptr()) };
+            if result != 0 {
+                return Err(OpticalHostError::InvalidMount);
+            }
+            let facts = unsafe { facts.assume_init() };
+            if facts.f_flag & libc::ST_RDONLY == 0 {
+                return Err(OpticalHostError::InvalidMount);
+            }
+            Ok(match locator {
+                OpticalTitleLocator::Dvd { title_number } if title_number > 0 => {
+                    ResolvedInput::Dvd {
+                        path: mount,
+                        title_number,
+                        angle,
+                    }
+                }
+                OpticalTitleLocator::Bluray { playlist_number } if playlist_number > 0 => {
+                    ResolvedInput::Bluray {
+                        path: mount,
+                        playlist_number,
+                        angle,
+                    }
+                }
+                _ => return Err(OpticalHostError::InvalidMount),
+            })
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (drive, locator, angle);
             Err(OpticalHostError::UnsupportedHost)
         }
     }

@@ -21,6 +21,7 @@ CREATE TABLE optical_titles (
     locator_json TEXT NOT NULL,
     angles INTEGER NOT NULL CHECK (angles >= 1),
     facts_json TEXT NOT NULL,
+    probe_json TEXT NOT NULL,
     chapters_json TEXT NOT NULL,
     duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
     matched_item_id INTEGER REFERENCES items(id) ON DELETE SET NULL,
@@ -106,6 +107,10 @@ pub struct OpticalTitle {
     pub locator: OpticalTitleLocator,
     pub angles: u32,
     pub facts: PlaybackMediaFacts,
+    /// Bounded FFprobe document used to resolve the immutable decode plan and
+    /// frame grid without reopening the drive outside its playback permit.
+    #[serde(skip_serializing)]
+    pub probe_json: String,
     pub chapters_json: String,
     pub duration_ms: Option<i64>,
     pub matched_item_id: Option<i64>,
@@ -200,6 +205,7 @@ pub(crate) fn validate_inspection_write(value: &OpticalInspection) -> Result<(),
         let facts_json = serde_json::to_string(&title.facts)
             .map_err(|error| format!("invalid title facts: {error}"))?;
         validate_document("title facts", &facts_json)?;
+        validate_document("title probe", &title.probe_json)?;
         validate_document("title chapters", &title.chapters_json)?;
         let locator = serde_json::to_value(title.locator)
             .map_err(|error| format!("invalid title locator: {error}"))?;
