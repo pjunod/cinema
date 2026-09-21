@@ -3117,6 +3117,30 @@ fn progressive_hevc_copy_args(
     args
 }
 
+/// Consume the stderr stream shared by progressive-remux diagnostics and
+/// `-progress`. Keeping the complete reader in one function lets the contract
+/// test exercise the same classification, telemetry mutation, and log path as
+/// production rather than testing the classifier in isolation.
+async fn consume_remux_stderr<R>(
+    stderr: R,
+    telemetry: Option<(std::sync::Arc<crate::transcode::Progress>, u64)>,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt as _, BufReader};
+
+    let mut lines = BufReader::new(stderr).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some((progress, generation)) = &telemetry {
+            if plurx_core::transcode::progress::is_progress_line(&line) {
+                crate::transcode::apply_progress_line(progress, *generation, &line);
+                continue;
+            }
+        }
+        tracing::warn!("remux ffmpeg: {line}");
+    }
+}
+
 async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     let RemuxSpec {
         path,
@@ -3312,19 +3336,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         let generation = p.begin_attempt();
         (p, generation)
     });
-    tokio::spawn(async move {
-        use tokio::io::{AsyncBufReadExt, BufReader};
-        let mut lines = BufReader::new(stderr).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Some((progress, generation)) = &telemetry {
-                if plurx_core::transcode::progress::is_progress_line(&line) {
-                    crate::transcode::apply_progress_line(progress, *generation, &line);
-                    continue;
-                }
-            }
-            tracing::warn!("remux ffmpeg: {line}");
-        }
-    });
+    tokio::spawn(consume_remux_stderr(stderr, telemetry));
 
     let owner_guard = guard.clone();
     let (process_guard, _process_owner) = spawn_remux_process_owner(
@@ -4401,6 +4413,65 @@ mod tests {
                 "prose: {line}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn tracked_remux_logs_diagnostics_without_advancing_progress() {
+        use tokio::io::AsyncWriteExt as _;
+        use tracing_subscriber::prelude::*;
+
+        let logs = std::sync::Arc::new(crate::logbuf::LogBuffer::new(8));
+        let subscriber = tracing_subscriber::registry()
+            .with(crate::logbuf::BufferLayer(std::sync::Arc::clone(&logs)));
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let progress = std::sync::Arc::new(crate::transcode::Progress::new());
+        let generation = progress.begin_attempt();
+
+        let (mut diagnostic_writer, diagnostic_reader) = tokio::io::duplex(256);
+        diagnostic_writer
+            .write_all(b"filter_units=remove_types=32-34\n")
+            .await
+            .expect("write diagnostic transcript");
+        diagnostic_writer
+            .shutdown()
+            .await
+            .expect("finish diagnostic transcript");
+        consume_remux_stderr(
+            diagnostic_reader,
+            Some((std::sync::Arc::clone(&progress), generation)),
+        )
+        .await;
+
+        assert_eq!(progress.speed(), None);
+        assert_eq!(progress.out_time_ms(), None);
+        let captured = logs.tail("trace", 8);
+        assert_eq!(captured.len(), 1, "{captured:?}");
+        assert!(
+            captured[0]
+                .message
+                .contains("remux ffmpeg: filter_units=remove_types=32-34"),
+            "{}",
+            captured[0].message
+        );
+
+        let (mut progress_writer, progress_reader) = tokio::io::duplex(256);
+        progress_writer
+            .write_all(b"speed=2.50x\nout_time_us=1250000\n")
+            .await
+            .expect("write progress transcript");
+        progress_writer
+            .shutdown()
+            .await
+            .expect("finish progress transcript");
+        consume_remux_stderr(progress_reader, Some((progress.clone(), generation))).await;
+
+        assert_eq!(progress.speed(), Some(2.5));
+        assert_eq!(progress.out_time_ms(), Some(1_250));
+        assert_eq!(
+            logs.tail("trace", 8).len(),
+            1,
+            "progress lines stay out of logs"
+        );
     }
 
     /// This is the response-start budget in isolation: an artificially cold

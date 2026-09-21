@@ -265,7 +265,11 @@ mod tests {
                         .expect("descriptor contents");
                     values.push(value);
                 }
-                println!("descriptors={}", values.join("|"));
+                assert!(
+                    std::fs::File::open("/dev/fd/6").is_err(),
+                    "the descriptor setup leaked a non-reserved child fd"
+                );
+                println!("descriptors={};fd6=closed", values.join("|"));
             }
             Ok("pipes") => {
                 std::io::stdout()
@@ -275,6 +279,13 @@ mod tests {
                     .write_all(b"stderr-owned")
                     .expect("stderr");
             }
+            Ok("hold") => {
+                println!("pid={}", std::process::id());
+                std::io::stdout().flush().expect("flush child pid");
+                std::thread::sleep(std::time::Duration::from_secs(300));
+            }
+            #[cfg(unix)]
+            Ok("low-fd-harness") => run_low_fd_harness(),
             _ => {}
         }
     }
@@ -294,6 +305,71 @@ mod tests {
             .expect("stderr");
         assert!(spawned.child.wait().await.expect("wait").success());
         (stdout, stderr)
+    }
+
+    fn holding_spawn() -> Spawned {
+        let cache = tempfile::tempdir().expect("runtime cache");
+        let mut args = child("hold");
+        args.pop();
+        let spawned = spawn(
+            &std::env::current_exe().expect("test executable"),
+            &args,
+            SpawnOptions {
+                runtime_cache: cache.path(),
+                progress: Progress::None,
+                descriptors: Descriptors::default(),
+                env: &[("PLURX_PRODUCER_CHILD_MODE", OsStr::new("hold"))],
+            },
+        )
+        .expect("spawn holding child");
+        // The environment is copied into the child during spawn; the fixture
+        // does not need the directory after that point.
+        drop(cache);
+        spawned
+    }
+
+    async fn child_pid(stdout: &mut tokio::process::ChildStdout) -> u32 {
+        use tokio::io::AsyncBufReadExt as _;
+
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
+        while let Some(line) = lines.next_line().await.expect("read child pid") {
+            if let Some(pid) = line.trim().strip_prefix("pid=") {
+                return pid.parse().expect("numeric child pid");
+            }
+        }
+        panic!("child exited before reporting its pid")
+    }
+
+    #[cfg(unix)]
+    fn process_exists(pid: u32) -> bool {
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+
+    #[cfg(windows)]
+    fn process_exists(pid: u32) -> bool {
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_TIMEOUT};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+        };
+
+        let process = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, pid) };
+        if process.is_null() {
+            return false;
+        }
+        let wait = unsafe { WaitForSingleObject(process, 0) };
+        unsafe { CloseHandle(process) };
+        wait == WAIT_TIMEOUT
+    }
+
+    async fn wait_until_reaped(pid: u32) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while process_exists(pid) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("spawned child was killed and reaped");
     }
 
     #[tokio::test]
@@ -361,6 +437,40 @@ mod tests {
         assert!(stderr.contains("stderr-owned"));
     }
 
+    #[tokio::test]
+    async fn dropping_a_live_spawned_child_kills_and_reaps_it() {
+        let mut spawned = holding_spawn();
+        let pid = child_pid(&mut spawned.stdout).await;
+        assert!(process_exists(pid), "fixture child is live before drop");
+        drop(spawned);
+        wait_until_reaped(pid).await;
+    }
+
+    #[tokio::test]
+    async fn job_owned_spawn_follows_the_vod_slot_through_confirmed_reap() {
+        let mut spawned = holding_spawn();
+        let pid = child_pid(&mut spawned.stdout).await;
+        let Spawned {
+            child,
+            child_job,
+            stdout,
+            stderr,
+        } = spawned;
+        drop((stdout, stderr));
+
+        let slot = crate::prodrun::ProducerSlot::new();
+        slot.attach_job_owned(child, child_job, 0, None).await;
+        slot.perform(
+            crate::prodexec::Step::Terminate {
+                why: crate::prodexec::Termination::Idle,
+            },
+            || {},
+        )
+        .await
+        .expect("terminate and reap the shared-builder child");
+        wait_until_reaped(pid).await;
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn descriptors_land_on_three_four_five() {
@@ -391,6 +501,83 @@ mod tests {
         )
         .expect("spawn child");
         let (stdout, _) = output(spawned).await;
-        assert!(stdout.contains("descriptors=source|output|subtitle"));
+        assert!(stdout.contains("descriptors=source|output|subtitle;fd6=closed"));
+    }
+
+    #[cfg(unix)]
+    fn run_low_fd_harness() {
+        use std::os::fd::{AsRawFd as _, FromRawFd as _};
+
+        let mut original = tempfile::tempfile().expect("source descriptor");
+        original.write_all(b"source").expect("source contents");
+        original.rewind().expect("rewind source");
+        let source = if original.as_raw_fd() == 4 {
+            original
+        } else {
+            assert_eq!(unsafe { libc::dup2(original.as_raw_fd(), 4) }, 4);
+            unsafe { std::fs::File::from_raw_fd(4) }
+        };
+        assert_eq!(
+            source.as_raw_fd(),
+            4,
+            "fixture source must collide with output target"
+        );
+
+        let mut output_file = tempfile::tempfile().expect("output descriptor");
+        output_file.write_all(b"output").expect("output contents");
+        output_file.rewind().expect("rewind output");
+        let mut subtitle = tempfile::tempfile().expect("subtitle descriptor");
+        subtitle.write_all(b"subtitle").expect("subtitle contents");
+        subtitle.rewind().expect("rewind subtitle");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("low-fd runtime");
+        let (stdout, _) = runtime.block_on(async {
+            let cache = tempfile::tempdir().expect("runtime cache");
+            let mut args = child("descriptors");
+            args.pop();
+            let spawned = spawn(
+                &std::env::current_exe().expect("test executable"),
+                &args,
+                SpawnOptions {
+                    runtime_cache: cache.path(),
+                    progress: Progress::None,
+                    descriptors: Descriptors::from_files(
+                        Some(&source),
+                        Some(&output_file),
+                        Some(&subtitle),
+                        false,
+                    ),
+                    env: &[("PLURX_PRODUCER_CHILD_MODE", OsStr::new("descriptors"))],
+                },
+            )
+            .expect("spawn low-fd child");
+            output(spawned).await
+        });
+        assert!(stdout.contains("descriptors=source|output|subtitle;fd6=closed"));
+        println!("low-fd-harness=ok");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn descriptor_dup_survives_an_unlucky_low_fd() {
+        let mut args = child("low-fd-harness");
+        args.pop();
+        let result =
+            tokio::process::Command::new(std::env::current_exe().expect("test executable"))
+                .args(args)
+                .env("PLURX_PRODUCER_CHILD_MODE", "low-fd-harness")
+                .kill_on_drop(true)
+                .output()
+                .await
+                .expect("run isolated low-fd harness");
+        assert!(
+            result.status.success(),
+            "low-fd harness failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(String::from_utf8_lossy(&result.stdout).contains("low-fd-harness=ok"));
     }
 }
