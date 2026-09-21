@@ -6,8 +6,9 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use plurx_core::domain::ItemKind;
 use plurx_core::optical::{
-    OpticalDisc, OpticalDriveSnapshot, OpticalDriveState, OpticalLifecycleError, OpticalMatchKind,
-    OpticalProgress, OpticalProgressWrite, OpticalServiceError, OpticalTitle, PlaybackSourceRef,
+    HostRequirement, HostRequirementStatus, OpticalDisc, OpticalDriveSnapshot, OpticalDriveState,
+    OpticalLifecycleError, OpticalMatchKind, OpticalProgress, OpticalProgressWrite,
+    OpticalServiceError, OpticalTitle, PlaybackSourceRef,
 };
 use plurx_core::playback::{self, Decision, DeviceCaps, Force};
 use plurx_core::store::{keys, stored_switch};
@@ -129,9 +130,17 @@ fn local_drive_id<'a>(state: &AppState, requested: &'a str) -> Result<&'a str, A
         return Ok(requested);
     }
     let prefix = format!("{}:", state.node_id);
-    let local = requested
-        .strip_prefix(&prefix)
-        .ok_or(ApiError::NotFound("drive"))?;
+    let local = if let Some(local) = requested.strip_prefix(&prefix) {
+        local
+    } else if requested.contains(':') {
+        return Err(ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "optical_owner_unavailable",
+            "this ingress cannot yet relay the request to the advertised drive owner",
+        ));
+    } else {
+        return Err(ApiError::NotFound("drive"));
+    };
     state
         .optical
         .manager()
@@ -174,7 +183,15 @@ async fn drive_dto(
                 }),
             _ => None,
         };
-    let requirements = state.optical.requirements(&snapshot.id).unwrap_or_default();
+    let requirements = if snapshot.owner_node_id == state.node_id {
+        state.optical.requirements(&snapshot.id).unwrap_or_default()
+    } else {
+        vec![HostRequirement {
+            id: "owner_advertisement",
+            status: HostRequirementStatus::Met,
+            detail: "Drive owner has a fresh optical_v1 cluster advertisement".to_owned(),
+        }]
+    };
     Ok(DriveDto {
         id: format!("{}:{}", snapshot.owner_node_id, snapshot.id),
         name: snapshot.label,
@@ -192,8 +209,15 @@ async fn drives(
 ) -> Result<Json<Vec<DriveDto>>, ApiError> {
     authorize_play(&state, user.id).await?;
     let enabled = optical_enabled(&state).await?;
-    let mut result = Vec::new();
-    for snapshot in state.optical.manager().snapshots() {
+    let mut snapshots = state.optical.manager().snapshots();
+    snapshots.extend(state.media_pool.remote_optical_drives().await);
+    snapshots.sort_by(|left, right| {
+        left.owner_node_id
+            .cmp(&right.owner_node_id)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    let mut result = Vec::with_capacity(snapshots.len());
+    for snapshot in snapshots {
         result.push(drive_dto(&state, snapshot, enabled).await?);
     }
     Ok(Json(result))

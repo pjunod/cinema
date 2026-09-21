@@ -23,10 +23,11 @@ use crate::state::AppState;
 
 pub(crate) const SNAPSHOT_PATH: &str = "/internal/v1/media/snapshot";
 pub(crate) const OFFERS_PATH: &str = "/internal/v1/media/offers";
-/// Protocol 5 carries Library-channel purpose in every worker/takeover
-/// envelope. Exact-version offer filtering is the activation fence: a mixed
-/// cluster refuses placement instead of losing following semantics.
-pub(crate) const PROTOCOL_VERSION: i64 = 6;
+/// Protocol 7 carries Library-channel purpose in worker/takeover envelopes and
+/// path-free optical ownership in node snapshots. Exact-version filtering is
+/// the activation fence: a mixed cluster refuses placement instead of losing
+/// source semantics.
+pub(crate) const PROTOCOL_VERSION: i64 = 7;
 pub(crate) const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) const SNAPSHOT_DEADLINE: Duration = Duration::from_secs(2);
 pub(crate) const SNAPSHOT_EXPIRY: Duration = Duration::from_secs(15);
@@ -87,6 +88,15 @@ pub(crate) struct MediaNodeSnapshot {
     pub observed_at_unix_ms: i64,
     pub build: String,
     pub protocol_version: i64,
+    /// Exact-version capability for source recipes that name an optical
+    /// insertion. Old nodes are excluded by the protocol fence before any
+    /// drive advertisement can be trusted.
+    #[serde(default)]
+    pub optical_v1: bool,
+    /// Path-free, insertion-fenced ownership advertisements. Device and mount
+    /// paths remain node-local configuration and never enter this directory.
+    #[serde(default)]
+    pub optical_drives: Vec<plurx_core::optical::OpticalDriveSnapshot>,
     pub encoders: Vec<EncoderOfferCapability>,
     pub tone_map: Vec<ToneMapOfferCapability>,
     pub hardware_slots_used: u32,
@@ -628,6 +638,28 @@ impl MediaPool {
             .retain(|_, cached| now <= cached.expires_at);
     }
 
+    /// Fresh remote optical ownership, excluding the local node (whose manager
+    /// is authoritative in-process). Expiry is the owner-offline fence.
+    pub(crate) async fn remote_optical_drives(
+        &self,
+    ) -> Vec<plurx_core::optical::OpticalDriveSnapshot> {
+        self.expire().await;
+        let mut drives = self
+            .snapshots
+            .read()
+            .await
+            .values()
+            .filter(|cached| cached.snapshot.optical_v1)
+            .flat_map(|cached| cached.snapshot.optical_drives.clone())
+            .collect::<Vec<_>>();
+        drives.sort_by(|left, right| {
+            left.owner_node_id
+                .cmp(&right.owner_node_id)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        drives
+    }
+
     pub(crate) async fn diagnostics(&self, state: &AppState) -> MediaDirectoryDiagnostics {
         self.expire().await;
         let mut nodes = vec![local_snapshot(state).await];
@@ -957,6 +989,12 @@ pub(crate) async fn local_snapshot(state: &AppState) -> MediaNodeSnapshot {
         observed_at_unix_ms: unix_ms(),
         build: crate::version::BUILD.to_owned(),
         protocol_version: PROTOCOL_VERSION,
+        optical_v1: cfg!(target_os = "linux"),
+        optical_drives: if cfg!(target_os = "linux") {
+            state.optical.manager().snapshots()
+        } else {
+            Vec::new()
+        },
         encoders: runtime
             .encoder_families
             .into_iter()
@@ -1171,6 +1209,19 @@ fn snapshot_is_bounded(snapshot: &MediaNodeSnapshot, expected_node_id: &str) -> 
         && snapshot.node_id.len() <= 256
         && snapshot.build.len() <= 256
         && snapshot.protocol_version == PROTOCOL_VERSION
+        && snapshot.optical_drives.len() <= MAX_CAPABILITIES
+        && (snapshot.optical_v1 || snapshot.optical_drives.is_empty())
+        && snapshot
+            .optical_drives
+            .iter()
+            .map(|drive| drive.id.as_str())
+            .collect::<BTreeSet<_>>()
+            .len()
+            == snapshot.optical_drives.len()
+        && snapshot
+            .optical_drives
+            .iter()
+            .all(|drive| optical_drive_advertisement_is_bounded(drive, expected_node_id))
         && snapshot_remaining_ttl(snapshot.observed_at_unix_ms).is_some()
         && snapshot.encoders.len() <= MAX_CAPABILITIES
         && snapshot.tone_map.len() <= MAX_CAPABILITIES
@@ -1187,6 +1238,45 @@ fn snapshot_is_bounded(snapshot: &MediaNodeSnapshot, expected_node_id: &str) -> 
         && snapshot.tone_map.iter().all(|capability| {
             !capability.pipeline.is_empty() && capability.pipeline.len() <= MAX_CAPABILITY_BYTES
         })
+}
+
+fn optical_drive_advertisement_is_bounded(
+    drive: &plurx_core::optical::OpticalDriveSnapshot,
+    expected_node_id: &str,
+) -> bool {
+    fn bounded(value: &str) -> bool {
+        !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+    }
+
+    let state_is_bounded = match &drive.state {
+        plurx_core::optical::OpticalDriveState::Empty => true,
+        plurx_core::optical::OpticalDriveState::Inspecting { media_generation } => {
+            bounded(media_generation)
+        }
+        plurx_core::optical::OpticalDriveState::Ready {
+            media_generation,
+            disc_id,
+        } => bounded(media_generation) && bounded(disc_id),
+        plurx_core::optical::OpticalDriveState::Busy {
+            media_generation,
+            disc_id,
+            title_id,
+            session_id,
+        } => {
+            bounded(media_generation)
+                && bounded(disc_id)
+                && bounded(title_id)
+                && bounded(session_id)
+        }
+        plurx_core::optical::OpticalDriveState::Failed {
+            media_generation,
+            reason,
+        } => media_generation.as_deref().is_none_or(bounded) && bounded(reason),
+    };
+    drive.owner_node_id == expected_node_id
+        && bounded(&drive.id)
+        && bounded(&drive.label)
+        && state_is_bounded
 }
 
 fn accepted_snapshot(
@@ -1404,6 +1494,8 @@ mod tests {
             observed_at_unix_ms: unix_ms(),
             build: "test".to_owned(),
             protocol_version: PROTOCOL_VERSION,
+            optical_v1: false,
+            optical_drives: Vec::new(),
             encoders: vec![EncoderOfferCapability {
                 family: "software".to_owned(),
                 max_target_height: max_height,
@@ -1421,6 +1513,66 @@ mod tests {
             live_waiting: false,
             background_active: false,
         }
+    }
+
+    fn advertised_drive(node: &str, id: &str) -> plurx_core::optical::OpticalDriveSnapshot {
+        plurx_core::optical::OpticalDriveSnapshot {
+            id: id.to_owned(),
+            label: "Media room".to_owned(),
+            owner_node_id: node.to_owned(),
+            state: plurx_core::optical::OpticalDriveState::Ready {
+                media_generation: "generation-1".to_owned(),
+                disc_id: "optical-v1:dvd:digest".to_owned(),
+            },
+        }
+    }
+
+    #[test]
+    fn optical_advertisements_are_capability_owner_and_identity_fenced() {
+        let mut current = snapshot("node-a", &["h264"], 1080);
+        current.optical_v1 = true;
+        current.optical_drives = vec![advertised_drive("node-a", "drive-a")];
+        assert!(snapshot_is_bounded(&current, "node-a"));
+        let wire = serde_json::to_string(&current).expect("serialize snapshot");
+        assert!(wire.contains(r#""optical_v1":true"#));
+        assert!(!wire.contains("/dev/"));
+        assert!(!wire.contains("/mnt/"));
+
+        let mut wrong_owner = current.clone();
+        wrong_owner.optical_drives[0].owner_node_id = "node-b".to_owned();
+        assert!(!snapshot_is_bounded(&wrong_owner, "node-a"));
+
+        let mut duplicate = current.clone();
+        duplicate
+            .optical_drives
+            .push(advertised_drive("node-a", "drive-a"));
+        assert!(!snapshot_is_bounded(&duplicate, "node-a"));
+
+        let mut old_protocol_shape = current;
+        old_protocol_shape.optical_v1 = false;
+        assert!(!snapshot_is_bounded(&old_protocol_shape, "node-a"));
+    }
+
+    #[tokio::test]
+    async fn remote_optical_directory_returns_only_fresh_capable_owners() {
+        let pool = MediaPool::new(MembershipManager::unavailable());
+        let mut capable = snapshot("node-a", &["h264"], 1080);
+        capable.optical_v1 = true;
+        capable.optical_drives = vec![advertised_drive("node-a", "drive-a")];
+        pool.snapshots.write().await.insert(
+            "node-a".to_owned(),
+            accepted_snapshot(capable, "node-a").expect("fresh capable snapshot"),
+        );
+        pool.snapshots.write().await.insert(
+            "node-b".to_owned(),
+            accepted_snapshot(snapshot("node-b", &["h264"], 1080), "node-b")
+                .expect("fresh ordinary snapshot"),
+        );
+
+        let drives = pool.remote_optical_drives().await;
+        assert_eq!(drives.len(), 1);
+        assert_eq!(drives[0].owner_node_id, "node-a");
+        assert_eq!(drives[0].id, "drive-a");
     }
 
     fn offer(node: &str) -> MediaOffer {
@@ -1801,6 +1953,8 @@ mod tests {
                     observed_at_unix_ms: 1,
                     build: "test".to_owned(),
                     protocol_version: PROTOCOL_VERSION,
+                    optical_v1: false,
+                    optical_drives: Vec::new(),
                     encoders: Vec::new(),
                     tone_map: Vec::new(),
                     hardware_slots_used: 0,
