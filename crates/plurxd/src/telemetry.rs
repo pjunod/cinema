@@ -758,6 +758,53 @@ pub fn prometheus() -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn settings_seed_precedes_the_first_event_and_local_changes_invalidate() {
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("telemetry store"));
+        store
+            .put_setting(keys::TELEMETRY_RETAIN_DAYS, "0")
+            .await
+            .expect("disable retention");
+        store
+            .put_setting(keys::PLAYBACK_NETWORK_PRIORS, "1")
+            .await
+            .expect("enable priors");
+
+        initialize(Arc::clone(&store)).await.expect("seed settings");
+        let sink = sink_for(Arc::clone(&store));
+        let seeded = *sink.settings.read().expect("settings");
+        assert!(!seeded.retain);
+        assert!(seeded.priors);
+        assert!(seeded.read_at.is_some());
+
+        store
+            .put_setting(keys::TELEMETRY_RETAIN_DAYS, "30")
+            .await
+            .expect("enable retention");
+        invalidate_settings(&store);
+        assert!(sink.settings.read().expect("settings").read_at.is_none());
+        sink.refresh_settings(&store, false)
+            .await
+            .expect("refresh invalidated settings");
+        assert!(sink.settings.read().expect("settings").retain);
+    }
+
+    #[tokio::test]
+    async fn a_fresh_cache_skips_replicated_setting_reads_for_its_window() {
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("telemetry store"));
+        initialize(Arc::clone(&store)).await.expect("seed settings");
+        let sink = sink_for(Arc::clone(&store));
+        let first_read = sink.settings.read().expect("settings").read_at;
+
+        sink.refresh_settings(&store, false)
+            .await
+            .expect("cached refresh");
+
+        assert_eq!(sink.settings.read().expect("settings").read_at, first_read);
+    }
+
     #[test]
     fn playback_metrics_render_bounded_labels_and_counts() {
         let metrics = PlaybackMetrics::new();
