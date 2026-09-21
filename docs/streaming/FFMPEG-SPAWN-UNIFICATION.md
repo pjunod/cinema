@@ -1,7 +1,8 @@
 # FFmpeg spawn unification — one producer spawn path, one progress classifier
 
-**Status:** ready for review · **Executes:** F-stream-13, the progress-line
-half of F-stream-12, and the "unify the spawn path (fixes the drift)" step of
+**Status:** M1/M2 built in draft #415; M3 needs deployed fleet evidence ·
+**Executes:** F-stream-13, the progress-line half of F-stream-12, and the
+"unify the spawn path (fixes the drift)" step of
 §4.1 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -295,8 +296,9 @@ frame-rate parsers are not touched by this plan.
 
 ### 5.1 M1 — the builder, adopted by all three sites
 
-One PR, three commits (builder + A; B; C), each green on its own so a
-bisect lands on one site. Tests in `producer_spawn.rs`, using the
+One logical implementation commit in the plan PR owns the builder and all
+three adoptions; splitting caller adoption across PRs would recreate the drift
+this milestone removes. Tests in `producer_spawn.rs`, using the
 re-exec-the-test-binary child from
 [PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md](PROCESS-OUTPUT-CAPTURE-AND-SCAN-PROBE-BOUNDS.md)
 §5.1 (portable; no `/bin/sh`):
@@ -321,7 +323,8 @@ http::stream::tests` (C). Plus one new B test:
 resources include the `ChildJob` and it is dropped after `kill().await`,
 not before.
 
-Acceptance: all of the above green; `make unit` green; `grep -rn
+Acceptance: all of the above green; the ready-PR fast lane supplies the broad
+`make unit` result; `grep -rn
 "Command::new(recipe_program\|Command::new(ffmpeg_bin())" crates/plurxd/src/
 {transcode,vodserve}.rs crates/plurxd/src/http/stream.rs` shows no
 producer site outside `producer_spawn.rs` (probes remain and are listed in
@@ -329,15 +332,16 @@ the PR body).
 
 ### 5.2 M2 — one `is_progress_line`
 
-Separate small PR after M1. Code: §3.2. Tests: the table in §3.2 as one
-parameterised test in `plurx-core`, plus the two fixtures moved from
+Separate logical commit after M1 in the same plan PR. Code: §3.2. Tests: the
+table in §3.2 as one parameterised test in `plurx-core`, plus the two fixtures moved from
 `stream.rs`. A remux-side test: a tracked progressive stream fed a stderr
 transcript containing one bare `filter_units=…` line logs it as `remux
 ffmpeg: filter_units=…` and does not advance progress.
 
-Acceptance: `cargo test -p plurx-core progress::is_progress_line`; `cargo
-test -p plurxd http::stream::tests::.*progress.*`; `grep -rn "fn
-is_progress_line" crates/` returns exactly one definition; `make unit`.
+Acceptance: `cargo test -p plurx-core progress::tests`; `cargo test -p
+plurxd http::stream::tests::progress_blocks_are_distinguishable_from_ffmpegs_prose`;
+`grep -rn "fn is_progress_line" crates/` returns exactly one definition. The
+ready-PR fast lane supplies the broad `make unit` result.
 
 ### 5.3 M3 — fleet check
 
@@ -363,13 +367,13 @@ here, per §3.2's last row).
 
 - Focused: named per milestone above; `make vodencode-restart-check` is
   mandatory for M1 because B is the path it exercises.
-- Lane: `make unit` on both PRs; `cargo check -p plurxd --tests --target
+- Lane: the one ready plan PR runs `make unit`; `cargo check -p plurxd --tests --target
   x86_64-pc-windows-msvc` for M1 in the PR body (the builder has Windows
   branches — `descriptors.verify()` and the Job Object — and the Windows
   lane compiles release only).
 - Metrics: none added. The observable is environmental (`/proc/<pid>/environ`)
   and the existing first-segment telemetry.
-- Rollout: M1 as one draft PR with three commits; M2 after. No setting, no
+- Rollout: M1 and M2 as logical commits in one draft plan PR. No setting, no
   gate, no schema, no recipe identity change — `recipe_pipe_args` is
   untouched and the encoded identity hashes argv, not environment
   (`vodencode.rs:172-197`). Rollback: revert; nothing persists.
@@ -379,26 +383,30 @@ here, per §3.2's last row).
   [ENCODED-VOD-HOLD-AND-RELEASE.md](ENCODED-VOD-HOLD-AND-RELEASE.md) (which
   changes when `spawn_generation` is called, not what it does).
 
-## 7. Open questions
+## 7. Decisions
 
-1. Should the builder take `program: &Path` or resolve `ffmpeg_bin()` /
-   `recipe_program(recipe)` itself? VOD's program is the recipe's attested
-   executable path (`EncodedExecutable`), not `ffmpeg_bin()`; the builder
-   must not re-resolve it. Proposed: caller passes the path; the builder
-   never consults `PLURX_FFMPEG`.
-2. `ChildJob` in the VOD slot: `attach_owned` takes `Box<dyn Send>` for
-   owned resources today (the permit). Add the job to that box, or a
-   second field? Proposed: a second, typed field, so the drop order (job
-   after wait) is explicit rather than a property of a tuple.
-3. The strict key set is FFmpeg 6.1's `-progress` output. Does the
-   deployed jellyfin-ffmpeg 8 emit any additional key (`out_time_ms` is
-   deprecated there in favour of `out_time_us`, which is already in the
-   set)? A one-line check on media1 before M2: `ffmpeg -progress pipe:1 -f
-   lavfi -i testsrc=duration=1 -f null - | cut -d= -f1 | sort -u`.
-4. `inherit_file_descriptors`'s assert (`files.len() <= 7`, targets 3..=9)
-   versus the rolling path's fixed three: keep the general form as the
-   shared `pre_exec` and let the builder pass exactly three? Proposed yes;
-   the subtitle extractors pass one.
+1. **The caller passes `program: &Path`.** An encoded VOD recipe names an
+   attested executable, so re-resolving `PLURX_FFMPEG` inside the builder could
+   launch bytes other than the recipe identifies.
+2. **The VOD slot carries `ChildJob` in a typed field.** The field remains
+   alive through `kill().await` and is released before a successor can attach;
+   hiding it in the permit's type-erased box would make that order accidental.
+3. **The strict key set stays closed.** A read-only 2026-09-21 probe of the
+   deployed media1 FFmpeg emitted exactly `bitrate`, `drop_frames`,
+   `dup_frames`, `fps`, `frame`, `out_time`, `out_time_ms`, `out_time_us`,
+   `progress`, `speed`, `stream_0_0_q`, and `total_size`; all are in the set.
+   An unknown future key is logged as a diagnostic until deliberately added.
+4. **The descriptor primitive stays general while producers use 3/4/5.**
+   Subtitle helpers still need an arbitrary target list. The shared primitive
+   keeps dup-all-before-dup2 ordering and the producer builder supplies only
+   the three recipe-reserved targets.
+5. **Head regeneration uses the builder too.** Current `main` had gained a
+   fourth direct recipe-program launch after the plan snapshot. Leaving it
+   direct would preserve the same runtime-environment and Windows-descendant
+   drift inside the VOD lifecycle, so M1 includes it and retains its existing
+   cancellation-independent reaper.
+6. **There is no enablement setting.** This is invariant consolidation, not a
+   behavior operators opt into; no feature gate or Developer toggle is added.
 
 ---
 
@@ -413,3 +421,6 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#415](http://192.168.4.7:3000/noirr/plurx/pulls/415) | Claimed `plan/S-05` from `f0af512d`; pinned Rust 1.97.1 available locally. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#415](http://192.168.4.7:3000/noirr/plurx/pulls/415) · `e12f0c02` | Shared builder adopted by rolling HLS, VOD generation/head regeneration, and progressive remux. Builder 5, producer-slot 12, head-regeneration 2, and both real-FFmpeg restart tests passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#415](http://192.168.4.7:3000/noirr/plurx/pulls/415) · `60b2faa9` | One strict classifier definition; core and remux focused tests passed. Media1's deployed key vocabulary matched the closed set exactly. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3 | [#415](http://192.168.4.7:3000/noirr/plurx/pulls/415) | needs: deploy the candidate, run the §5.3 encoded-burn and progressive-remux environment/TTFF checks, and inspect the journal for unexpected progress keys. |
