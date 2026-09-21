@@ -1745,6 +1745,7 @@ assert.equal(context.ACT_TIMER, null);
         self.assertEqual(
             list(fast_rust_steps),
             [
+                "Install Rust gate prerequisites",
                 "Check out the candidate",
                 "Install the pinned Rust toolchain",
                 "Install the pinned FFmpeg",
@@ -1755,6 +1756,11 @@ assert.equal(context.ACT_TIMER, null);
                 "Enforce persistent Cargo bounds",
             ],
         )
+        self.assertIn("container: ubuntu:24.04", fast_jobs["rust_compile"])
+        prerequisites = workflow_step_literal(
+            fast_rust_steps["Install Rust gate prerequisites"], "run"
+        )
+        self.assertTrue(any("python3" in line for line in prerequisites))
         self.assertEqual(
             workflow_step_literal(fast_rust_steps["Lint the workspace"], "run"),
             ["make lint"],
