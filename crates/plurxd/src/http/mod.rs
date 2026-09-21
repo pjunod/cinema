@@ -287,6 +287,13 @@ pub fn router(state: AppState) -> Router {
         .route("/setup", post(system::setup))
         .route("/auth/login", post(auth::login))
         .route("/auth/logout", post(auth::logout))
+        .route("/me/devices", get(users::list_my_devices))
+        .route("/me/devices/{prefix}", delete(users::revoke_my_device))
+        .route("/users/{id}/devices", get(users::list_user_devices))
+        .route(
+            "/users/{id}/devices/{prefix}",
+            delete(users::revoke_user_device),
+        )
         .route("/settings", put(system::update_settings))
         .route(
             "/live-tv/readiness/refresh",
@@ -5465,6 +5472,128 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn device_inventory_and_fenced_revocation_cover_self_and_admin_routes() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        let (status, second_login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "paul", "password": "supersecret", "device": "Living room" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{second_login}");
+        let second = second_login["token"].as_str().expect("second token");
+
+        let (status, devices) = call(&app, get("/api/v1/me/devices", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{devices}");
+        let devices = devices.as_array().expect("device array");
+        assert_eq!(devices.len(), 2);
+        assert!(devices.iter().all(|row| {
+            row["token_hash_prefix"]
+                .as_str()
+                .is_some_and(|prefix| prefix.len() == 8)
+        }));
+        assert!(!format!("{devices:?}").contains(second));
+        let current_prefix = plurx_core::auth::hash_token(&admin)
+            .chars()
+            .take(8)
+            .collect::<String>();
+        let current = devices
+            .iter()
+            .find(|row| row["token_hash_prefix"] == current_prefix)
+            .expect("current device");
+        let (status, body) = call(
+            &app,
+            delete(
+                &format!(
+                    "/api/v1/me/devices/{}",
+                    current["token_hash_prefix"].as_str().expect("prefix")
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("logout"));
+
+        let other = devices
+            .iter()
+            .find(|row| row["token_hash_prefix"] != current_prefix)
+            .expect("other device");
+        let (status, body) = call(
+            &app,
+            delete(
+                &format!(
+                    "/api/v1/me/devices/{}",
+                    other["token_hash_prefix"].as_str().expect("prefix")
+                ),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(second))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(&admin))).await.0,
+            StatusCode::OK
+        );
+
+        let (status, user) = call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "kid", "password": "longenough" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{user}");
+        let user_id = user["id"].as_i64().expect("user id");
+        let (status, kid_login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "kid", "password": "longenough", "device": "Tablet" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{kid_login}");
+        let kid = kid_login["token"].as_str().expect("kid token");
+        let (status, kid_devices) = call(
+            &app,
+            get(&format!("/api/v1/users/{user_id}/devices"), Some(&admin)),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{kid_devices}");
+        let prefix = kid_devices[0]["token_hash_prefix"]
+            .as_str()
+            .expect("kid prefix");
+        let (status, body) = call(
+            &app,
+            delete(
+                &format!("/api/v1/users/{user_id}/devices/{prefix}"),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            call(&app, get("/api/v1/me", Some(kid))).await.0,
+            StatusCode::UNAUTHORIZED
+        );
     }
 
     /// The Settings→login-page bounce, as a request pair.

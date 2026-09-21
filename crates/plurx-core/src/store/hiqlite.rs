@@ -26,8 +26,8 @@ use super::replicated::ReplicatedSql;
 use super::telemetry::NodeLocalTelemetry;
 use super::{
     keys, validate_generated_settings, ApiKeyStore, ArtworkRepairFence, CacheAdminMutationClaim,
-    MetricsStore, NetworkPriorStore, PlaybackTelemetryStore, PrometheusStoreSnapshot,
-    SettingsStore, UserStore,
+    DeleteTokenByPrefixOutcome, MetricsStore, NetworkPriorStore, PlaybackTelemetryStore,
+    PrometheusStoreSnapshot, SettingsStore, TokenSummary, UserStore, TOKEN_SUMMARY_MAX,
 };
 use crate::domain::{
     ApiKey, NetworkPrior, NetworkPriorObservation, OfflinePackageStats, PlaybackEvent,
@@ -4040,6 +4040,66 @@ impl UserStore for HiqliteAuthStore {
         let changed = self.credential_mutation(vec![statement]).await?[0];
         Ok(changed > 0)
     }
+
+    async fn list_tokens_for_user(&self, user_id: i64) -> Result<Vec<TokenSummary>, StoreError> {
+        let sql = "SELECT substr(token_hash, 1, 8) AS token_hash_prefix, \
+                          device, created_at, last_seen_at \
+                   FROM tokens WHERE user_id = $1 \
+                   ORDER BY created_at, token_hash LIMIT $2";
+        validate_sql(sql)?;
+        Ok(self
+            .client()
+            .query_consistent_map::<TokenSummaryRow, _>(
+                sql,
+                params!(user_id, TOKEN_SUMMARY_MAX as i64),
+            )
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect())
+    }
+
+    async fn delete_token_by_prefix_for_user(
+        &self,
+        user_id: i64,
+        prefix: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<DeleteTokenByPrefixOutcome, StoreError> {
+        let statement = match claim {
+            Some(claim) => (
+                "DELETE FROM tokens \
+                 WHERE user_id = $1 AND substr(token_hash, 1, 8) = $2 \
+                   AND (SELECT COUNT(*) FROM tokens \
+                        WHERE user_id = $1 AND substr(token_hash, 1, 8) = $2) = 1 \
+                   AND EXISTS (SELECT 1 FROM cluster_cache_admin_revocation_leases \
+                               WHERE claim_id = $3)",
+                params!(user_id, prefix, claim.as_str()),
+            ),
+            None => (
+                "DELETE FROM tokens \
+                 WHERE user_id = $1 AND substr(token_hash, 1, 8) = $2 \
+                   AND (SELECT COUNT(*) FROM tokens \
+                        WHERE user_id = $1 AND substr(token_hash, 1, 8) = $2) = 1",
+                params!(user_id, prefix),
+            ),
+        };
+        if self.credential_mutation(vec![statement]).await?[0] > 0 {
+            return Ok(DeleteTokenByPrefixOutcome::Deleted);
+        }
+        let count_sql = "SELECT COUNT(*) AS count FROM tokens \
+                         WHERE user_id = $1 AND substr(token_hash, 1, 8) = $2";
+        validate_sql(count_sql)?;
+        let count = one_count(
+            self.client()
+                .query_consistent_map::<CountRow, _>(count_sql, params!(user_id, prefix))
+                .await?,
+        )?;
+        Ok(match count {
+            0 => DeleteTokenByPrefixOutcome::NotFound,
+            1 => DeleteTokenByPrefixOutcome::ClaimLost,
+            _ => DeleteTokenByPrefixOutcome::Ambiguous,
+        })
+    }
 }
 
 #[async_trait]
@@ -4577,6 +4637,35 @@ struct UserRow {
 struct TokenUserRow {
     user: UserRow,
     last_seen_at: i64,
+}
+
+struct TokenSummaryRow {
+    token_hash_prefix: String,
+    device: Option<String>,
+    created_at: i64,
+    last_seen_at: i64,
+}
+
+impl From<&mut Row<'_>> for TokenSummaryRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            token_hash_prefix: row.get("token_hash_prefix"),
+            device: row.get("device"),
+            created_at: row.get("created_at"),
+            last_seen_at: row.get("last_seen_at"),
+        }
+    }
+}
+
+impl From<TokenSummaryRow> for TokenSummary {
+    fn from(row: TokenSummaryRow) -> Self {
+        Self {
+            token_hash_prefix: row.token_hash_prefix,
+            device: row.device,
+            created_at: row.created_at,
+            last_seen_at: row.last_seen_at,
+        }
+    }
 }
 
 impl From<&mut Row<'_>> for TokenUserRow {

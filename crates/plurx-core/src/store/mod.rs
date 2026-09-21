@@ -101,6 +101,27 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CacheAdminMutationClaim(String);
 
+pub const TOKEN_SUMMARY_MAX: usize = 256;
+
+/// Privacy-safe login-token metadata for account device management. The full
+/// digest remains inside the Store; eight hex characters identify one row
+/// only after the Store has proved the prefix is unique for that user.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct TokenSummary {
+    pub token_hash_prefix: String,
+    pub device: Option<String>,
+    pub created_at: i64,
+    pub last_seen_at: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeleteTokenByPrefixOutcome {
+    Deleted,
+    NotFound,
+    Ambiguous,
+    ClaimLost,
+}
+
 #[cfg(feature = "hiqlite-store")]
 impl CacheAdminMutationClaim {
     pub(crate) fn new(claim_id: String) -> Self {
@@ -2040,6 +2061,18 @@ pub trait UserStore: Send + Sync + 'static {
         token_hash: &str,
         claim: Option<&CacheAdminMutationClaim>,
     ) -> Result<bool, StoreError>;
+    /// List a bounded, oldest-first inventory without exposing full token
+    /// digests to the HTTP layer.
+    async fn list_tokens_for_user(&self, user_id: i64) -> Result<Vec<TokenSummary>, StoreError>;
+    /// Delete exactly one token selected by an eight-hex prefix. Ambiguous
+    /// prefixes are never accepted, and clustered writes retain the exact
+    /// cache-admin mutation claim.
+    async fn delete_token_by_prefix_for_user(
+        &self,
+        user_id: i64,
+        prefix: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<DeleteTokenByPrefixOutcome, StoreError>;
 }
 
 #[async_trait]

@@ -6,7 +6,9 @@ use rusqlite::{params, OptionalExtension};
 use super::{user_from_row, SqliteStore, USER_COLS};
 use crate::domain::User;
 use crate::error::StoreError;
-use crate::store::{CacheAdminMutationClaim, UserStore};
+use crate::store::{
+    CacheAdminMutationClaim, DeleteTokenByPrefixOutcome, TokenSummary, UserStore, TOKEN_SUMMARY_MAX,
+};
 
 fn require_standalone_claim(claim: Option<&CacheAdminMutationClaim>) -> Result<(), StoreError> {
     if claim.is_some() {
@@ -317,11 +319,65 @@ impl UserStore for SqliteStore {
         require_standalone_claim(claim)?;
         self.delete_token(token_hash).await
     }
+
+    async fn list_tokens_for_user(&self, user_id: i64) -> Result<Vec<TokenSummary>, StoreError> {
+        self.with_conn(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT substr(token_hash, 1, 8), device, created_at, last_seen_at \
+                 FROM tokens WHERE user_id = ?1 \
+                 ORDER BY created_at, token_hash LIMIT ?2",
+            )?;
+            let rows = statement.query_map(params![user_id, TOKEN_SUMMARY_MAX as i64], |row| {
+                Ok(TokenSummary {
+                    token_hash_prefix: row.get(0)?,
+                    device: row.get(1)?,
+                    created_at: row.get(2)?,
+                    last_seen_at: row.get(3)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        })
+        .await
+    }
+
+    async fn delete_token_by_prefix_for_user(
+        &self,
+        user_id: i64,
+        prefix: &str,
+        claim: Option<&CacheAdminMutationClaim>,
+    ) -> Result<DeleteTokenByPrefixOutcome, StoreError> {
+        require_standalone_claim(claim)?;
+        let prefix = prefix.to_owned();
+        self.with_conn(move |conn| {
+            let transaction = conn.unchecked_transaction()?;
+            let count: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM tokens \
+                 WHERE user_id = ?1 AND substr(token_hash, 1, 8) = ?2",
+                params![user_id, prefix],
+                |row| row.get(0),
+            )?;
+            let outcome = match count {
+                0 => DeleteTokenByPrefixOutcome::NotFound,
+                1 => {
+                    transaction.execute(
+                        "DELETE FROM tokens \
+                         WHERE user_id = ?1 AND substr(token_hash, 1, 8) = ?2",
+                        params![user_id, prefix],
+                    )?;
+                    DeleteTokenByPrefixOutcome::Deleted
+                }
+                _ => DeleteTokenByPrefixOutcome::Ambiguous,
+            };
+            transaction.commit()?;
+            Ok(outcome)
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::store::{SqliteStore, UserStore};
+    use crate::store::{DeleteTokenByPrefixOutcome, SqliteStore, UserStore};
     use std::sync::Arc;
 
     #[tokio::test]
@@ -371,6 +427,56 @@ mod tests {
             .user_for_token("th_2")
             .await
             .expect("resolve")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn device_inventory_never_exposes_a_full_digest_and_delete_requires_a_unique_prefix() {
+        let store = SqliteStore::open_in_memory().expect("open");
+        let user = store
+            .create_user("paul", "hash", true)
+            .await
+            .expect("create");
+        let first = format!("deadbeef{}", "1".repeat(56));
+        let collision = format!("deadbeef{}", "2".repeat(56));
+        let unique = format!("cafebabe{}", "3".repeat(56));
+        store
+            .create_token(&first, user.id, Some("Living room"))
+            .await
+            .expect("first token");
+        store
+            .create_token(&collision, user.id, Some("Tablet"))
+            .await
+            .expect("collision token");
+        store
+            .create_token(&unique, user.id, None)
+            .await
+            .expect("unique token");
+
+        let listed = store.list_tokens_for_user(user.id).await.expect("list");
+        assert_eq!(listed.len(), 3);
+        assert!(listed
+            .iter()
+            .all(|token| token.token_hash_prefix.len() == 8));
+        assert!(!format!("{listed:?}").contains(&"1".repeat(56)));
+        assert_eq!(
+            store
+                .delete_token_by_prefix_for_user(user.id, "deadbeef", None)
+                .await
+                .expect("ambiguous delete"),
+            DeleteTokenByPrefixOutcome::Ambiguous
+        );
+        assert_eq!(
+            store
+                .delete_token_by_prefix_for_user(user.id, "cafebabe", None)
+                .await
+                .expect("unique delete"),
+            DeleteTokenByPrefixOutcome::Deleted
+        );
+        assert!(store
+            .user_for_token(&unique)
+            .await
+            .expect("lookup")
             .is_none());
     }
 
