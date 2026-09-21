@@ -4776,22 +4776,24 @@ mod tests {
         let staged_local = configured_local_peer(&joining_config, issued.raft_id)
             .expect("configure the staged peer");
         let issued_digest = join_token_digest(&issued.token);
+        let staged_node_id = staged_identity.node_id.clone();
+        let redeem_request = RedeemJoinRequest {
+            token_digest: issued_digest.clone(),
+            raft_id: issued.raft_id,
+            node_id: staged_node_id.clone(),
+            hostname: "joining-test-node".to_owned(),
+            raft_address: staged_local.raft_address,
+            api_address: staged_local.api_address,
+            http_base: configured_artwork_url(&joining_config)
+                .expect("derive the staged node artwork origin"),
+            schema_version: AUTH_SCHEMA_VERSION,
+            protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
+            protocol_min: crate::store::AUTH_PROTOCOL_MIN,
+            protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+            live_tv_v1: true,
+        };
         coordinator
-            .redeem(&RedeemJoinRequest {
-                token_digest: issued_digest.clone(),
-                raft_id: issued.raft_id,
-                node_id: staged_identity.node_id,
-                hostname: "joining-test-node".to_owned(),
-                raft_address: staged_local.raft_address,
-                api_address: staged_local.api_address,
-                http_base: configured_artwork_url(&joining_config)
-                    .expect("derive the staged node artwork origin"),
-                schema_version: AUTH_SCHEMA_VERSION,
-                protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
-                protocol_min: crate::store::AUTH_PROTOCOL_MIN,
-                protocol_max: crate::store::AUTH_PROTOCOL_MAX,
-                live_tv_v1: true,
-            })
+            .redeem(&redeem_request)
             .await
             .expect("reserve the token to the staged node before its failed start");
         source_client
@@ -4802,6 +4804,14 @@ mod tests {
             )
             .await
             .expect("expire the identity-bound reservation deterministically");
+        // Treat the first successful redemption as an ambiguous transport
+        // outcome: the same staged identity must be able to repeat it after
+        // the reservation's original TTL, rather than losing the node to an
+        // orphaned `redeeming` record.
+        coordinator
+            .redeem(&redeem_request)
+            .await
+            .expect("repeat the expired identity-bound redemption");
         let joined = select_daemon_store(&joining_config)
             .await
             .expect("resume an expired identity-bound join through daemon store selection");
@@ -4818,6 +4828,19 @@ mod tests {
             local.join_token_digest.as_deref(),
             Some(issued_digest.as_str())
         );
+        let finalize_request = FinalizeJoinRequest {
+            token_digest: issued_digest.clone(),
+            raft_id: issued.raft_id,
+            node_id: staged_node_id,
+        };
+        coordinator
+            .finalize(&finalize_request)
+            .await
+            .expect("repeat finalization after the daemon lost its response");
+        coordinator
+            .finalize(&finalize_request)
+            .await
+            .expect("repeated finalization remains idempotent");
 
         // A crash after finalization but before unlink leaves exactly this
         // shape: active target + membership.json + the original token. The
