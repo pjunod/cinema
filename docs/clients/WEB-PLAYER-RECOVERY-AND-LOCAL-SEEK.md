@@ -1,6 +1,6 @@
 # Web player recovery and local seek — worker on, one decoder rescue, seek without a reopen
 
-**Status:** ready for review · **Executes:** Q10 / W4, W7, W3 / F-web-5 from
+**Status:** implementation complete — draft awaiting adversarial review · **Executes:** Q10 / W4, W7, W3 / F-web-5 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -9,20 +9,21 @@
 Companion to [WEB-SHELL-LAYOUT.md](WEB-SHELL-LAYOUT.md) (which file holds
 what) and [PLAYBACK-SURFACE-CONTRACT.md](PLAYBACK-SURFACE-CONTRACT.md) (who may
 stop the player and when a surface may be raised) — this is *what changes in
-the finite web player*, in four PRs.
+the finite web player*, in one whole-plan PR with one logical implementation
+commit per milestone.
 
 Read first: the review's Q10 row (§3.1), W3 and W7 rows (§3.5), and the
 assessment rows Q10, W3, W4, W7, F-web-5, F-web-6, F-web-7, F-web-9 in
 [ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md).
 Every "required disposition" there is a guardrail in §4 with the line that
 honours it. Then read the code in §2 in the order given. Work milestone by
-milestone (§5); each is one draft PR into `main` under the fast lane.
+milestone (§5) in the plan's single draft PR into `main`.
 
 The standing instruction: **if a step seems to require changing the
 attempt fences (`observesCurrent`, `hlsStartupCurrent`,
 `playbackAttemptTerminallyStopped`), the surface classes, the
 control-protocol snapshot, or the server's publication/retention rules, stop
-and flag it.** These PRs add one decision each inside the fences that exist;
+and flag it.** These milestone commits add one decision each inside the fences that exist;
 they do not move a fence. Line numbers are from `88a3957a` and will drift —
 re-verify each anchor by function name before editing.
 
@@ -52,7 +53,7 @@ Three independent behaviour changes to `crates/plurxd/src/web/player/`:
    currently advertised range, moves `currentTime` instead of creating a new
    server session. Everything else keeps the reopen path unchanged.
 
-Done means: four PRs merged, `make web-check` green (including the two
+Done means: the whole-plan PR merged, `make web-check` green (including the two
 tests §4.8 of the review found red — see §6), and the browser checks in §6
 recorded in the PR bodies.
 
@@ -523,7 +524,7 @@ network log for that seek.
 
 ## 6. Verification and rollout
 
-Fast lane per milestone: `make web-check` (which runs `js-check`,
+Whole-plan fast lane: `make web-check` (which runs `js-check`,
 `asset-order`, `asset-load`, `asset-layout`, `web-policy`, `web-control`,
 `seek-control`, and the two CDP browser checks) plus `cargo test -p plurxd
 client_log_` for 5.3.
@@ -535,7 +536,7 @@ under Node 22.22.2. The behaviour-test replacement for `:6007` is the
 review's own §5.1 item 15; land it before 5.2, or 5.2's gate cannot be
 green for the right reason. Do not widen a timeout to make `:3164` pass.
 
-What only a browser proves, recorded in each PR body:
+What only a browser proves, recorded in the plan PR body:
 
 - 5.1: Chrome and Safari, worker started vs fallback, first-frame times.
 - 5.4: which browsers honour an in-buffer `currentTime` assignment on the
@@ -551,7 +552,7 @@ over a week, counted per event. A `seek_local_fallback` rate above 5 % of
 wrong for some stream class, and the log line carries the delivery method
 to say which.
 
-Rollout: each PR deploys with the normal server deploy (the web app is
+Rollout: the plan PR deploys with the normal server deploy (the web app is
 `include_str!`-embedded); no client build is involved. Rollback is a
 revert.
 
@@ -593,7 +594,7 @@ reload: report which banner appears at 5 s and at 20 s and its exact text.
 
 ## Execution log
 
-Executing sessions append one row per milestone PR (see the
+Executing sessions append one row per milestone (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
@@ -601,4 +602,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-20 | gpt-5.6-sol | `agent:/root/c02_builder` | M1 — worker on | [#408](http://192.168.4.7:3000/noirr/plurx/pulls/408) · `b50c4816` | Removed both worker opt-outs. The deterministic MPEG-TS browser fixture proves an actual worker starts, CSP blocking falls back inline, both reach first frame, and the loader remains compatible. |
+| 2026-09-20 | gpt-5.6-sol | `agent:/root/c02_builder` | M2 — decoder rescue | [#408](http://192.168.4.7:3000/noirr/plurx/pulls/408) · `3d63b5ac` | Added the pure recovery policy and attached-player/item fences. Focused media-recovery and policy regressions cover incompatible codecs, shared budget, audio swap, settle bound, ordering, and stale handlers. |
+| 2026-09-21 | gpt-5.6-sol | `agent:/root/c02_builder` | M3 — early error reporter | [#408](http://192.168.4.7:3000/noirr/plurx/pulls/408) · `3362df6a` | Added the first head script, bounded queue/drain and boot classifications, server fields/caps, catalog contracts, focused reporter tests, and focused `client_log_` Rust evidence. Device-side missing-asset/journal proof remains post-deploy. |
+| 2026-09-21 | gpt-5.6-sol | `agent:/root/c02_builder` | M4 — local seek | [#408](http://192.168.4.7:3000/noirr/plurx/pulls/408) · `aadf9c1c` | Added pure routing plus fenced three-second fallback. Focused seek regressions prove buffered/published/holdback/remux/forced routes; the browser fixture proves a +10 s HLS scrub logs `seek_local` with zero session creates. Progressive-remux browser coverage remains device/browser-matrix evidence. |
