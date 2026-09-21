@@ -1,6 +1,7 @@
 # Cluster performance — turn replicated correctness into useful capacity
 
-**Status:** P0–P7 implementation and deterministic acceptance delivered; M4
+**Status:** open — P0–P7 source delivered; named physical evidence remains ·
+**Delivered:** M4
 singleton and serving-partition proofs delivered; P5 storage-pressure behavior
 revised after adversarial review (§6.6), with its deterministic and privileged
 storage guards now pinned; P6 delivered across two stacked
