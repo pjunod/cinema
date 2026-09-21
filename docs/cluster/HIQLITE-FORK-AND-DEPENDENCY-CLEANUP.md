@@ -787,4 +787,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | claim | `plan/K-08` | Claimed K-08 from `9deb58a2`; one whole-plan draft PR will preserve the `hiqlite` patch name and remove only dependency edges supported by repository evidence. |
