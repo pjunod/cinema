@@ -4,25 +4,19 @@ name: P-01 temporary Rust lane measurement
 # Revert this commit after recording the named run URLs.
 on:
   workflow_dispatch:
-    inputs:
-      scenario:
-        description: Measurement scenario (cold, warm-1, warm-2, or unit-only)
-        required: true
-        default: cold
 
 env:
   CARGO_TERM_COLOR: always
 
 concurrency:
-  group: p01-measure-${{ inputs.scenario }}
+  group: p01-measure-cold
   cancel-in-progress: false
 
 jobs:
   measure:
-    name: ${{ inputs.scenario }} Rust lane measurement
+    name: cold Rust lane measurement
     runs-on: [self-hosted, Linux, X64, lab, general, high-cpu]
     timeout-minutes: 45
-    continue-on-error: true
     steps:
       - name: Check out the measurement candidate
         uses: https://data.forgejo.org/actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -42,7 +36,6 @@ jobs:
         with:
           lane: p01-measure
       - name: Prune the cold compilation tree
-        if: inputs.scenario == 'cold'
         run: cargo clean
       - name: Record the runner identity
         run: |
@@ -50,14 +43,12 @@ jobs:
           rustc --version
           ffmpeg -version | sed -n '1p'
       - name: Compile every Rust target without executing tests
-        if: inputs.scenario != 'unit-only'
         run: |
           started=$(date +%s)
           make effort-rust-check
           make hiqlite-vendor-clippy
           echo "P01_TIMING compile_seconds=$(($(date +%s)-started))"
       - name: Measure workspace Clippy
-        if: inputs.scenario != 'unit-only'
         run: |
           started=$(date +%s)
           make lint
