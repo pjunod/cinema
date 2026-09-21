@@ -13766,6 +13766,12 @@ pub struct TranscodeManager {
     /// authority; every production insert/removal publishes its resulting
     /// length while holding that map's lock.
     active_session_count: Arc<AtomicUsize>,
+    /// Process-local, closed-cardinality inventory of the encoder contract
+    /// selected by successful session starts. These counters deliberately
+    /// live beside the boot-probed caps: `/metrics` can compare what this
+    /// process proved with what playback actually selected without a Store
+    /// read or a request-derived label.
+    codec_qualification: Arc<CodecQualificationMetrics>,
     /// Creation requests by `request_id` — reserved *before* work starts, so
     /// two concurrent creates with the same id cannot both pass the check and
     /// spawn two encoders (the check-then-act race this map used to have).
@@ -13841,6 +13847,123 @@ pub struct TranscodeManager {
 pub(crate) struct TranscodeMetrics {
     active_sessions: Arc<AtomicUsize>,
     active_cache: crate::cachekeep::ActiveCacheMetrics,
+    caps: EncoderCaps,
+    codec_qualification: Arc<CodecQualificationMetrics>,
+}
+
+const QUALIFICATION_ENCODERS: [Encoder; 5] = [
+    Encoder::Software,
+    Encoder::Nvenc,
+    Encoder::Qsv,
+    Encoder::Vaapi,
+    Encoder::VideoToolbox,
+];
+const QUALIFICATION_GRADES: [OutputGrade; 2] = [OutputGrade::Sdr, OutputGrade::Hdr10];
+const QUALIFICATION_PIPELINES: [Pipeline; 8] = [
+    Pipeline::VppQsv,
+    Pipeline::TonemapVaapi,
+    Pipeline::Libplacebo,
+    Pipeline::TonemapOpencl,
+    Pipeline::DoviTonemapx,
+    Pipeline::DoviPassthrough,
+    Pipeline::Hdr10Passthrough,
+    Pipeline::Cpu,
+];
+
+struct CodecQualificationMetrics {
+    encoder_sessions: [[AtomicU64; QUALIFICATION_GRADES.len()]; QUALIFICATION_ENCODERS.len()],
+    pipeline_sessions: [AtomicU64; QUALIFICATION_PIPELINES.len()],
+}
+
+impl Default for CodecQualificationMetrics {
+    fn default() -> Self {
+        Self {
+            encoder_sessions: std::array::from_fn(|_| std::array::from_fn(|_| AtomicU64::new(0))),
+            pipeline_sessions: std::array::from_fn(|_| AtomicU64::new(0)),
+        }
+    }
+}
+
+impl CodecQualificationMetrics {
+    fn encoder_slot(encoder: Encoder) -> usize {
+        match encoder {
+            Encoder::Software => 0,
+            Encoder::Nvenc => 1,
+            Encoder::Qsv => 2,
+            Encoder::Vaapi => 3,
+            Encoder::VideoToolbox => 4,
+        }
+    }
+
+    fn grade_slot(grade: OutputGrade) -> usize {
+        match grade {
+            OutputGrade::Sdr => 0,
+            OutputGrade::Hdr10 => 1,
+        }
+    }
+
+    fn pipeline_slot(pipeline: Pipeline) -> usize {
+        match pipeline {
+            Pipeline::VppQsv => 0,
+            Pipeline::TonemapVaapi => 1,
+            Pipeline::Libplacebo => 2,
+            Pipeline::TonemapOpencl => 3,
+            Pipeline::DoviTonemapx => 4,
+            Pipeline::DoviPassthrough => 5,
+            Pipeline::Hdr10Passthrough => 6,
+            Pipeline::Cpu => 7,
+        }
+    }
+
+    fn record_encoder(&self, encoder: Encoder, grade: OutputGrade) {
+        self.encoder_sessions[Self::encoder_slot(encoder)][Self::grade_slot(grade)]
+            .fetch_add(1, Relaxed);
+    }
+
+    fn record_pipeline(&self, pipeline: Pipeline) {
+        self.pipeline_sessions[Self::pipeline_slot(pipeline)].fetch_add(1, Relaxed);
+    }
+
+    fn prometheus(&self, caps: &EncoderCaps) -> String {
+        let mut out = String::from(
+            "# HELP plurx_encoder_available Whether boot validation test-encoded through this family.\n\
+             # TYPE plurx_encoder_available gauge\n",
+        );
+        for encoder in QUALIFICATION_ENCODERS {
+            out.push_str(&format!(
+                "plurx_encoder_available{{family=\"{}\"}} {}\n",
+                encoder.family_name(),
+                u8::from(caps.available(encoder)),
+            ));
+        }
+        out.push_str(
+            "# HELP plurx_encoder_sessions_total Successfully started encoding sessions by family and output grade.\n\
+             # TYPE plurx_encoder_sessions_total counter\n",
+        );
+        for encoder in QUALIFICATION_ENCODERS {
+            for grade in QUALIFICATION_GRADES {
+                out.push_str(&format!(
+                    "plurx_encoder_sessions_total{{family=\"{}\",grade=\"{}\"}} {}\n",
+                    encoder.family_name(),
+                    grade.name(),
+                    self.encoder_sessions[Self::encoder_slot(encoder)][Self::grade_slot(grade)]
+                        .load(Relaxed),
+                ));
+            }
+        }
+        out.push_str(
+            "# HELP plurx_tone_map_pipeline_sessions_total Successfully started encoding sessions by resolved video pipeline.\n\
+             # TYPE plurx_tone_map_pipeline_sessions_total counter\n",
+        );
+        for pipeline in QUALIFICATION_PIPELINES {
+            out.push_str(&format!(
+                "plurx_tone_map_pipeline_sessions_total{{pipeline=\"{}\"}} {}\n",
+                pipeline.name(),
+                self.pipeline_sessions[Self::pipeline_slot(pipeline)].load(Relaxed),
+            ));
+        }
+        out
+    }
 }
 
 /// Bounded local facts published in the cluster media snapshot. None of these
@@ -13884,6 +14007,10 @@ impl TranscodeMetrics {
             self.active_sessions.load(Relaxed),
             self.active_cache.active_entries(),
         )
+    }
+
+    pub(crate) fn codec_qualification_prometheus(&self) -> String {
+        self.codec_qualification.prometheus(&self.caps)
     }
 }
 
@@ -14083,6 +14210,7 @@ impl TranscodeManager {
             serving_ready: AtomicBool::new(true),
             serving_loss_generation: AtomicU64::new(0),
             active_session_count: Arc::new(AtomicUsize::new(0)),
+            codec_qualification: Arc::new(CodecQualificationMetrics::default()),
             requests: std::sync::Mutex::new(HashMap::new()),
             producer: ProducerTuning::default(),
             background_producer: Mutex::new(()),
@@ -14382,6 +14510,23 @@ impl TranscodeManager {
         TranscodeMetrics {
             active_sessions: Arc::clone(&self.active_session_count),
             active_cache: self.cache_readers.metrics(),
+            caps: self.caps.clone(),
+            codec_qualification: Arc::clone(&self.codec_qualification),
+        }
+    }
+
+    /// Record one encoding session only after its serving identity is
+    /// published. Callers that do not execute a video pipeline (copy/remux)
+    /// must not call this method.
+    pub(crate) fn record_codec_qualification_session(
+        &self,
+        encoder: Encoder,
+        grade: OutputGrade,
+        pipeline: Option<Pipeline>,
+    ) {
+        self.codec_qualification.record_encoder(encoder, grade);
+        if let Some(pipeline) = pipeline {
+            self.codec_qualification.record_pipeline(pipeline);
         }
     }
 
@@ -19580,6 +19725,13 @@ impl TranscodeManager {
         let encoder = encoding
             .as_ref()
             .map_or("vod", |encoding| encoding.plan.encoder().label());
+        let codec_qualification = encoding.as_ref().map(|encoding| {
+            (
+                encoding.plan.encoder(),
+                encoding.options.pipeline.output_grade(),
+                encoding.options.pipeline,
+            )
+        });
         let prepared = crate::vodserve::VodRecipeRequest {
             request: req,
             encoding,
@@ -19638,6 +19790,9 @@ impl TranscodeManager {
                 .try_create(prepared, &file, &settings, attribution, session_id)
                 .await?
         };
+        if let Some((encoder, grade, pipeline)) = codec_qualification {
+            self.record_codec_qualification_session(encoder, grade, Some(pipeline));
+        }
         Ok(StartInfo {
             playlist_url: format!("/api/v1/hls/{}/index.m3u8", start.session_id),
             session_id: start.session_id,
@@ -22121,6 +22276,11 @@ impl TranscodeManager {
             },
         )
         .await;
+        self.record_codec_qualification_session(
+            encoder,
+            opts.pipeline.output_grade(),
+            Some(opts.pipeline),
+        );
 
         Ok(StartInfo {
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -28911,6 +29071,49 @@ fn test_session_with_control(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn metrics_encoder_inventory_has_closed_labels_and_records_successful_starts() {
+        let metrics = CodecQualificationMetrics::default();
+        metrics.record_encoder(Encoder::Qsv, OutputGrade::Hdr10);
+        metrics.record_encoder(Encoder::Qsv, OutputGrade::Hdr10);
+        metrics.record_pipeline(Pipeline::DoviPassthrough);
+        let rendered = metrics.prometheus(&EncoderCaps {
+            qsv: true,
+            vaapi: true,
+            ..EncoderCaps::default()
+        });
+
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("plurx_encoder_available{"))
+                .count(),
+            QUALIFICATION_ENCODERS.len()
+        );
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("plurx_encoder_sessions_total{"))
+                .count(),
+            QUALIFICATION_ENCODERS.len() * QUALIFICATION_GRADES.len()
+        );
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("plurx_tone_map_pipeline_sessions_total{"))
+                .count(),
+            QUALIFICATION_PIPELINES.len()
+        );
+        assert!(rendered.contains("plurx_encoder_available{family=\"software\"} 1\n"));
+        assert!(rendered.contains("plurx_encoder_available{family=\"qsv\"} 1\n"));
+        assert!(rendered.contains("plurx_encoder_available{family=\"nvenc\"} 0\n"));
+        assert!(
+            rendered.contains("plurx_encoder_sessions_total{family=\"qsv\",grade=\"hdr10\"} 2\n")
+        );
+        assert!(rendered
+            .contains("plurx_tone_map_pipeline_sessions_total{pipeline=\"dovi_passthrough\"} 1\n"));
+    }
 
     #[tokio::test]
     async fn channel_playback_repair_installs_normalized_native_hls_retry() {

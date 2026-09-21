@@ -5418,6 +5418,16 @@ async fn run_live_session_inner(
                         state.provisional_at = Some(now);
                         state.startup = Some(Ok(provisional));
                         drop(state);
+                        if let Some(admission) = admission.as_ref() {
+                            // Live TV currently refuses routes that require a
+                            // tone-map graph, so it contributes an encoder
+                            // session but cannot truthfully claim a pipeline.
+                            owner.transcode.record_codec_qualification_session(
+                                admission.encoder,
+                                plurx_core::transcode::OutputGrade::Sdr,
+                                None,
+                            );
+                        }
                         session.changed.notify_waiters();
                         published = true;
                     }
