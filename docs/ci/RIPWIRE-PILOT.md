@@ -1,6 +1,6 @@
 # Ripwire pilot — measured speed, graph omissions, and opt-in verdict
 
-**Status:** trial complete with measurement limits · **Verdict:** opt-in only ·
+**Status:** open — trial complete with measurement limits · **Verdict:** opt-in only ·
 **Measured:** 2026-09-10 · **Owner:** validation.framework
 
 Companion to [the usage guide](RIPWIRE.md) and
