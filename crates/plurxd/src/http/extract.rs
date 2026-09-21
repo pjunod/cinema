@@ -11,6 +11,7 @@ use plurx_core::auth;
 use plurx_core::domain::ApiKey;
 use plurx_core::domain::User;
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -55,11 +56,57 @@ pub struct CacheOnlyAdminUser;
 
 const CACHE_ONLY_ADMIN_PROOF_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_CACHE_ONLY_ADMIN_PROOFS: usize = 64;
+const REVOCATION_WAITERS: usize = 8;
+const REVOCATION_ADMISSION_WAIT: Duration = Duration::from_millis(2_500);
 
-#[derive(Clone, Default)]
+static REVOCATION_COMPLETE: AtomicU64 = AtomicU64::new(0);
+static REVOCATION_QUEUE_FULL: AtomicU64 = AtomicU64::new(0);
+static REVOCATION_ADMISSION_TIMEOUT: AtomicU64 = AtomicU64::new(0);
+static REVOCATION_PROPAGATION_FAILED: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Clone)]
 pub(crate) struct CacheOnlyAdminProofCache {
     inner: Arc<Mutex<CachedAdminProofState>>,
     revocation_operation_gate: Arc<tokio::sync::Mutex<()>>,
+    revocation_waiters: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for CacheOnlyAdminProofCache {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(CachedAdminProofState::default())),
+            revocation_operation_gate: Arc::new(tokio::sync::Mutex::new(())),
+            revocation_waiters: Arc::new(tokio::sync::Semaphore::new(REVOCATION_WAITERS)),
+        }
+    }
+}
+
+pub(crate) struct RevocationAdmission {
+    _operation: tokio::sync::OwnedMutexGuard<()>,
+    _waiting: tokio::sync::OwnedSemaphorePermit,
+}
+
+pub(crate) fn record_revocation_complete() {
+    REVOCATION_COMPLETE.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_revocation_propagation_failed() {
+    REVOCATION_PROPAGATION_FAILED.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn prometheus_auth_revocations() -> String {
+    format!(
+        "# HELP plurx_auth_revocations_total Cache-admin revocation operations by outcome.\n\
+         # TYPE plurx_auth_revocations_total counter\n\
+         plurx_auth_revocations_total{{outcome=\"complete\"}} {}\n\
+         plurx_auth_revocations_total{{outcome=\"queue_full\"}} {}\n\
+         plurx_auth_revocations_total{{outcome=\"admission_timeout\"}} {}\n\
+         plurx_auth_revocations_total{{outcome=\"propagation_failed\"}} {}\n",
+        REVOCATION_COMPLETE.load(Ordering::Relaxed),
+        REVOCATION_QUEUE_FULL.load(Ordering::Relaxed),
+        REVOCATION_ADMISSION_TIMEOUT.load(Ordering::Relaxed),
+        REVOCATION_PROPAGATION_FAILED.load(Ordering::Relaxed),
+    )
 }
 
 struct CachedAdminProofState {
@@ -215,16 +262,33 @@ impl CacheOnlyAdminProofCache {
         cache
     }
 
-    /// Admit at most one cache-admin mutation coordinator in this process.
-    /// Callers use a fail-fast acquire so a request burst cannot accumulate an
-    /// unbounded queue of futures, claims, or detached cleanup tasks.
-    pub(crate) fn try_acquire_revocation_operation(
+    /// Admit one active cache-admin mutation coordinator and at most eight
+    /// bounded waiters. No waiter can create a replicated claim before it owns
+    /// the operation mutex.
+    pub(crate) async fn acquire_revocation_operation(
         &self,
-    ) -> Result<tokio::sync::OwnedMutexGuard<()>, &'static str> {
-        self.revocation_operation_gate
+    ) -> Result<RevocationAdmission, &'static str> {
+        let waiting = self
+            .revocation_waiters
             .clone()
-            .try_lock_owned()
-            .map_err(|_| "cache-admin revocation already in progress")
+            .try_acquire_owned()
+            .map_err(|_| {
+                REVOCATION_QUEUE_FULL.fetch_add(1, Ordering::Relaxed);
+                "cache-admin revocation queue is full"
+            })?;
+        let operation = tokio::time::timeout(
+            REVOCATION_ADMISSION_WAIT,
+            self.revocation_operation_gate.clone().lock_owned(),
+        )
+        .await
+        .map_err(|_| {
+            REVOCATION_ADMISSION_TIMEOUT.fetch_add(1, Ordering::Relaxed);
+            "cache-admin revocation admission timed out"
+        })?;
+        Ok(RevocationAdmission {
+            _operation: operation,
+            _waiting: waiting,
+        })
     }
 
     /// Publish the latest heartbeat-coupled committed-roster verdict. Every
@@ -919,21 +983,31 @@ mod tests {
         );
     }
 
-    #[test]
-    fn cache_admin_revocation_operation_gate_fails_fast_and_is_raii_released() {
+    #[tokio::test(start_paused = true)]
+    async fn cache_admin_revocation_operation_queue_is_bounded_and_raii_released() {
         let cache = CacheOnlyAdminProofCache::default();
         let owner = cache
-            .try_acquire_revocation_operation()
+            .acquire_revocation_operation()
+            .await
             .expect("first request owns the process gate");
-        for _ in 0..1_024 {
-            assert!(
-                cache.try_acquire_revocation_operation().is_err(),
-                "concurrent requests must not queue or allocate claims"
-            );
+        let mut waiters = Vec::new();
+        for _ in 1..super::REVOCATION_WAITERS {
+            let cache = cache.clone();
+            waiters.push(tokio::spawn(async move {
+                cache.acquire_revocation_operation().await
+            }));
+        }
+        tokio::task::yield_now().await;
+        assert_eq!(cache.revocation_waiters.available_permits(), 0);
+        assert!(cache.acquire_revocation_operation().await.is_err());
+
+        tokio::time::advance(super::REVOCATION_ADMISSION_WAIT).await;
+        for waiter in waiters {
+            assert!(waiter.await.expect("waiter task").is_err());
         }
         drop(owner);
         assert!(
-            cache.try_acquire_revocation_operation().is_ok(),
+            cache.acquire_revocation_operation().await.is_ok(),
             "RAII cancellation releases the gate when no cleanup owns it"
         );
     }
