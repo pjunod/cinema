@@ -1,6 +1,6 @@
 # FFmpeg spawn unification — one producer spawn path, one progress classifier
 
-**Status:** M1/M2 built in draft #415; M3 needs deployed fleet evidence ·
+**Status:** M1/M2 built in PR #415; M3 pending deployed fleet evidence ·
 **Executes:** F-stream-13, the progress-line half of F-stream-12, and the
 "unify the spawn path (fixes the drift)" step of
 §4.1 from
