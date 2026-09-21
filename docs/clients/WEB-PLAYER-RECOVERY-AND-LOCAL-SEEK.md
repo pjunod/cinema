@@ -1,6 +1,6 @@
 # Web player recovery and local seek — worker on, one decoder rescue, seek without a reopen
 
-**Status:** implementation complete — sole adversarial finding addressed · **Executes:** Q10 / W4, W7, W3 / F-web-5 from
+**Status:** implementation complete — sole adversarial finding addressed; browser-matrix and fleet evidence pending · **Executes:** Q10 / W4, W7, W3 / F-web-5 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
