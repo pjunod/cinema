@@ -1136,6 +1136,7 @@ pub async fn enrich_anime_library_with_publication(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn enrich_anime_library_inner(
     store: &PublicationStore<'_>,
     client: &AniListClient,
