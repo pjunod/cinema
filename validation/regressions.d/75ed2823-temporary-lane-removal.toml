@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["75ed2823"]
+points = ["validation.framework"]
+checks = ["operations-contract"]
+reason = "Operations contracts assert the permanent ready-PR fast lane and trigger policy after the temporary P-01 measurement-only workflows were removed."
