@@ -295,6 +295,7 @@ impl DeviceCaps {
                         codec: codec.clone(),
                         max_channels,
                         passthrough: false,
+                        sample_rates_hz: Vec::new(),
                     })
                 })
                 .collect(),
@@ -367,6 +368,18 @@ impl DeviceCaps {
             if !(1..=16).contains(&sink.max_channels) {
                 return Err("audio_sinks max_channels must be between 1 and 16");
             }
+            if sink.sample_rates_hz.len() > 16 {
+                return Err("audio_sinks sample_rates_hz must contain at most 16 entries");
+            }
+            let mut rates = BTreeSet::new();
+            for rate in &sink.sample_rates_hz {
+                if !(8_000..=768_000).contains(rate) {
+                    return Err("audio_sinks contains an invalid sample rate");
+                }
+                if !rates.insert(*rate) {
+                    return Err("audio_sinks contains a duplicate sample rate");
+                }
+            }
             if !seen.insert(codec) {
                 return Err("audio_sinks contains a duplicate codec");
             }
@@ -392,25 +405,32 @@ impl DeviceProfile {
         } else {
             caps.containers.clone()
         };
-        let mut audio_codecs = if caps.audio.is_empty() {
+        let audio_codecs = if caps.audio.is_empty() {
             vec!["aac".into(), "mp3".into()]
         } else {
             caps.audio.clone()
         };
+        let claimed_audio_decoders = caps
+            .audio
+            .iter()
+            .map(|codec| codec.trim().to_ascii_lowercase())
+            .filter(|codec| !codec.is_empty())
+            .collect();
         let max_audio_channels = caps
             .audio_sinks
             .iter()
             .map(|sink| (sink.codec.trim().to_ascii_lowercase(), sink.max_channels))
             .collect();
-        for sink in &caps.audio_sinks {
-            let codec = sink.codec.trim().to_ascii_lowercase();
-            if !audio_codecs
-                .iter()
-                .any(|candidate| candidate.eq_ignore_ascii_case(&codec))
-            {
-                audio_codecs.push(codec);
-            }
-        }
+        let audio_sink_claims = caps
+            .audio_sinks
+            .iter()
+            .map(|sink| {
+                let codec = sink.codec.trim().to_ascii_lowercase();
+                let mut sink = sink.clone();
+                sink.codec.clone_from(&codec);
+                (codec, sink)
+            })
+            .collect();
         let mut video_codecs: Vec<String> = Vec::new();
         // Membership is a set lookup rather than a scan of `video_codecs`.
         // The document arrives from the network with no per-field bound, and
@@ -504,6 +524,8 @@ impl DeviceProfile {
             video_codecs,
             audio_codecs,
             max_audio_channels,
+            claimed_audio_decoders,
+            audio_sink_claims,
             max_height: caps.max_height,
             video_max_heights,
             max_bitrate,

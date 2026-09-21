@@ -117,7 +117,7 @@ and is **out of this plan**; VOD gets 5.1 AAC, which keeps the lattice.
 ### 3.1 The sink claim (client → server)
 
 `DeviceCaps` gains `audio_sinks: Vec<AudioSink { codec: String,
-max_channels: u8, passthrough: bool }>` (v2 JSON) and the flat query gains
+max_channels: u8, passthrough: bool, sample_rates_hz: Vec<u32> }>` (v2 JSON) and the flat query gains
 `achannels=<n>` (a single ceiling, the legacy shape's best effort). Absent
 keeps the legacy codec-only copy rule and the existing stereo AAC full-
 transcode default. Treating absence as a new two-channel refusal would remux
@@ -135,9 +135,14 @@ rule: a fixture string is not decoder evidence):
 - Web: `AudioContext.destination.maxChannelCount`; browsers without E-AC-3
   claim none (Safari on macOS may; test).
 
-`DeviceProfile` gains `max_audio_channels: HashMap<String, u8>` keyed by
-codec, translated from either wire shape by the one function both shapes
-already share (caps.rs's `LegacyCaps` route).
+`DeviceProfile` keeps decoder claims, route sinks and passthrough claims as
+different facts. It gains `max_audio_channels` for the channel ceiling plus
+the complete normalized sink claims and the explicitly reported decoder set;
+the sink codec is never appended to the decoder list. `AudioStream` records
+the positive ffprobe sample rate. A sink's absent rate list and an older
+catalog row's absent source rate are both no claim, not wildcards. The flat
+`achannels` form is rejected outside 1–16 at deserialization and carries no
+sample-rate claim, so it cannot newly authorize copy.
 
 ### 3.2 Negotiation (server, pure function, fixtures shared with clients)
 
@@ -151,7 +156,7 @@ AudioDelivery { action: Copy | Encode { codec, channels, layout, bitrate_kbps, s
 
 Order of preference, first that fits:
 
-1. **Copy** — codec in `profile.audio_codecs`, channels ≤
+1. **Copy** — an explicit decoder claim or a true passthrough claim, channels ≤
    `max_audio_channels[codec]`, container/transport admits it (HLS TS:
    AAC/AC-3/E-AC-3/MP3; fMP4: those plus FLAC/ALAC where claimed), no A/V
    offset correction (a copied stream cannot take `-af`), sample rate
@@ -181,8 +186,9 @@ return E-AC-3/AC-3. Audio offset correction still forces `Encode`.
   `audio_downmix` (matrix id) added beside the existing audio fields.
   `Recipe::hash`'s `aaction` keeps emitting `copy`/`aac` for AAC and copy
   so **no existing key moves**; it emits `eac3`/`ac3` for the new codecs.
-  `CACHE_RECIPE_VERSION` stays 3. Only sessions whose negotiation now
-  differs from "stereo AAC 160 k" get new keys — which is the point.
+  `CACHE_RECIPE_VERSION` is 4 and an `arate=source|48000` field records the
+  byte-changing fixed-rate decision. Existing version-3 entries miss rather
+  than being served under the new output contract.
 - `Decision` gains `audio: AudioDelivery` beside `transcode_audio` (kept in
   step for old clients: `transcode_audio = matches!(audio.action,
   Encode{..})`).
@@ -241,8 +247,9 @@ gains are chosen become the `DownmixMatrix` id in the digest.
 - **The copy path's `-channel_layout:a 5.1` for six channels stays**; the
   new builder reproduces it byte-for-byte for the AAC-6ch case (test pins
   the argv).
-- **Existing recipe keys for stereo-AAC and copy do not move**: `aaction`
-  spellings preserved.
+- **The cache rotates when byte semantics change.** `aaction` spellings stay
+  stable, while recipe v4 and `arate=source|48000` prevent a 48 kHz encode
+  from reusing an artifact created before sample-rate pinning.
 - **A codec name is not a sink.** Absent `audio_sinks` preserves the legacy
   codec-only copy rule and stereo full-transcode default; no client gains a
   new surround encode from the server's guess.
@@ -271,7 +278,7 @@ answer equals today's behaviour (stereo AAC 160 k on transcodes; the copy
 path's rule on copies).
 
 Tests: `cargo test -p plurx-core playback::audio` — 5.1 TrueHD source with
-`eac3@6` claimed on the rolling route → `Encode{eac3,6,640}`; same with VOD
+`eac3@6/48000` and decoder or passthrough evidence on the rolling route → `Encode{eac3,6,640}`; same with VOD
 route → `Encode{aac,6,320,layout 5.1}`; AAC 5.1 source with `aac@6` → Copy;
 same with offset ≠ 0 → Encode; stereo claim → stereo AAC with a 5.1 matrix
 id; absent claim → today's answer. `node tests/playback/*.test.js` fixtures
@@ -300,24 +307,24 @@ handoff inheritance rule.
 Tests: argv baselines (`cargo test -p plurx-core transcode`) — the stereo
 AAC line gains exactly `-ar 48000` and nothing else; the 6-ch AAC line
 equals the copy path's `320k -channel_layout:a 5.1`; E-AC-3 line `-c:a
-eac3 -ac 6 -b:a 640k -ar 48000`; `cargo test -p plurx-core recipe` — a
-stereo-AAC recipe hash is unchanged from `88a3957a` (extend the golden
-table), an E-AC-3 recipe differs; `cargo test -p plurxd hls` master codecs
+eac3 -ac 6 -b:a 640k -ar 48000`; `cargo test -p plurx-core recipe` — the
+version-4 stereo-AAC recipe hash pins `arate=48000`, copied audio pins
+`arate=source`, and the old version-3 key is intentionally unreachable;
+`cargo test -p plurxd hls` master codecs
 `avc1…,ec-3`; `cargo test -p plurxd offline` snapshot round-trip; `cargo
 test -p plurxd prepared` refusal when audio differs.
 
-Acceptance: golden hash unchanged; new hashes differ; `make unit` green.
+Acceptance: the version-4 golden is pinned; new hashes differ; `make unit` green.
 
-Only the independently safe sample-rate slice is implemented in `659fb6372`:
+The independently safe sample-rate slice began in `659fb6372`:
 every lossy rolling/full-transcode and copy-conversion path now emits `-ar
-48000`, while copied audio remains untouched. The rest is blocked rather than
-guessing: normalized `AudioStream` records contain channel count but not
-channel layout or sample rate, `AudioSink` has no sample-rate ceiling, and M4
-has not measured the per-layout gains or limiter need. Without those facts,
-emitting a pan string, admitting a newly claimed copy tuple, or assigning its
-recipe identity would repeat the universal-ordering mistake F-stream-5
-explicitly rejected. No shipped client sends the new claim, so that incomplete
-route is not enabled.
+48000`, including progressive remux conversion, while copied audio remains
+untouched. The review disposition then added source and sink sample-rate facts,
+kept decoder and passthrough trust separate, and rotated recipe identity to v4.
+The remaining work is still blocked rather than guessed: normalized sources
+do not carry channel layout, M4 has not measured per-layout gains or limiter
+need, and no Apple/Android/web device has supplied the route evidence. No
+shipped client sends the claim, so surround delivery remains unenabled.
 
 ### 5.3 M3 — first client claim, on a device
 
@@ -422,14 +429,18 @@ channels produces the M4 stereo matrix path.
    wins until a client supplies measured route evidence.
 3. **Unmeasured downmixes carry a requirement, not invented gains.** The pure
    decision reports `requires_layout_measurement` with the source channel
-   count. M2 must not turn that into FFmpeg argv or cache identity until M4
-   supplies the source layout and measured matrix. Likewise, a new copy route
-   must not be enabled until the source and sink contracts carry sample-rate
-   facts; the current wire claim has no sample-rate ceiling.
+   count. M2 must not turn that into FFmpeg argv until M4 supplies the source
+   layout and measured matrix. Source and sink sample-rate facts now fail
+   closed before a copy is admitted; missing evidence takes the encode
+   fallback.
 4. **No feature gate or setting is added.** The server accepts and reports an
    evidence-bearing claim, but no shipped client sends one. A Developer toggle
    would imply an enablement choice where the remaining boundary is physical
    evidence, not preference.
+5. **Decoder, sink and passthrough are separate authority.** A sink codec does
+   not populate the decoder set. Copy requires an explicit decoder plus a
+   compatible sink, or a true passthrough claim plus a compatible sink; both
+   require exact source/sink sample-rate agreement.
 
 ---
 
@@ -447,3 +458,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) · `142502010` | Server sink claim, pure route negotiation and `delivered_audio` response implemented; 87 focused playback tests and the daemon serialization/translation/refusal checks passed. No client claim enabled. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) · `659fb6372` | Partial: lossy rolling outputs are fixed at 48 kHz. needs: normalized source channel-layout/sample-rate facts, a sink sample-rate contract and M4 matrix/clipping measurements before argv, identity, manifest, offline or prepared-handoff propagation. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3–M5 | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) | needs: the Apple/AVR/AirPods observations, per-layout loudness/peak/clipping measurements, then Android/web device evidence. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Sole review disposition | [#418 comment #3296](http://192.168.4.7:3000/noirr/plurx/pulls/418#issuecomment-3296) | Separated decoder/sink/passthrough authority; source/sink sample rates now fail closed; recipe v4 keys the 48 kHz decision; flat `achannels` is bounded at the request; progressive AAC remux is fixed at 48 kHz. Hardware, layout and downmix evidence remain blocked honestly. |

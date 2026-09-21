@@ -177,6 +177,7 @@ pub struct Caps {
     pub acodec: Option<String>,
     /// Current output-route channel ceiling for the legacy flat capability
     /// shape. Omission preserves the codec-only behavior older clients use.
+    #[serde(default, deserialize_with = "deserialize_audio_channels")]
     pub achannels: Option<u8>,
     /// Containers playable via `<video src>` (never mkv), e.g. `mp4,webm`.
     pub container: Option<String>,
@@ -238,6 +239,20 @@ pub struct Caps {
     /// differently.
     #[serde(skip)]
     pub caps_v2: Option<playback::DeviceCaps>,
+}
+
+fn deserialize_audio_channels<'de, D>(deserializer: D) -> Result<Option<u8>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let value = Option::<u8>::deserialize(deserializer)?;
+    match value {
+        Some(value @ 1..=16) => Ok(Some(value)),
+        Some(_) => Err(D::Error::custom("achannels must be between 1 and 16")),
+        None => Ok(None),
+    }
 }
 
 fn csv(s: &Option<String>) -> Vec<String> {
@@ -3232,9 +3247,9 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         if let Some(af) = plurx_core::transcode::audio_offset_filter(audio_offset_ms) {
             cmd.arg("-af").arg(af);
         }
-        cmd.args(["-c:a", "aac", "-ac", "2", "-b:a", "256k"]);
+        cmd.args(progressive_audio_args(true));
     } else {
-        cmd.args(["-c:a", "copy"]);
+        cmd.args(progressive_audio_args(false));
     }
     // Fragmented MP4 so it streams without a seekable output.
     // `-avoid_negative_ts make_zero` normalizes the first timestamp to zero: a
@@ -3424,6 +3439,14 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     Ok(response)
 }
 
+fn progressive_audio_args(transcode_audio: bool) -> &'static [&'static str] {
+    if transcode_audio {
+        &["-c:a", "aac", "-ac", "2", "-b:a", "256k", "-ar", "48000"]
+    } else {
+        &["-c:a", "copy"]
+    }
+}
+
 /// Is this stderr line one of ffmpeg's `-progress` blocks rather than a
 /// diagnostic? Progress is strictly `lower_snake_key=value`; ffmpeg's own
 /// messages are prose and normally carry a `[component @ 0x…]` prefix, so the
@@ -3444,6 +3467,31 @@ fn is_progress_line(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flat_audio_channel_claim_is_bounded_at_the_request_boundary() {
+        for value in ["0", "17", "255"] {
+            assert!(
+                serde_urlencoded::from_str::<Caps>(&format!("achannels={value}")).is_err(),
+                "achannels={value} must not reach capability translation"
+            );
+        }
+        assert_eq!(
+            serde_urlencoded::from_str::<Caps>("achannels=16")
+                .expect("the documented ceiling is valid")
+                .achannels,
+            Some(16)
+        );
+    }
+
+    #[test]
+    fn progressive_aac_conversion_is_pinned_to_forty_eight_khz() {
+        assert_eq!(
+            progressive_audio_args(true),
+            ["-c:a", "aac", "-ac", "2", "-b:a", "256k", "-ar", "48000"]
+        );
+        assert_eq!(progressive_audio_args(false), ["-c:a", "copy"]);
+    }
 
     /// A fixed clock for every test that builds a device profile.
     ///
@@ -3650,11 +3698,13 @@ mod tests {
                     codec: "eac3".into(),
                     max_channels: 6,
                     passthrough: true,
+                    sample_rates_hz: vec![48_000],
                 },
                 playback::AudioSink {
                     codec: "EAC3".into(),
                     max_channels: 2,
                     passthrough: false,
+                    sample_rates_hz: vec![48_000],
                 },
             ],
             ..Default::default()
@@ -4282,6 +4332,7 @@ mod tests {
             index,
             codec: "eac3".into(),
             channels: Some(6),
+            sample_rate: Some(48_000),
             language: Some(language.into()),
             title: None,
             default,
@@ -4330,6 +4381,7 @@ mod tests {
                     index: 0,
                     codec: "eac3".into(),
                     channels: Some(8),
+                    sample_rate: Some(48_000),
                     language: Some("fra".into()),
                     title: Some("French E-AC-3".into()),
                     default: true,
@@ -4338,6 +4390,7 @@ mod tests {
                     index: 3,
                     codec: "truehd".into(),
                     channels: Some(8),
+                    sample_rate: Some(48_000),
                     language: Some("eng".into()),
                     title: Some("English TrueHD Atmos".into()),
                     default: false,

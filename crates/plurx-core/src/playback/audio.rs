@@ -20,6 +20,10 @@ pub struct AudioSink {
     pub max_channels: u8,
     #[serde(default)]
     pub passthrough: bool,
+    /// Sample rates this current route proved it can reproduce for `codec`.
+    /// Empty is no claim, never an all-rates wildcard.
+    #[serde(default)]
+    pub sample_rates_hz: Vec<u32>,
 }
 
 /// The delivery envelope whose mux rules constrain audio copying.
@@ -134,17 +138,26 @@ pub fn resolve_audio(
     };
     let codec = source.codec.trim().to_ascii_lowercase();
     let source_channels = channels(source);
-    let explicit_sink = profile.max_audio_channels.get(&codec).copied();
+    let explicit_sink = profile.audio_sink_claims.get(&codec);
     let legacy_claim = profile.max_audio_channels.is_empty();
     let codec_allowed = profile
         .audio_codecs
         .iter()
         .any(|candidate| candidate.eq_ignore_ascii_case(&codec));
-    let fits_sink = explicit_sink.is_some_and(|maximum| source_channels <= maximum);
+    let fits_sink = explicit_sink.is_some_and(|sink| source_channels <= sink.max_channels);
+    let rate_admitted = explicit_sink.is_some_and(|sink| {
+        source.sample_rate.is_some_and(|rate| {
+            u32::try_from(rate)
+                .ok()
+                .is_some_and(|rate| sink.sample_rates_hz.contains(&rate))
+        })
+    });
+    let trust_admitted = explicit_sink
+        .is_some_and(|sink| sink.passthrough || profile.claimed_audio_decoders.contains(&codec));
     let copy_admitted = route_admits_copy(route, &codec)
         && audio_offset_ms == 0
-        && codec_allowed
-        && (fits_sink || (legacy_claim && route == AudioRoute::Progressive));
+        && ((fits_sink && rate_admitted && trust_admitted)
+            || (legacy_claim && codec_allowed && route == AudioRoute::Progressive));
     if copy_admitted {
         return AudioDelivery {
             action: AudioAction::Copy {
@@ -187,11 +200,7 @@ pub fn resolve_audio(
     }
 
     if route != AudioRoute::EncodedVod {
-        if profile
-            .max_audio_channels
-            .get("eac3")
-            .is_some_and(|channels| *channels >= 6)
-        {
+        if output_admitted(profile, "eac3", 6) {
             return encoded(
                 "eac3",
                 source_channels.min(6),
@@ -204,11 +213,7 @@ pub fn resolve_audio(
                 "current sink admits E-AC-3",
             );
         }
-        if profile
-            .max_audio_channels
-            .get("ac3")
-            .is_some_and(|channels| *channels >= 6)
-        {
+        if output_admitted(profile, "ac3", 6) {
             return encoded(
                 "ac3",
                 source_channels.min(6),
@@ -219,12 +224,16 @@ pub fn resolve_audio(
         }
     }
 
-    let sink_channels = profile
-        .max_audio_channels
-        .get("aac")
-        .copied()
-        .unwrap_or(2)
-        .min(6);
+    let sink_channels = if output_admitted(profile, "aac", 1) {
+        profile
+            .max_audio_channels
+            .get("aac")
+            .copied()
+            .unwrap_or(2)
+            .min(6)
+    } else {
+        2
+    };
     let output_channels = source_channels.min(sink_channels).max(1);
     encoded(
         "aac",
@@ -239,6 +248,14 @@ pub fn resolve_audio(
     )
 }
 
+fn output_admitted(profile: &DeviceProfile, codec: &str, minimum_channels: u8) -> bool {
+    profile.audio_sink_claims.get(codec).is_some_and(|sink| {
+        sink.max_channels >= minimum_channels
+            && sink.sample_rates_hz.contains(&AUDIO_SAMPLE_RATE)
+            && (sink.passthrough || profile.claimed_audio_decoders.contains(codec))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,6 +265,7 @@ mod tests {
         AudioStream {
             codec: codec.to_owned(),
             channels: Some(channels),
+            sample_rate: Some(i64::from(AUDIO_SAMPLE_RATE)),
             ..AudioStream::default()
         }
     }
@@ -258,6 +276,22 @@ mod tests {
         profile.max_audio_channels = sinks
             .iter()
             .map(|(codec, channels)| ((*codec).to_owned(), *channels))
+            .collect();
+        profile.claimed_audio_decoders =
+            sinks.iter().map(|(codec, _)| (*codec).to_owned()).collect();
+        profile.audio_sink_claims = sinks
+            .iter()
+            .map(|(codec, channels)| {
+                (
+                    (*codec).to_owned(),
+                    AudioSink {
+                        codec: (*codec).to_owned(),
+                        max_channels: *channels,
+                        passthrough: false,
+                        sample_rates_hz: vec![AUDIO_SAMPLE_RATE],
+                    },
+                )
+            })
             .collect();
         profile
     }
@@ -361,11 +395,13 @@ mod tests {
                     codec: "eac3".into(),
                     max_channels: 6,
                     passthrough: true,
+                    sample_rates_hz: vec![48_000],
                 },
                 AudioSink {
                     codec: "EAC3".into(),
                     max_channels: 2,
                     passthrough: false,
+                    sample_rates_hz: vec![48_000],
                 },
             ],
             ..DeviceCaps::default()
@@ -385,6 +421,17 @@ mod tests {
             caps.validate_audio_sinks(),
             Err("audio_sinks max_channels must be between 1 and 16")
         );
+        caps.audio_sinks[1].max_channels = 2;
+        caps.audio_sinks[1].sample_rates_hz = vec![48_000, 48_000];
+        assert_eq!(
+            caps.validate_audio_sinks(),
+            Err("audio_sinks contains a duplicate sample rate")
+        );
+        caps.audio_sinks[1].sample_rates_hz = vec![1];
+        assert_eq!(
+            caps.validate_audio_sinks(),
+            Err("audio_sinks contains an invalid sample rate")
+        );
     }
 
     #[test]
@@ -394,11 +441,57 @@ mod tests {
                 codec: "EAC3".into(),
                 max_channels: 6,
                 passthrough: true,
+                sample_rates_hz: vec![48_000],
             }],
             ..DeviceCaps::default()
         };
         let profile = DeviceProfile::from_caps_v2(&caps);
         assert_eq!(profile.max_audio_channels.get("eac3"), Some(&6));
-        assert!(profile.audio_codecs.iter().any(|codec| codec == "eac3"));
+        assert!(!profile.audio_codecs.iter().any(|codec| codec == "eac3"));
+        assert!(profile.audio_sink_claims["eac3"].passthrough);
+    }
+
+    #[test]
+    fn sink_only_and_false_passthrough_do_not_authorize_copy() {
+        for passthrough in [false, true] {
+            let caps = DeviceCaps {
+                audio_sinks: vec![AudioSink {
+                    codec: "eac3".into(),
+                    max_channels: 6,
+                    passthrough,
+                    sample_rates_hz: vec![48_000],
+                }],
+                ..DeviceCaps::default()
+            };
+            let profile = DeviceProfile::from_caps_v2(&caps);
+            let delivery = resolve_audio(
+                Some(&source("eac3", 6)),
+                &profile,
+                AudioRoute::RollingHls,
+                0,
+            );
+            assert_eq!(
+                matches!(delivery.action, AudioAction::Copy { .. }),
+                passthrough,
+                "only a true passthrough claim can replace decoder evidence"
+            );
+        }
+    }
+
+    #[test]
+    fn copy_requires_known_compatible_source_and_sink_sample_rates() {
+        let profile = claimed(&[("aac", 6)]);
+        let mut input = source("aac", 6);
+        input.sample_rate = None;
+        assert!(resolve_audio(Some(&input), &profile, AudioRoute::RollingHls, 0).transcodes());
+
+        input.sample_rate = Some(44_100);
+        assert!(resolve_audio(Some(&input), &profile, AudioRoute::RollingHls, 0).transcodes());
+
+        input.sample_rate = Some(48_000);
+        assert!(matches!(
+            resolve_audio(Some(&input), &profile, AudioRoute::RollingHls, 0).action,
+            AudioAction::Copy { .. }
+        ));
     }
 }

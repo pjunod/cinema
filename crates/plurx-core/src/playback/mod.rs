@@ -6,7 +6,7 @@
 //! release (REQ-PLAY-4). Phase 1 serves DirectPlay and Remux; a Transcode
 //! verdict is reported honestly and its serving lands in Phase 2.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
@@ -76,6 +76,8 @@ pub fn caps_profile(
         video_codecs,
         audio_codecs,
         max_audio_channels: HashMap::new(),
+        claimed_audio_decoders: HashSet::new(),
+        audio_sink_claims: HashMap::new(),
         max_height,
         video_max_heights: HashMap::new(),
         max_bitrate: None,
@@ -130,6 +132,15 @@ pub struct DeviceProfile {
     /// the legacy codec-only claim and preserves its existing copy behavior.
     #[serde(default)]
     pub max_audio_channels: HashMap<String, u8>,
+    /// Decoder codecs the current capability document explicitly proved.
+    /// This is deliberately not the default-filled `audio_codecs` list.
+    #[serde(default)]
+    pub claimed_audio_decoders: HashSet<String>,
+    /// Current route facts keyed by codec. Keeping the full claim preserves
+    /// passthrough and sample-rate evidence instead of reducing it to a
+    /// channel count that could accidentally authorize copy.
+    #[serde(default)]
+    pub audio_sink_claims: HashMap<String, AudioSink>,
     #[serde(default)]
     pub max_height: Option<i64>,
     /// Runtime-probed direct-play ceilings keyed by normalized video codec.
@@ -228,20 +239,24 @@ impl DeviceProfile {
     }
 
     fn allows_audio_stream(&self, stream: &crate::domain::AudioStream) -> bool {
-        if !self.allows_audio(&stream.codec) {
-            return false;
-        }
         if self.max_audio_channels.is_empty() {
-            return true;
+            return self.allows_audio(&stream.codec);
         }
         let channels = stream
             .channels
             .and_then(|channels| u8::try_from(channels).ok())
             .filter(|channels| *channels > 0)
             .unwrap_or(2);
-        self.max_audio_channels
-            .get(&stream.codec.to_ascii_lowercase())
-            .is_some_and(|maximum| channels <= *maximum)
+        let codec = stream.codec.to_ascii_lowercase();
+        self.audio_sink_claims.get(&codec).is_some_and(|sink| {
+            channels <= sink.max_channels
+                && stream.sample_rate.is_some_and(|rate| {
+                    u32::try_from(rate)
+                        .ok()
+                        .is_some_and(|rate| sink.sample_rates_hz.contains(&rate))
+                })
+                && (sink.passthrough || self.claimed_audio_decoders.contains(&codec))
+        })
     }
 
     /// This client's height ceiling for a source in `codec`, narrowed by the
