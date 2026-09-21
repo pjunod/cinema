@@ -1,6 +1,6 @@
 # The hiqlite fork and what it drags in — decide the ownership, then cut the graph
 
-**Status:** ready for review · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
+**Status:** implementation in progress; lab/provider/upstream evidence pending · **Executes:** §4.3 / F-sc-11 / F-hist-12 /
 F-build-ops-codehealth-5, -6, -7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -734,6 +734,38 @@ of the above.
 Acceptance: every `generic bug` row in the three ledgers has a URL, and this
 document's Execution log records which were accepted, rejected or ignored.
 
+### 5.8 2026-09-21 implementation boundary
+
+The safe source-only boundary is M1 plus the locally provable portion of M2.
+Paul Junod is the named fork owner. The crate remains named `hiqlite`, every
+retained patch has a ledger row and drop condition, and the dependency policy
+rejects the retired `aws-lc-sys = 0.39.1` plus accidental OpenSSL/native-TLS
+stacks. Generic rows say `pending M6` until a real public link exists; a label
+is not substituted for external coordination.
+
+The default workspace graph moved from 47 to 43 duplicate-version rows at
+base `9deb58a2` versus `5c87d1895`. `s3-simple`, `quinn`, and
+`aws-lc-sys = 0.39.1` have no root reverse dependency. The fork's optional
+feature matrix reports S3 absent for the empty, `cache`, and `dashboard`
+configurations, and present for `backup`, `s3`, `backup,s3`, and `full`.
+This removes only the cryptr edge. The `axum-server/tls-rustls` and
+`rustls/prefer-post-quantum` routes to the surviving aws-lc version remain
+unchanged pending M3's provider proof.
+
+The remaining milestones are evidence-bound rather than safe assumptions:
+
+- **M0 needs:** cold/warm timings and target size from the named lab runner;
+  the source-only compiler VM is not that runner.
+- **M2/M6 need:** public upstream issues or pull requests for the nine generic
+  ledger rows. No upstream credential or issue authority was available in
+  this session.
+- **M3 needs:** the installed-provider test and three-voter transport evidence
+  before either surviving aws-lc edge can move.
+- **M4 needs:** the lab library corpus and both tokenizer backends for exact id
+  equivalence.
+- **M5 needs:** M0's cost result and M4's equivalence result; no build feature,
+  runtime gate, or Developer setting was added speculatively.
+
 ## 6. Verification and rollout
 
 Fast lane per PR. M1 and M3 additionally need `make cluster-check`, because
@@ -786,4 +818,11 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | claim | `plan/K-08` | Claimed K-08 from `9deb58a2`; one whole-plan draft PR will preserve the `hiqlite` patch name and remove only dependency edges supported by repository evidence. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | claim | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | Claimed K-08 from `9deb58a2`; opened the whole-plan draft before implementation. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M0 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: cold/warm workspace and lean-lane timings plus target size on the normal lab runner; not replaced with source-only VM measurements. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 · `a94c71a9e` | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | Root graph no longer contains `s3-simple`, `quinn`, or `aws-lc-sys = 0.39.1`; duplicate rows 47 → 43. All seven optional-feature combinations preserve S3 exactly when `backup`/`s3` requires it. Rust 1.97.1 checks cover the shipped core and optional backup fork configurations. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 · `5c87d1895` | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | Named Paul Junod as owner; recorded 16 + 3 patch kinds/drop conditions; added drift contracts and dependency bans. `cargo-deny` 0.20.2 reports bans/licenses green and rejects the base graph's banned 0.39.1 version. Generic upstream URLs remain pending M6. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: ring-provider assertion plus three-voter transport evidence. Both surviving aws-lc routes are mapped and deliberately unchanged. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: lab library snapshot and exact onig/fancy-regex token-id comparison. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M5 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: M0 cost and M4 equivalence results. No speculative build/runtime gate was added. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M6 | [#432](http://192.168.4.7:3000/noirr/plurx/pulls/432) | needs: public upstream issue/PR coordination for nine generic bugs; the ledgers expose `pending M6` until real URLs exist. |
