@@ -6290,6 +6290,7 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             produced_through: belief.produced_through(),
             positioned_at: belief.positioned_at(),
             seconds_per_segment: rendition.seconds_per_segment,
+            ahead_held: false,
             working_set: WorkingSet {
                 used_bytes: shared.working_set.load(Relaxed),
                 budget_bytes: rendition.working_set_budget,
@@ -8979,6 +8980,7 @@ mod tests {
             produced_through: None,
             positioned_at: None,
             seconds_per_segment: rendition.seconds_per_segment,
+            ahead_held: false,
             working_set: WorkingSet::default(),
         };
         assert_eq!(
@@ -9019,6 +9021,7 @@ mod tests {
             produced_through: Some(foreground_end),
             positioned_at: Some(0),
             seconds_per_segment: rendition.seconds_per_segment,
+            ahead_held: false,
             working_set: WorkingSet {
                 used_bytes: 2,
                 budget_bytes: 1,
@@ -13624,6 +13627,7 @@ mod tests {
             produced_through: None,
             positioned_at: None,
             seconds_per_segment: rendition.seconds_per_segment,
+            ahead_held: false,
             working_set: WorkingSet::default(),
         };
         let readers = rendition.readers.lock().await;
@@ -13891,6 +13895,7 @@ mod tests {
             produced_through: None,
             positioned_at: Some(45),
             seconds_per_segment: rendition.seconds_per_segment,
+            ahead_held: false,
             working_set: WorkingSet::default(),
         };
         assert_eq!(
@@ -13977,6 +13982,7 @@ mod tests {
             produced_through: Some(45),
             positioned_at: Some(45),
             seconds_per_segment: rendition.seconds_per_segment,
+            ahead_held: false,
             working_set: WorkingSet::default(),
         };
         assert_eq!(
