@@ -3063,6 +3063,8 @@ dependencies = [
  "hex",
  "hiqlite-wal",
  "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "mdns-sd",
  "mime_guess",

@@ -475,7 +475,7 @@ source of truth for "how does this file play," not two.
 | Discovery | mDNS `_plurx._tcp` + Plex GDM responder | LAN only |
 | Passwords / tokens | Argon2id (at rest) · SHA-256 (token lookup) | §5 |
 | Observability | `tracing` + Prometheus exporter | REQ-OPS-1 |
-| Web app | embedded static app, `` `WEB_ASSETS` = 64 `` files, no bundler or framework | [shell layout](clients/WEB-SHELL-LAYOUT.md), [source table](../crates/plurxd/src/http/web.rs) |
+| Web app | embedded static app, `` `WEB_ASSETS` = 65 `` files, no bundler or framework | [shell layout](clients/WEB-SHELL-LAYOUT.md), [source table](../crates/plurxd/src/http/web.rs) |
 | Avoided | sled (stalled), rocksdb (C++ dep), external DBs, ffmpeg linking | — |
 
 The web app is a deliberate non-choice: a hand-written shell loads the checked

@@ -1534,4 +1534,10 @@ mod tests {
     fn peak_rss_bytes() -> u64 {
         0
     }
+
+    #[test]
+    fn publication_resources_still_allow_self_framing() {
+        assert!(RESOURCE_CSP.contains("frame-ancestors 'self'"));
+        assert!(!RESOURCE_CSP.contains("frame-ancestors 'none'"));
+    }
 }

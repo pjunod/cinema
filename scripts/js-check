@@ -7,8 +7,8 @@ the Rust gate never parses it. A stray brace compiles, links, passes
 `make check` cannot see it; this can.
 
 Two things get checked. Every JavaScript file the shell loads from `/assets/`
-— the sixty-two rows of the split web shell plus the sidecars — because that is
-where the app is (`docs/clients/WEB-SHELL-LAYOUT.md`). And every inline
+— the sixty-four script rows of the split web shell plus the sidecars —
+because that is where the app is (`docs/clients/WEB-SHELL-LAYOUT.md`). And every inline
 `<script>` block still in the shell, which is currently none: that path stays so
 that an inline block sneaking back in is checked rather than ignored.
 

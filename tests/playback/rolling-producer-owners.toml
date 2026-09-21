@@ -1568,7 +1568,14 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # reviewed under `all-detached-tokio-tasks` above.
 # +2 with the seek-scratch ledger: the retired scratch conversion owner and the
 # copy reader whose writer guard is now registered before the spawn.
-expected_occurrences = 524
+# +3 for C-01 HTTP ownership: startup precompression is one `spawn_blocking`
+# awaited before the listener binds; each accepted connection is a graceful-
+# shutdown-watched task; and the shortened-timeout listener fixture joins its
+# server task before returning. None owns a media producer or child process.
+# +2 for the review regressions: the injectable listener server and the real
+# authenticated logout request each run in a test task whose JoinHandle is
+# awaited before the fixture returns. Neither task owns a child process.
+expected_occurrences = 529
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -1980,7 +1987,15 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +4 with the seek-scratch ledger: the conversion retry interval, the copy
 # writer's grant-wait poll, the writer-settle barrier's bounded wait, and the
 # retired cleanup owner's shortenable deadline.
-expected_occurrences = 809
+# +8 net for C-01: one shipped handler deadline bounds JSON work; two fixture
+# sleeps model slow handlers; and five fixture timeouts bound server teardown,
+# socket reads, and the raw HTTP/2 PING observation. The existing shutdown
+# drain sleep moved into the new accept-loop helper and remains one occurrence.
+# Every fixture task is joined; the shipped timers own no media producer.
+# +2 net for review fixes: the shipped accept loop adds its one-second
+# resource-pressure backoff, and the real logout-fence seam replaces the old
+# dummy sleep while its listener regression adds one bounded response wait.
+expected_occurrences = 819
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -2318,7 +2333,13 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # are ordinary in-process methods and launch no child.
 # +1: the 503 classification is asserted through the real HTTP mapper, which
 # reads the response `.status()`.
-expected_occurrences = 319
+# +6 for C-01 HTTP response construction/tests: one `Response::builder().status`
+# selects 200 vs 304 and five `.status()` reads assert in-process Axum answers.
+# None is a command launch or process owner.
+# 325 -> 324 after replacing dummy deadline responses with the production
+# authenticated logout route. Every retained `.status()` is an in-process HTTP
+# response inspection, not a command launch.
+expected_occurrences = 324
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -2396,6 +2417,8 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +3 for finite Live TV source observation: ordinary ffprobe wait plus timeout
 # start-kill and wait. All three address the same retained child before the
 # replay sample and session scratch can be released.
+# +2 for the real logout-fence regression's two-party Barrier rendezvous.
+# Both waits are test-only in-process synchronization, not child lifecycle.
 # Windows adds nine explicit waits/start-kills in the shared job-owned output
 # and status helpers and in bounded probe cleanup. All address retained children
 # and complete before their Job Object guard can leave scope.
@@ -2407,7 +2430,7 @@ pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
 # +4 are the packet probe's awaited completion, explicit timeout reap, and the
 # publication retirement ticket wait. Only the first three concern a process;
 # all retain their owner until the wait settles.
-expected_occurrences = 370
+expected_occurrences = 372
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

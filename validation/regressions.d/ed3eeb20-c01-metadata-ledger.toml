@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["ed3eeb20"]
+points = []
+checks = []
+reason = "Validation-metadata-only follow-up: this commit records the non-runtime classification required for the preceding C-01 asset-count contract update. It adds no runtime or client behavior."
+ignore = true

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["dbd3ceda"]
+points = ["server.api", "web.experience"]
+checks = ["rust-gate", "web-static"]
+reason = "The Rust gate exercises the bounded listener, graceful drain, semantic handler deadlines, production route inventory, authenticated logout revocation fence, representation-specific validators, gzip negotiation, and static security headers. The web-static gate verifies that hls.js remains the first body asset, all embedded rows match the shell and layout inventory, the source graph still resolves, and the complete Node web contract stays green."

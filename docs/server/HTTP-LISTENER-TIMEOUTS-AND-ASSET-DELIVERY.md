@@ -11,11 +11,10 @@
 Read §2 first — it quotes the listener, the router layers and the asset
 handlers as they are, with the one hyper fact the whole item rests on. Then
 build §5 in order: M1 (listener + handler deadlines), M2 (compressed and
-versioned assets), M3 (security headers). Each is one draft PR into `main`
-under the fast lane, with the focused tests named in its acceptance check.
-The three are independent after M1's dependency bump lands; M2 and M3 may
-run in parallel sessions. Every `file:line` here is from `88a3957a` —
-re-verify each anchor by function name before editing.
+versioned assets), M3 (security headers). They are logical milestones in one
+draft plan PR into `main`, under the fast lane, with the focused tests named
+in each acceptance check. Every `file:line` here is from `88a3957a` — re-verify
+each anchor by function name before editing.
 
 **If a step seems to require a deadline on a streaming route, a
 `CompressionLayer` on the router, removing an existing body limit, or
@@ -219,7 +218,14 @@ builder.http2()
 let graceful = hyper_util::server::graceful::GracefulShutdown::new();
 loop {
     let (stream, remote) = tokio::select! {
-        accepted = listener.accept() => accepted?,
+        accepted = listener.accept() => match accepted {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                tracing::error!(%error, "HTTP listener accept failed; retrying");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+        },
         () = &mut shutdown => break,
     };
     let app = app.clone();
@@ -474,7 +480,7 @@ returns before the sleep ends (connection closed by the server at 15 s), and
 `curl -s http://10.42.1.11:32400/metrics | grep plurx_http_handler_deadlines_total`
 shows both groups at 0.
 
-### 5.2 M2 — gzip, hashes and validators for the web shell (`web/asset-delivery`)
+### 5.2 M2 — gzip, hashes and validators for the web shell (`server/http-listener-timeouts`)
 
 1. `ASSET_GZIP`, `SIDECAR_HASHES`, `accepts_gzip`, `serve_static` (§3.2);
    force the LazyLock in `main` before the bind.
@@ -495,7 +501,7 @@ shows `content-encoding: gzip`, `vary: Accept-Encoding`, an `etag` ending
 `content-encoding`; a second request with `If-None-Match` returns 304; the
 §6.3 waterfall table is in the PR body.
 
-### 5.3 M3 — security headers on the shell (`web/security-headers`)
+### 5.3 M3 — security headers on the shell (`server/http-listener-timeouts`)
 
 1. `shell_headers()` and its application (§3.3).
 2. Tests: `shell_sends_nosniff_referrer_policy_and_frame_csp`,
@@ -596,4 +602,6 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c01_builder | M1–M3 (single PR at explicit user direction) | #395 | Draft implementation complete. Rust 1.97.1: focused listener, route-deadline, asset-delivery, security-header, publication-frame, and preserved serve/connect-info tests pass; `cargo check -p plurxd --all-targets --locked` and rustfmt pass; 25 body-limit registrations preserved; dependency tree has no duplicate `hyper`/`hyper-util`. `node --test tests/web/`: 51/51 pass. Baseline #394 independently reproduces the unrelated `first_media_retains_advancing_deadline_and_published_failure_is_immutable` failure, the Android `behindLiveWindow.attached()` `make web-check` failure, and four existing Clippy `-D warnings` findings; C-01 does not touch those files. Needs after merge: §6.2 lab1 listener/metric soak, §6.3 cold/warm waterfall HARs, and §6.4 browser/native reader device prompt; no deployment or device authority was available during implementation. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c01_builder | Adversarial findings | #395 | Merged current `main` at `f73a9187` without rewriting history. Finding #3067 addressed: listener accept errors now retry after a shutdown-aware one-second backoff; `If-None-Match: *` returns 304 for identity and gzip representations; production route inventory pins the HLS segment route to `media`, and a paused-clock request drives the production router, authenticated logout handler, and real digest-revocation fence beyond the short deadline before proving revocation. Focused regressions, Rust 1.97.1 check/rustfmt, ownership inventory, and scoped Clippy pass. Full Clippy remains red only on the four independently reproduced current-main findings recorded above. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c01_builder | Broad-unit disposition | #395 | The one permitted exact-findings-head `make unit` run was stopped after about 12 minutes when four untouched transcode tests remained parked in Tokio with no child process or CPU use; it was not restarted. All C-01 regressions reached by that run passed. The exact hanging tests and partial unrelated failures are recorded in [PR comment #3085](http://192.168.4.7:3000/noirr/plurx/pulls/395#issuecomment-3085). Main later advanced through #399; it was merged additively, focused Rust 1.97.1 checks passed, and the branch remains draft until the already-running #398 replacement lane settles. |
