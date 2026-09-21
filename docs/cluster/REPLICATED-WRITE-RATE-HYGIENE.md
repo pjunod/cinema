@@ -1,6 +1,7 @@
 # Replicated write-rate hygiene — stop proposing no-ops every second on every voter
 
-**Status:** ready for review · **Executes:** S3, F-sc-3 and the takeover-loop
+**Status:** blocked — M0 24-hour fleet capture is waiting for an idle window ·
+**Executes:** S3, F-sc-3 and the takeover-loop
 audit from S3's row in
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -267,6 +268,23 @@ plurx_watched_outbox{status="pending"}. Repeat after <M1..M4 sha> is
 deployed and report both tables side by side.
 ```
 
+Read-only discovery on 2026-09-20 found that the old lab names no longer
+describe the live voter set: `192.168.4.7` reports itself as the learner,
+while `nuc4` (`192.168.4.8`), `m6` (`192.168.4.14`) and `nynuc`
+(`192.168.5.236`) report themselves as the three voters. No historical
+Prometheus-compatible endpoint was exposed on those nodes' standard ports,
+and the supplied deployment key was refused by all four hosts, so no
+node-local history could be inspected.
+
+A persistent read-only `/metrics` capture started at 2026-09-21T03:23:20Z. It samples
+the three voters every 60 s and starts the acceptance window only when all
+three are reachable, remain voters on one build, report zero pending outbox
+rows, and report no transcode, Live TV or protected-playback activity. It
+resets the window on activity, reachability, build or role change, or a
+counter rollback. `m6` reported one active transcode at launch, so the
+continuous 24-hour window had not started yet. The sampler deploys nothing
+and performs only unauthenticated `GET /metrics` reads.
+
 ### 5.2 M1 — hint + forced claim + settings cache + idle backoff (`watched.rs`)
 
 §3.1–§3.3 in one PR; they share the tick loop.
@@ -317,16 +335,17 @@ draining at 1 Hz while new nodes defer to the lease — duplicate delivery is
 still prevented by the claim, so the order does not matter. Rollback is a
 redeploy.
 
-## 7. Open questions
+## 7. Decisions
 
-1. `HINT_FORCE_INTERVAL = 30 s` and `IDLE_TICK_MAX = 10 s` are proposals
-   inside the review's "5–10 s idle backoff"; Paul confirms.
-2. Should the SQLite standalone backend skip the singleton entirely (it is
-   the whole cluster) — yes by construction via `UnclusteredJobAuthority`,
-   but the lease row is still written; acceptable or special-case?
-3. Whether a settings-write `Notify` should be a general facility (C15's
-   telemetry loop and the Live TV owner reads want the same thing) or stay
-   local to these two loops; this plan keeps it local.
+The coordinator recorded the delegated decisions on 2026-09-20:
+
+1. Use `HINT_FORCE_INTERVAL = 30 s` and `IDLE_TICK_MAX = 10 s`, inside the
+   review's approved 5–10 s idle-backoff range.
+2. Keep the singleton lease on standalone SQLite. It preserves one-drainer
+   semantics across multiple processes, and its lease cost is negligible
+   beside the 1 Hz empty claims being removed.
+3. Keep the settings-write `Notify` local to the watched and takeover loops.
+   A general notification facility would expand K-03 beyond its plan.
 
 ---
 
@@ -340,4 +359,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M0 | #405 | Read-only discovery found the live three-voter set is `nuc4`, `m6`, and `nynuc`; the old `lab1`–`lab3` names are stale and `192.168.4.7` is now the learner. No historical metrics endpoint was found and node SSH refused the supplied key. A persistent 60 s `/metrics` sampler started at 2026-09-21T03:23:20Z and will complete only after a continuous 24-hour idle, empty-outbox, stable-build/role and monotonic-counter window; it was waiting because `m6` had one active transcode. The coordinator approved the 30 s forced claim, 10 s idle ceiling, unchanged SQLite singleton lease, and local-only notifications. No Rust was changed. |
