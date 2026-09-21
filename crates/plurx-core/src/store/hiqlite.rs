@@ -739,6 +739,7 @@ impl StoreOperationMetrics {
 
 static STORE_OPERATION_METRICS: LazyLock<StoreOperationMetrics> =
     LazyLock::new(StoreOperationMetrics::default);
+static STORE_VALIDATION_REFUSALS: AtomicU64 = AtomicU64::new(0);
 
 // The named P2f runner needs a production-equivalent control arm without
 // maintaining or rebuilding a historical binary. This switch exists only in
@@ -1009,7 +1010,19 @@ where
 /// SQLite mode leaves these series at zero. Rendering reads only atomics and
 /// cannot execute or wait on the Store operation it describes.
 pub fn prometheus_store_operations() -> String {
-    STORE_OPERATION_METRICS.render()
+    use std::fmt::Write;
+
+    let mut out = STORE_OPERATION_METRICS.render();
+    out.push_str(
+        "# HELP plurx_store_validation_refusals_total Replicated statements refused before store I/O.\n\
+         # TYPE plurx_store_validation_refusals_total counter\n",
+    );
+    let _ = writeln!(
+        out,
+        "plurx_store_validation_refusals_total {}",
+        STORE_VALIDATION_REFUSALS.load(Ordering::Relaxed)
+    );
+    out
 }
 
 /// The only application-facing path to hiqlite. Keeping the timeout at this
@@ -4138,10 +4151,18 @@ impl Clock for SystemClock {
 }
 
 pub(super) fn validate_sql(sql: &str) -> Result<(), StoreError> {
-    ReplicatedSql::new(sql)
+    validate_sql_with_refusal_counter(sql, &STORE_VALIDATION_REFUSALS)
+}
+
+fn validate_sql_with_refusal_counter(sql: &str, refusals: &AtomicU64) -> Result<(), StoreError> {
+    let result = ReplicatedSql::new(sql)
         .map(|_| ())
-        .map_err(|error| StoreError::Database(error.to_string()))?;
-    validate_parameter_order(sql)
+        .map_err(|error| StoreError::Database(error.to_string()))
+        .and_then(|()| validate_parameter_order(sql));
+    if result.is_err() {
+        StoreOperationMetrics::saturating_add(refusals, 1);
+    }
+    result
 }
 
 /// hiqlite binds parameters with rusqlite's numeric parameter index. SQLite
@@ -5825,6 +5846,26 @@ mod tests {
         }
         validate_sql("SELECT [a'b], $2, $1 FROM users")
             .expect_err("bracket quote cannot hide misordered placeholders");
+    }
+
+    #[test]
+    fn validation_refusals_are_counted_once_before_io() {
+        let refusals = AtomicU64::new(0);
+        validate_sql_with_refusal_counter("SELECT $1", &refusals)
+            .expect("a valid statement is accepted");
+        assert_eq!(refusals.load(Ordering::Relaxed), 0);
+
+        validate_sql_with_refusal_counter("SELECT $2, $1", &refusals)
+            .expect_err("an out-of-order statement is refused");
+        assert_eq!(refusals.load(Ordering::Relaxed), 1);
+
+        validate_sql_with_refusal_counter("SELECT ?1", &refusals)
+            .expect_err("an unsupported placeholder is refused");
+        assert_eq!(refusals.load(Ordering::Relaxed), 2);
+
+        let exposition = prometheus_store_operations();
+        assert!(exposition.contains("# TYPE plurx_store_validation_refusals_total counter"));
+        assert!(exposition.contains("plurx_store_validation_refusals_total "));
     }
 
     /// The binary that shipped before P6: it implements exactly protocol 4.
