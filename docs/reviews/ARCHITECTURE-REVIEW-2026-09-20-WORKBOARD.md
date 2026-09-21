@@ -123,7 +123,7 @@ document (the twelve written second landed on 2026-09-20 as well).
 | S-13 | [DECODE-FACTS-GATE-AND-FALLBACK](../streaming/DECODE-FACTS-GATE-AND-FALLBACK.md) | C13 | month | unclaimed | | | | 2026-09-20 | Measure before optimising |
 | S-14 | [TRANSCODE-DECOMPOSITION-PLAN](../streaming/TRANSCODE-DECOMPOSITION-PLAN.md) | §4.1, §4.2, §4.9 | quarter | unclaimed | | | | 2026-09-20 | Behaviour-preserving moves first; registry unification separate |
 | K-01 | [CLUSTER-BACKUP-AND-RESTORE](../cluster/CLUSTER-BACKUP-AND-RESTORE.md) | §2.3, S4 | month | unclaimed | | | | 2026-09-20 | The procedure is the deliverable |
-| K-02 | [RAFT-SNAPSHOT-CADENCE-AND-CONSISTENT-CUT](../cluster/RAFT-SNAPSHOT-CADENCE-AND-CONSISTENT-CUT.md) | S2, S5 | month | unclaimed | | | | 2026-09-20 | M0 measurement on each voter |
+| K-02 | [RAFT-SNAPSHOT-CADENCE-AND-CONSISTENT-CUT](../cluster/RAFT-SNAPSHOT-CADENCE-AND-CONSISTENT-CUT.md) | S2, S5 | month | claimed | gpt-5.6-sol | agent:/root/p01_builder | `plan/K-02` · draft pending | 2026-09-21 | Claimed from `9deb58a2`; M0 read-only measurement on every voter precedes cadence or snapshot-path changes. |
 | K-03 | [REPLICATED-WRITE-RATE-HYGIENE](../cluster/REPLICATED-WRITE-RATE-HYGIENE.md) | S3 | week | unclaimed | | | | 2026-09-20 | Keep the atomic claim |
 | K-04 | [BOUNDED-REPLICA-READS-ROLLOUT](../cluster/BOUNDED-REPLICA-READS-ROLLOUT.md) | S1 | month | unclaimed | | | | 2026-09-20 | Consistency-policy change; no auth cache |
 | K-05 | [SQLITE-READ-PATH-AND-QUERY-PLANS](../cluster/SQLITE-READ-PATH-AND-QUERY-PLANS.md) | S6, S7, S11 | month | unclaimed | | | | 2026-09-20 | Search predicate is the corrected one |
