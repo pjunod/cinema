@@ -793,6 +793,7 @@ impl StoreOperationTimer {
     fn complete(mut self, outcome: StoreOperationOutcome) {
         self.metrics
             .record(self.class, outcome, self.started_at.elapsed());
+        super::record_http_store_operation(self.class.index());
         self.completed = true;
     }
 }
@@ -805,6 +806,7 @@ impl Drop for StoreOperationTimer {
                 StoreOperationOutcome::Cancelled,
                 self.started_at.elapsed(),
             );
+            super::record_http_store_operation(self.class.index());
         }
     }
 }

@@ -67,15 +67,16 @@ mod users;
 mod watch;
 pub(crate) mod web;
 
-use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
+use axum::extract::{DefaultBodyLimit, MatchedPath};
 use axum::http::{header, HeaderValue, Method, Request, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::sync::LazyLock;
+use std::time::{Duration, Instant};
 
 use crate::state::AppState;
 use plurx_core::cluster::membership::LocalServingRole;
@@ -84,6 +85,197 @@ use serde::{Deserialize, Serialize};
 const JSON_SHORT_DEADLINE: Duration = Duration::from_secs(30);
 const JSON_LONG_DEADLINE: Duration = Duration::from_secs(300);
 static HANDLER_DEADLINES: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+
+const HTTP_ROUTE_GROUPS: [&str; 9] = [
+    "auth", "home", "library", "item", "search", "playback", "settings", "cluster", "other",
+];
+const HTTP_STORE_CLASSES: [&str; 3] = ["local_read", "authority_read", "write"];
+const HTTP_NODE_ROLES: [&str; 4] = ["standalone", "voter", "learner", "remote_authority"];
+const HTTP_ROUTE_BUCKETS: [(u64, &str); 12] = [
+    (1_000_000, "0.001"),
+    (5_000_000, "0.005"),
+    (10_000_000, "0.01"),
+    (25_000_000, "0.025"),
+    (50_000_000, "0.05"),
+    (100_000_000, "0.1"),
+    (250_000_000, "0.25"),
+    (500_000_000, "0.5"),
+    (1_000_000_000, "1"),
+    (2_500_000_000, "2.5"),
+    (5_000_000_000, "5"),
+    (10_000_000_000, "10"),
+];
+
+#[derive(Default)]
+struct HttpRouteCell {
+    count: AtomicU64,
+    elapsed_nanos: AtomicU64,
+    buckets: [AtomicU64; HTTP_ROUTE_BUCKETS.len()],
+}
+
+struct HttpRouteMetrics {
+    store_reads: [AtomicU64; 9 * 3 * 4],
+    routes: [HttpRouteCell; 9 * 4],
+}
+
+impl Default for HttpRouteMetrics {
+    fn default() -> Self {
+        Self {
+            store_reads: std::array::from_fn(|_| AtomicU64::new(0)),
+            routes: std::array::from_fn(|_| HttpRouteCell::default()),
+        }
+    }
+}
+
+impl HttpRouteMetrics {
+    fn saturating_add(target: &AtomicU64, amount: u64) {
+        let _ = target.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            (current != u64::MAX).then(|| current.saturating_add(amount))
+        });
+    }
+
+    fn record(&self, group: usize, role: usize, counts: [u64; 3], elapsed: Duration) {
+        for (class, count) in counts.into_iter().enumerate() {
+            Self::saturating_add(
+                &self.store_reads
+                    [(group * HTTP_STORE_CLASSES.len() + class) * HTTP_NODE_ROLES.len() + role],
+                count,
+            );
+        }
+        let elapsed_nanos = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
+        let cell = &self.routes[group * HTTP_NODE_ROLES.len() + role];
+        Self::saturating_add(&cell.count, 1);
+        Self::saturating_add(&cell.elapsed_nanos, elapsed_nanos);
+        if let Some(index) = HTTP_ROUTE_BUCKETS
+            .iter()
+            .position(|(upper, _)| elapsed_nanos <= *upper)
+        {
+            Self::saturating_add(&cell.buckets[index], 1);
+        }
+    }
+
+    fn render(&self) -> String {
+        use std::fmt::Write;
+
+        let mut out = String::from(
+            "# HELP plurx_http_store_reads_total Replicated Store operations attributed to matched HTTP route group and serving role.\n\
+             # TYPE plurx_http_store_reads_total counter\n",
+        );
+        for (group_index, group) in HTTP_ROUTE_GROUPS.iter().enumerate() {
+            for (class_index, class) in HTTP_STORE_CLASSES.iter().enumerate() {
+                for (role_index, role) in HTTP_NODE_ROLES.iter().enumerate() {
+                    let count = self.store_reads[(group_index * HTTP_STORE_CLASSES.len()
+                        + class_index)
+                        * HTTP_NODE_ROLES.len()
+                        + role_index]
+                        .load(Ordering::Relaxed);
+                    let _ = writeln!(
+                        out,
+                        "plurx_http_store_reads_total{{route_group=\"{group}\",class=\"{class}\",role=\"{role}\"}} {count}"
+                    );
+                }
+            }
+        }
+        out.push_str(
+            "# HELP plurx_http_route_seconds Matched HTTP route latency by bounded route group and serving role.\n\
+             # TYPE plurx_http_route_seconds histogram\n",
+        );
+        for (group_index, group) in HTTP_ROUTE_GROUPS.iter().enumerate() {
+            for (role_index, role) in HTTP_NODE_ROLES.iter().enumerate() {
+                let cell = &self.routes[group_index * HTTP_NODE_ROLES.len() + role_index];
+                let mut cumulative = 0_u64;
+                for (bucket_index, (_, upper)) in HTTP_ROUTE_BUCKETS.iter().enumerate() {
+                    cumulative = cumulative
+                        .saturating_add(cell.buckets[bucket_index].load(Ordering::Relaxed));
+                    let _ = writeln!(
+                        out,
+                        "plurx_http_route_seconds_bucket{{route_group=\"{group}\",role=\"{role}\",le=\"{upper}\"}} {cumulative}"
+                    );
+                }
+                let count = cell.count.load(Ordering::Relaxed);
+                let _ = writeln!(
+                    out,
+                    "plurx_http_route_seconds_bucket{{route_group=\"{group}\",role=\"{role}\",le=\"+Inf\"}} {count}"
+                );
+                let seconds = cell.elapsed_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0;
+                let _ = writeln!(
+                    out,
+                    "plurx_http_route_seconds_sum{{route_group=\"{group}\",role=\"{role}\"}} {seconds:.9}"
+                );
+                let _ = writeln!(
+                    out,
+                    "plurx_http_route_seconds_count{{route_group=\"{group}\",role=\"{role}\"}} {count}"
+                );
+            }
+        }
+        out
+    }
+}
+
+static HTTP_ROUTE_METRICS: LazyLock<HttpRouteMetrics> = LazyLock::new(HttpRouteMetrics::default);
+
+fn http_route_group(path: &str) -> usize {
+    if path.contains("/auth/") || path.ends_with("/me") {
+        0
+    } else if path.contains("/home") || path.ends_with("/hubs") {
+        1
+    } else if path.contains("/libraries") || path.contains("/library/sections") {
+        2
+    } else if path.contains("/items/") || path.contains("/library/metadata/") {
+        3
+    } else if path.contains("/search") {
+        4
+    } else if path.contains("/hls/")
+        || path.contains("/stream")
+        || path.contains("/live-tv/")
+        || path.contains("/publication/")
+        || path.contains("/offline/")
+    {
+        5
+    } else if path.contains("/settings") || path.contains("/developer/") {
+        6
+    } else if path.contains("/cluster/") || path.contains("/internal/") {
+        7
+    } else {
+        8
+    }
+}
+
+async fn http_store_attribution(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let group = request
+        .extensions()
+        .get::<MatchedPath>()
+        .map_or(8, |path| http_route_group(path.as_str()));
+    let raft = state.replication.metrics_handle().snapshot();
+    let role = if !raft.local_source && raft.watermark_source {
+        3
+    } else if !raft.local_source {
+        0
+    } else {
+        match state.membership.local_serving_role().await {
+            Ok(LocalServingRole::Learner) => 2,
+            Ok(LocalServingRole::Unclustered) if !raft.watermark_source => 0,
+            Ok(
+                LocalServingRole::Unclustered | LocalServingRole::Voter | LocalServingRole::Fenced,
+            )
+            | Err(_) => 1,
+        }
+    };
+    let counts = plurx_core::store::HttpStoreOperationCounts::default();
+    let started_at = Instant::now();
+    let response =
+        plurx_core::store::scope_http_store_operations(counts.clone(), next.run(request)).await;
+    HTTP_ROUTE_METRICS.record(group, role, counts.snapshot(), started_at.elapsed());
+    response
+}
+
+pub(crate) fn prometheus_http_store_attribution() -> String {
+    HTTP_ROUTE_METRICS.render()
+}
 
 #[derive(Clone, Copy)]
 enum DeadlineGroup {
@@ -725,6 +917,10 @@ pub fn router(state: AppState) -> Router {
             state.clone(),
             cluster_capacity_gate,
         ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            http_store_attribution,
+        ))
         .with_state(state)
 }
 
@@ -1234,6 +1430,45 @@ mod tests {
     async fn slow_test_handler() -> &'static str {
         tokio::time::sleep(Duration::from_millis(40)).await;
         "ok"
+    }
+
+    #[tokio::test]
+    async fn metrics_route_attribution_renders_fixed_labels_and_scoped_store_counts() {
+        let counts = plurx_core::store::HttpStoreOperationCounts::default();
+        plurx_core::store::scope_http_store_operations(counts.clone(), async {
+            plurx_core::store::validation_record_http_store_operation(0);
+            plurx_core::store::validation_record_http_store_operation(1);
+            plurx_core::store::validation_record_http_store_operation(1);
+            plurx_core::store::validation_record_http_store_operation(2);
+        })
+        .await;
+
+        let metrics = HttpRouteMetrics::default();
+        metrics.record(1, 1, counts.snapshot(), Duration::from_millis(25));
+        let exposition = metrics.render();
+        assert!(exposition.contains("# TYPE plurx_http_store_reads_total counter"));
+        assert!(exposition.contains("# TYPE plurx_http_route_seconds histogram"));
+        assert!(exposition.contains(
+            "plurx_http_store_reads_total{route_group=\"home\",class=\"local_read\",role=\"voter\"} 1"
+        ));
+        assert!(exposition.contains(
+            "plurx_http_store_reads_total{route_group=\"home\",class=\"authority_read\",role=\"voter\"} 2"
+        ));
+        assert!(exposition.contains(
+            "plurx_http_store_reads_total{route_group=\"home\",class=\"write\",role=\"voter\"} 1"
+        ));
+        assert!(exposition
+            .contains("plurx_http_route_seconds_count{route_group=\"home\",role=\"voter\"} 1"));
+        assert_eq!(
+            exposition
+                .lines()
+                .filter(|line| line.starts_with("plurx_http_store_reads_total{"))
+                .count(),
+            HTTP_ROUTE_GROUPS.len() * HTTP_STORE_CLASSES.len() * HTTP_NODE_ROLES.len()
+        );
+        assert_eq!(http_route_group("/api/v1/home/previews"), 1);
+        assert_eq!(http_route_group("/api/v1/search"), 4);
+        assert_eq!(http_route_group("/unmatched"), 8);
     }
 
     async fn ten_ms_short_deadline(request: Request<axum::body::Body>, next: Next) -> Response {
