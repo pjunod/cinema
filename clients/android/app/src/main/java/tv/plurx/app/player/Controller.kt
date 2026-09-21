@@ -73,6 +73,7 @@ import tv.plurx.app.data.AudioTrack
 import tv.plurx.app.data.SubTrack
 import tv.plurx.app.data.SubtitleReadiness
 import tv.plurx.app.data.Net
+import tv.plurx.app.data.OpticalSessionRequest
 import tv.plurx.app.data.RefusalException
 import tv.plurx.app.data.refusalStatusOf
 import tv.plurx.app.data.PlaybackSessionStatus
@@ -296,7 +297,30 @@ class Controller(
      * the user request the server's final replacement as well as the UI's.
      */
     private val sessionCreateCoordinator = SessionCreateCoordinator(
-        createSession = { body -> vm.createHlsSession(plan.fileId, body) },
+        createSession = { body ->
+            val optical = plan.optical
+            if (optical == null) {
+                vm.createHlsSession(requireNotNull(plan.fileId), body)
+            } else {
+                vm.createOpticalSession(
+                    optical.driveId,
+                    optical.titleId,
+                    OpticalSessionRequest(
+                        expected_disc_id = optical.discId,
+                        media_generation = optical.mediaGeneration,
+                        playback_id = body.playback_id,
+                        request_id = body.request_id ?: UUID.randomUUID().toString(),
+                        start = body.start ?: 0.0,
+                        height = body.height,
+                        audio = body.audio,
+                        subtitle_burn = body.subtitle_burn ?: body.subtitle,
+                        audio_offset_ms = body.audio_offset_ms,
+                        block_budget_secs = body.block_budget_secs,
+                        caps = body.caps ?: decisionCaps,
+                    ),
+                )
+            }
+        },
         // A refusal the server explained now arrives as RefusalException,
         // so "is this a 400" has to ask for the status rather than for one of
         // the two exception types that can carry it.
@@ -665,17 +689,19 @@ class Controller(
      */
     private var audioSelectionArmed = false
 
-    private val pgsOverlay = AndroidPGSOverlayController(
-        api = { vm.api() },
-        scope = scope,
-        fileId = plan.fileId,
-        sourcePositionMs = ::realPosition,
-        isPlaying = { player.isPlaying },
-        playbackSpeed = { player.playbackParameters.speed },
-        onFrame = { pgsOverlayFrame = it },
-        onStatus = { pgsOverlayStatus = it },
-        onFailure = { message -> raiseDegradedNotice(message) },
-    )
+    private val pgsOverlay = plan.fileId?.let { fileId ->
+        AndroidPGSOverlayController(
+            api = { vm.api() },
+            scope = scope,
+            fileId = fileId,
+            sourcePositionMs = ::realPosition,
+            isPlaying = { player.isPlaying },
+            playbackSpeed = { player.playbackParameters.speed },
+            onFrame = { pgsOverlayFrame = it },
+            onStatus = { pgsOverlayStatus = it },
+            onFailure = { message -> raiseDegradedNotice(message) },
+        )
+    }
 
     private val listener = object : Player.Listener {
         override fun onPlayerError(error: PlaybackException) {
@@ -884,12 +910,12 @@ class Controller(
             newPosition: Player.PositionInfo,
             reason: Int,
         ) {
-            pgsOverlay.reconcile()
+            pgsOverlay?.reconcile()
         }
 
         override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
             settleAudioPlaybackIntentIfPresented()
-            pgsOverlay.reconcile()
+            pgsOverlay?.reconcile()
         }
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -901,7 +927,7 @@ class Controller(
                 establishedPlayback = true
                 openStallTracker.reset()
             }
-            pgsOverlay.reconcile()
+            pgsOverlay?.reconcile()
         }
 
         override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
@@ -922,7 +948,7 @@ class Controller(
         }
 
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-            pgsOverlay.itemChanged()
+            pgsOverlay?.itemChanged()
         }
     }
 
@@ -1016,7 +1042,7 @@ class Controller(
         player.playWhenReady = playbackIntent.playbackRequested
         player.addListener(listener)
         player.addAnalyticsListener(preparedSwitchAnalytics(player))
-        pgsOverlay.select(selectedSubtitle.takeIf { subtitleDelivery == SubtitleDelivery.BitmapOverlay })
+        pgsOverlay?.select(selectedSubtitle.takeIf { subtitleDelivery == SubtitleDelivery.BitmapOverlay })
         attachSurfaceGeneration()
         targetPresentationWatchdogJob = scope.launch {
             while (isActive) {
@@ -1430,7 +1456,7 @@ class Controller(
         targetPresentationDeadline.suspendOwner(targetPresentationOwner, monotonicNowMs())
         planReplacement.release()
         clearStatusPolling()
-        pgsOverlay.release()
+        pgsOverlay?.release()
         stallGuard.invalidateForUserAction()
         // The terminal acknowledgement a live preparation is owed, and then one
         // exchange to carry it — on the view model's scope, because this
@@ -2095,7 +2121,7 @@ class Controller(
     private fun armTrackSelections(recipe: PlaybackRecipeOwnership.Claim? = recipeOwnership.attached) {
         if (recipe == null || recipeOwnership.needsMediaReplacement(recipe)) return
         selectionRecipe = recipe
-        pgsOverlay.select(recipe.recipe.subtitleIndex.takeIf { recipe.recipe.subtitleDelivery == SubtitleDelivery.BitmapOverlay })
+        pgsOverlay?.select(recipe.recipe.subtitleIndex.takeIf { recipe.recipe.subtitleDelivery == SubtitleDelivery.BitmapOverlay })
         textSelectionArmed = true
         audioSelectionArmed = true
         applyTextSelection()
@@ -2264,7 +2290,7 @@ class Controller(
 
     private fun remuxUri(ms: Long): String = progressiveRemuxUri(
         plannedUrl = if (plan.mode == "direct") {
-            Session.url("/api/v1/files/${plan.fileId}/stream.mp4")
+            Session.url("/api/v1/files/${requireNotNull(plan.fileId)}/stream.mp4")
         } else {
             plan.playUrl
         },
@@ -3919,7 +3945,8 @@ internal fun isTelevision(context: Context): Boolean =
 /** Minimal view of [Plan] so the controller doesn't depend on the screen file. */
 interface PlanLike {
     val title: String
-    val fileId: Long
+    val fileId: Long?
+    val optical: OpticalPlaybackContext? get() = null
     val playUrl: String
     val mode: String // "direct" | "remux" | "transcode"
     /** `delivery.requires_hls`: this remux needs the copy-HLS producer. */

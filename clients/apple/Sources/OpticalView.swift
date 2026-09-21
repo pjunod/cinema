@@ -1,4 +1,3 @@
-import AVKit
 import SwiftUI
 
 struct OpticalPlaybackContext: Hashable {
@@ -229,126 +228,21 @@ struct OpticalTitleView: View {
 }
 
 struct OpticalPlayerView: View {
-    @EnvironmentObject private var model: AppModel
     let context: OpticalPlaybackContext
-    @State private var player = AVPlayer()
-    @State private var session: HlsStart?
-    @State private var error: String?
 
     var body: some View {
-        ZStack {
-            Color.black.ignoresSafeArea()
-            if let error {
-                ContentUnavailableView("Playback unavailable", systemImage: "exclamationmark.triangle", description: Text(error))
-                    .foregroundStyle(.white)
-            } else if session == nil {
-                ProgressView("Preparing disc…").tint(.white).foregroundStyle(.white)
-            } else {
-                VideoPlayer(player: player).ignoresSafeArea()
-            }
-        }
-        .navigationTitle(context.title)
-        .task { await start() }
-        .task(id: session?.sessionId) { await reportLoop() }
-        .onDisappear { finish() }
-    }
-
-    private func start() async {
-        let caps = model.caps()
-        do {
-            _ = try await model.requireAPI().opticalDecision(
-                driveId: context.driveId,
-                titleId: context.titleId,
-                body: OpticalDecisionRequest(
-                    expectedDiscId: context.discId,
-                    mediaGeneration: context.mediaGeneration,
-                    angle: context.angle,
-                    caps: caps,
-                    force: nil,
-                    audio: context.audio,
-                    subtitle: context.subtitle
-                )
-            )
-            let started = try await model.requireAPI().createOpticalSession(
-                driveId: context.driveId,
-                titleId: context.titleId,
-                body: OpticalSessionRequest(
-                    expectedDiscId: context.discId,
-                    mediaGeneration: context.mediaGeneration,
-                    angle: context.angle,
-                    playbackId: UUID().uuidString,
-                    requestId: UUID().uuidString,
-                    start: Double(context.startMs) / 1000,
-                    height: nil,
-                    audio: context.audio,
-                    subtitleBurn: context.subtitle,
-                    audioOffsetMs: nil,
-                    blockBudgetSecs: nil,
-                    caps: caps
-                )
-            )
-            guard let url = Session.shared.url(started.playlistUrl) else { throw APIError.badURL }
-            session = started
-            player.replaceCurrentItem(with: AVPlayerItem(url: url))
-            if context.startMs > 0 {
-                _ = await player.seek(to: CMTime(value: CMTimeValue(context.startMs), timescale: 1000))
-            }
-            player.play()
-        } catch { self.error = opticalErrorMessage(error) }
-    }
-
-    private func reportLoop() async {
-        while !Task.isCancelled, session != nil {
-            try? await Task.sleep(for: .seconds(5))
-            await reportProgress()
-        }
-    }
-
-    private func reportProgress() async {
-        guard let session else { return }
-        let seconds = player.currentTime().seconds
-        guard seconds.isFinite && seconds >= 0 else { return }
-        _ = try? await model.requireAPI().opticalProgress(
-            discId: context.discId,
-            titleId: context.titleId,
-            body: OpticalProgressRequest(
-                driveId: context.driveId,
-                mediaGeneration: context.mediaGeneration,
-                sessionId: session.sessionId,
-                angle: context.angle,
-                positionMs: Int(seconds * 1000),
-                durationMs: context.durationMs,
-                audio: context.audio,
-                subtitle: context.subtitle,
-                recordedAtMs: Int(Date().timeIntervalSince1970 * 1000)
-            )
+        PlayerView(
+            itemId: nil,
+            fileId: nil,
+            startMs: context.startMs,
+            durationMs: context.durationMs ?? 0,
+            title: context.title,
+            selection: PrePlaySelection(
+                audioIndex: context.audio,
+                subtitleIndex: context.subtitle ?? PrePlaySelection.subtitleOff
+            ),
+            opticalContext: context
         )
-    }
-
-    private func finish() {
-        player.pause()
-        guard let session else { return }
-        let seconds = player.currentTime().seconds
-        let finalPositionMs = seconds.isFinite && seconds >= 0 ? Int(seconds * 1000) : 0
-        Task {
-            _ = try? await model.requireAPI().opticalProgress(
-                discId: context.discId,
-                titleId: context.titleId,
-                body: OpticalProgressRequest(
-                    driveId: context.driveId,
-                    mediaGeneration: context.mediaGeneration,
-                    sessionId: session.sessionId,
-                    angle: context.angle,
-                    positionMs: finalPositionMs,
-                    durationMs: context.durationMs,
-                    audio: context.audio,
-                    subtitle: context.subtitle,
-                    recordedAtMs: Int(Date().timeIntervalSince1970 * 1000)
-                )
-            )
-            await model.requireAPI().endHlsSession(session.sessionId)
-        }
-        self.session = nil
     }
 }
 

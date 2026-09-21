@@ -793,7 +793,9 @@ struct DecisionSelection: Codable {
 }
 
 struct Decision: Codable {
-    let fileId: Int
+    /// Catalog identity is absent for managed sources such as an optical
+    /// title. A client must not manufacture one merely to reuse the player.
+    let fileId: Int?
     let method: String          // "direct_play" | "remux" | "transcode"
     let playUrl: String
     var delivery: Delivery?

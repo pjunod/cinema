@@ -1,5 +1,3 @@
-@file:androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
-
 package tv.plurx.app.ui
 
 import androidx.activity.compose.BackHandler
@@ -24,39 +22,19 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.MediaItem
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
-import androidx.media3.ui.PlayerView
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import kotlinx.serialization.json.JsonPrimitive
-import tv.plurx.app.data.Caps
-import tv.plurx.app.data.HlsStart
-import tv.plurx.app.data.Net
-import tv.plurx.app.data.OpticalDecisionRequest
-import tv.plurx.app.data.OpticalProgressRequest
-import tv.plurx.app.data.OpticalSessionRequest
 import tv.plurx.app.data.OpticalTitleDetailDto
 import tv.plurx.app.data.OpticalTrackDto
+import tv.plurx.app.data.RefusalException
 import tv.plurx.app.ui.theme.Accent
 import tv.plurx.app.ui.theme.Muted
-import java.util.UUID
 
 @Composable
 fun OpticalDiscScreen(
@@ -69,7 +47,7 @@ fun OpticalDiscScreen(
     var error by remember(driveId) { mutableStateOf<String?>(null) }
     BackHandler(onBack = onBack)
     LaunchedEffect(driveId) {
-        runCatching { vm.api().opticalDrive(driveId) }
+        runCatching { vm.opticalDrive(driveId) }
             .onSuccess { content = it }
             .onFailure { error = opticalFailure(it) }
     }
@@ -125,7 +103,7 @@ fun OpticalTitleScreen(
     var subtitle by remember { mutableStateOf<Int?>(null) }
     BackHandler(onBack = onBack)
     LaunchedEffect(discId, titleId) {
-        runCatching { vm.api().opticalTitle(discId, titleId) }
+        runCatching { vm.opticalTitle(discId, titleId) }
             .onSuccess { detail = it }
             .onFailure { error = opticalFailure(it) }
     }
@@ -199,129 +177,6 @@ private fun OpticalTrackChoices(
 }
 
 @Composable
-fun OpticalPlayerScreen(
-    vm: AppViewModel,
-    driveId: String,
-    discId: String,
-    mediaGeneration: String,
-    titleId: String,
-    title: String,
-    startMs: Long,
-    durationMs: Long?,
-    audio: Int?,
-    subtitle: Int?,
-    onExit: () -> Unit,
-) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val player = remember {
-        ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(Net.dataSourceFactory()))
-            .build()
-    }
-    var session by remember { mutableStateOf<HlsStart?>(null) }
-    var error by remember { mutableStateOf<String?>(null) }
-
-    suspend fun report(positionMs: Long = player.currentPosition.coerceAtLeast(0)) {
-        val active = session ?: return
-        runCatching {
-            vm.api().opticalProgress(
-                discId,
-                titleId,
-                OpticalProgressRequest(
-                    drive_id = driveId,
-                    media_generation = mediaGeneration,
-                    session_id = active.session_id,
-                    position_ms = positionMs,
-                    duration_ms = durationMs,
-                    audio = audio?.let(::JsonPrimitive),
-                    subtitle = subtitle?.let(::JsonPrimitive),
-                    recorded_at_ms = System.currentTimeMillis(),
-                ),
-            )
-        }
-    }
-
-    BackHandler(onBack = onExit)
-    DisposableEffect(player) {
-        val listener = object : Player.Listener {
-            override fun onPlayerError(failure: PlaybackException) {
-                error = failure.localizedMessage ?: "The optical stream ended."
-            }
-        }
-        player.addListener(listener)
-        onDispose {
-            val active = session
-            val finalPosition = player.currentPosition.coerceAtLeast(0)
-            scope.launch {
-                report(finalPosition)
-                active?.let { runCatching { vm.api().endHlsSession(it.session_id) } }
-            }
-            player.removeListener(listener)
-            player.release()
-        }
-    }
-    LaunchedEffect(driveId, discId, titleId, startMs, audio, subtitle) {
-        runCatching {
-            val caps = Caps.snapshot(context).document
-            vm.api().opticalDecision(
-                driveId,
-                titleId,
-                OpticalDecisionRequest(
-                    expected_disc_id = discId,
-                    media_generation = mediaGeneration,
-                    caps = caps,
-                    audio = audio,
-                    subtitle = subtitle,
-                ),
-            )
-            vm.api().createOpticalSession(
-                driveId,
-                titleId,
-                OpticalSessionRequest(
-                    expected_disc_id = discId,
-                    media_generation = mediaGeneration,
-                    playback_id = UUID.randomUUID().toString(),
-                    request_id = UUID.randomUUID().toString(),
-                    start = startMs / 1000.0,
-                    audio = audio,
-                    subtitle_burn = subtitle,
-                    caps = caps,
-                ),
-            )
-        }.onSuccess { started ->
-            session = started
-            player.setMediaItem(MediaItem.fromUri(vm.origin + started.playlist_url))
-            player.prepare()
-            if (startMs > 0) player.seekTo(startMs)
-            player.playWhenReady = true
-        }.onFailure { error = opticalFailure(it) }
-    }
-    LaunchedEffect(session?.session_id) {
-        while (isActive && session != null) {
-            delay(5_000)
-            report()
-        }
-    }
-
-    Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color.Black)) {
-        when {
-            error != null -> Column(Modifier.align(Alignment.Center).padding(24.dp)) {
-                Text("Playback unavailable", color = androidx.compose.ui.graphics.Color.White, style = MaterialTheme.typography.headlineSmall)
-                Text(error!!, color = androidx.compose.ui.graphics.Color.White.copy(alpha = .72f))
-                OutlinedButton(onClick = onExit, modifier = Modifier.padding(top = 16.dp)) { Text("Back") }
-            }
-            session == null -> CircularProgressIndicator(Modifier.align(Alignment.Center), color = Accent)
-            else -> AndroidView(
-                factory = { PlayerView(it).apply { this.player = player; useController = true } },
-                modifier = Modifier.fillMaxSize(),
-            )
-        }
-        Text(title, color = androidx.compose.ui.graphics.Color.White, modifier = Modifier.align(Alignment.TopStart).padding(18.dp))
-    }
-}
-
-@Composable
 private fun OpticalScaffold(
     title: String,
     onBack: () -> Unit,
@@ -354,9 +209,13 @@ private fun opticalTrackLabel(track: OpticalTrackDto): String = listOfNotNull(
     track.codec.uppercase(),
 ).joinToString(" · ")
 
-private fun opticalFailure(error: Throwable): String = when {
-    error.message?.contains("optical_media_changed") == true -> "The disc changed. Choose the title again."
-    error.message?.contains("optical_drive_busy") == true -> "This drive is already in use."
-    error.message?.contains("optical_owner_unavailable") == true -> "The drive host is offline."
+private fun opticalFailure(error: Throwable): String = when ((error as? RefusalException)?.code) {
+    "optical_media_changed" -> "The disc changed. Choose the title again."
+    "optical_drive_busy" -> "This drive is already in use."
+    "optical_request_conflict" -> "This playback request no longer matches the disc. Start again."
+    "optical_owner_unavailable" -> "The drive host is offline."
+    "optical_reader_unavailable", "optical_read_failed" -> "The drive could not read this title."
+    "optical_format_unsupported" -> "This disc format is not supported by the drive host."
+    "optical_protection_unsupported" -> "This disc's protection is not supported by the installed reader."
     else -> error.localizedMessage ?: "The optical source is unavailable."
 }

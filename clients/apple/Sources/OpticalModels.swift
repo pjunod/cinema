@@ -135,6 +135,81 @@ struct OpticalDecisionDTO: Codable {
     var deliveredDynamicRange: String?
 }
 
+extension OpticalDecisionDTO {
+    func playerDecision(selection: PrePlaySelection) -> Decision {
+        Decision(
+            fileId: nil,
+            method: method,
+            playUrl: playUrl,
+            delivery: Delivery(
+                mode: "transcode",
+                url: nil,
+                sessionsUrl: playUrl,
+                aac: nil,
+                requiresHls: true,
+                preserveDolbyVision: false,
+                audio: selection.audioIndex
+            ),
+            reasons: ["Managed optical source"],
+            transcodeAudio: true,
+            preserveDolbyVision: false,
+            source: source.map {
+                SourceSummary(
+                    container: nil,
+                    videoCodec: $0.videoCodec,
+                    videoProfile: nil,
+                    width: $0.width,
+                    height: $0.height,
+                    bitDepth: nil,
+                    hdr: $0.hdr,
+                    hdrFormat: nil,
+                    bitrate: nil,
+                    durationMs: $0.durationMs
+                )
+            },
+            audio: audio.compactMap { track in
+                track.index.map {
+                    AudioTrack(
+                        index: $0,
+                        codec: track.codec,
+                        channels: track.channels,
+                        language: track.language,
+                        title: track.title,
+                        default: track.default ?? false
+                    )
+                }
+            },
+            subtitles: subtitles.compactMap { track in
+                track.index.map {
+                    SubtitleTrack(
+                        index: $0,
+                        codec: track.codec,
+                        language: track.language,
+                        title: track.title,
+                        default: track.default ?? false,
+                        forced: track.forced ?? false,
+                        text: false,
+                        native: false,
+                        overlay: nil
+                    )
+                }
+            },
+            selection: DecisionSelection(
+                audioIndex: selection.audioIndex,
+                subtitleIndex: selection.subtitleIndex.flatMap { $0 >= 0 ? $0 : nil },
+                subtitleRequiresBurnIn: selection.subtitleIndex.map { $0 >= 0 },
+                subtitleBurnInBlockedByHdr: false
+            ),
+            markers: nil,
+            audioOffsetMs: 0,
+            declaredOffsetMs: 0,
+            ladder: ladder,
+            deliveredDynamicRange: deliveredDynamicRange,
+            deliveredDolbyVisionProfile: nil
+        )
+    }
+}
+
 struct OpticalSessionRequest: Codable {
     let expectedDiscId: String
     let mediaGeneration: String

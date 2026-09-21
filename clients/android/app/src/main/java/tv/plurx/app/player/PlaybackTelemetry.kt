@@ -82,7 +82,7 @@ internal fun postPlaybackClientLog(scope: CoroutineScope, event: PlaybackClientL
  * can contain request URLs, and those URLs may carry capability or auth data.
  */
 internal fun planLoadFailureEvent(
-    fileId: Long,
+    fileId: Long?,
     reason: String,
     stage: String,
     error: Throwable,

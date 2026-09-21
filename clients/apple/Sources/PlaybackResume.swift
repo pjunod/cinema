@@ -239,7 +239,7 @@ struct ApplePlaybackResumeLog: Encodable, Equatable {
     let message: String
     let method: String
     let title: String
-    let fileId: Int
+    let fileId: Int?
     let sessionId: String?
     let attempt: String
     let phase: String
@@ -261,7 +261,7 @@ struct ApplePlaybackResumeLog: Encodable, Equatable {
         elapsedMs: Int,
         method: String,
         title: String,
-        fileId: Int,
+        fileId: Int?,
         sessionId: String?,
         firstPictureMs: Int? = nil,
         settledMs: Int? = nil

@@ -659,8 +659,10 @@ struct PlayerView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
 
-    let itemId: Int
-    let fileId: Int
+    /// Catalog identity is absent for managed sources. Optionality keeps the
+    /// shared player honest instead of routing a made-up file row through it.
+    let itemId: Int?
+    let fileId: Int?
     let startMs: Int
     let durationMs: Int
     let title: String
@@ -677,6 +679,10 @@ struct PlayerView: View {
     /// remote-control quality change against the initial session open.
     var initialHeight: Int? = nil
     var diagnosticProbesEnabled = false
+    /// Managed source identity for disc playback. File callers leave this nil;
+    /// the shared controller selects its source adapter without manufacturing
+    /// catalog file or item identifiers.
+    var opticalContext: OpticalPlaybackContext? = nil
     var onPlayNext: ((PlayContext) -> Void)?
     /// Hands the owning detail screen the last on-screen position immediately.
     /// The server progress write is intentionally best-effort and asynchronous;
@@ -884,7 +890,8 @@ struct PlayerView: View {
                     title: title,
                     selection: selection,
                     initialHeight: initialHeight,
-                    diagnosticProbesEnabled: diagnosticProbesEnabled
+                    diagnosticProbesEnabled: diagnosticProbesEnabled,
+                    opticalContext: opticalContext
                 )
             }
             #else
@@ -899,7 +906,8 @@ struct PlayerView: View {
                 title: title,
                 selection: selection,
                 initialHeight: initialHeight,
-                diagnosticProbesEnabled: diagnosticProbesEnabled
+                diagnosticProbesEnabled: diagnosticProbesEnabled,
+                opticalContext: opticalContext
             )
             #endif
             #if os(tvOS)
@@ -977,7 +985,9 @@ struct PlayerView: View {
         }
         .onChange(of: optionMenuOpen) { _, _ in restartAutoHideTimer() }
         .onChange(of: controller.finished) { _, finished in
-            let action = itemDurationMs != nil && offlineItem == nil
+            let action = opticalContext != nil
+                ? Self.naturalEndAction(finished: finished, autoplay: false, offline: false)
+                : itemDurationMs != nil && offlineItem == nil
                 ? Self.audiobookNaturalEndAction(
                     finished: finished,
                     alreadyFinding: findingNext
@@ -1033,10 +1043,12 @@ struct PlayerView: View {
                 nextEpisodeTask?.cancel()
                 nextEpisodeTask = Task {
                     let next: PlayContext?
-                    if itemDurationMs != nil {
+                    if let itemId, let fileId, itemDurationMs != nil {
                         next = await model.nextAudiobookPart(itemId: itemId, after: fileId)
-                    } else {
+                    } else if let itemId {
                         next = await model.nextEpisode(after: itemId)
+                    } else {
+                        next = nil
                     }
                     guard !Task.isCancelled, !lifecycle.isTearingDown else { return }
                     findingNext = false

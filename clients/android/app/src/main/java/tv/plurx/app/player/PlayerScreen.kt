@@ -125,6 +125,8 @@ import tv.plurx.app.data.Decision
 import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.Marker
 import tv.plurx.app.data.MediaFileDto
+import tv.plurx.app.data.OpticalDecisionRequest
+import tv.plurx.app.data.OpticalTrackDto
 import tv.plurx.app.data.PlaybackSessionStatus
 import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.Rung
@@ -150,6 +152,17 @@ import tv.plurx.app.ui.theme.Accent
 import tv.plurx.app.ui.theme.Muted
 import tv.plurx.app.ui.theme.Surface
 
+data class OpticalPlaybackContext(
+    val driveId: String,
+    val discId: String,
+    val mediaGeneration: String,
+    val titleId: String,
+    val title: String,
+    val durationMs: Long?,
+    val audio: Long?,
+    val subtitle: Long?,
+)
+
 private data class Plan(
     override val title: String,
     val subtitle: String?,
@@ -157,7 +170,8 @@ private data class Plan(
     val overview: String?,
     override val durationMs: Long,
     override val videoCodec: String?,
-    override val fileId: Long,
+    override val fileId: Long?,
+    override val optical: OpticalPlaybackContext? = null,
     override val playUrl: String,
     override val mode: String,
     override val requiresHls: Boolean,
@@ -210,21 +224,93 @@ private suspend fun <T> planLoadStage(stage: String, block: suspend () -> T): T 
 
 private suspend fun loadPlan(
     vm: AppViewModel,
-    itemId: Long,
-    fileId: Long,
+    itemId: Long?,
+    fileId: Long?,
+    optical: OpticalPlaybackContext?,
     tracks: PreplayTracks,
     requestedQuality: PlaybackQuality,
 ): Plan {
-    val detail = planLoadStage("item_detail") { vm.itemDetail(itemId) }
+    if (optical != null) {
+        val snapshot = Caps.snapshot(vm.getApplication())
+        val decision = planLoadStage("decision") {
+            vm.opticalDecision(
+                optical.driveId,
+                optical.titleId,
+                OpticalDecisionRequest(
+                    expected_disc_id = optical.discId,
+                    media_generation = optical.mediaGeneration,
+                    caps = snapshot.document,
+                    force = decisionForce(requestedQuality),
+                    audio = tracks.audio?.toInt(),
+                    subtitle = tracks.subtitle?.index?.toInt(),
+                ),
+            )
+        }
+        fun audioTrack(track: OpticalTrackDto) = AudioTrack(
+            index = track.index.toLong(),
+            codec = track.codec,
+            channels = track.channels,
+            language = track.language,
+            title = track.title,
+            default = track.default,
+        )
+        fun subtitleTrack(track: OpticalTrackDto) = SubTrack(
+            index = track.index.toLong(),
+            codec = track.codec,
+            language = track.language,
+            title = track.title,
+            default = track.default,
+            forced = track.forced,
+            text = false,
+            native = false,
+        )
+        return Plan(
+            title = optical.title,
+            subtitle = "Optical disc · Title ${optical.titleId}",
+            releaseDate = null,
+            overview = null,
+            durationMs = decision.source?.duration_ms ?: optical.durationMs ?: 0L,
+            videoCodec = decision.source?.video_codec,
+            fileId = null,
+            optical = optical,
+            playUrl = Session.url(decision.play_url),
+            mode = decision.method,
+            requiresHls = true,
+            sourceHeight = decision.source?.height,
+            aac = true,
+            preserveDolbyVision = false,
+            deliveredDynamicRange = decision.delivered_dynamic_range,
+            deliveredDolbyVisionProfile = null,
+            legacyCaps = snapshot.legacyQuery,
+            decisionCaps = snapshot.document,
+            deliveryAudio = optical.audio,
+            markers = emptyList(),
+            reasons = listOf("optical_source"),
+            videoWidth = decision.source?.width,
+            videoHeight = decision.source?.height,
+            source = null,
+            audio = decision.audio.map(::audioTrack),
+            subtitles = decision.subtitles.map(::subtitleTrack),
+            ladder = decision.ladder,
+            declaredOffsetMs = null,
+            progressOffsetMs = 0,
+            itemDurationMs = null,
+            nextAudiobookPartId = null,
+            requestedQuality = requestedQuality,
+        )
+    }
+    val libraryItemId = requireNotNull(itemId)
+    val libraryFileId = requireNotNull(fileId)
+    val detail = planLoadStage("item_detail") { vm.itemDetail(libraryItemId) }
     // The pre-play choice reaches the *first* decision, so the plan that comes
     // back already carries it. Starting on the policy default and switching
     // afterwards is what criterion 4 forbids: it is a visible re-buffer to
     // apply something the viewer chose before playback began.
     val playbackDecision = planLoadStage("decision") {
-        vm.playbackDecision(fileId, tracks, requestedQuality)
+        vm.playbackDecision(libraryFileId, tracks, requestedQuality)
     }
     val decision: Decision = playbackDecision.decision
-    val file = detail.files.firstOrNull { it.id == fileId } ?: detail.files.firstOrNull()
+    val file = detail.files.firstOrNull { it.id == libraryFileId } ?: detail.files.firstOrNull()
     val mode = decision.delivery?.mode ?: when (decision.method) {
         "direct_play" -> "direct"
         "remux" -> "remux"
@@ -238,7 +324,7 @@ private suspend fun loadPlan(
             overview = detail.item.overview,
             durationMs = file?.duration_ms ?: detail.item.runtime_ms ?: 0L,
             videoCodec = decision.source?.video_codec ?: file?.video_codec,
-            fileId = fileId,
+            fileId = libraryFileId,
             playUrl = Session.url(decision.delivery?.url ?: decision.play_url),
             mode = mode,
             requiresHls = decision.delivery?.requires_hls ?: false,
@@ -270,7 +356,7 @@ private suspend fun loadPlan(
             progressOffsetMs = if (detail.item.isAudiobook) file?.part_offset_ms ?: 0L else 0L,
             itemDurationMs = if (detail.item.isAudiobook) detail.item.runtime_ms else null,
             nextAudiobookPartId = if (detail.item.isAudiobook) {
-                nextAudiobookPartId(detail.files, fileId)
+                nextAudiobookPartId(detail.files, libraryFileId)
             } else null,
             requestedQuality = requestedQuality,
         )
@@ -442,9 +528,10 @@ private fun isInPictureInPicture(activity: android.app.Activity): Boolean =
 @Composable
 fun PlayerScreen(
     vm: AppViewModel,
-    itemId: Long,
-    fileId: Long,
+    itemId: Long? = null,
+    fileId: Long? = null,
     startMs: Long,
+    optical: OpticalPlaybackContext? = null,
     /**
      * What the viewer chose on the detail screen, before pressing play. It is a
      * property of this one playback: nothing here writes a server setting, and
@@ -456,38 +543,41 @@ fun PlayerScreen(
     onPlayNext: (PlaybackTarget) -> Unit,
     onExit: () -> Unit,
 ) {
-    var plan by remember(itemId, fileId) { mutableStateOf<Plan?>(null) }
-    var failed by remember(itemId, fileId) { mutableStateOf(false) }
-    var generation by remember(itemId, fileId) { mutableIntStateOf(0) }
-    var resumeAt by remember(itemId, fileId) { mutableLongStateOf(startMs) }
-    var startReason by remember(itemId, fileId) {
+    require(optical != null || (itemId != null && fileId != null))
+    var plan by remember(itemId, fileId, optical) { mutableStateOf<Plan?>(null) }
+    var failed by remember(itemId, fileId, optical) { mutableStateOf(false) }
+    var generation by remember(itemId, fileId, optical) { mutableIntStateOf(0) }
+    var resumeAt by remember(itemId, fileId, optical) { mutableLongStateOf(startMs) }
+    var startReason by remember(itemId, fileId, optical) {
         mutableStateOf(if (startMs > 0) "resume" else "cold-start")
     }
-    var attemptOpenedAtMs by remember(itemId, fileId) { mutableLongStateOf(monotonicNowMs()) }
-    var requestedQuality by remember(itemId, fileId) {
+    var attemptOpenedAtMs by remember(itemId, fileId, optical) { mutableLongStateOf(monotonicNowMs()) }
+    var requestedQuality by remember(itemId, fileId, optical) {
         mutableStateOf(vm.preferences.value.playbackQuality)
     }
     // Survives the plan, like the A/V correction beside it: a quality change
     // reloads the plan and rebuilds the controller, and the viewer's audio and
     // subtitle picks must come back with them.
-    var playbackAudioOffset by remember(itemId, fileId) { mutableLongStateOf(0) }
+    var playbackAudioOffset by remember(itemId, fileId, optical) { mutableLongStateOf(0) }
     // Seeded from the pre-play choice, so a quality change mid-playback keeps
     // the tracks the viewer picked on the detail screen rather than falling
     // back to the server's policy default.
-    var playbackAudio by remember(itemId, fileId) { mutableStateOf(preplayTracks.audio) }
-    var playbackSubtitle by remember(itemId, fileId) {
-        mutableStateOf(preplayTracks.subtitle)
+    var playbackAudio by remember(itemId, fileId, optical) {
+        mutableStateOf(preplayTracks.audio ?: optical?.audio)
+    }
+    var playbackSubtitle by remember(itemId, fileId, optical) {
+        mutableStateOf(if (optical != null) SubtitleChoice(optical.subtitle) else preplayTracks.subtitle)
     }
     // Identity and outstanding destination belong to the presentation. A
     // quality change replaces both the plan and Controller, but not the viewer
     // or the seek that caused the replacement.
-    val playbackIntent = remember(itemId, fileId) {
+    val playbackIntent = remember(itemId, fileId, optical) {
         PlaybackIntent(initialQuality = vm.preferences.value.playbackQuality)
     }
 
     ImmersivePlaybackEffect()
 
-    LaunchedEffect(itemId, fileId, generation) {
+    LaunchedEffect(itemId, fileId, optical, generation) {
         failed = false
         // Anchor TTFF before the detail and decision requests. This is the
         // Android equivalent of the web click timestamp, not merely decoder
@@ -498,6 +588,7 @@ fun PlayerScreen(
                 vm,
                 itemId,
                 fileId,
+                optical,
                 PreplayTracks(audio = playbackAudio, subtitle = playbackSubtitle),
                 requestedQuality = requestedQuality,
             )
@@ -513,7 +604,7 @@ fun PlayerScreen(
             )
             Log.w(
                 "plurx-playback",
-                "file=$fileId playback plan failed stage=$stage type=${cause.javaClass.simpleName}",
+                "source=${if (optical == null) "file=$fileId" else "optical"} playback plan failed stage=$stage type=${cause.javaClass.simpleName}",
                 cause,
             )
             failed = true
@@ -713,7 +804,7 @@ private fun surfaceHistoryLine(rows: List<SurfaceLedgerRow>): String? {
 @Composable
 private fun PlayerContent(
     vm: AppViewModel,
-    itemId: Long,
+    itemId: Long?,
     plan: Plan,
     startMs: Long,
     startReason: String,
@@ -754,6 +845,28 @@ private fun PlayerContent(
             retainedAudio = retainedAudio,
             retainedSubtitle = retainedSubtitle,
         )
+    }
+    fun reportProgress(positionMs: Long) {
+        val optical = plan.optical
+        val sessionId = controller.currentSessionId
+        when {
+            optical != null && sessionId != null -> vm.postOpticalProgress(
+                discId = optical.discId,
+                titleId = optical.titleId,
+                driveId = optical.driveId,
+                mediaGeneration = optical.mediaGeneration,
+                sessionId = sessionId,
+                positionMs = plan.globalPosition(positionMs),
+                durationMs = plan.progressDurationMs,
+                audio = controller.selectedAudio,
+                subtitle = controller.selectedSubtitle,
+            )
+            itemId != null -> vm.postProgress(
+                itemId,
+                plan.globalPosition(positionMs),
+                plan.progressDurationMs,
+            )
+        }
     }
     // The one surface, projected from the player by the presenter.
     val collectedSurface by controller.surface.collectAsStateWithLifecycle()
@@ -1100,18 +1213,18 @@ private fun PlayerContent(
         val listener = object : Player.Listener {
             override fun onIsPlayingChanged(playing: Boolean) {
                 isPlaying = playing
-                if (!playing) vm.postProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs)
+                if (!playing) reportProgress(controller.realPosition())
             }
 
             override fun onPlaybackStateChanged(state: Int) {
                 // No screen-held copy of "the player is buffering": that is the
                 // presenter's `media_waiting` now, and one of it is the point.
                 if (state == Player.STATE_ENDED) {
-                    vm.postProgress(itemId, plan.globalPosition(plan.durationMs), plan.progressDurationMs)
+                    reportProgress(plan.durationMs)
                     controlsVisible = true
-                    if (plan.nextAudiobookPartId != null) {
+                    if (itemId != null && plan.nextAudiobookPartId != null) {
                         playNext(PlaybackTarget(itemId, plan.nextAudiobookPartId, 0))
-                    } else if (autoplayNext && !findingNext) {
+                    } else if (itemId != null && autoplayNext && !findingNext) {
                         findingNext = true
                         scope.launch {
                             val next = catchingUnlessCancelled { vm.nextEpisode(itemId) }.getOrNull()
@@ -1141,7 +1254,7 @@ private fun PlayerContent(
         controller.addPlayerListener(listener)
         controller.startAt(startMs, startReason, attemptOpenedAtMs)
         onDispose {
-            vm.postProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs)
+            reportProgress(controller.realPosition())
             controller.removePlayerListener(listener)
             controller.release()
         }
@@ -1238,7 +1351,7 @@ private fun PlayerContent(
     LaunchedEffect(controller) {
         while (true) {
             delay(10_000)
-            if (isPlaying) vm.reportProgress(itemId, plan.globalPosition(controller.realPosition()), plan.progressDurationMs)
+            if (isPlaying) reportProgress(controller.realPosition())
         }
     }
     LaunchedEffect(lastInteraction, isPlaying, panel, pendingMs, blockingFault) {
@@ -2132,7 +2245,7 @@ private fun playbackTransportReserve(controlsVisible: Boolean, measuredPx: Int):
 internal data class PlaybackInfoDetails(
     val preparedSwitch: PreparedSwitchReading = PreparedSwitchReading.unmeasured,
     val title: String,
-    val fileId: Long,
+    val fileId: Long?,
     val delivery: String,
     val position: String,
     val clientLoadedSeconds: Double,
@@ -2296,7 +2409,13 @@ internal fun playbackInfoRows(
         ),
         InfoRow("build", "Build", "PLAYBACK", setOf(PlaybackStatsMode.Debug), details.build.ifBlank { "—" }),
         InfoRow("transport", "Transport", "PLAYBACK", setOf(PlaybackStatsMode.Debug), details.transport, placement = "notes"),
-        InfoRow("file_id", "File ID", "PLAYBACK", setOf(PlaybackStatsMode.Debug), "#${details.fileId}"),
+        InfoRow(
+            "file_id",
+            "Source ID",
+            "PLAYBACK",
+            setOf(PlaybackStatsMode.Debug),
+            details.fileId?.let { "#$it" } ?: "Optical disc",
+        ),
         InfoRow("session", "Session", "PLAYBACK", setOf(PlaybackStatsMode.Debug), details.sessionId, placement = "notes"),
         InfoRow("source_video", "Original video", "SOURCE", StandardAndDebug, details.sourceVideo, placement = "notes"),
         InfoRow("source_resolution", "Original resolution", "SOURCE", StandardAndDebug, details.sourceResolution),

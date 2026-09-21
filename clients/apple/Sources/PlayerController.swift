@@ -29,7 +29,7 @@ private struct ApplePlaybackFailureLog: Encodable {
     let method: String
     let code: Int?
     let title: String
-    let fileId: Int
+    let fileId: Int?
     let vcodec: String?
     let detail: String
     let ua = "Apple AVPlayer"
@@ -68,7 +68,7 @@ private struct ApplePlaybackSurfaceLog: Encodable {
     let raisedAtMs: Int
     let method: String
     let title: String
-    let fileId: Int
+    let fileId: Int?
     let sessionId: String?
     let attempt: String?
     let ua = "Apple AVPlayer"
@@ -92,7 +92,7 @@ private struct AppleMarkerPlaybackLog: Encodable {
     let message: String
     let method: String
     let title: String
-    let fileId: Int
+    let fileId: Int?
     let detail: String
     let ua = "Apple AVPlayer"
 
@@ -146,7 +146,7 @@ struct ApplePlaybackEarlyEndLog: Encodable, Equatable {
     let message: String
     let method: String
     let title: String
-    let fileId: Int
+    let fileId: Int?
     let vcodec: String?
     let detail: String
     let ua = "Apple AVPlayer"
@@ -158,7 +158,7 @@ struct ApplePlaybackEarlyEndLog: Encodable, Equatable {
         message: String,
         method: String,
         title: String,
-        fileId: Int,
+        fileId: Int?,
         vcodec: String?
     ) {
         self.message = message
@@ -187,7 +187,7 @@ struct ApplePlaybackTTFFLog: Encodable {
     let message: String
     let method: String
     let title: String
-    let fileId: Int
+    let fileId: Int?
     let vcodec: String?
     let ms: Int
     let height: Int?
@@ -201,7 +201,7 @@ struct ApplePlaybackTTFFLog: Encodable {
         ms: Int,
         method: String,
         title: String,
-        fileId: Int,
+        fileId: Int?,
         vcodec: String?,
         height: Int?,
         encoder: String?,
@@ -427,7 +427,7 @@ struct ApplePlaybackProbeLog: Encodable {
     let message = "periodic physical-device playback sample"
     let method: String
     let title: String
-    let fileId: Int
+    let fileId: Int?
     let vcodec: String?
     let height: Int?
     let encoder: String?
@@ -454,7 +454,7 @@ struct ApplePlaybackStallLog: Encodable {
     let message: String
     let method: String
     let title: String
-    let fileId: Int
+    let fileId: Int?
     let vcodec: String?
     let detail: String
     let ms: Int
@@ -472,7 +472,7 @@ struct ApplePlaybackStallLog: Encodable {
         durationMs: Int,
         method: String,
         title: String,
-        fileId: Int,
+        fileId: Int?,
         vcodec: String?,
         encoder: String?,
         sessionId: String?,
@@ -512,7 +512,7 @@ struct ApplePlaybackObservedStallLog: Encodable {
     let message = "AVPlayer reported a self-recovered stall"
     let method: String
     let title: String
-    let fileId: Int
+    let fileId: Int?
     let vcodec: String?
     let detail: String
     let ms: Int
@@ -529,7 +529,7 @@ struct ApplePlaybackObservedStallLog: Encodable {
         stagnantDurationMs: Int,
         method: String,
         title: String,
-        fileId: Int,
+        fileId: Int?,
         vcodec: String?,
         encoder: String?,
         sessionId: String?,
@@ -2004,8 +2004,9 @@ final class PlayerController: ObservableObject {
     @Published private(set) var playbackControlSummary: String?
 
     private var baseMs = 0
-    private var itemId = 0
-    private var fileId = 0
+    private var itemId: Int?
+    private var fileId: Int?
+    private var opticalContext: OpticalPlaybackContext?
     private var progressOffsetMs = 0
     private var itemDurationMs: Int?
     private var title = ""
@@ -2535,8 +2536,8 @@ final class PlayerController: ObservableObject {
 
     func start(
         model: AppModel,
-        itemId: Int,
-        fileId: Int,
+        itemId: Int?,
+        fileId: Int?,
         startMs: Int,
         durationMs: Int,
         progressOffsetMs: Int = 0,
@@ -2544,7 +2545,8 @@ final class PlayerController: ObservableObject {
         title: String,
         selection: PrePlaySelection = .none,
         initialHeight: Int? = nil,
-        diagnosticProbesEnabled: Bool = false
+        diagnosticProbesEnabled: Bool = false,
+        opticalContext: OpticalPlaybackContext? = nil
     ) {
         guard !started else { return }
         started = true
@@ -2560,6 +2562,7 @@ final class PlayerController: ObservableObject {
         self.model = model
         self.itemId = itemId
         self.fileId = fileId
+        self.opticalContext = opticalContext
         self.progressOffsetMs = max(0, progressOffsetMs)
         self.itemDurationMs = itemDurationMs
         self.knownDurationMs = durationMs
@@ -2647,6 +2650,7 @@ final class PlayerController: ObservableObject {
         self.model = model
         offlineId = offline.id
         offlineAssetURL = OfflineCatalog.localURL(for: path)
+        opticalContext = nil
         itemId = offline.itemId
         fileId = offline.fileId
         knownDurationMs = offline.durationMs ?? 0
@@ -4130,14 +4134,48 @@ final class PlayerController: ObservableObject {
         PlaybackQuality(rawValue: String(height)) ?? .p1080
     }
 
+    private func sourceDecision(
+        model: AppModel,
+        file: Int?,
+        request: InitialDecisionRequest
+    ) async throws -> (decision: Decision, caps: DeviceCaps) {
+        guard let opticalContext else {
+            guard let file else {
+                throw APIError.transport("Playback source has no catalog file identity.")
+            }
+            return try await requestPlaybackDecision(
+                model, file, request.selection, request.quality
+            )
+        }
+        let caps = model.caps()
+        let response = try await model.requireAPI().opticalDecision(
+            driveId: opticalContext.driveId,
+            titleId: opticalContext.titleId,
+            body: OpticalDecisionRequest(
+                expectedDiscId: opticalContext.discId,
+                mediaGeneration: opticalContext.mediaGeneration,
+                angle: opticalContext.angle,
+                caps: caps,
+                force: nil,
+                audio: request.selection.audioIndex,
+                subtitle: request.selection.subtitleIndex
+            )
+        )
+        return (response.playerDecision(selection: request.selection), caps)
+    }
+
     private func load(
         startMs: Int, lifecycle: Int, generation: Int,
-        file: Int, request: InitialDecisionRequest
+        file: Int?, request: InitialDecisionRequest
     ) async {
         guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
               initialDecisionGeneration == generation, let model else { return }
         do {
-            let playbackDecision = try await requestPlaybackDecision(model, file, request.selection, request.quality)
+            let playbackDecision = try await sourceDecision(
+                model: model,
+                file: file,
+                request: request
+            )
             let decision = playbackDecision.decision
             guard !Task.isCancelled, isCurrentLifecycle(lifecycle),
                   initialDecisionGeneration == generation else { return }
@@ -4813,7 +4851,7 @@ final class PlayerController: ObservableObject {
         let selectionGeneration = pgsOverlaySelectionGeneration
 
         pgsOverlayPrepareTask = Task { [weak self] in
-            guard let self, let model = self.model else { return }
+            guard let self, let model = self.model, let fileId = self.fileId else { return }
             do {
                 let clock = ContinuousClock()
                 let deadline = clock.now.advanced(
@@ -4826,12 +4864,12 @@ final class PlayerController: ObservableObject {
                           self.selectedSubtitle == index
                     else { return }
                     switch try await model.pgsOverlayManifest(
-                        fileId: self.fileId,
+                        fileId: fileId,
                         trackIndex: index
                     ) {
                     case .ready(let rawManifest):
                         let manifest = try rawManifest.validated(
-                            fileId: self.fileId,
+                            fileId: fileId,
                             trackIndex: index
                         )
                         guard self.pgsOverlaySelectionGeneration == selectionGeneration else {
@@ -4880,6 +4918,7 @@ final class PlayerController: ObservableObject {
     private func refreshPGSOverlayWindow(at sourceTimeMs: Int, force: Bool = false) {
         guard let manifest = pgsOverlayManifest,
               let trackIndex = pgsOverlayTrackIndex,
+              let fileId,
               selectedSubtitle == trackIndex,
               force || PGSOverlayPolicy.shouldRefresh(
                 sourceTimeMs: sourceTimeMs,
@@ -4921,7 +4960,7 @@ final class PlayerController: ObservableObject {
                             image = cached
                         } else {
                             let data = try await model.pgsOverlayObject(
-                                fileId: self.fileId,
+                                fileId: fileId,
                                 trackIndex: trackIndex,
                                 generation: generation,
                                 path: object.image
@@ -5898,6 +5937,40 @@ final class PlayerController: ObservableObject {
 
     // MARK: - M5: the create "not yet" retry
 
+    private func requestSourceSession(
+        model: AppModel,
+        file: Int?,
+        body: CreateSessionRequest
+    ) async throws -> HlsStart {
+        guard let opticalContext else {
+            guard let file else {
+                throw APIError.transport("Playback source has no catalog file identity.")
+            }
+            return try await requestHlsSession(model, file, body)
+        }
+        guard let requestId = body.requestId else {
+            throw APIError.transport("The optical session request has no identity.")
+        }
+        return try await model.requireAPI().createOpticalSession(
+            driveId: opticalContext.driveId,
+            titleId: opticalContext.titleId,
+            body: OpticalSessionRequest(
+                expectedDiscId: opticalContext.discId,
+                mediaGeneration: opticalContext.mediaGeneration,
+                angle: opticalContext.angle,
+                playbackId: body.playbackId,
+                requestId: requestId,
+                start: body.start ?? 0,
+                height: body.height,
+                audio: body.audio,
+                subtitleBurn: body.subtitleBurn,
+                audioOffsetMs: nil,
+                blockBudgetSecs: body.blockBudgetSecs,
+                caps: body.caps ?? decisionCaps ?? model.caps()
+            )
+        )
+    }
+
     /// Re-post the SAME create, under the SAME request identity, while the
     /// server says it is still building this stream (contract §3.3 row 6).
     ///
@@ -5917,13 +5990,13 @@ final class PlayerController: ObservableObject {
     /// and is not retried, so the sequence does not run there at all.
     private func createRetryingNotYet(
         model: AppModel,
-        file: Int,
+        file: Int?,
         body: CreateSessionRequest,
         lifecycle: Int,
         generation: Int
     ) async throws -> HlsStart {
         guard surfaceContext == .start else {
-            return try await requestHlsSession(model, file, body)
+            return try await requestSourceSession(model: model, file: file, body: body)
         }
         // ONE identity for the whole sequence. The server persists a create's
         // answer under `request_id`, so replaying one recovers the session it
@@ -5974,7 +6047,11 @@ final class PlayerController: ObservableObject {
                 // Not `started`: that is the controller's own "is this player
                 // running" flag, and shadowing it inside a recovery sequence is
                 // the kind of thing a reader has to stop and check.
-                let opened = try await requestHlsSession(model, file, request)
+                let opened = try await requestSourceSession(
+                    model: model,
+                    file: file,
+                    body: request
+                )
                 guard createRetryExpiredEpoch != epoch else {
                     await release(session: opened.sessionId)
                     throw PlaybackCreateRetryError.exhausted(reason: "deadline")
@@ -7414,6 +7491,10 @@ final class PlayerController: ObservableObject {
     }
 
     private func postClientLog<Payload: Encodable>(_ payload: Payload) {
+        // Existing client-log payloads require a real catalog file ID. Optical
+        // delivery is already visible through session Activity; do not send a
+        // fabricated zero until the telemetry schema has a source union.
+        guard opticalContext == nil else { return }
         guard let url = Session.shared.url("/api/v1/client-log"),
               let body = try? JSONEncoder().encode(payload)
         else { return }
@@ -7962,6 +8043,28 @@ final class PlayerController: ObservableObject {
             partOffsetMs: progressOffsetMs
         )
         let duration = itemDurationMs ?? (knownDurationMs > 0 ? knownDurationMs : nil)
+        if let opticalContext, let sessionId, let model {
+            let audio = selectedAudio
+            let subtitle = selectedSubtitle
+            Task {
+                _ = try? await model.requireAPI().opticalProgress(
+                    discId: opticalContext.discId,
+                    titleId: opticalContext.titleId,
+                    body: OpticalProgressRequest(
+                        driveId: opticalContext.driveId,
+                        mediaGeneration: opticalContext.mediaGeneration,
+                        sessionId: sessionId,
+                        angle: opticalContext.angle,
+                        positionMs: globalPosition,
+                        durationMs: duration,
+                        audio: audio,
+                        subtitle: subtitle,
+                        recordedAtMs: Int(Date().timeIntervalSince1970 * 1_000)
+                    )
+                )
+            }
+            return
+        }
         #if os(iOS)
         if let offlineId {
             Task {
@@ -7974,7 +8077,7 @@ final class PlayerController: ObservableObject {
             return
         }
         #endif
-        let itemId = itemId
+        guard let itemId else { return }
         let model = model
         Task { await model?.reportProgress(itemId: itemId, positionMs: globalPosition, durationMs: duration) }
     }

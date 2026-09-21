@@ -31,6 +31,7 @@ import tv.plurx.app.data.Caps
 import tv.plurx.app.data.Session
 import tv.plurx.app.reminders.ReminderAlarms
 import tv.plurx.app.player.PlayerScreen
+import tv.plurx.app.player.OpticalPlaybackContext
 import tv.plurx.app.player.OfflinePlayerScreen
 import tv.plurx.app.player.preplayRouteQuery
 import tv.plurx.app.player.preplayTracksFromRoute
@@ -40,7 +41,6 @@ import tv.plurx.app.ui.DetailScreen
 import tv.plurx.app.ui.DownloadsScreen
 import tv.plurx.app.ui.HomeScreen
 import tv.plurx.app.ui.OpticalDiscScreen
-import tv.plurx.app.ui.OpticalPlayerScreen
 import tv.plurx.app.ui.OpticalTitleScreen
 import tv.plurx.app.ui.LibraryScreen
 import tv.plurx.app.ui.LoginScreen
@@ -250,17 +250,28 @@ private fun MainNav(
             ),
         ) { entry ->
             val a = entry.arguments!!
-            OpticalPlayerScreen(
+            PlayerScreen(
                 vm = vm,
-                driveId = a.getString("drive").orEmpty(),
-                discId = a.getString("disc").orEmpty(),
-                mediaGeneration = a.getString("generation").orEmpty(),
-                titleId = a.getString("title").orEmpty(),
-                title = a.getString("name").orEmpty(),
+                itemId = null,
+                fileId = null,
                 startMs = a.getLong("startMs"),
-                durationMs = a.getLong("durationMs").takeIf { it >= 0 },
-                audio = a.getInt("audio").takeIf { it >= 0 },
-                subtitle = a.getInt("subtitle").takeIf { it >= 0 },
+                optical = OpticalPlaybackContext(
+                    driveId = a.getString("drive").orEmpty(),
+                    discId = a.getString("disc").orEmpty(),
+                    mediaGeneration = a.getString("generation").orEmpty(),
+                    titleId = a.getString("title").orEmpty(),
+                    title = a.getString("name").orEmpty(),
+                    durationMs = a.getLong("durationMs").takeIf { it >= 0 },
+                    audio = a.getInt("audio").takeIf { it >= 0 }?.toLong(),
+                    subtitle = a.getInt("subtitle").takeIf { it >= 0 }?.toLong(),
+                ),
+                preplayTracks = tv.plurx.app.player.PreplayTracks(
+                    audio = a.getInt("audio").takeIf { it >= 0 }?.toLong(),
+                    subtitle = tv.plurx.app.player.SubtitleChoice(
+                        a.getInt("subtitle").takeIf { it >= 0 }?.toLong(),
+                    ),
+                ),
+                onPlayNext = {},
                 onExit = { nav.popBackStack() },
             )
         }

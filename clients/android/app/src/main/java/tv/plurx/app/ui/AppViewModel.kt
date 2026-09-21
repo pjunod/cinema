@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonPrimitive
 import retrofit2.HttpException
 import java.net.URI
 import tv.plurx.app.data.Caps
@@ -27,6 +28,13 @@ import tv.plurx.app.data.PlaybackQuality
 import tv.plurx.app.data.OfflineNetwork
 import tv.plurx.app.data.OfflineQuality
 import tv.plurx.app.data.OpticalDriveDto
+import tv.plurx.app.data.OpticalDecisionDto
+import tv.plurx.app.data.OpticalDecisionRequest
+import tv.plurx.app.data.OpticalDriveDiscDto
+import tv.plurx.app.data.OpticalProgressDto
+import tv.plurx.app.data.OpticalProgressRequest
+import tv.plurx.app.data.OpticalSessionRequest
+import tv.plurx.app.data.OpticalTitleDetailDto
 import tv.plurx.app.data.PosterSize
 import tv.plurx.app.data.SubtitleReadiness
 import tv.plurx.app.data.ThemeId
@@ -813,6 +821,38 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return acceptHlsSessionPresentation(started)
     }
 
+    suspend fun opticalDrive(driveId: String): OpticalDriveDiscDto =
+        typedRequest { api().opticalDrive(driveId) }
+
+    suspend fun opticalTitle(discId: String, titleId: String): OpticalTitleDetailDto =
+        typedRequest { api().opticalTitle(discId, titleId) }
+
+    suspend fun opticalDecision(
+        driveId: String,
+        titleId: String,
+        body: OpticalDecisionRequest,
+    ): OpticalDecisionDto = typedRequest { api().opticalDecision(driveId, titleId, body) }
+
+    suspend fun createOpticalSession(
+        driveId: String,
+        titleId: String,
+        body: OpticalSessionRequest,
+    ): HlsStart = acceptHlsSessionPresentation(
+        typedRequest { api().createOpticalSession(driveId, titleId, body) },
+    )
+
+    suspend fun opticalProgress(
+        discId: String,
+        titleId: String,
+        body: OpticalProgressRequest,
+    ): OpticalProgressDto = typedRequest { api().opticalProgress(discId, titleId, body) }
+
+    private suspend fun <T> typedRequest(request: suspend () -> T): T = try {
+        request()
+    } catch (error: HttpException) {
+        throw parseRefusal(error.code(), error.response()?.errorBody()?.string()) ?: error
+    }
+
     suspend fun hlsSessionStatus(sessionId: String) = api().hlsSessionStatus(sessionId)
 
     /**
@@ -847,6 +887,39 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun postProgress(itemId: Long, positionMs: Long, durationMs: Long?) {
         viewModelScope.launch { reportProgress(itemId, positionMs, durationMs) }
+    }
+
+    fun postOpticalProgress(
+        discId: String,
+        titleId: String,
+        driveId: String,
+        mediaGeneration: String,
+        sessionId: String,
+        positionMs: Long,
+        durationMs: Long?,
+        audio: Long?,
+        subtitle: Long?,
+    ) {
+        viewModelScope.launch {
+            try {
+                opticalProgress(
+                    discId,
+                    titleId,
+                    OpticalProgressRequest(
+                        drive_id = driveId,
+                        media_generation = mediaGeneration,
+                        session_id = sessionId,
+                        position_ms = positionMs,
+                        duration_ms = durationMs,
+                        audio = audio?.let(::JsonPrimitive),
+                        subtitle = subtitle?.let(::JsonPrimitive),
+                        recorded_at_ms = System.currentTimeMillis(),
+                    ),
+                )
+            } catch (_: Exception) {
+                // Progress is advisory and must never interrupt playback.
+            }
+        }
     }
 
     private suspend fun connectToOrigin(normalized: String) {
