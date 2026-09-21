@@ -14,7 +14,7 @@ This file is the specification in the meantime, written by reading the routers
 and the handlers on 2026-09-07. Where a plan document and the code disagreed,
 the code won and the disagreement is recorded in §23.
 
-One binary serves everything on one port (`:32400` by default). plurx has 217
+One binary serves everything on one port (`:32400` by default). plurx has 216
 routes across the four surfaces below. Every path here is absolute; the native
 API is the only one under a version prefix, and §7-§18 state that prefix once
 per section rather than repeating it in every row.
@@ -2808,8 +2808,7 @@ returns `learner_route_ineligible` (§3.2).
 | Method | Path | Auth | Notes |
 |---|---|---|---|
 | GET | `/` | none | The app shell, or the Plex container (§20). `no-cache`: the assets it names are immutable, so a cached shell would pin a deploy's old hashes |
-| GET | `/assets/{*path}` | none | Any row of the split web shell — `app.css`, `core/theme.js`, and the sixty body files (docs/clients/WEB-SHELL-LAYOUT.md). `public, max-age=31536000, immutable`; the `?v=<hash>` the shell carries is the version and is ignored here. A path that is not a row is a `404`, not the shell |
-| GET | `/assets/hls.min.js` | none | `public, max-age=604800` |
+| GET | `/assets/{*path}` | none | Any row of the split web shell — `app.css`, `core/theme.js`, vendored `hls.min.js`, and the remaining body scripts (docs/clients/WEB-SHELL-LAYOUT.md). `public, max-age=31536000, immutable`; the `?v=<hash>` the shell carries is the version and is ignored here. A path that is not a row is a `404`, not the shell |
 | GET | `/assets/{cluster-panel,playback-policy,playback-control,live-tv,library-channels,reader}.js` | none | `no-cache`. Sidecars: their own routes, not in the table above |
 | GET | `/assets/reader.css` | none | `no-cache` |
 | GET | `/connect.svg` | none | QR code of the server origin, taken from `?origin=`. Refuses anything that is not a bare `http`/`https` origin, and carries no credential |

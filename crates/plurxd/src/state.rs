@@ -712,6 +712,10 @@ pub struct AppState {
     /// watcher in `main`; the cluster leave endpoint cancels this only after
     /// its own voter removal has committed.
     pub shutdown: tokio_util::sync::CancellationToken,
+    /// Test-only rendezvous inside the real cache-admin revocation fence.
+    /// Production has no hook or alternate path.
+    #[cfg(test)]
+    pub(crate) cache_revocation_test_barrier: Option<Arc<tokio::sync::Barrier>>,
     pub started_at: Instant,
 }
 
@@ -980,6 +984,8 @@ impl AppState {
             direct_plays: crate::delivery::DirectPlays::new(),
             store_metrics: StoreMetricsCache::default(),
             shutdown: tokio_util::sync::CancellationToken::new(),
+            #[cfg(test)]
+            cache_revocation_test_barrier: None,
             started_at: Instant::now(),
         }
     }
