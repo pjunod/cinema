@@ -1,6 +1,6 @@
 # Audio resolved independently — the picture's rung stops deciding the sound
 
-**Status:** ready for review · **Executes:** Q5 / §3.1.2 / F-stream-5 from
+**Status:** implementation blocked on measured audio evidence · **Executes:** Q5 / §3.1.2 / F-stream-5 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -119,9 +119,12 @@ and is **out of this plan**; VOD gets 5.1 AAC, which keeps the lattice.
 `DeviceCaps` gains `audio_sinks: Vec<AudioSink { codec: String,
 max_channels: u8, passthrough: bool }>` (v2 JSON) and the flat query gains
 `achannels=<n>` (a single ceiling, the legacy shape's best effort). Absent
-means **2** — exactly today's behaviour for every client until it learns to
-report. Sources of truth per client, each to be verified on a device before
-the client sends it (Q11's rule: a fixture string is not decoder evidence):
+keeps the legacy codec-only copy rule and the existing stereo AAC full-
+transcode default. Treating absence as a new two-channel refusal would remux
+and downmix existing AAC 5.1 direct plays before any client learned to report
+its route, contradicting M1's no-output-change requirement. Sources of truth
+per client, each to be verified on a device before the client sends it (Q11's
+rule: a fixture string is not decoder evidence):
 
 - Apple: `AVAudioSession.sharedInstance().currentRoute.outputs` channel
   counts and `maximumOutputNumberOfChannels`; E-AC-3 passthrough is claimed
@@ -193,7 +196,9 @@ return E-AC-3/AC-3. Audio offset correction still forces `Encode`.
   group is ever introduced, `CHANNELS="6"` comes from the same struct.
 - Playback info / badges: `delivered_audio` (`codec`, `channels`, `action`)
   on `/decision` and the session response, the way `delivered_dynamic_range`
-  is carried.
+  is carried. `/decision` already uses `audio` for its selectable-track list,
+  so the delivery field cannot use that shorter name without being silently
+  overwritten during flattened response serialization.
 - Prepared handoffs: the successor inherits the incumbent's `AudioDelivery`
   unless the request changed the audio index or the sink claim; a successor
   with different audio is refused as a prepared replacement and offered as
@@ -272,8 +277,14 @@ id; absent claim → today's answer. `node tests/playback/*.test.js` fixtures
 for the three clients' translation of the claim.
 
 Acceptance: `cargo test -p plurx-core playback` green; `curl -s -X POST
-:32400/api/v1/files/<id>/decision -d @caps-v2.json | jq .audio` shows the
+:32400/api/v1/files/<id>/decision -d @caps-v2.json | jq .delivered_audio` shows the
 struct, and with `caps-v2.json` lacking `audio_sinks` shows `channels: 2`.
+
+Implemented server-side in `142502010`: the v2 and flat claims share one
+translation; malformed, out-of-range and duplicate claims fail closed;
+negotiation is pure and route-aware; the final post-subtitle decision is
+serialized as `delivered_audio`. No client emits `audio_sinks`, so this adds
+readiness information without enabling surround delivery.
 
 ### 5.2 M2 — carry it through options, argv, digest, manifests
 
@@ -293,6 +304,14 @@ table), an E-AC-3 recipe differs; `cargo test -p plurxd hls` master codecs
 test -p plurxd prepared` refusal when audio differs.
 
 Acceptance: golden hash unchanged; new hashes differ; `make unit` green.
+
+Only the independently safe sample-rate slice is implemented in `659fb6372`:
+every lossy rolling/full-transcode and copy-conversion path now emits `-ar
+48000`, while copied audio remains untouched. The rest is blocked rather than
+guessing: normalized `AudioStream` records contain channel count but not
+channel layout, and M4 has not measured the per-layout gains or limiter need.
+Without those facts, emitting a pan string or assigning its recipe identity
+would repeat the universal-ordering mistake F-stream-5 explicitly rejected.
 
 ### 5.3 M3 — first client claim, on a device
 
@@ -385,6 +404,25 @@ channels produces the M4 stereo matrix path.
    `EXT-X-MEDIA` group so multiple layouts can be offered at once; out of
    scope.
 
+## 8. Implementation decisions
+
+1. **The response field is `delivered_audio`.** `DecisionResponse.audio`
+   already owns the selectable track list; Serde flattening otherwise lets the
+   later list overwrite the negotiated object. A focused serialization test
+   pins the distinct top-level field.
+2. **An absent sink claim preserves legacy copy behavior.** The plan called
+   absence "2 channels" and also required no output change. Those statements
+   conflict for existing compatible AAC 5.1 direct plays, so compatibility
+   wins until a client supplies measured route evidence.
+3. **Unmeasured downmixes carry a requirement, not invented gains.** The pure
+   decision reports `requires_layout_measurement` with the source channel
+   count. M2 must not turn that into FFmpeg argv or cache identity until M4
+   supplies the source layout and measured matrix.
+4. **No feature gate or setting is added.** The server accepts and reports an
+   evidence-bearing claim, but no shipped client sends one. A Developer toggle
+   would imply an enablement choice where the remaining boundary is physical
+   evidence, not preference.
+
 ---
 
 ## Execution log
@@ -398,3 +436,6 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) | Claimed `plan/S-09` from `665b8b5c`; M3–M5 remain evidence-gated. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) · `142502010` | Server sink claim, pure route negotiation and `delivered_audio` response implemented; 87 focused playback tests and the daemon serialization/translation/refusal checks passed. No client claim enabled. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) · `659fb6372` | Partial: lossy rolling outputs are fixed at 48 kHz. needs: normalized source channel layout and M4 matrix/clipping measurements before argv, identity, manifest, offline or prepared-handoff propagation. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3–M5 | [#418](http://192.168.4.7:3000/noirr/plurx/pulls/418) | needs: the Apple/AVR/AirPods observations, per-layout loudness/peak/clipping measurements, then Android/web device evidence. |
