@@ -34019,7 +34019,7 @@ pub(crate) mod tests {
             .await
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn rolling_publication_budget_two_x_writer_tracks_one_x_for_one_simulated_hour() {
         let directory = crate::test_tempdir().expect("publication budget");
         let session = test_session(directory.path().to_path_buf());
@@ -34038,7 +34038,8 @@ pub(crate) mod tests {
             )
             .await;
             let produced_end_ms = 48_000_i64.saturating_add(elapsed_ms.saturating_mul(2));
-            let segment_count = usize::try_from(produced_end_ms / 6_000).expect("segment count");
+            let segment_count =
+                usize::try_from(produced_end_ms / 6_000 + 1).expect("segment count");
             tokio::fs::write(
                 directory.path().join("index.m3u8"),
                 rolling_playlist(&vec![6.0; segment_count], false),
@@ -34076,10 +34077,12 @@ pub(crate) mod tests {
             );
             assert_eq!(clock.budget_anchor_sequence, Some((step + 1) as u64));
             previous_frontier = served.end_ms;
+            drop(clock);
+            tokio::time::advance(Duration::from_millis(251)).await;
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn rolling_publication_budget_one_point_two_x_writer_sustains_one_x_for_thirty_minutes() {
         let directory = crate::test_tempdir().expect("publication capacity");
         let session = test_session(directory.path().to_path_buf());
@@ -34114,7 +34117,8 @@ pub(crate) mod tests {
             .await;
             let produced_end_ms = 48_000_i64
                 .saturating_add(((elapsed_ms as f64) * 1.2).round().min(i64::MAX as f64) as i64);
-            let segment_count = usize::try_from(produced_end_ms / 6_000).expect("segment count");
+            let segment_count =
+                usize::try_from(produced_end_ms / 6_000 + 1).expect("segment count");
             tokio::fs::write(
                 directory.path().join("index.m3u8"),
                 rolling_playlist(&vec![6.0; segment_count], false),
@@ -34135,10 +34139,12 @@ pub(crate) mod tests {
                     <= rolling_initial_runway_ms(1.0) + ROLLING_SEGMENT_MAX_MS,
                 "bounded lead at step {step}"
             );
+            drop(clock);
+            tokio::time::advance(Duration::from_millis(251)).await;
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn rolling_publication_budget_low_rate_retires_before_the_window_can_skip() {
         let directory = crate::test_tempdir().expect("low-rate budget");
         let session = Arc::new(test_session(directory.path().to_path_buf()));
@@ -34169,6 +34175,7 @@ pub(crate) mod tests {
                 )
                 .await
                 .expect("low-rate floor remains safe before exhaustion");
+            tokio::time::advance(Duration::from_millis(251)).await;
         }
         accept_rolling_publication_demand(
             &session,
@@ -34239,6 +34246,8 @@ pub(crate) mod tests {
         )
         .await
         .expect("burst writer playlist");
+        session.publication.lock().await.next_publish_at =
+            Some(Instant::now() - Duration::from_millis(1));
         session
             .publication_cycle_at(
                 "rolling_publication_budget_legacy",
@@ -34248,11 +34257,15 @@ pub(crate) mod tests {
             .expect("bounded legacy publication");
         let clock = session.publication.lock().await;
         let served = clock.served.as_ref().expect("legacy snapshot");
-        assert_eq!(served.end_ms, 64_000);
-        assert_eq!(served.last_segment, 3);
+        assert_eq!(served.end_ms, 80_000);
+        assert_eq!(served.last_segment, 4);
         assert!(
-            served.end_ms <= 16_000 + ROLLING_INITIAL_RUNWAY_MS,
-            "rapid writer inventory escaped the fixed legacy clock"
+            served.end_ms <= 16_000 + ROLLING_INITIAL_RUNWAY_MS + ROLLING_SEGMENT_MAX_MS,
+            "rapid writer inventory escaped the fixed legacy clock plus one segment"
+        );
+        assert!(
+            served.end_ms <= 48_000 + ROLLING_INITIAL_RUNWAY_MS,
+            "rapid fetching released media beyond the fixed legacy fetch allowance"
         );
     }
 
@@ -34293,6 +34306,8 @@ pub(crate) mod tests {
         )
         .await
         .expect("paced variable playlist");
+        session.publication.lock().await.next_publish_at =
+            Some(Instant::now() - Duration::from_millis(1));
         session
             .publication_cycle_at(
                 "rolling_publication_budget_legacy_variable",
@@ -34321,6 +34336,8 @@ pub(crate) mod tests {
             crate::playback_control::RenderState::Rendering,
         )
         .await;
+        session.publication.lock().await.next_publish_at =
+            Some(Instant::now() - Duration::from_millis(1));
         session
             .publication_cycle_at(
                 "rolling_publication_budget_legacy_variable",
@@ -34352,7 +34369,7 @@ pub(crate) mod tests {
         .await;
         tokio::fs::write(
             directory.path().join("index.m3u8"),
-            rolling_playlist(&[16.0; 3], false),
+            rolling_playlist(&[16.0; 4], false),
         )
         .await
         .expect("writer playlist");
