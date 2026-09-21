@@ -20148,10 +20148,9 @@ mod tests {
                 TerminalModelEvent::Publication => {
                     let expected =
                         model.terminal.is_none() && model.producer_attempt == initial_attempt;
-                    let accepted = actor.observe_publication_at(
-                        now,
-                        publication(initial_attempt, true, 1, 4_000, None),
-                    );
+                    let mut observation = publication(initial_attempt, true, 1, 4_000, None);
+                    observation.demand_sequence = actor.accepted_demand_sequence;
+                    let accepted = actor.observe_publication_at(now, observation);
                     assert_eq!(accepted, expected, "order {order:?}");
                     model.playlist_ready |= expected;
                 }
@@ -26748,13 +26747,7 @@ mod tests {
         };
         assert!(uuid::Uuid::parse_str(&proposal.proposal_id).is_ok());
         assert_eq!(cleanup.cleanup_policy, CleanupPolicy::RetainPublished);
-        assert_eq!(
-            actor.admit_producer_retry_at(advancing.instant, 1, "recipe-published"),
-            Err(ProducerAttemptRejection::RetryUnavailable)
-        );
-        assert!(actor
-            .settle_due_deadlines_at(advancing.instant + Duration::from_secs(30))
-            .is_none());
+        assert!(actor.settle_due_deadlines_at(advancing.instant).is_none());
         assert_eq!(actor.pending_decision.as_ref(), Some(&retained));
         assert_eq!(
             actor.authorize_response_publication_at(

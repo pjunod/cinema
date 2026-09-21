@@ -941,51 +941,70 @@ fn join_session_truth(event: &mut PlaybackEvent, info: &crate::transcode::Sessio
         .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
         .and_then(|value| value.as_object().cloned())
         .unwrap_or_default();
-    extra.insert(
-        "server".to_owned(),
-        serde_json::json!({
-            "recent_speed": info.recent_speed,
-            "ahead_seconds": info.ahead_seconds,
-            "ahead_bytes": info.ahead_bytes,
-            "suspended": info.suspended,
-            "hold_reason": info.hold_reason,
-            "delivered_bps": info.delivered_bps,
-            "delivered_idle_ms": info.delivered_idle_ms,
-            "readrate": info.readrate,
-            "suspend_count": info.suspend_count,
-            "progress_idle_ms": info.progress_idle_ms,
-            "producer_state": info.producer_state,
-            "producer_exit_success": info.producer_exit_success,
-            "producer_exit_code": info.producer_exit_code,
-            "producer_exit_signal": info.producer_exit_signal,
-            "producer_exit_idle_ms": info.producer_exit_idle_ms,
-            "producer_attempt": info.producer_attempt,
-            "playlist_ready": info.playlist_ready,
-            "published_segment": info.published_segment,
-            "published_end_ms": info.published_end_ms,
-            "next_media_sequence": info.next_media_sequence,
-            "fetched_end_ms": info.fetched_end_ms,
-            "fetched_segment": info.fetched_segment,
-            "pending_fetched_segment": info.pending_fetched_segment,
-            "first_retained_segment": info.first_retained_segment,
-            "playlist_shape": info.playlist_shape,
-            "last_request": info.last_request,
-            "lease_mode": info.lease_mode,
-            "lease_state": info.lease_state,
-            "lease_timeout_ms": info.lease_timeout_ms,
-            "control_demand": info.control_demand,
-            "reported_position_ms": info.reported_position_ms,
-            "client_runway_ms": info.client_runway_ms,
-            "render_state": info.render_state,
-            "production_policy": info.production_policy,
-            "production_ahead_seconds": info.production_ahead_seconds,
-            "production_target_seconds": info.production_target_seconds,
-            "producer_control": info.producer_control,
-            "last_request_idle_ms": i64::try_from(info.idle_seconds)
-                .unwrap_or(i64::MAX)
-                .saturating_mul(1_000)
-        }),
-    );
+    let mut server = serde_json::json!({
+        "recent_speed": info.recent_speed,
+        "ahead_seconds": info.ahead_seconds,
+        "ahead_bytes": info.ahead_bytes,
+        "suspended": info.suspended,
+        "hold_reason": info.hold_reason,
+        "delivered_bps": info.delivered_bps,
+        "delivered_idle_ms": info.delivered_idle_ms,
+        "readrate": info.readrate,
+        "suspend_count": info.suspend_count,
+        "progress_idle_ms": info.progress_idle_ms,
+        "producer_state": info.producer_state,
+        "producer_exit_success": info.producer_exit_success,
+        "producer_exit_code": info.producer_exit_code,
+        "producer_exit_signal": info.producer_exit_signal,
+        "producer_exit_idle_ms": info.producer_exit_idle_ms,
+        "producer_attempt": info.producer_attempt,
+        "playlist_ready": info.playlist_ready,
+        "published_segment": info.published_segment,
+        "published_end_ms": info.published_end_ms,
+        "next_media_sequence": info.next_media_sequence,
+        "fetched_end_ms": info.fetched_end_ms,
+        "fetched_segment": info.fetched_segment,
+        "pending_fetched_segment": info.pending_fetched_segment,
+        "first_retained_segment": info.first_retained_segment,
+        "playlist_shape": info.playlist_shape,
+        "last_request": info.last_request,
+        "lease_mode": info.lease_mode,
+        "lease_state": info.lease_state,
+        "lease_timeout_ms": info.lease_timeout_ms,
+        "control_demand": info.control_demand,
+        "reported_position_ms": info.reported_position_ms,
+        "client_runway_ms": info.client_runway_ms,
+        "render_state": info.render_state,
+        "production_policy": info.production_policy,
+        "production_ahead_seconds": info.production_ahead_seconds,
+        "production_target_seconds": info.production_target_seconds,
+        "producer_control": info.producer_control,
+        "last_request_idle_ms": i64::try_from(info.idle_seconds)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(1_000)
+    });
+    let server_fields = server.as_object_mut().expect("server telemetry object");
+    for (key, value) in [
+        ("produced_end_ms", serde_json::json!(info.produced_end_ms)),
+        ("served_end_ms", serde_json::json!(info.served_end_ms)),
+        ("staged_bytes", serde_json::json!(info.staged_bytes)),
+        (
+            "playlist_target_ms",
+            serde_json::json!(info.playlist_target_ms),
+        ),
+        ("served_revision", serde_json::json!(info.served_revision)),
+        (
+            "rate_estimate_source",
+            serde_json::json!(info.rate_estimate_source),
+        ),
+        ("advertised_bytes", serde_json::json!(info.advertised_bytes)),
+        ("grace_bytes", serde_json::json!(info.grace_bytes)),
+        ("reserved_bytes", serde_json::json!(info.reserved_bytes)),
+        ("live_bytes", serde_json::json!(info.live_bytes)),
+    ] {
+        server_fields.insert(key.to_owned(), value);
+    }
+    extra.insert("server".to_owned(), server);
     event.extra = Some(serde_json::Value::Object(extra).to_string());
 }
 
@@ -5013,9 +5032,12 @@ pub(crate) async fn metrics(
     let process_metrics = format!(
         "# HELP plurx_cache_protected_entries Cache entries protected from housekeeping by active playback.\n\
          # TYPE plurx_cache_protected_entries gauge\n\
-         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}",
+         plurx_cache_protected_entries{{reason=\"active_playback\"}} {active_cache_entries}\n{}{}{}{}{}{}{}{}{}",
         state.offline.prometheus(),
         plurx_core::store::prometheus_store_operations(),
+        crate::store_result::prometheus(),
+        plurx_core::scan::prometheus_scan_walk(),
+        plurx_core::metadata::prometheus_provider_requests(),
         // Stays at zero on a healthy node and on an unclustered one. It moves
         // only when this process declined the cluster's singleton work because
         // it could not read committed membership — a state nothing else in
@@ -5047,6 +5069,7 @@ pub(crate) async fn metrics(
          # TYPE plurx_notify_received_total counter\n\
          plurx_notify_received_total {notifications}\n"
     ));
+    scans.push_str(&plurx_core::scan::prometheus_probe_outcomes());
 
     let body = format!(
         "# HELP plurx_build_info Build information.\n\

@@ -838,7 +838,7 @@ test("analysis controls are first-class settings separate from playback mode con
   // two writes with two buttons, and neither carries an analysis field.
   const save = shippedSource("saveStreaming");
   const liveRecovery = shippedSource("liveHlsRecoveryCard");
-  const saveLiveRecovery = shippedSource("saveLiveHlsRecoveryDeveloper");
+  const saveLiveRecovery = shippedSource("saveLiveHlsRecovery");
   const saveDefaults = shippedSource("savePlaybackDefaults");
   const analysisPanel = shippedSource("analysisSettingsPanel");
   assert.match(saveDefaults, /default_audio_lang:/);
@@ -4140,6 +4140,8 @@ asyncTest("a burn session-open refusal reaches the surface as a refused change",
       shippedSource("positionForPlaybackIntent"),
       shippedSource("selectedAudioIndex"),
       "function cancelPendingSeek(){}",
+      "function notifyPlaybackControl(){}",
+      shippedSource("playbackChangeRecipeKey"),
       shippedSource("requestPlaybackMediaChange"),shippedSource("executePlaybackMediaChange"),
       shippedSource("beginPlaybackPreparation"),
       shippedSource("burnSub"),
@@ -4405,7 +4407,7 @@ test("the detail screen names the supported HLS mode before playback", () => {
   const pending = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "pending" });
   assert.match(pending, /<span class="mode-chip live">Live HLS fallback<\/span>/);
   assert.match(pending, /while VOD analysis is pending/);
-  assert.match(pending, /when live recovery is enabled in Developer settings/);
+  assert.match(pending, /when live recovery is enabled in Playback settings/);
   const unsupported = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "unsupported" });
   assert.match(unsupported, /cannot use the VOD indexer/);
   assert.match(unsupported, /Live HLS requires live recovery to be enabled/);
@@ -6001,19 +6003,14 @@ test("the hls.js retry budget is one per attach, and `BEHIND_LIVE_WINDOW` is fin
   // Anchored inside the branch: `player.prepare()` appears at eight other
   // sites in that file, so asserting the bare call pinned nothing. What has to
   // be true is that the owner hands the recovery a seek target on the PLAYER's
-  // timeline and the player's own seek and prepare, and re-arms the budget
-  // wherever an item takes the screen.
+  // timeline and the player's own seek and prepare. This source inventory can
+  // establish ownership and call shape, but not frame continuity or
+  // cancellation cleanup. BehindLiveWindowRecoveryTest drives `attached()`
+  // behaviorally and proves that a spent budget gets exactly one fresh use.
   assert.match(
     androidController,
     /seekTargetMs = \{ playerTimelinePositionMs\(filmPositionMs\) \},\s*\n\s*seekTo = \{ target -> player\.seekTo\(target\) \},\s*\n\s*prepare = \{ player\.prepare\(\) \},/,
     "the recovery seeks on the player's timeline and prepares again",
-  );
-  assert.equal(
-    (androidController.match(/behindLiveWindow\.attached\(\)/g) || []).length,
-    2,
-    "the per-attach budget is re-armed at BOTH attach sites: `attachRecipe` and "
-      + "`commitPreparedReplacement`, which swaps in a second ExoPlayer without "
-      + "coming near the first",
   );
   assert.match(
     androidController,

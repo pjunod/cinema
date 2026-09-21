@@ -61,6 +61,9 @@ test failures, or denied lints.
 - Run the smallest focused regression for changed behavior locally and record
   that command in the task pull request. The effort workflow deliberately
   defers the full suites.
+- A focused `plurx-core` regression that covers replicated storage must use
+  `make unit-core` or pass `--features hiqlite-store`. Bare
+  `cargo test -p plurx-core --lib` is not evidence for `store/hiqlite*` code.
 - Commit normally on every branch. The tracked hook runs only catalog lint,
   Rust formatting and Clippy, and embedded JavaScript syntax; it does not run
   tests or compile-only effort evidence. Run the smallest focused regression

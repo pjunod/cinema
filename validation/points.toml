@@ -117,6 +117,16 @@ missing = "fail"
 timeout_seconds = 1800
 
 [[checks]]
+id = "unit-core"
+title = "plurx-core unit tests with replicated-store feature coverage"
+command = "PLURX_EXPECT_TEST_COUNT_AT_LEAST=1100 make unit-core"
+profiles = ["commit", "ci", "full", "nightly"]
+requires = ["cargo", "make"]
+missing = "fail"
+timeout_seconds = 1800
+expect_at_least = 1100
+
+[[checks]]
 id = "hiqlite-vendor-clippy"
 title = "Vendored Hiqlite production snapshot transport denied-warning Clippy"
 command = "make hiqlite-vendor-clippy"
@@ -426,7 +436,7 @@ paths = [
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
   "rust-toolchain.toml",
 ]
-checks = ["rust-gate", "rust-gate-ci"]
+checks = ["rust-gate", "rust-gate-ci", "unit-core"]
 
 [[points]]
 id = "persistence.upgrades"
@@ -461,19 +471,30 @@ paths = [
   "crates/plurx-core/src/scan/**",
   "crates/plurx-core/src/store/hiqlite.rs",
   "crates/plurx-core/src/store/hiqlite_catalog.rs",
+  "crates/plurx-core/src/store/hiqlite_classification.rs",
   "crates/plurx-core/src/store/hiqlite_coordination.rs",
   "crates/plurx-core/src/store/hiqlite_durable.rs",
+  "crates/plurx-core/src/store/hiqlite_dvr.rs",
   "crates/plurx-core/src/store/hiqlite_import.rs",
+  "crates/plurx-core/src/store/hiqlite_library_channels.rs",
   "crates/plurx-core/src/store/hiqlite_media.rs",
   "crates/plurx-core/src/store/hiqlite_publication.rs",
   "crates/plurx-core/src/store/hiqlite_pretranscode.rs",
   "crates/plurx-core/src/store/hiqlite_reading.rs",
   "crates/plurx-core/src/store/hiqlite_sessions.rs",
+  "crates/plurx-core/src/store/sqlite/classification.rs",
   "crates/plurx-core/src/store/sqlite/coordination.rs",
+  "crates/plurx-core/src/store/sqlite/dvr.rs",
+  "crates/plurx-core/src/store/sqlite/library.rs",
+  "crates/plurx-core/src/store/sqlite/library_channels.rs",
+  "crates/plurx-core/src/store/sqlite/outbox.rs",
   "crates/plurx-core/src/store/sqlite/publication.rs",
   "crates/plurx-core/src/store/sqlite/pretranscode.rs",
   "crates/plurx-core/src/store/sqlite/sessions.rs",
+  "crates/plurx-core/src/store/sqlite/trakt.rs",
+  "crates/plurx-core/src/store/sqlite/watch.rs",
   "crates/plurx-core/src/store/publication.rs",
+  "crates/plurx-core/src/store/sql_source.rs",
   "crates/plurx-core/src/transcode/{encoder,manifest}.rs",
   "crates/plurx-core/tests/store_contract.rs",
   "tests/validation/test_store_shard.py",
@@ -481,6 +502,7 @@ paths = [
   "crates/plurxd/src/{cachekeep,job_lease,main,manifest_cache,serving_fence,state,transcode}.rs",
   "crates/plurxd/src/media_sessions.rs",
   "crates/plurxd/src/shared_cache.rs",
+  "crates/plurxd/src/store_result.rs",
   "crates/plurxd/src/http/{cluster,internal_media_sessions,peer_transport}.rs",
   "crates/plurxd/src/http/items.rs",
   "scripts/vendor-audit-lock",
@@ -671,6 +693,7 @@ contract = "Every supported source reaches a client through the intended direct,
 paths = [
   "crates/plurx-core/src/fmp4.rs",
   "crates/plurx-core/src/mediafacts.rs",
+  "crates/plurx-core/src/process/**",
   "crates/plurx-core/src/playback/**",
   "crates/plurx-core/src/tracks.rs",
   "crates/plurx-core/src/segplan.rs",
