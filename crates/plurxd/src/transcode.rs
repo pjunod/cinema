@@ -1597,8 +1597,7 @@ fn rolling_publication_batch_ms(rate: f64) -> i64 {
 
 fn rolling_initial_runway_ms(rate: f64) -> i64 {
     (((ROLLING_INITIAL_RUNWAY_MS as f64) * rate).ceil() as i64)
-        .max(ROLLING_INITIAL_RUNWAY_MS)
-        .min(ROLLING_RESERVE_MAX_MS)
+        .clamp(ROLLING_INITIAL_RUNWAY_MS, ROLLING_RESERVE_MAX_MS)
 }
 
 fn rolling_insufficient_capacity(rate: f64, recent_speed: Option<f64>) -> bool {
