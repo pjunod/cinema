@@ -333,11 +333,18 @@ impl SharedCacheCoordinator {
             // continue serving those immutable bytes.
             let _publication_commit = publication_commit.write().await;
             let _transition = transition.lock().await;
-            let _ = tokio::time::timeout(
+            let suspect = tokio::time::timeout(
                 Duration::from_secs(3),
                 store.mark_cache_storage_suspect(&storage_id, &node_id, unix_ms()),
             )
             .await;
+            // Lost work: a failed or timed-out durable suspect transition can
+            // leave peers advertising storage this node has already revoked.
+            crate::store_result::observe_timeout(
+                crate::store_result::Operation::MarkSharedCacheStorageSuspect,
+                crate::store_result::Discard::LostWork,
+                suspect,
+            );
             pending.store(false, Ordering::Release);
         });
     }

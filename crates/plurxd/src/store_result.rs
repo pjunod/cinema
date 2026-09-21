@@ -84,6 +84,19 @@ operations! {
     TouchSharedCacheEntry => "touch_shared_cache_entry",
     TouchCacheEntry => "touch_cache_entry",
     ForgetFailedOfflineCacheEntry => "forget_failed_offline_cache_entry",
+    MarkSharedCacheStorageSuspect => "mark_shared_cache_storage_suspect",
+    ForgetFencedUnfencedClaim => "forget_fenced_unfenced_claim",
+    ForgetFailedFencedOfflineCacheEntry => "forget_failed_fenced_offline_cache_entry",
+    ReleaseSharedLookupPinAfterVerification => "release_shared_lookup_pin_after_verification",
+    ReleaseExpiredSharedLookupPin => "release_expired_shared_lookup_pin",
+    ReleaseSharedLookupPinAfterPreparationFailure => "release_shared_lookup_pin_after_preparation_failure",
+    UpdateOfflineProgressExtractingSubtitles => "update_offline_progress_extracting_subtitles",
+    UpdateOfflineProgressCachedTranscode => "update_offline_progress_cached_transcode",
+    UpdateOfflineProgressTranscoding => "update_offline_progress_transcoding",
+    InvalidateCorruptCacheManifest => "invalidate_corrupt_cache_manifest",
+    RecordAnalysisRetryWaitPhase => "record_analysis_retry_wait_phase",
+    RecordAnalysisFailedPhase => "record_analysis_failed_phase",
+    TouchSharedOfflineCacheEntry => "touch_shared_offline_cache_entry",
 }
 
 const OUTCOMES: [&str; 2] = ["ok", "error"];
@@ -210,6 +223,21 @@ pub(crate) fn observe<T, E: Display>(
     }
 }
 
+/// Observe a bounded Store operation without treating an inner Store failure
+/// as a successful timeout result. Both the deadline and the Store call are
+/// classified under the same closed operation label, and both reach the
+/// counter and bounded log path.
+pub(crate) fn observe_timeout<T, E: Display>(
+    operation: Operation,
+    severity: Discard,
+    result: Result<Result<T, E>, tokio::time::error::Elapsed>,
+) {
+    match result {
+        Ok(result) => observe(operation, severity, result),
+        Err(error) => observe(operation, severity, Err::<T, _>(error)),
+    }
+}
+
 pub(crate) fn prometheus() -> String {
     METRICS.render()
 }
@@ -217,20 +245,224 @@ pub(crate) fn prometheus() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+    use syn::visit::Visit;
+
+    fn test_only(attributes: &[syn::Attribute]) -> bool {
+        attributes.iter().any(|attribute| {
+            if attribute.path().is_ident("test") {
+                return true;
+            }
+            if attribute.path().segments.last().is_some_and(|segment| {
+                segment.ident == "test" && attribute.path().segments.len() > 1
+            }) {
+                return true;
+            }
+            matches!(
+                &attribute.meta,
+                syn::Meta::List(list)
+                    if list.path.is_ident("cfg") && list.tokens.to_string() == "test"
+            )
+        })
+    }
+
+    #[derive(Default)]
+    struct StoreMethodCollector {
+        names: BTreeSet<String>,
+    }
+
+    impl<'ast> Visit<'ast> for StoreMethodCollector {
+        fn visit_item_trait(&mut self, item: &'ast syn::ItemTrait) {
+            for member in &item.items {
+                if let syn::TraitItem::Fn(method) = member {
+                    if method.sig.asyncness.is_some()
+                        && matches!(
+                            &method.sig.output,
+                            syn::ReturnType::Type(_, ty)
+                                if matches!(ty.as_ref(), syn::Type::Path(path)
+                                    if path.path.segments.last().is_some_and(|segment| segment.ident == "Result"))
+                        )
+                    {
+                        self.names.insert(method.sig.ident.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    struct CallCollector<'a> {
+        store_methods: &'a BTreeSet<String>,
+        calls: BTreeSet<String>,
+    }
+
+    impl<'ast> Visit<'ast> for CallCollector<'_> {
+        fn visit_expr_method_call(&mut self, expression: &'ast syn::ExprMethodCall) {
+            let name = expression.method.to_string();
+            if self.store_methods.contains(&name) {
+                self.calls.insert(name);
+            }
+            syn::visit::visit_expr_method_call(self, expression);
+        }
+
+        fn visit_expr_call(&mut self, expression: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = expression.func.as_ref() {
+                if let Some(segment) = path.path.segments.last() {
+                    let name = segment.ident.to_string();
+                    if self.store_methods.contains(&name) {
+                        self.calls.insert(name);
+                    }
+                }
+            }
+            syn::visit::visit_expr_call(self, expression);
+        }
+    }
+
+    struct DiscardCollector<'a> {
+        path: &'a Path,
+        store_methods: &'a BTreeSet<String>,
+        offenders: Vec<String>,
+    }
+
+    fn wildcard(pattern: &syn::Pat) -> bool {
+        match pattern {
+            syn::Pat::Wild(_) => true,
+            syn::Pat::Type(typed) => wildcard(&typed.pat),
+            _ => false,
+        }
+    }
+
+    impl<'ast> Visit<'ast> for DiscardCollector<'_> {
+        fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+            if !test_only(&item.attrs) {
+                syn::visit::visit_item_mod(self, item);
+            }
+        }
+
+        fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
+            if !test_only(&item.attrs) {
+                syn::visit::visit_item_fn(self, item);
+            }
+        }
+
+        fn visit_impl_item_fn(&mut self, item: &'ast syn::ImplItemFn) {
+            if !test_only(&item.attrs) {
+                syn::visit::visit_impl_item_fn(self, item);
+            }
+        }
+
+        fn visit_local(&mut self, local: &'ast syn::Local) {
+            if wildcard(&local.pat) {
+                if let Some(initializer) = &local.init {
+                    let mut calls = CallCollector {
+                        store_methods: self.store_methods,
+                        calls: BTreeSet::new(),
+                    };
+                    calls.visit_expr(&initializer.expr);
+                    for call in calls.calls {
+                        self.offenders
+                            .push(format!("{}: discarded {call}", self.path.display()));
+                    }
+                }
+            }
+            syn::visit::visit_local(self, local);
+        }
+    }
+
+    fn rust_sources(root: &Path, sources: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(root).expect("source directory") {
+            let entry = entry.expect("source entry");
+            let path = entry.path();
+            if path.is_dir() {
+                rust_sources(&path, sources);
+            } else if path.extension().and_then(std::ffi::OsStr::to_str) == Some("rs") {
+                sources.push(path);
+            }
+        }
+    }
+
+    fn parse(path: &Path) -> syn::File {
+        syn::parse_file(&std::fs::read_to_string(path).expect("Rust source"))
+            .unwrap_or_else(|error| panic!("parsing {}: {error}", path.display()))
+    }
+
+    fn store_method_names(workspace: &Path) -> BTreeSet<String> {
+        let mut sources = Vec::new();
+        rust_sources(&workspace.join("crates/plurx-core/src/store"), &mut sources);
+        sources.sort();
+        let mut collector = StoreMethodCollector::default();
+        for source in sources {
+            collector.visit_file(&parse(&source));
+        }
+        collector.names
+    }
+
+    fn discarded_store_calls(
+        path: &Path,
+        source: &str,
+        store_methods: &BTreeSet<String>,
+    ) -> Vec<String> {
+        let syntax = syn::parse_file(source).expect("discard fixture is valid Rust");
+        let mut collector = DiscardCollector {
+            path,
+            store_methods,
+            offenders: Vec::new(),
+        };
+        collector.visit_file(&syntax);
+        collector.offenders
+    }
 
     #[test]
-    fn all_three_severities_have_bounded_metric_rows() {
-        assert_eq!(Operation::ALL.len(), 29, "one fixed label per audited site");
+    fn every_classified_failure_has_a_bounded_metric_row() {
+        assert_eq!(Operation::ALL.len(), 42, "one fixed label per audited site");
         let metrics = Metrics::default();
-        for severity in Discard::ALL {
-            metrics.record(Operation::RequeueFragmentIndexNoHolder, severity, true);
+        for operation in Operation::ALL {
+            for severity in Discard::ALL {
+                metrics.record(operation, severity, true);
+            }
         }
         let rendered = metrics.render();
-        for severity in ["lost_work", "best_effort", "cancelled"] {
-            assert!(rendered.contains(&format!(
-                "operation=\"requeue_fragment_index_no_holder\",severity=\"{severity}\",outcome=\"error\"}} 1"
-            )));
+        for operation in Operation::ALL {
+            for severity in ["lost_work", "best_effort", "cancelled"] {
+                assert!(rendered.contains(&format!(
+                    "operation=\"{}\",severity=\"{severity}\",outcome=\"error\"}} 1",
+                    operation.label()
+                )));
+            }
         }
+    }
+
+    fn metric_value(operation: Operation, severity: Discard, outcome: &str) -> u64 {
+        let prefix = format!(
+            "plurx_store_discarded_results_total{{operation=\"{}\",severity=\"{}\",outcome=\"{outcome}\"}} ",
+            operation.label(),
+            severity.label()
+        );
+        prometheus()
+            .lines()
+            .find_map(|line| line.strip_prefix(&prefix))
+            .expect("metric row")
+            .parse()
+            .expect("metric value")
+    }
+
+    #[tokio::test]
+    async fn timeout_observation_counts_inner_and_deadline_failures_as_errors() {
+        let operation = Operation::MarkSharedCacheStorageSuspect;
+        let severity = Discard::LostWork;
+        let before = metric_value(operation, severity, "error");
+        observe_timeout(operation, severity, Ok(Err::<(), _>("inner Store failure")));
+        let deadline = tokio::time::timeout(
+            Duration::ZERO,
+            std::future::pending::<Result<(), &'static str>>(),
+        )
+        .await;
+        observe_timeout(operation, severity, deadline);
+        assert_eq!(
+            metric_value(operation, severity, "error"),
+            before + 2,
+            "an outer timeout and an inner Store error are both classified failures"
+        );
     }
 
     #[test]
@@ -245,39 +477,73 @@ mod tests {
     }
 
     #[test]
+    fn discarded_store_result_guard_recognizes_receiver_independent_shapes() {
+        let methods = BTreeSet::from([
+            "forget_cache_entry".to_owned(),
+            "mark_cache_storage_suspect".to_owned(),
+        ]);
+        let source = r#"
+            async fn direct(store: &Store) {
+                let _ = store.forget_cache_entry("a", "b", "c").await;
+            }
+            async fn wrapped(store: &Store, fence: Fence) {
+                let _ = PublicationStore::fenced(store, fence)
+                    .forget_cache_entry("a", "b", "c").await;
+            }
+            async fn nested(store: &Store) {
+                let _ = timeout(DURATION,
+                    store.mark_cache_storage_suspect("a", "b", 1)).await;
+            }
+            async fn unrelated(directory: &Directory) {
+                let _ = directory.unlink_child("a").await;
+            }
+        "#;
+        let offenders = discarded_store_calls(Path::new("fixture.rs"), source, &methods);
+        assert_eq!(offenders.len(), 3, "{offenders:?}");
+        assert!(offenders
+            .iter()
+            .any(|entry| entry.contains("mark_cache_storage_suspect")));
+        assert_eq!(
+            offenders
+                .iter()
+                .filter(|entry| entry.contains("forget_cache_entry"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn production_store_results_never_use_bare_let_underscore() {
-        fn visit(path: &std::path::Path, offenders: &mut Vec<String>) {
-            for entry in std::fs::read_dir(path).expect("source directory") {
-                let entry = entry.expect("source entry");
-                let path = entry.path();
-                if path.is_dir() {
-                    visit(&path, offenders);
-                } else if path.extension().and_then(std::ffi::OsStr::to_str) == Some("rs") {
-                    let source = std::fs::read_to_string(&path).expect("Rust source");
-                    for (line, suffix) in source.match_indices("let _ =") {
-                        let sample = suffix
-                            .chars()
-                            .take(360)
-                            .collect::<String>()
-                            .split_whitespace()
-                            .collect::<String>();
-                        if sample.contains("store.") && sample.contains(".await") {
-                            offenders.push(format!(
-                                "{}:{}",
-                                path.display(),
-                                source[..line].matches('\n').count() + 1
-                            ));
-                        }
-                    }
-                }
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace = manifest
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let store_methods = store_method_names(workspace);
+        assert!(
+            store_methods.contains("forget_cache_entry")
+                && store_methods.contains("mark_cache_storage_suspect"),
+            "the semantic guard must derive wrapper and nested methods from the Store traits"
+        );
+        let mut sources = Vec::new();
+        for crate_dir in std::fs::read_dir(workspace.join("crates")).expect("workspace crates") {
+            let source_root = crate_dir.expect("crate directory").path().join("src");
+            if source_root.is_dir() {
+                rust_sources(&source_root, &mut sources);
             }
         }
-
+        sources.sort();
         let mut offenders = Vec::new();
-        visit(
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
-            &mut offenders,
-        );
+        for source in sources {
+            let syntax = parse(&source);
+            let mut collector = DiscardCollector {
+                path: &source,
+                store_methods: &store_methods,
+                offenders: Vec::new(),
+            };
+            collector.visit_file(&syntax);
+            offenders.extend(collector.offenders);
+        }
         assert!(
             offenders.is_empty(),
             "store results must go through store_result::observe: {offenders:?}"

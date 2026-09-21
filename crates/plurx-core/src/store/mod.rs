@@ -4947,6 +4947,21 @@ impl<T> Store for T where
 {
 }
 
+/// Reopen the immutable fragment-index generation selected by the daemon
+/// after every advertised holder failed to supply a valid blob.
+///
+/// This named boundary is the exact transition used by the VOD no-holder
+/// arm. Keeping it in `plurx-core` lets the backend-neutral contract execute
+/// that production transition against both SQLite and the three-voter store,
+/// instead of testing only the lower-level primitive and assuming the daemon
+/// calls it the same way.
+pub async fn requeue_cluster_fragment_index_after_no_holder(
+    store: &dyn Store,
+    replacement: &NewClusterFragmentIndexJob,
+) -> Result<bool, StoreError> {
+    store.requeue_cluster_fragment_index(replacement).await
+}
+
 /// The only application-facing boundary for catalogue consistency choices.
 ///
 /// Ordinary [`Store`] methods remain Authority. This wrapper may run one

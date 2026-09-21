@@ -7100,15 +7100,20 @@ impl JobManager {
                             .await
                         {
                             Ok(true) => {
-                                let _ = self
-                                    .store
-                                    .record_analysis_request_phase(
-                                        &request,
-                                        "retry_wait",
-                                        Some(code),
-                                        now,
-                                    )
-                                    .await;
+                                // Best effort: the retry transition already
+                                // committed; this row is diagnostic history.
+                                crate::store_result::observe(
+                                    crate::store_result::Operation::RecordAnalysisRetryWaitPhase,
+                                    crate::store_result::Discard::BestEffort,
+                                    self.store
+                                        .record_analysis_request_phase(
+                                            &request,
+                                            "retry_wait",
+                                            Some(code),
+                                            now,
+                                        )
+                                        .await,
+                                );
                             }
                             Ok(false) => {}
                             Err(error) => tracing::warn!(
@@ -7131,15 +7136,20 @@ impl JobManager {
                             .await
                         {
                             Ok(true) => {
-                                let _ = self
-                                    .store
-                                    .record_analysis_request_phase(
-                                        &request,
-                                        "failed",
-                                        Some(code),
-                                        now,
-                                    )
-                                    .await;
+                                // Best effort: the failed terminal state is
+                                // durable already; this row explains it.
+                                crate::store_result::observe(
+                                    crate::store_result::Operation::RecordAnalysisFailedPhase,
+                                    crate::store_result::Discard::BestEffort,
+                                    self.store
+                                        .record_analysis_request_phase(
+                                            &request,
+                                            "failed",
+                                            Some(code),
+                                            now,
+                                        )
+                                        .await,
+                                );
                             }
                             Ok(false) => {}
                             Err(error) => tracing::warn!(

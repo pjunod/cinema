@@ -2539,10 +2539,11 @@ impl VodServe {
             crate::store_result::observe(
                 crate::store_result::Operation::RequeueFragmentIndexNoHolder,
                 crate::store_result::Discard::LostWork,
-                self.shared
-                    .store
-                    .requeue_cluster_fragment_index(&repair)
-                    .await,
+                plurx_core::store::requeue_cluster_fragment_index_after_no_holder(
+                    self.shared.store.as_ref(),
+                    &repair,
+                )
+                .await,
             );
             return Err("no verified holder could supply the v2 artifact".to_owned());
         };
