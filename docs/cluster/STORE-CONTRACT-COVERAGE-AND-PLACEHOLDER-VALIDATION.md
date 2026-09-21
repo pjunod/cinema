@@ -1,6 +1,6 @@
 # Store-contract coverage and placeholder validation — close the ten paths, then check the other dialect
 
-**Status:** ready for review · **Executes:** S10 / F-sc-13 and the
+**Status:** implementation complete; draft review pending · **Executes:** S10 / F-sc-13 and the
 prescriptions of F-hist-1 / F-hist-2 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -550,6 +550,42 @@ in this plan.
    plan puts all ten in `cluster.auth` because the property at risk is
    backend parity, not page latency; Paul confirms.
 
+## 8. M4 spread decision
+
+Keep the generator at the `next_up` pilot. The pilot replaced **two**
+hand-written statements with **one** typed source, but its measured patch was
+119 insertions and 61 deletions (net +58), including a 112-line source module.
+That is a reasonable fixed cost for proving the invariant, not evidence for a
+mechanical conversion of the review's approximately **50** duplicated hot
+statements. The current two-parameter API also has not yet proved the predicate,
+list-expansion or optional-clause shapes those other statements use.
+
+This is deliberately a stay decision rather than a revert. The generated
+SQLite and hiqlite texts differ only by sigil, both dialect validators accept
+them, and the backend-neutral watch contract returns the same `next_up` row.
+The next proposal to spread it must first inventory the actual duplicated SQL
+shapes and demonstrate a net reduction across at least three unlike methods;
+it must not mechanically rewrite sigils.
+
+M1 measured **91** statement variants whose binding arity is not local enough
+for the conservative static scanner to prove. That count is pinned and may
+only fall without review. It is a useful guard against regression, but large
+enough that arity coverage should be tightened before shared generation is
+presented as the primary safety mechanism.
+
+Decisions made during execution where the plan named no owner:
+
+- Keep the `$N` and `?N` validation errors separate. Their invariants differ,
+  and collapsing them would obscure whether first appearance or numeric gaps
+  caused a refusal.
+- Assign the deferred dead-job/workload alert definition to C-08 observability;
+  this plan supplies the refusal counter but has no evidence-based alert window.
+- Retain `cluster.auth` for all store slices and the two new shared enforcement
+  modules. The property is backend parity, not page-read latency.
+- Measure the median-PR lane effect over the first ten post-merge PRs as
+  follow-up evidence. No post-M0 PR sample exists while this implementation is
+  still a draft, so that observation is not fabricated here.
+
 ---
 
 ## Execution log
@@ -562,4 +598,8 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `07796d70` | Routed all store slices; selector moved from hiqlite 3/16 + SQLite 7/24 outside `cluster_auth` to 0/16 + 0/24. Directory-derived regression passed. Historical cost remains 3 extra cluster lanes among 19 touching commits in 30 days. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `6e1554ed` | Added 24-file SQLite census, gap/mixed-spelling/local-arity checks, pinned 91 unchecked variants, fixed two real gaps, and exposed the fixed-cardinality pre-I/O refusal counter. Fourteen focused census tests and the counter regression passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `3ebc50be` | Classified all 29 discarded results: 25 best-effort, 3 lost-work, 1 cancelled. Closed labels, 30-second per-operation log windows, metrics, source lint, and actual VOD no-holder requeue regression passed; backend-neutral repair contract passed on SQLite. Replicated-lane execution remains CI evidence. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `8cfd50a5` | One typed parameter order now renders both `next_up` dialects; equivalence/validator, SQLite behavior, and backend-neutral watch-contract regressions passed. Measured patch: +119/-61, net +58. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M4 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / this commit | Decision: keep the safe pilot, do not spread or revert. A future spread needs a shape inventory and net reduction across at least three unlike methods. |
