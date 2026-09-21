@@ -2210,6 +2210,16 @@ test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest
 test_anchor = "fun androidDvDeliveryRequiredHlsSurvivesStartSeekTracksAndRecoveryBodies()"
 
 [[fixes]]
+# All three detail layouts use this lossless wire-ID path; the regression
+# fixture is the live episode ID that JavaScript previously rounded.
+id = "web.artwork-refresh-exact-item-id"
+commits = ["447a5f76"]
+source = "crates/plurxd/src/web/detail/preplay-selection.js"
+source_anchor = "onclick=\"refreshArtwork('${exactWireId(it)}',this)\""
+test = "tests/web/reader.test.js"
+test_anchor = "artwork refresh retains opaque 64-bit item identifiers in every detail layout"
+
+[[fixes]]
 # The display handshake is allowed to suspend, so a delayed tune could build a
 # player for a channel or window that had already been superseded. This helper
 # is the one ownership recheck every Live TV tune passes through before any
