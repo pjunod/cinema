@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["fb98dc61"]
+points = ["metadata.enrichment", "cluster.auth"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+reason = "The retained enrichment regression makes the first item exceed a short test deadline, requires the next item to enrich, and proves the timed-out item remains eligible; the daemon lease regression holds provider work past the original TTL and requires an independent heartbeat to prevent successor acquisition."

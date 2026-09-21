@@ -1597,7 +1597,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
 # +2 for the review regressions: the injectable listener server and the real
 # authenticated logout request each run in a test task whose JoinHandle is
 # awaited before the fixture returns. Neither task owns a child process.
-expected_occurrences = 530
+# +4 for C-02's bounded scan walk, root fingerprint, contained-path check, and
+# sparse-walker cancellation fixture. Every blocking task is awaited; none is
+# a detached producer or process owner.
+expected_occurrences = 534
 # 446 -> 448 on the exact promotion merge: the streaming branch's bounded
 # extractor kill/reap ownership and joined cancellation fixtures coexist with
 # main's Live TV guide loop. Production tasks are cancellation-bound or own the
@@ -2026,7 +2029,13 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # suspend/resume fixture. No shipped timer or owner changed.
 # 824 is a fresh measurement of the merged S-01 and current-main tree; neither
 # branch's standalone count describes the combined source.
-expected_occurrences = 824
+# +1 for C-02's lease-heartbeat regression: one test-only sleep holds simulated
+# provider work past the original one-second lease TTL. `ActiveJobLease` owns
+# and joins the independent renewal task, and the test releases it explicitly;
+# no production timer, producer, process, or replacement policy is added.
+# C-02 also adds one test-only timeout around sparse-walker cancellation; it
+# bounds and awaits that exact task.
+expected_occurrences = 827
 
 [[module_structures]]
 id = "bare-time-constructor"

@@ -189,9 +189,12 @@ def _closing(
 ) -> int:
     depth = 0
     for index in range(start, len(tokens)):
-        if tokens[index].value == opening:
+        token = tokens[index]
+        if token.kind != "punct":
+            continue
+        if token.value == opening:
             depth += 1
-        elif tokens[index].value == closing:
+        elif token.value == closing:
             depth -= 1
             if depth == 0:
                 return index
@@ -238,6 +241,8 @@ def _split_meta(tokens: tuple[_Token, ...]) -> tuple[tuple[_Token, ...], ...]:
     depths = {"(": 0, "[": 0, "{": 0}
     pairs = {")": "(", "]": "[", "}": "{"}
     for index, token in enumerate(tokens):
+        if token.kind != "punct":
+            continue
         if token.value in depths:
             depths[token.value] += 1
         elif token.value in pairs:
