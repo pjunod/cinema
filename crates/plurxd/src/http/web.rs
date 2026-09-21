@@ -5,7 +5,7 @@
 //! non-API GET path.
 //!
 //! The app is not one file. `index.html` is a 97-line shell of markup and tags;
-//! the CSS and the JavaScript live in the sixty-five files of [`WEB_ASSETS`],
+//! the CSS and the JavaScript live in the sixty-six files of [`WEB_ASSETS`],
 //! which is also their load order. There is no bundler and no build step —
 //! `docs/clients/WEB-SHELL-LAYOUT.md` is the map, and adding a file means a row
 //! there, a row here, and a tag in the shell, or the tests below say so.
@@ -54,12 +54,13 @@ pub enum WebAsset {
 ///
 /// `rustfmt::skip` because this is a table: one row per line, columns aligned,
 /// read top to bottom as the load order it is. Left to rustfmt each row
-/// becomes five lines and 65 rows become 325, which hides the one property
+/// becomes five lines and 66 rows become 330, which hides the one property
 /// the table exists to show.
 #[rustfmt::skip]
 pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("app.css",                                WebAsset::HeadStyle,   include_str!("../web/app.css")),
     ("core/theme.js",                          WebAsset::HeadScript,  include_str!("../web/core/theme.js")),
+    ("core/errors.js",                         WebAsset::HeadScript,  include_str!("../web/core/errors.js")),
     ("hls.min.js",                             WebAsset::BodyScript,  include_str!("../web/hls.min.js")),
     ("core/app.js",                            WebAsset::BodyScript,  include_str!("../web/core/app.js")),
     ("core/api.js",                            WebAsset::BodyScript,  include_str!("../web/core/api.js")),
