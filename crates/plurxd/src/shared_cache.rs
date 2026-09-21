@@ -333,11 +333,18 @@ impl SharedCacheCoordinator {
             // continue serving those immutable bytes.
             let _publication_commit = publication_commit.write().await;
             let _transition = transition.lock().await;
-            let _ = tokio::time::timeout(
+            let suspect = tokio::time::timeout(
                 Duration::from_secs(3),
                 store.mark_cache_storage_suspect(&storage_id, &node_id, unix_ms()),
             )
             .await;
+            // Lost work: a failed or timed-out durable suspect transition can
+            // leave peers advertising storage this node has already revoked.
+            crate::store_result::observe_timeout(
+                crate::store_result::Operation::MarkSharedCacheStorageSuspect,
+                crate::store_result::Discard::LostWork,
+                suspect,
+            );
             pending.store(false, Ordering::Release);
         });
     }
@@ -1216,7 +1223,13 @@ impl SharedCacheCoordinator {
             }
         }
         if !self.is_verified() {
-            let _ = self.store.release_lease(&lease, unix_ms()).await;
+            // Best-effort: this process is no longer eligible to run GC and
+            // the bounded lease expires without an explicit release.
+            crate::store_result::observe(
+                crate::store_result::Operation::ReleaseUnverifiedCacheGcLease,
+                crate::store_result::Discard::BestEffort,
+                self.store.release_lease(&lease, unix_ms()).await,
+            );
             return Ok(());
         }
         let candidates = self
@@ -1247,7 +1260,13 @@ impl SharedCacheCoordinator {
                 }
             }
         }
-        let _ = self.store.release_lease(&lease, unix_ms()).await;
+        // Best-effort: the completed GC lease is self-expiring, so a failed
+        // early release only defers the next maintenance owner.
+        crate::store_result::observe(
+            crate::store_result::Operation::ReleaseCacheGcLease,
+            crate::store_result::Discard::BestEffort,
+            self.store.release_lease(&lease, unix_ms()).await,
+        );
         Ok(())
     }
 }
