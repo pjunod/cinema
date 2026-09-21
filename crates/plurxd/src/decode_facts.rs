@@ -148,6 +148,7 @@ struct DecodeFactPhaseCell {
 
 pub(crate) struct DecodeFactMetrics {
     phases: [DecodeFactPhaseCell; 25],
+    hit_phases: [DecodeFactPhaseCell; 5],
     lookups: [AtomicU64; 3],
     fallbacks: [AtomicU64; 7],
 }
@@ -156,6 +157,7 @@ impl Default for DecodeFactMetrics {
     fn default() -> Self {
         Self {
             phases: std::array::from_fn(|_| DecodeFactPhaseCell::default()),
+            hit_phases: std::array::from_fn(|_| DecodeFactPhaseCell::default()),
             lookups: std::array::from_fn(|_| AtomicU64::new(0)),
             fallbacks: std::array::from_fn(|_| AtomicU64::new(0)),
         }
@@ -261,6 +263,19 @@ impl DecodeFactMetrics {
         Self::saturating_add(&self.lookups[result.index()], 1);
     }
 
+    fn record_hit_phase(&self, phase: DecodeFactPhase, elapsed: Duration) {
+        let cell = &self.hit_phases[phase.index()];
+        let elapsed_nanos = elapsed.as_nanos().min(u128::from(u64::MAX)) as u64;
+        Self::saturating_add(&cell.count, 1);
+        Self::saturating_add(&cell.elapsed_nanos, elapsed_nanos);
+        if let Some(index) = DECODE_FACT_PHASE_BUCKETS
+            .iter()
+            .position(|(upper, _)| elapsed_nanos <= *upper)
+        {
+            Self::saturating_add(&cell.buckets[index], 1);
+        }
+    }
+
     pub(crate) fn record_fallback(&self, reason: DecodePlanFallbackReason) {
         Self::saturating_add(&self.fallbacks[reason.index()], 1);
     }
@@ -304,6 +319,41 @@ impl DecodeFactMetrics {
                     outcome.label()
                 );
             }
+        }
+        out.push_str(
+            "# HELP plurx_decode_facts_hit_phase_seconds Decode-fact latency for cache-hit lookups only.\n\
+             # TYPE plurx_decode_facts_hit_phase_seconds histogram\n",
+        );
+        for phase in DecodeFactPhase::ALL {
+            let cell = &self.hit_phases[phase.index()];
+            let mut cumulative = 0_u64;
+            for (index, (_, upper)) in DECODE_FACT_PHASE_BUCKETS.iter().enumerate() {
+                cumulative = cumulative.saturating_add(cell.buckets[index].load(Ordering::Relaxed));
+                let _ = writeln!(
+                    out,
+                    "plurx_decode_facts_hit_phase_seconds_bucket{{phase=\"{}\",le=\"{}\"}} {}",
+                    phase.label(),
+                    upper,
+                    cumulative
+                );
+            }
+            let count = cell.count.load(Ordering::Relaxed);
+            let _ = writeln!(
+                out,
+                "plurx_decode_facts_hit_phase_seconds_bucket{{phase=\"{}\",le=\"+Inf\"}} {count}",
+                phase.label()
+            );
+            let seconds = cell.elapsed_nanos.load(Ordering::Relaxed) as f64 / 1_000_000_000.0;
+            let _ = writeln!(
+                out,
+                "plurx_decode_facts_hit_phase_seconds_sum{{phase=\"{}\"}} {seconds:.9}",
+                phase.label()
+            );
+            let _ = writeln!(
+                out,
+                "plurx_decode_facts_hit_phase_seconds_count{{phase=\"{}\"}} {count}",
+                phase.label()
+            );
         }
         out.push_str(
             "# HELP plurx_decode_facts_lookups_total Decode-fact cache lookups by bounded result.\n\
@@ -3242,19 +3292,21 @@ impl DecodeFactCache {
                 }
             }
         };
+        let gate_elapsed = phase_started.elapsed();
         self.metrics.record_phase(
             DecodeFactPhase::GateWait,
             &gate_result.as_ref().map(|_| ()).map_err(Clone::clone),
-            phase_started.elapsed(),
+            gate_elapsed,
         );
         let gate = gate_result?;
         let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
         let phase_started = std::time::Instant::now();
         let validation = probe.validate_current(remaining, cancelled).await;
+        let identity_elapsed = phase_started.elapsed();
         self.metrics.record_phase(
             DecodeFactPhase::IdentityValidation,
             &validation,
-            phase_started.elapsed(),
+            identity_elapsed,
         );
         validation?;
         let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
@@ -3267,10 +3319,11 @@ impl DecodeFactCache {
             source.initial_identity_delay(),
         )
         .await;
+        let observation_elapsed = phase_started.elapsed();
         self.metrics.record_phase(
             DecodeFactPhase::SourceObservation,
             &observation.as_ref().map(|_| ()).map_err(Clone::clone),
-            phase_started.elapsed(),
+            observation_elapsed,
         );
         let (bound_source, gate) = observation?;
         let bound_identity = bound_source.identity.clone();
@@ -3281,6 +3334,12 @@ impl DecodeFactCache {
             selected_stream,
         };
         if let Some(facts) = self.entries.lock().await.get(&key).cloned() {
+            self.metrics
+                .record_hit_phase(DecodeFactPhase::GateWait, gate_elapsed);
+            self.metrics
+                .record_hit_phase(DecodeFactPhase::IdentityValidation, identity_elapsed);
+            self.metrics
+                .record_hit_phase(DecodeFactPhase::SourceObservation, observation_elapsed);
             return Ok((facts, DecodeFactLookupResult::Hit));
         }
         let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
@@ -3306,10 +3365,12 @@ impl DecodeFactCache {
         let owned_probe = probe.clone();
         let owned_catalog = catalog.cloned();
         let owned_cancelled = cancelled.cloned();
+        let owned_metrics = Arc::clone(&self.metrics);
         // The task owns both the source descriptor and the singleflight
         // permit. Dropping or aborting this waiter cannot abandon a live child
         // or restore the shared source offset before kill/reap completes.
         let collection = tokio::spawn(async move {
+            let phase_started = std::time::Instant::now();
             let result = collect(
                 &owned_probe,
                 DecodeFactCollectionSource {
@@ -3323,19 +3384,14 @@ impl DecodeFactCache {
                 owned_cancelled.as_ref(),
             )
             .await;
+            owned_metrics.record_phase(
+                DecodeFactPhase::Collection,
+                &result.as_ref().map(|_| ()).map_err(Clone::clone),
+                phase_started.elapsed(),
+            );
             (result, gate, source)
         });
-        let phase_started = std::time::Instant::now();
         let collection_result = await_owned_collection(collection, remaining, cancelled).await;
-        let collection_outcome = match &collection_result {
-            Ok((facts, _, _)) => facts.as_ref().map(|_| ()).map_err(Clone::clone),
-            Err(error) => Err(error.clone()),
-        };
-        self.metrics.record_phase(
-            DecodeFactPhase::Collection,
-            &collection_outcome,
-            phase_started.elapsed(),
-        );
         let (facts, gate, source) = collection_result?;
         let facts = facts?;
         let remaining = budget.min(PROBE_DEADLINE).saturating_sub(started.elapsed());
@@ -5057,9 +5113,10 @@ void probe_main(unsigned long *stack) {
         opened.seek(SeekFrom::Start(3)).expect("set source offset");
         let source = Arc::new(opened);
         let ownership = Arc::new(tokio::sync::Semaphore::new(1));
+        let cache = DecodeFactCache::new();
         let started = std::time::Instant::now();
         assert_eq!(
-            DecodeFactCache::new()
+            cache
                 .get_or_probe(
                     &identity,
                     DecodeFactSource::new(Arc::clone(&source), Arc::clone(&ownership)),
@@ -5083,10 +5140,28 @@ void probe_main(unsigned long *stack) {
             PIDFD_READ_SUPERVISOR_OWNERS.load(Ordering::Acquire) == 1,
             "production supervisor ownership remains attached through reap"
         );
+        assert!(
+            cache.metrics().prometheus().contains(
+                "plurx_decode_facts_phase_seconds_count{phase=\"collection\",outcome=\"deadline\"} 0"
+            ),
+            "the detached collection must not publish a phase sample before slow reap finishes"
+        );
         let _ownership = tokio::time::timeout(Duration::from_secs(2), ownership.acquire_owned())
             .await
             .expect("detached pidfd-read cleanup finishes")
             .expect("source ownership returns after reap");
+        tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                if cache.metrics().prometheus().contains(
+                    "plurx_decode_facts_phase_seconds_count{phase=\"collection\",outcome=\"deadline\"} 1"
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the collection sample appears after the detached owner finishes cleanup");
         assert_eq!(PIDFD_READ_SUPERVISOR_OWNERS.load(Ordering::Acquire), 0);
         assert_eq!(
             source
@@ -5552,6 +5627,7 @@ touch "$PLURX_TEST_PROBE_PATH.done"
             &probe,
             r###"#!/bin/sh
 if test "$1" = "-version"; then printf '%s\n' 'ffprobe version phase-metrics'; exit 0; fi
+sleep 0.2
 printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"24/1","r_frame_rate":"24/1","color_transfer":"bt709","disposition":{"attached_pic":0}}]}'
 "###,
         );
@@ -5592,6 +5668,22 @@ printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","
         assert!(metrics.contains("plurx_decode_facts_lookups_total{result=\"hit\"} 1"));
         assert!(metrics.contains("plurx_decode_facts_lookups_total{result=\"miss_collected\"} 1"));
         assert!(metrics.contains("plurx_decode_facts_lookups_total{result=\"refused\"} 0"));
+        for phase in ["gate_wait", "identity_validation", "source_observation"] {
+            assert!(
+                metrics.contains(&format!(
+                    "plurx_decode_facts_hit_phase_seconds_count{{phase=\"{phase}\"}} 1"
+                )),
+                "the warm-hit phase must be joinable to the hit result for {phase}:\n{metrics}"
+            );
+        }
+        for phase in ["collection", "final_validation"] {
+            assert!(
+                metrics.contains(&format!(
+                    "plurx_decode_facts_hit_phase_seconds_count{{phase=\"{phase}\"}} 0"
+                )),
+                "the deliberately slow miss must not contaminate hit-only {phase}:\n{metrics}"
+            );
+        }
     }
 
     #[tokio::test]

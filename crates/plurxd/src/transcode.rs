@@ -240,6 +240,26 @@ pub(crate) fn vod_refusal(error: &str) -> Option<(&str, &str)> {
     Some((code, message))
 }
 
+#[derive(Clone, Copy)]
+enum BoundPlanCaller {
+    Pretranscode,
+    Vod,
+}
+
+impl BoundPlanCaller {
+    fn finish(
+        self,
+        result: Result<ResolvedTranscode, String>,
+    ) -> Result<ResolvedTranscode, String> {
+        match self {
+            Self::Pretranscode => result,
+            Self::Vod => {
+                result.map_err(|error| vod_refusal_error("vod_decoder_plan_refused", error))
+            }
+        }
+    }
+}
+
 /// What "Auto" resolves to — see [`TranscodeManager::auto_height`].
 const AUTO_SOFTWARE_HEIGHT: i64 = 720;
 /// Safe fallback when the source has no usable geometry, and the highest HDR
@@ -15104,18 +15124,20 @@ impl TranscodeManager {
         deadline: Instant,
         cancelled: Option<&tokio_util::sync::CancellationToken>,
     ) -> Result<ResolvedTranscode, String> {
-        self.resolve_held_movie_plan(
-            file,
-            options,
-            encoder,
-            crate::decode_facts::DecodeFactSource::new(
-                Arc::clone(&source.handle),
-                Arc::clone(&source.offset_gate),
-            ),
-            deadline,
-            cancelled,
+        BoundPlanCaller::Pretranscode.finish(
+            self.resolve_held_movie_plan(
+                file,
+                options,
+                encoder,
+                crate::decode_facts::DecodeFactSource::new(
+                    Arc::clone(&source.handle),
+                    Arc::clone(&source.offset_gate),
+                ),
+                deadline,
+                cancelled,
+            )
+            .await,
         )
-        .await
     }
 
     /// Resolve decoder facts through the exact source description the caller
@@ -15152,6 +15174,17 @@ impl TranscodeManager {
                 cancelled,
             )
             .await;
+        self.resolve_held_movie_plan_facts(file, options, encoder, facts)
+            .await
+    }
+
+    async fn resolve_held_movie_plan_facts(
+        &self,
+        file: &plurx_core::domain::MediaFile,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+        facts: Result<plurx_core::transcode::DecodeFacts, crate::decode_facts::DecodeFactError>,
+    ) -> Result<ResolvedTranscode, String> {
         match facts {
             Ok(facts) => self.resolve_movie_plan_with_facts(
                 file,
@@ -19507,8 +19540,8 @@ impl TranscodeManager {
                 format!("the held source could not be retained for decoder planning: {error}"),
             )
         })?;
-        let plan = self
-            .resolve_held_movie_plan(
+        let plan = BoundPlanCaller::Vod.finish(
+            self.resolve_held_movie_plan(
                 file,
                 &options,
                 encoder,
@@ -19519,8 +19552,8 @@ impl TranscodeManager {
                 Instant::now() + DECODE_PLAN_PROBE_BUDGET,
                 None,
             )
-            .await
-            .map_err(|error| vod_refusal_error("vod_decoder_plan_refused", error))?;
+            .await,
+        )?;
         let resources = TranscodeResourceEstimate::of(&plan, &Workload::of(file, target_height));
         if !source.unchanged() {
             return Err(vod_refusal_error(
@@ -28968,11 +29001,13 @@ fn test_session_with_control(
 pub(crate) mod tests {
     use super::*;
 
-    #[test]
-    fn held_plan_fallback_reasons() {
+    #[tokio::test]
+    async fn held_plan_fallback_reasons() {
         use crate::decode_facts::{DecodeFactError, DecodePlanFallbackReason};
+        use plurx_core::store::SqliteStore;
+        use plurx_core::transcode::PlanSourceBinding;
 
-        let mut cases = vec![
+        let cases = vec![
             (
                 DecodeFactError::Deadline,
                 DecodePlanFallbackReason::Deadline,
@@ -28984,10 +29019,6 @@ pub(crate) mod tests {
             (
                 DecodeFactError::ProbeChanged,
                 DecodePlanFallbackReason::ProbeChanged,
-            ),
-            (
-                DecodeFactError::SourceChanged,
-                DecodePlanFallbackReason::RefusedSourceChanged,
             ),
             (
                 DecodeFactError::Spawn("spawn".into()),
@@ -29031,12 +29062,52 @@ pub(crate) mod tests {
             ),
         ];
         #[cfg(not(target_os = "linux"))]
-        cases.push((
-            DecodeFactError::UnsupportedPlatform,
-            DecodePlanFallbackReason::Invariant,
-        ));
+        let cases = cases
+            .into_iter()
+            .chain(std::iter::once((
+                DecodeFactError::UnsupportedPlatform,
+                DecodePlanFallbackReason::Invariant,
+            )))
+            .collect::<Vec<_>>();
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("get file")
+            .expect("media file");
         for (error, expected) in cases {
             assert_eq!(error.fallback_reason(), expected, "{error}");
+            let (manager, _work, _cache) = cached_manager(&store);
+            let options = manager.options_for_tone_map(
+                Encoder::Software,
+                &file,
+                720,
+                0.0,
+                None,
+                None,
+                Some(1),
+                ToneMap::None,
+                OutputGrade::Sdr,
+            );
+            let plan = manager
+                .resolve_held_movie_plan_facts(&file, &options, Encoder::Software, Err(error))
+                .await
+                .expect("every non-source-change failure keeps the catalog fallback");
+            assert_eq!(plan.source_binding(), PlanSourceBinding::CatalogRow);
+            assert!(
+                manager
+                    .decode_facts
+                    .metrics()
+                    .prometheus()
+                    .contains(&format!(
+                        "plurx_decode_plan_fallbacks_total{{reason=\"{}\"}} 1",
+                        expected.label()
+                    )),
+                "the real fallback disposition records {}",
+                expected.label()
+            );
         }
     }
 
@@ -29111,6 +29182,19 @@ pub(crate) mod tests {
         assert_eq!(
             result,
             Err("the held source changed during decoder probing; rescan before playback".into())
+        );
+        let reason = "the held source changed during decoder probing; rescan before playback";
+        let vod_error = BoundPlanCaller::Vod
+            .finish(Err(reason.to_owned()))
+            .expect_err("VOD must preserve the typed decoder-plan refusal");
+        assert_eq!(
+            vod_refusal(&vod_error),
+            Some(("vod_decoder_plan_refused", reason))
+        );
+        assert_eq!(
+            BoundPlanCaller::Pretranscode.finish(Err(reason.to_owned())),
+            Err(reason.to_owned()),
+            "the pretranscode job must receive the actionable failure for retry/settlement"
         );
         assert!(manager
             .decode_facts
