@@ -3,6 +3,7 @@
 // Availability is process-local UI state. It never enables the server feature
 // and never substitutes for the owner checks repeated by decision/session.
 let OPTICAL_NAV=false;
+let OPTICAL_MATCH_DRAFT=null;
 function opticalRememberAvailability(drives){
   if(Array.isArray(drives)&&drives.length&&!OPTICAL_NAV){
     OPTICAL_NAV=true;
@@ -142,6 +143,11 @@ async function viewOpticalTitle(data,titleId,generation,route){
   if(!disc) throw new Error("The disc is no longer inserted.");
   const detail=await api(`/optical/discs/${encodeURIComponent(disc.id)}/titles/${encodeURIComponent(titleId)}`);
   if(generation!==PAGE_RENDER_GENERATION||location.hash!==route) return;
+  let matched=null;
+  if(ME.is_admin&&detail.title.matched_item_id!=null){
+    try{ matched=(await api(`/items/${encodeURIComponent(String(detail.title.matched_item_id))}`)).item; }
+    catch(e){ matched=null; }
+  }
   const title=data.titles.find(row=>row.id===titleId)||{id:titleId,duration_ms:detail.title.duration_ms,angles:detail.title.angles};
   const resume=Math.max(0,Number(detail.progress?.position_ms)||0);
   const name=title.match_kind?`${title.match_kind} · ${title.id}`:title.id;
@@ -155,10 +161,51 @@ async function viewOpticalTitle(data,titleId,generation,route){
     <div class="optical-mark large">${disc.format==="bluray"?"BD":"DVD"}</div><div><div class="vbadges"><span>${esc(opticalFormatLabel(disc.format))}</span><span>${esc(opticalDuration(title.duration_ms))}</span>${facts.height?`<span>${facts.height}p source</span>`:""}</div>
     <h1>${esc(name)}</h1>${actions}</div></section>
     <div class="optical-columns"><section class="card"><h2 class="section">Chapters</h2>${opticalChapterRows(detail.chapters,drive,title,detail)}</section>
-    <section class="card"><h2 class="section">Audio &amp; subtitles</h2>${audio?`<h3>Audio</h3><ul>${audio}</ul>`:`<div class="hint">No audio tracks were reported.</div>`}${subs?`<h3>Subtitles</h3><ul>${subs}</ul>`:`<div class="hint">No subtitle tracks were reported.</div>`}</section></div>`;
+    <section class="card"><h2 class="section">Audio &amp; subtitles</h2>${audio?`<h3>Audio</h3><ul>${audio}</ul>`:`<div class="hint">No audio tracks were reported.</div>`}${subs?`<h3>Subtitles</h3><ul>${subs}</ul>`:`<div class="hint">No subtitle tracks were reported.</div>`}</section>
+    ${ME.is_admin?opticalMatchHtml(disc,title,matched):""}</div>`;
   layoutChrome("discs",body);
   setPagePhase(route,generation,"content");setPagePhase(route,generation,"settled");
   setPageTimer(()=>opticalRefreshDisc(drive.id,generation,route),5000,generation);
+}
+function opticalMatchHtml(disc,title,matched){
+  const current=detail=>detail?`<div class="optical-match-current"><span>Matched as <strong>${esc(title.match_kind||"title")}</strong> to <a href="#/item/${exactWireId(detail)}">${esc(detail.title)}</a>${detail.year?` (${detail.year})`:""}.</span><button class="ghost sm" onclick="opticalUnmatch(${esc(JSON.stringify(disc.id))},${esc(JSON.stringify(title.id))})">Unmatch</button></div>`:`<p class="hint">No verified library match. Matching is explicit; the volume label is never accepted as proof.</p>`;
+  return `<section class="card optical-match"><h2 class="section">Library match</h2>${current(matched)}
+    <div class="optical-match-search"><label for="optical-match-q">Find a movie or episode</label><div><input id="optical-match-q" type="search" placeholder="Title…" onkeydown="if(event.key==='Enter'){event.preventDefault();opticalSearchMatch()}"><button class="ghost" onclick="opticalSearchMatch()">Search</button></div></div>
+    <div id="optical-match-results" aria-live="polite"></div><div id="optical-match-confirm"></div></section>`;
+}
+async function opticalSearchMatch(){
+  const input=document.getElementById("optical-match-q"), host=document.getElementById("optical-match-results");
+  const q=input&&input.value.trim();if(!q||!host)return;
+  host.innerHTML=`<div class="hint">Searching…</div>`;
+  try{
+    const result=await api(`/search?q=${encodeURIComponent(q)}&limit=20`);
+    const items=(result.results||[]).filter(item=>["movie","episode","video"].includes(item.kind));
+    host.innerHTML=items.length?items.map(item=>{
+      const id=exactWireId(item), bits=[item.kind,item.year].filter(Boolean).join(" · ");
+      const choices=item.kind==="movie"?["movie","extra"]:item.kind==="episode"?["episode","extra"]:["extra"];
+      return `<div class="optical-match-result"><span><strong>${esc(item.title)}</strong><small>${esc(bits)}</small></span><span>${choices.map(kind=>`<button class="ghost sm" onclick="opticalChooseMatch(${esc(JSON.stringify(id))},${esc(JSON.stringify(item.title))},${esc(JSON.stringify(kind))})">Use as ${esc(kind)}</button>`).join("")}</span></div>`;
+    }).join(""):`<div class="hint">No matching movies, episodes or videos found.</div>`;
+  }catch(error){host.innerHTML=`<div class="hint">Search failed: ${esc(error.message)}</div>`;}
+}
+function opticalChooseMatch(itemId,itemTitle,kind){
+  const parts=location.hash.slice("#/discs/".length).split("/");
+  if(parts.length<2)return;
+  OPTICAL_MATCH_DRAFT={discId:null,driveId:decodeURIComponent(parts[0]),titleId:decodeURIComponent(parts[1]),itemId,itemTitle,kind};
+  const host=document.getElementById("optical-match-confirm");if(!host)return;
+  host.innerHTML=`<div class="optical-match-confirm"><span>Match this disc title to <strong>${esc(itemTitle)}</strong> as <strong>${esc(kind)}</strong>?</span><button onclick="opticalSaveMatch()">Save match</button><button class="ghost" onclick="OPTICAL_MATCH_DRAFT=null;this.parentElement.remove()">Cancel</button></div>`;
+}
+async function opticalSaveMatch(){
+  const draft=OPTICAL_MATCH_DRAFT;if(!draft)return;
+  const data=await opticalLoadDrive(draft.driveId), disc=data.drive.disc;
+  if(!disc||!data.titles.some(title=>title.id===draft.titleId)) return toast("The disc changed before the match was saved");
+  draft.discId=disc.id;
+  await api(`/optical/discs/${encodeURIComponent(draft.discId)}/titles/${encodeURIComponent(draft.titleId)}/match`,{method:"PUT",body:{matched_item_id:String(draft.itemId),match_kind:draft.kind}});
+  OPTICAL_MATCH_DRAFT=null;toast("Disc title matched");await render();
+}
+async function opticalUnmatch(discId,titleId){
+  if(!confirm("Remove this verified library match? Disc progress is kept."))return;
+  await api(`/optical/discs/${encodeURIComponent(discId)}/titles/${encodeURIComponent(titleId)}/match`,{method:"PUT",body:{matched_item_id:null,match_kind:null}});
+  toast("Disc title unmatched");await render();
 }
 async function opticalPlayAt(driveId,titleId,startMs){
   const data=await opticalLoadDrive(driveId);

@@ -1098,8 +1098,29 @@ async fn progress(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MatchRequest {
-    matched_item_id: Option<i64>,
+    matched_item_id: Option<OpticalItemId>,
     match_kind: Option<OpticalMatchKind>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OpticalItemId {
+    Number(i64),
+    Text(String),
+}
+
+impl OpticalItemId {
+    fn parse(self) -> Result<i64, ApiError> {
+        let value = match self {
+            Self::Number(value) => value,
+            Self::Text(value) => value
+                .parse::<i64>()
+                .map_err(|_| ApiError::BadRequest("invalid matched item id".to_owned()))?,
+        };
+        (value > 0)
+            .then_some(value)
+            .ok_or_else(|| ApiError::BadRequest("invalid matched item id".to_owned()))
+    }
 }
 
 async fn set_match(
@@ -1113,7 +1134,11 @@ async fn set_match(
             "matched_item_id and match_kind must be present together".into(),
         ));
     }
-    if let (Some(item_id), Some(kind)) = (request.matched_item_id, request.match_kind) {
+    let matched_item_id = request
+        .matched_item_id
+        .map(OpticalItemId::parse)
+        .transpose()?;
+    if let (Some(item_id), Some(kind)) = (matched_item_id, request.match_kind) {
         let item = state
             .store
             .get_item(item_id)
@@ -1135,12 +1160,7 @@ async fn set_match(
     }
     if state
         .store
-        .set_optical_match(
-            &disc_id,
-            &title_id,
-            request.matched_item_id,
-            request.match_kind,
-        )
+        .set_optical_match(&disc_id, &title_id, matched_item_id, request.match_kind)
         .await?
     {
         Ok(StatusCode::NO_CONTENT)
