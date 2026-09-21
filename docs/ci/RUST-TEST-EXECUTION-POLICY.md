@@ -1,9 +1,10 @@
 # Rust test execution policy — where the suite runs, and what red means
 
-**Status:** ready for review · **Executes:** §2.2 / §4.8 / F-build-1 /
+**Status:** implemented; ready for adversarial review · **Executes:** §2.2 / §4.8 / F-build-1 /
 F-hist-7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
-· **Written:** 2026-09-20 against `main` @ `88a3957a`
+· **Written:** 2026-09-20 · **Implemented:** 2026-09-21 against `main` @
+`882862e8`
 
 **Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
 
@@ -13,10 +14,12 @@ ruling this document asks Paul to revisit), [VALIDATION.md](../VALIDATION.md)
 [CI_TEST_OVERHAUL_PLAN.md](CI_TEST_OVERHAUL_PLAN.md) (the earlier lane
 design). Read review §2.2, §4.8 and §7.1, then assessment correction 10 and
 rows `2.2`, `F-build-ops-codehealth-1`, `F-hist-7`, then this document. §3
-presents the options with their measured and estimated cost; **§7.1 records
-the decision as Paul's** — this document recommends, it does not decide.
-M1 (measure) runs before the decision; M2 implements whichever option he
-picks; M3–M6 are independent hygiene items that hold under any option.
+presents the options with their measured and estimated cost; **§7 records
+Paul's decision.** Paul delegated option (a): workspace Clippy and `make unit`
+run only in the ready-PR fast lane, with no periodic schedule. M1's intended
+Forgejo runner measurements were blocked by runner-image drift, so §2.4
+records the failed runs and one bounded source-only fallback without
+misrepresenting it as Forgejo-run evidence.
 
 The standing instruction: **if a step seems to require changing
 `make unit`'s definition, the `plurx-cluster-check` exclusion, the cluster
@@ -58,8 +61,8 @@ is enforcement by convention.
    known-red inventory exists that is empty or lists only `#[ignore =
    "reason"]` tests.
 
-Done means: the decision is recorded in §7.1 with a date, M2's PR is
-merged under it, and M3–M6 are merged.
+Done means: the decision is recorded in §7 with a date, this plan PR is
+merged under it, and M1–M6 evidence is recorded in the Execution log.
 
 ---
 
@@ -71,7 +74,7 @@ Re-verify at build time.
 
 | Trigger | Workflow | Rust content |
 |---|---|---|
-| PR to `main`, ready (not draft) | `main-fast-lane.yml:110-130` `rust_compile` | `make effort-rust-check` (`Makefile:76-77`: `fmt-check`, `spike-lock-check`, `cargo check --workspace --locked --all-targets`) + `make hiqlite-vendor-clippy` (`:156-159`, vendored lib only) |
+| PR to `main`, ready (not draft) | `main-fast-lane.yml` `rust_compile` | pinned Ubuntu 24.04 / FFmpeg 6; `make effort-rust-check`; vendored and workspace Clippy; `make unit` |
 | `v*` tag, `workflow_dispatch` | `ci.yml:6-9` | `check` job (`:260-291`): `make ci-rust-gate` = `fmt-check spike-lock-check lint test-socket-permission-check` + `cargo test --workspace --locked --exclude plurx-cluster-check --no-fail-fast` + `vodencode-restart-check`, on `ffmpeg-6` runners; cluster lanes; `publish_main` (push-to-main only) |
 | `v*` tag, dispatch | `lint.yml:3-6` | `make fmt-check lint` (workspace Clippy), badge |
 | weekly cron | `rust-audit.yml` | advisories only |
@@ -83,11 +86,11 @@ then `vodencode-restart-check` (two `#[ignore]`d real-FFmpeg restart
 fixtures, serial). `make test-full` (`:50-54`) adds
 `plurx-core/hiqlite-contract-tests,plurxd/cluster-integration-tests`.
 
-### 2.2 The stale comment
+### 2.2 The lint comment
 
-`lint.yml:15-16`: `# Release-tag and manual badge workflow. Main pull
-requests run Clippy in main-fast-lane.yml after the one adversarial
-review.` They do not; the fast lane runs the vendored crate's Clippy only.
+`lint.yml` now says that its badge workflow is release-tag/manual and that
+ready main pull requests run workspace Clippy in `main-fast-lane.yml` after
+the one adversarial review. The implementation makes that statement true.
 
 ### 2.3 The ruling
 
@@ -109,7 +112,7 @@ Rust test execution, and the 09-10 record's assumption that "a batch
 process picks up full-suite failures" has no producer (review §1 item 1,
 §2.2).
 
-### 2.4 Measured timings (DEVELOPMENT_PIPELINE §4, one crate, one session)
+### 2.4 Measured timings
 
 | Step | Cold | Warm |
 |---|---:|---:|
@@ -119,6 +122,37 @@ process picks up full-suite failures" has no producer (review §1 item 1,
 
 These are `-p plurxd` numbers on the cloud loop, not the `high-cpu` runner
 and not the workspace.
+
+#### P-01 measurement, 2026-09-21
+
+The intended cold/warm/warm plus media1 experiment could not be completed as
+named Forgejo runs. Temporary measurement workflows were committed to this
+branch and later removed. Forgejo dispatches
+[2382](http://192.168.4.7:3000/noirr/plurx/actions/runs/2382),
+[2384](http://192.168.4.7:3000/noirr/plurx/actions/runs/2384),
+[2386](http://192.168.4.7:3000/noirr/plurx/actions/runs/2386), and
+[2388](http://192.168.4.7:3000/noirr/plurx/actions/runs/2388) did not reach a
+measurement job. The registered fast-lane dispatch
+[2392](http://192.168.4.7:3000/noirr/plurx/actions/runs/2392) did reach
+`gha-nynuc-general-03`, then failed before measurement because that generic
+runner had FFmpeg 8 while the lane requires FFmpeg 6. No media1 runner was
+online. These URLs are failure evidence, not timing evidence.
+
+With no further dispatch retries, one source-only archive of branch
+`401d465f` was measured in an Ubuntu 24.04 container on `nynuc` (16 CPUs),
+then the container and archive were removed. The environment reported Rust
+1.97.1 and FFmpeg 6.1.1. This is relative sizing evidence only: it was not a
+Forgejo job and no warm or media1 result is claimed.
+
+| Environment | Compile + vendored Clippy | Workspace Clippy | `make unit` | Result |
+|---|---:|---:|---:|---|
+| `nynuc`, Ubuntu 24.04 container, source-only cold tree | 155 s | 85 s | ~610 s | green: 2,426 passed, 8 ignored, 0 failed; both serial restart fixtures passed |
+
+The measured Rust work totals about 14 minutes 10 seconds before checkout,
+package setup and cache finalization. The implemented 30-minute job timeout
+therefore retains substantial bounded headroom. The fast Rust job now pins
+Ubuntu 24.04 as its FFmpeg 6 environment while selecting the online generic
+high-CPU pool; this corrects the drift exposed by run 2392.
 
 ### 2.5 The hiqlite-store blind spot
 
@@ -131,32 +165,24 @@ workspace, and `plurxd` depends on `plurx-core` with `features =
 turns the feature on there; the blind spot is the **focused per-crate**
 command form, which is exactly the form AGENTS.md asks contributors to run.
 
-### 2.6 The two red Node tests
+### 2.6 The two Node regressions
 
-- `tests/playback/web-policy.test.js:6007`: `assert.equal((androidController.match(/behindLiveWindow\.attached\(\)/g) || []).length, 2, …)`.
-  The tree has one call, inside `attachRecipe` (`Controller.kt:373-382`),
-  which the prepared commit reaches (`:3565`). The count is stale; the
-  behaviour it meant to pin (budget re-armed at both attach sites) holds.
-  Reproduced here: 137 PASS then the `strictEqual`.
-- `tests/playback/web-control.test.js:3164`: under Node 22.22.2 (this
-  checkout) `settledPromptly(running)` returns `true` where the assertion
-  wants `false` ("the in-flight exchange's verdict does not answer this
-  ask"); Astra's Node 26.8.1 run passed. `settledPromptly` (`:2749-2755`)
-  is four `flush()` microtask pairs, a real 400 ms `setTimeout`, one more
-  flush, then `Promise.race`. The harness stubs `setTimeout` inside the
-  shipped code (`:2354-2455`, `timers` map), so the ask's own bound cannot
-  fire on wall-clock time — `running` settled because the held verdict
-  reached the waiter, or because a stubbed timer was fired by `h.fire()`
-  ordering, and which one differs by runtime. Reproduced here.
+- `web-policy.test.js` no longer counts Kotlin source matches. The existing
+  `BehindLiveWindowRecoveryTest` proves the finite-budget re-arm behaviour,
+  while the Node inventory keeps only ownership and call-shape assertions.
+- `web-control.test.js` passed unchanged under Node 22.22.2 and 26.8.1 on the
+  repaired current tree. The reported runtime split did not reproduce, so
+  neither shipped ordering logic nor the 400 ms bound was changed. Both files
+  now run in the fast-lane preflight under the pinned Node 22 runtime.
 
 ### 2.7 Ignored tests today
 
-Twelve `#[ignore = "…"]` in `crates/` (`grep -rn '#\[ignore' crates/`),
+Eleven `#[ignore = "…"]` in `crates/`,
 every one with a reason (600 MB store probe, 620 MiB EPUB proof, two-hour
 audio benchmark, the two serial FFmpeg restart fixtures, MiniLM download
 opt-in, nightly runner capability, private ATSC capture, macOS
-VideoToolbox, two contract-factory spawns). One bare `#[ignore]` mention is
-a doc comment (`storeprobe.rs:791`), not an attribute.
+VideoToolbox, and contract-factory spawns). `validation.known_red` derives
+this inventory and rejects expired, unknown, or non-ignored entries.
 
 ---
 
@@ -218,13 +244,11 @@ flaky-under-load tests like the exact-count cluster windows RELEASING.md
 records) and produces the periodic green run that release tagging can
 hang off.
 
-**Recommendation:** (c), for the reason the review gives — (b) alone
-leaves the deploy window — and because (a) alone gives no periodic run for
-`sha-` images and tags to bind to. If the measured cost of (a) exceeds
-15 min warm, the fallback recommendation is (b) with `publish_main`
-widened and a notification target, plus AGENTS.md's focused-regression
-duty upgraded to "run `make unit` before marking ready" as a stated
-convention.
+**Decision, 2026-09-20:** Paul selected (a). Workspace Clippy and `make unit`
+join the blocking ready-PR fast lane; no runtime-test schedule, scheduled
+image publication, or recurring runner load is added. The source-only sizing
+run in §2.4 supports a 30-minute timeout, while the first ready-PR run remains
+the required Forgejo proof of the implemented lane.
 
 ### 3.2 `lint.yml` comment
 
@@ -357,6 +381,14 @@ Acceptance: §2.4 has a second table with cold and warm wall-clock for
 `make lint`, `make unit` and the whole `rust_compile` job, each from a
 named Forgejo run URL.
 
+**Outcome:** the named acceptance could not be met before merge because the
+online high-CPU runner image had drifted to FFmpeg 8 and no media1 runner was
+online. §2.4 preserves all failed run URLs and the one explicitly non-Forgejo
+fallback timing. This is a documented infrastructure deviation, not invented
+cold/warm evidence. The deviation also changed the milestone order: the
+current-main unit failures and hang were repaired before measurement so the
+timed command could have a meaningful completion signal.
+
 ### 5.2 M2 — implement Paul's choice
 
 (a): `rust_compile` gains the two steps and the ffmpeg action; `timeout-minutes`
@@ -405,7 +437,7 @@ step runs both playback tests.
 
 Per §3.6.
 
-Acceptance: `python3 -m validation.known_red` prints the twelve ignored
+Acceptance: `python3 -m validation.known_red` prints the eleven ignored
 Rust tests with reasons and "known-red: 0 entries"; `make operations-check`
 includes the expiry test; a deliberately added entry naming a non-ignored
 test fails it.
@@ -414,50 +446,49 @@ test fails it.
 
 ## 6. Verification and rollout
 
-Every PR here is a draft into `main` under the fast lane; M2 is the one
-that changes the lane itself, so its own run is the first evidence. Node
+This plan is one draft PR into `main`; milestones are logical commits and
+Execution-log rows. M2 changes the lane itself, so the same PR's first
+post-review ready run is its Forgejo acceptance evidence. Node
 gate: `node tests/playback/web-policy.test.js` and
 `web-control.test.js` for M4/M5. Python gate: `make operations-check` for
-M2, M3, M6. Nothing here needs a device or the fleet; the only
-fleet-adjacent effect is (b)'s runner load, observed for one week via the
-runner janitor's disk and queue reports (RUNNER-DISK.md) before the
-cadence is called settled.
+M2, M3, M6. Option (a) adds no schedule and no device evidence.
 
-Rollout order: M1 → decision → M2 → M3–M6 in any order. If Paul's answer
-is "keep compile-only", M2 is replaced by a dated paragraph in
-DEVELOPMENT_PIPELINE.md stating that no automatic Rust test execution
-exists by decision, that `make unit` before marking ready is the
-contributor's duty, and that the `sha-` image publication needs its own
-trigger — and M3–M6 still land.
+Actual order: claim → repair the current-main unit baseline → M3–M6 → M2 →
+bounded M1 fallback → exact-main reconciliation. Repair moved ahead of M1
+because a suite with deterministic failures and a reproduced hang cannot
+produce a meaningful lane-cost measurement.
 
 ---
 
-## 7. Open questions
+## 7. Decisions
 
-1. **Paul's decision on §3.1** — (a), (b), (c), or keep. Recorded here
-   with the date when made. Until then, DEVELOPMENT_PIPELINE.md's 09-10
-   block is the policy.
-2. **Whether scheduled runs publish `sha-` images.** Tied to
-   LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md §3.5; if yes, `publish_main`'s
-   condition and OPERATIONS.md's "every successful main run" sentence
-   change together.
-3. **Notification target for a red scheduled run.** Forgejo notification,
-   a Slack-shaped webhook, or the badge alone. The badge alone is what
-   "nobody is told" looks like.
-4. **Node version pin.** The fast lane uses 22; local machines run 26. M5
-   decides which is asserted; running both in preflight doubles a
-   40-second step and is acceptable if the ordering bug is real.
+1. **Execution policy:** option (a), decided by Paul on 2026-09-20. Run
+   workspace Clippy and `make unit` in the ready-PR fast lane only.
+2. **Schedule, image publication, notification:** no schedule, so these
+   option-(b) questions are not applicable to P-01.
+3. **Node version:** CI asserts Node 22. Local diagnosis also ran Node 26;
+   both playback files passed on the same checkout, so no runtime-specific
+   implementation branch was warranted.
+4. **Runner environment:** pin Ubuntu 24.04 / FFmpeg 6 in the Rust job and
+   keep generic high-CPU selection. Run 2392 proved the host image itself no
+   longer supplied the pinned FFmpeg major.
 
 ---
 
 ## Execution log
 
-Executing sessions append one row per milestone PR (see the
+Executing sessions append one row per milestone (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
 trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
-| Date | Model | Session | Milestone | PR | Outcome / evidence |
+| Date | Model | Session | Milestone | Commit / PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p01_builder | Claim | `bab55a7e` / [#401](http://192.168.4.7:3000/noirr/plurx/pulls/401) | Claimed P-01 as one draft plan PR. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p01_builder | Baseline repair | `763f05b2`, `9a17df1e` / #401 | Repaired 29 initial failures plus 12 later deterministic fixture failures; the bounded suite reached 2,380 passed / 12 failed before the final focused repairs, and every repaired exact test then passed. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p01_builder | M3 | `53be36f9` / #401 | `unit-core` ran 1,142 tests; the 99,999 negative floor failed as designed; replicated-store guidance and count-floor contracts added. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p01_builder | M4–M5 | `2f5fc142` / #401 | Web policy/control passed under Node 22.22.2 and 26.8.1; Android JVM tests and lint passed in 9m10s; no ordering implementation change was justified. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p01_builder | M6 | `b4fd8c0a` / #401 | Eleven reasoned ignores, zero known-red entries; malformed/non-ignored/expired catalog cases are rejected. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | `10baad55`, `88f689bd` / #401 | Option (a) implemented with Node playback preflight, workspace Clippy, `make unit`, Ubuntu 24.04 / FFmpeg 6 pin, and a 30-minute bound; no schedule added. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | `f62eb0ab`–`75ed2823` / #401 | Temporary branch instrumentation was committed and removed. Runs 2382/2384/2386/2388 did not measure; run 2392 exposed FFmpeg drift. One bounded source-only fallback measured 155 s compile, 85 s Clippy and ~610 s unit, all green. |
