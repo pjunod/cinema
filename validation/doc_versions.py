@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 import re
@@ -176,7 +177,154 @@ def validate_documented_builds(read: Callable[[str], str]) -> tuple[str, ...]:
     return tuple(errors)
 
 
-def check_repository(root: Path = REPO_ROOT) -> tuple[str, ...]:
-    return validate_documented_builds(
-        lambda path: (root / path).read_text(encoding="utf-8")
+@dataclass(frozen=True)
+class _DocumentedConstant:
+    source: str
+    extractor: Callable[[str], int]
+
+
+def _rust_integer(name: str) -> Callable[[str], int]:
+    return lambda contents: _one(
+        contents,
+        rf"^\s*pub const {re.escape(name)}:\s*u32\s*=\s*(\d+)\s*;",
+        f"{name} definition",
     )
+
+
+def _duration_seconds(name: str) -> Callable[[str], int]:
+    return lambda contents: _one(
+        contents,
+        rf"^\s*(?:pub\(crate\)\s+)?const {re.escape(name)}:[^=\n]+="
+        rf"\s*(?:std::time::)?Duration::from_secs\((\d+)\)\s*;",
+        f"{name} definition",
+    )
+
+
+def _array_value(array_name: str, flag: str) -> Callable[[str], int]:
+    def extract(contents: str) -> int:
+        blocks = re.findall(
+            rf"^\s*const {re.escape(array_name)}:[^=\n]+=\s*&?\[(.*?)^\s*\];",
+            contents,
+            re.MULTILINE | re.DOTALL,
+        )
+        if len(blocks) != 1:
+            raise ValueError(
+                f"expected exactly one {array_name} array, found {len(blocks)}"
+            )
+        values = re.findall(r'^\s*"([^"]+)",\s*$', blocks[0], re.MULTILINE)
+        matches = [values[index + 1] for index, value in enumerate(values[:-1]) if value == flag]
+        if len(matches) != 1 or not matches[0].isdigit():
+            raise ValueError(
+                f"expected exactly one numeric {flag} value in {array_name}, "
+                f"found {matches!r}"
+            )
+        return int(matches[0])
+
+    return extract
+
+
+def _web_asset_count(contents: str) -> int:
+    blocks = re.findall(
+        r"^pub const WEB_ASSETS:[^=\n]+=\s*&\[(.*?)^\];",
+        contents,
+        re.MULTILINE | re.DOTALL,
+    )
+    if len(blocks) != 1:
+        raise ValueError(f"expected exactly one WEB_ASSETS slice, found {len(blocks)}")
+    rows = re.findall(r'^\s*\("[^"]+",', blocks[0], re.MULTILINE)
+    if not rows:
+        raise ValueError("WEB_ASSETS has no rows")
+    return len(rows)
+
+
+# M1 installs the complete source-of-truth table, while presence remains
+# optional until M2 rewrites ARCHITECTURE.md into the marked form. A marked
+# value is still checked immediately: M1 cannot silently accept a wrong quote.
+_DOCUMENTED_CONSTANTS = {
+    "SEGMENT_SECONDS": _DocumentedConstant(
+        "crates/plurx-core/src/transcode/mod.rs", _rust_integer("SEGMENT_SECONDS")
+    ),
+    "COPY_SEGMENT_SECONDS": _DocumentedConstant(
+        "crates/plurx-core/src/transcode/mod.rs",
+        _rust_integer("COPY_SEGMENT_SECONDS"),
+    ),
+    "COPY_FIRST_SEGMENT_SECONDS": _DocumentedConstant(
+        "crates/plurx-core/src/transcode/mod.rs",
+        _rust_integer("COPY_FIRST_SEGMENT_SECONDS"),
+    ),
+    "ACTOR_HARDWARE_STARTUP_BUDGET": _DocumentedConstant(
+        "crates/plurxd/src/transcode.rs",
+        _duration_seconds("ACTOR_HARDWARE_STARTUP_BUDGET"),
+    ),
+    "ACTOR_SOFTWARE_STARTUP_BUDGET": _DocumentedConstant(
+        "crates/plurxd/src/transcode.rs",
+        _duration_seconds("ACTOR_SOFTWARE_STARTUP_BUDGET"),
+    ),
+    "PROGRESS_STALL": _DocumentedConstant(
+        "crates/plurxd/src/transcode.rs", _duration_seconds("PROGRESS_STALL")
+    ),
+    "EXCHANGE_DEADLINE": _DocumentedConstant(
+        "crates/plurxd/src/playback_control.rs",
+        _duration_seconds("EXCHANGE_DEADLINE"),
+    ),
+    "DVR_TICK": _DocumentedConstant(
+        "crates/plurxd/src/live_tv/dvr.rs", _duration_seconds("DVR_TICK")
+    ),
+    "LIVE_HLS_OUTPUT_ARGS_HLS_LIST_SIZE": _DocumentedConstant(
+        "crates/plurxd/src/live_tv.rs",
+        _array_value("LIVE_HLS_OUTPUT_ARGS", "-hls_list_size"),
+    ),
+    "LIVE_HLS_OUTPUT_ARGS_HLS_TIME": _DocumentedConstant(
+        "crates/plurxd/src/live_tv.rs",
+        _array_value("LIVE_HLS_OUTPUT_ARGS", "-hls_time"),
+    ),
+    "WEB_ASSETS": _DocumentedConstant(
+        "crates/plurxd/src/http/web.rs", _web_asset_count
+    ),
+}
+_REQUIRED_DOCUMENTED_CONSTANTS: frozenset[str] = frozenset()
+_DOCUMENTED_VALUE = re.compile(r"`([A-Z][A-Z0-9_]*)`\s*=\s*(\d+)")
+
+
+def validate_documented_constants(read: Callable[[str], str]) -> tuple[str, ...]:
+    """Compare marked ARCHITECTURE.md values with their defining source.
+
+    The fixed `` `NAME` = number `` spelling makes each quote reviewable and
+    keeps unregistered constants from acquiring an unguarded second value.
+    """
+    architecture_path = "docs/ARCHITECTURE.md"
+    architecture = read(architecture_path)
+    occurrences: dict[str, list[int]] = {}
+    errors: list[str] = []
+    for name, value in _DOCUMENTED_VALUE.findall(architecture):
+        if name not in _DOCUMENTED_CONSTANTS:
+            errors.append(
+                f"{architecture_path} quotes `{name}` = {value}, but the "
+                "documented-constant table does not know that name"
+            )
+            continue
+        occurrences.setdefault(name, []).append(int(value))
+
+    for name in sorted(_REQUIRED_DOCUMENTED_CONSTANTS):
+        if name not in occurrences:
+            errors.append(f"{architecture_path} must quote `{name}` at least once")
+
+    for name, values in sorted(occurrences.items()):
+        specification = _DOCUMENTED_CONSTANTS[name]
+        try:
+            source_value = specification.extractor(read(specification.source))
+        except ValueError as exc:
+            errors.append(f"{specification.source}: {exc}")
+            continue
+        for documented_value in values:
+            if documented_value != source_value:
+                errors.append(
+                    f"{architecture_path} quotes `{name}` = {documented_value}; "
+                    f"{specification.source} defines {source_value}"
+                )
+    return tuple(errors)
+
+
+def check_repository(root: Path = REPO_ROOT) -> tuple[str, ...]:
+    read = lambda path: (root / path).read_text(encoding="utf-8")
+    return (*validate_documented_builds(read), *validate_documented_constants(read))
