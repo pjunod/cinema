@@ -137,6 +137,9 @@ pub struct SystemDto {
     pub users: i64,
     pub libraries: usize,
     pub active_transcodes: usize,
+    /// Advisory only: recent login traffic looks like an untrusted reverse
+    /// proxy collapsed distinct clients onto one throttle address.
+    pub login_proxy_advisory: bool,
     /// Backend and watch-state convergence, projected without membership data.
     pub replication: plurx_core::cluster::migration::status::ReplicationStatus,
     /// Hardware encoder slots in use, and the cap
@@ -283,6 +286,8 @@ pub async fn system_info(
         users: state.store.count_users().await?,
         libraries: state.catalogue.list_libraries().await?.len(),
         active_transcodes: state.transcode.active_sessions().await,
+        login_proxy_advisory: state.trusted_proxies.is_empty()
+            && state.login_throttle.unconfigured_proxy_advisory(),
         replication,
         hw_slots_in_use: hw_in_use,
         hw_slots_max: hw_max,
@@ -5067,7 +5072,7 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{auth_revocation_metrics}{live_tv_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}",
+        {scans}{store_metrics}{analysis_runtime_metrics}{membership_metrics}{raft_metrics}{process_metrics}{auth_revocation_metrics}{login_metrics}{live_tv_metrics}{library_channel_metrics}{takeover_metrics}{control_metrics}{playback_metrics}{blocked_get_metrics}{live_recovery_metrics}{probe_reporter_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         takeover_metrics = crate::media_sessions::prometheus(),
@@ -5082,6 +5087,7 @@ pub(crate) async fn metrics(
         // every scan in this library was written by the build serving it.
         probe_reporter_metrics = crate::ffmpeg::reporter_drift_prometheus(),
         auth_revocation_metrics = super::extract::prometheus_auth_revocations(),
+        login_metrics = super::auth::prometheus_login_attempts(),
         // Node-wide statics, so this reads no lock a live segment GET can
         // hold and no `VodServe` handle that a cluster boot may have replaced.
         blocked_get_metrics = state.blocked_gets.prometheus(),

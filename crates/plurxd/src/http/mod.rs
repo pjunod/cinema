@@ -7,6 +7,7 @@
 
 mod analysis;
 mod auth;
+pub(crate) use auth::LoginThrottle;
 mod browse;
 mod cluster;
 pub(crate) mod cluster_operations;
