@@ -16,9 +16,10 @@
 </head>
 <body>
   <h1>Optical media implementation status</h1>
-  <p><strong>Updated:</strong> 2026-09-20 · <strong>Branch:</strong>
-    <code>effort/optical-media</code> · <strong>Base:</strong>
-    <code>7911325407b9</code></p>
+  <p><strong>Updated:</strong> 2026-09-21 · <strong>Task branch:</strong>
+    <code>codex/optical-m0-foundations</code> · <strong>PR:</strong>
+    <code>#403 → effort/optical-media</code> · <strong>Head:</strong>
+    <code>6e80c5fe</code></p>
   <p>This page is the live execution ledger for DVD and Blu-ray playback.
     A green implementation row means code and focused evidence exist; it does
     not stand in for physical-media acceptance.</p>
@@ -31,9 +32,9 @@
       <tr><td>Contract rebase</td><td class="done">complete</td><td>Rebased onto current main; runtime enablement is authoritative and all readiness rows are advisory.</td></tr>
       <tr><td>Pinned compiler loop</td><td class="done">complete</td><td>Rust 1.97.1; clean-base <code>plurx-core</code> + <code>plurxd</code> all-target check passed in 1m 32s.</td></tr>
       <tr><td>M0 source feasibility</td><td class="open">partial</td><td>Typed input and bounded inspector contracts built; combined core+daemon clippy passed and 7/7 focused tests passed. Local FFmpeg reports DVD/Blu-ray missing despite exit zero; no reachable host has an identified drive. See <a href="../evidence/OPTICAL-M0-2026-09-20.md">evidence</a>.</td></tr>
-      <tr><td>M1 domain and Store</td><td class="done">built</td><td>Common path-free playback facts, managed optical delivery, versioned source/output identity, SQLite + Hiqlite persistence, progress, matching, cleanup and explicit grants are in <code>b9032504</code>. Combined check/Clippy passed; 13 optical and one migration-guard test passed. See <a href="../evidence/OPTICAL-M1-2026-09-20.md">evidence</a>.</td></tr>
+      <tr><td>M1 domain and Store</td><td class="done">built</td><td>Common path-free playback facts, managed optical delivery, versioned source/output identity, SQLite + Hiqlite persistence, progress, matching, cleanup and explicit grants are implemented. Admins can now grant or revoke disc playback from the existing Users settings surface; login and <code>/me</code> expose only that path-free entitlement. See <a href="../evidence/OPTICAL-M1-2026-09-20.md">evidence</a>.</td></tr>
       <tr><td>M2 lifecycle and admission</td><td class="done">built</td><td>Configured drives, fresh insertion generations, bounded helper calls, conditional observation, single-reader permits, cancellation fencing and generation/session-checked eject are implemented. Physical-host acceptance remains open. See <a href="../evidence/OPTICAL-M2-2026-09-20.md">evidence</a>.</td></tr>
-      <tr><td>M3 API and VOD</td><td class="open">partial</td><td>Authenticated path-free discovery, title detail, decision, session-bound progress, match and eject contracts compile. Source-aware VOD session execution remains blocked on the M0 reader/seek proof; no production playback claim is made.</td></tr>
+      <tr><td>M3 API and VOD</td><td class="open">partial</td><td>Authenticated path-free discovery, title detail, decision, session-bound progress, match and eject contracts compile. The bounded probe document is retained privately, playback admission revalidates the canonical read-only mount, and a lease now owns the typed DVD/Blu-ray input. Shared encoded VOD lowers that input for every open and keeps managed optical audio on the same demux reader. Session registration, source-loss teardown, copy indexing and physical seek acceptance remain open, so no production playback claim is made.</td></tr>
       <tr><td>M4 cluster routing</td><td class="open">partial</td><td>Media-pool protocol 7 advertises bounded path-free <code>optical_v1</code> drive ownership with normal snapshot expiry. Any ingress can list fresh remote drives; remote operations fail with typed <code>optical_owner_unavailable</code> until authenticated relay and owner-only placement land. See <a href="../evidence/OPTICAL-M4-2026-09-21.md">evidence</a>.</td></tr>
       <tr><td>M5 web UI</td><td class="open">partial</td><td>The Developer tab has an authoritative enable switch plus advisory configured-drive, host, helper, device, mount, permission and physical-acceptance rows. Library discovery and disc detail remain downstream of working playback.</td></tr>
       <tr><td>M6 native clients</td><td class="open">open</td><td>Not started.</td></tr>
@@ -47,7 +48,7 @@
   <ul>
     <li>Feature enablement is explicit and authoritative. Readiness evidence is advisory and never disables or overrides the saved choice.</li>
     <li>Operational safety checks still reject unauthorized, stale-generation, busy-drive, and unsupported-reader operations.</li>
-    <li>Compile and narrowly focused regression evidence required by the repository may run before final promotion; the full fast lane runs once on the reviewed candidate.</li>
+    <li>Compiler and syntax checks required by the repository may run while building; the requested full fast lane runs once on the reviewed candidate.</li>
     <li>No deployment is part of this effort unless separately requested.</li>
   </ul>
 </body>
