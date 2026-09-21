@@ -1,6 +1,6 @@
 # Interlace in the media contract — field order as a fact, deinterlace as a decision
 
-**Status:** ready for review · **Executes:** Q4 / §3.1.1 / F-stream-4 and
+**Status:** implementation in draft #417; M5 blocked on media1 qualification · **Executes:** Q4 / §3.1.1 / F-stream-4 and
 the field-rate bitrate half of Q9 / F-ltv-7 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -13,8 +13,8 @@ assessment's Q4, F-stream-4, Q9 and F-ltv-7 rows
 and the Live TV planner
 ([`live_tv_delivery.rs`](../../crates/plurxd/src/live_tv_delivery.rs)),
 which already carries `field_order` and is the precedent this plan copies
-onto the file path. Work the milestones in order; one draft PR each into
-`main` under the fast lane. Every `file:line` was read at `88a3957a` and is
+onto the file path. Work the milestones in order in one whole-plan draft PR
+to `main` under the fast lane. Every `file:line` was read at `88a3957a` and is
 marked **re-verify at build time**. If a step seems to require doubling the
 encoded-VOD frame grid, changing a GPU graph's filter string, or treating
 `field_order != progressive` as proof, stop and flag it.
@@ -198,8 +198,8 @@ makes the choice explicit and the operator's.
 - M5 adds, after qualification on media1: `vpp_qsv=…:deinterlace=2`
   (advanced, frame-rate output) inside the VppQsv string and
   `deinterlace_vaapi=mode=motion_adaptive:rate=frame` before `scale_vaapi`.
-  Each is its own PR with `idet` counts and a picture comparison against the
-  CPU bwdif output on the same fixture.
+  Each is its own logical M5 commit in the plan PR with `idet` counts and a
+  picture comparison against the CPU bwdif output on the same fixture.
 
 ### 3.4 Live TV output cadence and bitrate (M3)
 
@@ -408,6 +408,32 @@ longer names interlace for QSV once it passes.
    `mpeg2video` only, decided after M1's backfill shows how many rows read
    `unknown`.
 
+## 8. Execution decisions
+
+- SQLite v64 and replicated v43 were still the next free migrations after
+  rebasing onto `main` at `665b8b5c`; the implementation uses those numbers.
+- The resolved-plan version is 2 because adding the deinterlace decision
+  changes artifact identity. The facts cache projection is version 3 after M4
+  because the cached value now includes the content verdict as well as
+  `field_order`.
+- `live_tv.deinterlace_output` is intentionally independent of the Live TV
+  configuration-generation compare-and-swap. It changes subsequent encoder
+  planning, not tuner discovery, and the Developer control stays editable
+  while Live TV is enabled. Its prerequisites and unmeasured encoder status
+  are advisory and never disable the control.
+- The first corrected misflagged fixture measured 35.29 dB after bwdif, below
+  M2's 40 dB shipping threshold. M4 therefore became mandatory for M2. The
+  verifier reuses the startup-snapshotted FFprobe, the exact held source
+  descriptor and its single offset lane; it does not introduce a pathname
+  reopen or a second executable identity. The final `idet` summary must be
+  strictly more than 90 percent progressive, including undetermined frames in
+  the denominator, before the field-order hint is overruled.
+- Descriptor-bound probing is production-supported on Unix/Linux. Windows
+  records `idet_unavailable` and retains the conservative field-order decision
+  until its held-handle execution path can provide the same invariant.
+- M5 has no safe implementation without the plan's media1 QSV/VAAPI fixture
+  measurements. No hardware filter string or hidden enable gate was added.
+
 ---
 
 ## Execution log
@@ -420,4 +446,8 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M1 | [#417](http://192.168.4.7:3000/noirr/plurx/pulls/417) (`4fc76aa3b`) | Field order captured, migrated and exact-fence backfilled on SQLite/Hiqlite; shared conservative `ScanType`, decode-fact/cache identity and read-only DTO covered by focused probe, migration and store-contract tests. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M2 | [#417](http://192.168.4.7:3000/noirr/plurx/pulls/417) (`4fc76aa3b`, acceptance corrected in `a55bad845`) | CPU `bwdif=send_frame` precedes scale; interlaced GPU graphs decline to CPU; resolved-plan identity/logging and generated TFF/BFF/progressive/telecine/misflag fixtures are executable. M4 is part of this shipping boundary because the unverified misflag measured 35.29 dB. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M3 | [#417](http://192.168.4.7:3000/noirr/plurx/pulls/417) (`4fc76aa3b`) | Exact rational output cadence drives reported frame rate and bitrate (15,984/7,992 kbps); cap preserved; replicated Developer setting saves independently and remains advisory-only. Fleet playback/journal observation remains post-deploy evidence. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M4 | [#417](http://192.168.4.7:3000/noirr/plurx/pulls/417) (`a55bad845`) | Ten-second-media `idet` pass uses the snapshotted FFprobe and held descriptor under the existing overall deadline, output caps, cancellation/reap and offset ownership. Verdict is cached/digested, strict >90% progressive overrides bwdif, and three fixed metric labels are exported. Real FFmpeg/FFprobe descriptor acceptance confirms both overrule and confirmation. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/s01_builder | M5 | [#417](http://192.168.4.7:3000/noirr/plurx/pulls/417) | **needs:** run the §5.5 media1 QSV/VAAPI prompt and record idet, cadence, signalstats and wall-time comparisons. Hardware graphs remain conservatively declined; no unqualified filter was added. |
