@@ -19129,6 +19129,7 @@ impl TranscodeManager {
         }
         Ok(Some(Arc::new(crate::vodencode::Encoding {
             source_object_version,
+            source_input: None,
             plan,
             resources,
             options,

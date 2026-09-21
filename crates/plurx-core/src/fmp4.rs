@@ -8466,8 +8466,7 @@ mod tests {
             )
             .expect("execution");
             let bytes =
-                run(Command::new(ffmpeg())
-                    .args(vod_pipe_args(&file, &plan, &execution, grid, 12.0)));
+                run(Command::new(ffmpeg()).args(vod_pipe_args(&plan, &execution, grid, 12.0)));
             read_all(&bytes)
         };
 

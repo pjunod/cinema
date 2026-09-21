@@ -43,6 +43,12 @@ pub enum InputBuildError {
 }
 
 impl ResolvedInput {
+    pub fn path(&self) -> &std::path::Path {
+        match self {
+            Self::File { path } | Self::Dvd { path, .. } | Self::Bluray { path, .. } => path,
+        }
+    }
+
     pub fn validate(&self) -> Result<(), InputBuildError> {
         let (path, selection, angle) = match self {
             Self::File { path } => {

@@ -505,6 +505,16 @@ impl DecodeCacheIdentity {
         Self(hex::encode(digest.finalize()))
     }
 
+    /// Identity for a managed source whose version is already generation-
+    /// fenced by its owner. This namespace cannot alias catalog file recipes.
+    pub fn from_managed_source(identity: &str) -> Self {
+        let mut digest = Sha256::new();
+        digest.update(b"managed-source-v1\0");
+        digest.update((identity.len() as u64).to_le_bytes());
+        digest.update(identity.as_bytes());
+        Self(hex::encode(digest.finalize()))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -546,6 +556,16 @@ impl DecodeCatalogMetadata {
             file.hdr.as_deref(),
             file.hdr_format.as_deref(),
             file.dolby_vision,
+        )
+    }
+
+    pub fn from_playback_facts(
+        facts: &crate::playback::PlaybackMediaFacts,
+    ) -> Result<Self, PlanError> {
+        Self::new(
+            facts.hdr.as_deref(),
+            facts.hdr_format.as_deref(),
+            facts.dolby_vision,
         )
     }
 
@@ -1714,6 +1734,27 @@ impl TranscodeMediaOptions {
             pipeline: options.pipeline,
             subtitle_burn: options.subtitle_burn.clone(),
             cache_identity: DecodeCacheIdentity::from_media_file(source),
+        }
+    }
+
+    pub fn from_playback_facts(
+        source: &crate::playback::PlaybackMediaFacts,
+        options: &TranscodeOptions,
+        cache_identity: DecodeCacheIdentity,
+    ) -> Self {
+        Self {
+            target_height: options.target_height,
+            video_bitrate_kbps: options.video_bitrate_kbps,
+            effective_rate_control: options.effective_rate_control,
+            audio_channels: options.audio_channels,
+            audio_bitrate_kbps: options.audio_bitrate_kbps,
+            audio_index: options.audio_index,
+            audio_offset_ms: source.audio_offset_ms,
+            input_has_audio: !source.audio_streams.is_empty(),
+            tone_map: options.tone_map,
+            pipeline: options.pipeline,
+            subtitle_burn: options.subtitle_burn.clone(),
+            cache_identity,
         }
     }
 }

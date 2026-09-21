@@ -1,6 +1,5 @@
 //! Immutable encoded media: one frame grid owns the plan and every restart.
 
-use crate::domain::MediaFile;
 use crate::segplan::{PlanCut, PlanEntry, PlanEntryKind, SegmentPlan, SEGPLAN_VERSION};
 
 use super::{ResolvedTranscode, TranscodeExecution, BURNED_VIDEO_LABEL};
@@ -111,7 +110,6 @@ impl VodFrameGrid {
 /// final rebase, so libass and manual A/V correction retain film time after
 /// seeking. The output frame grid and IDRs are identical on every restart.
 pub fn vod_pipe_args(
-    source: &MediaFile,
     plan: &ResolvedTranscode,
     execution: &TranscodeExecution,
     grid: VodFrameGrid,
@@ -210,7 +208,10 @@ pub fn vod_pipe_args(
     );
     // Use the same explicit even raster for CPU scale, GPU/bitmap scale,
     // identity and HLS facts; -2's independent aspect rounding can differ.
-    if let Some((width, height)) = super::output_size(source, media.target_height) {
+    if let (Some(width), Some(height)) = (
+        plan.output_contract().effective_width(),
+        plan.output_contract().effective_height(),
+    ) {
         let automatic = format!("scale=-2:'min({},ih)'", media.target_height);
         for flag in ["-vf", "-filter_complex"] {
             if let Some(index) = args.iter().position(|arg| arg == flag) {
@@ -386,7 +387,6 @@ mod tests {
         )
         .expect("execution");
         let args = vod_pipe_args(
-            &source,
             &plan,
             &execution,
             VodFrameGrid::new(24, 1).expect("grid"),

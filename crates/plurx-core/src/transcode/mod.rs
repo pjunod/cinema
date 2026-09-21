@@ -828,9 +828,25 @@ impl TranscodeExecution {
         pacing: Pacing,
         out_dir: &str,
     ) -> Result<Self, TranscodeExecutionError> {
-        if source.path.as_os_str().is_empty() {
-            return Err(TranscodeExecutionError::Invalid("source path is empty"));
-        }
+        Self::from_resolved_input(
+            crate::optical::ResolvedInput::File {
+                path: source.path.clone(),
+            },
+            options,
+            pacing,
+            out_dir,
+        )
+    }
+
+    pub fn from_resolved_input(
+        source_input: crate::optical::ResolvedInput,
+        options: &TranscodeOptions,
+        pacing: Pacing,
+        out_dir: &str,
+    ) -> Result<Self, TranscodeExecutionError> {
+        source_input
+            .validate()
+            .map_err(|_| TranscodeExecutionError::Invalid("source input is invalid"))?;
         if out_dir.is_empty() {
             return Err(TranscodeExecutionError::Invalid(
                 "output directory is empty",
@@ -862,11 +878,10 @@ impl TranscodeExecution {
                 "pacing values must be finite and positive",
             ));
         }
+        let source_path = source_input.path().to_path_buf();
         Ok(Self {
-            source_input: crate::optical::ResolvedInput::File {
-                path: source.path.clone(),
-            },
-            source_path: source.path.clone(),
+            source_input,
+            source_path,
             start_seconds: options.start_seconds,
             start_number: options.start_number,
             subtitle_file: options.subtitle_file.clone(),
@@ -948,7 +963,15 @@ const BURNED_VIDEO_LABEL: &str = "[vout]";
 /// never probed — an unprobed file has no aspect to preserve, and guessing one
 /// would misshape the picture rather than the subtitle.
 pub fn output_size(source: &MediaFile, target_height: i64) -> Option<(i64, i64)> {
-    let (sw, sh) = (source.width?, source.height?);
+    output_size_for_dimensions(source.width?, source.height?, target_height)
+}
+
+pub fn output_size_for_dimensions(
+    source_width: i64,
+    source_height: i64,
+    target_height: i64,
+) -> Option<(i64, i64)> {
+    let (sw, sh) = (source_width, source_height);
     if sw <= 0 || sh <= 0 {
         return None;
     }

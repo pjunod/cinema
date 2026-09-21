@@ -17,6 +17,10 @@ use crate::admission::{
 /// grade, cadence, rate control, tracks, or burn pixels under an immutable URI.
 pub(crate) struct Encoding {
     pub source_object_version: String,
+    /// `None` preserves descriptor-attested regular-file execution. Managed
+    /// sources retain their typed input here because no catalog file path may
+    /// be invented for them.
+    pub source_input: Option<plurx_core::optical::ResolvedInput>,
     pub plan: ResolvedTranscode,
     pub resources: TranscodeResourceEstimate,
     pub options: TranscodeOptions,
@@ -166,8 +170,12 @@ impl Encoding {
         let mut options = self.options.clone();
         options.start_seconds = start_seconds;
         let execution = TranscodeExecution::from_options(file, &options, Pacing::unpaced(), ".")
+            .and_then(|execution| match &self.source_input {
+                Some(input) => execution.with_source_input(input.clone()),
+                None => Ok(execution),
+            })
             .expect("frozen VOD execution remains valid");
-        vod_pipe_args(file, &self.plan, &execution, self.grid, duration_seconds)
+        vod_pipe_args(&self.plan, &execution, self.grid, duration_seconds)
     }
 
     pub fn identity(&self, file: &MediaFile, duration_seconds: f64) -> SourceIdentity {
