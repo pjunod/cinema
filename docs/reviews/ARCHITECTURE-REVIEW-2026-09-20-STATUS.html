@@ -129,6 +129,7 @@
     td:nth-child(4), td:nth-child(9) { white-space: nowrap; }
     td:nth-child(5) { min-width: 165px; }
     td:nth-child(10) { min-width: 260px; }
+    td:nth-child(11) { min-width: 280px; }
 
     .status {
       display: inline-block;
@@ -146,6 +147,25 @@
     .status-merged { color: var(--merged); }
     .status-done { color: var(--done); }
     .status-abandoned { color: var(--abandoned); }
+
+    .live-pr + .live-pr {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--line);
+    }
+
+    .live-pr div { margin-top: 2px; color: var(--muted); font-size: 0.84rem; }
+    .live-pr .overlay-title { color: var(--text); }
+    .pr-readiness {
+      padding: 1px 6px;
+      border: 1px solid currentColor;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 700;
+    }
+    .pr-draft { color: var(--active); }
+    .pr-ready { color: var(--merged); }
+    .overlay-none { color: var(--muted); font-size: 0.84rem; }
 
     .message {
       padding: 18px;
@@ -198,7 +218,15 @@
         review workboard</a>. This page fetches and parses that table; it does
         not keep a second copy of its rows.
       </p>
+      <p class="muted">
+        The final column is a read-only browser overlay from the same-origin
+        Forgejo API. It maps open PRs onto board rows but never writes either
+        source; if the API is unavailable, the canonical rows remain visible.
+      </p>
       <p class="muted" id="freshness" aria-live="polite">Loading workboard…</p>
+      <p class="muted" id="overlay-freshness" aria-live="polite">
+        Forgejo overlay waiting for the canonical board…
+      </p>
     </div>
 
     <section aria-labelledby="summary-heading">
@@ -261,15 +289,33 @@
     "use strict";
 
     const WORKBOARD = "ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md";
-    const { EXPECTED_COLUMNS, parseBoard } =
+    const {
+      EXPECTED_COLUMNS,
+      LIVE_COLUMN,
+      MAX_PULL_PAGES,
+      MAX_STATUS_FETCHES,
+      PULL_PAGE_SIZE,
+      STATUS_CONCURRENCY,
+      aggregateCommitStatus,
+      mapPullsToPlans,
+      overlayFallback,
+      parseBoard,
+      pullOverlayMarkup,
+    } =
       globalThis.ArchitectureReviewStatusParser;
     const REFRESH_MS = 60_000;
+    const PULLS_API = "/api/v1/repos/noirr/plurx/pulls";
+    const COMMIT_STATUS_API = "/api/v1/repos/noirr/plurx/commits";
 
-    const state = { rows: [] };
+    const state = {
+      rows: [],
+      overlay: { byPlan: {}, mode: "loading", reason: "" },
+    };
     const elements = {
       error: document.querySelector("#error"),
       freshness: document.querySelector("#freshness"),
       loading: document.querySelector("#loading"),
+      overlayFreshness: document.querySelector("#overlay-freshness"),
       priority: document.querySelector("#priority-filter"),
       refresh: document.querySelector("#refresh"),
       resultCount: document.querySelector("#result-count"),
@@ -286,7 +332,7 @@
       if (normalized === "unclaimed") return "unclaimed";
       if (["claimed", "in-progress", "in-review"].includes(normalized)) return "active";
       if (normalized.startsWith("blocked:")) return "blocked";
-      if (normalized === "merged") return "merged";
+      if (normalized === "merged" || normalized.startsWith("merged:")) return "merged";
       if (normalized === "done") return "done";
       if (normalized.startsWith("abandoned:")) return "abandoned";
       return "active";
@@ -368,7 +414,7 @@
       const rows = filteredRows();
       elements.tableHead.replaceChildren();
       const headerRow = document.createElement("tr");
-      for (const column of EXPECTED_COLUMNS) {
+      for (const column of [...EXPECTED_COLUMNS, LIVE_COLUMN]) {
         const heading = document.createElement("th");
         heading.scope = "col";
         heading.textContent = column;
@@ -379,9 +425,21 @@
       elements.tableBody.replaceChildren();
       for (const row of rows) {
         const tableRow = document.createElement("tr");
-        for (const column of EXPECTED_COLUMNS) {
+        for (const column of [...EXPECTED_COLUMNS, LIVE_COLUMN]) {
           const cell = document.createElement("td");
-          if (column === "Status") {
+          if (column === LIVE_COLUMN) {
+            const pulls = state.overlay.byPlan[row.Id] || [];
+            if (pulls.length) {
+              cell.innerHTML = pulls.map(pullOverlayMarkup).join("");
+            } else {
+              const empty = document.createElement("span");
+              empty.className = "overlay-none";
+              empty.textContent = state.overlay.mode === "unavailable"
+                ? "Overlay unavailable"
+                : "No mapped open PR";
+              cell.append(empty);
+            }
+          } else if (column === "Status") {
             const status = document.createElement("span");
             status.className = `status status-${statusGroup(row.Status)}`;
             status.textContent = row.Status;
@@ -394,6 +452,101 @@
         elements.tableBody.append(tableRow);
       }
       elements.resultCount.textContent = `Showing ${rows.length} of ${state.rows.length} plans.`;
+    }
+
+    async function apiJson(url) {
+      const response = await fetch(url, {
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      });
+      if (!response.ok) {
+        throw new Error(`Forgejo API returned HTTP ${response.status}.`);
+      }
+      return response.json();
+    }
+
+    async function openPulls() {
+      const pulls = [];
+      for (let page = 1; page <= MAX_PULL_PAGES; page += 1) {
+        const query = new URLSearchParams({
+          state: "open",
+          limit: String(PULL_PAGE_SIZE),
+          page: String(page),
+        });
+        const batch = await apiJson(`${PULLS_API}?${query}`);
+        if (!Array.isArray(batch)) throw new Error("Forgejo pull list was not an array.");
+        pulls.push(...batch);
+        if (batch.length < PULL_PAGE_SIZE) break;
+      }
+      return pulls;
+    }
+
+    async function mapWithConcurrency(items, limit, operation) {
+      const results = new Array(items.length);
+      let next = 0;
+      async function worker() {
+        while (next < items.length) {
+          const index = next;
+          next += 1;
+          results[index] = await operation(items[index]);
+        }
+      }
+      await Promise.all(
+        Array.from({ length: Math.min(limit, items.length) }, () => worker()),
+      );
+      return results;
+    }
+
+    async function exactHeadStatus(pull) {
+      try {
+        const payload = await apiJson(
+          `${COMMIT_STATUS_API}/${encodeURIComponent(pull.headSha)}/status`,
+        );
+        return aggregateCommitStatus(payload, pull.headSha);
+      } catch (_error) {
+        return null;
+      }
+    }
+
+    async function loadOverlay() {
+      const previous = state.overlay;
+      elements.overlayFreshness.textContent = "Loading same-origin Forgejo PR state…";
+      try {
+        const pulls = await openPulls();
+        const mapped = mapPullsToPlans(pulls, state.rows.map((row) => row.Id));
+        const mappedPulls = Object.values(mapped.byPlan).flat();
+        const statusTargets = mappedPulls.slice(0, MAX_STATUS_FETCHES);
+        const statuses = await mapWithConcurrency(
+          statusTargets,
+          STATUS_CONCURRENCY,
+          exactHeadStatus,
+        );
+        statusTargets.forEach((pull, index) => {
+          pull.ci = statuses[index];
+        });
+        state.overlay = { byPlan: mapped.byPlan, mode: "available", reason: "" };
+        renderTable();
+
+        const mappedCount = mappedPulls.length;
+        const failedStatuses = statuses.filter((status) => status === null).length;
+        const constrained = Math.max(0, mappedCount - MAX_STATUS_FETCHES);
+        const loaded = new Intl.DateTimeFormat(undefined, {
+          dateStyle: "medium", timeStyle: "medium",
+        }).format(new Date());
+        const qualifications = [];
+        if (failedStatuses) qualifications.push(`${failedStatuses} CI lookups unavailable`);
+        if (constrained) qualifications.push(`${constrained} CI lookups omitted by the cap`);
+        elements.overlayFreshness.textContent =
+          `Forgejo overlay loaded ${mappedCount} mapped open plan PRs at ${loaded}` +
+          (qualifications.length ? `; partial: ${qualifications.join(", ")}.` : ".");
+      } catch (error) {
+        state.overlay = overlayFallback(previous, error.message);
+        renderTable();
+        elements.overlayFreshness.textContent = state.overlay.mode === "stale"
+          ? `Forgejo overlay is stale; the last successful mapping remains visible. ${state.overlay.reason}`
+          : `Forgejo overlay unavailable; the canonical board remains complete. ${state.overlay.reason}`;
+      }
     }
 
     async function loadBoard() {
@@ -415,6 +568,7 @@
           "Refreshes every 60 seconds.";
         elements.loading.classList.add("hidden");
         elements.tableWrap.classList.remove("hidden");
+        await loadOverlay();
       } catch (error) {
         elements.loading.classList.add("hidden");
         elements.tableWrap.classList.add("hidden");

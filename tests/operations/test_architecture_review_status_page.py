@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 PAGE = ROOT / "docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-STATUS.html"
 PARSER = ROOT / "docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-STATUS.js"
 BOARD = ROOT / "docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md"
+OVERLAY_TEST = ROOT / "tests/operations/architecture_review_status_overlay.test.js"
 
 EXPECTED_COLUMNS = (
     "Id",
@@ -54,9 +55,17 @@ class ArchitectureReviewStatusPageCase(unittest.TestCase):
             "One PR per milestone",
             "Each milestone PR",
             "milestone PRs open",
-            "merged: <milestones>",
         ):
             self.assertNotIn(superseded, board)
+
+    def test_c01_records_the_merge_without_claiming_post_merge_evidence(self) -> None:
+        row = next(line for line in board_rows() if line.startswith("| C-01 |"))
+        self.assertIn("| merged: M1-M3 |", row)
+        self.assertIn("[PR #395]", row)
+        self.assertIn("`79113254`", row)
+        self.assertIn("§6.2–§6.4 lab soak, HAR/waterfall", row)
+        self.assertIn("device-reader evidence remains pending", row)
+        self.assertIn("not done", row)
 
     def test_page_fetches_the_canonical_board_without_caching_it(self) -> None:
         page = PAGE.read_text(encoding="utf-8")
@@ -68,6 +77,24 @@ class ArchitectureReviewStatusPageCase(unittest.TestCase):
         self.assertIn("window.setInterval(loadBoard, REFRESH_MS)", page)
         self.assertIn(PARSER.name, page)
         self.assertIn("globalThis.ArchitectureReviewStatusParser", page)
+
+    def test_forgejo_overlay_is_bounded_and_fails_open_to_board_rows(self) -> None:
+        page = PAGE.read_text(encoding="utf-8")
+        parser = PARSER.read_text(encoding="utf-8")
+
+        self.assertIn('const PULLS_API = "/api/v1/repos/noirr/plurx/pulls";', page)
+        self.assertIn('credentials: "same-origin"', page)
+        self.assertIn("slice(0, MAX_STATUS_FETCHES)", page)
+        self.assertIn("STATUS_CONCURRENCY", page)
+        self.assertIn("state.overlay = overlayFallback(previous, error.message)", page)
+        self.assertIn("the canonical board remains complete", page)
+        load_board = page[page.index("async function loadBoard()") :]
+        self.assertLess(
+            load_board.index("renderTable();"),
+            load_board.index("await loadOverlay();"),
+        )
+        self.assertIn("const MAX_PULL_PAGES = 2;", parser)
+        self.assertIn("const MAX_STATUS_FETCHES = 12;", parser)
 
     def test_page_does_not_copy_plan_rows(self) -> None:
         page = PAGE.read_text(encoding="utf-8")
@@ -117,6 +144,20 @@ console.log(JSON.stringify({
         self.assertEqual([10], observed["cellCounts"])
         self.assertIn("ldd | grep fontconfig", observed["s04Notes"])
         self.assertTrue(observed["schemaMismatchFailedClosed"])
+
+    def test_overlay_javascript_contract_executes(self) -> None:
+        result = subprocess.run(
+            ["node", str(OVERLAY_TEST), str(PARSER), str(BOARD)],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        observed = json.loads(result.stdout)
+        self.assertEqual(["P-01", "C-02", "S-01"], observed["currentExamples"])
+        self.assertEqual("C-01", observed["customBranchFallback"])
+        self.assertTrue(observed["escaped"])
+        self.assertEqual(["unavailable", "stale"], observed["fallbackModes"])
 
 
 if __name__ == "__main__":
