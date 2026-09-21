@@ -693,6 +693,7 @@ contract = "Every supported source reaches a client through the intended direct,
 paths = [
   "crates/plurx-core/src/fmp4.rs",
   "crates/plurx-core/src/mediafacts.rs",
+  "crates/plurx-core/src/process/**",
   "crates/plurx-core/src/playback/**",
   "crates/plurx-core/src/tracks.rs",
   "crates/plurx-core/src/segplan.rs",

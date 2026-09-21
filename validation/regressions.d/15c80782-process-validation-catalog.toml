@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["15c80782"]
+points = ["validation.framework"]
+checks = ["catalog-contract"]
+reason = "The fail-closed validation catalog maps the shared bounded-process module to the playback pipeline, and the catalog contract rejects any audited source that loses an owning functionality point."
