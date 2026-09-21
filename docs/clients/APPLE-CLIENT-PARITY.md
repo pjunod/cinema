@@ -11,7 +11,7 @@ The implementation history, deployment evidence, and resolved copied-Dolby-
 Vision investigation are recorded in
 [APPLE-NATIVE-SUBTITLES-HANDOFF.md](APPLE-NATIVE-SUBTITLES-HANDOFF.md).
 
-> Status (2026-09-15): source is v0.3.0, Apple build 173. Timer-only
+> Status (2026-09-15): source is v0.3.0, Apple build 174. Timer-only
 > presentation stalls stay explicitly unknown and use one bounded same-recipe
 > repair without a legacy quality-reduction ticket. The repair preserves the
 > selected quality, HDR, tracks, offset, film position and pause intent; actual
@@ -33,6 +33,20 @@ Vision investigation are recorded in
 > TestFlight and the deployment ledger still ends at server `787eaa6`, so
 > publishing plus the broader real-hardware/offline matrix remain release
 > gates.
+
+**Display matching and audio-session implementation (2026-09-20).** Apple
+build 174 restores the `AVPlayerLayer` behavior that `AVPlayerViewController`
+normally supplies: the finite and Live TV players now apply the committed
+asset's preferred display criteria to the active tvOS window when the viewer's
+Match Content setting permits it, and clear the criteria on every teardown.
+All three player stacks distinguish a system interruption from viewer pause,
+keep stall recovery idle during the interruption, resume only when both iOS
+and the retained viewer intent permit it, and turn loss of the old audio route
+into a real pause. Simulator policy tests and iOS/tvOS compilation pass. The
+physical HDMI observations for the Library-channel inline `VideoPlayer` and
+fullscreen surface have **not** been made; the plan's Apple TV prompt remains
+the required evidence, so this paragraph records implementation and the open
+measurement rather than asserting that either surface switches modes.
 
 ## What parity means
 
