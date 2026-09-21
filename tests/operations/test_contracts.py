@@ -1762,6 +1762,7 @@ assert.equal(context.ACT_TIMER, null);
             fast_rust_steps["Install Rust gate prerequisites"], "run"
         )
         self.assertTrue(any("python3" in line for line in prerequisites))
+        self.assertTrue(any("nodejs" in line for line in prerequisites))
         self.assertEqual(
             workflow_step_literal(fast_rust_steps["Lint the workspace"], "run"),
             ["make lint"],
