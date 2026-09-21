@@ -1,6 +1,7 @@
 # Architecture document reconciliation — make §1–§9 describe the tree it ships with
 
-**Status:** ready for review · **Executes:** §4.7 / F-hist-10 / F-ltv-10 from
+**Status:** open — M1-M4 implemented in draft PR #398; adversarial review
+pending · **Executes:** §4.7 / F-hist-10 / F-ltv-10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
 
@@ -522,4 +523,7 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M1 | [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | Constant guard and reporting-only status audit built; focused unit green; pre-M2 audit reproduced 46 contradictions. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M2 | [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | All eleven checked claims required; retired spellings absent; docs-index test green. Delegated decisions: keep the supported 1-voter path, record the interrupted-activation recovery boot, accepted DVR reversal and maintained fork. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M3 | [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | 304 indexed status rows scanned; zero contradictions and zero missing Markdown status headers; docs-index and status-claim tests green. Merged milestones remain open where promotion, deployment or physical acceptance is outstanding. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M4 | [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | Stale spelt count absent; 65-row scratch rejects all four prose surfaces; both touched Node contracts green. |
