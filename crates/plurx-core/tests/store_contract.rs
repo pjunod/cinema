@@ -337,8 +337,10 @@ const CLASSIFICATION_METHODS: &[&str] = &["classification_page", "write_classifi
 const MEDIA_METHODS: &[&str] = &[
     "item_by_external_id",
     "find_movie",
+    "find_movies_by_directory",
     "find_book",
     "find_show",
+    "find_shows_by_directory",
     "find_season",
     "find_episode",
     "find_child_item",
@@ -352,6 +354,10 @@ const MEDIA_METHODS: &[&str] = &[
     "recently_added",
     "search_items",
     "apply_metadata",
+    "apply_series_tmdb_hint",
+    "identity_repair_snapshot",
+    "apply_identity_repair_fenced",
+    "apply_series_tmdb_hint_fenced",
     "apply_metadata_if_artwork_repair_current",
     "apply_book_metadata",
     "apply_book_metadata_if_current",
@@ -16403,7 +16409,7 @@ fn contract_inventory_matches_every_store_method() {
     // Both independently reviewed method sets survive this integration. Read
     // the total from the merged trait rather than carrying either parent's
     // count across the promotion merge.
-    assert_eq!(declared.len(), 369, "review the Store method count");
+    assert_eq!(declared.len(), 375, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

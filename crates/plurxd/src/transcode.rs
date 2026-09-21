@@ -27800,6 +27800,39 @@ pub(crate) struct HlsDeliveryFixture {
 
 #[cfg(test)]
 impl HlsDeliveryFixture {
+    /// Install a compatibility serving window without publishing first media
+    /// to the control actor. Response-race tests use this narrow state to open
+    /// predecessor bytes before an actor-authorized successor attempt begins.
+    pub(crate) async fn make_segment_window_servable(&self) {
+        let mut index = self.session.segments.lock().await;
+        if index.segs.is_empty() {
+            for segment in 0..12_i64 {
+                index.segs.push(SegmentMeta {
+                    index: segment,
+                    name: format!("seg{segment:05}.ts"),
+                    start_ms: segment * 4_000,
+                    end_ms: (segment + 1) * 4_000,
+                    bytes: 0,
+                    visibility: SegmentVisibility::Advertised,
+                });
+            }
+            index.revision = index.revision.saturating_add(1);
+        }
+        drop(index);
+        let producer_attempt = self.session.control.current_producer_attempt();
+        self.session.publication.lock().await.served = Some(ServedPlaylistSnapshot {
+            raw: Arc::from(&b"#EXTM3U\n"[..]),
+            producer_attempt,
+            revision: 1,
+            last_segment: 11,
+            first_segment: 0,
+            end_ms: 48_000,
+            duration_ms: 48_000,
+            end_list: false,
+            available_at: Instant::now(),
+        });
+    }
+
     /// Mark this synthetic session as having presented media to its client.
     ///
     /// A fixture session has an empty segment index, which is exactly the
@@ -27811,16 +27844,59 @@ impl HlsDeliveryFixture {
     /// rather than borrow the startup exemption by accident.
     pub(crate) async fn mark_started(&self) {
         let mut index = self.session.segments.lock().await;
-        index.segs.push(SegmentMeta {
-            index: 0,
-            name: "seg00000.ts".into(),
-            start_ms: 0,
-            end_ms: i64::from(plurx_core::transcode::COPY_PUBLISH_GATE_SECS) * 1_000,
-            bytes: 0,
-            visibility: SegmentVisibility::Advertised,
-        });
-        index.revision = index.revision.saturating_add(1);
+        if index.segs.is_empty() {
+            // A published rolling fixture must satisfy the same initial
+            // runway as production. Seed the ordinary four-second grid so
+            // HTTP tests can resolve any of the early segment names they
+            // materialize without borrowing a pre-publication state.
+            for segment in 0..16_i64 {
+                index.segs.push(SegmentMeta {
+                    index: segment,
+                    name: format!("seg{segment:05}.ts"),
+                    start_ms: segment * 4_000,
+                    end_ms: (segment + 1) * 4_000,
+                    bytes: 0,
+                    visibility: SegmentVisibility::Advertised,
+                });
+            }
+            index.revision = index.revision.saturating_add(1);
+        }
         drop(index);
+        let producer_attempt = self.session.control.current_producer_attempt();
+        let accepted = self
+            .session
+            .control
+            .observe_publication(crate::playback_control::RollingPublicationObservation {
+                producer_attempt,
+                produced_segment: Some(15),
+                produced_end_ms: Some(64_000),
+                playlist_ready: true,
+                published_segment: Some(11),
+                published_end_ms: Some(48_000),
+                next_media_sequence: 12,
+                resolved_fetched_segment: None,
+                resolved_fetched_end_ms: None,
+            })
+            .await;
+        assert!(accepted, "fixture publication must reach the control actor");
+        let mut publication = self.session.publication.lock().await;
+        if publication.served.is_none() {
+            publication.served = Some(ServedPlaylistSnapshot {
+                raw: Arc::from(&b"#EXTM3U\n"[..]),
+                producer_attempt,
+                revision: 1,
+                last_segment: 11,
+                first_segment: 0,
+                end_ms: 48_000,
+                duration_ms: 48_000,
+                end_list: false,
+                available_at: Instant::now(),
+            });
+        }
+        publication.staged_attempt = Some(producer_attempt);
+        publication.staged_last_segment = Some(15);
+        publication.staged_end_ms = Some(64_000);
+        drop(publication);
         // A started fixture is one whose actor has accepted presentation, not
         // merely one whose producer filled the old publication floor.
         self.session.playlist_published.store(true, Relaxed);
@@ -29092,7 +29168,7 @@ pub(crate) mod tests {
             assert_eq!(status.reported_position_ms, Some(10_000));
             assert_eq!(status.client_runway_ms, Some(15_000));
             assert_eq!(status.render_state, Some("rendering"));
-            assert_eq!(status.production_policy, "explicit_demand");
+            assert_eq!(status.production_policy, "publication_clock_explicit");
             let producer_control = status
                 .producer_control
                 .as_ref()
@@ -29541,10 +29617,13 @@ pub(crate) mod tests {
         let HlsSessionInfo::Live(active_status) = active.status else {
             panic!("rolling active returned VOD status");
         };
-        assert!(!active_status.suspended);
+        assert!(active_status.suspended);
         assert_eq!(active_status.control_demand, Some("active"));
-        assert_eq!(active_status.hold_reason, None);
-        assert_eq!(active_status.production_policy, "explicit_demand");
+        assert_eq!(active_status.hold_reason, Some(AheadHoldReason::Time));
+        assert_eq!(
+            active_status.production_policy,
+            "publication_clock_explicit"
+        );
 
         let events = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -29557,16 +29636,18 @@ pub(crate) mod tests {
                     })
                     .await
                     .expect("flow events");
-                if events.iter().any(|event| event.event == "suspend")
-                    && events.iter().any(|event| event.event == "resume")
-                {
+                if events.iter().any(|event| event.event == "suspend") {
                     return events;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("demand hold/resume events persisted");
+        .expect("demand hold event persisted");
+        assert!(
+            events.iter().all(|event| event.event != "resume"),
+            "active demand cannot bypass an already-staged publication batch"
+        );
         let suspend = events
             .iter()
             .find(|event| event.event == "suspend")
@@ -35011,11 +35092,8 @@ pub(crate) mod tests {
         let stale = flow(&demand);
         assert_eq!(demand.runway_ms(), 0);
         assert_eq!(stale.production_ahead_seconds, Some(86));
-        assert_eq!(stale.production_target_seconds, Some(30));
-        assert_eq!(
-            stale.hold.map(|hold| hold.reason),
-            Some(AheadHoldReason::Time)
-        );
+        assert_eq!(stale.production_target_seconds, Some(16));
+        assert_eq!(stale.hold, None);
 
         // Counterfactual: if the client were presenting at this position and
         // could report its real 11.5-second buffer without a stale seek, the
@@ -35026,7 +35104,7 @@ pub(crate) mod tests {
         demand.buffered_through_ms = 809_211;
         let current = flow(&demand);
         assert_eq!(current.production_ahead_seconds, Some(18));
-        assert_eq!(current.production_target_seconds, Some(42));
+        assert_eq!(current.production_target_seconds, Some(16));
         assert_eq!(current.hold, None);
     }
 
@@ -35062,7 +35140,7 @@ pub(crate) mod tests {
                     bytes: 1_000,
                 }),
                 published_end_ms: Some(80_000),
-                staged_publication_seconds: None,
+                staged_publication_seconds: Some(16),
                 // Pre-existing coverage: the startup grant is already spent, so
                 // these assertions are about steady-state flow control.
                 startup_protected: false,
@@ -35077,23 +35155,23 @@ pub(crate) mod tests {
             })
         };
         let held = flow(false);
-        assert_eq!(held.production_ahead_seconds, Some(60));
+        assert_eq!(held.production_ahead_seconds, Some(16));
         assert_eq!(
             held.production_target_seconds,
-            Some(30),
-            "a frozen position asks for nothing but the wall-clock reserve",
+            Some(16),
+            "the publication clock asks for one fixed batch",
         );
         assert_eq!(
             held.hold,
             Some(AheadHold {
                 reason: AheadHoldReason::Time,
-                release_value: 30,
+                release_value: 0,
             }),
         );
         assert_eq!(
             flow(true).hold.map(|hold| hold.release_value),
-            Some(15),
-            "and the release value is the resume threshold, not a second policy",
+            Some(0),
+            "the next publication tick releases the staged-batch hold",
         );
 
         // The same hold, as the control plane sees it, for a client that is
@@ -35148,7 +35226,7 @@ pub(crate) mod tests {
                 bytes: 1_000,
             }),
             published_end_ms: Some(80_000),
-            staged_publication_seconds: None,
+            staged_publication_seconds: Some(16),
             startup_protected: false,
             media_origin_ms: 100_000,
             lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
@@ -35159,7 +35237,7 @@ pub(crate) mod tests {
             currently_suspended: false,
             scratch_grant_exhausted: None,
         });
-        assert_eq!(loaded_flow.production_target_seconds, Some(52));
+        assert_eq!(loaded_flow.production_target_seconds, Some(16));
         assert_eq!(
             loaded_flow.hold.map(|hold| hold.reason),
             Some(AheadHoldReason::Time),
@@ -35206,7 +35284,7 @@ pub(crate) mod tests {
             currently_suspended: true,
             scratch_grant_exhausted: None,
         });
-        assert_eq!(supply_pending.production_target_seconds, Some(30));
+        assert_eq!(supply_pending.production_target_seconds, Some(16));
         assert_eq!(
             supply_pending.hold, None,
             "fixed-position supply below target must reach the existing resume operation"
@@ -35268,16 +35346,10 @@ pub(crate) mod tests {
             currently_suspended: false,
             scratch_grant_exhausted: None,
         });
-        assert_eq!(active.policy, "explicit_demand");
+        assert_eq!(active.policy, "publication_clock_explicit");
         assert_eq!(active.production_ahead_seconds, Some(60));
-        assert_eq!(active.production_target_seconds, Some(50));
-        assert_eq!(
-            active.hold,
-            Some(AheadHold {
-                reason: AheadHoldReason::Time,
-                release_value: 50,
-            })
-        );
+        assert_eq!(active.production_target_seconds, Some(16));
+        assert_eq!(active.hold, None);
 
         demand.playback_rate = 2.0;
         let faster = evaluate_flow(FlowInputs {
@@ -35298,8 +35370,8 @@ pub(crate) mod tests {
         });
         assert_eq!(
             faster.production_target_seconds,
-            Some(80),
-            "thirty seconds of wall-clock reserve becomes sixty media seconds at 2x"
+            Some(32),
+            "the publication batch scales with playback rate"
         );
         assert_eq!(faster.hold, None);
 
@@ -35352,7 +35424,7 @@ pub(crate) mod tests {
             currently_suspended: false,
             scratch_grant_exhausted: None,
         });
-        assert_eq!(unbounded_time.production_target_seconds, None);
+        assert_eq!(unbounded_time.production_target_seconds, Some(32));
         assert_eq!(
             unbounded_time.hold, None,
             "a zero configured time limit is disabled, not a target of zero"
@@ -35535,8 +35607,8 @@ pub(crate) mod tests {
         });
         assert_eq!(
             retried.hold.map(|hold| hold.reason),
-            Some(AheadHoldReason::Demand),
-            "a session that already spent its startup grant honours the hold"
+            None,
+            "an empty replacement keeps running until one publication batch is staged"
         );
 
         // The fleet-wide disk cap still answers while the index is empty. It
@@ -36374,6 +36446,72 @@ pub(crate) mod tests {
             .expect("write playlist");
     }
 
+    async fn expire_seeded_prefix(session: &Session, count: usize) {
+        let removed_at = Instant::now() - Duration::from_secs(2);
+        let serve_until = Instant::now() - Duration::from_secs(1);
+        let mut segments = session.segments.lock().await;
+        for segment in segments.segs.iter_mut().take(count) {
+            segment.visibility = SegmentVisibility::Grace {
+                removed_at,
+                serve_until,
+            };
+        }
+    }
+
+    async fn install_seeded_served_playlist_snapshot(
+        session: &Session,
+        producer_attempt: u64,
+    ) -> (i64, i64) {
+        let raw = tokio::fs::read(session.dir.join("index.m3u8"))
+            .await
+            .expect("seeded playlist");
+        let index = SegmentIndex {
+            segs: parse_playlist(&String::from_utf8_lossy(&raw)),
+            revision: 0,
+        };
+        let first_segment = index.segs.first().expect("first segment").index;
+        let last_segment = index.segs.last().expect("last segment").index;
+        let end_ms = index
+            .produced_playable_end_ms()
+            .expect("seeded playable end");
+        let raw = served_live_playlist(raw, Some(first_segment), session.takeover.as_ref())
+            .expect("seeded served playlist");
+        session.publication.lock().await.served = Some(ServedPlaylistSnapshot {
+            raw: Arc::from(raw),
+            producer_attempt,
+            revision: 1,
+            last_segment,
+            first_segment,
+            end_ms,
+            duration_ms: end_ms,
+            end_list: false,
+            available_at: Instant::now(),
+        });
+        (last_segment, end_ms)
+    }
+
+    async fn install_seeded_served_playlist(session: &Session, producer_attempt: u64) {
+        let (last_segment, end_ms) =
+            install_seeded_served_playlist_snapshot(session, producer_attempt).await;
+        assert!(
+            session
+                .control
+                .observe_publication(crate::playback_control::RollingPublicationObservation {
+                    producer_attempt,
+                    produced_segment: Some(last_segment),
+                    produced_end_ms: Some(end_ms),
+                    playlist_ready: true,
+                    published_segment: Some(last_segment),
+                    published_end_ms: Some(end_ms),
+                    next_media_sequence: last_segment.saturating_add(1),
+                    resolved_fetched_segment: None,
+                    resolved_fetched_end_ms: None,
+                })
+                .await,
+            "seeded publication must reach the control actor"
+        );
+    }
+
     async fn complete_seeded_replacement(
         session: Arc<Session>,
         dir: PathBuf,
@@ -36400,19 +36538,21 @@ pub(crate) mod tests {
             None,
         ));
         replacement.complete();
+        session.refresh_segments().await;
+        install_seeded_served_playlist(&session, attempt).await;
         attempt
     }
 
-    /// The manager must hold the first live response while ffmpeg has only a
-    /// one-segment EVENT playlist, then release it as soon as a second segment
-    /// provides the startup cushion. This pins both the asynchronous polling
-    /// behavior and the per-session one-way publication state.
+    /// The manager must hold the first live response below the rolling
+    /// publication runway, then release it as soon as the configured 48-second
+    /// cushion exists. This pins both the asynchronous polling behavior and
+    /// the per-session one-way publication state.
     #[tokio::test]
     async fn first_live_transcode_playlist_waits_for_two_segments() {
         use plurx_core::store::SqliteStore;
 
         let dir = crate::test_tempdir().expect("tempdir");
-        seeded_session_dir(dir.path(), 1, 2.0).await;
+        seeded_session_dir(dir.path(), 11, 4.0).await;
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let mgr = Arc::new(TranscodeManager::new(
@@ -36430,18 +36570,18 @@ pub(crate) mod tests {
             tokio::time::timeout(Duration::from_millis(250), mgr.playlist("startup-gate")).await;
         assert!(
             held.is_err(),
-            "one segment must not escape the startup gate"
+            "a playlist below the 48-second runway must not escape the startup gate"
         );
         assert!(!session.playlist_published.load(Relaxed));
 
-        seeded_session_dir(dir.path(), 2, 2.0).await;
+        seeded_session_dir(dir.path(), 12, 4.0).await;
         let playlist = tokio::time::timeout(Duration::from_secs(2), mgr.playlist("startup-gate"))
             .await
-            .expect("two-segment playlist should be released")
+            .expect("48-second playlist should be released")
             .expect("playlist");
         let text = String::from_utf8(playlist).expect("utf8 playlist");
         assert!(text.contains("seg00000.ts"));
-        assert!(text.contains("seg00001.ts"));
+        assert!(text.contains("seg00011.ts"));
         assert!(
             !session.playlist_published.load(Relaxed),
             "the read-only fixture does not impersonate response authorization"
@@ -36453,15 +36593,15 @@ pub(crate) mod tests {
             .expect("rolling actor")
             .delivery;
         assert!(actor_delivery.playlist_ready);
-        assert_eq!(actor_delivery.published_segment, Some(1));
-        assert_eq!(actor_delivery.published_end_ms, Some(4_000));
-        assert_eq!(actor_delivery.next_media_sequence, 2);
+        assert_eq!(actor_delivery.published_segment, Some(11));
+        assert_eq!(actor_delivery.published_end_ms, Some(48_000));
+        assert_eq!(actor_delivery.next_media_sequence, 12);
         let status = mgr.session_status("startup-gate").await.expect("status");
         assert_eq!(status.producer_attempt, Some(0));
         assert_eq!(status.playlist_ready, Some(true));
-        assert_eq!(status.published_segment, Some(1));
-        assert_eq!(status.published_end_ms, Some(4_000));
-        assert_eq!(status.next_media_sequence, Some(2));
+        assert_eq!(status.published_segment, Some(11));
+        assert_eq!(status.published_end_ms, Some(48_000));
+        assert_eq!(status.next_media_sequence, Some(12));
         assert_eq!(status.pending_fetched_segment, None);
     }
 
@@ -36500,7 +36640,7 @@ pub(crate) mod tests {
             .await
             .expect("prepublication successor");
         session.reset_compatibility_delivery(successor).await;
-        seeded_session_dir(dir.path(), 2, 2.0).await;
+        seeded_session_dir(dir.path(), 12, 4.0).await;
 
         let bytes = tokio::time::timeout(Duration::from_secs(2), playlist)
             .await
@@ -36509,7 +36649,7 @@ pub(crate) mod tests {
             .expect("the original request follows the successor");
         assert!(String::from_utf8(bytes)
             .expect("playlist text")
-            .contains("seg00001.ts"));
+            .contains("seg00011.ts"));
         assert_eq!(session.control.current_producer_attempt(), successor);
     }
 
@@ -36519,8 +36659,10 @@ pub(crate) mod tests {
 
         let dir = crate::test_tempdir().expect("tempdir");
         let manager_dir = crate::test_tempdir().expect("manager tempdir");
-        seeded_session_dir(dir.path(), 2, 2.0).await;
+        seeded_session_dir(dir.path(), 12, 4.0).await;
         let session = Arc::new(test_session(dir.path().to_path_buf()));
+        session.publication_worker_started.store(true, Release);
+        install_seeded_served_playlist_snapshot(&session, 0).await;
         let pause = Arc::new(tokio::sync::Barrier::new(2));
         *session
             .playlist_publication_pause
@@ -36557,20 +36699,21 @@ pub(crate) mod tests {
             .await
             .expect("clear predecessor");
         session.confirm_predecessor_scratch_cleared();
-        seeded_session_dir(dir.path(), 1, 2.0).await;
+        seeded_session_dir(dir.path(), 11, 4.0).await;
         session.replacing_child.store(false, Release);
 
         tokio::time::sleep(PLAYLIST_WAIT_POLL * 2).await;
         assert!(
             !playlist.is_finished(),
-            "one successor segment must not inherit the predecessor's open gate"
+            "a successor below the runway must not inherit the predecessor's open gate"
         );
         assert_eq!(
             session.compatibility_playlist_published(successor),
             Some(false)
         );
 
-        seeded_session_dir(dir.path(), 2, 2.0).await;
+        seeded_session_dir(dir.path(), 12, 4.0).await;
+        install_seeded_served_playlist(&session, successor).await;
         let bytes = tokio::time::timeout(Duration::from_secs(2), playlist)
             .await
             .expect("successor cushion deadline")
@@ -36578,7 +36721,7 @@ pub(crate) mod tests {
             .expect("successor playlist");
         assert!(String::from_utf8(bytes)
             .expect("playlist text")
-            .contains("seg00001.ts"));
+            .contains("seg00011.ts"));
         let delivery = session
             .control
             .snapshot()
@@ -36586,8 +36729,8 @@ pub(crate) mod tests {
             .expect("rolling actor")
             .delivery;
         assert!(delivery.playlist_ready);
-        assert_eq!(delivery.published_segment, Some(1));
-        assert_eq!(delivery.published_end_ms, Some(4_000));
+        assert_eq!(delivery.published_segment, Some(11));
+        assert_eq!(delivery.published_end_ms, Some(48_000));
         assert_eq!(
             session.compatibility_playlist_published(successor),
             Some(false),
@@ -36600,8 +36743,10 @@ pub(crate) mod tests {
         use plurx_core::store::SqliteStore;
 
         let dir = crate::test_tempdir().expect("tempdir");
-        seeded_session_dir(dir.path(), 2, 2.0).await;
+        seeded_session_dir(dir.path(), 12, 4.0).await;
         let session = Arc::new(test_session(dir.path().to_path_buf()));
+        session.publication_worker_started.store(true, Release);
+        install_seeded_served_playlist(&session, 0).await;
         let pause = Arc::new(tokio::sync::Barrier::new(2));
         *session
             .playlist_publication_pause
@@ -36635,7 +36780,7 @@ pub(crate) mod tests {
             .expect("the already-read exact playlist remains servable");
         assert!(String::from_utf8(bytes)
             .expect("playlist text")
-            .contains("seg00001.ts"));
+            .contains("seg00011.ts"));
         let delivery = session
             .control
             .snapshot()
@@ -36643,8 +36788,8 @@ pub(crate) mod tests {
             .expect("rolling actor")
             .delivery;
         assert!(delivery.playlist_ready);
-        assert_eq!(delivery.published_segment, Some(1));
-        assert_eq!(delivery.published_end_ms, Some(4_000));
+        assert_eq!(delivery.published_segment, Some(11));
+        assert_eq!(delivery.published_end_ms, Some(48_000));
         assert_eq!(
             session.kill_child_for_replacement().await.err(),
             Some(crate::playback_control::ProducerAttemptRejection::PlaylistPublished),
@@ -36725,7 +36870,7 @@ pub(crate) mod tests {
         use plurx_core::store::SqliteStore;
 
         let dir = crate::test_tempdir().expect("playlist bounded work dir");
-        seeded_session_dir(dir.path(), 2, 2.0).await;
+        seeded_session_dir(dir.path(), 12, 4.0).await;
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let mgr = Arc::new(TranscodeManager::new(
@@ -36870,7 +37015,7 @@ pub(crate) mod tests {
             let path = dir.path().to_path_buf();
             tokio::spawn(async move {
                 tokio::time::sleep(Duration::from_millis(400)).await;
-                seeded_session_dir(&path, 2, 2.0).await;
+                seeded_session_dir(&path, 12, 4.0).await;
             })
         };
         let started = Instant::now();
@@ -37636,7 +37781,8 @@ pub(crate) mod tests {
             .expect("predecessor bytes");
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         session.refresh_segments().await;
-        assert_eq!(session.live_bytes.load(Acquire), 1_024);
+        let predecessor_live_bytes = session.live_bytes.load(Acquire);
+        assert!(predecessor_live_bytes >= 1_024);
 
         let mut opts = mgr.options_for_tone_map(
             Encoder::VideoToolbox,
@@ -37708,7 +37854,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             session.live_bytes.load(Acquire),
-            1_024,
+            predecessor_live_bytes,
             "predecessor bytes remain charged until verified scratch clearing"
         );
         assert!(
@@ -37927,7 +38073,7 @@ pub(crate) mod tests {
         let successor = tokio::spawn(complete_seeded_replacement(
             Arc::clone(&session),
             dir.path().to_path_buf(),
-            2,
+            16,
             3.0,
             None,
         ));
@@ -37995,7 +38141,7 @@ pub(crate) mod tests {
         let successor = tokio::spawn(complete_seeded_replacement(
             Arc::clone(&session),
             dir.path().to_path_buf(),
-            1,
+            16,
             3.0,
             Some(b"successor"),
         ));
@@ -38050,7 +38196,7 @@ pub(crate) mod tests {
         let successor = tokio::spawn(complete_seeded_replacement(
             Arc::clone(&session),
             dir.path().to_path_buf(),
-            2,
+            16,
             3.0,
             None,
         ));
@@ -38064,7 +38210,7 @@ pub(crate) mod tests {
         session.refresh_segments().await;
         assert_eq!(
             session.segments.lock().await.produced_playable_end_ms(),
-            Some(6_000)
+            Some(48_000)
         );
         let delivery = session
             .control
@@ -38073,7 +38219,7 @@ pub(crate) mod tests {
             .expect("rolling actor")
             .delivery;
         assert_eq!(delivery.producer_attempt, successor);
-        assert_eq!(delivery.published_end_ms, Some(6_000));
+        assert_eq!(delivery.published_end_ms, Some(48_000));
     }
 
     #[tokio::test]
@@ -38093,6 +38239,7 @@ pub(crate) mod tests {
         }
         *session.segments.lock().await = seeded;
         session.fetched_end_ms.store(300_000, Relaxed);
+        expire_seeded_prefix(&session, 30).await;
 
         let pause = Arc::new(tokio::sync::Barrier::new(2));
         *session
@@ -38183,6 +38330,7 @@ pub(crate) mod tests {
         let session = Arc::new(fixture);
         session.refresh_segments().await;
         session.fetched_end_ms.store(300_000, Relaxed);
+        expire_seeded_prefix(&session, 30).await;
         let pause = Arc::new(tokio::sync::Barrier::new(2));
         *session
             .retention_delete_pause
@@ -38322,6 +38470,7 @@ pub(crate) mod tests {
         session
             .fetched_end_ms
             .store(observed_fetched_end_ms, Relaxed);
+        expire_seeded_prefix(&session, 30).await;
         gc_expired_segments(&session).await;
 
         // The retained/pruned segment boundary is the behavior under test.
@@ -38373,10 +38522,10 @@ pub(crate) mod tests {
             .map_err(|error| error.error)
             .expect("served playlist");
         let served = String::from_utf8(served).expect("playlist utf8");
-        assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:30"), "{served}");
+        assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:55"), "{served}");
         assert!(!served.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "{served}");
         assert!(!served.contains("seg00029.ts"), "{served}");
-        assert!(served.contains("seg00030.ts"), "{served}");
+        assert!(served.contains("seg00055.ts"), "{served}");
         for name in served.lines().filter(|line| line.ends_with(".ts")) {
             assert!(p.join(name).exists(), "served segment must exist: {name}");
         }
@@ -38435,6 +38584,7 @@ pub(crate) mod tests {
         let session = test_session(dir.path().to_path_buf());
         session.refresh_segments().await;
         session.fetched_end_ms.store(300_000, Relaxed);
+        expire_seeded_prefix(&session, 30).await;
 
         let before = session.ahead().await.expect("published").bytes;
         gc_expired_segments(&session).await;
@@ -38716,24 +38866,18 @@ pub(crate) mod tests {
             assert!(session.first_media_handoff_applied.load(Acquire));
             assert!(!session.actor_prepublication_producer.load(Acquire));
 
-            // A window it has already exceeded suspends it, and a suspended
-            // encoder stops advancing — which is the property actor progress relies
-            // on being able to tell apart from a wedge.
+            // Publication-clock pacing does not turn a freshly served window
+            // into the old inferred-ahead hold. The encoder remains runnable
+            // until a complete next batch is staged.
             mgr.flow_control(&session, &info.session_id).await;
-            assert!(session.suspended.load(Relaxed), "session was held");
+            assert!(!session.suspended.load(Relaxed));
             let status = mgr.session_status(&info.session_id).await.expect("status");
             assert_eq!(status.readrate, 1.0, "HLS exposes its effective input pace");
-            assert_eq!(status.hold_reason, Some(AheadHoldReason::Time));
-            assert_eq!(status.resume_below_seconds, Some(1));
+            assert_eq!(status.production_policy, "publication_clock_legacy");
+            assert_eq!(status.hold_reason, None);
             assert_eq!(status.resume_below_bytes, None);
-            assert_eq!(status.suspend_count, 1, "the first transition is visible");
-            let frozen = session.progress.out_time_ms();
-            tokio::time::sleep(Duration::from_millis(1200)).await;
-            assert_eq!(
-                session.progress.out_time_ms(),
-                frozen,
-                "a suspended encoder produces nothing"
-            );
+            assert_eq!(status.suspend_count, 0);
+            let before_fetch_progress = session.progress.out_time_ms();
 
             // Fetch the newest published segment through the real request path.
             // That advances the download frontier, re-evaluates the same configured
@@ -38803,54 +38947,13 @@ pub(crate) mod tests {
             assert_eq!(
                 mgr.session_status(&info.session_id)
                     .await
-                    .expect("status after release")
+                    .expect("status after fetch")
                     .suspend_count,
-                1,
-                "resume preserves the transition history"
-            );
-            let flow_events = tokio::time::timeout(Duration::from_secs(2), async {
-                loop {
-                    let events = store
-                        .playback_events(&plurx_core::domain::PlaybackEventQuery {
-                            since_ms: None,
-                            event: None,
-                            limit: 20,
-                        })
-                        .await
-                        .expect("flow-control telemetry query");
-                    if events.iter().any(|event| event.event == "suspend")
-                        && events.iter().any(|event| event.event == "resume")
-                    {
-                        return events;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .expect("suspend/resume telemetry persisted");
-            let suspend = flow_events
-                .iter()
-                .find(|event| event.event == "suspend")
-                .expect("suspend row");
-            assert_eq!(
-                suspend.session_id.as_deref(),
-                Some(session_log_id(&info.session_id).as_str())
-            );
-            assert_eq!(suspend.hold_reason.as_deref(), Some("time"));
-            assert_eq!(suspend.readrate, Some(1.0));
-            let resume = flow_events
-                .iter()
-                .find(|event| event.event == "resume")
-                .expect("resume row");
-            assert_eq!(resume.hold_reason.as_deref(), Some("time"));
-            assert!(
-                resume.ms.is_some_and(|held_ms| held_ms >= 1_000),
-                "resume row carries the measured hold duration: {:?}",
-                resume.ms
+                0,
             );
             let moved = tokio::time::timeout(Duration::from_secs(10), async {
                 loop {
-                    if session.progress.out_time_ms() > frozen {
+                    if session.progress.out_time_ms() > before_fetch_progress {
                         return true;
                     }
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -38858,7 +38961,7 @@ pub(crate) mod tests {
             })
             .await
             .unwrap_or(false);
-            assert!(moved, "SIGCONT actually restarted the encoder");
+            assert!(moved, "the publication-paced encoder remains live");
 
             // A suspended child still dies on request — SIGKILL does not need the
             // process to be scheduled, which is what makes the reaper safe.
@@ -38893,8 +38996,8 @@ pub(crate) mod tests {
                     .await
                     .expect("status after second hold")
                     .suspend_count,
-                2,
-                "a second transition cannot hide between activity polls"
+                1,
+                "the explicit byte ceiling owns the first suspension"
             );
         }
         assert!(mgr.stop_session(&info.session_id, "test").await);
@@ -40643,6 +40746,38 @@ pub(crate) mod tests {
             .compatibility_attempt
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = producer_attempt;
+        *session.segments.lock().await = SegmentIndex {
+            segs: vec![
+                SegmentMeta {
+                    index: 0,
+                    name: "seg00000.ts".into(),
+                    start_ms: 0,
+                    end_ms: 2_000,
+                    bytes: 9,
+                    visibility: SegmentVisibility::Advertised,
+                },
+                SegmentMeta {
+                    index: 1,
+                    name: "seg00001.ts".into(),
+                    start_ms: 2_000,
+                    end_ms: 4_000,
+                    bytes: 23,
+                    visibility: SegmentVisibility::Advertised,
+                },
+            ],
+            revision: 1,
+        };
+        session.publication.lock().await.served = Some(ServedPlaylistSnapshot {
+            raw: Arc::from(&b"#EXTM3U\n"[..]),
+            producer_attempt,
+            revision: 1,
+            last_segment: 0,
+            first_segment: 0,
+            end_ms: 2_000,
+            duration_ms: 2_000,
+            end_list: false,
+            available_at: Instant::now(),
+        });
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let manager = Arc::new(TranscodeManager::new(
             store,
