@@ -1,6 +1,6 @@
 # Bounded replica reads rollout — a consistency-policy change, one route at a time
 
-**Status:** ready for review · **Executes:** S1, F-sc-1, F-core-4 from
+**Status:** implementation blocked on M0 fleet evidence · **Executes:** S1, F-sc-1, F-core-4 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
 
@@ -335,4 +335,16 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [#428](http://192.168.4.7:3000/noirr/plurx/pulls/428) · `3976b8c51` | Implemented fixed-cardinality request-local Store attribution and route latency. `cargo test -p plurxd metrics_route_attribution_renders_fixed_labels_and_scoped_store_counts` passed; the required lab1–lab3 readout remains pending. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [#428](http://192.168.4.7:3000/noirr/plurx/pulls/428) · `06c87ff92` | Named search explicitly as `NodeLocal` through `CatalogueReader` and expanded the handler inventory across photos, images, reading, DVR, and library channels while retaining Authority pre-mutation/ownership reads. `cargo test -p plurxd bounded_catalogue_handler_inventory_keeps_reads_and_mutations_separate` passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | [#428](http://192.168.4.7:3000/noirr/plurx/pulls/428) · pending | Blocked: M0 fleet evidence is required before widening the rollout. The vendored `Client::execute` also exposes rows affected, not the acknowledged Raft log index; deriving a fence from a later quorum sample would add a second round trip and would not be the write response contract this milestone specifies. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [#428](http://192.168.4.7:3000/noirr/plurx/pulls/428) · pending | Blocked behind M2: watch-state reads stay Authority until the revision fence is real. No combined-query claim or authority-read reduction is recorded. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M4 | [#428](http://192.168.4.7:3000/noirr/plurx/pulls/428) · pending | Blocked on M0–M3 and three-voter paused/partition evidence. `bounded_replica_reads` remains false; the lag budget remains 64; no enablement gate or auth cache was added. |
+
+Implementation decisions recorded for this run: retain the proposed nine route
+groups (reader traffic remains `other` until evidence justifies another label),
+retain the proposed 60-second fence/header lifetime when M2 becomes executable,
+and refuse both an ordinary-auth cache and a fabricated write revision. Route
+attribution uses a Tokio request scope rather than a field copied through every
+`AppState` constructor; the scope is installed once around the matched request,
+and `TimedClient` remains the only recorder of physical replicated Store calls.
