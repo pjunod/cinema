@@ -5059,6 +5059,7 @@ pub(crate) async fn metrics(
          # TYPE plurx_notify_received_total counter\n\
          plurx_notify_received_total {notifications}\n"
     ));
+    scans.push_str(&plurx_core::scan::prometheus_probe_outcomes());
 
     let body = format!(
         "# HELP plurx_build_info Build information.\n\

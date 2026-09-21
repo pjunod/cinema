@@ -6,7 +6,9 @@
 //! across every container. The raw JSON is retained verbatim so the Phase 2
 //! decision engine can consult fields we don't model yet.
 
+use std::ffi::OsString;
 use std::path::Path;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -20,6 +22,55 @@ fn ffprobe_bin() -> String {
         .ok()
         .filter(|v| !v.is_empty())
         .unwrap_or_else(|| "ffprobe".to_owned())
+}
+
+/// A scan probe may read a large media file across a cold NAS mount. This is a
+/// hang ceiling, not a healthy-probe latency target.
+const SCAN_PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Sixteen times the largest observed streams-and-chapters document, while
+/// still keeping a flooding child bounded.
+const SCAN_PROBE_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+struct ProbeInvocation {
+    program: OsString,
+    args: Vec<OsString>,
+    wall_time: Duration,
+    reporter: Option<String>,
+    #[cfg(test)]
+    synthetic_stdout: Option<Vec<u8>>,
+}
+
+fn probe_invocation(path: &Path) -> ProbeInvocation {
+    #[cfg(test)]
+    if let Some(invocation) = tests::fixture_invocation(path) {
+        return invocation;
+    }
+
+    let program = ffprobe_bin();
+    ProbeInvocation {
+        program: program.clone().into(),
+        args: vec![
+            "-v".into(),
+            "error".into(),
+            "-print_format".into(),
+            "json".into(),
+            "-show_format".into(),
+            "-show_streams".into(),
+            // Chapters ride along here because the alternative is probing for
+            // them when someone presses Play — a second ffprobe of a
+            // NAS-mounted file on the click-to-first-frame path, paid every
+            // single time, for data that cannot change between scans. A file
+            // with no chapters still reports `"chapters": []`, so the key's
+            // *presence* is what tells a current probe from one taken before
+            // this landed (see `markers_for` in plurxd).
+            "-show_chapters".into(),
+            path.as_os_str().to_owned(),
+        ],
+        wall_time: SCAN_PROBE_TIMEOUT,
+        reporter: Some(program),
+        #[cfg(test)]
+        synthetic_stdout: None,
+    }
 }
 
 /// The field a probe document carries to name the FFprobe build that wrote
@@ -192,41 +243,51 @@ pub async fn probe(path: &Path) -> Result<ProbeResult, ProbeError> {
     // failure it holds the one thing worth reporting — *why* ffprobe refused.
     // "Permission denied" and "Invalid data found" are opposite problems with
     // opposite fixes, and an exit code alone tells them apart for nobody.
-    let output = tokio::process::Command::new(ffprobe_bin())
-        .args([
-            "-v",
-            "error",
-            "-print_format",
-            "json",
-            "-show_format",
-            "-show_streams",
-            // Chapters ride along here because the alternative is probing for
-            // them when someone presses Play — a second ffprobe of a
-            // NAS-mounted file on the click-to-first-frame path, paid every
-            // single time, for data that cannot change between scans. A file
-            // with no chapters still reports `"chapters": []`, so the key's
-            // *presence* is what tells a current probe from one taken before
-            // this landed (see `markers_for` in plurxd).
-            "-show_chapters",
-        ])
-        .arg(path)
-        .output()
+    let invocation = probe_invocation(path);
+    let path_display = path.display().to_string();
+    #[cfg(test)]
+    let synthetic_stdout = invocation.synthetic_stdout.clone();
+    #[cfg(not(test))]
+    let synthetic_stdout: Option<Vec<u8>> = None;
+    let stdout = if let Some(stdout) = synthetic_stdout {
+        stdout
+    } else {
+        let output = crate::process::bounded::output(
+            &invocation.program,
+            &invocation.args,
+            invocation.wall_time,
+            SCAN_PROBE_MAX_BYTES,
+        )
         .await
-        .map_err(|e| ProbeError::Spawn(e.to_string()))?;
+        .map_err(|error| match error.kind() {
+            std::io::ErrorKind::NotFound => ProbeError::Spawn(error.to_string()),
+            std::io::ErrorKind::TimedOut => ProbeError::Transient {
+                path: path_display.clone(),
+                reason: format!("ffprobe exceeded {} s", invocation.wall_time.as_secs_f64()),
+            },
+            _ => ProbeError::Transient {
+                path: path_display.clone(),
+                reason: error.to_string(),
+            },
+        })?;
 
-    if !output.status.success() {
-        return Err(ProbeError::Failed {
-            path: path.display().to_string(),
-            code: output.status.code(),
-            reason: probe_failure_reason(&output.stderr),
-        });
-    }
-    let mut json: Value = serde_json::from_slice(&output.stdout)
+        if !output.status.success() {
+            return Err(ProbeError::Failed {
+                path: path_display,
+                code: output.status.code(),
+                reason: probe_failure_reason(&output.stderr),
+            });
+        }
+        output.stdout
+    };
+    let mut json: Value = serde_json::from_slice(&stdout)
         .map_err(|e| ProbeError::Parse(format!("ffprobe json: {e}")))?;
     // Stamped before the document is retained, so a later comparison against a
     // fresh probe can tell an unchanged source from a changed reporter.
-    if let Some(reporter) = reporter_identity_of(&ffprobe_bin()).await {
-        stamp_reporter(&mut json, reporter);
+    if let Some(reporter_bin) = invocation.reporter {
+        if let Some(reporter) = reporter_identity_of(&reporter_bin).await {
+            stamp_reporter(&mut json, reporter);
+        }
     }
     let mut result = parse_probe_json(&json);
     // Container comes from the extension — the decision engine keys on it
@@ -557,9 +618,259 @@ fn detect_hdr_format(stream: &Value) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashMap;
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    #[derive(Clone, Copy)]
+    pub(crate) enum FixtureMode {
+        SleepDeadline,
+        SleepDrop,
+        Flood,
+        Fail,
+        SleepThenJson,
+    }
+
+    struct Fixture {
+        mode: FixtureMode,
+        calls: Arc<AtomicUsize>,
+        wall_time: Duration,
+    }
+
+    static FIXTURES: OnceLock<Mutex<HashMap<std::path::PathBuf, Fixture>>> = OnceLock::new();
+
+    pub(crate) struct FixtureGuard {
+        path: std::path::PathBuf,
+        pub(crate) calls: Arc<AtomicUsize>,
+    }
+
+    impl Drop for FixtureGuard {
+        fn drop(&mut self) {
+            FIXTURES
+                .get_or_init(Default::default)
+                .lock()
+                .expect("fixture registry")
+                .remove(&self.path);
+        }
+    }
+
+    pub(crate) fn install_fixture(
+        path: &Path,
+        mode: FixtureMode,
+        wall_time: Duration,
+    ) -> FixtureGuard {
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let replaced = FIXTURES
+            .get_or_init(Default::default)
+            .lock()
+            .expect("fixture registry")
+            .insert(
+                path.clone(),
+                Fixture {
+                    mode,
+                    calls: Arc::clone(&calls),
+                    wall_time,
+                },
+            );
+        assert!(replaced.is_none(), "one fixture owns each media path");
+        FixtureGuard { path, calls }
+    }
+
+    pub(super) fn fixture_invocation(path: &Path) -> Option<ProbeInvocation> {
+        let registry = FIXTURES.get_or_init(Default::default);
+        let registry = registry.lock().expect("fixture registry");
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+        let fixture = registry.get(&canonical)?;
+        let call = fixture.calls.fetch_add(1, Ordering::Relaxed);
+        let synthetic_stdout = matches!(fixture.mode, FixtureMode::SleepThenJson) && call > 0;
+        let child = match (fixture.mode, call) {
+            (FixtureMode::SleepDeadline, _) => "scan::probe::tests::fixture_child_sleep_deadline",
+            (FixtureMode::SleepDrop, _) => "scan::probe::tests::fixture_child_sleep_drop",
+            (FixtureMode::SleepThenJson, 0) => "scan::probe::tests::fixture_child_sleep_sequence",
+            (FixtureMode::Flood, _) => "scan::probe::tests::fixture_child_flood",
+            (FixtureMode::Fail, _) => "scan::probe::tests::fixture_child_fail",
+            (FixtureMode::SleepThenJson, _) => "scan::probe::tests::fixture_child_json",
+        };
+        Some(ProbeInvocation {
+            program: std::env::current_exe()
+                .expect("test executable")
+                .into_os_string(),
+            args: vec!["--exact".into(), child.into(), "--nocapture".into()],
+            wall_time: fixture.wall_time,
+            reporter: None,
+            synthetic_stdout: synthetic_stdout
+                .then(|| br#"{"format":{"duration":"1.0"},"streams":[]}"#.to_vec()),
+        })
+    }
+
+    fn invoked_as_child(name: &str) -> bool {
+        let args = std::env::args().collect::<Vec<_>>();
+        args.windows(2)
+            .any(|pair| pair[0] == "--exact" && pair[1] == name)
+    }
+
+    fn child_pid_file(mode: &str) -> std::path::PathBuf {
+        let executable = std::env::current_exe().expect("test executable");
+        let name = executable
+            .file_name()
+            .expect("test executable name")
+            .to_string_lossy();
+        std::env::temp_dir().join(format!("plurx-scan-probe-{name}-{mode}.pid"))
+    }
+
+    #[test]
+    fn fixture_child_sleep_deadline() {
+        if !invoked_as_child("scan::probe::tests::fixture_child_sleep_deadline") {
+            return;
+        }
+        std::fs::write(
+            child_pid_file("sleep-deadline"),
+            std::process::id().to_string(),
+        )
+        .expect("publish child pid");
+        std::thread::sleep(Duration::from_secs(300));
+    }
+
+    #[test]
+    fn fixture_child_sleep_drop() {
+        if !invoked_as_child("scan::probe::tests::fixture_child_sleep_drop") {
+            return;
+        }
+        std::fs::write(child_pid_file("sleep-drop"), std::process::id().to_string())
+            .expect("publish child pid");
+        std::thread::sleep(Duration::from_secs(300));
+    }
+
+    #[test]
+    fn fixture_child_sleep_sequence() {
+        if !invoked_as_child("scan::probe::tests::fixture_child_sleep_sequence") {
+            return;
+        }
+        std::thread::sleep(Duration::from_secs(300));
+    }
+
+    #[test]
+    fn fixture_child_flood() {
+        if !invoked_as_child("scan::probe::tests::fixture_child_flood") {
+            return;
+        }
+        std::fs::write(child_pid_file("flood"), std::process::id().to_string())
+            .expect("publish child pid");
+        let chunk = vec![b'{'; 64 * 1024];
+        let mut stdout = std::io::stdout().lock();
+        for _ in 0..1024 {
+            stdout.write_all(&chunk).expect("flood stdout");
+        }
+    }
+
+    #[test]
+    fn fixture_child_fail() {
+        if !invoked_as_child("scan::probe::tests::fixture_child_fail") {
+            return;
+        }
+        std::io::stderr()
+            .write_all(b"/media/fixture.mkv: Permission denied\n")
+            .expect("failure stderr");
+        std::process::exit(13);
+    }
+
+    #[test]
+    fn fixture_child_json() {
+        if !invoked_as_child("scan::probe::tests::fixture_child_json") {
+            return;
+        }
+        std::io::stdout()
+            .write_all(br#"{"format":{"duration":"1.0"},"streams":[]}"#)
+            .expect("probe json");
+    }
+
+    async fn wait_for_pid(mode: &str) -> u32 {
+        let path = child_pid_file(mode);
+        for _ in 0..200 {
+            if let Ok(pid) = std::fs::read_to_string(&path) {
+                return pid.parse().expect("numeric child pid");
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("fixture child did not publish {}", path.display());
+    }
+
+    async fn assert_pid_gone(pid: u32) {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(
+            !crate::process::signal(pid, crate::process::ProcessSignal::Terminate)
+                .expect("inspect fixture child"),
+            "fixture child {pid} survived for two seconds"
+        );
+    }
+
+    fn media_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+        let directory = tempfile::tempdir().expect("media fixture");
+        let path = directory.path().join("fixture.mkv");
+        std::fs::write(&path, b"fixture").expect("media fixture bytes");
+        (directory, path)
+    }
+
+    #[tokio::test]
+    async fn sleeping_probe_is_transient_and_reaped() {
+        let _ = std::fs::remove_file(child_pid_file("sleep-deadline"));
+        let (_directory, path) = media_fixture();
+        let _fixture = install_fixture(
+            &path,
+            FixtureMode::SleepDeadline,
+            Duration::from_millis(200),
+        );
+        let started = tokio::time::Instant::now();
+        let error = probe(&path).await.expect_err("sleeping probe times out");
+        assert!(matches!(error, ProbeError::Transient { .. }));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        let pid = wait_for_pid("sleep-deadline").await;
+        assert_pid_gone(pid).await;
+    }
+
+    #[tokio::test]
+    async fn flooding_probe_is_capped_drained_and_reaped() {
+        let _ = std::fs::remove_file(child_pid_file("flood"));
+        let (_directory, path) = media_fixture();
+        let _fixture = install_fixture(&path, FixtureMode::Flood, Duration::from_secs(5));
+        let error = probe(&path).await.expect_err("flood is not JSON");
+        assert!(matches!(error, ProbeError::Parse(_)));
+        let pid = wait_for_pid("flood").await;
+        assert_pid_gone(pid).await;
+    }
+
+    #[tokio::test]
+    async fn dropping_probe_future_reaps_its_child() {
+        let _ = std::fs::remove_file(child_pid_file("sleep-drop"));
+        let (_directory, path) = media_fixture();
+        let _fixture = install_fixture(&path, FixtureMode::SleepDrop, Duration::from_secs(300));
+        let task = tokio::spawn({
+            let path = path.clone();
+            async move { probe(&path).await }
+        });
+        let pid = wait_for_pid("sleep-drop").await;
+        task.abort();
+        let _ = task.await;
+        assert_pid_gone(pid).await;
+    }
+
+    #[tokio::test]
+    async fn failed_probe_keeps_its_stderr_reason() {
+        let (_directory, path) = media_fixture();
+        let _fixture = install_fixture(&path, FixtureMode::Fail, Duration::from_secs(5));
+        let error = probe(&path)
+            .await
+            .expect_err("fixture exits unsuccessfully");
+        match error {
+            ProbeError::Failed { reason, .. } => assert_eq!(reason, "Permission denied"),
+            other => panic!("expected permanent probe failure, got {other}"),
+        }
+    }
 
     #[test]
     fn parses_hdr10_movie() {
