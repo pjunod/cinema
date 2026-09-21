@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use super::{
     inspection_to_store, OpticalDriveManager, OpticalDriveSnapshot, OpticalHostAdapter,
-    OpticalHostError, OpticalLifecycleError, OpticalReadPermit,
+    OpticalHostError, OpticalLifecycleError, OpticalMediaPresence, OpticalReadPermit,
 };
 use crate::config::OpticalDriveConfig;
 use crate::error::StoreError;
@@ -29,16 +29,17 @@ pub enum OpticalServiceError {
 /// has no readiness gate. If an operator enables optical with an unmet helper
 /// or device requirement, the requested operation returns that concrete host
 /// error and the daemon remains healthy.
-pub struct OpticalService<S, H> {
+pub struct OpticalService<S: ?Sized, H> {
     manager: OpticalDriveManager,
     drives: BTreeMap<String, OpticalDriveConfig>,
     store: Arc<S>,
     host: Arc<H>,
+    poll_interval: std::time::Duration,
 }
 
 impl<S, H> OpticalService<S, H>
 where
-    S: OpticalStore,
+    S: OpticalStore + ?Sized,
     H: OpticalHostAdapter,
 {
     pub fn new(
@@ -46,6 +47,7 @@ where
         drives: Vec<OpticalDriveConfig>,
         store: Arc<S>,
         host: Arc<H>,
+        poll_interval: std::time::Duration,
     ) -> Self {
         let manager = OpticalDriveManager::new(owner_node_id, &drives);
         let drives = drives
@@ -57,7 +59,16 @@ where
             drives,
             store,
             host,
+            poll_interval,
         }
+    }
+
+    pub fn poll_interval(&self) -> std::time::Duration {
+        self.poll_interval
+    }
+
+    pub fn configured_drive_ids(&self) -> impl Iterator<Item = &str> {
+        self.drives.keys().map(String::as_str)
     }
 
     pub fn manager(&self) -> &OpticalDriveManager {
@@ -116,6 +127,51 @@ where
         Ok(())
     }
 
+    /// Perform one cheap observation pass. Full inspection occurs only on the
+    /// empty-to-present edge; stable present media is not repeatedly opened.
+    pub async fn observe_once(&self, now_ms: i64) -> Vec<(String, OpticalServiceError)> {
+        let mut errors = Vec::new();
+        for (drive_id, drive) in &self.drives {
+            let presence = match self.host.presence(drive).await {
+                Ok(presence) => presence,
+                Err(error) => {
+                    errors.push((drive_id.clone(), error.into()));
+                    continue;
+                }
+            };
+            let state = self
+                .manager
+                .snapshot(drive_id)
+                .map(|snapshot| snapshot.state);
+            match (presence, state) {
+                (OpticalMediaPresence::Present, Some(super::OpticalDriveState::Empty)) => {
+                    if let Err(error) = self.inspect_insertion(drive_id, now_ms).await {
+                        errors.push((drive_id.clone(), error));
+                    }
+                }
+                (OpticalMediaPresence::Empty, Some(super::OpticalDriveState::Empty))
+                | (OpticalMediaPresence::Unknown, _) => {}
+                (OpticalMediaPresence::Empty, Some(_)) => {
+                    if let Err(error) = self.remove(drive_id) {
+                        errors.push((drive_id.clone(), error));
+                    }
+                }
+                // A stable present signal does not prove a change. Host event
+                // adapters call `inspect_insertion` for explicit change edges.
+                (OpticalMediaPresence::Present, Some(_)) => {}
+                (_, None) => errors.push((drive_id.clone(), OpticalServiceError::UnknownDrive)),
+            }
+        }
+        errors
+    }
+
+    /// Disabling observation immediately fences all insertion generations.
+    pub fn deactivate(&self) {
+        for drive_id in self.drives.keys() {
+            let _ = self.manager.observe_removal(drive_id);
+        }
+    }
+
     pub fn claim_playback(
         &self,
         drive_id: &str,
@@ -145,11 +201,8 @@ where
             .drives
             .get(drive_id)
             .ok_or(OpticalServiceError::UnknownDrive)?;
-        self.manager.authorize_eject(
-            drive_id,
-            expected_generation,
-            stopped_session_id,
-        )?;
+        self.manager
+            .authorize_eject(drive_id, expected_generation, stopped_session_id)?;
         self.host.eject(drive).await?;
         self.manager.observe_removal(drive_id)?;
         Ok(())

@@ -1542,6 +1542,9 @@ pub struct SettingsDto {
     /// vetoes this explicit runtime choice.
     pub library_channels_enabled: bool,
     pub library_channel_subject_matching_enabled: bool,
+    /// Physical optical playback. The saved choice is authoritative;
+    /// `/developer/readiness` reports helper/drive prerequisites separately.
+    pub optical_enabled: bool,
     /// Always-compiled HDHomeRun integration. The switch is runtime-only and
     /// remains off until the separate readiness endpoint is green.
     pub live_tv_enabled: bool,
@@ -1938,6 +1941,10 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             setting(crate::channel_subjects::ENABLE_KEY).as_deref(),
             true,
         ),
+        optical_enabled: plurx_core::store::stored_switch(
+            setting(keys::OPTICAL_ENABLED).as_deref(),
+            false,
+        ),
         library_channels_enabled: plurx_core::store::stored_switch(
             setting(keys::LIBRARY_CHANNELS_ENABLED).as_deref(),
             false,
@@ -2183,6 +2190,7 @@ pub struct UpdateSettings {
     pub server_name: Option<String>,
     pub library_channels_enabled: Option<bool>,
     pub library_channel_subject_matching_enabled: Option<bool>,
+    pub optical_enabled: Option<bool>,
     /// HDHomeRun settings are a generation-CAS tuple. Save the address/owner
     /// while disabled, run readiness, then enable in a separate request.
     pub live_tv_enabled: Option<bool>,
@@ -2383,6 +2391,7 @@ impl UpdateSettings {
             || self.monarr_url.is_some()
             || self.monarr_api_key.is_some()
             || self.monarr_watched_sync.is_some()
+            || self.optical_enabled.is_some()
             || self.vod_presentation.is_some()
             || self.vod_live_recovery.is_some()
             || self.playback_control_protocol_v1.is_some()
@@ -3373,6 +3382,18 @@ pub async fn update_settings(
             .store
             .put_setting(keys::PGS_OVERLAY, if on { "1" } else { "0" })
             .await?;
+    }
+    if let Some(on) = req.optical_enabled {
+        state
+            .store
+            .put_setting(keys::OPTICAL_ENABLED, if on { "1" } else { "0" })
+            .await?;
+        if !on {
+            // The persisted choice never depends on readiness. Turning it off
+            // is still a lifecycle command and immediately revokes insertion
+            // generations so no new physical read can be admitted.
+            state.optical.deactivate();
+        }
     }
     if let Some(on) = req.dolby_vision_convert {
         state

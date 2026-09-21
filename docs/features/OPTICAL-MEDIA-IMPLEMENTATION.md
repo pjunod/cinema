@@ -1035,8 +1035,8 @@ compiles when its acceptance cases remain unexecuted.
 |---|---|---|
 | M0 source/VOD proof | partial | [2026-09-20 evidence](../evidence/OPTICAL-M0-2026-09-20.md): pinned compiler and typed source/helper contracts established; local FFmpeg lacks both optical inputs, lab nodes were unreachable, and no identified drive exists on the reachable host. Physical DVD/Blu-ray VOD proof remains open. |
 | M1 domain/Store | built | Commit `b9032504`; [M1 evidence](../evidence/OPTICAL-M1-2026-09-20.md). Common source facts, managed optical decision constraints, versioned session/output identity, both Store backends, per-user progress, matching cleanup and explicit `optical.play` grants are implemented. A live multi-node Hiqlite round trip remains M4 acceptance, not a claim of this focused receipt. |
-| M2 device lifecycle | open | No implementation |
-| M3 playback/API | open | Depends on M0 source/VOD decision |
+| M2 device lifecycle | built; physical acceptance open | Commit `fbbf1e25` establishes configured-drive admission and the current follow-up wires conditional runtime observation, path-free readiness, authoritative enable/disable transitions and HTTP-facing state. See [M2 evidence](../evidence/OPTICAL-M2-2026-09-20.md). No reachable identified drive exists, so physical lifecycle acceptance remains open. |
+| M3 playback/API | partial | Authenticated drive/disc/title reads, managed-source decisions, session-bound progress, admin match and generation-checked eject are implemented without device paths. A source-aware VOD session route is intentionally not advertised until the M0 reader/seek proof can support the existing controller honestly. |
 | M4 cluster | open | No implementation |
 | M5 web | open | Concept only; full UI contract is in §8 |
 | M6 native | open | No implementation |

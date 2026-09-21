@@ -138,6 +138,12 @@ pub(crate) async fn readiness(
             .map(String::as_str),
         true,
     );
+    let optical_on = plurx_core::store::stored_switch(
+        settings
+            .get(plurx_core::store::keys::OPTICAL_ENABLED)
+            .map(String::as_str),
+        false,
+    );
 
     // Parsed exactly the way the engine parses it. That was the point when all
     // three sites compared the raw value — a row that trimmed on its own would
@@ -171,6 +177,7 @@ pub(crate) async fn readiness(
     Ok(Json(DeveloperReadiness {
         items: vec![
             windows_server(&state, convert_on),
+            optical_media(&state, optical_on),
             library_channels(&state, library_channels_on).await,
             channel_subjects(plurx_core::store::stored_switch(
                 settings
@@ -200,6 +207,67 @@ pub(crate) async fn readiness(
             source_probe_comparison().await,
         ],
     }))
+}
+
+fn optical_media(state: &AppState, enabled: bool) -> DeveloperEnableItem {
+    use plurx_core::optical::{HostRequirementStatus, OpticalDriveState};
+
+    let snapshots = state.optical.manager().snapshots();
+    let mut requirements = Vec::new();
+    if snapshots.is_empty() {
+        requirements.push(DeveloperRequirement {
+            id: "optical_drive_configured",
+            title: "A node-local optical drive is configured",
+            status: RequirementStatus::Unmet,
+            evidence: "No [[optical.drives]] entry is configured on this node. The saved enable choice remains available and authoritative.".to_owned(),
+        });
+    }
+    for snapshot in &snapshots {
+        for requirement in state.optical.requirements(&snapshot.id).unwrap_or_default() {
+            let status = match requirement.status {
+                HostRequirementStatus::Met => RequirementStatus::Met,
+                HostRequirementStatus::Unmet => RequirementStatus::Unmet,
+                HostRequirementStatus::Unknown => RequirementStatus::Unobservable,
+            };
+            requirements.push(DeveloperRequirement {
+                id: match requirement.id {
+                    "linux_host" => "optical_linux_host",
+                    "helper" => "optical_helper",
+                    "device" => "optical_device",
+                    "mount" => "optical_mount",
+                    _ => "optical_permissions",
+                },
+                title: match requirement.id {
+                    "linux_host" => "Linux host adapter",
+                    "helper" => "Optical inspection helper",
+                    "device" => "Configured drive device",
+                    "mount" => "Configured read-only mount",
+                    _ => "Operation-time drive permissions",
+                },
+                status,
+                evidence: format!("{}: {}", snapshot.label, requirement.detail),
+            });
+        }
+    }
+    let ready_count = snapshots
+        .iter()
+        .filter(|snapshot| matches!(snapshot.state, OpticalDriveState::Ready { .. }))
+        .count();
+    requirements.push(DeveloperRequirement {
+        id: "optical_physical_acceptance",
+        title: "Representative DVD and Blu-ray qualification",
+        status: RequirementStatus::Unobservable,
+        evidence: format!(
+            "This node currently reports {ready_count} inspected ready drive(s). Physical seek, chapter, protection, and installed-package acceptance remains an operator qualification receipt and is never an enablement gate."
+        ),
+    });
+    DeveloperEnableItem {
+        id: "optical_media",
+        title: "Enable DVD and Blu-ray playback",
+        enabled: Some(enabled),
+        setting: Some("optical_enabled"),
+        requirements,
+    }
 }
 
 async fn content_analysis_repair(state: &AppState, enabled: bool) -> DeveloperEnableItem {

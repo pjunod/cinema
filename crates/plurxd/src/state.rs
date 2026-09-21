@@ -642,6 +642,11 @@ pub struct AppState {
     pub(crate) media_sessions: Arc<crate::media_sessions::MediaSessionCoordinator>,
     /// Always-compiled HDHomeRun configuration, readiness, and lineup owner.
     pub(crate) live_tv: Arc<crate::live_tv::LiveTvManager>,
+    /// Node-local optical drives and their insertion-fenced reader admission.
+    /// The service is always compiled; the replicated runtime switch decides
+    /// whether observation is active.
+    pub(crate) optical:
+        Arc<plurx_core::optical::OpticalService<dyn Store, plurx_core::optical::SystemOpticalHost>>,
     pub server_name: String,
     /// Stable identity of the node that owns local transcode/offline bytes.
     pub node_id: String,
@@ -804,6 +809,7 @@ impl AppState {
                 shared_cache_id: String::new(),
                 catalogue,
                 snapshot_recovery_budgets: SnapshotRecoveryBudgets::default(),
+                optical: plurx_core::config::OpticalConfig::default(),
             },
             store,
             dirs,
@@ -837,6 +843,7 @@ impl AppState {
             shared_cache_id,
             catalogue,
             snapshot_recovery_budgets,
+            optical,
         } = config;
         let serving = crate::serving_fence::ServingFence::new(replication.metrics_handle());
         let Dirs {
@@ -941,6 +948,16 @@ impl AppState {
             live_tv_scratch,
             runtime_cache.join("live-tv"),
         );
+        let optical_host = Arc::new(plurx_core::optical::SystemOpticalHost::new(
+            optical.helper_path,
+        ));
+        let optical = Arc::new(plurx_core::optical::OpticalService::new(
+            node_id.clone(),
+            optical.drives,
+            Arc::clone(&store),
+            optical_host,
+            std::time::Duration::from_secs(optical.poll_interval_secs),
+        ));
         AppState {
             store,
             cache_only_admin_proofs,
@@ -956,6 +973,7 @@ impl AppState {
             media_pool,
             media_sessions,
             live_tv,
+            optical,
             server_name,
             node_id,
             cluster_advertisement,
@@ -1119,6 +1137,7 @@ pub struct AppConfig {
     pub shared_cache_id: String,
     pub catalogue: CatalogueReader,
     pub snapshot_recovery_budgets: SnapshotRecoveryBudgets,
+    pub optical: plurx_core::config::OpticalConfig,
 }
 
 /// Status of the most recent (or in-flight) scan for one library.

@@ -22,6 +22,7 @@ mod media_pool;
 mod media_sessions;
 mod meter;
 mod offline;
+mod optical_observer;
 mod pgs_overlay;
 mod pipeprobe;
 mod playback_control;
@@ -2177,6 +2178,7 @@ fn build_state(
                 transfer_secs: config.cluster.snapshot_transfer_timeout_secs,
                 install_secs: config.cluster.install_snapshot_timeout_secs,
             },
+            optical: config.optical.clone(),
         },
         store,
         dirs,
@@ -2288,6 +2290,10 @@ fn spawn_background_loops(
     tokio::spawn(crate::media_sessions::lease_loop(state.clone()));
     tokio::spawn(crate::media_sessions::takeover_loop(state.clone()));
     tokio::spawn(crate::media_sessions::maintenance_loop(state.clone()));
+    tokio::spawn(crate::optical_observer::observation_loop(
+        state.clone(),
+        background_shutdown.clone(),
+    ));
     tokio::spawn(crate::library_search::semantic::worker(
         state.clone(),
         background_shutdown.clone(),

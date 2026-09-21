@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::{path::Path, process::Stdio, time::Duration};
 
 use async_trait::async_trait;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
 use tokio::io::AsyncReadExt;
 
@@ -17,6 +17,8 @@ const INSPECTION_TIMEOUT: Duration = Duration::from_secs(60);
 #[cfg(target_os = "linux")]
 const EJECT_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(target_os = "linux")]
+const PRESENCE_TIMEOUT: Duration = Duration::from_secs(5);
+#[cfg(target_os = "linux")]
 const MAX_HELPER_REPLY_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -25,6 +27,23 @@ pub enum HostRequirementStatus {
     Met,
     Unmet,
     Unknown,
+}
+
+/// Cheap media observation result. `Unknown` preserves the current insertion:
+/// a transient udev/helper failure is not evidence that the tray changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpticalMediaPresence {
+    Empty,
+    Present,
+    Unknown,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PresenceReply {
+    presence: OpticalMediaPresence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -56,6 +75,12 @@ pub enum OpticalHostError {
 pub trait OpticalHostAdapter: Send + Sync + 'static {
     fn requirements(&self, drive: &OpticalDriveConfig) -> Vec<HostRequirement>;
 
+    /// Observe tray/media state without performing title inspection.
+    async fn presence(
+        &self,
+        drive: &OpticalDriveConfig,
+    ) -> Result<OpticalMediaPresence, OpticalHostError>;
+
     async fn inspect(
         &self,
         drive: &OpticalDriveConfig,
@@ -84,6 +109,7 @@ impl SystemOpticalHost {
         drive: &OpticalDriveConfig,
         expected_generation: Option<&str>,
         timeout: Duration,
+        output_limit: u64,
     ) -> Result<Vec<u8>, OpticalHostError> {
         let mut command = tokio::process::Command::new(&self.helper_path);
         command
@@ -101,8 +127,10 @@ impl SystemOpticalHost {
         }
         if let Some(generation) = expected_generation {
             command
-                .args(["--schema", &INSPECTION_SCHEMA_V1.to_string()])
-                .args(["--expected-generation", generation]);
+                .arg("--schema")
+                .arg(INSPECTION_SCHEMA_V1.to_string())
+                .arg("--expected-generation")
+                .arg(generation);
         }
         let run = async move {
             let mut child = command
@@ -114,11 +142,11 @@ impl SystemOpticalHost {
                 .ok_or(OpticalHostError::HelperUnavailable)?;
             let mut bytes = Vec::new();
             stdout
-                .take(MAX_HELPER_REPLY_BYTES.saturating_add(1))
+                .take(output_limit.saturating_add(1))
                 .read_to_end(&mut bytes)
                 .await
                 .map_err(|_| OpticalHostError::Failed)?;
-            if bytes.len() > MAX_HELPER_REPLY_BYTES as usize {
+            if bytes.len() > output_limit as usize {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
                 return Err(OpticalHostError::OutputLimit);
@@ -210,6 +238,26 @@ impl OpticalHostAdapter for SystemOpticalHost {
         }
     }
 
+    async fn presence(
+        &self,
+        drive: &OpticalDriveConfig,
+    ) -> Result<OpticalMediaPresence, OpticalHostError> {
+        #[cfg(target_os = "linux")]
+        {
+            let bytes = self
+                .run_helper("presence", drive, None, PRESENCE_TIMEOUT, 4 * 1024)
+                .await?;
+            serde_json::from_slice::<PresenceReply>(&bytes)
+                .map(|reply| reply.presence)
+                .map_err(|error| OpticalHostError::InvalidReply(error.to_string()))
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = drive;
+            Err(OpticalHostError::UnsupportedHost)
+        }
+    }
+
     async fn inspect(
         &self,
         drive: &OpticalDriveConfig,
@@ -223,6 +271,7 @@ impl OpticalHostAdapter for SystemOpticalHost {
                     drive,
                     Some(expected_generation),
                     INSPECTION_TIMEOUT,
+                    MAX_HELPER_REPLY_BYTES,
                 )
                 .await?;
             let response = serde_json::from_slice::<InspectionResponse>(&bytes)
@@ -244,7 +293,8 @@ impl OpticalHostAdapter for SystemOpticalHost {
     async fn eject(&self, drive: &OpticalDriveConfig) -> Result<(), OpticalHostError> {
         #[cfg(target_os = "linux")]
         {
-            self.run_helper("eject", drive, None, EJECT_TIMEOUT).await?;
+            self.run_helper("eject", drive, None, EJECT_TIMEOUT, MAX_HELPER_REPLY_BYTES)
+                .await?;
             Ok(())
         }
         #[cfg(not(target_os = "linux"))]

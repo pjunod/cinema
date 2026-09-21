@@ -16,7 +16,8 @@ pub(crate) mod store;
 
 pub use capability::{classify_help_output, OpticalCapabilities, OpticalCapability};
 pub use host::{
-    HostRequirement, HostRequirementStatus, OpticalHostAdapter, OpticalHostError, SystemOpticalHost,
+    HostRequirement, HostRequirementStatus, OpticalHostAdapter, OpticalHostError,
+    OpticalMediaPresence, SystemOpticalHost,
 };
 pub use input::{InputBuildError, OpticalTitleLocator, ResolvedInput};
 pub use inspector::{

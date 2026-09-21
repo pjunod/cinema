@@ -1467,6 +1467,9 @@ pub(crate) fn persistable_credential(value: &SealedSecret) -> Result<String, Sto
 /// Well-known settings keys. Keys are dotted, lowercase, and owned by the
 /// module that writes them.
 pub mod keys {
+    /// Authoritative runtime optical-media switch. Absence is off. Readiness
+    /// diagnostics are advisory and never rewrite or veto this value.
+    pub const OPTICAL_ENABLED: &str = "optical.enabled";
     /// Runtime Library-channel playback switch. The feature is always compiled;
     /// absence is off so an upgrade never starts scheduled playback implicitly.
     pub const LIBRARY_CHANNELS_ENABLED: &str = "library_channels.enabled";

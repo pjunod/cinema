@@ -321,6 +321,45 @@ impl OpticalDriveManager {
             } => Err(OpticalLifecycleError::NotReady),
         }
     }
+
+    /// Validate a progress/control write against the exact active physical
+    /// session. Durable disc identity alone is insufficient: a stale client
+    /// must not update a new viewer's insertion after a tray swap.
+    pub fn authorize_session(
+        &self,
+        drive_id: &str,
+        expected_generation: &str,
+        expected_disc_id: &str,
+        expected_title_id: &str,
+        session_id: &str,
+    ) -> Result<(), OpticalLifecycleError> {
+        let drives = self.drives();
+        let slot = drives
+            .get(drive_id)
+            .ok_or(OpticalLifecycleError::UnknownDrive)?;
+        match &slot.state {
+            OpticalDriveState::Busy {
+                media_generation,
+                disc_id,
+                title_id,
+                session_id: current_session_id,
+            } if media_generation == expected_generation
+                && disc_id == expected_disc_id
+                && title_id == expected_title_id
+                && current_session_id == session_id =>
+            {
+                Ok(())
+            }
+            OpticalDriveState::Busy {
+                media_generation, ..
+            } if media_generation != expected_generation => {
+                Err(OpticalLifecycleError::StaleGeneration)
+            }
+            OpticalDriveState::Busy { .. } => Err(OpticalLifecycleError::Busy),
+            OpticalDriveState::Empty => Err(OpticalLifecycleError::Empty),
+            _ => Err(OpticalLifecycleError::NotReady),
+        }
+    }
 }
 
 pub struct OpticalReadPermit {
@@ -432,16 +471,27 @@ impl Drop for OpticalReadPermit {
             return;
         }
         slot.active = None;
-        if let OpticalDriveState::Busy {
-            media_generation,
-            disc_id,
-            ..
-        } = &slot.state
-        {
-            slot.state = OpticalDriveState::Ready {
-                media_generation: media_generation.clone(),
-                disc_id: disc_id.clone(),
-            };
+        match (&self.kind, &slot.state) {
+            (
+                ReaderKind::Playback,
+                OpticalDriveState::Busy {
+                    media_generation,
+                    disc_id,
+                    ..
+                },
+            ) => {
+                slot.state = OpticalDriveState::Ready {
+                    media_generation: media_generation.clone(),
+                    disc_id: disc_id.clone(),
+                };
+            }
+            (ReaderKind::Inspection, OpticalDriveState::Inspecting { .. }) => {
+                slot.state = OpticalDriveState::Failed {
+                    media_generation: Some(self.generation.clone()),
+                    reason: "optical inspection was cancelled".to_owned(),
+                };
+            }
+            _ => {}
         }
     }
 }
