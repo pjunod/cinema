@@ -33978,7 +33978,7 @@ pub(crate) mod tests {
                 generation: "rolling-budget-generation",
                 owner_node_id: "test-node",
                 owner_epoch: 1,
-                client_instance_id: "rolling-budget-client",
+                client_instance_id: "00000000-0000-4000-8000-000000000001",
                 sequence,
                 snapshot,
                 prepared_successor:
@@ -33990,6 +33990,33 @@ pub(crate) mod tests {
             outcome.disposition,
             crate::playback_control::ControlDisposition::Accepted
         );
+    }
+
+    async fn commit_rolling_publication_media(
+        session: &Session,
+        segment_index: i64,
+        segment_end_ms: i64,
+    ) -> bool {
+        let producer_attempt = session.control.current_producer_attempt();
+        let handoff = session.control.media_commit_handoff(
+            producer_attempt,
+            segment_index,
+            Some(segment_end_ms),
+            Arc::clone(&session.compatibility_attempt),
+            Arc::clone(&session.high_segment),
+            Arc::clone(&session.fetched_end_ms),
+        );
+        session
+            .control
+            .commit_media(
+                "segment",
+                producer_attempt,
+                Some(segment_index),
+                Some(segment_end_ms),
+                Some(handoff),
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
     }
 
     #[tokio::test]
@@ -34202,17 +34229,7 @@ pub(crate) mod tests {
             .await
             .expect("legacy bootstrap");
         assert!(
-            session
-                .control
-                .commit_media(
-                    "segment",
-                    0,
-                    Some(2),
-                    Some(48_000),
-                    None,
-                    Instant::now() + Duration::from_secs(5),
-                )
-                .await,
+            commit_rolling_publication_media(&session, 2, 48_000).await,
             "bootstrap fetch"
         );
 
@@ -34266,17 +34283,7 @@ pub(crate) mod tests {
             "the safe prefix below the 48 second boundary must bootstrap"
         );
         assert!(
-            session
-                .control
-                .commit_media(
-                    "segment",
-                    0,
-                    Some(2),
-                    Some(47_000),
-                    None,
-                    Instant::now() + Duration::from_secs(5),
-                )
-                .await,
+            commit_rolling_publication_media(&session, 2, 47_000).await,
             "legacy bootstrap fetch"
         );
 
@@ -34518,17 +34525,7 @@ pub(crate) mod tests {
         );
 
         assert!(
-            session
-                .control
-                .commit_media(
-                    "segment",
-                    0,
-                    Some(2),
-                    Some(48_000),
-                    None,
-                    Instant::now() + Duration::from_secs(5),
-                )
-                .await,
+            commit_rolling_publication_media(&session, 2, 48_000).await,
             "legacy fetch frontier"
         );
 
@@ -34638,17 +34635,7 @@ pub(crate) mod tests {
             "a prune-only repair pass changed the immutable served snapshot"
         );
         assert!(
-            session
-                .control
-                .commit_media(
-                    "segment",
-                    0,
-                    Some(2),
-                    Some(48_000),
-                    None,
-                    Instant::now() + Duration::from_secs(5),
-                )
-                .await,
+            commit_rolling_publication_media(&session, 2, 48_000).await,
             "legacy fetch frontier"
         );
 
