@@ -1,6 +1,6 @@
 # Store-contract coverage and placeholder validation — close the ten paths, then check the other dialect
 
-**Status:** implementation complete; draft review pending · **Executes:** S10 / F-sc-13 and the
+**Status:** implementation complete; sole review findings addressed · **Executes:** S10 / F-sc-13 and the
 prescriptions of F-hist-1 / F-hist-2 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
@@ -23,8 +23,12 @@ an error log, stop and flag it: each is refused in §4, with its reason.
    [vodserve.rs:2537-2541](../../crates/plurxd/src/vodserve.rs) — the "no
    verified holder" arm the commit body is about — is not among them,
    because rustfmt wrapped it across five lines. A multiline pattern finds
-   **29** production sites in eleven files, not 13. §2.5 gives the working
-   command; the audit in M2 is scoped to 29 sites, not 13.
+   **29** production sites in eleven files, not 13. The sole adversarial
+   review then showed that even the multiline pattern was still coupled to
+   receiver spelling and a bounded suffix. The final syntax-aware census in
+   M2 derives Result-returning Store methods from the traits and finds **42**
+   sites in thirteen files, including nested timeout calls and calls through
+   `PublicationStore::fenced`.
 2. **The appendix's list of out-of-scope hiqlite modules is stale.** It names
    seven (`hiqlite_{classification,dv_conversion,dvr,fragment_index_cluster,
    library_channels,shared_cache,timeline_annotations}.rs`) and 20 of 24
@@ -230,8 +234,8 @@ This plan is the "worth doing and is not done here".
 
 ### 2.5 The discarded results
 
-The appendix's command misses its own subject (correction 1). The working
-one, and its result on `0f02b7ea`:
+The appendix's command misses its own subject (correction 1). The initial
+multiline improvement, and its result on `0f02b7ea`, was:
 
 ```bash
 rg -nU --multiline-dotall \
@@ -239,7 +243,7 @@ rg -nU --multiline-dotall \
   crates/plurxd/src crates/plurx-core/src --no-heading -o | rg ':let _ = '
 ```
 
-29 production sites in eleven files: `state.rs` ×11, `transcode.rs` ×4,
+It found 29 production sites in eleven files: `state.rs` ×11, `transcode.rs` ×4,
 `fragment_index_cluster.rs` ×4, `shared_cache.rs` ×2,
 `http/internal_media.rs` ×2, and one each in `vodserve.rs` (the F-hist-2
 arm), `offline.rs`, `live_tv/dvr.rs`, `library_search.rs`,
@@ -265,6 +269,18 @@ The assessment's F-hist-2 row is explicit about the difference:
 > Do not turn every intentionally best-effort cleanup result into an
 > unbounded error stream. Classify operation, cancellation, retry and failure
 > severity; retain a regression through the actual no-holder path.
+
+That pattern was useful historical evidence, not a sufficient guard. It
+missed Store calls nested inside another await and calls whose receiver was a
+wrapper expression. M2 therefore parses every `crates/*/src/**/*.rs`, derives
+the async Result-returning Store method names from the Store traits, and
+rejects a wildcard `let _ =` whose initializer contains any such method call.
+The semantic census found 42 production sites in thirteen files: `state.rs`
+×13, `transcode.rs` ×12, `fragment_index_cluster.rs` ×4,
+`shared_cache.rs` ×3, `http/internal_media.rs` ×2, and one each in
+`vodserve.rs`, `offline.rs`, `live_tv/dvr.rs`, `library_search.rs`,
+`http/offline.rs`, `http/extract.rs`, `channel_subjects.rs` and
+`cachekeep.rs`.
 
 ### 2.6 What adding the ten paths costs
 
@@ -355,20 +371,23 @@ plurx_store_discarded_results_total{operation="requeue_cluster_fragment_index",s
 plurx_store_discarded_results_total{operation="release_lease",severity="best_effort",outcome="error"} 0
 ```
 
-Labels: `operation` ∈ the enum (29 today, one per site); `severity` ∈
+Labels: `operation` ∈ the enum (42 today, one per site); `severity` ∈
 {`lost_work`, `best_effort`, `cancelled`}; `outcome` ∈ {`ok`, `error`}.
 Error-level logs are rate-limited per operation (one per 30 s, with a
 suppressed count) so a peer outage cannot turn a cleanup path into a log
 flood — the assessment's "unbounded error stream" guardrail.
 
-The classification of all 29 sites is part of M2's PR and is reviewed
-site-by-site; `vodserve.rs:2537` is `LostWork`, `shared_cache.rs:1219,1250`
-are `BestEffort`. Each classification carries a one-line reason at the site.
+The classification of all 42 sites is part of M2's PR and was reviewed
+site-by-site: 35 are `BestEffort`, five are `LostWork`, and two are
+`Cancelled`. `vodserve.rs:2537` is `LostWork`; the bounded shared-cache
+suspect transition also counts both an inner Store failure and an outer
+deadline as `LostWork`. Each classification carries a one-line reason at the
+site.
 
-And a lint so the audit does not have to be repeated: a test in
-`placeholder_census.rs`'s neighbourhood that runs the §2.5 multiline pattern
-over `crates/*/src` and fails on any match, because every site now goes
-through `observe`. Directory-derived, no allow-list.
+And a lint so the audit does not have to be repeated: a syntax-aware test in
+`store_result.rs` scans `crates/*/src`, derives the Store method set from the
+traits, and fails on direct, wrapped or nested discarded calls, because every
+site now goes through `observe`. Directory-derived, no allow-list.
 
 ### 3.4 One SQL source, and why the rewrite cannot be mechanical
 
@@ -421,10 +440,11 @@ equivalence test; whether it spreads is a §7 question, not a commitment.
   row). Honoured by §3.3's three severities, debug level for `BestEffort`,
   and the per-operation rate limit.
 - **Retain a regression through the actual no-holder path** (F-hist-2 row).
-  M2's PR includes a store-contract scenario that drives
-  `requeue_cluster_fragment_index` through the `vodserve.rs:2537` arm on
-  both backends, asserting the row returns to `queued` — the test that would
-  have caught 22 days of silence.
+  M2's PR names the production no-holder transition and drives that exact
+  seam against in-memory SQLite, file SQLite and a three-voter Hiqlite store,
+  asserting the row returns to `queued` and exhausted work remains terminal.
+  A separate daemon test still drives the whole `vodserve.rs:2537` arm on
+  SQLite.
 - **Instrument validation failures before I/O, on both backend contracts**
   (F-hist-1 row). M1's PR adds `plurx_store_validation_refusals_total`
   next to the existing store error families, so a refusal is an error metric
@@ -476,15 +496,17 @@ green.
 
 ### 5.3 M2 — the discarded-result audit
 
-`store_result.rs`, all 29 sites classified, the metric, the rate limit, the
+`store_result.rs`, all 42 sites classified, the metric, the rate limit, the
 lint, and the no-holder regression.
 
-Acceptance: the §2.5 command returns no matches;
+Acceptance: the syntax-aware repository census reports no unclassified
+direct, wrapped or nested Store calls;
 `cargo test -p plurxd store_result` covers the rate limit and the three
 severities; `cargo test -p plurx-core --features hiqlite-contract-tests
-requeue_through_the_no_holder_arm` green on both backends (this one needs
+--test store_contract requeue_through_the_no_holder_arm` green on in-memory
+SQLite, file SQLite and three voters (this one needs
 the replicated lane, so it is `make cluster-check`, not `make unit`);
-`make unit` green. The PR body lists the 29 sites with their severity and
+`make unit` green. The PR body lists the 42 sites with their severity and
 one-line reason.
 
 ### 5.4 M3 — one SQL source, piloted
@@ -601,6 +623,6 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `07796d70` | Routed all store slices; selector moved from hiqlite 3/16 + SQLite 7/24 outside `cluster_auth` to 0/16 + 0/24. Directory-derived regression passed. Historical cost remains 3 extra cluster lanes among 19 touching commits in 30 days. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `6e1554ed` | Added 24-file SQLite census, gap/mixed-spelling/local-arity checks, pinned 91 unchecked variants, fixed two real gaps, and exposed the fixed-cardinality pre-I/O refusal counter. Fourteen focused census tests and the counter regression passed. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `3ebc50be` | Classified all 29 discarded results: 25 best-effort, 3 lost-work, 1 cancelled. Closed labels, 30-second per-operation log windows, metrics, source lint, and actual VOD no-holder requeue regression passed; backend-neutral repair contract passed on SQLite. Replicated-lane execution remains CI evidence. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `3ebc50be`, findings `d56ccea6` | Classified all 42 discarded results: 35 best-effort, 5 lost-work, 2 cancelled. The semantic guard covers direct, nested and wrapper Store calls; every operation/severity failure cell is counted and bounded-logged. The actual named no-holder transition passed on in-memory SQLite, file SQLite and three-voter Hiqlite; the daemon arm passed its SQLite regression. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `8cfd50a5` | One typed parameter order now renders both `next_up` dialects; equivalence/validator, SQLite behavior, and backend-neutral watch-contract regressions passed. Measured patch: +119/-61, net +58; the pinned unchecked arity set fell from 91 to 90. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M4 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / this commit | Decision: keep the safe pilot, do not spread or revert. A future spread needs a shape inventory and net reduction across at least three unlike methods. |
