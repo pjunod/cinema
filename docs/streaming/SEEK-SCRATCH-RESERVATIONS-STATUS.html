@@ -5,8 +5,8 @@
 <h1>Seek scratch reservations</h1><p>Updated: 2026-09-20</p>
 <p class="note">Repeated seeks refused playback with a 500, and then the healthy incumbent was reaped thirty seconds later.
 Executing R1–R6 of the <a href="SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md">approved RCA</a> as one combined promotion
-(units A, B and C on one effort branch). <b>No deployment has been performed.</b></p>
-<p>Branch: <code>effort/seek-scratch</code> · Base: <code>a1414368</code> · Compiler: <code>1.97.1</code> · Build host: <code>nuc3</code> ·
+(units A, B and C on one effort branch). <b>Merged to main as <code>c70390bc</code>; the server side is deployed to the lab nodes. Physical acceptance is still outstanding.</b></p>
+<p>Merged: <code>c70390bc</code> · Branch: <code>effort/seek-scratch</code> · Base: <code>a1414368</code> · Compiler: <code>1.97.1</code> · Build host: <code>nuc3</code> ·
 <a href="../evidence/seek-scratch-reservations-receipt-2026-09-20.md">Implementation receipt</a></p>
 
 <h2>Units</h2>
@@ -41,7 +41,8 @@ both the copy path, so the repair reaches them; this is named rather than hidden
 <tr><td>Already red at <code>a1414368</code></td><td class="todo">Two <code>copyseg</code> cases, one Android assertion in <code>web-policy</code>, one in <code>web-control</code>, the Playwright startup check, and <code>failed_retention_garbage_unlink_cannot_reexpose_a_served_path</code>, which <b>hangs</b> at the base too. Each confirmed by running the same command against a pristine base extraction; none caused here.</td></tr>
 <tr><td><code>tests/ui-structure.golden</code></td><td class="todo">Known drift from the new Developer card. Needs a booted <code>plurxd</code> plus Playwright, which this session has neither of. Not in the fast lane.</td></tr>
 <tr><td>Adversarial review</td><td class="done">Three reviewers, one per unit boundary. Twenty-four findings: twenty-one changed the code, three recorded as accepted limitations. The disposition table is in the receipt.</td></tr>
-<tr><td>Fast lane · merge</td><td class="wip">Review fixes pushed; running the fast lane on PR #389.</td></tr>
+<tr><td>Fast lane · merge</td><td class="done">PR #389 green across scope, preflight, Rust gate, Windows compile and web syntax (Apple and Android skipped — no client sources changed), merged to <code>main</code> as <code>c70390bc</code>.</td></tr>
+<tr><td>Server deployment</td><td class="done">ansible <code>media/deploy.yml</code> with <code>-e only=plurx</code>: nynuc, m6 and nuc4 at <code>v0.3.0-2976-gc70390bc3</code>, nuc3 at <code>v0.3.0-2979-g0f02b7eaf</code> (it picked up the docs-only #392 that merged while the play was running). Four hosts changed, nothing failed, pre-deploy database backups taken on each.</td></tr>
 <tr><td>Physical acceptance</td><td class="todo">Needs the devices — prompt below</td></tr>
 </table>
 
