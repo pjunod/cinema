@@ -101,11 +101,11 @@ const SETTINGS_ENDPOINTS={
 };
 const SETTINGS_MANIFEST={
   libraries:{required:["settings","libs","status","dvConversions"],secondary:[]},
-  metadata:{required:["settings"],secondary:["libs"]},
+  metadata:{required:["settings"],secondary:["libs","developerReadiness"]},
   playback:{required:["settings"],secondary:["developerReadiness"]},
-  livetv:{required:["settings"],secondary:[]},
+  livetv:{required:["settings"],secondary:["developerReadiness"]},
   analysis:{required:["settings","analysis"],secondary:[]},
-  maintenance:{required:["settings","dvConversions"],secondary:[]},
+  maintenance:{required:["settings","dvConversions"],secondary:["developerReadiness"]},
   users:{required:["users"],secondary:[]},
   system:{required:["sys"],secondary:["playbackEvents"]},
   cluster:{required:["cluster"],secondary:["clusterOps","developerReadiness"]},
@@ -183,10 +183,9 @@ function patchSettingsSecondary(tab,key,value){
     const mount=document.getElementById("settings-playback-events");
     if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
   }
-  if(["developer","playback","cluster"].includes(tab)&&key==="developerReadiness"){
+  if(key==="developerReadiness"&&SETTINGS_MANIFEST[tab]?.secondary.includes(key)){
     // Patch only the evidence rows. Re-rendering the entire panel here could
-    // overwrite a local prepared-handoff toggle while its change event is in
-    // flight.
+    // overwrite an unsaved setting while diagnostics are still loading.
     applyDeveloperReadiness(value);
   }
   if(tab==="cluster"&&key==="clusterOps"){
@@ -212,7 +211,7 @@ function patchSettingsSecondaryError(tab,key,error){
     const mount=document.getElementById("settings-playback-events");
     if(mount) mount.innerHTML=`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Playback history is unavailable: ${message}</span></div>`;
   }
-  if(["developer","playback","cluster"].includes(tab)&&key==="developerReadiness"){
+  if(key==="developerReadiness"&&SETTINGS_MANIFEST[tab]?.secondary.includes(key)){
     applyDeveloperReadiness({unavailable:error&&error.message||"request failed"});
   }
   if(tab==="cluster"&&key==="clusterOps"){

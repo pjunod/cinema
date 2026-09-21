@@ -1,7 +1,7 @@
 # Content analysis repair — build contract for completion checks and recoverable failures
 
-**Status:** implementation handoff; design decisions specified below, no
-implementation or deployment claimed · **Written:** 2026-09-17 UTC.
+**Status:** open — implementation handoff; no implementation or deployment
+claimed · **Written:** 2026-09-17 UTC.
 **Executes:** the [root-cause diagnosis](CONTENT-ANALYSIS-FAILURES-RCA-AND-FIX.md)
 and findings R1/R2 from the
 [adversarial review](CONTENT-ANALYSIS-FAILURES-ADVERSARIAL-REVIEW.md).

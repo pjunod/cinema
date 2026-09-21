@@ -1,5 +1,7 @@
 # Playback control M3c1 — attempt-fenced delivery ledger
 
+**Status:** built · **Reconciled:** 2026-09-20
+
 This slice moves rolling publication and completed-fetch facts into the M3
 actor without changing which producer recovery actions are selected. It also
 orders the existing pre-publication fallback so actor admission must succeed

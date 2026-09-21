@@ -1,6 +1,6 @@
 # Transport-recovery resource baseline — why that lane has never passed
 
-**Status:** measured, and the decision in §6 is taken — Option A as a
+**Status:** done — baseline measured and the §6 Option A decision implemented · **Decision:** Option A as a
 campaign floor, built and described in
 [TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md](TRANSPORT-RECOVERY-RESOURCE-CONTRACT-DECISION.md)
 §0 · **Measured:** 2026-09-07 · **Decided:** 2026-09-08

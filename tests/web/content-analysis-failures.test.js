@@ -79,27 +79,20 @@ test("copied diagnostics expose retry and selected-video evidence without interp
   assert.ok(text.includes(hostile), "plain-text copy preserves evidence without executing markup");
 });
 
-test("Developer enablement is authoritative and readiness remains advisory", () => {
+test("Analysis owns the durable queue switch without a duplicate Developer control", () => {
   const card = new Function(
-    "esc", "setCard", "cardHead", "togRow", "devReq", "setCardFoot",
-    `${shippedFunction("contentAnalysisEnableCard")} return contentAnalysisEnableCard;`,
+    "setHead", "setCard", "cardHead", "togRow", "setCardFoot", "esc", "presetOpts", "analysisSummaryCard",
+    `${shippedFunction("analysisSettingsPanel")} return analysisSettingsPanel;`,
   )(
-    esc,
-    (html) => html,
-    (title, detail, badge) => `<h2>${title}</h2><p>${detail}</p>${badge}`,
-    (id, title, detail, checked) => `<input id="${id}" type="checkbox"${checked ? " checked" : ""}><b>${title}</b><p>${detail}</p>`,
-    (_readiness, _feature, key, title, detail) => `<div data-key="${key}"><b>${title}</b><p>${detail}</p></div>`,
-    (save) => `<button data-save="${save}">Save</button>`,
+    () => "", (html) => html, () => "",
+    (id, title, detail, checked) => `<input id="${id}" type="checkbox"${checked ? " checked" : ""}>`,
+    (save) => `<button data-save="${save}">Save</button>`, esc, () => "", () => "",
   );
-
-  const html = card({ vod_index_cluster_cache: true }, {});
-  assert.match(html, /id="ca-enabled"[^>]*checked/);
-  assert.match(html, /advisory/i);
-  assert.match(html, /never disable or override/i);
-  assert.match(html, /compatibility_inventory/);
-  assert.doesNotMatch(shippedFunction("contentAnalysisEnableCard"), /disabled\s*=|\.disabled/);
-
-  const save = shippedFunction("saveContentAnalysisDeveloper");
-  assert.match(save, /vod_index_cluster_cache:document\.getElementById\("ca-enabled"\)\.checked/);
+  assert.match(card({vod_index_cluster_cache:true}), /id="an-enabled"[^>]*checked/);
+  assert.doesNotMatch(card({vod_index_cluster_cache:false}), /checked|disabled/);
+  assert.match(card({}), /data-save="saveAnalysisSettings"/);
+  assert.doesNotMatch(shippedFunction("developerPanel"), /contentAnalysisEnableCard|ca-enabled/);
+  const save = shippedFunction("saveAnalysisSettings");
+  assert.match(save, /vod_index_cluster_cache:document\.getElementById\("an-enabled"\)\.checked/);
   assert.doesNotMatch(save, /readiness|requirements|compatibility_inventory/);
 });

@@ -4,7 +4,7 @@
 //
 // Why this exists: until 2026-09 `crates/plurxd/src/web/index.html` was one
 // 23,901-line file and twenty-two tests sliced functions straight out of it by
-// name. `docs/clients/WEB-SHELL-SPLIT-PLAN.md` cut it into sixty-two files, so
+// name. `docs/clients/WEB-SHELL-SPLIT-PLAN.md` cut it into sixty-five assets, so
 // the string those tests want is no longer a file — it is the concatenation of
 // the shell's body rows in served order. This is the one place that knows how
 // to build it, so a new file joins every slicing test the moment it is served.
@@ -21,13 +21,13 @@ const path = require("node:path");
 
 const WEB = path.join(__dirname, "../../crates/plurxd/src/web");
 
-// The seven pre-existing sidecars and reader.css keep their own routes and are
+// The six pre-existing sidecars and reader.css keep their own routes and are
 // not part of the split table (plan §2): they are UMD modules `require()`d by
 // path from tests, and three of them are bundled into the native clients by
 // path. A `<script src>` row naming one of these is not a body row.
 const SIDECARS = Object.freeze([
   "cluster-panel.js", "playback-policy.js", "playback-control.js", "reader.js",
-  "hls.min.js", "live-tv.js", "library-channels.js", "reader.css",
+  "live-tv.js", "library-channels.js", "reader.css",
 ]);
 
 const SCRIPT_ROW = /^<script src="\/assets\/([^"?]+)"><\/script>$/;

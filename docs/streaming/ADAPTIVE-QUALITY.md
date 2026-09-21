@@ -1,5 +1,7 @@
 # Adaptive quality — the design for bandwidth-aware streaming
 
+**Status:** live · **Reconciled:** 2026-09-20
+
 Companion to [ARCHITECTURE.md](../ARCHITECTURE.md) (how it's built) and
 [FEATURES.md](../FEATURES.md) (what it does). This is a *design document*: what
 "adjust quality automatically" means for a just-in-time transcoder, what's

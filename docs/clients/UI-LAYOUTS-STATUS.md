@@ -1,6 +1,6 @@
 # UI layouts — build status and the issues a reviewer should settle
 
-**Status:** G0 · G1 · G2 · G2b · T1 built and proven · **Implements:**
+**Status:** open — G0, G1, G2, G2b and T1 built; S3 and accessibility checks remain · **Implements:**
 [UI-LAYOUTS-IMPLEMENTATION.md](UI-LAYOUTS-IMPLEMENTATION.md) v4 ·
 **Branch:** `feat/ui-layouts` · **Written:** 2026-08-02; amended same day
 for G2b (library + item detail converted, the four defects fixed, box 4

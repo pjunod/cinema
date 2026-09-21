@@ -787,7 +787,7 @@ async fn process_inner(
     if !batch.is_empty() {
         if !enabled(state).await? {
             job.state = "waiting_for_provider".into();
-            job.error = Some("Local rule matching is paused in Settings → Developer.".into());
+            job.error = Some("Local rule matching is paused in Settings → Live TV.".into());
             job.counts = counts(&candidates, &decisions);
             return Ok(());
         }

@@ -9,11 +9,11 @@ leaves a caller reading Rust to find it, and a route removed without deleting
 its row leaves a caller writing against an endpoint that returns the app
 shell with a 200.
 
-So the router is parsed, not grepped for prose. Route literals come from the
-three `Router::new()` chains in `router()` and from any named subrouter nested
-or merged inside the native API. Constants are resolved to their declared
+So the router is parsed, not grepped for prose. Route literals come from every
+named `Router::new()` chain in `router()` and from any named subrouter nested
+or merged inside those local groups. Constants are resolved to their declared
 values, nested prefixes are composed, and the `/api/v1` nest is applied to the
-native chain.
+native deadline groups.
 """
 
 from __future__ import annotations
@@ -166,22 +166,52 @@ def _merged_router_routes(segment: str) -> set[str]:
     return routes
 
 
+def _local_router_segments(body: str) -> dict[str, str]:
+    """Return each `let name = Router::new()` chain in source order."""
+    declarations = list(
+        re.finditer(r"^\s*let\s+([A-Za-z_]\w*)\s*=\s*Router::new\(\)", body, re.MULTILINE)
+    )
+    root_at = body.index("Router::new()\n        // Also opted out")
+    segments: dict[str, str] = {}
+    for index, declaration in enumerate(declarations):
+        end = declarations[index + 1].start() if index + 1 < len(declarations) else root_at
+        segments[declaration.group(1)] = body[declaration.start():end]
+    return segments
+
+
+def _local_router_routes(
+    name: str,
+    segments: dict[str, str],
+    visiting: frozenset[str] = frozenset(),
+) -> set[str]:
+    """Expand one local router group, including local and module merges."""
+    if name in visiting:
+        raise AssertionError(f"local router merge cycle through {name}")
+    segment = segments[name]
+    routes = {
+        argument.strip('"') if argument.startswith('"') else _resolve_constant(argument)
+        for argument in _route_arguments(segment)
+    }
+    routes.update(_nested_router_routes(segment))
+    routes.update(_merged_router_routes(segment))
+    local_merges = re.findall(r"\.merge\(\s*([A-Za-z_]\w*)\s*\)", segment)
+    for merged in local_merges:
+        if merged not in segments:
+            raise AssertionError(f"no local Router::new() chain found for {merged}")
+        routes.update(_local_router_routes(merged, segments, visiting | {name}))
+    return routes
+
+
 def registered_routes() -> set[str]:
     body = _router_body()
-    api_at = body.index("let api = Router::new()")
-    plex_at = body.index("let plex_routes = Router::new()")
     root_at = body.index("Router::new()\n        // Also opted out")
+    segments = _local_router_segments(body)
 
-    routes: set[str] = set()
-    api_segment = body[api_at:plex_at]
-    for argument in _route_arguments(api_segment):
-        literal = argument.strip('"') if argument.startswith('"') else _resolve_constant(argument)
-        routes.add("/api/v1" + literal)
-    routes.update("/api/v1" + path for path in _nested_router_routes(api_segment))
-    routes.update("/api/v1" + path for path in _merged_router_routes(api_segment))
-    for argument in _route_arguments(body[plex_at:]):
-        literal = argument.strip('"') if argument.startswith('"') else _resolve_constant(argument)
-        routes.add(literal)
+    routes = {"/api/v1" + path for path in _local_router_routes("api", segments)}
+    root_segment = body[root_at:]
+    for merged in re.findall(r"\.merge\(\s*([A-Za-z_]\w*)\s*\)", root_segment):
+        if merged != "api":
+            routes.update(_local_router_routes(merged, segments))
     return routes
 
 

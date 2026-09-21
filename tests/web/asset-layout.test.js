@@ -35,8 +35,12 @@ documented.forEach((row, index) => {
     `${row.file}'s link does not point at it`,
   );
   assert.ok(row.holds.trim().length > 20, `${row.file} has no description worth reading`);
-  assert.match(row.old, /^(\d+–\d+|\*\*Relocated\.\*\*.*|\d+–\d+ \(less \d+–\d+\))$/,
-    `${row.file} has no usable old line range: ${row.old}`);
+  if (row.file === "hls.min.js") {
+    assert.equal(row.old, "Vendored dependency.");
+  } else {
+    assert.match(row.old, /^(\d+–\d+|\*\*Relocated\.\*\*.*|\d+–\d+ \(less \d+–\d+\))$/,
+      `${row.file} has no usable old line range: ${row.old}`);
+  }
 });
 
 // The sidecars are the other half of the claim: §4 says which files are

@@ -819,7 +819,8 @@ impl ScratchLedger {
         self.lock().entries.get(&key).map(|entry| entry.grant_bytes)
     }
 
-    /// The charge one allocation contributes, for diagnostics and tests.
+    /// The charge one allocation contributes, for ledger assertions.
+    #[cfg(test)]
     pub(crate) fn charge_of(&self, key: ScratchKey) -> Option<i64> {
         self.lock().entries.get(&key).map(Entry::charge)
     }
@@ -858,7 +859,7 @@ impl ScratchLedger {
                 )
             })
             .collect();
-        rows.sort_by(|left, right| right.0.cmp(&left.0));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.0));
         rows.into_iter()
             .take(limit)
             .map(|(_, row)| row)

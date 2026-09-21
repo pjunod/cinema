@@ -52,11 +52,11 @@ function renderSettings(){
   if(tab==="cluster"){ applyClusterFolds(); return refreshClusterLogs(); }
 }
 function settingsPanel(tab,d){
-  if(tab==="metadata")     return metadataPanel(d.settings);
-  if(tab==="playback")     return playbackPanel(d.settings);
-  if(tab==="livetv")       return liveTvPanel(d.settings);
+  if(tab==="metadata")     return metadataPanel(d.settings,d.developerReadiness);
+  if(tab==="playback")     return playbackPanel(d.settings,d.developerReadiness);
+  if(tab==="livetv")       return liveTvPanel(d.settings,d.developerReadiness);
   if(tab==="analysis")     return analysisSettingsPanel(d.settings,d.analysis);
-  if(tab==="maintenance")  return maintenancePanel(d.settings,d.dvConversions);
+  if(tab==="maintenance")  return maintenancePanel(d.settings,d.dvConversions,d.developerReadiness);
   if(tab==="users")        return usersPanel(d.users);
   if(tab==="system")       return systemPanel(d.sys,d.playbackEvents);
   if(tab==="cluster")      return clusterPanel(d);
@@ -129,7 +129,7 @@ const RETRY_EVERY=[[0,"Never"],[360,"6 hours"],[720,"12 hours"],[1440,"Daily"],[
 // poster is visible on every screen the item appears on.
 const ART_EVERY=[[0,"Never"],[30,"30 minutes"],[60,"Hourly"],[360,"6 hours"],[1440,"Daily"]];
 const CLEAN_EVERY=[[0,"Never"],[60,"Hourly"],[360,"6 hours"],[1440,"Daily"]];
-function maintenancePanel(settings,dv){
+function maintenancePanel(settings,dv,readiness){
   if(!ME||!ME.is_admin||!settings) return '';
   const jobs=setCard(`${cardHead("Scheduled jobs","All off by default except missing-artwork retries. Each one leaves no trace a normal scan would notice, which is why it needs a timer of its own.")}
     ${togSelect("job-probe","Retry unreadable files","Re-probe anything scanned without codec or duration — the fix (permissions, a remounted share) is invisible to a scan.",RETRY_EVERY,settings.probe_retry_mins,"Re-run ffprobe on files whose media details were never read")}
@@ -138,7 +138,7 @@ function maintenancePanel(settings,dv){
     ${togRow("job-boot","Scan every library at startup","About 30 seconds after the server starts — a server switched off while files landed doesn't notice them until its next scheduled run.",settings.scan_on_startup)}
     ${setCardFoot("saveMaintenance")}`);
   return `${setHead("Maintenance","Background work this node does on its own: what is scheduled, what it costs, and where to turn it off.")}
-    <div class="setgrid2">${jobs}${precachePanel(settings)}${dvDiskPanel(settings,dv)}${telemetryPanel(settings)}</div>`;
+    <div class="setgrid2">${jobs}${precachePanel(settings)}${dvDiskPanel(settings,dv)}${windowsServerCard(settings,readiness)}${telemetryPanel(settings)}</div>`;
 }
 const PRODUCE_EVERY=[[0,"Never"],[360,"6 hours"],[720,"12 hours"],[1440,"Daily"]];
 const CACHE_SIZES=[0,10,25,50,100,250,500,1000];
@@ -416,7 +416,7 @@ async function backfillFromKey(){
   setSettingsTab("libraries");
   setTimeout(settingsTick,400);
 }
-function metadataPanel(settings){
+function metadataPanel(settings,readiness){
   const libs=(SETTINGS_DATA&&SETTINGS_DATA.libs)||[];
   const keyCard=(id,title,sub,configured,value,link,saveFn,errId)=>setCard(`${cardHead(title,sub,`<span class="pill ${configured?"ok":"bad"}">${configured?"configured":"not set"}</span>`)}
       <div class="setfields">
@@ -425,11 +425,11 @@ function metadataPanel(settings){
         <div class="err" id="${errId}"></div>
       </div>
       ${setCardFoot(saveFn)}`);
-  return `${setHead("Metadata","Where posters, overviews, episode data and ratings come from.")}
+  return `${setHead("Metadata","Metadata providers, classification and search.")}
     <div id="metadata-libraries">${keyBackfillHtml(libs)}</div>
     ${keyCard("tk","TMDB","Posters, overviews and episode data for Movies and TV.",settings.tmdb_configured,settings.tmdb_api_key,`<a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener">themoviedb.org</a>`,"saveTmdb","terr")}
     ${keyCard("ok","OMDb","Rotten Tomatoes, Metacritic and IMDb ratings on the item page — TMDB doesn't carry these.",settings.omdb_configured,settings.omdb_api_key,`<a href="https://www.omdbapi.com/apikey.aspx" target="_blank" rel="noopener">omdbapi.com</a>`,"saveOmdb","oerr")}
-    <div class="card">${cardHead("Providers with no key","Anime uses AniList. Books and home-video libraries use no provider.")}</div>`;
+    <div class="card">${cardHead("Providers with no key","Anime uses AniList. Books and home-video libraries use no provider.")}</div>${searchSettingsCard(readiness)}`;
 }
 // The section for services plurx talks to. Trakt is a two-way sync, Curator a
 // calendar seam; both are the opposite direction of the Metadata providers,
@@ -464,7 +464,7 @@ function analysisSettingsPanel(settings,snapshot){
       <div class="analysis-diag-grid"><b>1 · Verify</b><span>Read and hash the exact source without blocking playback.</span><b>2 · Index</b><span>Build a complete fragment timeline on an eligible media worker.</span><b>3 · Publish</b><span>Store the content-addressed artifact and mark the file VOD HLS ready.</span></div>
     </div>`;
 }
-function playbackPanel(settings){
+function playbackPanel(settings,readiness){
   const vodWorking=Number(settings.vod_working_set_bytes)||(8*1024*1024*1024);
   const vodMaterialize=Number(settings.vod_materialize_budget_secs)||30;
   const vodBlockedGets=Number(settings.vod_blocked_get_cap)||64;
@@ -507,5 +507,30 @@ function playbackPanel(settings){
       ${togRow("autonext","Auto-play the next episode when one finishes","",autoNextOn(),'onchange="setAutoNext(this.checked)"')}
       <div class="tog"><span>Measured playback limits<small>When an original stream loses visible frames, this browser remembers that exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets <b>Auto</b> transcode it next time instead of stuttering first. A measurement expires after 30 days; <b>Quality → Original</b> always bypasses it.</small></span></div>
       <div class="row" id="dlrow">${decodeLimitsSummary()}</div>`,{local:true});
-  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${local}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}</details>`;
+  return `${setHead("Playback","How streams start, how they are delivered, and what every player picks by default.")}${defaults}${local}<details class="setdetails"><summary>Advanced server delivery</summary>${streaming}${liveHlsRecoveryCard(settings,readiness)}${playbackProtocolCard(settings,readiness)}</details>`;
+}
+
+function searchSettingsCard(readiness){
+  return setCard(`${cardHead("Search and classification","Local text search, channel rules and automatic metadata labels are always available. Optionally add search by meaning using an embedded model.")}
+    <p class="hint">Semantic search downloads approximately 91 MB once per node and uses additional CPU and memory for indexing.</p>
+    <details class="setdetails"><summary>Search diagnostics</summary><div class="setdetails-body">
+      ${devReq(readiness,"embedded_semantic_search","runtime","Embedded CPU runtime","Included in ordinary builds; no inference service is required.")}
+      ${devReq(readiness,"embedded_semantic_search","model","Verified model loaded","The model is downloaded when semantic search is enabled.")}
+      ${devReq(readiness,"embedded_semantic_search","index","Local semantic index","Readiness is advisory and does not override your saved choice.")}
+    </div></details>
+    <button class="ghost" onclick="showSearchSettings()">Search settings</button>`);
+}
+
+function windowsServerCard(settings,readiness){
+  return setCard(`${cardHead("Windows server","Native runtime, media engine and measured hardware status.",`<span class="pill">advisory</span>`)}
+      ${togRow("dvwin","Enable permanent Dolby Vision conversion","Allows Profile 7 media to be converted to a verified Profile 8.1 replacement on Windows. This saved choice is authoritative; readiness below is advice only.",settings.dolby_vision_convert)}
+      <div class="hint">These readings never enable or disable a feature. A failed or absent hardware probe keeps the ordinary software encoder available.</div>
+      <details class="setdetails"><summary>Runtime and hardware readiness</summary><div class="setdetails-body">
+      ${devReq(readiness,"windows_server","native_runtime","Native Windows runtime","The Windows build requires x64 Windows 10 1809 or Server 2019+, NTFS/ReFS managed storage, Job Objects and the embedded long-path manifest.")}
+      ${devReq(readiness,"windows_server","ffmpeg_runtime","FFmpeg runtime","Point PLURX_FFMPEG and PLURX_FFPROBE at the packaged jellyfin-ffmpeg build. The exact binaries are measured at startup.")}
+      ${devReq(readiness,"windows_server","nvenc","NVIDIA NVENC","NVENC is admitted only when the installed driver and this FFmpeg pass the ordinary startup and forced-IDR probes.")}
+      ${devReq(readiness,"windows_server","qsv","Intel Quick Sync","Quick Sync is admitted only when D3D11 device initialization, encode and forced-IDR probes succeed on this node.")}
+      <p class="devcheck-note">Advisory only. Unmet hardware rows mean software fallback, not a hidden gate.</p>
+      </div></details>
+      <div class="err" id="winerr" role="alert"></div>${setCardFoot("saveWindowsCompatibility")}`);
 }

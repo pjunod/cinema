@@ -1,6 +1,6 @@
 # Live TV reliability — why the guide is empty and why it says "wait 90 seconds"
 
-**Status:** diagnosis complete, fix ruled on by Paul 2026-09-13 (§7), building on `effort/live-tv-reliability` ·
+**Status:** open — diagnosis complete, fix ruled on by Paul 2026-09-13 (§7), building on `effort/live-tv-reliability` ·
 **Written:** 2026-09-13 · **Against:** `main` at `a124876` · **Evidence:**
 media1's `/metrics` and container log, 2026-09-13 00:29 UTC (§10)
 

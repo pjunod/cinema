@@ -1,5 +1,7 @@
 # Android client parity
 
+**Status:** live · **Reconciled:** 2026-09-20
+
 The Android client is the native plurx **viewer** for phones, foldables,
 tablets, Android TV, and Google TV. This page records what “web parity” means
 for that viewer and keeps server administration out of the comparison.

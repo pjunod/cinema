@@ -1,7 +1,8 @@
 # Live TV start stall and tvOS surface — the implementation plan
 
-**Status:** v2 after Astra's review (17 findings folded, §0) — **ready to
-build; Sol builds it** · **Executes:** §3 and §5 of
+**Status:** built — server and native-client work merged through PR #301;
+physical closeout recorded in PR #303 · **Review:** Astra v2, 17 findings folded
+in §0 · **Executes:** §3 and §5 of
 [LIVE-TV-START-STALL-AND-TVOS-PLAYBACK-SURFACE.md](LIVE-TV-START-STALL-AND-TVOS-PLAYBACK-SURFACE.md)
 · **Against:** `main` at `a605d03c` (Apple build 152) · **Lane:**
 `effort/live-tv-start-stall` (create it from current `main`) ·

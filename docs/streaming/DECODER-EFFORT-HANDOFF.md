@@ -1,5 +1,7 @@
 # Decoder selection and recovery — handoff
 
+**Status:** open · **Reconciled:** 2026-09-20
+
 **Written:** 2026-09-08 · **By:** the Claude session that carried M3–M7b ·
 **For:** whoever continues the effort · **Effort branch:**
 `effort/decoder-selection-recovery`

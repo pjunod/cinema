@@ -1,5 +1,7 @@
 # M6 Android client — status
 
+**Status:** superseded · **Reconciled:** 2026-09-20
+
 **Milestone:** the Android half of M6, the prepared replacement.
 **Brief:** [`M6-ANDROID-CLIENT-BUILD.md`](M6-ANDROID-CLIENT-BUILD.md).
 **Contract:** [`M6-CLIENT-REPLACEMENT-CONTRACT.md`](M6-CLIENT-REPLACEMENT-CONTRACT.md).

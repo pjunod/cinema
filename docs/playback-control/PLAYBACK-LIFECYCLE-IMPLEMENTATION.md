@@ -7,8 +7,7 @@
 > replacement AGENTS.md requires focused local tests and current qualification
 > for the new effort. Historical receipts below remain unchanged.
 
-**Status:** implementation complete on `effort/playback-lifecycle`; main
-promotion pending, updated 2026-09-12.
+**Status:** built — implementation and main promotion completed 2026-09-12.
 **Handoff integration baseline:** `30cd51afc` (merged documentation PR #255).
 **Incident/source audit baseline:**
 `efd54247adddeb3978812e55ebbb6a7f08adc9d9`. No runtime changes are delivered by

@@ -9,7 +9,7 @@
 > where it says an ineligible request keeps or falls back to live HLS, the
 > cutover ruling controls.
 
-**Status:** M0 ACCEPTED, M1 AUTHORIZED with amendments — P0 failed clause (b)
+**Status:** open — M0 ACCEPTED, M1 AUTHORIZED with amendments — P0 failed clause (b)
 as v2 wrote it, rulings A1–A3 amended §2.1/§2.2/§2.3/§6/§9 accordingly, and
 D6 stays open pending the device halves. Results are §12; the rulings are
 recorded in

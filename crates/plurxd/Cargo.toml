@@ -30,6 +30,15 @@ tokenizers = { version = "0.22", default-features = false, features = ["onig"] }
 toml = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true }
+hyper = { version = "1", features = ["server", "http1", "http2"] }
+hyper-util = { version = "0.1", features = [
+    "server-auto",
+    "server-graceful",
+    "tokio",
+    "http1",
+    "http2",
+    "service",
+] }
 clap = { workspace = true }
 plurx-core = { path = "../plurx-core", features = ["hiqlite-store"] }
 hiqlite-wal = { workspace = true }

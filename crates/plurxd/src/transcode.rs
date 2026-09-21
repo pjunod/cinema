@@ -26752,12 +26752,9 @@ impl TranscodeManager {
 
     /// The scratch charge every admission is compared against, and the
     /// categories that explain it.
+    #[cfg(test)]
     pub(crate) fn scratch_snapshot(&self) -> crate::scratch_ledger::ScratchSnapshot {
         self.scratch_ledger.snapshot()
-    }
-
-    pub(crate) fn scratch_holders(&self, limit: usize) -> Vec<String> {
-        self.scratch_ledger.describe(limit)
     }
 
     /// One accepted exact-incarnation release, from the capability-authenticated
@@ -26778,9 +26775,7 @@ impl TranscodeManager {
         session_id: &str,
         class: ReleaseClass,
     ) -> Option<Instant> {
-        if class.allowance().is_none() {
-            return None;
-        }
+        class.allowance()?;
         let session = {
             let live = self.sessions.lock().await;
             match live.get(session_id) {
@@ -26814,21 +26809,6 @@ impl TranscodeManager {
             "exact same-viewer release recorded against the retired promise"
         );
         shortened
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn retired_promise_for_test(&self, session_id: &str) -> Option<Instant> {
-        self.retired_presentations
-            .lock()
-            .await
-            .get(session_id)
-            .and_then(|retired| {
-                retired
-                    .session
-                    .retired_release
-                    .deadline()
-                    .or(Some(retired.serve_until))
-            })
     }
 
     /// Forget the snapshot, so the next evaluation reads the settings. For

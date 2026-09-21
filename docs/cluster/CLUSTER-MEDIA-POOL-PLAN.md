@@ -1,6 +1,6 @@
 # Cluster media pool — make every node improve playback
 
-**Status:** P0–P8 delivered ·
+**Status:** built — P0–P8 delivered ·
 **Executes:** M4–M5 from [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md) and M4 from
 [PERF-PLAN.md](../performance/PERF-PLAN.md) · **Written:** 2026-08-21 against `main`
 `a543dcaa`

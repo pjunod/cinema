@@ -1,6 +1,6 @@
 # Live TV native layouts — why the TV and phone screens look wrong, and the numbers that fix them
 
-**Status:** review + fix spec — **built and merged 2026-09-12** · **Reviews:** the layouts
+**Status:** open — review + fix spec — **built and merged 2026-09-12** · **Reviews:** the layouts
 shipped by [LIVE-TV-NATIVE-LAYOUTS-STATUS.md](LIVE-TV-NATIVE-LAYOUTS-STATUS.md)
 (Apple build 144 / Android versionCode 87, `main` at `10f2afe60`) · **Written:** 2026-09-12
 

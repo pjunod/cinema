@@ -7,8 +7,8 @@
 > replacement AGENTS.md requires focused local tests and current qualification
 > for the new effort. Historical receipts below remain unchanged.
 
-**Status:** combined B01–B05 implementation, review, qualification and main
-promotion complete · **Updated:** 2026-09-12 · **Promotion:**
+**Status:** done — B01–B05 implementation, review, qualification and main
+promotion completed · **Updated:** 2026-09-12 · **Promotion:**
 [PR #263](http://forge.lan:3000/noirr/plurx/pulls/263), merge `eaecb199`
 
 Companion to the

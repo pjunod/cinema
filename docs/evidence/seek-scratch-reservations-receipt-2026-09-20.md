@@ -1,5 +1,7 @@
 # Seek scratch reservations — implementation receipt
 
+**Status:** open · **Reconciled:** 2026-09-20
+
 **Effort:** `effort/seek-scratch` · **Base:** `a1414368400720884599732e3f8f3c71a9272edc`
 · **Written:** 2026-09-20 · **Executes:** R1–R6 of the
 [approved RCA](../streaming/SEEK-SCRATCH-RESERVATIONS-RCA-AND-FIX.md) under the

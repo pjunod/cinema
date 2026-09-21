@@ -1,5 +1,7 @@
 # Playback control M3b — explicit demand lease and producer pacing
 
+**Status:** built · **Reconciled:** 2026-09-20
+
 This slice makes the M3a rolling actor's retained client state authoritative
 for liveness and producer pacing. It is the second M3 implementation slice in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).

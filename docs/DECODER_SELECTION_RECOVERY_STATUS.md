@@ -1,6 +1,6 @@
 # Decoder selection and recovery — implementation status
 
-**Status:** M0–M7 implementation complete and merged · post-merge Rust core
+**Status:** open — M0–M7 implementation complete and merged · post-merge Rust core
 and daemon suites green · broader fleet qualification remains optional
 post-merge evidence · **Updated:** 2026-09-09 · **Current `main`:**
 `633a32ad`

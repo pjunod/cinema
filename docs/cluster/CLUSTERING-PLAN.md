@@ -1,6 +1,6 @@
 # Clustering transition — from one plurxd node to Phase 4
 
-**Status:** executing — M0 through M3 are complete; M4's production fences,
+**Status:** open — executing — M0 through M3 are complete; M4's production fences,
 real-process singleton pause/takeover proof, and distinct serving-process
 partition proof are staged; the non-voting learner role now has readiness,
 bounded read/media eligibility, promotion, removal, capacity reporting, and a

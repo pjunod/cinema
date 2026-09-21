@@ -15,9 +15,10 @@ rotting in a separate asset pipeline.
 
 ## 1. System overview
 
-Every node is identical — there are no roles to configure. In a cluster the raft
-leader is an internal detail (it serializes writes); every node serves reads,
-streams, and transcodes.
+Every node runs the same binary and serves reads, streams, and transcodes. Raft
+leadership is an internal write-serialization detail, while membership carries
+a durable `cluster_nodes.role`: voters decide consensus; learners replicate and
+relay but hold no vote and may not open a tuner.
 
 ```
         ┌──────────────────────── clients ─────────────────────────┐
@@ -37,7 +38,7 @@ streams, and transcodes.
         │      │                                            │               │
         │      │                                     ffmpeg (child proc)    │
         │      ├──▶ scanner + metadata agents                               │
-        │      └──▶ Store trait ──▶ Hiqlite: 1 voter (M2) · 3+ future (M3) │
+        │      └──▶ Store trait ──▶ Hiqlite: voters + non-voting learners   │
         └───────────────┬───────────────────────────────┬──────────────────┘
                         │ read-only                      │ HTTPS
                         ▼                                ▼
@@ -56,9 +57,9 @@ deduplication and carries the replicated id separately as `Logical-Identifier`.
 Legacy single-node discovery remains byte-for-byte unchanged.
 
 The load-bearing boundary is the **`Store` trait**: every read and write goes
-through it, so single-node SQLite and the replicated cluster store are the same
-call sites. That is what makes HA a backend swap (Phase 4) instead of a rewrite
-— it existed from the first commit specifically so this promise could be kept.
+through it, so one-voter and multi-voter stores use the same call sites. That
+is what made HA a backend swap (Phase 4) instead of a rewrite — the boundary
+existed from the first commit specifically so this promise could be kept.
 
 ## 2. Cluster & state (the differentiator)
 
@@ -72,22 +73,24 @@ seconds."
 
 ### 2.1 Consensus & storage — embed the store, don't run a database
 
-**Decided (Phase 3 spike): embed [hiqlite](https://github.com/sebadob/hiqlite)
-0.14** — raft-replicated SQLite built on openraft, purpose-built for the exact
-"1 node or 3+ nodes, no external infra" shape (production-proven as Rauthy's
-default store; SQL + replicated KV cache + distributed locks + listen/notify in
-~65 MB RAM for an HA cluster). The spike confirmed its `execute`/`query_map`/
-`txn` API maps directly onto the existing rusqlite row mappers, it compiles
-clean in the workspace, and a live node ran a migration + raft insert + typed
-read-back; its own suite proves 3-node replication and self-heal. See
-[PHASE3-SPIKE.md](cluster/PHASE3-SPIKE.md). **Fallback (not needed):** hand-rolled
-[openraft 0.9.x](https://github.com/databendlabs/openraft) with a redb raft log
-and a rusqlite state machine. Nothing before Phase 4 depends on the choice
-because all cluster access goes through the one internal `Store` trait.
+**Decided (Phase 3 spike): embed the maintained hiqlite 0.14 fork** —
+raft-replicated SQLite built on openraft for the exact "1 node or 3+ nodes, no
+external infra" shape. The spike confirmed its `execute`/`query_map`/`txn` API
+maps onto the existing rusqlite row mappers, and the shipped fork now carries
+the compatibility patches listed in
+[`PLURX-PATCH.md`](../vendor/hiqlite/PLURX-PATCH.md). See
+[PHASE3-SPIKE.md](cluster/PHASE3-SPIKE.md). All cluster access stays behind the
+one internal `Store` trait; openraft is an implementation dependency, not a
+second ready-to-select backend.
 
 Single-node mode is the same code path with a 1-voter raft (a supported
 openraft/hiqlite pattern) — no "cluster edition" fork, and any single node can
-later grow into a cluster by adding voters.
+later grow into a cluster by adding voters. A fresh data directory imports its
+SQLite state into the replicated store on first boot, and activation is
+one-way. If activation is interrupted, the next start permits one explicitly
+warned unreplicated SQLite recovery boot; restart after that recovery completes
+activation. The backup and restore boundary is specified in
+[CLUSTER-BACKUP-AND-RESTORE.md](cluster/CLUSTER-BACKUP-AND-RESTORE.md).
 
 ### 2.2 Replication classes — not everything needs consensus
 
@@ -96,10 +99,13 @@ regenerable thumbnail cache would be waste:
 
 | Class | Examples | Storage | Loss tolerance |
 |---|---|---|---|
-| **Replicated-durable** | Users, auth tokens, settings, library metadata, watch state, playlists | Raft → SQLite | None once acked |
-| **Replicated-ephemeral** | Playback sessions (item, decision, position, segment index), node membership/health | Raft KV/cache with TTL | Seconds of staleness OK |
+| **Replicated-durable** | Users, auth tokens, settings, library metadata, watch state, playlists, playback sessions, node membership/health | Raft → SQLite through `Store` | None once acked |
 | **Node-local, regenerable** | Transcode segment cache, image cache, thumbnails/trickplay | Local disk (optionally shared) | Free to lose |
 | **Operator-owned** | The media files themselves | Shared storage | Read-only by default; only an admin-enabled library may opt into the Dolby Vision replacement contract |
+
+The earlier replicated KV/cache tier was designed and not built. The shipped
+hiqlite dependency does not enable its `cache` feature; adding an ephemeral
+tier is a separate decision, not a property of session or membership state.
 
 Write rates must be safe for raft. Each active-player heartbeat still reads
 the item and durable watch state, but the M1d server coalescer now bounds
@@ -137,6 +143,11 @@ consensus and melt it.
 
 ### 2.3 The failover mechanic — any node can serve segment N
 
+Every operational number in this document is a named, checked value with a
+link to the file that defines it. A bare duplicate is a bug: the code already
+warns that a second copy is a failover defect waiting for the constant to
+change.
+
 The Phase 3 spike ([PHASE3-SPIKE.md](cluster/PHASE3-SPIKE.md)) measured the
 deterministic-segment idea against constant-frame-rate, **sparse-keyframe**, and
 VFR sources. The load-bearing property — *any node can produce a valid segment
@@ -153,15 +164,20 @@ playlist.
    writing forward            replicated raft state          ├ restarts ffmpeg,
                                      │                        │   input-seek to seg 4
                                      ▼                        ├ emits EXT-X-DISCONTINUITY
-                             recipe: {file, args,             └ serves seg 4,5,6…
-                              seg=4s, keyframes@4s}          buffered 0–3 still valid
+                             recipe: {file, args,             └ serves the next segment
+                              seg=SEGMENT_SECONDS,           buffered segments stay valid
+                              keyframes@N*SEGMENT_SECONDS}
                                                             cost: a few seconds, once
 ```
 
 1. Every transcode session pins its full recipe in replicated state: source
-   file, ffmpeg arg set, segment duration `d` (4 s), forced keyframes at
-   multiples of `d`. The **primary** path is one sequential ffmpeg session
-   (Phase 2) — clean, no per-segment resets.
+   file, ffmpeg arg set, encode segment duration `` `SEGMENT_SECONDS` = 2 ``,
+   and forced keyframes at its multiples. The copy path separately uses
+   `` `COPY_SEGMENT_SECONDS` = 6 `` with
+   `` `COPY_FIRST_SEGMENT_SECONDS` = 2 ``; all three are defined in
+   [`transcode/mod.rs`](../crates/plurx-core/src/transcode/mod.rs). The
+   **primary** path is one sequential ffmpeg session (Phase 2) — clean, no
+   per-segment resets.
 2. **Failover:** a surviving node restarts the session seeked to the last-served
    segment boundary. Accurate input-seek guarantees a valid segment N from any
    node, so the client keeps its already-buffered segments and continues; an
@@ -238,12 +254,17 @@ never depends on runtime state.
 - **Audio** — passthrough per device profile (TrueHD/DTS-HD where the chain
   allows), else transcode to EAC3/AC3/AAC with correct downmix.
 
-**A stalled hardware session repairs itself.** Hardware encoders can initialize
-cleanly and then stall under concurrency (two QSV sessions on one iGPU is the
-classic case). The transcode manager arms a watchdog: if the first HLS segment
-hasn't landed within a grace window (8 s), it kills the session, clears its
-directory, and respawns on software x264. The user sees a few extra seconds of
-the loading overlay, not a permanent gray screen.
+**A stalled session repairs itself.** Hardware encoders can initialize cleanly
+and then stall under concurrency (two QSV sessions on one iGPU is the classic
+case). The prepublication actor exclusively commits the start verdict:
+`` `ACTOR_HARDWARE_STARTUP_BUDGET` = 12 ``, then
+`` `ACTOR_SOFTWARE_STARTUP_BUDGET` = 30 ``, while a running producer gets
+`` `PROGRESS_STALL` = 10 `` seconds without output-timestamp progress. The
+values are defined in
+[`transcode.rs`](../crates/plurxd/src/transcode.rs); HTTP-side values are
+compatibility mirrors that size playlist waiting and own no timer or recovery
+decision. The ownership change is recorded in
+[PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md](playback-control/PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md).
 
 ffmpeg is orchestrated as a **spawned CLI** (thin tokio process code), never
 linked: crash isolation, license cleanliness, and drop-in support for the user's
@@ -274,7 +295,7 @@ the system by adding one idea: **ownership**.
                              │ ONE GET → ONE ffmpeg   │    │        ▼           │
                              │      │                 │    │  signed relay over │
                              │      ▼                 │◀───┼── cluster API      │
-                             │ 6-segment live window  │    │  (authenticated,   │
+                             │ 24-entry live window   │    │  (authenticated,   │
                              │ + opaque capability    │    │   bounded reads)   │
                              └────────────────────────┘    └────────────────────┘
 ```
@@ -297,10 +318,14 @@ the system by adding one idea: **ownership**.
   Relayed reads are authenticated between voters and bounded in size; the
   playlist bytes and their segment inventory are published atomically, so a
   reader never sees a playlist naming a segment that is not there yet.
-- **The window is the bound.** Six listed segments, deleted behind the frontier.
-  §3's live-HLS reaper reasons about a file that has an end; a channel does not,
-  so Live TV bounds its scratch by construction instead and reserves its own
-  namespace from the finite-media sweeper.
+- **The window is the bound.** The checked `LIVE_HLS_OUTPUT_ARGS` fields are
+  `` `LIVE_HLS_OUTPUT_ARGS_HLS_TIME` = 1 `` and
+  `` `LIVE_HLS_OUTPUT_ARGS_HLS_LIST_SIZE` = 24 `` in
+  [`live_tv.rs`](../crates/plurxd/src/live_tv.rs): a 24-second encode window or
+  24 source GOPs on a copy route, deleted behind the frontier. §3's live-HLS
+  reaper reasons about a file that has an end; a channel does not, so Live TV
+  bounds its scratch by construction instead and reserves its own namespace
+  from the finite-media sweeper.
 - **Always compiled, never on by default.** There is no Cargo feature and no
   build variant. One binary exposes the same capability everywhere, and
   `live_tv.enabled` is a replicated runtime setting an administrator flips
@@ -397,12 +422,16 @@ doesn't triple-hit the providers.
 **Native API** (`/api/v1`) — JSON over HTTP, enumerated route by route in
 [API.md](API.md). Auth: opaque bearer tokens from local login, plus scoped
 `plx_` keys for machine callers; Argon2id at rest, SHA-256 token lookup.
-Clients poll — there is no push channel. Two things this design called for are
-not built: an OpenAPI description (the routes were meant to generate one and
-do not, so API.md and the `tests/contracts/native-api.json` fixture are the
+There is no WebSocket or SSE push channel. Most client state is polled, while
+the playback-control exchange is a bounded long poll the server may hold for
+`` `EXCHANGE_DEADLINE` = 4 `` seconds, defined in
+[`playback_control.rs`](../crates/plurxd/src/playback_control.rs); a prepared
+server decision therefore arrives on a held client request. [API.md](API.md)
+§10 specifies its cadence and floor. Two things this design called for are not
+built: an OpenAPI description (the routes were meant to generate one and do
+not, so API.md and the `tests/contracts/native-api.json` fixture are the
 specification the five client platforms work from), and the optional OIDC
-(Google/Apple) code flow mapping to local accounts that REQ-USER-2 asks
-for.
+(Google/Apple) code flow mapping to local accounts that REQ-USER-2 asks for.
 
 Cluster activity uses one separate, non-public application RPC:
 `/_internal/v1/activity-snapshot`. Membership retains explicitly advertised
@@ -438,7 +467,7 @@ source of truth for "how does this file play," not two.
 |---|---|---|
 | Language | Rust (stable, pinned toolchain) | Single static binary; cross-compile amd64/arm64 |
 | HTTP | axum 0.8 + tower-http | Streaming bodies, range serving; hyper 1.x |
-| Cluster | hiqlite 0.14 (spike) → else openraft 0.9 + redb + rusqlite | §2.1 |
+| Cluster | hiqlite 0.14, vendored and patched | [`PLURX-PATCH.md`](../vendor/hiqlite/PLURX-PATCH.md) |
 | Local DB | SQLite (rusqlite), STRICT tables + FTS5 search | Relational metadata, append-only migrations |
 | Transcode | ffmpeg CLI spawn; jellyfin-ffmpeg supported | §3 |
 | Inspection | ffprobe JSON; `symphonia` / `matroska` pre-scan | §4 |
@@ -446,13 +475,13 @@ source of truth for "how does this file play," not two.
 | Discovery | mDNS `_plurx._tcp` + Plex GDM responder | LAN only |
 | Passwords / tokens | Argon2id (at rest) · SHA-256 (token lookup) | §5 |
 | Observability | `tracing` + Prometheus exporter | REQ-OPS-1 |
-| Web app | embedded single-file SPA (no build step, no framework) | served by `plurxd` |
+| Web app | embedded static app, `` `WEB_ASSETS` = 65 `` files, no bundler or framework | [shell layout](clients/WEB-SHELL-LAYOUT.md), [source table](../crates/plurxd/src/http/web.rs) |
 | Avoided | sled (stalled), rocksdb (C++ dep), external DBs, ffmpeg linking | — |
 
-The web app is a deliberate non-choice: one hand-written `index.html` with inline
-CSS and JS, compiled into the binary. No npm, no bundler, no framework churn — the
-admin UI ships in the same static binary as the server and can never version-skew
-against the API it talks to.
+The web app is a deliberate non-choice: a hand-written shell loads the checked
+asset table, all compiled into the binary. No npm, no bundler, no framework
+churn — the admin UI ships in the same static binary as the server and can
+never version-skew against the API it talks to.
 
 ## 7. Key decisions, each with its reason
 
@@ -507,6 +536,17 @@ against the API it talks to.
    progressive stream's `video.duration` grows as it buffers; trusting it marked
    partially-watched items as fully watched. The file's `ffprobe` duration is the
    authority. Scar: this bug shipped once and is why the rule is now explicit.
+9. **DVR reverses §8's "no scheduler", decided 2026-09-13.** Recording was
+   refused because it introduces a writer with a schedule, a retention policy
+   and a conflict resolver. Paul accepted the choices in
+   [LIVE-TV-DVR-AND-REMINDERS-OPTIONS.md](features/LIVE-TV-DVR-AND-REMINDERS-OPTIONS.md)
+   on 2026-09-13; the constraints that make the writer safe are in
+   [LIVE-TV-DVR-IMPLEMENTATION.md](features/LIVE-TV-DVR-IMPLEMENTATION.md) — a
+   dedicated `dvr.root` outside every library, a free-space floor, a tuner
+   reserve, `dvr.enabled` off by default, and
+   `` `DVR_TICK` = 15 `` seconds as defined in
+   [`dvr.rs`](../crates/plurxd/src/live_tv/dvr.rs). §8's read-only rule is
+   unchanged: plurx still never writes into media storage.
 
 ## 8. Non-goals (what the architecture deliberately refuses)
 
@@ -530,19 +570,19 @@ one of these is a door we're keeping shut on purpose:
 - **Not an everything-server (yet).** Music is out of scope (photos: supported
   in `home` libraries since 2026-07); the data model won't preclude music, but
   it is not bolted on speculatively.
-- **No DVR, and no scheduler.** Live TV (§3a) plays one tuner and keeps
-  nothing. Recording would introduce a writer with a schedule, a retention
-  policy, and a conflict resolver — a second product wearing this one's
-  clothes — and it would put plurx in the business of mutating storage on a
-  timer, which §8's read-only rule exists to prevent.
-- **No transcode-by-default.** The server will not "optimize" a library into
-  pre-baked renditions; it transcodes on demand, only when a client forces it.
+- **DVR never writes into a library.** The off-by-default recorder writes only
+  under its dedicated `dvr.root`; its scheduler does not weaken the media
+  read-only boundary above.
+- **No transcode-by-default.** The server does not automatically "optimize" a
+  library into pre-baked renditions. An off-by-default pre-transcode pass exists
+  when `jobs.cache_produce_mins` is greater than zero, and it never outranks a
+  live viewer; [OPERATIONS.md](OPERATIONS.md) documents that queue boundary.
 
 ## 9. Risks & mitigations
 
 | Risk | Mitigation |
 |---|---|
-| hiqlite is a small project (bus factor) | `Store` trait isolation; openraft fallback is the same shape; both MIT/Apache |
+| hiqlite is a small project (bus factor) | The maintained fork and its fifteen patches are explicit in `PLURX-PATCH.md`; `Store` isolates callers, while carrying the fork is now the accepted cost |
 | Deterministic-segment failover has sharp edges (VFR, keyframe drift) | Spiked at the Phase 3 gate; worst case = session restart-at-position, still ahead of everyone |
 | Plex-compat drift / client quirks | Tier 1 targets a small, testable client set; contract tests against recorded Composite/PKC traffic; official API docs exist now |
 | DV/HDR correctness is genuinely hard | Profiles are data; a test-file corpus per DV profile (P5/P8) from day one; HDR10 base-layer + tone-map fallbacks |

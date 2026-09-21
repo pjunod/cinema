@@ -1,6 +1,6 @@
 # Streaming reliability — execution plan and integration contract
 
-**Status:** six implementation packages and one adversarial review complete; main
+**Status:** open — six implementation packages and one adversarial review complete; main
 promotion pending; not deployed · **Written:** 2026-09-15 · **Base:** c2216ae75cb2a6f86efabaa4ebc2169a231ecc50
 · **Integration branch:** effort/streaming-reliability
 

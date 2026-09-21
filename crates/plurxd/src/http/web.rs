@@ -5,17 +5,20 @@
 //! non-API GET path.
 //!
 //! The app is not one file. `index.html` is a 97-line shell of markup and tags;
-//! the CSS and the JavaScript live in the sixty-two files of [`WEB_ASSETS`],
+//! the CSS and the JavaScript live in the sixty-five files of [`WEB_ASSETS`],
 //! which is also their load order. There is no bundler and no build step —
 //! `docs/clients/WEB-SHELL-LAYOUT.md` is the map, and adding a file means a row
 //! there, a row here, and a tag in the shell, or the tests below say so.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
+use axum::body::Body;
 use axum::extract::{Path as AxPath, Query, State};
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode, Uri};
 use axum::response::{Html, IntoResponse, Response};
+use flate2::{write::GzEncoder, Compression};
 use qrcode::{render::svg, QrCode};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -45,18 +48,19 @@ pub enum WebAsset {
 /// `tests/web/asset-order.test.js` refuses a table that says otherwise, and
 /// `tests/web/asset-load.test.js` loads the whole thing to check.
 ///
-/// The seven pre-existing sidecars keep their own routes below and are **not**
+/// The six JavaScript sidecars and reader.css keep their own routes below and are **not**
 /// in this table: they are UMD modules `require()`d by path from forty-odd
 /// tests, and three of them are bundled into the native clients by path.
 ///
 /// `rustfmt::skip` because this is a table: one row per line, columns aligned,
 /// read top to bottom as the load order it is. Left to rustfmt each row
-/// becomes five lines and 62 rows become 310, which hides the one property
+/// becomes five lines and 65 rows become 325, which hides the one property
 /// the table exists to show.
 #[rustfmt::skip]
 pub const WEB_ASSETS: &[(&str, WebAsset, &str)] = &[
     ("app.css",                                WebAsset::HeadStyle,   include_str!("../web/app.css")),
     ("core/theme.js",                          WebAsset::HeadScript,  include_str!("../web/core/theme.js")),
+    ("hls.min.js",                             WebAsset::BodyScript,  include_str!("../web/hls.min.js")),
     ("core/app.js",                            WebAsset::BodyScript,  include_str!("../web/core/app.js")),
     ("core/api.js",                            WebAsset::BodyScript,  include_str!("../web/core/api.js")),
     ("player/measurements.js",                 WebAsset::BodyScript,  include_str!("../web/player/measurements.js")),
@@ -131,6 +135,13 @@ static ASSET_HASHES: LazyLock<Vec<String>> = LazyLock::new(|| {
         .collect()
 });
 
+static ASSET_GZIP: LazyLock<Vec<Box<[u8]>>> = LazyLock::new(|| {
+    WEB_ASSETS
+        .iter()
+        .map(|(_, _, body)| gzip(body.as_bytes()))
+        .collect()
+});
+
 /// The shell as served: every row's `src`/`href` rewritten to carry its hash.
 ///
 /// A row whose tag is missing is a panic at first request, not a silent miss,
@@ -143,6 +154,13 @@ static SHELL: LazyLock<String> = LazyLock::new(|| {
         let at = html
             .find(&tag)
             .unwrap_or_else(|| panic!("index.html carries no tag for the WEB_ASSETS row {path}"));
+        html.replace_range(at..at + tag.len(), &format!("\"/assets/{path}?v={hash}\""));
+    }
+    for ((path, _), hash) in SIDECAR_ASSETS.iter().zip(SIDECAR_HASHES.iter()) {
+        let tag = format!("\"/assets/{path}\"");
+        let at = html
+            .find(&tag)
+            .unwrap_or_else(|| panic!("index.html carries no tag for sidecar {path}"));
         html.replace_range(at..at + tag.len(), &format!("\"/assets/{path}?v={hash}\""));
     }
     html
@@ -177,9 +195,6 @@ const LIBRARY_CHANNELS_JS: &str = include_str!("../web/library-channels.js");
 /// shell so native WebViews can reuse the same navigator in M3.
 const READER_JS: &str = include_str!("../web/reader.js");
 const READER_CSS: &str = include_str!("../web/reader.css");
-/// hls.js (bundled for the transcode playback path; keeps the single-binary,
-/// works-offline promise instead of a CDN dependency).
-const HLS_JS: &str = include_str!("../web/hls.min.js");
 /// PWA manifest + icons — bundled so "Add to Home Screen" (iOS) and installable
 /// PWA (Android/desktop) work with no external assets.
 const MANIFEST: &str = include_str!("../web/manifest.webmanifest");
@@ -188,6 +203,174 @@ const ICON_512: &[u8] = include_bytes!("../web/icons/icon-512.png");
 const ICON_MASKABLE: &[u8] = include_bytes!("../web/icons/maskable-512.png");
 const APPLE_TOUCH: &[u8] = include_bytes!("../web/icons/apple-touch-icon.png");
 
+const SIDECAR_ASSETS: &[(&str, &str)] = &[
+    ("cluster-panel.js", CLUSTER_PANEL_JS),
+    ("playback-policy.js", PLAYBACK_POLICY_JS),
+    ("playback-control.js", PLAYBACK_CONTROL_JS),
+    ("live-tv.js", LIVE_TV_JS),
+    ("library-channels.js", LIBRARY_CHANNELS_JS),
+    ("reader.js", READER_JS),
+    ("reader.css", READER_CSS),
+];
+
+static SIDECAR_HASHES: LazyLock<Vec<String>> = LazyLock::new(|| {
+    SIDECAR_ASSETS
+        .iter()
+        .map(|(_, body)| hex::encode(&Sha256::digest(body.as_bytes())[..8]))
+        .collect()
+});
+
+static SIDECAR_GZIP: LazyLock<Vec<Box<[u8]>>> = LazyLock::new(|| {
+    SIDECAR_ASSETS
+        .iter()
+        .map(|(_, body)| gzip(body.as_bytes()))
+        .collect()
+});
+
+fn gzip(body: &[u8]) -> Box<[u8]> {
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+    encoder.write_all(body).expect("write to in-memory gzip");
+    encoder
+        .finish()
+        .expect("finish in-memory gzip")
+        .into_boxed_slice()
+}
+
+/// Build compressed static representations before the listener is reachable.
+pub(crate) fn warm_static_assets() {
+    LazyLock::force(&ASSET_GZIP);
+    LazyLock::force(&SIDECAR_GZIP);
+    LazyLock::force(&SHELL);
+}
+
+fn accepts_gzip(value: Option<&str>) -> bool {
+    let mut gzip = None;
+    let mut wildcard = None;
+    for item in value.unwrap_or_default().split(',') {
+        let mut parts = item.trim().split(';');
+        let coding = parts.next().unwrap_or_default().trim();
+        let mut quality = 1.0_f32;
+        for parameter in parts {
+            let Some((name, value)) = parameter.trim().split_once('=') else {
+                continue;
+            };
+            if name.trim().eq_ignore_ascii_case("q") {
+                quality = value
+                    .trim()
+                    .parse()
+                    .ok()
+                    .filter(|quality| (0.0..=1.0).contains(quality))
+                    .unwrap_or(0.0);
+            }
+        }
+        if coding.eq_ignore_ascii_case("gzip") {
+            gzip = Some(quality > 0.0);
+        } else if coding == "*" {
+            wildcard = Some(quality > 0.0);
+        }
+    }
+    gzip.or(wildcard).unwrap_or(false)
+}
+
+fn static_security_headers(headers: &mut HeaderMap) {
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        "cross-origin-resource-policy",
+        HeaderValue::from_static("same-origin"),
+    );
+}
+
+fn shell_security_headers(headers: &mut HeaderMap) {
+    static_security_headers(headers);
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static("frame-ancestors 'none'; base-uri 'none'; object-src 'none'"),
+    );
+}
+
+fn if_none_match(headers: &HeaderMap, etag: &str) -> bool {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').any(|candidate| {
+                let candidate = candidate.trim();
+                candidate == "*" || candidate.trim_start_matches("W/") == etag
+            })
+        })
+}
+
+fn serve_static(
+    content_type: &'static str,
+    body: &'static [u8],
+    gzipped: &'static [u8],
+    hash: &str,
+    request_headers: &HeaderMap,
+) -> Response {
+    let use_gzip = accepts_gzip(
+        request_headers
+            .get(header::ACCEPT_ENCODING)
+            .and_then(|value| value.to_str().ok()),
+    );
+    let etag = if use_gzip {
+        format!("\"{hash}-gz\"")
+    } else {
+        format!("\"{hash}\"")
+    };
+    let not_modified = if_none_match(request_headers, &etag);
+    let selected = if use_gzip { gzipped } else { body };
+    let mut response = Response::builder()
+        .status(if not_modified {
+            StatusCode::NOT_MODIFIED
+        } else {
+            StatusCode::OK
+        })
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, "public, max-age=31536000, immutable")
+        .header(header::VARY, "Accept-Encoding")
+        .header(header::ETAG, etag)
+        .body(if not_modified {
+            Body::empty()
+        } else {
+            Body::from(selected)
+        })
+        .expect("valid embedded-asset response");
+    if use_gzip {
+        response
+            .headers_mut()
+            .insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+    }
+    if !not_modified {
+        response.headers_mut().insert(
+            header::CONTENT_LENGTH,
+            HeaderValue::from_str(&selected.len().to_string()).expect("usize is a header value"),
+        );
+    }
+    static_security_headers(response.headers_mut());
+    response
+}
+
+fn serve_sidecar(name: &str, request_headers: &HeaderMap) -> Response {
+    let Some(index) = SIDECAR_ASSETS.iter().position(|(path, _)| *path == name) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let (path, body) = SIDECAR_ASSETS[index];
+    serve_static(
+        asset_content_type(path),
+        body.as_bytes(),
+        &SIDECAR_GZIP[index],
+        &SIDECAR_HASHES[index],
+        request_headers,
+    )
+}
+
 /// Serve the web app shell.
 ///
 /// `no-cache` because the assets it names are immutable: a heuristically cached
@@ -195,7 +378,10 @@ const APPLE_TOUCH: &[u8] = include_bytes!("../web/icons/apple-touch-icon.png");
 /// it, and the whole point of the hash is that the shell is the only thing that
 /// has to be re-read.
 pub async fn index() -> Response {
-    ([(header::CACHE_CONTROL, "no-cache")], Html(SHELL.as_str())).into_response()
+    let mut response =
+        ([(header::CACHE_CONTROL, "no-cache")], Html(SHELL.as_str())).into_response();
+    shell_security_headers(response.headers_mut());
+    response
 }
 
 /// Serve one row of [`WEB_ASSETS`].
@@ -204,17 +390,18 @@ pub async fn index() -> Response {
 /// identity. An unknown path is a 404 rather than the shell: before this
 /// existed a mistyped asset URL fell through to [`fallback`] and came back as
 /// `200 text/html`, which a browser then tried to execute as JavaScript.
-pub async fn asset(AxPath(path): AxPath<String>) -> Response {
-    match WEB_ASSETS.iter().find(|(name, _, _)| *name == path) {
-        Some((name, _, body)) => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, asset_content_type(name)),
-                (header::CACHE_CONTROL, "public, max-age=31536000, immutable"),
-            ],
-            *body,
-        )
-            .into_response(),
+pub async fn asset(AxPath(path): AxPath<String>, headers: HeaderMap) -> Response {
+    match WEB_ASSETS.iter().position(|(name, _, _)| *name == path) {
+        Some(index) => {
+            let (name, _, body) = WEB_ASSETS[index];
+            serve_static(
+                asset_content_type(name),
+                body.as_bytes(),
+                &ASSET_GZIP[index],
+                &ASSET_HASHES[index],
+                &headers,
+            )
+        }
         None => (
             StatusCode::NOT_FOUND,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -224,107 +411,38 @@ pub async fn asset(AxPath(path): AxPath<String>) -> Response {
     }
 }
 
-/// Serve the bundled hls.js.
-pub async fn hls_js() -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "public, max-age=604800"),
-        ],
-        HLS_JS,
-    )
-        .into_response()
-}
-
 /// Serve the cluster panel's model.
-pub async fn cluster_panel_js() -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        CLUSTER_PANEL_JS,
-    )
-        .into_response()
+pub async fn cluster_panel_js(headers: HeaderMap) -> Response {
+    serve_sidecar("cluster-panel.js", &headers)
 }
 
 /// Serve the web player's unit-tested routing policy.
-pub async fn playback_policy_js() -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        PLAYBACK_POLICY_JS,
-    )
-        .into_response()
+pub async fn playback_policy_js(headers: HeaderMap) -> Response {
+    serve_sidecar("playback-policy.js", &headers)
 }
 
 /// Serve the browser's passive playback-control reporter.
-pub async fn playback_control_js() -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        PLAYBACK_CONTROL_JS,
-    )
-        .into_response()
+pub async fn playback_control_js(headers: HeaderMap) -> Response {
+    serve_sidecar("playback-control.js", &headers)
 }
 
 /// Serve the browser's unit-tested Live TV lifecycle controller.
-pub async fn live_tv_js() -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        LIVE_TV_JS,
-    )
-        .into_response()
+pub async fn live_tv_js(headers: HeaderMap) -> Response {
+    serve_sidecar("live-tv.js", &headers)
 }
 
-pub async fn library_channels_js() -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        LIBRARY_CHANNELS_JS,
-    )
-        .into_response()
+pub async fn library_channels_js(headers: HeaderMap) -> Response {
+    serve_sidecar("library-channels.js", &headers)
 }
 
 /// Serve the unit-tested EPUB navigator shared by the browser reader.
-pub async fn reader_js() -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        READER_JS,
-    )
-        .into_response()
+pub async fn reader_js(headers: HeaderMap) -> Response {
+    serve_sidecar("reader.js", &headers)
 }
 
 /// Serve the trusted reader chrome; publication styles stay inside the frame.
-pub async fn reader_css() -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "text/css; charset=utf-8"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        READER_CSS,
-    )
-        .into_response()
+pub async fn reader_css(headers: HeaderMap) -> Response {
+    serve_sidecar("reader.css", &headers)
 }
 
 #[derive(Deserialize)]
@@ -373,7 +491,7 @@ fn connection_qr_svg(origin: &str) -> Result<String, ()> {
 
 /// Serve the PWA manifest (enables install / Add-to-Home-Screen).
 pub async fn manifest() -> Response {
-    (
+    let mut response = (
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "application/manifest+json"),
@@ -381,7 +499,9 @@ pub async fn manifest() -> Response {
         ],
         MANIFEST,
     )
-        .into_response()
+        .into_response();
+    static_security_headers(response.headers_mut());
+    response
 }
 
 /// Serve one of the embedded PWA / apple-touch icons by name.
@@ -393,7 +513,7 @@ pub async fn icon(AxPath(name): AxPath<String>) -> Response {
         "apple-touch-icon.png" => APPLE_TOUCH,
         _ => return StatusCode::NOT_FOUND.into_response(),
     };
-    (
+    let mut response = (
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "image/png"),
@@ -401,7 +521,9 @@ pub async fn icon(AxPath(name): AxPath<String>) -> Response {
         ],
         bytes,
     )
-        .into_response()
+        .into_response();
+    static_security_headers(response.headers_mut());
+    response
 }
 
 /// Resolve the Android APK to serve, if one is published: `PLURX_ANDROID_APK`
@@ -426,22 +548,26 @@ pub async fn download_android(State(state): State<AppState>) -> Response {
         return (StatusCode::NOT_FOUND, "no Android app published").into_response();
     };
     match tokio::fs::read(&path).await {
-        Ok(bytes) => (
-            StatusCode::OK,
-            [
-                (
-                    header::CONTENT_TYPE,
-                    "application/vnd.android.package-archive",
-                ),
-                (
-                    header::CONTENT_DISPOSITION,
-                    "attachment; filename=\"plurx.apk\"",
-                ),
-                (header::CACHE_CONTROL, "no-cache"),
-            ],
-            bytes,
-        )
-            .into_response(),
+        Ok(bytes) => {
+            let mut response = (
+                StatusCode::OK,
+                [
+                    (
+                        header::CONTENT_TYPE,
+                        "application/vnd.android.package-archive",
+                    ),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        "attachment; filename=\"plurx.apk\"",
+                    ),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ],
+                bytes,
+            )
+                .into_response();
+            static_security_headers(response.headers_mut());
+            response
+        }
         Err(_) => (StatusCode::NOT_FOUND, "no Android app published").into_response(),
     }
 }
@@ -465,19 +591,21 @@ pub async fn fallback(uri: axum::http::Uri) -> Response {
 #[cfg(test)]
 mod tests {
     use super::{
-        asset_content_type, connection_qr_svg, WebAsset, INDEX_HTML, LIVE_TV_JS,
-        PLAYBACK_POLICY_JS, READER_JS, SHELL, WEB_ASSETS,
+        accepts_gzip, asset_content_type, connection_qr_svg, serve_static, WebAsset, ASSET_GZIP,
+        ASSET_HASHES, INDEX_HTML, LIVE_TV_JS, PLAYBACK_POLICY_JS, READER_JS, SHELL, SIDECAR_ASSETS,
+        SIDECAR_HASHES, WEB_ASSETS,
     };
+    use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+    use http_body_util::BodyExt;
 
-    /// The seven sidecars and `reader.css`. They are served by their own
+    /// The six JavaScript sidecars and `reader.css`. They are served by their own
     /// handlers and are deliberately absent from `WEB_ASSETS`, so the shell
     /// carries tags for them that the table knows nothing about.
-    const SIDECARS: [&str; 8] = [
+    const SIDECARS: [&str; 7] = [
         "cluster-panel.js",
         "playback-policy.js",
         "playback-control.js",
         "reader.js",
-        "hls.min.js",
         "live-tv.js",
         "library-channels.js",
         "reader.css",
@@ -642,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn served_shell_versions_every_asset_it_names() {
+    fn every_shell_tag_is_versioned() {
         let served = SHELL.as_str();
         for ((path, _, _), hash) in WEB_ASSETS.iter().zip(super::ASSET_HASHES.iter()) {
             assert_eq!(hash.len(), 16, "{path} hash is not 16 hex characters");
@@ -651,22 +779,171 @@ mod tests {
                 "the served shell does not version /assets/{path}"
             );
         }
-        // The sidecars are not in the table and keep their unversioned URLs.
-        for path in SIDECARS {
+        for ((path, _), hash) in SIDECAR_ASSETS.iter().zip(SIDECAR_HASHES.iter()) {
+            assert_eq!(hash.len(), 16, "{path} hash is not 16 hex characters");
             assert!(
-                served.contains(&format!("\"/assets/{path}\"")),
-                "the served shell lost the sidecar /assets/{path}"
+                served.contains(&format!("\"/assets/{path}?v={hash}\"")),
+                "the served shell does not version sidecar /assets/{path}"
             );
         }
         assert_eq!(
             served.matches("?v=").count(),
-            WEB_ASSETS.len(),
+            WEB_ASSETS.len() + SIDECARS.len(),
             "the served shell versions something that is not a table row"
         );
         // Two rows with the same bytes would still be two rows; the hash is a
         // version, not an identity, and the path stays the identity.
         assert_eq!(asset_content_type("app.css"), "text/css; charset=utf-8");
         assert_eq!(asset_content_type("router.js"), "application/javascript");
+    }
+
+    #[test]
+    fn accepts_gzip_negotiates_quality() {
+        for (value, expected) in [
+            (Some("gzip"), true),
+            (Some("gzip;q=0"), false),
+            (Some("*"), true),
+            (Some("*;q=0, gzip"), true),
+            (Some("br"), false),
+            (None, false),
+            (Some("GZIP"), true),
+            (Some("identity;q=0"), false),
+            (Some("*;q=1, gzip;q=0"), false),
+            (Some("gzip;q=2"), false),
+        ] {
+            assert_eq!(accepts_gzip(value), expected, "{value:?}");
+        }
+    }
+
+    fn test_asset(headers: HeaderMap) -> axum::response::Response {
+        let (path, _, body) = WEB_ASSETS[0];
+        serve_static(
+            asset_content_type(path),
+            body.as_bytes(),
+            &ASSET_GZIP[0],
+            &ASSET_HASHES[0],
+            &headers,
+        )
+    }
+
+    #[tokio::test]
+    async fn asset_gzip_and_identity_have_distinct_etags() {
+        let identity = test_asset(HeaderMap::new());
+        let mut gzip_headers = HeaderMap::new();
+        gzip_headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let gzip = test_asset(gzip_headers);
+        assert_ne!(
+            identity.headers()[header::ETAG],
+            gzip.headers()[header::ETAG]
+        );
+        assert!(identity.headers().get(header::CONTENT_ENCODING).is_none());
+        assert_eq!(gzip.headers()[header::CONTENT_ENCODING], "gzip");
+        assert_eq!(
+            identity.headers()[header::CONTENT_LENGTH],
+            WEB_ASSETS[0].2.len().to_string()
+        );
+        assert_eq!(
+            gzip.headers()[header::CONTENT_LENGTH],
+            ASSET_GZIP[0].len().to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn if_none_match_answers_304_for_either_representation() {
+        for encoding in [None, Some("gzip")] {
+            let mut headers = HeaderMap::new();
+            if let Some(encoding) = encoding {
+                headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static(encoding));
+            }
+            let first = test_asset(headers.clone());
+            headers.insert(header::IF_NONE_MATCH, first.headers()[header::ETAG].clone());
+            let second = test_asset(headers);
+            assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+            assert!(second
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes()
+                .is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn if_none_match_wildcard_answers_304_for_either_representation() {
+        for encoding in [None, Some("gzip")] {
+            let mut headers = HeaderMap::new();
+            if let Some(encoding) = encoding {
+                headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static(encoding));
+            }
+            headers.insert(header::IF_NONE_MATCH, HeaderValue::from_static("*"));
+            let response = test_asset(headers);
+            assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+            assert!(response.headers().get(header::CONTENT_LENGTH).is_none());
+            assert!(response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes()
+                .is_empty());
+        }
+    }
+
+    #[test]
+    fn vary_is_sent_on_both() {
+        let identity = test_asset(HeaderMap::new());
+        let mut headers = HeaderMap::new();
+        headers.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let gzip = test_asset(headers);
+        assert_eq!(identity.headers()[header::VARY], "Accept-Encoding");
+        assert_eq!(gzip.headers()[header::VARY], "Accept-Encoding");
+    }
+
+    #[test]
+    fn hls_js_is_a_table_row_and_the_first_body_row() {
+        let first = WEB_ASSETS
+            .iter()
+            .find(|(_, kind, _)| *kind == WebAsset::BodyScript)
+            .expect("a body row");
+        assert_eq!(first.0, "hls.min.js");
+        assert!(!SIDECARS.contains(&"hls.min.js"));
+        assert!(tag_at("hls.min.js") < tag_at("core/app.js"));
+    }
+
+    mod security {
+        use super::*;
+
+        #[tokio::test]
+        async fn shell_sends_nosniff_referrer_policy_and_frame_csp() {
+            let response = super::super::index().await;
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+            assert_eq!(response.headers()[header::REFERRER_POLICY], "same-origin");
+            assert_eq!(
+                response.headers()[header::CONTENT_SECURITY_POLICY],
+                "frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+            );
+        }
+
+        #[test]
+        fn assets_send_nosniff_and_corp() {
+            let response = test_asset(HeaderMap::new());
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+            assert_eq!(
+                response.headers()["cross-origin-resource-policy"],
+                "same-origin"
+            );
+            assert_eq!(response.headers()[header::REFERRER_POLICY], "same-origin");
+        }
+
+        #[tokio::test]
+        async fn shell_csp_has_no_script_src() {
+            let response = super::super::index().await;
+            let csp = response.headers()[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .expect("ASCII CSP");
+            assert!(!csp.contains("script-src"));
+        }
     }
 
     #[test]

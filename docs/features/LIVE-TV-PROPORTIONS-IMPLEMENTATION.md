@@ -1,6 +1,6 @@
 # Live TV proportions — the build plan for the TV and phone layouts Paul approved
 
-**Status:** **executed and merged 2026-09-12** · **Executes:** the fix spec in
+**Status:** open — **executed and merged 2026-09-12** · **Executes:** the fix spec in
 [LIVE-TV-NATIVE-LAYOUTS-PROPORTIONS-REVIEW.md](LIVE-TV-NATIVE-LAYOUTS-PROPORTIONS-REVIEW.md)
 §3, approved by Paul 2026-09-12 · **Base:** `main` at `10f2afe60` (Apple
 build 144 · Android versionCode 87) · **Written:** 2026-09-12

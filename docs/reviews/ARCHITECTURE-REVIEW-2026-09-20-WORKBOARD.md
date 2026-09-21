@@ -47,22 +47,28 @@ failure it prevents.
    (Claude sessions keep their existing `Co-Authored-By` and
    `Claude-Session` trailers as well.) This is what lets a later reader tell
    which model wrote which change without guessing from prose style.
-4. **Work only inside the plan's milestones.** One PR per milestone unless
-   the plan says otherwise. Each milestone PR updates the plan's own
-   **Execution log** table (bottom of every plan) with date, model, session,
-   milestone, PR and outcome, and updates this board's **Status** and
-   **Last update** cells. A plan that tells you to stop and flag something
-   means stop and flag it — in the PR body and in the board's **Notes**
-   cell — not "make a reasonable choice".
+4. **One implementation PR owns the whole plan.** Work only inside the
+   plan's milestones, but keep every milestone in the draft PR opened by
+   rule 2. Milestones are logical commits and rows in the plan's
+   **Execution log**, not separate PRs: record date, model, session,
+   milestone, commit and outcome, and update this board's **Status** and
+   **Last update** cells in that same plan PR. Evidence that can exist only
+   after merge (deployment, fleet or device results) is appended later to
+   the same execution log and board row through one evidence-only docs PR;
+   it never creates milestone PRs or a second status ledger. A plan that
+   tells you to stop and flag something means stop and flag it — in the PR
+   body and in the board's **Notes** cell — not "make a reasonable choice".
 5. **Statuses** (the only words allowed in the Status column):
    `unclaimed` · `claimed` (branch exists, no code yet) · `in-progress`
-   (milestone PRs open) · `blocked: <reason>` (waiting on a fleet
-   measurement, a device test, or a decision that is Paul's — say which) ·
+   (the plan PR contains implementation commits) · `blocked: <reason>`
+   (waiting on a fleet measurement, a device test, or a decision that is
+   Paul's — say which) ·
    `in-review` (adversarial review requested; name the reviewer session) ·
-   `merged: <milestones>` (for example `merged: M1-M2 of M4`) · `done`
-   (every milestone merged and its acceptance evidence recorded in the
-   plan) · `abandoned: <reason>` (release the row back to `unclaimed` in the
-   same edit, keeping the reason in Notes).
+   `merged: <landed milestones>` (the one implementation PR landed, but
+   post-merge evidence is still owed; name the logical milestones without
+   implying separate PRs) · `done` (every milestone landed and its acceptance
+   evidence is recorded in the plan) · `abandoned: <reason>` (release the row
+   back to `unclaimed` in the same edit, keeping the reason in Notes).
 6. **Release what you cannot finish.** If your session is ending with a
    milestone unfinished, set `blocked:` or `abandoned:` with a one-line
    handover in Notes (branch, what is done, what is next, what is broken)
@@ -71,9 +77,10 @@ failure it prevents.
    `claimed` or `in-progress` may be reclaimed by anyone after they add a
    note saying so.
 7. **Never edit another session's row** except to reclaim a stale one under
-   rule 6, or to mark `done` after merging its final PR yourself (Paul's
-   standing rule is that the executing session merges its own PRs; if you
-   are merging someone else's, say why in Notes).
+   rule 6, or to record objective post-merge evidence and mark it `done`
+   after its implementation PR lands. Paul's standing rule is that the
+   executing session merges its own implementation PR; if you are recording
+   evidence or merging for someone else, say why in Notes.
 8. **The PR lifecycle is the repository's**: draft until ready · adversarial
    review · findings folded · fast lane green (`make unit` locally for Rust
    changes; the CI fast lane compiles but does not run tests — see
@@ -82,9 +89,11 @@ failure it prevents.
    CI; close and reopen the PR to start the lane.
 9. **Fleet and device evidence** that a session cannot produce itself goes
    in the plan's Execution log as `needs: <what>` with the plan's GPT prompt;
-   the row's Status becomes `blocked: fleet evidence`. Do not mark a
-   milestone merged whose acceptance check is a device observation nobody
-   has made.
+   before merge the row's Status becomes `blocked: fleet evidence`. If the
+   implementation is safe to merge without that observation, merge the one
+   plan PR with Status `merged`, then record the result through the
+   evidence-only docs PR from rule 4. Do not mark a plan `done` from a device
+   observation nobody has made.
 
 A session that cannot follow rule 2 (no push access) has no business
 claiming; it can still review.
@@ -121,12 +130,12 @@ document (the twelve written second landed on 2026-09-20 as well).
 | K-06 | [CLOCK-SKEW-GUARD-DESIGN](../cluster/CLOCK-SKEW-GUARD-DESIGN.md) | S9 | design | unclaimed | | | | 2026-09-20 | Half the exchange exists (`x-plurx-cluster-time-ms`); auth windows already assume ≤5 s |
 | K-07 | [STORE-CONTRACT-COVERAGE-AND-PLACEHOLDER-VALIDATION](../cluster/STORE-CONTRACT-COVERAGE-AND-PLACEHOLDER-VALIDATION.md) | S10 | week | unclaimed | | | | 2026-09-20 | Selector output confirmed 3/16 + 7/24; 29 discarded store results, not 13 |
 | K-08 | [HIQLITE-FORK-AND-DEPENDENCY-CLEANUP](../cluster/HIQLITE-FORK-AND-DEPENDENCY-CLEANUP.md) | §4.3 | month | unclaimed | | | | 2026-09-20 | Do not rename (patch-by-name); three edges reach aws-lc, cryptr fix removes one |
-| C-01 | [HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY](../server/HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY.md) | §2.5, W1, W2, W5, W6 | week | unclaimed | | | | 2026-09-20 | Three PRs |
+| C-01 | [HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY](../server/HTTP-LISTENER-TIMEOUTS-AND-ASSET-DELIVERY.md) | §2.5, W1, W2, W5, W6 | week | merged: M1-M3 | gpt-5.6-sol | agent:/root/c01_builder | [PR #395](http://192.168.4.7:3000/noirr/plurx/pulls/395) | 2026-09-20 | One plan PR merged as `79113254`; §6.2–§6.4 lab soak, HAR/waterfall, and device-reader evidence remains pending, so this row is not done. |
 | C-02 | [SCAN-AND-ENRICHMENT-HYGIENE](../server/SCAN-AND-ENRICHMENT-HYGIENE.md) | C3, C5 | week | unclaimed | | | | 2026-09-20 | |
 | C-03 | [IMAGE-SERVING-AND-DERIVATIVES](../server/IMAGE-SERVING-AND-DERIVATIVES.md) | C6 | month | unclaimed | | | | 2026-09-20 | Keep `original` backdrops |
 | C-04 | [AUTH-HARDENING](../server/AUTH-HARDENING.md) | C7, C8 | month | unclaimed | | | | 2026-09-20 | Fence kept; token expiry is Paul's call |
 | C-05 | [DETAIL-READS-AND-STORAGE-AVAILABILITY](../server/DETAIL-READS-AND-STORAGE-AVAILABILITY.md) | C14 | month | unclaimed | | | | 2026-09-20 | M1 marker must land and backfill before M2; cost is the node-local sidecar, not raft |
-| C-06 | [TELEMETRY-BACKPRESSURE](../server/TELEMETRY-BACKPRESSURE.md) | C15 | month | unclaimed | | | | 2026-09-20 | Four small PRs; M1 first |
+| C-06 | [TELEMETRY-BACKPRESSURE](../server/TELEMETRY-BACKPRESSURE.md) | C15 | month | unclaimed | | | | 2026-09-20 | Four logical milestone commits in one plan PR; M1 first |
 | C-07 | [PLEX-FACADE-PAGING](../server/PLEX-FACADE-PAGING.md) | C4, C9 | month | unclaimed | | | | 2026-09-20 | M0 census decides whether to build; `files_for_items` does not exist yet; C9 is measure-only |
 | C-08 | [OBSERVABILITY-BASELINE](../server/OBSERVABILITY-BASELINE.md) | C10, §4.9 | month | unclaimed | | | | 2026-09-20 | M1–M4 parallel; M5 needs M1; there is no access log today at all |
 | L-01 | [DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION](../features/DVR-SCHEDULER-GUIDE-VIEW-AND-SINK-ISOLATION.md) | L1, L10 | week (L1) / month (L10) | unclaimed | | | | 2026-09-20 | |
@@ -144,7 +153,7 @@ document (the twelve written second landed on 2026-09-20 as well).
 | P-01 | [RUST-TEST-EXECUTION-POLICY](../ci/RUST-TEST-EXECUTION-POLICY.md) | §2.2, §4.8 | week | unclaimed | | | | 2026-09-20 | Decision is Paul's (§7.1); the two red tests are not |
 | P-02 | [SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE](../ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md) | §4.6 | month | unclaimed | | | | 2026-09-20 | Observe inherited limits first |
 | P-03 | [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS](../ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md) | §4.4, §4.5 | month | unclaimed | | | | 2026-09-20 | Two decisions are Paul's; `publish_main` is unreachable on current triggers (blocks M7 behind P-01) |
-| P-04 | [ARCHITECTURE-DOC-RECONCILIATION](../ci/ARCHITECTURE-DOC-RECONCILIATION.md) | §4.7 | week | unclaimed | | | | 2026-09-20 | 46 index-row/header contradictions listed; the "1-voter" sentence is incomplete, not wrong |
+| P-04 | [ARCHITECTURE-DOC-RECONCILIATION](../ci/ARCHITECTURE-DOC-RECONCILIATION.md) | §4.7 | week | in-progress | gpt-5.6-sol | agent:/root/p04_builder | [PR #398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | 2026-09-20 | Both adversarial findings addressed: one-plan protocol aligned; 305-row audit now reports zero contradictions, missing headers or unclear statuses; exact-head validation pending |
 
 Not on the board by design: C16 (scratch reservations) belongs to the
 seek-scratch repair effort and is tracked there.
@@ -156,7 +165,10 @@ new session should take first, in id order within the `week` set: S-01,
 C-01, C-02, K-03, K-07, P-04, then the client `week` items. A row in
 `blocked: fleet evidence` is not free work for a session without device or
 fleet access — leave it. A row in `in-review` is waiting on the named
-reviewer, not on a builder.
+reviewer, not on a builder. `in-progress` always names one plan PR, never a
+set of milestone PRs; `merged: <landed milestones>` means its one
+implementation PR landed and only the post-merge evidence recorded under
+rule 4 remains.
 
 This file is kept honest by `tests/operations/test_docs_index.py` (every
 linked plan must exist) and by rule 2 above (a claim without a PR is not a

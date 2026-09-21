@@ -56,7 +56,6 @@ mod watched;
 #[cfg(windows)]
 mod windows_service;
 
-use std::future::IntoFuture;
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
@@ -64,7 +63,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
+use axum::extract::ConnectInfo;
+use axum::http::Request;
 use clap::{Parser, Subcommand};
+use hyper::body::Incoming;
+use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto::Builder as ConnectionBuilder;
+use hyper_util::server::graceful::GracefulShutdown;
+use hyper_util::service::TowerToHyperService;
 use plurx_core::cluster::coordination::StoreCoordinator;
 use plurx_core::cluster::migration::{
     connect_activated_store, select_daemon_store, SelectedBackend,
@@ -1487,6 +1493,9 @@ async fn boot(
     let live_tv_shutdown = Arc::clone(&state.live_tv);
     let serving_shutdown = state.serving.clone();
     let app = http::router(state);
+    tokio::task::spawn_blocking(http::web::warm_static_assets)
+        .await
+        .context("precompute embedded web assets")?;
     let listener = bind_listener(config.server.bind).await?;
     #[cfg(windows)]
     crate::windows_service::report_listener_ready()?;
@@ -2413,40 +2422,7 @@ async fn serve(
     mdns: Option<mdns_sd::ServiceDaemon>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
-    let (drain_started, drain_signal) = tokio::sync::oneshot::channel();
-    // `WithGracefulShutdown` is IntoFuture rather than Future, and select!
-    // needs the future itself to poll it more than once.
-    let server = axum::serve(
-        listener,
-        // Connect info is load-bearing for the network-priors handlers in
-        // `http::network`, which extract the peer address; serving the bare
-        // router would make them reject at runtime with nothing to compile
-        // against.
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
-        shutdown.await;
-        let _ = drain_started.send(());
-    })
-    .into_future();
-    tokio::pin!(server);
-    tokio::select! {
-        result = &mut server => {
-            result?;
-            tracing::info!("shutdown complete");
-        }
-        // Only starts counting once the signal has actually arrived: if the
-        // channel never fires, this branch stays pending and the server runs.
-        _ = async {
-            let _ = drain_signal.await;
-            tokio::time::sleep(SHUTDOWN_DRAIN_TIMEOUT).await;
-        } => {
-            tracing::warn!(
-                after = ?SHUTDOWN_DRAIN_TIMEOUT,
-                "drain timed out with connections still open; exiting anyway"
-            );
-        }
-    }
+    serve_http(listener, app, shutdown, HTTP_TIMEOUTS).await?;
     match tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, progress.drain()).await {
         Ok(Ok(flushed)) if flushed > 0 => {
             tracing::info!(
@@ -2473,12 +2449,137 @@ async fn serve(
     Ok(())
 }
 
+#[derive(Clone, Copy)]
+struct HttpTimeouts {
+    header_read: Duration,
+    h2_keepalive_interval: Duration,
+    h2_keepalive_timeout: Duration,
+    accept_error_backoff: Duration,
+    shutdown_drain: Duration,
+}
+
+const HTTP_TIMEOUTS: HttpTimeouts = HttpTimeouts {
+    header_read: HEADER_READ_TIMEOUT,
+    h2_keepalive_interval: H2_KEEPALIVE_INTERVAL,
+    h2_keepalive_timeout: H2_KEEPALIVE_TIMEOUT,
+    accept_error_backoff: Duration::from_secs(1),
+    shutdown_drain: SHUTDOWN_DRAIN_TIMEOUT,
+};
+
+trait HttpAcceptor {
+    type Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static;
+
+    async fn accept(&self) -> std::io::Result<(Self::Stream, SocketAddr)>;
+}
+
+impl HttpAcceptor for tokio::net::TcpListener {
+    type Stream = tokio::net::TcpStream;
+
+    async fn accept(&self) -> std::io::Result<(Self::Stream, SocketAddr)> {
+        tokio::net::TcpListener::accept(self).await
+    }
+}
+
+async fn serve_http<A: HttpAcceptor>(
+    listener: A,
+    app: axum::Router,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    timeouts: HttpTimeouts,
+) -> anyhow::Result<()> {
+    let (drain_started, drain_signal) = tokio::sync::oneshot::channel();
+    let mut builder = ConnectionBuilder::new(TokioExecutor::new());
+    builder
+        .http1()
+        .timer(TokioTimer::new())
+        .header_read_timeout(timeouts.header_read)
+        .keep_alive(true);
+    builder
+        .http2()
+        .timer(TokioTimer::new())
+        .keep_alive_interval(Some(timeouts.h2_keepalive_interval))
+        .keep_alive_timeout(timeouts.h2_keepalive_timeout)
+        // axum's server enables CONNECT for HTTP/2 websocket upgrades. Keep
+        // that behavior while taking ownership of the connection builder.
+        .enable_connect_protocol();
+
+    let graceful = GracefulShutdown::new();
+    tokio::pin!(shutdown);
+    loop {
+        let accepted = tokio::select! {
+            accepted = listener.accept() => accepted,
+            () = &mut shutdown => break,
+        };
+        let (stream, remote) = match accepted {
+            Ok(accepted) => accepted,
+            Err(error) => {
+                // Accept errors are listener-local, not evidence that the
+                // bound socket is permanently unusable. In particular,
+                // descriptor and buffer exhaustion are expected to clear.
+                // Backing off keeps a persistent condition from turning the
+                // loop into a CPU/log spinner while preserving availability.
+                tracing::error!(%error, "HTTP listener accept failed; retrying");
+                tokio::select! {
+                    () = &mut shutdown => break,
+                    () = tokio::time::sleep(timeouts.accept_error_backoff) => continue,
+                }
+            }
+        };
+        // Connect info is load-bearing for the network-priors handlers in
+        // `http::network`, which extract the peer address. The lower-level
+        // hyper loop has to insert it explicitly because axum's IncomingStream
+        // is private to `axum::serve`.
+        let service = tower::ServiceBuilder::new()
+            .map_request(move |mut request: Request<Incoming>| {
+                request.extensions_mut().insert(ConnectInfo(remote));
+                request.map(axum::body::Body::new)
+            })
+            .service(app.clone());
+        let connection = builder
+            .serve_connection_with_upgrades(TokioIo::new(stream), TowerToHyperService::new(service))
+            .into_owned();
+        let connection = graceful.watch(connection);
+        tokio::spawn(async move {
+            if let Err(error) = connection.await {
+                tracing::debug!(%error, %remote, "HTTP connection closed with an error");
+            }
+        });
+    }
+
+    let _ = drain_started.send(());
+    let connections_drained = graceful.shutdown();
+    tokio::pin!(connections_drained);
+    tokio::select! {
+        () = &mut connections_drained => {
+            tracing::info!("shutdown complete");
+        }
+        // Only starts counting once the signal has actually arrived: if the
+        // channel never fires, this branch stays pending and the server runs.
+        _ = async {
+            let _ = drain_signal.await;
+            tokio::time::sleep(timeouts.shutdown_drain).await;
+        } => {
+            tracing::warn!(
+                after = ?timeouts.shutdown_drain,
+                "drain timed out with connections still open; exiting anyway"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// How long to wait for open connections to finish after a shutdown signal.
 /// Comfortably inside Docker's default ten-second stop grace period, so the
 /// process gets to choose its own exit rather than being killed mid-drain.
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// Leaves headroom inside Docker's ten-second stop window after HTTP drain.
 const PROGRESS_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
+/// A request head on the LAN should arrive in milliseconds. Fifteen seconds
+/// permits a bad Wi-Fi hop without letting a silent socket live forever.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
+/// HTTP/2 has no next-request head to time while idle, so ping it explicitly.
+const H2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(20);
+/// A peer that misses one ping gets another interval to answer before close.
+const H2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Native plurx discovery contract. The Apple clients declare this exact type
 /// in `NSBonjourServices`, so changing it is a protocol change, not a rename.
@@ -3279,9 +3380,207 @@ mod startup_tests {
 
     use std::io::{Read, Write};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     use plurx_core::domain::Library;
     use plurx_core::store::Store;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn timeout_test_server(
+        timeouts: HttpTimeouts,
+    ) -> (
+        SocketAddr,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<anyhow::Result<()>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let app = axum::Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let served = tokio::spawn(serve_http(
+            listener,
+            app,
+            async move {
+                let _ = stopped.await;
+            },
+            timeouts,
+        ));
+        (address, stop, served)
+    }
+
+    fn test_http_timeouts() -> HttpTimeouts {
+        HttpTimeouts {
+            header_read: Duration::from_millis(80),
+            h2_keepalive_interval: Duration::from_millis(30),
+            h2_keepalive_timeout: Duration::from_millis(200),
+            accept_error_backoff: Duration::from_millis(20),
+            shutdown_drain: Duration::from_millis(200),
+        }
+    }
+
+    struct FailFirstAccept {
+        listener: tokio::net::TcpListener,
+        failed: Arc<AtomicBool>,
+    }
+
+    impl HttpAcceptor for FailFirstAccept {
+        type Stream = tokio::net::TcpStream;
+
+        async fn accept(&self) -> std::io::Result<(Self::Stream, SocketAddr)> {
+            if !self.failed.swap(true, Ordering::SeqCst) {
+                return Err(std::io::Error::other("simulated descriptor pressure"));
+            }
+            self.listener.accept().await
+        }
+    }
+
+    #[tokio::test]
+    async fn accept_error_backs_off_then_serves_the_next_connection() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let failed = Arc::new(AtomicBool::new(false));
+        let acceptor = FailFirstAccept {
+            listener,
+            failed: Arc::clone(&failed),
+        };
+        let app = axum::Router::new().route("/", axum::routing::get(|| async { "ok" }));
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let started = tokio::time::Instant::now();
+        let served = tokio::spawn(serve_http(
+            acceptor,
+            app,
+            async move {
+                let _ = stopped.await;
+            },
+            test_http_timeouts(),
+        ));
+
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect after the injected accept failure");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("request");
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), stream.read_to_end(&mut response))
+            .await
+            .expect("response timeout")
+            .expect("response");
+        assert!(response.windows(2).any(|window| window == b"ok"));
+        assert!(
+            started.elapsed() >= test_http_timeouts().accept_error_backoff,
+            "the injected resource-pressure error must not spin"
+        );
+        assert!(failed.load(Ordering::SeqCst), "the failure was injected");
+        stop_timeout_test_server(stop, served).await;
+    }
+
+    async fn stop_timeout_test_server(
+        stop: tokio::sync::oneshot::Sender<()>,
+        served: tokio::task::JoinHandle<anyhow::Result<()>>,
+    ) {
+        stop.send(()).expect("stop server");
+        tokio::time::timeout(Duration::from_secs(1), served)
+            .await
+            .expect("server stops")
+            .expect("server task")
+            .expect("clean server shutdown");
+    }
+
+    #[tokio::test]
+    async fn header_read_timeout_closes_a_silent_connection() {
+        let (address, stop, served) = timeout_test_server(test_http_timeouts()).await;
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n")
+            .await
+            .expect("partial request head");
+
+        let mut byte = [0u8; 1];
+        let read = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut byte))
+            .await
+            .expect("header timeout must close the socket")
+            .expect("read");
+        assert_eq!(read, 0, "a partial request head must end at EOF");
+        stop_timeout_test_server(stop, served).await;
+    }
+
+    #[tokio::test]
+    async fn keep_alive_idle_is_bounded_by_the_header_timer() {
+        let (address, stop, served) = timeout_test_server(test_http_timeouts()).await;
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+        stream
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n")
+            .await
+            .expect("request");
+
+        let mut response = Vec::new();
+        while !response.ends_with(b"ok") {
+            let mut chunk = [0u8; 256];
+            let read = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut chunk))
+                .await
+                .expect("response arrives")
+                .expect("read response");
+            assert!(read > 0, "connection closed before its response");
+            response.extend_from_slice(&chunk[..read]);
+        }
+
+        let mut byte = [0u8; 1];
+        let read = tokio::time::timeout(Duration::from_millis(500), stream.read(&mut byte))
+            .await
+            .expect("the next-head timeout must close an idle keep-alive socket")
+            .expect("read");
+        assert_eq!(read, 0, "idle keep-alive must end at EOF");
+        stop_timeout_test_server(stop, served).await;
+    }
+
+    #[tokio::test]
+    async fn h2_keepalive_is_configured() {
+        let (address, stop, served) = timeout_test_server(test_http_timeouts()).await;
+        let mut stream = tokio::net::TcpStream::connect(address)
+            .await
+            .expect("connect");
+        // HTTP/2 prior knowledge: the client preface followed by an empty
+        // SETTINGS frame. Read raw frames because a high-level h2 client
+        // answers keepalive PINGs internally and would hide the evidence.
+        stream
+            .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\x00\x00\x00\x04\x00\x00\x00\x00\x00")
+            .await
+            .expect("h2 preface");
+
+        let saw_ping = tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                let mut header = [0u8; 9];
+                stream.read_exact(&mut header).await.expect("frame header");
+                let length =
+                    ((header[0] as usize) << 16) | ((header[1] as usize) << 8) | header[2] as usize;
+                let mut payload = vec![0u8; length];
+                stream
+                    .read_exact(&mut payload)
+                    .await
+                    .expect("frame payload");
+                if header[3] == 0x6 {
+                    assert_eq!(length, 8, "PING payload length");
+                    assert_eq!(&header[5..9], &[0, 0, 0, 0], "PING is stream zero");
+                    break true;
+                }
+            }
+        })
+        .await
+        .expect("server must emit a PING inside the keepalive interval");
+        assert!(saw_ping);
+        stop_timeout_test_server(stop, served).await;
+    }
 
     /// The operator-facing cluster refusal is a sentence, not a paragraph with
     /// the indentation baked in.

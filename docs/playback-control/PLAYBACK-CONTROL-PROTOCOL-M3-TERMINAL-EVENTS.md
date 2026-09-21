@@ -1,6 +1,6 @@
 # Playback control M3c3 — terminal event ownership
 
-**Status:** implementation contract
+**Status:** built — terminal-event ownership merged in PR #616
 **Baseline:** merged PR #616 at `8c6ccdf7`
 **Scope:** terminal ownership for rolling compatibility and VOD session
 handles, including the protocol's orderly client release

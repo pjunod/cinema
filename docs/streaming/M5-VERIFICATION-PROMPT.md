@@ -1,5 +1,7 @@
 # M5 verification — the first converted stream a browser ever plays
 
+**Status:** open · **Reconciled:** 2026-09-20
+
 You are verifying, on the live fleet, that a Dolby Vision Profile 7 title
 reaches a browser as **Profile 8.1** and plays. This is the only step that
 proves the feature; everything merged in PR #869 removes a reason it could
