@@ -1,6 +1,7 @@
 # Apple display criteria and audio session — Match Content on tvOS, and a player that knows it was interrupted
 
-**Status:** ready for review · **Executes:** §2.8 / A1 / F-apple-1 and
+**Status:** implementation complete; device evidence pending; draft PR #406
+awaits one adversarial review · **Executes:** §2.8 / A1 / F-apple-1 and
 §2.10 / A2 / F-apple-2 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `88a3957a`
@@ -27,6 +28,15 @@ constants, the recovery ladder, the prepared-commit sequence, or replacing
 `AVPlayerLayer` with `AVPlayerViewController`, stop and flag it.** Both
 integrations are observers and one property assignment each. Line numbers
 are from `88a3957a`; re-verify by function name.
+
+**Execution decisions (2026-09-20).** The current Xcode 27.0 / tvOS 27.0 SDK
+exports `AVDisplayCriteria.initWithRefreshRate:formatDescription:` and does
+not export the review's proposed dynamic-range initializer. The implementation
+therefore follows the plan's asset-owned route and does not construct criteria.
+The current work-board protocol supersedes this document's older three-PR
+wording: M1–M3 stay in one draft PR, with milestone commits/log rows. No plurx
+enablement setting was added because Match Content is the viewer's tvOS setting
+and interruption correctness is unconditional.
 
 **Correction to the review:** none for the code facts. Two things the
 review states as expected behaviour, not observation, stay that way here:
@@ -457,6 +467,8 @@ claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
 trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
-| Date | Model | Session | Milestone | PR | Outcome / evidence |
+| Date | Model | Session | Milestone | Commit / PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M1 | `c9b1acfd` / #406 | Finite and Live TV apply asset-owned criteria only for the current committed item/open; teardown clears the active window at the finite controller, Live TV controller, and layer release. The four-case pure decision test and iOS/tvOS simulator compilation pass. Physical HDMI-mode evidence remains required. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M2 | `c9b1acfd` / #406 | One owned observer serves all three player stacks; interruption state remains separate from viewer intent, stall/watchdog sampling is gated, old-route loss revokes intent, and iOS uses `.playback` / `.moviePlayback`. Six focused Swift tests and all 64 shared surface cases pass. The iPhone interruption matrix remains required. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/c02_builder | M3 | `7a67da0e` / #406 | No second display writer was added beside SwiftUI `VideoPlayer`. APPLE-CLIENT-PARITY records the implementation and explicitly leaves inline/fullscreen HDMI behavior unobserved; needs the §6 Apple TV prompt before this plan can be `done`. |
