@@ -1,6 +1,6 @@
 # Cluster page latency — evidence and adversarial review brief
 
-**Status:** ready for adversarial review · **Scope:** Home, Activity, and
+**Status:** done — evidence reviewed and companion fix plan produced · **Scope:** Home, Activity, and
 Settings in the clustered web app · **Observed:** 2026-08-22 · **Code:**
 `origin/main` at `a0f9fc14`
 

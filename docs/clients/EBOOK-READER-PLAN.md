@@ -1,6 +1,6 @@
 # Ebook reader — Cinema reads what Curator acquires
 
-**Status:** M0–M5 complete · M4 physical-device acceptance pending · M6
+**Status:** open — M0–M5 complete · M4 physical-device acceptance pending · M6
 registry complete, Apple PDF implementation complete, physical acceptance
 pending · **Written:** 2026-08-20 · **Verified against:** `plurx` `e0af2a04`
 and `Curator` `bd168b02`

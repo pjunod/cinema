@@ -4,7 +4,7 @@
 //
 // Why this exists: until 2026-09 `crates/plurxd/src/web/index.html` was one
 // 23,901-line file and twenty-two tests sliced functions straight out of it by
-// name. `docs/clients/WEB-SHELL-SPLIT-PLAN.md` cut it into separate files, so
+// name. `docs/clients/WEB-SHELL-SPLIT-PLAN.md` cut it into sixty-five assets, so
 // the string those tests want is no longer a file — it is the concatenation of
 // the shell's body rows in served order. This is the one place that knows how
 // to build it, so a new file joins every slicing test the moment it is served.

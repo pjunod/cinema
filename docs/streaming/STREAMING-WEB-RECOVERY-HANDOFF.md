@@ -1,6 +1,6 @@
 # Web recovery — Sol implementation handoff
 
-**Status:** Wave 1 implemented · **Written:** 2026-09-15
+**Status:** open — Wave 1 implemented; Safari physical observation remains · **Written:** 2026-09-15
 · **Executes:** W1/W2 in [the effort plan](STREAMING-RELIABILITY-IMPLEMENTATION.md)
 · **Tested base:** fea5d245131095f26f60d67a69e6570aa3626125
 

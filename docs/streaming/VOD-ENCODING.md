@@ -1,5 +1,7 @@
 # Encoded VOD — produce the immutable recipe the playlist names
 
+**Status:** built · **Reconciled:** 2026-09-20
+
 Companion to [VOD-M3-HANDOFF.md](VOD-M3-HANDOFF.md): this describes the
 encoded producer behind the same immutable manifest, GET admission, and
 eviction model. Copy still uses its source fragment index. Transcode and

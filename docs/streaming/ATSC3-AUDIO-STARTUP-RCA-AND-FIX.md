@@ -1,6 +1,6 @@
 # ATSC 3.0 audio — safe live startup and what the captures prove
 
-**Status:** implemented, locally validated and adversarially reviewed; not deployed ·
+**Status:** open — implementation and review complete; deployment pending ·
 **Written:** 2026-09-19
 
 Companion to [Live TV features](../FEATURES.md#4a-live-tv--the-antenna-on-every-screen)

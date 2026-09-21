@@ -1,6 +1,6 @@
 # Cluster transport recovery — live implementation status
 
-**Status:** deploy-first promotion · **Effort:** `effort/cluster-transport-recovery` ·
+**Status:** open — deploy-first promotion; exhaustive qualification remains · **Effort:** `effort/cluster-transport-recovery` ·
 **Started:** 2026-09-05 · **Last updated:** 2026-09-08
 
 Companion to [OPERATIONS.md](../OPERATIONS.md) (operator contracts) and

@@ -1,6 +1,6 @@
 # VOD M0 review brief — three normative sentences to re-decide
 
-**Status:** RULED 2026-08-23 — A1, A2 and A3 decided, M1 authorized with
+**Status:** done — A1, A2 and A3 ruled 2026-08-23; M1 authorized with
 amendments, D6 left open; the amendments are applied to plan §2.1, §2.2, §2.3,
 §6 and §9, and §12.9 records them. The sections below are kept as the record of
 what was asked and on what evidence · **Ruling summary:** A1 — adopt

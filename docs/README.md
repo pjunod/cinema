@@ -216,7 +216,7 @@ conversion, decoder selection, and the stall/stutter investigations.
 | [STREAMING-WEB-RECOVERY-HANDOFF.md](streaming/STREAMING-WEB-RECOVERY-HANDOFF.md) | Sol work package for truthful web stall evidence, recipe-preserving recovery and native parity. | open |
 | [VOD-PRESENTATION-PLAN.md](streaming/VOD-PRESENTATION-PLAN.md) | Every title is a film, not a broadcast — the programme. | open |
 | [VOD-PRESENTATION-PLAN-REVIEW.md](streaming/VOD-PRESENTATION-PLAN-REVIEW.md) · [response](streaming/VOD-PRESENTATION-PLAN-REVIEW-RESPONSE.md) | Six contracts that were not buildable, and the answers to them. | done |
-| [VOD-PRESENTATION-IMPLEMENTATION-HANDOFF.md](streaming/VOD-PRESENTATION-IMPLEMENTATION-HANDOFF.md) | How to build the plan without breaking the live path. | built |
+| [VOD-PRESENTATION-IMPLEMENTATION-HANDOFF.md](streaming/VOD-PRESENTATION-IMPLEMENTATION-HANDOFF.md) | How to build the plan without breaking the live path. | open |
 | [VOD-PRESENTATION-M0-REVIEW-BRIEF.md](streaming/VOD-PRESENTATION-M0-REVIEW-BRIEF.md) | Three normative sentences re-decided before M1. | done |
 | [VOD-M0-ISSUES.md](streaming/VOD-M0-ISSUES.md) | Every issue M0 found. | done |
 | [VOD-M2-QUESTIONS.md](streaming/VOD-M2-QUESTIONS.md) | The M2 questions and how each was ruled. | done |
@@ -361,8 +361,8 @@ player obeys, subtitles and overlays, layouts and themes.
 | [UI-LAYOUTS-IMPLEMENTATION.md](clients/UI-LAYOUTS-IMPLEMENTATION.md) | The accepted slice, as built. | built |
 | [UI-LAYOUTS-STATUS.md](clients/UI-LAYOUTS-STATUS.md) | Ground truth for what of that slice is proven. | open |
 | [UI-LAYOUTS-G3-DECISION.md](clients/UI-LAYOUTS-G3-DECISION.md) | Did the layout abstraction pay for itself? | done |
-| [WEB-SHELL-LAYOUT.md](clients/WEB-SHELL-LAYOUT.md) | Where the web app's sixty-two files are, what each one holds, where its code used to be in `index.html`, and the rules a new file has to obey. | live |
-| [WEB-SHELL-SPLIT-PLAN.md](clients/WEB-SHELL-SPLIT-PLAN.md) | How the 23,901-line web `index.html` became sixty-two files with no build step, and the byte-identity gate that proved nothing else changed. | built |
+| [WEB-SHELL-LAYOUT.md](clients/WEB-SHELL-LAYOUT.md) | Where the web app's sixty-five files are, what each one holds, where its code used to be in `index.html`, and the rules a new file has to obey. | live |
+| [WEB-SHELL-SPLIT-PLAN.md](clients/WEB-SHELL-SPLIT-PLAN.md) | How the 23,901-line web `index.html` became a multi-file app with no build step, and the byte-identity gate that proved nothing else changed. | built |
 | [WEB_LAYOUT_CONTAINMENT_STATUS.md](clients/WEB_LAYOUT_CONTAINMENT_STATUS.md) | Live delivery status of web layout containment. | open |
 | [OFFLINE-VIEWING-PLAN.md](clients/OFFLINE-VIEWING-PLAN.md) · [review](clients/OFFLINE-VIEWING-REVIEW.md) | One-tap, app-managed downloads — the plan and its review. | built |
 | [EBOOK-READER-PLAN.md](clients/EBOOK-READER-PLAN.md) | plurx reads what Curator acquires. | open |

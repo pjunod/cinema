@@ -1,5 +1,7 @@
 # Forgejo main-image publisher handoff
 
+**Status:** open · **Reconciled:** 2026-09-20
+
 Snapshot: 2026-09-04 21:24 EDT
 
 ## Outcome

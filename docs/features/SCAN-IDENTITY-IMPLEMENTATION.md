@@ -1,6 +1,6 @@
 # Scan identity — Sol's build contract for ownership, matching and repair
 
-**Status:** M1 merged to the effort; M2 guarded hints built and under focused
+**Status:** open — M1 merged to the effort; M2 guarded hints built and under focused
 verification; M3 open;
 no production repair run ·
 **Executes:** the revised [root-cause and fix proposal](SHOW-IDENTITY-SPLIT-RCA-AND-FIX.md)

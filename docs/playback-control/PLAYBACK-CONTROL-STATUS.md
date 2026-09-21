@@ -1,5 +1,7 @@
 # Playback control rewrite — project status
 
+**Status:** open · **Reconciled:** 2026-09-20
+
 **Reconciliation, 2026-09-12:** this historical ledger contains conflicting
 status snapshots. Read [PLAYBACK-REWRITE-REMAINDER.md](PLAYBACK-REWRITE-REMAINDER.md)
 for the source-verified remainder at `10f2afe6`: M6 priming and VOD marker

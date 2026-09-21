@@ -1,6 +1,6 @@
 # Streaming reliability — handoff for the continuing session
 
-**Status:** server work landed through 2026-09-08; the remaining §4 item is
+**Status:** open — server work landed through 2026-09-08; the remaining §4 item is
 blocked on a hardware measurement · **Repo:** `noirr/plurx` on Forgejo ·
 **Branch:** `effort/streaming-reliability` · **Written:** 2026-09-08
 

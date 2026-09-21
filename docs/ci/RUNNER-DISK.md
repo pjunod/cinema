@@ -1,5 +1,7 @@
 # Runner disk — what fills a CI runner, and what is bounded
 
+**Status:** live · **Reconciled:** 2026-09-20
+
 Companion to [CI_EXECUTION_ACCELERATION_PLAN.md](CI_EXECUTION_ACCELERATION_PLAN.md)
 (how the lanes are meant to get faster) — this is *where the bytes go, who
 deletes them, and what to do when a runner fills anyway*.

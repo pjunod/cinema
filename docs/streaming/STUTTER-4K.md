@@ -1,6 +1,7 @@
 # 4K copy-path stutter — what it is, what it isn't, and what to try next
 
-**Status:** measured fact: the client pipeline holds zero decode slack on
+**Status:** open — residual segment-boundary drops remain under investigation ·
+**Measured fact:** the client pipeline holds zero decode slack on
 this stream (§5.3) — first misread as decoder capacity, corrected the same
 night by the client itself (an M3 Max); the DV P7 signaling fix
 (§5.3) is CONFIRMED — VideoToolbox flipped software → hardware the moment

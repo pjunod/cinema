@@ -1,5 +1,7 @@
 # Queue repair verification — did the index queue come back, and stay back
 
+**Status:** open · **Reconciled:** 2026-09-20
+
 You are verifying, on the live fleet, that the fragment-index queue is
 building again after the repair effort and the sampled-attestation change.
 Everything below is a read. **Do not change code, do not restart nodes to

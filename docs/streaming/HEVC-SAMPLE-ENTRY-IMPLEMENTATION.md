@@ -1,6 +1,6 @@
 # HEVC sample-entry admission — Sol's implementation contract
 
-**Status:** ready for implementation; no runtime code built by this document
+**Status:** open — ready for implementation; no runtime code built by this document
 · **Written:** 2026-09-16 UTC · **Executes:** Fable's F1–F10 review findings
 and the two follow-up safeguards in the
 [diagnosis, §1.2](SAFARI-DIAGNOSIS-AND-FIX.md).
