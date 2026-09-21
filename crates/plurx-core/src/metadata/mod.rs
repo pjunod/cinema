@@ -1494,8 +1494,8 @@ async fn enrich_episodes(
                 // here, where that distinction is known, so the retry sweep
                 // can back it off without fabricating an artwork attempt for
                 // paths that never reached TMDB.
-                if ep.poster_path.is_none() {
-                    if !apply(
+                if ep.poster_path.is_none()
+                    && !apply(
                         store,
                         ep.id,
                         MetadataPatch {
@@ -1508,9 +1508,8 @@ async fn enrich_episodes(
                         repair_fence,
                     )
                     .await
-                    {
-                        complete = false;
-                    }
+                {
+                    complete = false;
                 }
                 continue;
             };
