@@ -2210,6 +2210,16 @@ test = "clients/android/app/src/test/java/tv/plurx/app/player/SubtitlePolicyTest
 test_anchor = "fun androidDvDeliveryRequiredHlsSurvivesStartSeekTracksAndRecoveryBodies()"
 
 [[fixes]]
+# All three detail layouts use this lossless wire-ID path; the regression
+# fixture is the live episode ID that JavaScript previously rounded.
+id = "web.artwork-refresh-exact-item-id"
+commits = ["447a5f76"]
+source = "crates/plurxd/src/web/detail/preplay-selection.js"
+source_anchor = "onclick=\"refreshArtwork('${exactWireId(it)}',this)\""
+test = "tests/web/reader.test.js"
+test_anchor = "artwork refresh retains opaque 64-bit item identifiers in every detail layout"
+
+[[fixes]]
 # Both clients now read an explicit tone-map peak and the provenance of that
 # number. The 1,000-nit `default` is a policy value, not something read off
 # the file, and the playback-info note has to say which one it is showing.
