@@ -3397,8 +3397,8 @@ and falls back to the log ring when pointed at an older server.
 
 ### Quality-bounded transcodes
 
-N1 adds two admin runtime settings. `transcode.rate_mode` is `bitrate` by
-default and preserves the pre-N1 encoder arguments and cache identity.
+N1 adds two admin runtime settings. An explicit `transcode.rate_mode` of
+`bitrate` preserves the pre-N1 encoder arguments and cache identity.
 `quality` requests the family-specific quality mode below. An optional
 `transcode.quality` integer overrides the family default; JSON `null` clears
 that override. The server validates the complete production argument list on
@@ -3412,6 +3412,21 @@ sessions.
 | VA-API | `-rc_mode QVBR -global_quality q`, with target bitrate and caps |
 | NVIDIA NVENC | `-rc vbr -cq q`, with target bitrate and caps |
 | Apple VideoToolbox | `-q:v q`, with target bitrate and caps |
+
+When no mode is stored, the server resolves the selected encoder's code
+default; this is distinct from an operator explicitly choosing `bitrate`.
+Every family default remains Bitrate as of S-06 PR #414. Admin diagnostics
+report the map at `encoders.quality_rc.default_rate_mode`; the settings form
+keeps presenting `bitrate` for an absent legacy pair.
+
+Read-only census at deployed revision `882862e8` on 2026-09-21 found QSV
+selected on `nynuc`, `nuc4` and `nuc3`, and VA-API selected on `m6`. The fresh
+process counters were zero for QSV, VA-API, software, NVENC and VideoToolbox
+on every node (m6 had three copy sessions and one VOD session). This does not
+qualify a default: QSV and software still need separate n2 corpus captures;
+VA-API now has a selectable node but needs a non-zero week and its own n2
+comparison; NVENC is unusable on the four Linux daemons; VideoToolbox has no
+deployed daemon. Do not infer calibration from the 15-frame boot probe.
 
 The request and the effective result are deliberately different facts. A
 driver that refuses its quality arguments remains usable for bitrate mode; new
