@@ -1,6 +1,6 @@
 # Detail reads and storage availability — a badge that never unpacks an index, and an availability answer that carries its age
 
-**Status:** ready for review · **Executes:** C14 (§3.3.3) from
+**Status:** implementation in progress · **Executes:** C14 (§3.3.3) from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
 
@@ -10,11 +10,13 @@ Board id **C-05**. Read §2 first: it quotes the detail loop, the index
 read it calls, and the two rows in the sidecar that decide the badge, and
 it states exactly which of `get`'s five refusal conditions a cheap
 projection has to reproduce. Then build §5 in order — M1 (the validation
-marker) must land before M2 (the projection), because the projection's
-whole safety argument is that marker; M3 (availability) is independent of
-both and may run in a parallel session. One draft PR per milestone into
-`main` under the fast lane. Every `file:line` is from `0f02b7ea`;
-re-verify by function name.
+marker) is the first logical commit and must be deployed/backfilled before M2
+is eligible for promotion, because the projection's whole safety argument is
+that marker; M3 (availability) is independent of both. Current protocol keeps
+all milestones in one draft plan PR with logical commits. The intermediate M1
+commit is therefore a named rollout prerequisite, not a claim that the final
+tree may expose M2 on an unbackfilled fleet. Every `file:line` is from
+`0f02b7ea`; re-verify by function name.
 
 **If a step seems to require changing invalidation-by-mismatch (a stale
 row answering `None` rather than being deleted), making the detail page
@@ -569,11 +571,15 @@ un-WIP. `make validate-staged` before every push. M3 touches
 
 ### 6.2 Rollout
 
-M1 first and alone, to one node, watched for one backfill convergence
+The one-plan PR records M1 as its first implementation commit. Build and deploy
+that exact intermediate commit first and alone to one node, watched for one backfill convergence
 (`plurx_index_validation_backfill_total` stops rising) before M2 goes
 anywhere — M2's badge is only correct once markers exist, and on an
 unbackfilled node every title reads `pending`, which is a visible
-regression if the two land together. M2 and M3 to the fleet after that.
+regression if the two land together. The PR remains draft and cannot be
+promoted until that M1 receipt exists; this preserves the required order
+without splitting one plan across multiple PRs. M2 and M3 go to the fleet
+only after that receipt.
 Nothing here changes recipe identity, argv fingerprints or cache digests;
 the sidecar schema version moves, and a rollback to the previous
 `sha-` image reads the new column as absent, which the frozen-create rule
@@ -649,7 +655,7 @@ badge". Three independent checks, all in M2:
 
 ## Execution log
 
-Executing sessions append one row per milestone PR (see the
+Executing sessions append one row per logical milestone in the one plan PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
@@ -657,4 +663,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | claim | pending | Claimed one-plan/one-PR ownership from `main` @ `9deb58a2`; Rust 1.97.1 baseline `cargo check --locked -p plurxd --all-targets` passed before edits. M1 will be the first implementation commit and its rollout/backfill receipt remains mandatory before M2 promotion. |
