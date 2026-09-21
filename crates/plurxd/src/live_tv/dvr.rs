@@ -2317,10 +2317,16 @@ async fn reminder_tick(
         )
     {
         if now - reminder.airing_end > REMINDER_RETENTION_S {
-            let _ = manager
-                .store
-                .delete_dvr_reminder(reminder.user_id, &reminder.id)
-                .await;
+            // Best-effort retention cleanup: a failure leaves an inert moved
+            // reminder for the next maintenance pass to delete.
+            crate::store_result::observe(
+                crate::store_result::Operation::DeleteExpiredDvrReminder,
+                crate::store_result::Discard::BestEffort,
+                manager
+                    .store
+                    .delete_dvr_reminder(reminder.user_id, &reminder.id)
+                    .await,
+            );
         }
     }
 

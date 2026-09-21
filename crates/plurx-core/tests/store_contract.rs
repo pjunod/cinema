@@ -59,14 +59,15 @@ use plurx_core::segplan::{
 };
 use plurx_core::store::{
     analysis_backoff_ms, cluster_fragment_index_generation_key, cluster_fragment_index_key,
-    AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryQuery, ArtworkRepairFence,
-    ClusterFragmentIndexArtifact, ClusterFragmentIndexJob, ClusterFragmentIndexLocation,
-    DvConversionMode, DvConversionState, DvRecoveryGuardState, IdentityRepairOutcome, LibraryStore,
-    MediaStore, NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
-    QueueDvConversionOutcome, ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome,
-    SqliteStore, Store, ANALYSIS_LIFECYCLE_METRICS, ANALYSIS_METRIC_COMPONENTS,
-    ANALYSIS_METRIC_PRIORITIES, ANALYSIS_METRIC_STATES, ANALYSIS_METRIC_TRIGGERS,
-    DV_CONVERSION_LEDGER_READ_MAX, DV_RECOVERY_GUARD_READ_MAX,
+    requeue_cluster_fragment_index_after_no_holder, AnalysisHistoryCursor, AnalysisHistoryFilter,
+    AnalysisHistoryQuery, ArtworkRepairFence, ClusterFragmentIndexArtifact,
+    ClusterFragmentIndexJob, ClusterFragmentIndexLocation, DvConversionMode, DvConversionState,
+    DvRecoveryGuardState, IdentityRepairOutcome, LibraryStore, MediaStore, NewAnalysisRequest,
+    NewClusterFragmentIndexJob, OutboxEntry, PublicationStore, QueueDvConversionOutcome,
+    ReconcileOutcome, RootFingerprintStatus, SeriesHintOutcome, SqliteStore, Store,
+    ANALYSIS_LIFECYCLE_METRICS, ANALYSIS_METRIC_COMPONENTS, ANALYSIS_METRIC_PRIORITIES,
+    ANALYSIS_METRIC_STATES, ANALYSIS_METRIC_TRIGGERS, DV_CONVERSION_LEDGER_READ_MAX,
+    DV_RECOVERY_GUARD_READ_MAX,
 };
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::{
@@ -20131,7 +20132,7 @@ async fn exhausted_structural_lease_counts_loss_and_failure_through_dyn_store() 
 }
 
 #[tokio::test]
-async fn repair_requeue_cleanup_preserves_exhausted_lease_terminality_through_dyn_store() {
+async fn requeue_through_the_no_holder_arm_preserves_exhausted_lease_terminality() {
     for_each_backend(|store, backend| async move {
         store
             .put_setting("analysis.max_attempts", "1")
@@ -20226,10 +20227,11 @@ async fn repair_requeue_cleanup_preserves_exhausted_lease_terminality_through_dy
             created_at_ms: 20,
             ..repair
         };
-        assert!(store
-            .requeue_cluster_fragment_index(&repair_requeue)
-            .await
-            .unwrap_or_else(|error| panic!("{backend}: requeue repair: {error}")));
+        assert!(
+            requeue_cluster_fragment_index_after_no_holder(store.as_ref(), &repair_requeue,)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: requeue repair: {error}"))
+        );
 
         let failed = store
             .cluster_fragment_index_job(&expired.cache_key, &expired.target_node_id)

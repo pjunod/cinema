@@ -2538,11 +2538,17 @@ impl VodServe {
         .await?;
         let Some(index) = index else {
             let repair = repair_job_for_artifact(repair, &artifact);
-            let _ = self
-                .shared
-                .store
-                .requeue_cluster_fragment_index(&repair)
-                .await;
+            // Lost work: without this transition the exact artifact remains
+            // permanently complete even though no verified holder can serve it.
+            crate::store_result::observe(
+                crate::store_result::Operation::RequeueFragmentIndexNoHolder,
+                crate::store_result::Discard::LostWork,
+                plurx_core::store::requeue_cluster_fragment_index_after_no_holder(
+                    self.shared.store.as_ref(),
+                    &repair,
+                )
+                .await,
+            );
             return Err("no verified holder could supply the v2 artifact".to_owned());
         };
         Ok(Some((index, object_version, artifact.cache_key)))
@@ -8302,7 +8308,7 @@ mod tests {
     /// local cache is preinstalled only to keep transport/authentication out
     /// of a recipe-identity regression.
     #[tokio::test]
-    async fn a_converting_cluster_artifact_hydrates_without_a_local_v1_index() {
+    async fn requeue_through_the_no_holder_arm_after_converting_artifact_hydrates() {
         testfixtures::require_ffmpeg();
         let source_dir = crate::test_tempdir().expect("source dir");
         let source_path = source_dir.path().join("profile-seven.mkv");
@@ -8467,7 +8473,7 @@ mod tests {
             .is_none());
 
         let base = crate::test_tempdir().expect("rendition root");
-        let store: Arc<dyn Store> = sqlite;
+        let store: Arc<dyn Store> = sqlite.clone();
         let serve = VodServe::new_cluster(
             base.path().to_path_buf(),
             store,
@@ -8484,6 +8490,24 @@ mod tests {
         assert_eq!(hydrated_version, object_version);
         assert_eq!(hydrated.promotion.dolby_vision, Some(record));
         assert_eq!(hydrated.rows, index.rows);
+
+        crate::fragment_index_cluster::remove_local_blob(cache.path(), &cache_key).await;
+        let unavailable = serve
+            .try_cluster_fragment_index(&file, video)
+            .await
+            .expect_err("a catalogue row without any verified holder is not playable");
+        assert!(
+            unavailable.contains("no verified holder could supply"),
+            "{unavailable}"
+        );
+        let repair = sqlite
+            .cluster_fragment_index_job(&cache_key, "node-a")
+            .await
+            .expect("read repair job")
+            .expect("the no-holder arm retains a repair job");
+        assert_eq!(repair.state, "queued");
+        assert_eq!(repair.priority, "foreground");
+        assert_eq!(repair.trigger, "foreground");
     }
 
     fn fixture_file() -> MediaFile {

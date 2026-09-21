@@ -4000,31 +4000,7 @@ impl WatchStore for HiqliteAuthStore {
     }
 
     async fn next_up(&self, user_id: i64, limit: i64) -> Result<Vec<RecentItem>, StoreError> {
-        let sql = format!(
-            "SELECT {e}, show.title AS rail_show_title, \
-                    season.poster_path AS rail_season_poster, \
-                    MIN(season.season_number*100000 + e.episode_number) AS ord \
-             FROM items e JOIN items season ON season.id = e.parent_id \
-             JOIN items show ON show.id = season.parent_id \
-             WHERE e.kind = 'episode' \
-               AND e.id NOT IN (SELECT item_id FROM watch_state \
-                                WHERE user_id = $1 AND (watched = 1 OR position_ms > 0)) \
-               AND (season.season_number*100000 + e.episode_number) > ( \
-                   SELECT COALESCE(MAX(se.season_number*100000 + ep.episode_number), -1) \
-                   FROM watch_state w JOIN items ep ON ep.id = w.item_id AND ep.kind = 'episode' \
-                   JOIN items se ON se.id = ep.parent_id \
-                   WHERE w.user_id = $1 AND w.watched = 1 AND se.parent_id = show.id) \
-               AND show.id IN (SELECT sh.id FROM watch_state w \
-                   JOIN items ep ON ep.id = w.item_id AND ep.kind = 'episode' \
-                   JOIN items se ON se.id = ep.parent_id JOIN items sh ON sh.id = se.parent_id \
-                   WHERE w.user_id = $1 AND w.watched = 1) \
-               AND show.id NOT IN (SELECT sh.id FROM watch_state w \
-                   JOIN items ep ON ep.id = w.item_id AND ep.kind = 'episode' \
-                   JOIN items se ON se.id = ep.parent_id JOIN items sh ON sh.id = se.parent_id \
-                   WHERE w.user_id = $1 AND w.watched = 0 AND w.position_ms > 0) \
-             GROUP BY show.id ORDER BY show.sort_title LIMIT $2",
-            e = item_cols("e")
-        );
+        let sql = super::sql_source::next_up(&item_cols("e")).hiqlite();
         recent_items(
             self.client()
                 .query_consistent_map::<RecentItemRow, _>(sql, params!(user_id, limit))
