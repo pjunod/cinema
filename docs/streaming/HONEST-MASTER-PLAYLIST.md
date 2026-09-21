@@ -954,7 +954,7 @@ fleet.
 
 ## Execution log
 
-Executing sessions append one row per milestone PR (see the
+Executing sessions append one row per logical milestone in the single plan PR (see the
 [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) for the
 claim protocol). **Model** is the runtime's exact model identifier;
 **Session** is the session id or URL; the same two values are commit
@@ -966,3 +966,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Rolling frozen presentations use `output_size`; three focused rolling-geometry tests and the copy-session guard passed. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | Bounded `avcC` parsing, fMP4 normalization, MPEG-TS bypass and attempt-media classification passed focused tests. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3–M6 | [#419](http://192.168.4.7:3000/noirr/plurx/pulls/419) | needs: fleet encoder/SPS qualification, named-device SDR `CODECS` re-qualification, measured corpus peak/average/overhead, and Apple-panel before/after observations. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Sole review [#3318](http://192.168.4.7:3000/noirr/plurx/pulls/419#issuecomment-3318) | `9ca2cb23` | Resolved all four findings: structural selected-track `stsd`/`avcC` identity with decoy/duplicate/typed-refusal tests; coherent encoded-VOD no-upscale/unprobed geometry; cadence-safe proposed levels with 23.976/29.97/59.94/60 evidence; copy/remux/prepared-successor fragment-index peak contract. Pinned 1.97.1 focused AVC (4), fMP4 AVC (2), MPEG-TS (1), VOD geometry (2), affected Clippy, rustfmt, docs index and diff check green; no broad unit. |
