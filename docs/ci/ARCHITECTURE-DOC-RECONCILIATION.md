@@ -21,8 +21,8 @@ is written around. M3 and M4 are independent.
 The standing instruction: **if a step seems to require changing a constant in
 `crates/` so the document can keep its sentence, stop and flag it.** The code
 is the truth here; this plan moves the document, never the tree. The one
-permitted code edit is prose: three source comments that say "sixty-two" where
-the array has sixty-four rows (§3.4).
+permitted code edit is prose: three source comments that carry the stale web
+file count where the array has sixty-four rows (§3.4).
 
 ---
 
@@ -42,10 +42,10 @@ the array has sixty-four rows (§3.4).
    (`ARCHITECTURE.md:88`) is **correct**; what is missing is the recovery boot
    and its one-way activation. §3.1 adds it rather than replacing the
    sentence.
-2. **The web app is sixty-four files, not sixty-two.** `WEB_ASSETS`
+2. **The web app is sixty-four files, not the stale count.** `WEB_ASSETS`
    (`crates/plurxd/src/http/web.rs:57`) has 64 rows;
    [WEB-SHELL-LAYOUT.md](../clients/WEB-SHELL-LAYOUT.md):1 already says
-   sixty-four. Three source comments still say sixty-two — `web.rs:8`,
+   sixty-four. Three source comments still carry the stale count — `web.rs:8`,
    `tests/web/asset-graph.js:5`, `tests/web/shell-source.js:7` — which is the
    same prose drift as ARCHITECTURE's, one layer down. M4 fixes them.
 3. **The watchdog claim is wrong twice, not once.** §4.7 gives
@@ -363,7 +363,7 @@ sweep, taken from their own last dated section; a document whose state cannot
 be established from its own text gets `**Status:** unknown — last touched
 <date>` rather than a guess.
 
-Separately, the three source comments that say "sixty-two"
+Separately, the three source comments that carry the stale spelt count
 (`crates/plurxd/src/http/web.rs:8`, `tests/web/asset-graph.js:5`,
 `tests/web/shell-source.js:7`) become "sixty-four", which check rule 1 above
 would not catch because they are not in ARCHITECTURE.md — so the constant
@@ -453,13 +453,13 @@ contradictions for the folders that PR covers and no new ones elsewhere;
 `make operations-check` green (`test_docs_index` and `test_status_pr_claims`
 both run there); every document that PR touched has a `**Status:**` header.
 
-### 5.4 M4 — the "sixty-two" comments
+### 5.4 M4 — the stale web-file comments
 
 `crates/plurxd/src/http/web.rs:8`, `tests/web/asset-graph.js:5`,
 `tests/web/shell-source.js:7`, plus the `WEB_ASSETS` sweep extension from
 §3.4's last paragraph.
 
-Acceptance: `grep -rn 'sixty-two' crates/ tests/ docs/` returns nothing;
+Acceptance: `grep -rn 'sixty[-]two' crates/ tests/ docs/` returns nothing;
 `make operations-check` green; adding a 65th `WEB_ASSETS` row in a scratch
 copy makes the constant check fail naming all four files.
 

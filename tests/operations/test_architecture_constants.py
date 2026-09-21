@@ -51,6 +51,28 @@ class ArchitectureConstantCase(unittest.TestCase):
         self.assertIn("`UNREGISTERED_LIMIT` = 9", errors[0])
         self.assertIn("does not know", errors[0])
 
+    def test_a_new_web_asset_rejects_all_four_stale_prose_surfaces(self) -> None:
+        def read(path: str) -> str:
+            contents = repository_read(path)
+            if path == "crates/plurxd/src/http/web.rs":
+                anchor = (
+                    '    ("router.js",                              '
+                    'WebAsset::BodyScript,  include_str!("../web/router.js")),\n'
+                )
+                return contents.replace(anchor, anchor + anchor, 1)
+            return contents
+
+        failure = "\n".join(validate_documented_constants(read))
+
+        self.assertIn("docs/ARCHITECTURE.md", failure)
+        for path in (
+            "crates/plurxd/src/http/web.rs",
+            "tests/web/asset-graph.js",
+            "tests/web/shell-source.js",
+        ):
+            self.assertIn(path, failure)
+        self.assertIn('must say "sixty-five"', failure)
+
 
 if __name__ == "__main__":
     unittest.main()

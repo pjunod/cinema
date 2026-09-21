@@ -284,6 +284,43 @@ _DOCUMENTED_CONSTANTS = {
 }
 _REQUIRED_DOCUMENTED_CONSTANTS: frozenset[str] = frozenset(_DOCUMENTED_CONSTANTS)
 _DOCUMENTED_VALUE = re.compile(r"`([A-Z][A-Z0-9_]*)`\s*=\s*(\d+)")
+_WEB_ASSET_PROSE = (
+    "crates/plurxd/src/http/web.rs",
+    "tests/web/asset-graph.js",
+    "tests/web/shell-source.js",
+)
+
+
+def _spell_cardinal(value: int) -> str:
+    ones = (
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+    )
+    tens = ("", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety")
+    if value < len(ones):
+        return ones[value]
+    if value < 100:
+        quotient, remainder = divmod(value, 10)
+        return tens[quotient] if remainder == 0 else f"{tens[quotient]}-{ones[remainder]}"
+    raise ValueError(f"cannot spell WEB_ASSETS row count {value}")
 
 
 def validate_documented_constants(read: Callable[[str], str]) -> tuple[str, ...]:
@@ -322,6 +359,14 @@ def validate_documented_constants(read: Callable[[str], str]) -> tuple[str, ...]
                     f"{architecture_path} quotes `{name}` = {documented_value}; "
                     f"{specification.source} defines {source_value}"
                 )
+        if name == "WEB_ASSETS":
+            expected = _spell_cardinal(source_value)
+            for prose_path in _WEB_ASSET_PROSE:
+                if expected not in read(prose_path):
+                    errors.append(
+                        f'{prose_path} must say "{expected}" because '
+                        f"{specification.source} defines {source_value} WEB_ASSETS rows"
+                    )
     return tuple(errors)
 
 
