@@ -567,9 +567,10 @@ The next proposal to spread it must first inventory the actual duplicated SQL
 shapes and demonstrate a net reduction across at least three unlike methods;
 it must not mechanically rewrite sigils.
 
-M1 measured **91** statement variants whose binding arity is not local enough
-for the conservative static scanner to prove. That count is pinned and may
-only fall without review. It is a useful guard against regression, but large
+M1 initially measured **91** statement variants whose binding arity is not
+local enough for the conservative static scanner to prove. Moving `next_up`
+to M3's shared source reduced the final pinned count to **90**; it may only
+fall without review. It is a useful guard against regression, but large
 enough that arity coverage should be tightened before shared generation is
 presented as the primary safety mechanism.
 
@@ -601,5 +602,5 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `07796d70` | Routed all store slices; selector moved from hiqlite 3/16 + SQLite 7/24 outside `cluster_auth` to 0/16 + 0/24. Directory-derived regression passed. Historical cost remains 3 extra cluster lanes among 19 touching commits in 30 days. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M1 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `6e1554ed` | Added 24-file SQLite census, gap/mixed-spelling/local-arity checks, pinned 91 unchecked variants, fixed two real gaps, and exposed the fixed-cardinality pre-I/O refusal counter. Fourteen focused census tests and the counter regression passed. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M2 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `3ebc50be` | Classified all 29 discarded results: 25 best-effort, 3 lost-work, 1 cancelled. Closed labels, 30-second per-operation log windows, metrics, source lint, and actual VOD no-holder requeue regression passed; backend-neutral repair contract passed on SQLite. Replicated-lane execution remains CI evidence. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `8cfd50a5` | One typed parameter order now renders both `next_up` dialects; equivalence/validator, SQLite behavior, and backend-neutral watch-contract regressions passed. Measured patch: +119/-61, net +58. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M3 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / `8cfd50a5` | One typed parameter order now renders both `next_up` dialects; equivalence/validator, SQLite behavior, and backend-neutral watch-contract regressions passed. Measured patch: +119/-61, net +58; the pinned unchecked arity set fell from 91 to 90. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M4 | [#411](http://192.168.4.7:3000/noirr/plurx/pulls/411) / this commit | Decision: keep the safe pilot, do not spread or revert. A future spread needs a shape inventory and net reduction across at least three unlike methods. |
