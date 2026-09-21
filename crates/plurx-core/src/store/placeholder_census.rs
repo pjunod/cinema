@@ -820,7 +820,10 @@ fn is_sqlite_candidate(text: &str) -> bool {
 /// Current number of SQLite statement variants whose binding list is built in
 /// another statement or dynamically. This is measured by the census and may
 /// only fall unless a reviewer accepts a new non-local binding shape.
-const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 90;
+// `sqlite/users.rs::list_tokens_for_user` prepares once and binds in a later
+// `query_map`, so its arity cannot be paired syntactically even though the
+// numbered placeholder itself is still covered by this census.
+const EXPECTED_UNCHECKED_SQLITE_ARITY: usize = 91;
 
 #[test]
 fn every_sqlite_placeholder_and_local_binding_arity_is_valid() {
