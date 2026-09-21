@@ -94,6 +94,16 @@ internal class DisplayModeMatcher(private val activity: Activity) {
                 }
             }
         } == true
+        if (owner != generation) {
+            return DisplayModeMatchResult(
+                "unsupported",
+                sourceFps,
+                current.refreshHz,
+                requested.refreshHz,
+                (SystemClock.elapsedRealtime() - startedAt).coerceAtLeast(0),
+                late,
+            )
+        }
         return DisplayModeMatchResult(
             outcome = if (matched) "matched" else "timeout",
             sourceFps = sourceFps,
@@ -103,6 +113,8 @@ internal class DisplayModeMatcher(private val activity: Activity) {
             late = late,
         )
     }
+
+    fun isOwner(owner: Long): Boolean = owner == generation
 
     fun reset(owner: Long) {
         if (owner != generation) return

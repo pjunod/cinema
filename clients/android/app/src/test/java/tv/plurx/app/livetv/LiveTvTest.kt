@@ -8,7 +8,9 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.jsonObject
@@ -18,6 +20,7 @@ import kotlinx.serialization.json.int
 import org.junit.Assert.*
 import org.junit.Test
 import tv.plurx.app.data.Net
+import tv.plurx.app.player.DisplayModeMatchResult
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LiveTvTest {
@@ -325,16 +328,68 @@ class LiveTvTest {
         val enabled = LiveTvSettingsChange.Enabled(true).body(20)
         assertEquals(setOf("live_tv_config_generation", "live_tv_enabled"), enabled.keys)
         val displayMode = LiveTvSettingsChange.DisplayModeMatch(true).body(20)
-        assertEquals(
-            setOf("live_tv_config_generation", "playback_display_mode_match"),
-            displayMode.keys,
-        )
+        assertEquals(setOf("playback_display_mode_match"), displayMode.keys)
+        assertEquals("true", displayMode.getValue("playback_display_mode_match").jsonPrimitive.content)
         val recovery = LiveTvSettingsChange.FencedOwner("owner-original", 18).body(21)
         assertEquals(setOf("live_tv_config_generation", "live_tv_fenced_owner"), recovery.keys)
         val tuple = recovery.getValue("live_tv_fenced_owner").jsonObject
         assertEquals("owner-original", tuple.getValue("owner_node_id").jsonPrimitive.content)
         assertEquals("18", tuple.getValue("drain_before_generation").jsonPrimitive.content)
         assertEquals("true", tuple.getValue("stopped_and_restart_prevented").jsonPrimitive.content)
+    }
+
+    @Test fun delayedDisplayMatchCannotOutliveChannelOrWindowOwnership() = runTest {
+        suspend fun overtake(reason: String) {
+            val entered = CompletableDeferred<Unit>()
+            val release = CompletableDeferred<Unit>()
+            val cleanup = mutableListOf<String>()
+            var serial = 1L
+            var owner = true
+            val attach = async {
+                awaitLiveTvDisplayMode(
+                    mine = 1,
+                    currentSerial = { serial },
+                    ownerIsCurrent = { owner },
+                    match = {
+                        entered.complete(Unit)
+                        release.await()
+                        DisplayModeMatchResult("matched")
+                    },
+                    cleanup = { cleanup += "release-exact-start" },
+                )
+            }
+            entered.await()
+            when (reason) {
+                "channel" -> serial = 2
+                "window" -> owner = false
+                "cancel" -> attach.cancel()
+                else -> error("unknown supersession")
+            }
+            if (reason != "cancel") release.complete(Unit)
+            runCurrent()
+            if (reason == "cancel") assertTrue(attach.isCancelled) else assertNull(attach.await())
+            assertEquals(listOf("release-exact-start"), cleanup)
+        }
+
+        overtake("channel") // A newer channel owns the serial.
+        overtake("window") // The activity unbound and reset its matcher.
+        overtake("cancel") // Stop/unbind cancels the pending tune job.
+    }
+
+    @Test fun staleAttachCleanupCannotReleaseTheNewerChannel() = runTest {
+        val requests = Requests()
+        val store = Store()
+        val lease = lease(requests, store, CoroutineScope(SupervisorJob() + UnconfinedTestDispatcher(testScheduler)))
+        val first = requireNotNull(lease.start("one").await())
+        val second = requireNotNull(lease.start("two").await())
+
+        assertFalse(lease.stopIfCurrent(first).await())
+        assertSame(second, lease.current)
+        lease.stop().await()
+        assertEquals(
+            listOf("start:one", "release:cap-one", "start:two", "release:cap-two"),
+            requests.events.filterNot { it.startsWith("retire:") },
+        )
     }
 
     @Test fun actualSnakeCaseSettingsContractPreservesOldOwnerTuple() {

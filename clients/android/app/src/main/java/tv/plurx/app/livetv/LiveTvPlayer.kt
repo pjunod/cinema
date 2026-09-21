@@ -12,14 +12,19 @@ import androidx.media3.datasource.okhttp.OkHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import tv.plurx.app.player.playbackLoadControl
+import tv.plurx.app.player.DisplayModeMatchResult
 import tv.plurx.app.player.DisplayModeMatcher
 import tv.plurx.app.player.PlaybackClientLog
 import tv.plurx.app.player.postPlaybackClientLog
@@ -55,6 +60,7 @@ class LiveTvPlayer private constructor(context: Context) {
     private var heartbeat: Job? = null
     private var guideRefresh: Job? = null
     private var channelChange: Job? = null
+    private var tuneJob: Job? = null
     private var displayModeActivity: Activity? = null
     private var displayModeMatcher: DisplayModeMatcher? = null
     private var displayModeOwner: Long? = null
@@ -142,15 +148,22 @@ class LiveTvPlayer private constructor(context: Context) {
         detach()
         mutableState.value = mutableState.value.copy(busy = true, playing = false, title = channel.title,
             watching = channel, status = null, message = "Starting ${channel.title}…")
-        scope.launch {
+        val launched = scope.launch(start = CoroutineStart.LAZY) {
             try {
                 val started = lease.start(channel.id).await() ?: return@launch
                 if (mine != serial) return@launch
                 attach(channel, started, mine, api, lease, compatibilityRetry)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
                 if (mine == serial) { fail(error); stopWithMessage(message(error)) }
             }
         }
+        tuneJob = launched
+        launched.invokeOnCompletion {
+            if (tuneJob === launched) tuneJob = null
+        }
+        launched.start()
     }
 
     /**
@@ -168,7 +181,7 @@ class LiveTvPlayer private constructor(context: Context) {
         api: LiveTvApi,
         lease: LiveTvLease,
         compatibilityRetry: Boolean,
-    ) {
+    ): Boolean {
         val delivery = started.delivery
         val outputIsProgressive = delivery?.deinterlace == true ||
             delivery?.source?.field_order?.lowercase() in setOf("progressive", "unknown")
@@ -178,7 +191,15 @@ class LiveTvPlayer private constructor(context: Context) {
         val matcher = displayModeMatcher
         val owner = displayModeOwner
         if (!compatibilityRetry && matcher != null && owner != null) {
-            val result = matcher.match(owner, rate, tv.plurx.app.data.Session.displayModeMatch)
+            val result = awaitLiveTvDisplayMode(
+                mine = mine,
+                currentSerial = { serial },
+                ownerIsCurrent = {
+                    matcher === displayModeMatcher && owner == displayModeOwner && matcher.isOwner(owner)
+                },
+                match = { matcher.match(owner, rate, tv.plurx.app.data.Session.displayModeMatch) },
+                cleanup = { lease.stopIfCurrent(started).await() },
+            ) ?: return false
             logDisplayModeResult(result)
             postPlaybackClientLog(
                 scope,
@@ -192,6 +213,10 @@ class LiveTvPlayer private constructor(context: Context) {
                     sessionId = started.session_id,
                 ),
             )
+        }
+        if (mine != serial) {
+            lease.stopIfCurrent(started).await()
+            return false
         }
         val output = ExoPlayer.Builder(context)
             .setMediaSourceFactory(DefaultMediaSourceFactory(OkHttpDataSource.Factory(api.mediaClient)))
@@ -268,6 +293,7 @@ class LiveTvPlayer private constructor(context: Context) {
                 } else if (mine == serial) stopWithMessage(message(error))
             }
         }
+        return true
     }
 
     /**
@@ -376,6 +402,16 @@ class LiveTvPlayer private constructor(context: Context) {
 
     fun unbindDisplayMode(activity: Activity) {
         if (displayModeActivity !== activity) return
+        if (tuneJob?.isActive == true) {
+            // An unbound window cannot finish a tune it no longer owns. Bump
+            // both generations: cancellation alone would stop the waiter but
+            // could leave the lease's independently scoped start publishing a
+            // capability after this coroutine disappeared.
+            ++serial
+            tuneJob?.cancel()
+            val cleanup = lease?.stop()
+            scope.launch { runCatching { cleanup?.await() } }
+        }
         displayModeOwner?.let { owner -> displayModeMatcher?.reset(owner) }
         displayModeOwner = null
         displayModeMatcher = null
@@ -430,6 +466,7 @@ class LiveTvPlayer private constructor(context: Context) {
     }
 
     private fun detach() {
+        tuneJob?.cancel(); tuneJob = null
         heartbeat?.cancel(); heartbeat = null
         channelChange?.cancel(); channelChange = null
         val output = player
@@ -532,6 +569,30 @@ class LiveTvPlayer private constructor(context: Context) {
             instance ?: LiveTvPlayer(context).also { instance = it }
         }
     }
+}
+
+/**
+ * The display handshake is allowed to suspend, but ownership is not.
+ * Recheck both the channel serial and window generation before any player is
+ * constructed; cancellation performs the same exact-session cleanup.
+ */
+internal suspend fun awaitLiveTvDisplayMode(
+    mine: Long,
+    currentSerial: () -> Long,
+    ownerIsCurrent: () -> Boolean,
+    match: suspend () -> DisplayModeMatchResult,
+    cleanup: suspend () -> Unit,
+): DisplayModeMatchResult? = try {
+    val result = match()
+    if (mine == currentSerial() && ownerIsCurrent()) {
+        result
+    } else {
+        cleanup()
+        null
+    }
+} catch (cancelled: CancellationException) {
+    withContext(NonCancellable) { cleanup() }
+    throw cancelled
 }
 
 internal fun liveTvPlaybackErrorCode(code: Int): String = when (code) {

@@ -433,7 +433,13 @@ sealed interface LiveTvSettingsChange {
     data class FencedOwner(val owner: String, val cutoff: Long) : LiveTvSettingsChange
 
     fun body(generation: Long): JsonObject = buildJsonObject {
-        put("live_tv_config_generation", generation)
+        // The display-mode preference is an ordinary playback setting, not
+        // part of the replicated Live TV owner tuple. Sending the tuple's CAS
+        // with it is rejected by the server and would falsely make this
+        // advisory switch depend on unrelated tuner configuration churn.
+        if (this@LiveTvSettingsChange !is DisplayModeMatch) {
+            put("live_tv_config_generation", generation)
+        }
         when (val change = this@LiveTvSettingsChange) {
             is Configure -> {
                 put("live_tv_device_ipv4", change.ipv4)
