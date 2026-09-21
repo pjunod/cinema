@@ -577,4 +577,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| | | | | | |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | pending | Claimed design-only S-12 from `6063b37c`; verified current `validate_encoded_fragment` rejects any nonzero CTO before publication. |
