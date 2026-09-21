@@ -6,20 +6,27 @@ first.
 
 ## Implementation plans for the architecture review, and one work board for every vendor
 
-**34 handoff plans** under `docs/{streaming,server,cluster,features,clients,ci}/`
+**46 handoff plans** under `docs/{streaming,server,cluster,features,clients,ci}/`
 (index rows in [docs/README.md](docs/README.md)), one per finding or per
 shared mechanism, each executing named ids of
 [the review](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20.md) with the
 adversarial assessment's dispositions as guardrails, the current code copied
 into a contract section, and a runnable acceptance check per milestone.
-Twelve planned documents are **not yet written** (their writers were cut off
-by a usage limit) and are listed on the board with "writing the document" as
-their first milestone: HONEST-MASTER-PLAYLIST, CODEC-AND-GPU-QUALIFICATION,
-CLOCK-SKEW-GUARD-DESIGN, STORE-CONTRACT-COVERAGE-AND-PLACEHOLDER-VALIDATION,
-HIQLITE-FORK-AND-DEPENDENCY-CLEANUP, DETAIL-READS-AND-STORAGE-AVAILABILITY,
-TELEMETRY-BACKPRESSURE, PLEX-FACADE-PAGING, OBSERVABILITY-BASELINE,
-NATIVE-ADAPTIVE-QUALITY-DESIGN, LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS,
-ARCHITECTURE-DOC-RECONCILIATION.
+The remaining twelve landed in a second pass the same day, so **all 46
+board rows have a document**. The second pass corrected the review in
+several places worth knowing before Astra reviews: the encoded-VOD master
+already emits output geometry (only the rolling path does not) and the
+hard-coded codec string is `avc1.640034`, not `.640028`; `publish_main` is
+unreachable on `ci.yml`'s current triggers, so no `sha-` rollback image has
+been produced automatically since 2026-09-10; half the clock-skew exchange
+already exists (`x-plurx-cluster-time-ms`) and the peer-auth windows already
+assume ≤5 s; there are 29 discarded store results, not 13; removing the
+cryptr `s3` edge does not remove the second `reqwest`, and renaming the fork
+is actively expensive because the patch stack substitutes by registry name;
+`files_for_items` does not exist and there are no recorded Kodi fixtures;
+there is no HTTP access log at all; and the review's "unreplicated SQLite
+mode" is the one recovery boot, so ARCHITECTURE's 1-voter sentence is
+incomplete rather than wrong.
 
 **[docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md](docs/reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md)
 is the only shared status.** The plans will be executed by Claude, GPT and

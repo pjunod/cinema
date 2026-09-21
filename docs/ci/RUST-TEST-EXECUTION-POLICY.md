@@ -32,7 +32,7 @@ is.
 calls automatic has had no automatic trigger for ten days; only a manual
 dispatch on `main` produces one. Option (b) below must widen that condition
 to `schedule` if the schedule is to restore image publication, and
-the ledger/release-tags plan (not yet written; see the work board)
+[LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md](LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md)
 depends on this. (2) The policy is pinned by text contracts:
 `tests/operations/test_evidence_workflows.py:14-22` asserts `ci.yml` has no
 `schedule:` and no `branches: [main]` trigger, and
