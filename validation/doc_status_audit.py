@@ -22,7 +22,8 @@ _ROW = re.compile(
 )
 _LINK = re.compile(r"\[[^\]]+\]\(([^)#]+)")
 _STATUS = re.compile(
-    r"^\s*>?\s*\*\*Status(?:\s*\([^\n]*?\))?:?\*\*\s*:?[ \t]*(.*)$",
+    r"^[ \t]*>?[ \t]*\*\*Status(?:[ \t]*\([^\n]*?\))?:?\*\*"
+    r"[ \t]*:?[ \t]*(.*)$",
     re.IGNORECASE | re.MULTILINE,
 )
 _TERMINAL = re.compile(
@@ -50,6 +51,24 @@ _BROAD_TERMINAL = re.compile(
     r"reconciled|resolved|shipped|superseded)\b|^live\b",
     re.IGNORECASE,
 )
+_NEXT_FIELD = re.compile(r"\s*·\s*\*\*[^*]+:\*\*")
+_IMPOSSIBLE_COMPOSITES = (
+    re.compile(
+        r"\b(?:built|complete|done|implemented|landed|merged|shipped|"
+        r"superseded)\b.*\bready to (?:build|run)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bready to (?:build|run)\b.*\b(?:built|complete|done|implemented|"
+        r"landed|merged|shipped|superseded)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bdone\b.*\bawaiting\b", re.IGNORECASE),
+    re.compile(
+        r"\bbuilt\b.*\b(?:validation and merge|merge|promotion) pending\b",
+        re.IGNORECASE,
+    ),
+)
 
 
 @dataclass(frozen=True)
@@ -60,8 +79,30 @@ class Finding:
     header: str | None
 
 
-def _first_clause(header: str) -> str:
-    return re.split(r"\s*·\s*", header, maxsplit=1)[0].strip()
+def _status_clause(text: str) -> str | None:
+    """Return the complete Status value, including wrapped continuation lines."""
+
+    match = _STATUS.search(text)
+    if match is None:
+        return None
+
+    lines = text.splitlines()
+    line_number = text[: match.start()].count("\n")
+    pieces = [match.group(1).strip()]
+    for line in lines[line_number + 1 :]:
+        stripped = line.strip().removeprefix(">").strip()
+        if not stripped or re.match(r"^\*\*[^*]+:\*\*", stripped):
+            break
+        pieces.append(stripped)
+        if _NEXT_FIELD.search(stripped):
+            break
+
+    value = " ".join(piece for piece in pieces if piece)
+    return _NEXT_FIELD.split(value, maxsplit=1)[0].strip()
+
+
+def _is_impossible_composite(header: str) -> bool:
+    return any(pattern.search(header) for pattern in _IMPOSSIBLE_COMPOSITES)
 
 
 def audit(root: Path = REPO_ROOT) -> dict[str, Any]:
@@ -86,14 +127,13 @@ def audit(root: Path = REPO_ROOT) -> dict[str, Any]:
         if not relative_path.endswith(".md"):
             continue
         document = root / "docs" / relative_path
-        header_match = _STATUS.search(document.read_text(encoding="utf-8"))
-        if header_match is None:
+        header = _status_clause(document.read_text(encoding="utf-8"))
+        if header is None:
             missing_headers.append(
                 Finding(line_number, index_status, relative_path, None)
             )
             continue
 
-        header = _first_clause(header_match.group(1))
         terminal = bool(_TERMINAL.search(header))
         nonterminal = bool(_NONTERMINAL.search(header))
         contradiction = (
@@ -104,6 +144,9 @@ def audit(root: Path = REPO_ROOT) -> dict[str, Any]:
             index_status in {"built", "done", "superseded"}
             and nonterminal
             and not terminal
+        ) or (
+            index_status in {"built", "done", "superseded"}
+            and _is_impossible_composite(header)
         )
         finding = Finding(line_number, index_status, relative_path, header)
         if contradiction:
