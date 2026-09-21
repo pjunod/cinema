@@ -370,7 +370,12 @@ here, per §3.2's last row).
 - Lane: the one ready plan PR runs `make unit`; `cargo check -p plurxd --tests --target
   x86_64-pc-windows-msvc` for M1 in the PR body (the builder has Windows
   branches — `descriptors.verify()` and the Job Object — and the Windows
-  lane compiles release only).
+  lane compiles release only). The 2026-09-21 author-host cross-check reached
+  third-party C builds but could not reach project Rust: this macOS host has
+  the Rust target installed but no MSVC C headers/toolchain (`stdlib.h` was
+  missing in `libsqlite3-sys`/`onig_sys`, and `assert.h` in `ring`). The exact
+  command and environment limitation are recorded on the draft PR rather than
+  presented as Windows compile evidence.
 - Metrics: none added. The observable is environmental (`/proc/<pid>/environ`)
   and the existing first-segment telemetry.
 - Rollout: M1 and M2 as logical commits in one draft plan PR. No setting, no
@@ -421,6 +426,6 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Claim | [#415](http://192.168.4.7:3000/noirr/plurx/pulls/415) | Claimed `plan/S-05` from `f0af512d`; pinned Rust 1.97.1 available locally. |
-| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#415](http://192.168.4.7:3000/noirr/plurx/pulls/415) · `e12f0c02` | Shared builder adopted by rolling HLS, VOD generation/head regeneration, and progressive remux. Builder 5, producer-slot 12, head-regeneration 2, and both real-FFmpeg restart tests passed. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | [#415](http://192.168.4.7:3000/noirr/plurx/pulls/415) · `e12f0c02` | Shared builder adopted by rolling HLS, VOD generation/head regeneration, and progressive remux. Builder 5, producer-slot 12, head-regeneration 2, and both real-FFmpeg restart tests passed. Host format/check/Clippy passed; Windows cross-check stopped in third-party C builds because the macOS host has no MSVC C headers/toolchain. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | [#415](http://192.168.4.7:3000/noirr/plurx/pulls/415) · `60b2faa9` | One strict classifier definition; core and remux focused tests passed. Media1's deployed key vocabulary matched the closed set exactly. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M3 | [#415](http://192.168.4.7:3000/noirr/plurx/pulls/415) | needs: deploy the candidate, run the §5.3 encoded-burn and progressive-remux environment/TTFF checks, and inspect the journal for unexpected progress keys. |
