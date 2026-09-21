@@ -14264,6 +14264,8 @@ fn segment_content_type(name: &str) -> &'static str {
     }
 }
 
+// split: begin hls-tests
 #[cfg(test)]
 #[path = "hls/tests.rs"]
 mod tests;
+// split: end hls-tests

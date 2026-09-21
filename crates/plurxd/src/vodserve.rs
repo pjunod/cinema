@@ -8094,6 +8094,8 @@ async fn sync_file(path: &Path) -> io::Result<()> {
     }
 }
 
+// split: begin vod-tests
 #[cfg(test)]
 #[path = "vod/tests.rs"]
 mod tests;
+// split: end vod-tests

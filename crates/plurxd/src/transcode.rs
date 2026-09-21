@@ -717,9 +717,11 @@ impl Progress {
     }
 }
 
+// split: begin segment-index
 #[path = "transcode/rolling/segment_index.rs"]
 mod segment_index;
 use segment_index::*;
+// split: end segment-index
 
 /// How far a session has run ahead of the client, both ways it can matter.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -11766,9 +11768,11 @@ fn renewal_response_is_authoritative(
         && replacement.fence == previous.fence
 }
 
+// split: begin pretranscode-renewal-tests
 #[cfg(test)]
 #[path = "transcode/tests/pretranscode_renewal.rs"]
 mod pretranscode_renewal_tests;
+// split: end pretranscode-renewal-tests
 
 /// The policy and source shared by the cache-claim and encoder stages of one
 /// portable production attempt. Keeping these together makes it much harder
@@ -28244,6 +28248,8 @@ fn test_session_with_control(
     }
 }
 
+// split: begin transcode-tests
 #[cfg(test)]
 #[path = "transcode/tests.rs"]
 pub(crate) mod tests;
+// split: end transcode-tests
