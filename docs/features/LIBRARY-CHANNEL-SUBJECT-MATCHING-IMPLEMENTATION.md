@@ -1,6 +1,6 @@
 # Library channel subjects — build useful matching without a research project
 
-**Status:** implementation complete; final promotion tracked in PR #313; not deployed; not shipped · **Written:**
+**Status:** open — implementation complete; promotion and deployment pending · **Promotion:** PR #313 · **Written:**
 2026-09-14 · **Executes:** Paul's request for reliable subject selection,
 short delivery, advisory Developer requirements, and the current fast lane.
 
