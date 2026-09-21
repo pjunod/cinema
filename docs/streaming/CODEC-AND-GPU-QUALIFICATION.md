@@ -567,17 +567,27 @@ it invalidates cached entries produced on OpenCL nodes.
 ### 5.1 M0 — fleet inventory: configured versus selected versus used
 
 Code: §3.2's three metrics, in `system.rs`'s exposition beside the existing
-families, fed from `EncoderCaps` and the session start path. Bounded labels
-only. No behaviour change.
+families, fed from `EncoderCaps` and the accepted-session boundaries. The
+counter advances after manager registration for rolling, after VOD reader
+attachment, or after the first publishable Live TV inventory crosses its
+serving fence. It does not claim first-media publication for rolling or VOD.
+Bounded labels only. No behaviour change.
 
-Then one week of collection, then the GPT prompt in §6 to read it off every
-node.
+Then one week of reset-aware collection, then the GPT prompt in §6 to read it
+off every node. These counters are process-local. A final zero from a direct
+scrape is never week-long absence evidence: use a continuously scraped
+Prometheus `increase(...[7d])` and verify the exact `plurx_build_info` series
+throughout that interval, or retain start/end scrapes and prove
+`plurx_uptime_seconds` was uninterrupted for the entire interval. Any restart
+invalidates the second method and restarts its seven-day window.
 
-Acceptance: `curl -s http://media1:32400/metrics | grep plurx_encoder_`
-prints one `plurx_encoder_available` line per family and a
-`plurx_encoder_sessions_total` counter that advances when a session starts;
-`cargo test -p plurxd metrics_encoder` green; `make unit` green; and, one
-week later, the §6 table filled for every node, stating for each: families
+Acceptance: a scrape from each current node prints one
+`plurx_encoder_available` line per family and a
+`plurx_encoder_sessions_total` counter that advances once at the accepted
+start boundary; focused rolling, VOD and Live TV seam tests prove one increment
+and pre-boundary failure/replay non-increments; `cargo test -p plurxd
+metrics_encoder` green; `make unit` green; and, one week later, the §6 table
+filled from reset-aware evidence for every node, stating for each: families
 compiled, families the probe accepted, family actually selected, sessions
 per family and grade, tone-map pipelines used.
 
@@ -612,8 +622,10 @@ The existing image exports none of the three M0 metric families, and its
 pre-change VOD logs do not preserve the resolved encoder as a countable
 session field. Recent container logs therefore cannot reconstruct a truthful
 one-week use table. This PR adds the bounded process counters, but M0 remains
-open until that image is deployed and scraped for one week. M1-M6 do not begin
-on an invented baseline.
+open until that image is deployed and continuously scraped for one reset-aware
+week. The direct-scrape fallback is valid only when start/end evidence proves
+uninterrupted uptime; otherwise its window restarts. M1-M6 do not begin on an
+invented baseline.
 
 ### 5.2 M1 — extend the corpus to §3.1.3's content classes
 
@@ -729,20 +741,29 @@ Fast lane for the plan PR: `make unit`. Focused per milestone as named in §5.
 ([../BENCHMARKING.md](../BENCHMARKING.md)); M1's new fixtures do not enter
 that matrix and must not silently change it.
 
-**GPT prompt — fleet encoder inventory (M0, after one week):**
+**GPT prompt — fleet encoder inventory (M0, after one reset-aware week):**
 
 ```text
-On media1, lab1 through lab6, maca and macb, with the current plurxd
-running:
-1. `curl -fsS http://<host>:32400/metrics | grep -E
-   'plurx_encoder_available|plurx_encoder_sessions_total|plurx_tone_map_pipeline_sessions_total'`
-2. `curl -fsS -H "Authorization: Bearer $TOKEN"
+On the maintained Plurx nodes `nynuc`, `m6`, `nuc4`, and `nuc3`, with the
+exact candidate build running:
+1. From the continuously scraped Prometheus history, report seven-day
+   `increase()` values for `plurx_encoder_sessions_total` and
+   `plurx_tone_map_pipeline_sessions_total`, grouped by instance and their
+   closed labels. Verify that `plurx_build_info` names the candidate build for
+   the whole interval. Counter resets are included by `increase`; a node with
+   missing scrape history or another build is incomplete, not zero.
+2. If Prometheus history is unavailable, retain start and end outputs of
+   `curl -fsS http://<host>:32400/metrics | grep -E
+   'plurx_encoder_available|plurx_encoder_sessions_total|plurx_tone_map_pipeline_sessions_total|plurx_build_info|plurx_uptime_seconds'`.
+   Accept the counter delta only when the same build and uninterrupted uptime
+   prove the process spans the full seven days; otherwise restart the window.
+3. `curl -fsS -H "Authorization: Bearer $TOKEN"
    http://<host>:32400/api/v1/system` — report the Hardware pills, the
    Transcoder line (selected encoder and PLURX_HWACCEL preference), and the
    ffmpeg version string.
-3. `ffmpeg -hide_banner -encoders | grep -E 'nvenc|qsv|vaapi|videotoolbox'`
+4. `ffmpeg -hide_banner -encoders | grep -E 'nvenc|qsv|vaapi|videotoolbox'`
    on each host, to separate "compiled in" from "probe accepted".
-4. If the host has a GPU: `intel_gpu_top -l -s 1000 | head -5` (Intel),
+5. If the host has a GPU: `intel_gpu_top -l -s 1000 | head -5` (Intel),
    `nvidia-smi --query-gpu=name,driver_version --format=csv` (NVIDIA), or
    `system_profiler SPDisplaysDataType | head -20` (Mac).
 Report one row per host: compiled families, probe-accepted families,
@@ -851,4 +872,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 
 | Date | Model | Session | Milestone | PR | Outcome / evidence |
 |---|---|---|---|---|---|
-| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [`17dfebc4` / #422](http://192.168.4.7:3000/noirr/plurx/pulls/422) | Implemented five-family availability, family/grade session, and eight-pipeline counters with closed enum labels. Count points are successful rolling/VOD publication and successful Live TV publication (encoder only; Live TV currently refuses tone-map-required routes). Read-only inventory found QSV/VA-API nodes only; M7 NVENC and M8 VideoToolbox are refused for this fleet. Needs: deploy and scrape the counters for one week before M1-M6. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/c02_builder | M0 | [`17dfebc4` / #422](http://192.168.4.7:3000/noirr/plurx/pulls/422) | Implemented five-family availability, family/grade accepted-start, and eight-pipeline counters with closed enum labels. Count points are manager registration for rolling, reader attachment for VOD, and first publishable/fenced Live TV inventory (encoder only; Live TV currently refuses tone-map-required routes). Read-only inventory found QSV/VA-API nodes only; M7 NVENC and M8 VideoToolbox are refused for this fleet. Review correction: the seven-day gate is reset-aware and bound to the exact build; focused production-seam tests cover rolling, VOD and Live TV once-only/pre-boundary behavior. Needs: deploy and collect one valid reset-aware week before M1-M6. |

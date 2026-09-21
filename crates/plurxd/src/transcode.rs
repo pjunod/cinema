@@ -13937,7 +13937,7 @@ impl CodecQualificationMetrics {
             ));
         }
         out.push_str(
-            "# HELP plurx_encoder_sessions_total Successfully started encoding sessions by family and output grade.\n\
+            "# HELP plurx_encoder_sessions_total Accepted encoding starts after their serving owner is registered, by family and output grade. Process-local; use reset-aware increase() or uninterrupted uptime for interval totals.\n\
              # TYPE plurx_encoder_sessions_total counter\n",
         );
         for encoder in QUALIFICATION_ENCODERS {
@@ -13952,7 +13952,7 @@ impl CodecQualificationMetrics {
             }
         }
         out.push_str(
-            "# HELP plurx_tone_map_pipeline_sessions_total Successfully started encoding sessions by resolved video pipeline.\n\
+            "# HELP plurx_tone_map_pipeline_sessions_total Accepted encoding starts after their serving owner is registered, by resolved video pipeline. Process-local; use reset-aware increase() or uninterrupted uptime for interval totals.\n\
              # TYPE plurx_tone_map_pipeline_sessions_total counter\n",
         );
         for pipeline in QUALIFICATION_PIPELINES {
@@ -14515,9 +14515,12 @@ impl TranscodeManager {
         }
     }
 
-    /// Record one encoding session only after its serving identity is
-    /// published. Callers that do not execute a video pipeline (copy/remux)
-    /// must not call this method.
+    /// Record one accepted encoding start after its serving owner is
+    /// registered. For rolling this is manager registration, for VOD it is
+    /// the reader attachment returned by `try_create`, and Live TV calls it
+    /// only after the first publishable scratch inventory crosses its serving
+    /// fence. Callers that do not execute a video pipeline (copy/remux) must
+    /// not call this method.
     pub(crate) fn record_codec_qualification_session(
         &self,
         encoder: Encoder,
@@ -14528,6 +14531,24 @@ impl TranscodeManager {
         if let Some(pipeline) = pipeline {
             self.codec_qualification.record_pipeline(pipeline);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn codec_qualification_encoder_count(
+        &self,
+        encoder: Encoder,
+        grade: OutputGrade,
+    ) -> u64 {
+        self.codec_qualification.encoder_sessions[CodecQualificationMetrics::encoder_slot(encoder)]
+            [CodecQualificationMetrics::grade_slot(grade)]
+        .load(Relaxed)
+    }
+
+    #[cfg(test)]
+    fn codec_qualification_pipeline_count(&self, pipeline: Pipeline) -> u64 {
+        self.codec_qualification.pipeline_sessions
+            [CodecQualificationMetrics::pipeline_slot(pipeline)]
+        .load(Relaxed)
     }
 
     /// Override [`ProducerTuning`]. Tests only — there is deliberately no
@@ -40317,6 +40338,10 @@ pub(crate) mod tests {
             EncoderCaps::default(),
             Pipeline::Cpu,
         );
+        assert_eq!(
+            mgr.codec_qualification_encoder_count(Encoder::Software, OutputGrade::Sdr),
+            0
+        );
 
         let error = match mgr
             .start(file_id, 720, 0.0, None, None, "paul", "pb-failed-start")
@@ -40329,6 +40354,12 @@ pub(crate) mod tests {
         assert_eq!(mgr.active_sessions().await, 0);
         assert!(!mgr.admissions.live_is_waiting());
         assert_eq!(mgr.admissions.in_use(), 0);
+        assert_eq!(
+            mgr.codec_qualification_encoder_count(Encoder::Software, OutputGrade::Sdr),
+            0,
+            "a start that failed before manager registration was counted"
+        );
+        assert_eq!(mgr.codec_qualification_pipeline_count(Pipeline::Cpu), 0);
         assert_eq!(
             mgr.admissions.software_in_use(),
             0,
@@ -40437,11 +40468,21 @@ pub(crate) mod tests {
             .put_setting(keys::MAX_HW_SESSIONS, "1")
             .await
             .expect("cap");
+        assert_eq!(
+            mgr.codec_qualification_encoder_count(Encoder::Nvenc, OutputGrade::Sdr),
+            0
+        );
 
         let info = mgr
             .start(file_id, 1080, 0.0, None, None, "paul", "pb-mixed")
             .await
             .expect("hardware start");
+        assert_eq!(
+            mgr.codec_qualification_encoder_count(Encoder::Nvenc, OutputGrade::Sdr),
+            1,
+            "one manager-registered rolling start must count once"
+        );
+        assert_eq!(mgr.codec_qualification_pipeline_count(Pipeline::Cpu), 1);
         assert_eq!(mgr.admissions.in_use(), 1, "the start holds the only slot");
         let session = mgr
             .sessions
@@ -45949,7 +45990,6 @@ pub(crate) mod tests {
             block_budget_secs: None,
             transport: None,
         };
-
         // The idempotency identity is `intent_fingerprint`, so that is what
         // these guards have to name. Asserting against anything else lets a
         // field silently leave the real key while the test stays green.

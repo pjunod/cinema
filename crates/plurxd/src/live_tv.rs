@@ -1308,6 +1308,10 @@ struct LiveTvSession {
     /// Bytes the tuner has delivered into the graph. Shared with the pump so
     /// the startup decision can tell a slow channel from an absent one.
     tuner_bytes: Arc<AtomicU64>,
+    /// A worker may be restarted around the first publishable inventory. The
+    /// qualification inventory counts the accepted session once, not once per
+    /// worker that reaches the same publication boundary.
+    codec_qualification_counted: AtomicBool,
     resource_admission: Arc<tokio::sync::Semaphore>,
     signal_cache: tokio::sync::Mutex<Option<(tokio::time::Instant, Option<LiveTvSignalStatus>)>>,
     state: StdMutex<LiveTvSessionState>,
@@ -1322,6 +1326,30 @@ struct LiveTvProcess {
 }
 
 impl LiveTvSession {
+    fn record_codec_qualification_publication(
+        &self,
+        transcode: &crate::transcode::TranscodeManager,
+        admission: Option<&crate::transcode::LiveAdmission>,
+    ) {
+        if self
+            .codec_qualification_counted
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return;
+        }
+        if let Some(admission) = admission {
+            // Live TV currently refuses routes that require a tone-map graph,
+            // so it contributes an encoder start but cannot truthfully claim
+            // one of the movie/VOD pipeline labels.
+            transcode.record_codec_qualification_session(
+                admission.encoder,
+                plurx_core::transcode::OutputGrade::Sdr,
+                None,
+            );
+        }
+    }
+
     fn output(&self) -> LiveTvOutput {
         self.output
             .lock()
@@ -3124,6 +3152,7 @@ impl LiveTvManager {
             source_format,
             source_format_expires_at,
             tuner_bytes: Arc::new(AtomicU64::new(0)),
+            codec_qualification_counted: AtomicBool::new(false),
             resource_admission: Arc::new(tokio::sync::Semaphore::new(LOCAL_RESOURCE_CONCURRENCY)),
             signal_cache: tokio::sync::Mutex::new(None),
             state: StdMutex::new(LiveTvSessionState {
@@ -5418,16 +5447,10 @@ async fn run_live_session_inner(
                         state.provisional_at = Some(now);
                         state.startup = Some(Ok(provisional));
                         drop(state);
-                        if let Some(admission) = admission.as_ref() {
-                            // Live TV currently refuses routes that require a
-                            // tone-map graph, so it contributes an encoder
-                            // session but cannot truthfully claim a pipeline.
-                            owner.transcode.record_codec_qualification_session(
-                                admission.encoder,
-                                plurx_core::transcode::OutputGrade::Sdr,
-                                None,
-                            );
-                        }
+                        session.record_codec_qualification_publication(
+                            &owner.transcode,
+                            admission.as_ref(),
+                        );
                         session.changed.notify_waiters();
                         published = true;
                     }
@@ -7663,6 +7686,7 @@ mod tests {
             source_format: Arc::new(StdMutex::new(None)),
             source_format_expires_at: Arc::new(AtomicI64::new(0)),
             tuner_bytes: Arc::new(AtomicU64::new(0)),
+            codec_qualification_counted: AtomicBool::new(false),
             state: StdMutex::new(LiveTvSessionState {
                 phase: LiveTvSessionPhase::Active,
                 startup: None,
@@ -7753,6 +7777,7 @@ mod tests {
             source_format: Arc::new(StdMutex::new(None)),
             source_format_expires_at: Arc::new(AtomicI64::new(0)),
             tuner_bytes: Arc::new(AtomicU64::new(0)),
+            codec_qualification_counted: AtomicBool::new(false),
             resource_admission: Arc::new(tokio::sync::Semaphore::new(LOCAL_RESOURCE_CONCURRENCY)),
             signal_cache: tokio::sync::Mutex::new(None),
         });
@@ -10071,6 +10096,50 @@ Output #0, hls, to 'index.m3u8':
             ),
             Some(Err(LiveTvError::StartupTimeout(_)))
         ));
+    }
+
+    #[tokio::test]
+    async fn live_tv_qualification_counts_the_first_encoded_publication_once() {
+        let temp = crate::test_tempdir().expect("qualification root");
+        let manager = test_manager(temp.path());
+        let copy_session = test_session(temp.path().join("copy"), 1);
+
+        assert_eq!(
+            manager.transcode.codec_qualification_encoder_count(
+                Encoder::Software,
+                plurx_core::transcode::OutputGrade::Sdr,
+            ),
+            0
+        );
+        copy_session.record_codec_qualification_publication(&manager.transcode, None);
+        copy_session.record_codec_qualification_publication(&manager.transcode, None);
+        assert_eq!(
+            manager.transcode.codec_qualification_encoder_count(
+                Encoder::Software,
+                plurx_core::transcode::OutputGrade::Sdr,
+            ),
+            0,
+            "a copy route without video admission must not count as encoding"
+        );
+
+        let encoded_session = test_session(temp.path().join("encoded"), 1);
+        let admission = manager
+            .transcode
+            .admit_live_tv(1080, "h264", None, 720, Duration::ZERO)
+            .await
+            .expect("software Live TV admission");
+        encoded_session
+            .record_codec_qualification_publication(&manager.transcode, Some(&admission));
+        encoded_session
+            .record_codec_qualification_publication(&manager.transcode, Some(&admission));
+        assert_eq!(
+            manager.transcode.codec_qualification_encoder_count(
+                Encoder::Software,
+                plurx_core::transcode::OutputGrade::Sdr,
+            ),
+            1,
+            "a worker retry at the same publication boundary double-counted the session"
+        );
     }
 
     #[test]
