@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["ac13aef3"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The shared owned-process regressions retain complete stdout and stderr capture across success, timeout, termination, and reap paths, while the fast Rust lanes exercise the production callers that use those bounded owners."
