@@ -63,10 +63,11 @@ const START_INFRASTRUCTURE_PREFIX: &str = "media session infrastructure is unava
 /// precondition for producing anything. Left unbounded it takes the whole
 /// production window from a title whose source probes slowly, and the producer
 /// then makes nothing — every cycle, forever, for that title. Bounded, the
-/// worst case is two seconds and a plan built from stored facts, which is what
-/// every other path already uses. The elapsed time is added back to the
-/// production deadline so observing costs the encode nothing.
-const DECODE_PLAN_PROBE_BUDGET: Duration = Duration::from_secs(2);
+/// worst case is ten seconds and a plan built from stored facts, which is what
+/// every other path already uses. Ten seconds also bounds S-08's descriptor-
+/// bound `idet` verification for flagged sources. The elapsed time is added
+/// back to the production deadline so observing costs the encode nothing.
+const DECODE_PLAN_PROBE_BUDGET: Duration = Duration::from_secs(10);
 
 /// How long a mixed recovery waits for the CPU it newly needs.
 ///

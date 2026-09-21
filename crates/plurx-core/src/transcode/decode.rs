@@ -37,6 +37,31 @@ pub enum Deinterlace {
     BwdifSendFrame,
 }
 
+/// Bounded content verification for a source whose container reports an
+/// interlaced field order. `NotChecked` is the neutral value for progressive
+/// and unknown sources; unavailable verification keeps the conservative flag
+/// decision rather than silently discarding fields.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InterlaceVerdict {
+    #[default]
+    NotChecked,
+    FlagConfirmed,
+    FlagOverruled,
+    IdetUnavailable,
+}
+
+impl InterlaceVerdict {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::NotChecked => "not_checked",
+            Self::FlagConfirmed => "flag_confirmed",
+            Self::FlagOverruled => "flag_overruled",
+            Self::IdetUnavailable => "idet_unavailable",
+        }
+    }
+}
+
 impl Deinterlace {
     pub fn for_scan_type(scan_type: ScanType) -> Self {
         match scan_type {
@@ -684,6 +709,7 @@ pub struct DecodeFacts {
     height: Option<u32>,
     frame_rate: FrameRate,
     field_order: Option<String>,
+    interlace_verdict: InterlaceVerdict,
     bit_depth: Option<u8>,
     color_range: Option<String>,
     color_space: Option<String>,
@@ -851,6 +877,7 @@ impl DecodeFacts {
             height,
             frame_rate,
             field_order,
+            interlace_verdict: InterlaceVerdict::NotChecked,
             bit_depth,
             color_range,
             color_space,
@@ -906,7 +933,27 @@ impl DecodeFacts {
     }
 
     pub fn scan_type(&self) -> ScanType {
-        ScanType::from_field_order(self.field_order())
+        if self.interlace_verdict == InterlaceVerdict::FlagOverruled {
+            ScanType::Progressive
+        } else {
+            ScanType::from_field_order(self.field_order())
+        }
+    }
+
+    pub fn interlace_verdict(&self) -> InterlaceVerdict {
+        self.interlace_verdict
+    }
+
+    /// Bind a descriptor-based content verdict into both the facts and their
+    /// stable identity. The existing digest already commits every parsed
+    /// field, so hashing it with the bounded verdict is equivalent to adding
+    /// that verdict as the final digest member without reserializing facts.
+    pub fn with_interlace_verdict(mut self, verdict: InterlaceVerdict) -> Self {
+        self.interlace_verdict = verdict;
+        let encoded = serde_json::to_vec(&(self.facts_digest.as_str(), verdict))
+            .expect("interlace verdict serialization is infallible");
+        self.facts_digest = hex::encode(Sha256::digest(encoded));
+        self
     }
 
     pub fn bit_depth(&self) -> Option<u8> {

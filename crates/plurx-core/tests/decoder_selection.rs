@@ -8,10 +8,11 @@ use plurx_core::transcode::{
     DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeEvidence, DecodeFacts,
     DecodePlanPolicy, DecodePolicySnapshot, DecodeReason, DecodeSourceIdentity,
     DecodeSurfaceContract, Deinterlace, DiagnosticLogging, EffectiveRateControl, Encoder,
-    FrameDomain, FrameRateProvenance, OutputGrade, Pacing, Pipeline, PipelineDigest, PlanError,
-    PlanSourceBinding, Recipe, SoftwareDecoder, StreamSelectionProvenance, SubtitleBurn,
-    SubtitleRendering, ToneMap, TranscodeExecution, TranscodeMediaOptions, TranscodeOptions,
-    TranscodeRequest, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, UNQUALIFIED_ARTIFACT_NAMESPACE,
+    FrameDomain, FrameRateProvenance, InterlaceVerdict, OutputGrade, Pacing, Pipeline,
+    PipelineDigest, PlanError, PlanSourceBinding, Recipe, SoftwareDecoder,
+    StreamSelectionProvenance, SubtitleBurn, SubtitleRendering, ToneMap, TranscodeExecution,
+    TranscodeMediaOptions, TranscodeOptions, TranscodeRequest, HEALTH_QUALIFIED_ARTIFACT_NAMESPACE,
+    UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -802,6 +803,11 @@ fn field_order_is_typed_conservatively_and_binds_into_the_facts_digest() {
         ScanType::Interlaced(FieldOrder::Tff)
     );
     assert_ne!(progressive.facts_digest(), interlaced.facts_digest());
+    let overruled = interlaced
+        .clone()
+        .with_interlace_verdict(InterlaceVerdict::FlagOverruled);
+    assert_eq!(overruled.scan_type(), ScanType::Progressive);
+    assert_ne!(overruled.facts_digest(), interlaced.facts_digest());
 
     let mut future = video(
         0,

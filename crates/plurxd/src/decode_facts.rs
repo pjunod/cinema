@@ -17,7 +17,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use plurx_core::transcode::{DecodeCatalogMetadata, DecodeFacts, DecodeSourceIdentity};
+use plurx_core::domain::ScanType;
+use plurx_core::transcode::{
+    DecodeCatalogMetadata, DecodeFacts, DecodeSourceIdentity, InterlaceVerdict,
+};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
@@ -26,10 +29,11 @@ const MAX_PROBE_STDERR_BYTES: usize = 16 * 1024;
 const MAX_PROBE_EXECUTABLE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_VERSION_BYTES: usize = 64 * 1024;
 /// Bump when the selective FFprobe projection changes the meaning of cached facts.
-const PROBE_SCHEMA_VERSION: u32 = 2;
+const PROBE_SCHEMA_VERSION: u32 = 3;
 const IDENTITY_DEADLINE: Duration = Duration::from_secs(10);
 const VERSION_DEADLINE: Duration = Duration::from_secs(5);
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
+const IDET_MEDIA_SECONDS: u8 = 10;
 const MAX_CACHE_ENTRIES: usize = 256;
 #[cfg(unix)]
 const HELD_PROBE_FD: std::os::fd::RawFd = 4;
@@ -42,6 +46,38 @@ fn identity_gate() -> Arc<tokio::sync::Semaphore> {
 fn version_gate() -> Arc<tokio::sync::Semaphore> {
     static GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
     Arc::clone(GATE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))))
+}
+
+static INTERLACE_FLAG_CONFIRMED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static INTERLACE_FLAG_OVERRULED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+static INTERLACE_IDET_UNAVAILABLE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+fn record_interlace_verdict(verdict: InterlaceVerdict) {
+    use std::sync::atomic::Ordering;
+
+    let counter = match verdict {
+        InterlaceVerdict::FlagConfirmed => &INTERLACE_FLAG_CONFIRMED,
+        InterlaceVerdict::FlagOverruled => &INTERLACE_FLAG_OVERRULED,
+        InterlaceVerdict::IdetUnavailable => &INTERLACE_IDET_UNAVAILABLE,
+        InterlaceVerdict::NotChecked => return,
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn interlace_prometheus() -> String {
+    use std::sync::atomic::Ordering;
+
+    format!(
+        "plurx_interlace_verdicts_total{{verdict=\"flag_confirmed\"}} {}\n\
+         plurx_interlace_verdicts_total{{verdict=\"flag_overruled\"}} {}\n\
+         plurx_interlace_verdicts_total{{verdict=\"idet_unavailable\"}} {}\n",
+        INTERLACE_FLAG_CONFIRMED.load(Ordering::Relaxed),
+        INTERLACE_FLAG_OVERRULED.load(Ordering::Relaxed),
+        INTERLACE_IDET_UNAVAILABLE.load(Ordering::Relaxed),
+    )
 }
 
 #[cfg(test)]
@@ -3288,6 +3324,177 @@ where
     Ok((retained, overflow))
 }
 
+fn idet_count(summary: &str, label: &str) -> Option<u64> {
+    let tail = summary.split_once(label)?.1.trim_start();
+    let digits = tail
+        .strip_prefix(':')?
+        .trim_start()
+        .chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
+}
+
+fn parse_idet_verdict(stderr: &[u8]) -> Option<InterlaceVerdict> {
+    let summary = String::from_utf8_lossy(stderr)
+        .lines()
+        .rev()
+        .find(|line| line.contains("Multi frame detection:"))?
+        .to_owned();
+    let tff = idet_count(&summary, "TFF")?;
+    let bff = idet_count(&summary, "BFF")?;
+    let progressive = idet_count(&summary, "Progressive")?;
+    let undetermined = idet_count(&summary, "Undetermined")?;
+    let total = tff
+        .checked_add(bff)?
+        .checked_add(progressive)?
+        .checked_add(undetermined)?;
+    if total == 0 {
+        return None;
+    }
+    if progressive.saturating_mul(100) > total.saturating_mul(90) {
+        Some(InterlaceVerdict::FlagOverruled)
+    } else {
+        Some(InterlaceVerdict::FlagConfirmed)
+    }
+}
+
+#[cfg(unix)]
+async fn collect_idet_verdict(
+    probe: &DecodeProbeIdentity,
+    source_fd: std::os::fd::RawFd,
+    input_video_stream: u32,
+    launch_deadline: std::time::Instant,
+    cancelled: Option<&tokio_util::sync::CancellationToken>,
+) -> Result<InterlaceVerdict, DecodeFactError> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let filter =
+        format!("movie=/dev/fd/3:si={input_video_stream},trim=duration={IDET_MEDIA_SECONDS},idet");
+    let arguments = vec![
+        OsString::from("-hide_banner"),
+        OsString::from("-v"),
+        OsString::from("info"),
+        OsString::from("-f"),
+        OsString::from("lavfi"),
+        OsString::from("-i"),
+        OsString::from(filter),
+        OsString::from("-show_entries"),
+        OsString::from("frame=media_type"),
+        OsString::from("-of"),
+        OsString::from("compact=p=0:nk=1"),
+    ];
+    let executable_fd = probe.executable_snapshot.as_file().as_raw_fd();
+    let mut command =
+        tokio::process::Command::new(snapshot_execution_path(&probe.executable_snapshot));
+    command.as_std_mut().arg0(probe.executable());
+    #[cfg(test)]
+    command.env("PLURX_TEST_PROBE_PATH", probe.executable());
+    command
+        .args(&arguments)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let supervisor = configure_probe_execution(
+        &mut command,
+        probe.launch_mode,
+        launch_deadline,
+        executable_fd,
+        Some(source_fd),
+        probe.executable(),
+        &arguments,
+    )?;
+    let (mut child, mut supervisor) = spawn_configured_probe(command, supervisor).await?;
+    let process_group = child.id().and_then(|id| libc::pid_t::try_from(id).ok());
+    let session = ProbeSessionGuard::new(process_group);
+    #[cfg(target_os = "linux")]
+    let exit_anchor = match ProbeExitAnchor::open(process_group, probe.launch_mode) {
+        Ok(anchor) => anchor,
+        Err(error) => {
+            terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
+            return Err(DecodeFactError::Spawn(format!(
+                "opening idet FFprobe exit anchor: {error}"
+            )));
+        }
+    };
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
+            return Err(DecodeFactError::MissingPipe);
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
+            return Err(DecodeFactError::MissingPipe);
+        }
+    };
+    let remaining = launch_deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
+        return Err(DecodeFactError::Deadline);
+    }
+    let outcome = tokio::select! {
+        biased;
+        _ = wait_for_cancellation(cancelled) => {
+            terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
+            return Err(DecodeFactError::Cancelled);
+        }
+        outcome = tokio::time::timeout(remaining, async {
+            #[cfg(target_os = "linux")]
+            let (stdout, stderr, exited) = tokio::join!(
+                read_bounded(stdout, MAX_PROBE_STDOUT_BYTES),
+                read_bounded(stderr, MAX_PROBE_STDERR_BYTES),
+                async {
+                    let exited = exit_anchor.wait_until_exit().await;
+                    session.kill_once();
+                    exited
+                },
+            );
+            #[cfg(target_os = "linux")]
+            let (status, exit_error) = {
+                let exit_error = exited.err().map(|error| DecodeFactError::Read(error.to_string()));
+                (wait_for_probe_reap(&mut child, probe.launch_mode).await, exit_error)
+            };
+            #[cfg(not(target_os = "linux"))]
+            let (stdout, stderr, status) = tokio::join!(
+                read_bounded(stdout, MAX_PROBE_STDOUT_BYTES),
+                read_bounded(stderr, MAX_PROBE_STDERR_BYTES),
+                child.wait(),
+            );
+            #[cfg(not(target_os = "linux"))]
+            session.kill_once();
+            #[cfg(not(target_os = "linux"))]
+            let exit_error: Option<DecodeFactError> = None;
+            Ok::<_, DecodeFactError>((stdout, stderr, status, exit_error))
+        }) => outcome,
+    };
+    let (stdout, stderr, status, exit_error) = match outcome {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => return Err(error),
+        Err(_) => {
+            terminate_probe_session(&mut child, &session, &mut supervisor, probe.launch_mode).await;
+            return Err(DecodeFactError::Deadline);
+        }
+    };
+    let supervisor_result = supervisor.finish();
+    if let Some(error) = exit_error {
+        return Err(error);
+    }
+    supervisor_result?;
+    let stdout = stdout?;
+    let stderr = stderr?;
+    let status = status.map_err(|error| DecodeFactError::Read(error.to_string()))?;
+    if stdout.1 || stderr.1 || !status.success() {
+        return Ok(InterlaceVerdict::IdetUnavailable);
+    }
+    Ok(parse_idet_verdict(&stderr.0).unwrap_or(InterlaceVerdict::IdetUnavailable))
+}
+
 #[cfg(unix)]
 async fn collect(
     probe: &DecodeProbeIdentity,
@@ -3455,12 +3662,6 @@ async fn collect(
         }
     };
     let supervisor_result = supervisor.finish();
-    // The probe process tree is reaped now. Restore the shared open-file
-    // offset and release the producer lane before parsing or the authoritative
-    // final metadata observation. A blocked final fstat must never prevent the
-    // neutral M1 fallback from launching the legacy FFmpeg producer.
-    drop(restore_offset);
-    drop(offset_permit);
     if let Some(error) = exit_error {
         return Err(error);
     }
@@ -3487,7 +3688,31 @@ async fn collect(
             .collect();
         return Err(DecodeFactError::Failed(status.code(), reason));
     }
-    parse_collected_facts(&stdout.0, observation.identity, catalog, selected_stream)
+    let mut facts =
+        parse_collected_facts(&stdout.0, observation.identity, catalog, selected_stream)?;
+    if matches!(facts.scan_type(), ScanType::Interlaced(_)) {
+        let verdict = match collect_idet_verdict(
+            probe,
+            source_fd,
+            facts.input_video_stream(),
+            launch_deadline,
+            cancelled,
+        )
+        .await
+        {
+            Ok(verdict) => verdict,
+            Err(DecodeFactError::Cancelled) => return Err(DecodeFactError::Cancelled),
+            Err(_) => InterlaceVerdict::IdetUnavailable,
+        };
+        record_interlace_verdict(verdict);
+        facts = facts.with_interlace_verdict(verdict);
+    }
+    // Every descriptor-reading child has now been reaped. Restore the shared
+    // open-file offset and release the producer lane before the authoritative
+    // final metadata observation.
+    drop(restore_offset);
+    drop(offset_permit);
+    Ok(facts)
 }
 
 fn parse_collected_facts(
@@ -3681,7 +3906,13 @@ async fn collect(
     if source_observation_windows(&handle)?.identity != observation.identity {
         return Err(DecodeFactError::ProbeChanged);
     }
-    parse_collected_facts(&stdout.0, observation.identity, catalog, selected_stream)
+    let mut facts =
+        parse_collected_facts(&stdout.0, observation.identity, catalog, selected_stream)?;
+    if matches!(facts.scan_type(), ScanType::Interlaced(_)) {
+        record_interlace_verdict(InterlaceVerdict::IdetUnavailable);
+        facts = facts.with_interlace_verdict(InterlaceVerdict::IdetUnavailable);
+    }
+    Ok(facts)
 }
 
 #[cfg(windows)]
@@ -3696,6 +3927,89 @@ async fn terminate_windows_probe(child: &mut tokio::process::Child) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idet_verdict_uses_the_final_multi_frame_summary_and_a_strict_ninety_percent_bound() {
+        let overruled = b"noise\n[Parsed_idet_2] Multi frame detection: TFF: 0 BFF: 0 Progressive: 271 Undetermined: 29\n";
+        assert_eq!(
+            parse_idet_verdict(overruled),
+            Some(InterlaceVerdict::FlagOverruled)
+        );
+        let confirmed = b"[Parsed_idet_2] Multi frame detection: TFF: 60 BFF: 0 Progressive: 0 Undetermined: 0\n";
+        assert_eq!(
+            parse_idet_verdict(confirmed),
+            Some(InterlaceVerdict::FlagConfirmed)
+        );
+        let boundary = b"[Parsed_idet_2] Multi frame detection: TFF: 10 BFF: 0 Progressive: 90 Undetermined: 0\n";
+        assert_eq!(
+            parse_idet_verdict(boundary),
+            Some(InterlaceVerdict::FlagConfirmed),
+            "the plan requires more than ninety percent"
+        );
+        assert_eq!(parse_idet_verdict(b"no summary"), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[ignore = "needs the shipped ffmpeg and ffprobe; set PLURX_FFMPEG and PLURX_FFPROBE"]
+    async fn descriptor_bound_idet_overrules_misflag_and_confirms_interlace() {
+        let ffmpeg = std::env::var("PLURX_FFMPEG").expect("PLURX_FFMPEG");
+        let ffprobe = std::env::var("PLURX_FFPROBE").expect("PLURX_FFPROBE");
+        let root = crate::test_tempdir().expect("tempdir");
+        let identity = DecodeProbeIdentity::discover_fixture(&ffprobe)
+            .await
+            .expect("probe identity");
+        let fixtures = [
+            (
+                "misflagged.mkv",
+                "testsrc=size=640x360:rate=30000/1001:duration=10",
+                "setfield=tff",
+                InterlaceVerdict::FlagOverruled,
+                ScanType::Progressive,
+            ),
+            (
+                "interlaced.mkv",
+                "testsrc2=size=640x360:rate=60000/1001:duration=4",
+                "tinterlace=mode=interleave_top,setfield=tff",
+                InterlaceVerdict::FlagConfirmed,
+                ScanType::Interlaced(plurx_core::domain::FieldOrder::TffCoded),
+            ),
+        ];
+        for (name, source, filter, expected_verdict, expected_scan) in fixtures {
+            let media = root.path().join(name);
+            let status = std::process::Command::new(&ffmpeg)
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                ])
+                .arg(source)
+                .args(["-vf", filter, "-c:v", "ffv1"])
+                .arg(&media)
+                .status()
+                .expect("generate fixture");
+            assert!(status.success(), "generate {name}");
+            let facts = DecodeFactCache::new()
+                .get_or_probe(
+                    &identity,
+                    DecodeFactSource::isolated(Arc::new(
+                        std::fs::File::open(&media).expect("open fixture"),
+                    )),
+                    None,
+                    ProbeStreamSelection::Absolute(0),
+                    PROBE_DEADLINE,
+                    None,
+                )
+                .await
+                .expect("descriptor-bound facts");
+            assert_eq!(facts.interlace_verdict(), expected_verdict, "{name}");
+            assert_eq!(facts.scan_type(), expected_scan, "{name}");
+        }
+    }
 
     /// One rule for both planning routes, including the case that used to
     /// split them: a file whose cover art is a video stream. Whatever the rule
@@ -4848,6 +5162,121 @@ printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","
             .await
             .expect("cache hit does not respawn");
         assert_eq!(cached.facts_digest(), first.facts_digest());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn flagged_source_runs_idet_on_the_same_descriptor_before_releasing_its_offset_lane() {
+        use std::io::{Seek, SeekFrom};
+
+        let root = crate::test_tempdir().expect("tempdir");
+        let media = root.path().join("media.bin");
+        std::fs::write(&media, b"bound interlace source").expect("media");
+        let source = Arc::new(std::fs::File::open(&media).expect("open media"));
+        let mut offset_view = source.try_clone().expect("offset view");
+        offset_view.seek(SeekFrom::Start(3)).expect("set offset");
+        std::fs::remove_file(&media).expect("unlink path after opening");
+        let probe = root.path().join("ffprobe-test");
+        executable(
+            &probe,
+            r###"#!/bin/sh
+if test "$1" = "-version"; then printf '%s\n' 'ffprobe version idet-bound'; exit 0; fi
+if test "$1" = "-hide_banner"; then
+  test -r /dev/fd/3 || exit 94
+  printf '%s\n' 'video'
+  printf '%s\n' '[Parsed_idet_2] Multi frame detection: TFF: 0 BFF: 0 Progressive: 91 Undetermined: 9' >&2
+  exit 0
+fi
+test "$8" = "/dev/fd/3" || exit 91
+cat "$8" >/dev/null || exit 92
+printf '%s\n' '{"streams":[{"index":4,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"30000/1001","r_frame_rate":"30000/1001","field_order":"tt","disposition":{"attached_pic":0}}]}'
+"###,
+        );
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
+            .await
+            .expect("probe identity");
+        let facts = DecodeFactCache::new()
+            .get_or_probe(
+                &identity,
+                DecodeFactSource::isolated(source),
+                None,
+                ProbeStreamSelection::Absolute(4),
+                PROBE_DEADLINE,
+                None,
+            )
+            .await
+            .expect("bound facts and idet verdict");
+        assert_eq!(facts.interlace_verdict(), InterlaceVerdict::FlagOverruled);
+        assert_eq!(facts.scan_type(), ScanType::Progressive);
+        assert_eq!(
+            offset_view.stream_position().expect("restored offset"),
+            3,
+            "both children must finish before the shared offset is restored"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelling_idet_reaps_the_second_child_before_returning_the_offset_lane() {
+        use std::io::{Seek, SeekFrom};
+
+        let root = crate::test_tempdir().expect("tempdir");
+        let media = root.path().join("media.bin");
+        std::fs::write(&media, b"cancelled interlace source").expect("media");
+        let source = Arc::new(std::fs::File::open(&media).expect("open media"));
+        let mut offset_view = source.try_clone().expect("offset view");
+        offset_view.seek(SeekFrom::Start(5)).expect("set offset");
+        let probe = root.path().join("ffprobe-test");
+        executable(
+            &probe,
+            r###"#!/bin/sh
+if test "$1" = "-version"; then printf '%s\n' 'ffprobe version idet-cancel'; exit 0; fi
+if test "$1" = "-hide_banner"; then
+  touch "$PLURX_TEST_PROBE_PATH.idet"
+  sleep 30
+  exit 95
+fi
+printf '%s\n' '{"streams":[{"index":0,"codec_type":"video","codec_name":"h264","profile":"High","pix_fmt":"yuv420p","width":1920,"height":1080,"avg_frame_rate":"30000/1001","r_frame_rate":"30000/1001","field_order":"tt","disposition":{"attached_pic":0}}]}'
+"###,
+        );
+        let marker = probe.with_extension("idet");
+        let identity = DecodeProbeIdentity::discover_fixture(probe.to_str().expect("probe path"))
+            .await
+            .expect("probe identity");
+        let offset_gate = Arc::new(tokio::sync::Semaphore::new(1));
+        let cancelled = tokio_util::sync::CancellationToken::new();
+        let child_cancelled = cancelled.clone();
+        let child_gate = Arc::clone(&offset_gate);
+        let task = tokio::spawn(async move {
+            DecodeFactCache::new()
+                .get_or_probe(
+                    &identity,
+                    DecodeFactSource::new(source, child_gate),
+                    None,
+                    ProbeStreamSelection::Absolute(0),
+                    PROBE_DEADLINE,
+                    Some(&child_cancelled),
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("idet child started");
+        cancelled.cancel();
+        assert_eq!(
+            task.await.expect("collection task"),
+            Err(DecodeFactError::Cancelled)
+        );
+        let _offset_owner =
+            tokio::time::timeout(Duration::from_secs(2), offset_gate.acquire_owned())
+                .await
+                .expect("idet cleanup returns the offset lane")
+                .expect("offset lane remains open");
+        assert_eq!(offset_view.stream_position().expect("restored offset"), 5);
     }
 
     #[cfg(unix)]

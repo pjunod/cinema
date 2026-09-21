@@ -28,9 +28,9 @@ pub use decode::{
     DecodeCapabilitySnapshotIdentity, DecodeCatalogMetadata, DecodeEvidence, DecodeFacts,
     DecodePlanPolicy, DecodePolicySnapshot, DecodeReason, DecodeSourceIdentity,
     DecodeSurfaceContract, Deinterlace, DynamicRangeClass, FrameDomain, FrameRate,
-    FrameRateProvenance, OutputWidthRule, PlanError, PlanSourceBinding, PresentationContract,
-    Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder, StreamSelectionProvenance,
-    SubtitleRendering, TranscodeMediaOptions, TranscodeRequest,
+    FrameRateProvenance, InterlaceVerdict, OutputWidthRule, PlanError, PlanSourceBinding,
+    PresentationContract, Rational, ResolvedDecode, ResolvedTranscode, SoftwareDecoder,
+    StreamSelectionProvenance, SubtitleRendering, TranscodeMediaOptions, TranscodeRequest,
     HEALTH_QUALIFIED_ARTIFACT_NAMESPACE, RESOLVED_TRANSCODE_PLAN_VERSION,
     UNQUALIFIED_ARTIFACT_NAMESPACE,
 };
