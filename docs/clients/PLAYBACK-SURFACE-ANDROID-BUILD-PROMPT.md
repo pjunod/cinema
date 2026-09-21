@@ -1,6 +1,6 @@
 # Android build and test — compile the playback surface contract
 
-**Status:** §§1–3 and 6 done 2026-09-13 (compile, tests, lint, APK, K1–K8);
+**Status:** open — §§1–3 and 6 done 2026-09-13 (compile, tests, lint, APK, K1–K8);
 §5 still open, it needs hardware · **For:** a session with an Android
 toolchain (Docker, or a local SDK) · **Covers:** M3 (PR #279) and M5 (PR #282)
 of the [playback surface contract](PLAYBACK-SURFACE-CONTRACT.md), both merged

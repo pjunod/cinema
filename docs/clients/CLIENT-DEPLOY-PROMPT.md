@@ -1,5 +1,7 @@
 # Client deploy — put the merged build on the phones and the Apple TVs
 
+**Status:** live · **Reconciled:** 2026-09-20
+
 The four servers are current. The Apple and Android clients are not, and no
 agent in a cloud session can change that: the builds need Xcode's signing
 identity and a paired `adb`, both of which live on Paul's Mac and neither of

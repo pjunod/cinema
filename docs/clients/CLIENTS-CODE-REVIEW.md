@@ -1,5 +1,7 @@
 # Clients code review — capable players that under-ask the server
 
+**Status:** done · **Reconciled:** 2026-09-20
+
 **Reviewed:** 2026-08-02
 **Scope:** `clients/android` and `clients/apple` at commit `f8655c166` plus
 the working tree (two uncommitted Apple files: `PlurxApp.swift`,

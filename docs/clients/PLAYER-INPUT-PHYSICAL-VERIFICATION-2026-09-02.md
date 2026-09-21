@@ -1,5 +1,7 @@
 # Player input physical verification — device results from 2026-09-02
 
+**Status:** done · **Reconciled:** 2026-09-20
+
 Companion to
 [PLAYER-INPUT-CONTRACT.md](PLAYER-INPUT-CONTRACT.md) (the behavior contract)
 and
