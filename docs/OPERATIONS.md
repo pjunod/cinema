@@ -58,7 +58,7 @@ data. With no explicit data directory, service mode uses
 
 An explicit `PLURX_FFMPEG` or `PLURX_FFPROBE` still has highest precedence.
 Otherwise Windows checks beside `plurxd.exe` for the matching `.exe` before
-falling back to the service account's `PATH`. Settings → Developer reports
+falling back to the service account's `PATH`. Settings → Maintenance → Windows server reports
 native-runtime, ffmpeg, NVENC, and Quick Sync readiness as advisory facts;
 software fallback remains available and the report does not silently rewrite
 an operator choice.

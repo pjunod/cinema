@@ -847,11 +847,11 @@ test("Settings loads only the active tab manifest", () => {
   const manifest = new Function(`${declaration[0]}; return SETTINGS_MANIFEST;`)();
   assert.deepEqual(manifest, {
     libraries: { required: ["settings", "libs", "status", "dvConversions"], secondary: [] },
-    metadata: { required: ["settings"], secondary: ["libs"] },
+    metadata: { required: ["settings"], secondary: ["libs", "developerReadiness"] },
     playback: { required: ["settings"], secondary: ["developerReadiness"] },
-    livetv: { required: ["settings"], secondary: [] },
+    livetv: { required: ["settings"], secondary: ["developerReadiness"] },
     analysis: { required: ["settings", "analysis"], secondary: [] },
-    maintenance: { required: ["settings", "dvConversions"], secondary: [] },
+    maintenance: { required: ["settings", "dvConversions"], secondary: ["developerReadiness"] },
     users: { required: ["users"], secondary: [] },
     system: { required: ["sys"], secondary: ["playbackEvents"] },
     cluster: { required: ["cluster"], secondary: ["clusterOps", "developerReadiness"] },
@@ -1636,11 +1636,11 @@ test("Settings executes exact required and secondary waves for every tab", async
   assert.ok(endpointDeclaration&&manifestDeclaration);
   const cases={
     libraries:{required:["/settings","/libraries","/scan/status","/dv-conversions"],secondary:[]},
-    metadata:{required:["/settings"],secondary:["/libraries"]},
+    metadata:{required:["/settings"],secondary:["/libraries","/developer/readiness"]},
     playback:{required:["/settings"],secondary:["/developer/readiness"]},
-    livetv:{required:["/settings"],secondary:[]},
+    livetv:{required:["/settings"],secondary:["/developer/readiness"]},
     analysis:{required:["/settings","/analysis/summary"],secondary:[]},
-    maintenance:{required:["/settings","/dv-conversions"],secondary:[]},
+    maintenance:{required:["/settings","/dv-conversions"],secondary:["/developer/readiness"]},
     users:{required:["/users"],secondary:[]},
     system:{required:["/system"],secondary:["playback-events","system-log"]},
     cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","/developer/readiness","cluster-log"]},
@@ -1661,7 +1661,8 @@ test("Settings executes exact required and secondary waves for every tab", async
       "patchSettingsSecondary","patchSettingsSecondaryError","refreshLogs","refreshClusterLogs",
       "setPageFailure","setPagePhase","document",
       `let PAGE_RENDER_GENERATION=1,SETTINGS=null,TRAKT=null,CLUSTER_LOADED=false,
-         SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map();
+         SETTINGS_DATA={},SETTINGS_LOADED=new Set(),SETTINGS_LOADS=new Map(),
+         DV_SETTINGS_POLL_AT=0; const DV_PROGRESS_POLL_MS=10000;
        ${shippedSource("isSettingsRoute")};
        ${shippedSource("settingsCurrent")};
        ${shippedSource("cacheSettings")};
@@ -1683,6 +1684,7 @@ test("Settings executes exact required and secondary waves for every tab", async
         request.url==="/system"?{}:request.url==="/cluster/nodes"?{nodes:[]}:[],
     );
     await nextTurn();
+    assert.ok(phases.includes("render"),`${tab} renders successfully after required data`);
     assert.ok(phases.includes("content"),`${tab} commits content after only required data`);
     const secondaryRequests=requests.slice(expected.required.length);
     const secondary=[...secondaryRequests.map(request=>request.url.includes("playback-events")?"playback-events":request.url),

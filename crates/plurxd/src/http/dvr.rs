@@ -550,7 +550,7 @@ fn dvr_disabled() -> ApiError {
     ApiError::typed(
         StatusCode::SERVICE_UNAVAILABLE,
         "dvr_disabled",
-        "recording is switched off; an administrator can enable it in Settings → Developer",
+        "recording is switched off; an administrator can enable it in Settings → Live TV",
     )
 }
 

@@ -1,7 +1,7 @@
 # CI test overhaul — fast failures, selective evidence, safe reuse
 
-**Status:** Milestone 1 implemented · effort-train lifecycle added 2026-08-29 ·
-Milestones 2–5 remain available optimizations · **Written:** 2026-08-05 ·
+**Status:** open — Milestone 1 implemented; Milestones 2–5 remain optional ·
+**Effort-train lifecycle:** added 2026-08-29 · **Written:** 2026-08-05 ·
 **Reviewed:** 2026-08-29
 
 Companion to [VALIDATION.md](../VALIDATION.md) (how changed paths select behavior

@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["eda11c85"]
+points = []
+checks = []
+reason = "Documentation-only M3 correction: DECODER_SELECTION_RECOVERY_STATUS.md remains open because broader fleet qualification is still evidence rather than shipped behavior. The status audit and docs-index contracts retain the header and indexed row, but no runtime or client behavior changed, so this is mapped as no-evidence."
+ignore = true

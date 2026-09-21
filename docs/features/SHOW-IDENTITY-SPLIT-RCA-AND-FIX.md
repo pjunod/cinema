@@ -1,6 +1,6 @@
 # Scan identity — prevent split items and preserve watch state
 
-**Status:** M1 prevention, M2 guarded hints and M3 bounded repair built and
+**Status:** open — M1 prevention, M2 guarded hints and M3 bounded repair built and
 fixture-verified; production repair remains unauthorized ·
 **Written:** 2026-09-19 · **Revised:** 2026-09-19 ·
 **Incident:** reference show S, season 5.

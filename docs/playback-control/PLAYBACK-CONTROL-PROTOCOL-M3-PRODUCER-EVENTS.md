@@ -1,5 +1,7 @@
 # Playback control M3c2 — producer progress and process-exit events
 
+**Status:** built · **Reconciled:** 2026-09-20
+
 ## Status
 
 Implementation slice M3c2. This document is the review and handoff contract

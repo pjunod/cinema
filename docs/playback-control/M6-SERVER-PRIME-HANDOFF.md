@@ -1,6 +1,6 @@
 # M6 phase 3 — reserve and prime
 
-**Status:** implemented on `codex/m6-server-prime`; validation and merge pending ·
+**Status:** built — reserve-and-prime implementation merged 2026-09-09 ·
 **Written:** 2026-09-08 · **Implementation update:** 2026-09-09 ·
 **Implementation base:** `main` at `75744fea`
 

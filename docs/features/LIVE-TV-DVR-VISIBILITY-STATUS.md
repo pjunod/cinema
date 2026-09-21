@@ -1,6 +1,6 @@
 # DVR visibility status — make capture state explain itself
 
-**Status:** foundation merged; web fidelity follow-up built and reviewed ·
+**Status:** open — foundation merged; web fidelity follow-up built and reviewed ·
 **Branch:** `codex/dvr-ui-fidelity` · **Base:** `0b2490839` (PR #314) ·
 **Updated:** 2026-09-14
 

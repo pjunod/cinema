@@ -1,5 +1,7 @@
 # Subtitle reliability — physical verification
 
+**Status:** open · **Reconciled:** 2026-09-20
+
 **For:** a session with the physical devices. **Against:** Apple build 171,
 Android versionCode 108, web from the same deploy, server at or after the
 subtitle reliability merge. **Written:** 2026-09-19.

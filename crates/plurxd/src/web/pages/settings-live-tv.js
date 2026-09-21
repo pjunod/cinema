@@ -123,8 +123,8 @@ async function refreshLiveTvGuide(button){
   }
   finally{ if(button.isConnected) button.disabled=false; }
 }
-function liveTvPanel(settings){
-  return `${setHead("Live TV","Connect your network tuner and choose what appears in the programme guide.",`<a class="ghost sm" href="#/live-tv" style="text-decoration:none">Browse channels ↗</a>`)}${liveTvSettingsCard(settings)}${liveTvGuideCard(settings)}`;
+function liveTvPanel(settings,readiness){
+  return `${setHead("Live TV","Manage your tuner, programme guide, recordings and library channels.",`<a class="ghost sm" href="#/live-tv" style="text-decoration:none">Browse channels ↗</a>`)}${liveTvSettingsCard(settings)}${liveTvGuideCard(settings)}${dvrCard(settings,readiness)}${libraryChannelsSettingsCard(settings,readiness)}`;
 }
 function liveTvSettingsCard(s){
   const enabled=!!s.live_tv_enabled, disabled=enabled?' disabled':'';
@@ -219,4 +219,43 @@ async function checkLiveTvReadiness(button){
     mount.innerHTML=`<h3>${r.ready?"Ready to enable":"Needs attention"}</h3><ul>${r.checks.map(c=>`<li><strong>${c.ready?"Pass":"Not ready"}:</strong> ${esc(c.message)}</li>`).join("")}</ul>${r.snapshot?`<p>${esc(r.snapshot.device.friendly_name)} · ${esc(r.snapshot.device.model_number)} · ${esc(r.snapshot.device.tuner_count)} tuners</p>`:""}<p class="hint">This result describes saved generation ${esc(r.generation)}. It is advisory: enabling is not blocked by a red check. Structural problems — an address that is not private, an unresolved previous owner, a stale generation — still refuse the save.</p>`;
   }catch(e){ if(settingsCurrent(generation,"livetv")&&mount.isConnected) mount.textContent=e.message; }
   finally{ if(button.isConnected) button.disabled=false; }
+}
+
+function dvrCard(settings,readiness){
+  return setCard(`${cardHead("Recording","Capture a programme from the tuner to a disk, and let the library scan pick it up.",settings.dvr_enabled?`<span class="pill ok">enabled</span>`:`<span class="pill">disabled</span>`)}
+      ${togRow("dvrenabled","Enable recording","This checkbox is authoritative. Reminders, rules and the schedule stay readable while it is off, so a deployment can be inspected and repaired before the first capture.",settings.dvr_enabled)}
+      <div class="setfields">
+        <div><label for="dvrroot">Recording folder</label><input id="dvrroot" value="${esc(settings.dvr_root||"")}" placeholder="/srv/plurx/recordings"><div class="hint">The tuner owner writes here, and every node that serves a recording has to be able to read it.</div></div>
+        <div><label for="dvrfloor">Keep free (GB)</label><input id="dvrfloor" type="number" min="0" max="1000000" value="${esc(String(settings.dvr_free_floor_gb??50))}"><div class="hint">A capture never starts under the floor; it shows the conflict instead of filling the disk.</div></div>
+        <div><label for="dvrreserve">Tuners reserved for viewing</label><select id="dvrreserve">${[0,1,2,3,4].map(n=>`<option value="${n}"${n===Number(settings.dvr_tuner_reserve??1)?" selected":""}>${n}</option>`).join("")}</select><div class="hint">Recordings never take the last reserved session, so a schedule cannot lock the household out of the tuner.</div></div>
+        <div><label for="dvrpadstart">Start early (seconds)</label><input id="dvrpadstart" type="number" min="0" max="3600" value="${esc(String(settings.dvr_pad_start_s??60))}"></div>
+        <div><label for="dvrpadend">Run late (seconds)</label><input id="dvrpadend" type="number" min="0" max="3600" value="${esc(String(settings.dvr_pad_end_s??120))}"></div>
+        <div><label for="dvrlead">Reminder lead (seconds)</label><input id="dvrlead" type="number" min="0" max="3600" value="${esc(String(settings.dvr_reminder_lead_s??300))}"><div class="hint">How long before a programme starts a reminder appears. “Watch at” sets one with no lead at all.</div></div>
+        <div><label for="dvrwebhook">Webhook URL</label><input id="dvrwebhook" value="${esc(settings.dvr_webhook_url||"")}" placeholder="https://example.invalid/hook"><div class="hint">Optional. https anywhere, or plain http only to a private address.</div></div>
+      </div>
+      <details class="setdetails"><summary>Requirements and readiness</summary><div class="setdetails-body">
+      ${devReq(readiness,"dvr","dvr_root_writable","Writable recording folder","The tuner owner creates and removes a probe file under the folder. A read-only remount, a full filesystem and an ACL that says yes but means no all look identical to a permission bit.")}
+      ${devReq(readiness,"dvr","dvr_free_space","Room above the floor","Free space on the recording folder against the floor set above. Read this row on the tuner owner; another node cannot see that filesystem.")}
+      ${devReq(readiness,"dvr","guide_horizon","A guide worth scheduling from","A four-hour guide can only record what is nearly on. Series rules, a schedule and a conflict worth resolving all need a horizon.")}
+      ${devReq(readiness,"dvr","tuner_reserve","A tuner stays free for watching","Reserving every session for viewing means no capture could ever start; reserving none means a schedule can take the last tuner.")}
+      ${devReq(readiness,"dvr","every_node_mounts_root","Every node can read the folder","The owner writes recordings and any node may serve them, so the folder has to be a mount every node has. This process can see its own filesystem and no peer's.")}
+      ${settings.dvr_webhook_url?devReq(readiness,"dvr","webhook_url_approved","An approved webhook URL","The outbound policy allows https anywhere and plain http only to a private address. An unapproved URL is never called."):""}
+      <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice. An operator who can see the deployment may turn recording on over any amount of red.</p>
+      </div></details>
+      <div class="err" id="dvrerr" role="alert"></div>${setCardFoot("saveDvrSettings")}`);
+}
+
+function libraryChannelsSettingsCard(settings,readiness){
+  return setCard(`${cardHead("Library channels","Build always-on schedules from movies and episodes in your library.",settings.library_channels_enabled?`<span class="pill ok">enabled</span>`:`<span class="pill">disabled</span>`)}
+      ${togRow("lcsubjectenabled","Enable subject matching","Runs local catalogue rules. Saving and existing playback remain available when paused.",settings.library_channel_subject_matching_enabled!==false)}
+      ${devReq(readiness,"library_channel_subject_matching","provider","Local catalogue matcher","Text, metadata and classification rules run inside plurx without an inference service.")}
+      ${devReq(readiness,"library_channel_subject_matching","metadata","Metadata coverage","Missing or vague descriptions can remain uncertain and can be included manually.")}
+      ${devReq(readiness,"library_channel_subject_matching","batch","Recent batch and queued work","Operational failures never become negative classifications.")}
+      ${togRow("lcenabled","Enable Library-channel playback","This checkbox is authoritative. Listing, preview and authoring stay available while off so readiness can be inspected and repaired.",settings.library_channels_enabled)}
+      <details class="setdetails"><summary>Requirements and readiness</summary><div class="setdetails-body">
+      ${devReq(readiness,"library_channels","authoritative_store","Authoritative Store","Definitions, schedules and favourites must come from current authority rather than a stale node-local copy.")}
+      ${devReq(readiness,"library_channels","eligible_video","Schedulable video","A successful probe, video stream and positive duration are needed to publish a non-empty rotation. A draft may still be saved without one.")}
+      ${devReq(readiness,"library_channels","compatible_clients","Compatible clients","Old clients retain VOD and Live TV, but do not know the dedicated channel-session purpose or boundary controller.")}
+      <p class="devcheck-note">Advisory only: no result disables the switch or overrides your saved choice. No tuner, metadata service, AI key, or external provider is required.</p>
+      </div></details><div class="err" id="lcdeverr" role="alert"></div>${setCardFoot("saveLibraryChannelsSettings")}`);
 }

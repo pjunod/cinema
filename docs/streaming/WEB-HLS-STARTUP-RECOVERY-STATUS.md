@@ -1,6 +1,6 @@
 # Web HLS startup recovery — implementation status
 
-**Status:** implementation complete · promotion qualified · **Updated:** 2026-09-14 · **Base:**
+**Status:** open — implementation complete · promotion qualified · **Updated:** 2026-09-14 · **Base:**
 `28ae8163b52545730f4c65916bb2c8757eabb993` · **Branch:**
 `codex/web-hls-startup-recovery`
 

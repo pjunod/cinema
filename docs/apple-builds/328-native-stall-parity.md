@@ -1,5 +1,7 @@
 # Preserve native quality through unattributed stalls
 
+**Status:** open · **Reconciled:** 2026-09-20
+
 Build: 162
 Issue: #328
 

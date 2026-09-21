@@ -4,7 +4,7 @@
 > [lifecycle contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) replaces measured
 > qualification gates with explicit client capability and real resource outcomes.
 
-**Status:** ready to build · **Executes:** §3 of
+**Status:** superseded 2026-09-12 — retained as implementation history · **Executes:** §3 of
 [REMAINING-ROADMAP-HANDOFF.md](REMAINING-ROADMAP-HANDOFF.md), which is §5.1–5.4
 of [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md) ·
 **Written:** 2026-09-02 · **Baseline:** `main` at `5a0ab78`

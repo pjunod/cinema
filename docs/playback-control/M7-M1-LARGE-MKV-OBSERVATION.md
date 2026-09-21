@@ -1,6 +1,6 @@
 # M7 M1 large-MKV observation — readiness and bounded subtitle publication
 
-**Status:** O1 and O2 passed on local hardware · **Exercises:** M7 readiness
+**Status:** done — O1 and O2 passed on local hardware · **Exercises:** M7 readiness
 M1-B2 and remediation ruling R1 · **Observed:** 2026-09-01
 
 Companion to the M7 remainder handoff in

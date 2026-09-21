@@ -2006,7 +2006,7 @@ async fn require_runtime_enabled(state: &AppState) -> Result<(), ApiError> {
         Err(channel_error(
             StatusCode::GONE,
             "channel_unavailable",
-            "Library-channel playback is disabled in Settings → Developer",
+            "Library-channel playback is disabled in Settings → Live TV",
         ))
     }
 }

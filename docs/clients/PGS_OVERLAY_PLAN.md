@@ -1,5 +1,7 @@
 # Dolby Vision-Safe PGS Subtitle Overlay Plan
 
+**Status:** open · **Reconciled:** 2026-09-20
+
 > Status: Architecture approved for Milestone 0 feasibility work. Production
 > implementation and rollout remain paused until the milestone is accepted.
 > Current evidence: [PGS-OVERLAY-M0-FEASIBILITY.md](PGS-OVERLAY-M0-FEASIBILITY.md).

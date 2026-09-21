@@ -1,6 +1,6 @@
 # Library channels status — what is built and what remains
 
-**Status:** shipped on `main`; collection-route correction merged as
+**Status:** open — shipped on `main`; collection-route correction merged as
 `29d97094`; production playback correction tracked by
 [#237](http://forge.lan:3000/noirr/plurx/issues/237)
 · **Updated:** 2026-09-10 · **Playback correction base:** `9e29429e`

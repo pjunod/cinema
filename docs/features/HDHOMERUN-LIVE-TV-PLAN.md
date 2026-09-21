@@ -1,6 +1,6 @@
 # HDHomeRun Live TV — one tuner, every plurx client
 
-**Status:** M0, M1, M2 and M4 Apple merged to the effort; the web and Android
+**Status:** open — M0, M1, M2 and M4 Apple merged to the effort; the web and Android
 task PRs are open with green effort gates and await review · **Effort:**
 `effort/hdhomerun-live-tv` · **Written:** 2026-09-04 · **Updated:** 2026-09-05
 

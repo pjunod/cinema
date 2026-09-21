@@ -1,5 +1,7 @@
 # Subtitle reliability assessment — 2026-09-16 (v2, revised after review)
 
+**Status:** done · **Reconciled:** 2026-09-20
+
 **Baseline:** origin/main `c9e4edf451e12247a7aa4188903e5ba36888e7e9`. Every anchor is file:line in that commit. This is a source review; no device playback, no test execution, no client-build inventory. v1 overstated several conclusions; the review's R1–R5 are applied below and each claim is now labelled **[confirmed in source]**, **[runtime hypothesis]** or **[not verified]**.
 
 ## 0. What changed from v1

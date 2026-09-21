@@ -1,7 +1,7 @@
 # Quality switch continuity — measured results
 
-**Status:** instrumented, **not yet run** — every result row below is empty on
-purpose · **Measures:** the bar in
+**Status:** open — instrumented, but the device run has not started · **Result
+rows:** empty on purpose · **Measures:** the bar in
 [QUALITY-SWITCH-CONTINUITY-BUILD.md](QUALITY-SWITCH-CONTINUITY-BUILD.md) §1,
 instrumented by its §8 · **Instruments:** built 2026-09-16 on
 `agent/m3-measure` · **Fills this in:** a device run on the fleet build, per

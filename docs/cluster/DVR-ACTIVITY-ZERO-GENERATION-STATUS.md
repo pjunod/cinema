@@ -1,6 +1,6 @@
 # DVR Activity generation zero — repair status
 
-**Status:** reviewed · local qualification complete · hosted fast lane next · **Updated:** 2026-09-14 ·
+**Status:** open — review and local qualification complete; hosted fast lane pending · **Updated:** 2026-09-14 ·
 **Base:** `0b2490839112` · **Branch:**
 `codex/fix-dvr-activity-zero-generation`
 

@@ -1,5 +1,7 @@
 # Return from Pause to a moving picture within one bound
 
+**Status:** built · **Reconciled:** 2026-09-20
+
 Build: 168
 Issue: #359
 

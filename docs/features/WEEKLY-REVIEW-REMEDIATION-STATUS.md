@@ -1,6 +1,6 @@
 # Weekly review remediation — what is fixed, what remains, and why
 
-**Status:** complete; main promotion pending · **Baseline:**
+**Status:** done — main promotion completed in PR #225 · **Baseline:**
 `4cef0da740c797364023284520adad8a93b172cd` · **Promotion base:**
 `200574162ad78786de49d06aa4b1127df1a206bf` · **Branch:**
 `codex/weekly-review-remediation` · **Updated:** 2026-09-10

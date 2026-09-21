@@ -1,5 +1,7 @@
 # Quiet library Home and open media details
 
+**Status:** built · **Reconciled:** 2026-09-20
+
 Build: 163
 Issue: #330
 

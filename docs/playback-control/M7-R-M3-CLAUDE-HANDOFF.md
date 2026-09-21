@@ -1,6 +1,6 @@
 # M7 R-M3 handoff — finish M2, then build seek coalescing
 
-**Status:** M1 merged · M2 PR #789 qualifying · M3 not started ·
+**Status:** open — M1 merged · M2 PR #789 qualifying · M3 not started ·
 **Audience:** Claude or another implementation agent · **Written:** 2026-09-02
 
 Companion to

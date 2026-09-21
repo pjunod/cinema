@@ -1,6 +1,6 @@
 # UI navigation audit — why the player feels different on every client
 
-**Status:** findings settled, rulings taken · **Snapshot:** every anchor below
+**Status:** done — findings settled and rulings recorded · **Snapshot:** every anchor below
 is `file:line` at commit `18886477` (main, 2026-09-01) — verify with
 `git show 18886477:<path>` because later commits have shifted line numbers ·
 **Written:** 2026-09-02 · **Leads to:** [PLAYER-INPUT-CONTRACT.md](PLAYER-INPUT-CONTRACT.md)

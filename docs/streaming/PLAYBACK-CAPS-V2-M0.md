@@ -1,6 +1,6 @@
 # Playback caps v2 — M0 measurements
 
-**Status:** measured 2026-08-30 · **Executes:** [PLAYBACK-CAPS-V2-PLAN.md](PLAYBACK-CAPS-V2-PLAN.md)
+**Status:** done — M0 measurements recorded 2026-08-30 · **Executes:** [PLAYBACK-CAPS-V2-PLAN.md](PLAYBACK-CAPS-V2-PLAN.md)
 §7 M0 · **Node:** lab4 (`10.42.4.8:32400`) on `v0.2.7-2417-g4ba8bb48`
 
 Companion to [PLAYBACK-CAPS-V2-PLAN.md](PLAYBACK-CAPS-V2-PLAN.md) (what to

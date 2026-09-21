@@ -1,6 +1,6 @@
 # VOD presentation — implementation handoff
 
-**Status:** ready to build · **Executes:**
+**Status:** open — M0 accepted and later milestones remain to build · **Executes:**
 [VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md) v2 (review round 1
 resolved — see [VOD-PRESENTATION-PLAN-REVIEW.md](VOD-PRESENTATION-PLAN-REVIEW.md)
 and [VOD-PRESENTATION-PLAN-REVIEW-RESPONSE.md](VOD-PRESENTATION-PLAN-REVIEW-RESPONSE.md))

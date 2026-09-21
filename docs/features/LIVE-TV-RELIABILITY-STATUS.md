@@ -1,5 +1,7 @@
 # Live TV reliability — build status
 
+**Status:** open · **Reconciled:** 2026-09-20
+
 What is built, what is merged, what is deployed, and what is still open on
 the Live TV reliability effort. Companion to
 [LIVE-TV-RELIABILITY-IMPLEMENTATION.md](LIVE-TV-RELIABILITY-IMPLEMENTATION.md)

@@ -1,6 +1,6 @@
 # reference film F held-seek stall — two commits, one source change, one recovery spent too early
 
-**Status:** implementation, adversarial review, and current-main qualification complete; fast-lane contract inventory updated, 2026-09-18
+**Status:** open — implementation, adversarial review, and current-main qualification complete; fast-lane contract inventory updated, 2026-09-18
 **Incident:** 2026-09-18, approximately 04:17–04:25 UTC
 **Incident build:** `v0.3.0-2770-g6fb0901d`
 **Exact source:** `6fb0901d3d18c1b181f7299f4faddfb73994fd1a`

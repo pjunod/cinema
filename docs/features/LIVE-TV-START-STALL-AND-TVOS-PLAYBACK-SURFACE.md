@@ -1,6 +1,7 @@
 # Live TV start stall and the tvOS playback surface — why every start pauses at 5–14 s, and what the fullscreen screen should be
 
-**Status:** diagnosis + design, awaiting Paul's two rulings (§4, §6) ·
+**Status:** done — diagnosis and design ruled; implementation merged through
+PR #301 ·
 **Measured against:** `main` at `de9f153c` (Apple build 147) · **Written:** 2026-09-13
 
 Companion to [LIVE-TV-GUIDE-AND-START-RELIABILITY.md](LIVE-TV-GUIDE-AND-START-RELIABILITY.md)

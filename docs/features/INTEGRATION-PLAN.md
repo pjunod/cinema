@@ -1,6 +1,6 @@
 # Integration plan — plurx's side of the Curator pipeline
 
-**Status:** ready to build · **Written:** 2026-07-26 ·
+**Status:** built — P1–P6 landed; later phases remain explicitly out of scope · **Written:** 2026-07-26 ·
 **Master plan:** Curator's `docs/plan-integration.md` (contract §3, phasing §7)
 
 This document is self-contained: everything plurx must build, with the

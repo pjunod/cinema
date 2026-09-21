@@ -1,6 +1,6 @@
 # Apple PGS overlay acceptance — one iPad Pro run, one decidable record
 
-**Status:** ready for operator execution after Apple build 58 is merged and
+**Status:** open — ready for operator execution after Apple build 58 is merged and
 uploaded · **Covers:** [PGS overlay plan](PGS_OVERLAY_PLAN.md) Milestone 2 ·
 **Written:** 2026-08-14
 

@@ -1,6 +1,6 @@
 # Native Live TV layouts — implementation status and evidence
 
-**Status:** proportions shipped on both native clients; the physical
+**Status:** open — proportions shipped on both native clients; the physical
 walkthrough is the only unproved step · **Base:** Forgejo `main` at
 `ebe2b100` · **Updated:** 2026-09-12
 

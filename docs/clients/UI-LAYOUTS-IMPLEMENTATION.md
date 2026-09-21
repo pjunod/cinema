@@ -1,6 +1,6 @@
 # UI layouts & themes — implementation plan for the accepted slice
 
-**Status:** G0 · G1 · T1 built and proven, G2 partial (home) — see
+**Status:** built — G0, G1 and T1 landed; G2 landed for Home only · **Ground truth:** see
 [UI-LAYOUTS-STATUS.md](UI-LAYOUTS-STATUS.md) for ground truth ·
 **Executes:** [UI-LAYOUTS-PLAN.md](UI-LAYOUTS-PLAN.md) as amended by
 [UI-LAYOUTS-REVIEW.md](UI-LAYOUTS-REVIEW.md) · **Written:** 2026-08-02;
