@@ -25411,11 +25411,9 @@ mod tests {
         // Well past the original 30-second startup budget, with the
         // replacement still refused and the same snapshots still arriving at
         // the ordinary reporter cadence.
-        let mut sequence = 3;
-        for second in (5..=60).step_by(5) {
+        for (sequence, second) in (3..).zip((5..=60).step_by(5)) {
             let late =
                 web_snapshot_request("incumbent_after_250ms_of_progress", &generation, sequence);
-            sequence += 1;
             actor
                 .control_at(started + Duration::from_secs(second), owned_control(&late))
                 .unwrap_or_else(|error| {

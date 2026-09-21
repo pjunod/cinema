@@ -55,16 +55,16 @@ async function saveStreaming(btn){
     toast("Streaming settings saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
-async function saveDeveloper(btn){
+async function savePlaybackCompatibility(btn){
   const err=document.getElementById("dverr"); err.textContent="";
   if(btn) btn.disabled=true;
   try{
     cacheSettings(await api("/settings",{method:"PUT",body:{
       playback_control_protocol_v1:document.getElementById("pcpv1").checked}}));
-    toast("Developer settings saved"); if(btn) setCardSaved(btn);
+    toast("Playback compatibility saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
-async function saveLiveHlsRecoveryDeveloper(btn){
+async function saveLiveHlsRecovery(btn){
   const err=document.getElementById("dvlrerr"); err.textContent="";
   if(btn) btn.disabled=true;
   try{
@@ -72,15 +72,6 @@ async function saveLiveHlsRecoveryDeveloper(btn){
       vod_live_recovery:document.getElementById("dvlr").checked}}));
     toast("Live HLS recovery setting saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
-}
-async function saveContentAnalysisDeveloper(btn){
-  const err=document.getElementById("caerr"); if(err) err.textContent="";
-  if(btn) btn.disabled=true;
-  try{
-    cacheSettings(await api("/settings",{method:"PUT",body:{
-      vod_index_cluster_cache:document.getElementById("ca-enabled").checked}}));
-    toast("Content analysis setting saved"); if(btn) setCardSaved(btn);
-  }catch(error){ if(err) err.textContent=error.message; if(btn) btn.disabled=false; }
 }
 async function saveWindowsCompatibility(btn){
   const err=document.getElementById("winerr"); err.textContent="";
@@ -95,7 +86,7 @@ async function saveWindowsCompatibility(btn){
 // tuple's write is a generation CAS, and a request carrying both would let one
 // commit while the other reported 409. The server refuses the mixture with a
 // 400 rather than let a client find that out the interesting way.
-async function saveDvrDeveloper(btn){
+async function saveDvrSettings(btn){
   const err=document.getElementById("dvrerr"); err.textContent="";
   const number=(id,fallback)=>{
     const value=Number(document.getElementById(id).value);
@@ -115,7 +106,7 @@ async function saveDvrDeveloper(btn){
     toast("Recording settings saved"); if(btn) setCardSaved(btn);
   }catch(e){ err.textContent=e.message; if(btn) btn.disabled=false; }
 }
-async function saveLibraryChannelsDeveloper(btn){
+async function saveLibraryChannelsSettings(btn){
   const err=document.getElementById("lcdeverr"); err.textContent="";
   if(btn) btn.disabled=true;
   try{
@@ -290,3 +281,29 @@ async function saveTraktKeys(){
 async function traktLink(){ try{ cacheTrakt(await api("/trakt/link",{method:"POST"})); paintTrakt(); }catch(e){ toast(e.message); } }
 async function traktUnlink(){ try{ cacheTrakt(await api("/trakt/link",{method:"DELETE"})); paintTrakt(); toast("Trakt disconnected"); }catch(e){ toast(e.message); } }
 async function traktSyncNow(){ try{ cacheTrakt(await api("/trakt/sync",{method:"POST"})); paintTrakt(); toast("Sync started"); }catch(e){ toast(e.message); } }
+
+function playbackProtocolCard(settings,readiness){
+  return setCard(`${cardHead("Playback control protocol","Allow compatible clients to report playback and request stream changes.",`<span class="pill">compatibility</span>`)}
+      ${togRow("pcpv1","Advertise playback control protocol v1","Applies to new sessions. Quality switching needs this enabled.",settings.playback_control_protocol_v1)}
+      <details class="setdetails"><summary>Client readiness</summary><div class="setdetails-body">
+      ${devReq(readiness,"playback_control_protocol_v1","clients_report","Client reporters","Only clients observed by this server can be reported here; silent clients remain unknown.")}
+      </div></details>
+      <div class="err" id="dverr" role="alert"></div>${setCardFoot("savePlaybackCompatibility")}`);
+}
+
+function liveHlsRecoveryCard(settings,readiness){
+  const enabled=!!settings.vod_live_recovery;
+  return setCard(`${cardHead("Sliding Live HLS recovery",
+      "Use the bounded growing presentation when immutable VOD cannot serve a title yet.",
+      enabled?`<span class="pill ok">enabled</span>`:`<span class="pill">disabled</span>`)}
+      ${togRow("dvlr","Enable sliding Live HLS recovery",
+        "Applies to new sessions. Titles without a usable VOD index can use a live timeline instead.",enabled)}
+      <div class="hint">VOD remains preferred. Live recovery provides a bounded, growing timeline while analysis is pending or unavailable.</div>
+      <details class="setdetails"><summary>Recovery diagnostics</summary><div class="setdetails-body">
+      ${devReq(readiness,"live_hls_recovery","rolling_contract_built","Bounded sliding contract","Target, scheduler, served window and object grace must be present in this build.")}
+      ${devReq(readiness,"live_hls_recovery","vod_coverage_replaces_it","Why recovery is still needed","Recent VOD refusals show which viewers would lose playback with recovery disabled.")}
+      ${devReq(readiness,"live_hls_recovery","no_session_bypasses_the_switch","Peer takeover path","A relay takeover can require the existing rolling presentation independently of this fallback choice.")}
+      ${devReq(readiness,"live_hls_recovery","rolling_clients_qualified","Physical-client qualification","Apple native HLS, Media3 and hls.js should be checked for startup, long playback, pause and resume.")}
+      <p class="devcheck-note">Advisory only. Unmet, unavailable or unobservable rows do not gate this switch. Authorization, exact object ownership and scratch limits still protect each request.</p>
+      </div></details><div class="err" id="dvlrerr" role="alert"></div>${setCardFoot("saveLiveHlsRecovery")}`);
+}

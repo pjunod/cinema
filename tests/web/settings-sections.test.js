@@ -73,11 +73,11 @@ test("every section is a route, grouped in the rail's order", () => {
     "maintenance", "users", "system", "cluster", "integrations", "developer",
   ]);
   const dispatch = {
-    metadata: "metadataPanel(d.settings)",
-    playback: "playbackPanel(d.settings)",
-    livetv: "liveTvPanel(d.settings)",
+    metadata: "metadataPanel(d.settings,d.developerReadiness)",
+    playback: "playbackPanel(d.settings,d.developerReadiness)",
+    livetv: "liveTvPanel(d.settings,d.developerReadiness)",
     analysis: "analysisSettingsPanel(d.settings,d.analysis)",
-    maintenance: "maintenancePanel(d.settings,d.dvConversions)",
+    maintenance: "maintenancePanel(d.settings,d.dvConversions,d.developerReadiness)",
     users: "usersPanel(d.users)",
     system: "systemPanel(d.sys,d.playbackEvents)",
     cluster: "clusterPanel(d)",
@@ -233,8 +233,8 @@ test("Playback saves per card, and each card writes only its own fields", () => 
   return Promise.all([
     run("savePlaybackDefaults", defaults)({ disabled: false }),
     run("saveStreaming", streaming)({ disabled: false }),
-    run("saveLiveHlsRecoveryDeveloper", liveRecovery)({ disabled: false }),
-    run("saveDeveloper", developer)({ disabled: false }),
+    run("saveLiveHlsRecovery", liveRecovery)({ disabled: false }),
+    run("savePlaybackCompatibility", developer)({ disabled: false }),
     run("savePreparedQuality", prepared)({ disabled: false }),
     run("saveVerifiedDecode", verifiedDecode)({ disabled: false }),
     run("saveAutomaticDecoderRecovery", automaticRecovery)({ disabled: false }),
@@ -247,10 +247,10 @@ test("Playback saves per card, and each card writes only its own fields", () => 
       "vod_working_set_bytes",
     ]);
     assert.deepEqual(
-      Object.keys(writes.saveLiveHlsRecoveryDeveloper.body),
+      Object.keys(writes.saveLiveHlsRecovery.body),
       ["vod_live_recovery"],
     );
-    assert.deepEqual(Object.keys(writes.saveDeveloper.body).sort(), ["playback_control_protocol_v1"]);
+    assert.deepEqual(Object.keys(writes.savePlaybackCompatibility.body).sort(), ["playback_control_protocol_v1"]);
     assert.deepEqual(Object.keys(writes.savePreparedQuality.body), ["prepared_quality_handoff"]);
     // Its own card, its own field. The verified-decode request renames cached
     // transcodes on covered paths, so it must never ride along with a save an
@@ -261,7 +261,7 @@ test("Playback saves per card, and each card writes only its own fields", () => 
     assert.equal(writes.saveAutomaticDecoderRecovery.path, "/settings");
     assert.equal(writes.savePlaybackDefaults.path, "/settings");
     assert.equal(writes.saveStreaming.path, "/settings");
-    assert.equal(writes.saveDeveloper.path, "/settings");
+    assert.equal(writes.savePlaybackCompatibility.path, "/settings");
   });
 });
 
@@ -323,7 +323,7 @@ test("an older quality save never overwrites a newer draft", async () => {
   assert.deepEqual(notices, ["Earlier quality change saved; newer edit remains unsaved"]);
 });
 
-test("Developer keeps explicit enablement and readiness advisory", () => {
+test("Developer keeps only experiments; everyday controls retain their saves and advisory readiness", () => {
   assert.doesNotMatch(
     shippedSource("playbackPanel"),
     /preparedQualityCard/,
@@ -348,24 +348,21 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
       shippedSource("devReadinessEvidence"), shippedSource("devReq"),
       shippedSource("devStaticReq"), shippedSource("clusterTransportRecoveryCard"),
       shippedSource("preparedQualityCard"), shippedSource("dvrCard"),
-      shippedSource("playbackSurfaceReadinessCard"),
-      // #309's Compatibility section put a new card inside `developerPanel`.
-      // The panel is composed here from the shipped source, so a card it calls
-      // has to be composed too or the panel throws on the name.
-      shippedSource("windowsServerCard"),
-      shippedSource("webHlsStartupRecoveryCard"),
-      shippedSource("hevcSampleEntryAdmissionCard"),
-      shippedSource("contentAnalysisEnableCard"),
-      shippedSource("liveHlsRecoveryCard"),
-      shippedSource("sourceProbeCompatibilityCard"),
+      shippedSource("libraryChannelsSettingsCard"),
+      shippedSource("playbackProtocolCard"), shippedSource("liveHlsRecoveryCard"),
+      shippedSource("playbackPanel"), shippedSource("metadataPanel"),
+      shippedSource("searchSettingsCard"), shippedSource("windowsServerCard"),
+      shippedSource("maintenancePanel"), shippedSource("presetOpts"),
+      "const SERVER=null, RETRY_EVERY=[], ART_EVERY=[], CLEAN_EVERY=[];",
+      "const langOpts=()=>'',autoNextOn=()=>true,decodeLimitsSummary=()=>'',keyBackfillHtml=()=>'',togSelect=()=>'',precachePanel=()=>'',dvDiskPanel=()=>'',telemetryPanel=()=>'';",
       // `directedChangeDeveloperRows` reads the live player and returns ""
       // when there is none, which is exactly the state a settings page is in.
       shippedSource("directedChangeDeveloperRows"),
-      "const SETTINGS_DATA=null,ME=null,PLAYER=null;",
-      shippedSource("uiEnableAdvisory"),
+      "const SETTINGS_DATA=null,ME={is_admin:true},PLAYER=null;",
+      shippedSource("seekScratchReservationsCard"),
       shippedSource("developerPanel"),
       shippedSource("liveTvPanel"),
-      "return {developerPanel,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard};",
+      "return {developerPanel,preparedQualityCard,clusterTransportRecoveryCard,liveTvPanel,dvrCard,playbackPanel,metadataPanel,maintenancePanel};",
     ].join("\n"),
   )(
     (title, sub) => `HEAD:${title}|${sub}`,
@@ -408,40 +405,25 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
     dvr_webhook_url: "",
   };
   const html = panels.developerPanel(settings, readiness);
-  for (const id of ["pqh", "pcpv1", "pdp", "dhqa", "adr", "dvlr", "dvrenabled", "sub503"])
+  for (const id of ["pqh", "pdp", "dhqa", "adr", "sub503"])
     assert.match(html, new RegExp(`TOG:${id}\\|`), `Developer retains ${id}`);
   assert.doesNotMatch(html, /HDHomeRun Live TV|CARDHEAD:Programme guide/);
   for (const route of ["livetv", "playback", "cluster"])
     assert.ok(html.includes(`href="#/settings/${route}"`), `${route} has a destination link`);
-  assert.match(html, /FOOT:saveDeveloper/);
   assert.match(html, /FOOT:savePreparedQuality/);
-  assert.match(html, /FOOT:saveLiveHlsRecoveryDeveloper/);
-  assert.doesNotMatch(html, /Typeless sliding HLS|FOOT:saveExperimental/);
-  assert.match(html, /Explicit server and browser enablement with advisory safety evidence/);
-  // The readiness card is rendered by Developer, not merely declared: a card
-  // that stops being reachable from the panel is the same regression as a card
-  // that stops existing.
-  assert.match(html, /CARDHEAD:Playback surface contract\|/);
-  assert.match(html, /Nothing on this card is a switch/);
-  assert.match(html, /CARDHEAD:Web HLS startup recovery\|/);
-  assert.match(html, /Final-send loader interception/);
-  assert.match(html, /Recovery is enabled for every hls\.js attachment/);
-  assert.match(html, /CARDHEAD:HEVC sample-entry admission\|/);
-  assert.doesNotMatch(html, /nzbd BitTorrent|enable-bittorrent|nzbdBittorrentEnableCard/,
-    "Plurx does not render or own nzbd BitTorrent enablement");
-  // Source verification is always on and has no switch; the card exists to say
-  // what is and is not known about it, which is the only honest thing a
-  // compatibility rule can offer an operator.
-  assert.match(html, /CARDHEAD:Source probe compatibility\|/);
-  assert.match(html, /Derived Atmos profile omissions/);
-  assert.match(html, /Scan provenance/);
-  // The row 5409b567 put in place of "Typed source verification", which this
-  // case asserted on long after it was renamed.
-  assert.match(html, /Compared media facts/);
-  assert.match(html, /Nothing on this card enables, disables, hides or overrides playback admission/);
-  assert.match(html, /No feature flag is used/);
-  assert.match(html, /Serving-fleet order/);
-  assert.match(html, /These checks[^.]*never enable, disable, or hide it/);
+  assert.match(html, /Seek scratch accounting/);
+  for (const id of ["pcpv1", "dvlr", "dvrenabled", "lcenabled", "lcsubjectenabled", "ca-enabled", "dvwin"])
+    assert.ok(!html.includes(`TOG:${id}|`), `Developer no longer owns ${id}`);
+  assert.doesNotMatch(html, /Playback surface contract|Web HLS startup recovery|HEVC sample-entry admission|Source probe compatibility|Search and classification|id="ui-enable"/);
+  const playback = panels.playbackPanel(settings, readiness);
+  for (const id of ["pcpv1", "dvlr"])
+    assert.match(playback, new RegExp(`TOG:${id}\\|[^|]*\\|[^|]*\\|checked=true`));
+  assert.match(playback, /FOOT:savePlaybackCompatibility/);
+  assert.match(playback, /FOOT:saveLiveHlsRecovery/);
+  assert.match(playback, /Advanced server delivery/);
+  assert.match(panels.metadataPanel(settings, readiness), /onclick="showSearchSettings\(\)"/);
+  assert.match(panels.maintenancePanel({...settings,dolby_vision_convert:true}, null, readiness), /TOG:dvwin\|[^|]*\|[^|]*\|checked=true/);
+  assert.match(panels.maintenancePanel(settings, null, readiness), /FOOT:saveWindowsCompatibility/);
   assert.match(html, /This saved switch is authoritative; readiness is advisory and never overrides your choice/);
   // The switch has to be wired to something. A control that renders and does
   // nothing is worse than no control: it reports a capability to the operator
@@ -478,7 +460,7 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
   const dvr = panels.dvrCard(settings, readiness);
   assert.match(dvr, /TOG:dvrenabled\|[^|]*\|[^|]*\|checked=false\|/);
   assert.doesNotMatch(dvr, / disabled/, "no readiness result may disable the switch");
-  assert.match(dvr, /FOOT:saveDvrDeveloper/);
+  assert.match(dvr, /FOOT:saveDvrSettings/);
   for (const id of ["dvrroot", "dvrfloor", "dvrreserve", "dvrpadstart", "dvrpadend", "dvrlead", "dvrwebhook"])
     assert.ok(dvr.includes(`id="${id}"`), `the recording card carries ${id}`);
   // Five rows without a webhook, six with one: the webhook row only exists
@@ -491,12 +473,17 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
   assert.match(dvr, /may turn recording on over any amount of red/);
   // The DVR tuple is its own transaction boundary. A save that carried a
   // Live TV field with it would be refused by the server with a 400.
-  const save = shippedSource("saveDvrDeveloper");
+  const save = shippedSource("saveDvrSettings");
   assert.doesNotMatch(save, /live_tv_/, "dvr_* settings are saved on their own");
   assert.match(save, /dvr_enabled:/);
   assert.match(save, /dvr_webhook_url:/);
 
-  const live = panels.liveTvPanel(settings);
+  const live = panels.liveTvPanel(settings, readiness);
+  assert.match(live, /TOG:dvrenabled\|/);
+  assert.match(live, /TOG:lcenabled\|/);
+  assert.match(live, /TOG:lcsubjectenabled\|/);
+  assert.match(live, /FOOT:saveDvrSettings/);
+  assert.match(live, /FOOT:saveLibraryChannelsSettings/);
   assert.match(live, /HDHomeRun Live TV/);
   assert.match(live, /Save the configuration, check readiness, then enable/);
   assert.match(live, /Readiness is advice, not a gate/);
@@ -505,6 +492,36 @@ test("Developer keeps explicit enablement and readiness advisory", () => {
   assert.match(live, /api\.hdhomerun\.com/);
   assert.match(live, /never stores, logs or relays that credential/);
   assert.match(live, /FOOT:saveLiveTvGuide/);
+});
+
+test("server guidance sends disabled Live TV features to their current settings", () => {
+  const sourceRoot = path.resolve(__dirname, "../../crates/plurxd/src");
+  for (const file of ["http/dvr.rs", "http/library_channels.rs", "channel_subjects.rs", "http/live_tv.rs", "live_tv.rs"]) {
+    const source = fs.readFileSync(path.join(sourceRoot, file), "utf8");
+    assert.match(source, /Settings → Live TV/, `${file} names the current destination`);
+    assert.doesNotMatch(source, /Settings → Developer|Developer settings|use Developer recovery|Run the Developer readiness check/,
+      `${file} must not send an operator to the retired destination`);
+  }
+});
+
+test("late readiness success and failure update evidence without repainting moved settings", () => {
+  const updates=[];
+  const patch = new Function("applyDeveloperReadiness", "esc", `
+    ${shippedConst("SETTINGS_MANIFEST")}
+    ${shippedSource("patchSettingsSecondary")}
+    ${shippedSource("patchSettingsSecondaryError")}
+    return {ok:patchSettingsSecondary,fail:patchSettingsSecondaryError};
+  `)(value=>updates.push(value),esc);
+  // No document or renderSettings stub: touching the surrounding panel would
+  // throw instead of silently losing an edit when the diagnostics arrive.
+  for(const tab of ["metadata","playback","livetv","maintenance","developer","cluster"]){
+    const evidence={items:[]};
+    patch.ok(tab,"developerReadiness",evidence);
+    assert.equal(updates.at(-1),evidence);
+    patch.fail(tab,"developerReadiness",new Error("offline"));
+    assert.deepEqual(updates.at(-1),{unavailable:"offline"});
+  }
+  assert.equal(updates.length,12);
 });
 
 test("the guide's readiness rows are advisory and never disable the save", () => {
@@ -884,7 +901,7 @@ test("Metadata holds the providers; Integrations holds the services", () => {
   assert.match(integrations, /traktCardHtml\(trakt\)/);
   assert.match(integrations, /monarrCardHtml\(\)/);
   assert.match(SHIPPED_UI, /if\(tab==="integrations"\)\s*return integrationsPanel\(d\.settings,d\.trakt\)/);
-  assert.match(SHIPPED_UI, /if\(tab==="metadata"\)\s*return metadataPanel\(d\.settings\)/);
+  assert.match(SHIPPED_UI, /if\(tab==="metadata"\)\s*return metadataPanel\(d\.settings,d\.developerReadiness\)/);
   // The Trakt device-link poll follows the card to its new section.
   assert.match(shippedSource("settingsTick"), /if\(tab==="integrations"&&!TRAKT_EDIT\)/);
   assert.match(shippedSource("paintTrakt"), /traktcard/);

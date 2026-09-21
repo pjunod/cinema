@@ -97,7 +97,7 @@ pub(crate) async fn guide_document(
     let config = state.live_tv.config().await.map_err(api_error)?;
     if !config.enabled {
         return Err(api_error(LiveTvError::Disabled(
-            "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
+            "Live TV is disabled; an administrator can enable it in Settings → Live TV".into(),
         )));
     }
     let window = requested_window(&config, query);
@@ -469,7 +469,7 @@ pub(crate) async fn start_session(
     let config = state.live_tv.config().await.map_err(api_error)?;
     if !config.enabled {
         return Err(api_error(LiveTvError::Disabled(
-            "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
+            "Live TV is disabled; an administrator can enable it in Settings → Live TV".into(),
         )));
     }
     let Json(body) = body.unwrap_or(Json(PublicLiveTvStart {
@@ -613,7 +613,7 @@ async fn live_tv_enabled_config(state: &AppState) -> Result<LiveTvConfig, ApiErr
     let config = state.live_tv.config().await.map_err(api_error)?;
     if !config.enabled {
         return Err(api_error(LiveTvError::Disabled(
-            "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
+            "Live TV is disabled; an administrator can enable it in Settings → Live TV".into(),
         )));
     }
     Ok(config)
@@ -708,7 +708,7 @@ pub(crate) async fn channels(
     let config = state.live_tv.config().await.map_err(api_error)?;
     if !config.enabled {
         return Err(api_error(LiveTvError::Disabled(
-            "Live TV is disabled; an administrator can enable it in Settings → Developer".into(),
+            "Live TV is disabled; an administrator can enable it in Settings → Live TV".into(),
         )));
     }
     let snapshot = owner_snapshot(&state, &config, false, false)
@@ -804,7 +804,7 @@ pub(crate) async fn readiness_for_config(
                 .to_owned()
         } else {
             format!(
-                "Prior owner {} must acknowledge cleanup, or an administrator must stop it and confirm recovery in Developer settings",
+                "Prior owner {} must acknowledge cleanup, or an administrator must stop it and confirm recovery in Live TV settings",
                 config.transition_from_owner_node_id
             )
         },
