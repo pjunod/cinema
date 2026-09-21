@@ -169,7 +169,10 @@ replacement = "one helper and two call sites clamp polling to the already-owned 
 [[symbols]]
 id = "response-media-commit"
 pattern = "\\.commit_media\\("
-expected_occurrences = 2
+# +1 is the rolling-publication regression helper. It uses the production
+# move-only handoff and awaits actor acceptance so legacy fetch-budget tests
+# cannot manufacture a frontier the response path itself would reject.
+expected_occurrences = 3
 kind = "response_admission"
 replacement = "response EOF enters the actor with a move-only RollingMediaCommitHandoff so actor delivery, compatibility frontier, and flow wake settle synchronously; detached HTTP completion owns the bounded call"
 
@@ -234,7 +237,10 @@ pattern = "tokio::time::sleep\\("
 # (capped at 24 attempts) and the copy writer's grant-wait poll; the retired
 # cleanup owner's plain `sleep_until` became a shortenable select, so the net
 # count moves by one.
-expected_occurrences = 44
+# +1 is a test-only 10 ms poll inside a two-second timeout while the real
+# publication worker records low-rate window exhaustion. The worker owns the
+# terminal verdict; the regression only waits for that already-started owner.
+expected_occurrences = 45
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
@@ -1995,7 +2001,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # +2 net for review fixes: the shipped accept loop adds its one-second
 # resource-pressure backoff, and the real logout-fence seam replaces the old
 # dummy sleep while its listener regression adds one bounded response wait.
-expected_occurrences = 819
+# +2 are test-only bounds around low-rate publication-worker settlement: one
+# timeout and its short poll sleep. Both are awaited, own no process, and
+# exercise the production worker's existing failure/retirement authority.
+expected_occurrences = 821
 
 [[module_structures]]
 id = "bare-time-constructor"
