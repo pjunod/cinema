@@ -2,6 +2,7 @@
 """Exercise the shipped web player against a delayed HLS manifest in Chromium."""
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -126,6 +127,92 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(404, b"not found", "text/plain")
 
 
+def add_worker_blocking_csp(page):
+    """Fulfil the shell response with worker-src disabled through CDP."""
+    session = page.context.new_cdp_session(page)
+    session.send("Fetch.enable", {
+        "patterns": [{
+            "urlPattern": "*",
+            "resourceType": "Document",
+            "requestStage": "Response",
+        }],
+    })
+
+    def fulfil(event):
+        request_id = event["requestId"]
+        body = session.send("Fetch.getResponseBody", {"requestId": request_id})
+        raw = body["body"]
+        if not body.get("base64Encoded"):
+            raw = base64.b64encode(raw.encode()).decode()
+        headers = [
+            header for header in event.get("responseHeaders", [])
+            if header["name"].lower() != "content-security-policy"
+        ]
+        headers.append({"name": "Content-Security-Policy", "value": "worker-src 'none'"})
+        session.send("Fetch.fulfillRequest", {
+            "requestId": request_id,
+            "responseCode": event.get("responseStatusCode", 200),
+            "responsePhrase": event.get("responseStatusText", "OK"),
+            "responseHeaders": headers,
+            "body": raw,
+        })
+
+    session.on("Fetch.requestPaused", fulfil)
+    return session
+
+
+def run_case(browser, server, *, block_worker):
+    with server.lock:
+        server.manifest_requests = 0
+    page = browser.new_page()
+    console = []
+    page.on("console", lambda message: console.append(f"{message.type}: {message.text}"))
+    cdp = add_worker_blocking_csp(page) if block_worker else None
+    started_at = None
+    try:
+        page.goto(f"http://127.0.0.1:{server.server_port}/", wait_until="load")
+        page.wait_for_function("() => typeof attachHls === 'function' && window.Hls")
+        started_at = page.evaluate("() => performance.now()")
+        page.evaluate("""
+            () => {
+              Hls.DefaultConfig.debug=true;
+              const video=document.getElementById('video');
+              video.muted=true;
+              PLAYER={method:'transcode',source:{video_codec:'h264'},started:false,
+                wantsPlayback:true,controlIntentGeneration:1,attemptId:'browser-check',
+                bufSegSecs:4,marks:{},abr:{},offset:0,bookOffset:0,mediaAttachment:null};
+              attachHls(video,'/delayed/index.m3u8',0.75);
+            }
+        """)
+        page.wait_for_function(
+            """() => {
+              const video=document.getElementById('video');
+              return PLAYER && PLAYER.hlsStartup &&
+                PLAYER.hlsStartup.dispatches >= 9 && video.currentTime >= 0.5 &&
+                !video.paused && video.readyState >= 2;
+            }""",
+            timeout=TIMEOUT_MS,
+        )
+        result = page.evaluate("""() => ({
+          position:document.getElementById('video').currentTime,
+          readyState:document.getElementById('video').readyState,
+          dispatches:PLAYER.hlsStartup.dispatches,
+          manifestState:PLAYER.hlsStartup.manifestState,
+          retryState:PLAYER.hlsStartup.retry.state,
+          hlsVersion:Hls.version,
+          browser:navigator.userAgent,
+          finishedAt:performance.now(),
+        })""")
+    finally:
+        if cdp:
+            cdp.send("Fetch.disable")
+        page.close()
+    result["first_frame_ms"] = result.pop("finishedAt") - started_at
+    result["manifest_requests"] = server.manifest_requests
+    result["console"] = console
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--browser", default=None)
@@ -142,57 +229,35 @@ def main():
         server = FixtureServer(fixture)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
-        console = []
         try:
             with sync_playwright() as pw:
                 browser = pw.chromium.launch(
                     executable_path=find_browser(args.browser),
                     args=["--no-sandbox", "--disable-dev-shm-usage", "--autoplay-policy=no-user-gesture-required"],
                 )
-                page = browser.new_page()
-                page.on("console", lambda message: console.append(f"{message.type}: {message.text}"))
-                page.goto(f"http://127.0.0.1:{server.server_port}/", wait_until="load")
-                page.wait_for_function("() => typeof attachHls === 'function' && window.Hls")
-                page.evaluate("""
-                    () => {
-                      const video=document.getElementById('video');
-                      video.muted=true;
-                      PLAYER={method:'transcode',source:{video_codec:'h264'},started:false,
-                        wantsPlayback:true,controlIntentGeneration:1,attemptId:'browser-check',
-                        bufSegSecs:4,marks:{},abr:{},offset:0,bookOffset:0,mediaAttachment:null};
-                      attachHls(video,'/delayed/index.m3u8',0.75);
-                    }
-                """)
-                page.wait_for_function(
-                    """() => {
-                      const video=document.getElementById('video');
-                      return PLAYER && PLAYER.hlsStartup &&
-                        PLAYER.hlsStartup.dispatches >= 9 && video.currentTime >= 0.5 &&
-                        !video.paused && video.readyState >= 2;
-                    }""",
-                    timeout=TIMEOUT_MS,
-                )
-                result = page.evaluate("""() => ({
-                  position:document.getElementById('video').currentTime,
-                  readyState:document.getElementById('video').readyState,
-                  dispatches:PLAYER.hlsStartup.dispatches,
-                  manifestState:PLAYER.hlsStartup.manifestState,
-                  retryState:PLAYER.hlsStartup.retry.state,
-                  hlsVersion:Hls.version,
-                  browser:navigator.userAgent,
-                })""")
+                worker = run_case(browser, server, block_worker=False)
+                fallback = run_case(browser, server, block_worker=True)
                 browser.close()
         finally:
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
 
-    if server.manifest_requests < 9 or result["position"] < 0.5:
-        print("FAIL  delayed-manifest recovery did not present at the requested position")
-        print(json.dumps(result, indent=2))
+    for label, result in (("started", worker), ("fallback-inline", fallback)):
+        if result["manifest_requests"] < 9 or result["position"] < 0.5:
+            print(f"FAIL  worker: {label} did not recover and present at the requested position")
+            print(json.dumps(result, indent=2))
+            return 1
+    worker_log = "\n".join(worker["console"])
+    fallback_log = "\n".join(fallback["console"])
+    if "injecting Web Worker" not in worker_log or "fallback to inline" in worker_log:
+        print("FAIL  worker-enabled run did not start the vendored hls.js worker")
         return 1
-    print("PASS  shipped page recovered after the stock manifest ladder and presented media")
-    print(f"      manifest requests: {server.manifest_requests}; first observed position: {result['position']:.3f}s")
+    if "fallback to inline" not in fallback_log:
+        print("FAIL  worker-blocked run did not exercise hls.js inline fallback")
+        return 1
+    print(f"PASS  worker: started; first_frame_ms={worker['first_frame_ms']:.0f}")
+    print(f"PASS  worker: fallback-inline; first_frame_ms={fallback['first_frame_ms']:.0f}")
     print(f"      fixture sha256: {fixture_hash}; hls.js: {result['hlsVersion']}")
     print(f"      browser: {result['browser']}")
     return 0

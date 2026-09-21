@@ -579,7 +579,6 @@ function attachHls(video, playlistUrl, startAt){
       &&!playbackAttemptTerminallyStopped(attachedPlayer,startup.mediaAttachment);
     const StockLoader=Hls.DefaultConfig&&Hls.DefaultConfig.loader;
     const hls=new Hls({
-      enableWorker:false,
       maxBufferLength:tgt.fwd,
       backBufferLength:tgt.back,
       ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
