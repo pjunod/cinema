@@ -256,14 +256,13 @@
     </p>
   </main>
 
+  <script src="ARCHITECTURE-REVIEW-2026-09-20-STATUS.js"></script>
   <script>
     "use strict";
 
     const WORKBOARD = "ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md";
-    const EXPECTED_COLUMNS = [
-      "Id", "Plan", "Executes", "Priority", "Status", "Model", "Session",
-      "Branch / PR", "Last update", "Notes",
-    ];
+    const { EXPECTED_COLUMNS, parseBoard } =
+      globalThis.ArchitectureReviewStatusParser;
     const REFRESH_MS = 60_000;
 
     const state = { rows: [] };
@@ -282,61 +281,12 @@
       tableWrap: document.querySelector("#table-wrap"),
     };
 
-    function splitMarkdownRow(line) {
-      const cells = [];
-      let cell = "";
-      let escaped = false;
-      for (const character of line.trim().slice(1, -1)) {
-        if (escaped) {
-          cell += character;
-          escaped = false;
-        } else if (character === "\\") {
-          escaped = true;
-        } else if (character === "|") {
-          cells.push(cell.trim());
-          cell = "";
-        } else {
-          cell += character;
-        }
-      }
-      cells.push(cell.trim());
-      return cells;
-    }
-
-    function parseBoard(markdown) {
-      const lines = markdown.split(/\r?\n/);
-      const boardHeading = lines.findIndex((line) => line.trim() === "## The board");
-      if (boardHeading < 0) throw new Error("The workboard has no ‘The board’ section.");
-
-      const headerIndex = lines.findIndex(
-        (line, index) => index > boardHeading && line.startsWith("| Id | Plan |"),
-      );
-      if (headerIndex < 0) throw new Error("The workboard table header was not found.");
-
-      const columns = splitMarkdownRow(lines[headerIndex]);
-      if (columns.join("\u0000") !== EXPECTED_COLUMNS.join("\u0000")) {
-        throw new Error("The workboard columns changed; update this view before trusting it.");
-      }
-
-      const rows = [];
-      for (const line of lines.slice(headerIndex + 2)) {
-        if (!line.startsWith("|")) break;
-        const values = splitMarkdownRow(line);
-        if (values.length !== EXPECTED_COLUMNS.length) {
-          throw new Error(`Workboard row has ${values.length} cells instead of ${EXPECTED_COLUMNS.length}.`);
-        }
-        rows.push(Object.fromEntries(EXPECTED_COLUMNS.map((column, index) => [column, values[index]])));
-      }
-      if (!rows.length) throw new Error("The workboard table contains no plans.");
-      return rows;
-    }
-
     function statusGroup(status) {
       const normalized = status.trim().toLowerCase();
       if (normalized === "unclaimed") return "unclaimed";
       if (["claimed", "in-progress", "in-review"].includes(normalized)) return "active";
       if (normalized.startsWith("blocked:")) return "blocked";
-      if (normalized.startsWith("merged:")) return "merged";
+      if (normalized === "merged") return "merged";
       if (normalized === "done") return "done";
       if (normalized.startsWith("abandoned:")) return "abandoned";
       return "active";
@@ -396,7 +346,7 @@
         metric("Unclaimed", counts.unclaimed),
         metric("Active", counts.active),
         metric("Blocked", counts.blocked),
-        metric("Partly merged", counts.merged),
+        metric("Merged", counts.merged),
         metric("Done", counts.done),
         metric("Abandoned", counts.abandoned),
       );
