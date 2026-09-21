@@ -5784,6 +5784,10 @@ mod tests {
             ids,
             vec![
                 "windows_server",
+                // D-01 adds the Android TV display-mode card. Its one row is
+                // advisory and reports `unobservable` on a node with no
+                // display-mode telemetry; the enable switch stays available.
+                "android_display_mode_match",
                 "library_channels",
                 "library_channel_subject_matching",
                 "embedded_semantic_search",
