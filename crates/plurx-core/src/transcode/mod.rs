@@ -2930,6 +2930,9 @@ mod tests {
                 "2",
                 "-b:a",
                 "160k",
+                // S-09 M2 pins every lossy rolling audio output at 48 kHz.
+                "-ar",
+                "48000",
                 "-muxdelay",
                 "0",
                 "-muxpreload",
