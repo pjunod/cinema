@@ -1,6 +1,6 @@
 # Restore VOD steady-play acceptance
 
-**Status:** disabled in CI after a reproducible acceptance failure on
+**Status:** open — disabled in CI after a reproducible acceptance failure on
 2026-08-26; the case and all of its assertions remain in the VOD suite.
 
 ## Paste this into the next implementation session

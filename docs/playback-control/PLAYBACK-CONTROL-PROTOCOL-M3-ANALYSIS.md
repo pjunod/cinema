@@ -1,5 +1,7 @@
 # Playback control protocol M3: analysis control and status
 
+**Status:** built · **Reconciled:** 2026-09-20
+
 This slice implements the operator-facing foundation from
 [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md) §6.6 on
 top of the clustered fragment-index queue. It adds a durable **Analyze now /\

@@ -1,5 +1,7 @@
 # Review — ATSC 1.0 on VideoToolbox, caption-triggered encoder failure
 
+**Status:** done · **Reconciled:** 2026-09-20
+
 **Verified against:** origin/main @ `c9e4edf4` (Forgejo, 2026-09-16 19:36 UTC).
 **Candidate read from:** Paul's working tree at `~/code/plurx`, HEAD `10f2afe6`
 (the doc's stated base) — the only case where the worktree is the source.

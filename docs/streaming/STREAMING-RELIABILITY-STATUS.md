@@ -1,6 +1,7 @@
 # Streaming reliability — review, repair, and promotion status
 
-**Status:** the streaming-reliability continuation reached `main` as
+**Status:** open — continuation merged and default-on activation shipped;
+remaining fleet evidence stays open · **Continuation:** reached `main` as
 `1f6d6645` through [#178](http://forge.lan:3000/noirr/plurx/pulls/178), and
 the default-on activation followed as `7bb7cf6c` through
 [#193](http://forge.lan:3000/noirr/plurx/pulls/193). The server, web, Apple,

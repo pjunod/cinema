@@ -1,5 +1,7 @@
 # Apple client feature parity
 
+**Status:** live · **Reconciled:** 2026-09-20
+
 The web client remains plurx's reference viewer and administration surface.
 The iOS/tvOS app should reach viewer parity without duplicating browser-only
 server administration. This document records the boundary so “parity” means a

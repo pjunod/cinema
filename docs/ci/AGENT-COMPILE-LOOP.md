@@ -1,5 +1,7 @@
 # Agent compile loop — a compiler for a checkout that has none
 
+**Status:** live · **Reconciled:** 2026-09-20
+
 Companion to [DEVELOPMENT_PIPELINE.md](../DEVELOPMENT_PIPELINE.md) (how work is
 branched, gated and qualified) — this is *how to prove a change before pushing
 it at all*, from a session whose checkout has no toolchain.

@@ -1,5 +1,7 @@
 # Architecture review 2026-09-20 — appendix: the nine area reports
 
+**Status:** open · **Reconciled:** 2026-09-20
+
 Companion to ARCHITECTURE-REVIEW-2026-09-20.md (the consolidated, ranked verdict, now at revision 2). Each section below is one reviewer's full report against `main` @ a1414368, unedited except for heading depth. Finding ids (F-<area>-<n>) are the ones the main document and ARCHITECTURE-REVIEW-2026-09-20-ASSESSMENT.md cite. **This appendix is raw material and was not revised**: several remedies in it were withdrawn or corrected by the assessment (B-frames via negative CTS, the auth cache, heartbeat-derived skew, the `NOT EXISTS` search predicate, the `-hls_start_time_offset` option, the frame-rate parser claim, among others). Build from the main document's §0 and the assessment's per-finding verdicts, not from these reports alone.
 
 

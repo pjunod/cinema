@@ -1,6 +1,6 @@
 # Web layout containment — live delivery status
 
-**Status:** live delivery state is recorded on authoritative
+**Status:** open — live delivery state is recorded on authoritative
 [Forgejo PR #4](http://forge.lan:3000/noirr/plurx/pulls/4) ·
 **Updated:** 2026-09-04
 

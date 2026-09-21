@@ -1,6 +1,6 @@
 # M5a — the container-truth check that has to run on real media
 
-**Status:** runnable, never yet run · **Executes:** fable's §7 verification
+**Status:** open — runnable, but physical-media verification has not run · **Executes:** fable's §7 verification
 protocol for the Profile 7 → 8.1 conversion · **Written:** 2026-08-31 ·
 **Revised:** 2026-09-03 · **Blocks:** nothing in CI; it is the last thing
 between PR #716 and confidence

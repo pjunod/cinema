@@ -1,6 +1,6 @@
 # Streaming reliability — remaining-work handoff
 
-**Status:** implementation active; not release-qualified · **Updated:**
+**Status:** open — implementation active; release qualification pending · **Updated:**
 2026-09-04, 21:25 EDT · **Owner:** the next streaming-effort agent
 
 Companion to [STREAMING-RELIABILITY-STATUS.md](STREAMING-RELIABILITY-STATUS.md)

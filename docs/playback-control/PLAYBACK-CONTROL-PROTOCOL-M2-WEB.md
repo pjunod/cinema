@@ -1,5 +1,7 @@
 # Playback control protocol M2: web shadow reporter
 
+**Status:** built · **Reconciled:** 2026-09-20
+
 This slice adds the browser half of M2 from
 [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md). It is a
 passive reporter only: it tells the server what the player is actually doing,

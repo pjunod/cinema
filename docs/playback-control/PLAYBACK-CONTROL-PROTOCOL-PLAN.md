@@ -1,7 +1,7 @@
 # Playback control protocol — explicit demand, one owner, prepared handoffs
 
-**Status:** adversarially reviewed implementation handoff · M1, web M2, M3a,
-and M3b merged · M3c delivery-event ownership in progress · updated
+**Status:** open — M3c delivery-event ownership remains in progress · M1, web
+M2, M3a, and M3b merged · adversarially reviewed · updated
 2026-08-26 against `origin/main` at `5908e838` · wire names, defaults, and
 source locations must be re-verified at build time
 

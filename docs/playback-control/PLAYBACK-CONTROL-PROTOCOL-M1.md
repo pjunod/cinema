@@ -1,5 +1,7 @@
 # Playback control protocol M1
 
+**Status:** built · **Reconciled:** 2026-09-20
+
 M1 establishes the fenced, observable control path described in
 [PLAYBACK-CONTROL-PROTOCOL-PLAN.md](PLAYBACK-CONTROL-PROTOCOL-PLAN.md). It is
 behavior-neutral: the only action is `none`, and a newly accepted exchange

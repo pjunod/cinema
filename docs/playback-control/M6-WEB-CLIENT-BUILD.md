@@ -4,7 +4,7 @@
 > [lifecycle contract](PLAYBACK-LIFECYCLE-IMPLEMENTATION.md) and
 > [status](PLAYBACK-LIFECYCLE-STATUS.md). Qualification evidence is advisory.
 
-**Status:** ready to build · **Executes:** the web half of M6 · **Written:**
+**Status:** superseded 2026-09-12 — retained as the historical web build brief · **Executes:** the web half of M6 · **Written:**
 2026-09-07 · **Baseline:** effort head `e3b11182` on
 `effort/decoder-selection-recovery`
 

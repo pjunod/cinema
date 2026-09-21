@@ -1,6 +1,6 @@
 # Playback capabilities v2 — highest deliverable grade, negotiated not guessed
 
-**Status:** building — M0, M1, M2, M3a–M3d, M4, M5a, M5b and M6 merged;
+**Status:** open — building — M0, M1, M2, M3a–M3d, M4, M5a, M5b and M6 merged;
 M5a is #688 + #716; M5b is #710, merged under a documented owner-approved
 capacity exception after the final arm64 QEMU image build exceeded its
 60-minute guard and the promotion gate failed as designed. M5a's badge remains

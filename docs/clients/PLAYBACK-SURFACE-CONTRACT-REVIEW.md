@@ -1,6 +1,6 @@
 # Playback surface review — recovery authority cannot belong to an overlay
 
-**Status:** reviewed 2026-09-13 · **Reviews:** PR #274 @ c2deda1
+**Status:** done — adversarial review completed 2026-09-13 · **Reviews:** PR #274 @ c2deda1
 
 Reviews [the proposal](PLAYBACK-SURFACE-CONTRACT.md) against its stated
 `10f2afe6` baseline and the branch's shipped source at `c2deda1`. Evidence

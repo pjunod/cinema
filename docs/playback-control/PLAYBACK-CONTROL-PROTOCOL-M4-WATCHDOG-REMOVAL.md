@@ -1,8 +1,10 @@
 # Playback control protocol M4 — one producer deadline
 
-**Status:** implementation contract; copy-lifetime cut frozen at
-PR [#642](https://github.com/pjunod/plurx/pull/642), candidate
-implementation checkpoint `73f04d06c2870dabbea5cf5f45d423937ebc8858`, awaiting final hosted validation
+**Status:** built — M4 baseline merged through PR #641 · **Follow-on:**
+copy-lifetime cut frozen at PR
+[#642](https://github.com/pjunod/plurx/pull/642), candidate implementation
+checkpoint `73f04d06c2870dabbea5cf5f45d423937ebc8858`, awaiting final hosted
+validation
 **Contract baseline:** `9063bb1e` (PR #626)
 **Current merged baseline:** `32af5fa997459174e6b0bfe69bddd72473a1d5f6`
 (PR #641)

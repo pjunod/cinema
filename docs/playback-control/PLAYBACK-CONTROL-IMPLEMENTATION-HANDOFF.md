@@ -1,5 +1,7 @@
 # Playback control rewrite — implementation handoff
 
+**Status:** open · **Reconciled:** 2026-09-20
+
 **Updated:** 2026-08-29
 **Merged baseline:** `origin/main` at
 `32af5fa997459174e6b0bfe69bddd72473a1d5f6`
