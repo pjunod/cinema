@@ -3,7 +3,8 @@
 **Status:** implementation complete in draft PR #407; adversarial review and
 fleet evidence pending · **Executes:** L1 / F-ltv-1 and L10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
-· **Written:** 2026-09-20 · **Implemented against:** `main` @ `94e36750`
+· **Written:** 2026-09-20 · **Started from:** `main` @ `94e36750` ·
+**Revalidated after merging:** `main` @ `882862e8`
 
 **Board:** row on the [work board](../reviews/ARCHITECTURE-REVIEW-2026-09-20-WORKBOARD.md) — claim there before starting; record model and session id there and in the Execution log below.
 
@@ -459,7 +460,7 @@ an unrun observation into a passing result.
 | M2 | `cargo test -p plurxd pump_tuner_fanout`, `cargo test -p plurxd sink` | `make unit` |
 | M3 | `python3 -m pytest tests/operations/test_docs_index.py` | — |
 
-Exact-head branch evidence at `f2127e1a` used Rust 1.97.1:
+Post-base-merge Rust-tree evidence at `da578b7c` used Rust 1.97.1:
 `cargo fmt --all -- --check`, `cargo check -p plurxd --all-targets`, and
 `cargo clippy -p plurxd --all-targets -- -D warnings` are green; the 16-test
 `live_tv::dvr::tests::` module plus the three exact guide-view regressions are
