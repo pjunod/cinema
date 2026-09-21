@@ -152,7 +152,7 @@ document (the twelve written second landed on 2026-09-20 as well).
 | P-01 | [RUST-TEST-EXECUTION-POLICY](../ci/RUST-TEST-EXECUTION-POLICY.md) | §2.2, §4.8 | week | unclaimed | | | | 2026-09-20 | Decision is Paul's (§7.1); the two red tests are not |
 | P-02 | [SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE](../ci/SERVICE-LIMITS-CHILD-PRIORITIES-AND-BUILD-HYGIENE.md) | §4.6 | month | unclaimed | | | | 2026-09-20 | Observe inherited limits first |
 | P-03 | [LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS](../ci/LEDGER-TEXT-CONTRACTS-AND-RELEASE-TAGS.md) | §4.4, §4.5 | month | unclaimed | | | | 2026-09-20 | Two decisions are Paul's; `publish_main` is unreachable on current triggers (blocks M7 behind P-01) |
-| P-04 | [ARCHITECTURE-DOC-RECONCILIATION](../ci/ARCHITECTURE-DOC-RECONCILIATION.md) | §4.7 | week | in-progress | gpt-5.6-sol | agent:/root/p04_builder | [PR #398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | 2026-09-20 | M1-M4 built; focused checks green; ready for one adversarial review |
+| P-04 | [ARCHITECTURE-DOC-RECONCILIATION](../ci/ARCHITECTURE-DOC-RECONCILIATION.md) | §4.7 | week | in-progress | gpt-5.6-sol | agent:/root/p04_builder | [PR #398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | 2026-09-20 | Both adversarial findings addressed: one-plan protocol aligned; 305-row audit now reports zero contradictions, missing headers or unclear statuses; exact-head validation pending |
 
 Not on the board by design: C16 (scratch reservations) belongs to the
 seek-scratch repair effort and is tracked there.

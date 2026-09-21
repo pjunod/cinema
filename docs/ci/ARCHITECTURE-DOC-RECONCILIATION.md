@@ -1,7 +1,8 @@
 # Architecture document reconciliation — make §1–§9 describe the tree it ships with
 
-**Status:** open — M1-M4 implemented in draft PR #398; adversarial review
-pending · **Executes:** §4.7 / F-hist-10 / F-ltv-10 from
+**Status:** open — M1-M4 and both adversarial-review corrections implemented
+in draft PR #398; exact-head validation pending · **Executes:** §4.7 /
+F-hist-10 / F-ltv-10 from
 [ARCHITECTURE-REVIEW-2026-09-20.md](../reviews/ARCHITECTURE-REVIEW-2026-09-20.md)
 · **Written:** 2026-09-20 against `main` @ `0f02b7ea`
 
@@ -530,3 +531,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M2 | `ee72c187` · [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | All eleven checked claims required; retired spellings absent; docs-index test green. Delegated decisions: keep the supported 1-voter path, record the interrupted-activation recovery boot, accepted DVR reversal and maintained fork. |
 | 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M3 | `98c4c750..eda11c85` · [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | 304 indexed status rows scanned; zero contradictions and zero missing Markdown status headers; docs-index and status-claim tests green. Merged milestones remain open where promotion, deployment or physical acceptance is outstanding. |
 | 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | M4 | `a4c21621` · [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | Stale spelt count absent; 65-row scratch rejects all four prose surfaces; both touched Node contracts green. |
+| 2026-09-20 | gpt-5.6-sol | agent:/root/p04_builder | Review corrections | `c1b17959..bab34ba0` · [#398](http://192.168.4.7:3000/noirr/plurx/pulls/398) | P0 accepted: the plan now keeps M1-M4 as logical commits in one plan PR. P1 accepted: all 36 unclear headers were inspected, the additional impossible composites were corrected, and the executable multiline audit reports 305 rows, zero contradictions, zero missing headers and zero unclear rows. |
