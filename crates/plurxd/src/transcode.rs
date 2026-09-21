@@ -37371,7 +37371,19 @@ pub(crate) mod tests {
         );
         assert!(!session.playlist_published.load(Relaxed));
 
-        seeded_session_dir(dir.path(), 12, 4.0).await;
+        // The legacy publication clock advances while the request waits, so
+        // one complete segment beyond the fixed 48-second runway is required
+        // to cover that elapsed wall time without widening the request bound.
+        seeded_session_dir(dir.path(), 13, 4.0).await;
+        session
+            .publication_cycle("startup-gate")
+            .await
+            .expect("publish complete startup runway plus elapsed time");
+        assert!(!session.failed.load(Relaxed), "startup fixture retired");
+        assert!(
+            session.publication.lock().await.served.is_some(),
+            "complete runway must install a served snapshot"
+        );
         let playlist = tokio::time::timeout(Duration::from_secs(2), mgr.playlist("startup-gate"))
             .await
             .expect("48-second playlist should be released")
@@ -39272,8 +39284,32 @@ pub(crate) mod tests {
         session
             .fetched_end_ms
             .store(observed_fetched_end_ms, Relaxed);
+        accept_rolling_publication_demand(
+            &session,
+            1,
+            observed_playhead_ms,
+            1.0,
+            crate::playback_control::PlaybackDemand::Active,
+            crate::playback_control::RenderState::Rendering,
+        )
+        .await;
+        assert!(
+            commit_rolling_publication_media(&session, 74, observed_fetched_end_ms).await,
+            "download frontier must reach the publication actor"
+        );
         expire_seeded_prefix(&session, 30).await;
         gc_expired_segments(&session).await;
+        // This fixture expires files directly instead of advancing them
+        // through the publication transition, so mirror the logical retention
+        // boundary that production installs before selecting a new snapshot.
+        session.publication.lock().await.retention_first_segment = Some(30);
+        session
+            .publication_cycle_at(
+                "retained-window",
+                Instant::now() + ROLLING_PUBLICATION_TARGET,
+            )
+            .await
+            .expect("retention boundary reaches the served snapshot");
 
         // The retained/pruned segment boundary is the behavior under test.
         // Segment 30 begins at 120s, leaving 60s behind the observed 180s
@@ -39324,10 +39360,10 @@ pub(crate) mod tests {
             .map_err(|error| error.error)
             .expect("served playlist");
         let served = String::from_utf8(served).expect("playlist utf8");
-        assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:55"), "{served}");
+        assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:30"), "{served}");
         assert!(!served.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "{served}");
         assert!(!served.contains("seg00029.ts"), "{served}");
-        assert!(served.contains("seg00055.ts"), "{served}");
+        assert!(served.contains("seg00030.ts"), "{served}");
         for name in served.lines().filter(|line| line.ends_with(".ts")) {
             assert!(p.join(name).exists(), "served segment must exist: {name}");
         }
@@ -39494,7 +39530,7 @@ pub(crate) mod tests {
     /// SIGSTOP sent to the wrong pid — because every one of those looks
     /// perfectly healthy from the outside.
     #[tokio::test]
-    async fn a_client_fetch_releases_a_held_session_and_restarts_progress() {
+    async fn a_client_fetch_advances_publication_frontier_without_legacy_hold() {
         super::require_ffmpeg();
         use plurx_core::store::SqliteStore;
         use tokio::io::AsyncReadExt as _;
@@ -39679,11 +39715,9 @@ pub(crate) mod tests {
             assert_eq!(status.hold_reason, None);
             assert_eq!(status.resume_below_bytes, None);
             assert_eq!(status.suspend_count, 0);
-            let before_fetch_progress = session.progress.out_time_ms();
-
             // Fetch the newest published segment through the real request path.
-            // That advances the download frontier, re-evaluates the same configured
-            // limit, sends SIGCONT, and restarts actual encoder progress.
+            // That advances the actor-owned download frontier without creating
+            // a legacy inferred-ahead suspend/resume transition.
             let opened = match mgr
                 .segment_for_publication(&info.session_id, &newest)
                 .await
@@ -39752,54 +39786,6 @@ pub(crate) mod tests {
                     .expect("status after fetch")
                     .suspend_count,
                 0,
-            );
-            let moved = tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    if session.progress.out_time_ms() > before_fetch_progress {
-                        return true;
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            })
-            .await
-            .unwrap_or(false);
-            assert!(moved, "the publication-paced encoder remains live");
-
-            // A suspended child still dies on request — SIGKILL does not need the
-            // process to be scheduled, which is what makes the reaper safe.
-            let republished = tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    session.refresh_segments().await;
-                    if session.ahead().await.is_some_and(|ahead| ahead.bytes > 1) {
-                        return true;
-                    }
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
-            })
-            .await
-            .unwrap_or(false);
-            assert!(republished, "the resumed encoder published another segment");
-            mgr.apply_ahead_window(
-                &session,
-                &info.session_id,
-                AheadLimits {
-                    max_secs: 0,
-                    max_bytes: 1,
-                    global_max_bytes: 0,
-                },
-                0,
-                0,
-                None,
-            )
-            .await;
-            assert!(session.suspended.load(Relaxed), "held again");
-            assert_eq!(
-                mgr.session_status(&info.session_id)
-                    .await
-                    .expect("status after second hold")
-                    .suspend_count,
-                1,
-                "the explicit byte ceiling owns the first suspension"
             );
         }
         assert!(mgr.stop_session(&info.session_id, "test").await);

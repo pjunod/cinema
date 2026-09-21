@@ -20148,10 +20148,9 @@ mod tests {
                 TerminalModelEvent::Publication => {
                     let expected =
                         model.terminal.is_none() && model.producer_attempt == initial_attempt;
-                    let accepted = actor.observe_publication_at(
-                        now,
-                        publication(initial_attempt, true, 1, 4_000, None),
-                    );
+                    let mut observation = publication(initial_attempt, true, 1, 4_000, None);
+                    observation.demand_sequence = actor.accepted_demand_sequence;
+                    let accepted = actor.observe_publication_at(now, observation);
                     assert_eq!(accepted, expected, "order {order:?}");
                     model.playlist_ready |= expected;
                 }

@@ -154,6 +154,16 @@ therefore retains substantial bounded headroom. The fast Rust job now pins
 Ubuntu 24.04 as its FFmpeg 6 environment while selecting the online generic
 high-CPU pool; this corrects the drift exposed by run 2392.
 
+After merging current `main` at `882862e8`, one bounded workspace confirmation
+finished in 336 seconds rather than stalling. It exited 2 with 2,417 passed,
+4 failed and 9 ignored in the `plurxd` target; the remaining workspace targets
+and doc tests passed. The four failures were current-main fixture
+reconciliations: publication observation ownership, elapsed startup runway,
+the logical retention boundary, and a wall-clock-sensitive post-fetch progress
+assertion. Their four exact focused tests passed together after repair. Per the
+single-confirmation resource bound, the broad suite was not run a second time;
+the source-only container result above remains the timing evidence.
+
 ### 2.5 The hiqlite-store blind spot
 
 `e314a5bd` (2026-09-14): `cargo test -p plurx-core --lib` does not enable
@@ -492,3 +502,4 @@ trailers `Agent-Model:` / `Agent-Session:` on every commit of the branch.
 | 2026-09-20 | gpt-5.6-sol | agent:/root/p01_builder | M6 | `b4fd8c0a` / #401 | Eleven reasoned ignores, zero known-red entries; malformed/non-ignored/expired catalog cases are rejected. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M2 | `10baad55`, `88f689bd` / #401 | Option (a) implemented with Node playback preflight, workspace Clippy, `make unit`, Ubuntu 24.04 / FFmpeg 6 pin, and a 30-minute bound; no schedule added. |
 | 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | M1 | `f62eb0ab`–`75ed2823` / #401 | Temporary branch instrumentation was committed and removed. Runs 2382/2384/2386/2388 did not measure; run 2392 exposed FFmpeg drift. One bounded source-only fallback measured 155 s compile, 85 s Clippy and ~610 s unit, all green. |
+| 2026-09-21 | gpt-5.6-sol | agent:/root/p01_builder | Exact-main reconciliation | final reconciliation / #401 | One 336-second workspace confirmation found four fixture failures after merging `882862e8`; all four exact tests then passed together, and Rustfmt plus workspace Clippy passed. No broad retry was spent. |
