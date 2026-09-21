@@ -1,7 +1,7 @@
-# License policy for plurx. Enforced by `make license-check`
-# (`cargo deny check licenses`) so THIRD-PARTY-NOTICES.md cannot drift
-# quietly: a dependency whose license is not on this list fails the check
-# instead of arriving unannounced.
+# Dependency policy for plurx. Enforced by `make license-check`, which runs
+# both `cargo deny check bans` and `cargo deny check licenses`. A dependency
+# whose license is not on the list or whose native TLS stack is forbidden fails
+# the check instead of arriving unannounced.
 #
 # plurx is Apache-2.0. The allow-list is every permissive license already in
 # the resolved graph and nothing else. Copyleft is absent on purpose and is
@@ -39,7 +39,16 @@ allow = [
 confidence-threshold = 0.9
 
 [bans]
-multiple-versions = "allow"   # not a license concern; the gate owns dependency hygiene
+multiple-versions = "allow"   # ecosystem lag is allowed; named native stacks are not
+deny = [
+    # This obsolete copy existed only below the unused cryptr/S3 edge. Pin the
+    # version: aws-lc-sys 0.43 remains until the provider decision has evidence.
+    { crate = "aws-lc-sys:=0.39.1", reason = "obsolete duplicate below the disabled cryptr/S3 edge" },
+    # A second native TLS implementation is a security and build-policy
+    # decision, never an incidental transitive dependency.
+    { crate = "native-tls", use-instead = "rustls" },
+    { crate = "openssl-sys", use-instead = "rustls" },
+]
 
 [advisories]
 # Security advisories are the RustSec job, run separately. This file is

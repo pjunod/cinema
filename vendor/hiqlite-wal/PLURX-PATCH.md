@@ -3,6 +3,16 @@
 This directory is the crates.io `hiqlite-wal` 0.14.0 package, licensed under
 Apache-2.0. Plurx carries three restart-recovery patches for replicated SQLite:
 
+**Owner:** Paul Junod (repository owner). Every repair is a generic bug;
+`pending M6` records the outstanding upstream coordination without inventing a
+public URL.
+
+| # | Patch | Kind | Upstream | Drop condition |
+|---:|---|---|---|---|
+| 1 | Reconstruct missing purge boundary | generic bug | pending M6 | Upstream release derives the boundary from a retained entry above the initial range. |
+| 2 | Atomic `meta.hql` replacement | generic bug | pending M6 | Upstream release syncs and atomically renames same-directory metadata updates. |
+| 3 | WAL incarnation and layout guard | generic bug | pending M6 | Upstream release rejects stale memo/mmap reuse and serializes path reuse with readers. |
+
 - Missing `last_purged_log_id` metadata is reconstructed whenever the first
   retained WAL entry is above the initial log range. Snapshot installation can
   leave entries `10000–19999` in WAL file 1, so the retained entry—not a WAL

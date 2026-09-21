@@ -83,8 +83,11 @@ fmt-check: ## Verify formatting without changing files
 effort-rust-check: fmt-check spike-lock-check ## Compile every Rust target without running the test suite
 	$(CARGO) check --workspace --locked --all-targets
 
-.PHONY: lint
-license-check: ## Fail on any dependency license outside deny.toml's allow-list
+.PHONY: bans-check license-check lint
+bans-check: ## Reject forbidden duplicate crypto versions and native TLS stacks
+	cargo deny check bans
+
+license-check: bans-check ## Enforce dependency bans and the license allow-list
 	cargo deny check licenses
 
 lint: ## Clippy across the workspace, warnings are errors
