@@ -3,7 +3,8 @@ use std::sync::Arc;
 
 use super::{
     inspection_to_store, OpticalDriveManager, OpticalDriveSnapshot, OpticalHostAdapter,
-    OpticalHostError, OpticalLifecycleError, OpticalMediaPresence, OpticalReadPermit,
+    OpticalHostError, OpticalLifecycleError, OpticalMediaPresence, OpticalPlaybackClaim,
+    OpticalReadPermit,
 };
 use super::{OpticalTitle, PlaybackSourceRef, ResolvedInput};
 use crate::config::OpticalDriveConfig;
@@ -44,6 +45,17 @@ pub struct OpticalPlaybackLease {
     pub source: PlaybackSourceRef,
     pub input: ResolvedInput,
     pub permit: OpticalReadPermit,
+}
+
+impl OpticalPlaybackLease {
+    pub fn is_current(&self) -> bool {
+        self.permit.is_current()
+    }
+}
+
+pub enum OpticalTitleClaim {
+    Claimed(OpticalPlaybackLease),
+    Replay { session_id: String },
 }
 
 impl<S, H> OpticalService<S, H>
@@ -207,6 +219,33 @@ where
         angle: u32,
         session_id: &str,
     ) -> Result<OpticalPlaybackLease, OpticalServiceError> {
+        match self.claim_playback_title_request(
+            drive_id,
+            expected_generation,
+            expected_disc_id,
+            title,
+            angle,
+            session_id,
+            session_id,
+            session_id,
+        )? {
+            OpticalTitleClaim::Claimed(lease) => Ok(lease),
+            OpticalTitleClaim::Replay { .. } => Err(OpticalLifecycleError::Busy.into()),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_playback_title_request(
+        &self,
+        drive_id: &str,
+        expected_generation: &str,
+        expected_disc_id: &str,
+        title: &OpticalTitle,
+        angle: u32,
+        session_id: &str,
+        request_id: &str,
+        request_digest: &str,
+    ) -> Result<OpticalTitleClaim, OpticalServiceError> {
         if title.disc_id != expected_disc_id || angle == 0 || angle > title.angles {
             return Err(OpticalLifecycleError::InvalidIdentity.into());
         }
@@ -214,21 +253,29 @@ where
             .drives
             .get(drive_id)
             .ok_or(OpticalServiceError::UnknownDrive)?;
-        let permit = self.claim_playback(
+        let permit = self.manager.claim_playback_request(
             drive_id,
             expected_generation,
             expected_disc_id,
             &title.title_id,
             session_id,
+            request_id,
+            request_digest,
         )?;
+        let permit = match permit {
+            OpticalPlaybackClaim::Claimed(permit) => permit,
+            OpticalPlaybackClaim::Replay { session_id } => {
+                return Ok(OpticalTitleClaim::Replay { session_id })
+            }
+        };
         let source =
             permit.playback_source(expected_disc_id.to_owned(), title.title_id.clone(), angle)?;
         let input = self.host.resolve_input(drive, title.locator, angle)?;
-        Ok(OpticalPlaybackLease {
+        Ok(OpticalTitleClaim::Claimed(OpticalPlaybackLease {
             source,
             input,
             permit,
-        })
+        }))
     }
 
     /// Execute a previously authenticated/authorized eject against the exact

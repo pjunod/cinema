@@ -15173,7 +15173,7 @@ mod tests {
             http_wait_segment: None,
             status_generated_unix_ms: crate::media_sessions::unix_ms(),
             id: "vod-session".to_owned(),
-            file_id: 7,
+            file_id: Some(7),
             target_height: 1080,
             encoder: "vod",
             playlist_shape: "vod",

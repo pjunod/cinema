@@ -27,9 +27,9 @@ pub use inspector::{
 };
 pub use lifecycle::{
     OpticalDriveManager, OpticalDriveSnapshot, OpticalDriveState, OpticalLifecycleError,
-    OpticalReadPermit,
+    OpticalPlaybackClaim, OpticalReadPermit,
 };
-pub use service::{OpticalPlaybackLease, OpticalService, OpticalServiceError};
+pub use service::{OpticalPlaybackLease, OpticalService, OpticalServiceError, OpticalTitleClaim};
 pub use session::{
     optical_output_identity, DurableOpticalSessionSource, OpticalSessionPayloadError,
     OPTICAL_SESSION_PAYLOAD_V1,

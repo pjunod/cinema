@@ -10821,6 +10821,20 @@ pub struct SessionRequest {
     pub transport: Option<String>,
 }
 
+/// Normalized start intent for a path-free optical title. This is separate
+/// from `SessionRequest` because that legacy mixed-version envelope requires
+/// a real `file_id` and denies unknown fields.
+#[derive(Debug, Clone)]
+pub(crate) struct OpticalSessionRequest {
+    pub playback_id: String,
+    pub start_seconds: f64,
+    pub target_height: i64,
+    pub audio_index: Option<i64>,
+    pub subtitle_burn: Option<i64>,
+    pub audio_offset_ms: i64,
+    pub block_budget_secs: Option<f64>,
+}
+
 /// How long a retired presentation is kept readable after the exact viewer
 /// releases it.
 ///
@@ -14775,6 +14789,83 @@ impl TranscodeManager {
             restrictions,
         )
         .map_err(|error| format!("decoder plan refused: {error}"))
+    }
+
+    /// Resolve an optical title from bounded inspection evidence without
+    /// manufacturing a `MediaFile`. The managed identity participates in the
+    /// decode cache and the resulting artifact name; the local device path is
+    /// execution state only.
+    fn resolve_managed_movie_plan(
+        &self,
+        source_identity: &str,
+        source: &plurx_core::playback::PlaybackMediaFacts,
+        probe_json: &str,
+        options: &TranscodeOptions,
+        encoder: Encoder,
+    ) -> Result<ResolvedTranscode, String> {
+        let probe: serde_json::Value = serde_json::from_str(probe_json)
+            .map_err(|error| format!("optical decoder facts are invalid JSON: {error}"))?;
+        let absolute_index = crate::decode_facts::absolute_video_ordinal(&probe, 0)
+            .ok_or_else(|| "optical decoder facts name no video stream".to_owned())?;
+        let digest = hex::encode(Sha256::digest(source_identity.as_bytes()));
+        let observed = DecodeSourceIdentity::from_sha256(digest)
+            .map_err(|error| format!("optical source identity is invalid: {error}"))?;
+        let catalog = DecodeCatalogMetadata::from_playback_facts(source)
+            .map_err(|error| format!("optical decoder catalog facts are invalid: {error}"))?;
+        let facts = crate::decode_facts::legacy_ordinal_facts(
+            &probe,
+            observed,
+            absolute_index,
+            Some(&catalog),
+        )
+        .map_err(|error| format!("optical decoder facts are incompatible: {error}"))?;
+        let build = self
+            .cache
+            .as_ref()
+            .map_or("unconfigured-ffmpeg", |cache| cache.ffmpeg_build.as_str());
+        let identity = DecodeCapabilitySnapshotIdentity::new(
+            hex::encode(Sha256::digest(build.as_bytes())),
+            "legacy-unqualified-node".to_owned(),
+            None,
+        )
+        .map_err(|error| error.to_string())?;
+        #[allow(unused_mut)]
+        let mut decoders = self.decoders.clone();
+        #[cfg(test)]
+        if decoders.is_empty() {
+            if let Some(codec) = facts.codec() {
+                decoders.push(codec.to_owned());
+            }
+        }
+        let capabilities = DecodeCapabilities::new(
+            identity,
+            Vec::new(),
+            decoders
+                .into_iter()
+                .map(|codec| SoftwareDecoder {
+                    implementation: None,
+                    codec,
+                })
+                .collect(),
+        )
+        .map_err(|error| format!("decoder capability snapshot is invalid: {error}"))?;
+        let compatibility = std::env::var("PLURX_HWDECODE").ok();
+        let policy = DecodePolicySnapshot::new(DecodePlanPolicy::Legacy, compatibility.as_deref());
+        transcode::resolve_transcode(
+            &TranscodeRequest::new(
+                encoder,
+                TranscodeMediaOptions::from_playback_facts(
+                    source,
+                    options,
+                    DecodeCacheIdentity::from_managed_source(source_identity),
+                ),
+            ),
+            &facts,
+            &capabilities,
+            &policy,
+            &AttemptRestrictions::none(),
+        )
+        .map_err(|error| format!("optical decoder plan refused: {error}"))
     }
 
     async fn resolve_bound_movie_plan(
@@ -18878,6 +18969,214 @@ impl TranscodeManager {
         }
     }
 
+    async fn prepare_optical_vod_encoding(
+        &self,
+        request: &OpticalSessionRequest,
+        source: &plurx_core::optical::PlaybackSourceRef,
+        facts: &plurx_core::playback::PlaybackMediaFacts,
+        input: &plurx_core::optical::ResolvedInput,
+        probe_json: &str,
+    ) -> Result<Arc<crate::vodencode::Encoding>, String> {
+        let source_height = facts.height.filter(|height| *height >= 2).ok_or_else(|| {
+            vod_refusal_error(
+                "vod_video_geometry_unknown",
+                "the optical title has no usable video height",
+            )
+        })?;
+        let target_height = request.target_height.min(source_height).max(2) & !1;
+        if transcode::output_size_for_dimensions(
+            facts.width.unwrap_or(0),
+            source_height,
+            target_height,
+        )
+        .is_none()
+        {
+            return Err(vod_refusal_error(
+                "vod_video_geometry_unknown",
+                "the optical title has no usable video dimensions",
+            ));
+        }
+        if request
+            .audio_index
+            .is_some_and(|index| index < 0 || index as usize >= facts.audio_streams.len())
+        {
+            return Err(vod_refusal_error(
+                "vod_audio_track_missing",
+                "the requested optical audio track does not exist",
+            ));
+        }
+        let subtitle_burn = request
+            .subtitle_burn
+            .map(|index| {
+                let stream = usize::try_from(index)
+                    .ok()
+                    .and_then(|index| facts.subtitle_streams.get(index))
+                    .ok_or_else(|| {
+                        vod_refusal_error(
+                            "vod_subtitle_track_missing",
+                            "the requested optical subtitle track does not exist",
+                        )
+                    })?;
+                Ok::<_, String>(plurx_core::transcode::SubtitleBurn {
+                    subtitle_index: index,
+                    bitmap: plurx_core::tracks::is_bitmap_subtitle(&stream.codec),
+                })
+            })
+            .transpose()?;
+        if let Some(burn) = &subtitle_burn {
+            if let Some(reason) = crate::pipeprobe::burn_filters().await.refusal(burn.bitmap) {
+                return Err(unsupported_build_error(reason));
+            }
+        }
+        let grid = crate::vodencode::frame_grid(Some(probe_json)).ok_or_else(|| {
+            vod_refusal_error(
+                "vod_frame_cadence_unknown",
+                "the optical title probe has no usable video cadence",
+            )
+        })?;
+        let encoder = self.encoder().await;
+        let workload = Workload::of_playback_facts(facts, target_height);
+        let software_threads = workload
+            .software_threads()
+            .min(self.software_budget().await)
+            .max(1) as u32;
+        let options = TranscodeOptions {
+            target_height,
+            software_threads: Some(software_threads),
+            video_bitrate_kbps: bitrate_for_height(target_height),
+            effective_rate_control: self.effective_rate_control(encoder),
+            audio_index: request.audio_index,
+            start_seconds: 0.0,
+            tone_map: tone_map_pref(),
+            pipeline: Pipeline::Cpu,
+            subtitle_burn,
+            subtitle_file: None,
+            force_idr: self.caps.forced_idr.wanted_by(encoder),
+            ..TranscodeOptions::default()
+        };
+        let source_identity = serde_json::to_string(source).map_err(|error| {
+            start_infrastructure_error(format!("serializing optical source: {error}"))
+        })?;
+        let plan = self.resolve_managed_movie_plan(
+            &source_identity,
+            facts,
+            probe_json,
+            &options,
+            encoder,
+        )?;
+        let resources = TranscodeResourceEstimate::of(&plan, &workload);
+        let version = format!(
+            "optical-v1:{}",
+            hex::encode(Sha256::digest(source_identity.as_bytes()))
+        );
+        let engine = crate::ffmpeg::EncodedEngine::capture(
+            options
+                .subtitle_burn
+                .as_ref()
+                .is_some_and(|burn| !burn.bitmap),
+        )
+        .await
+        .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?;
+        Ok(Arc::new(crate::vodencode::Encoding {
+            source_object_version: version,
+            source_input: Some(input.clone()),
+            plan,
+            resources,
+            options,
+            grid,
+            subtitle: None,
+            subtitle_digest: None,
+            ffmpeg_build: crate::ffmpeg::ffmpeg_build().await,
+            executable: crate::ffmpeg::EncodedExecutable::capture()
+                .await
+                .map_err(|error| vod_refusal_error("vod_engine_unattested", error))?,
+            engine,
+            admissions: self.admissions.clone(),
+            store: Arc::clone(&self.store),
+            speculative: std::sync::atomic::AtomicBool::new(false),
+            queued: std::sync::Mutex::new(None),
+            policy_retry: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            admission_pause: std::sync::Mutex::new(None),
+        }))
+    }
+
+    /// Start an optical title on its owner node through the existing immutable
+    /// VOD controller. The already-claimed lease is consumed by the exact
+    /// session attachment or dropped on every refusal.
+    pub(crate) async fn start_optical_vod(
+        &self,
+        request: OpticalSessionRequest,
+        mut facts: plurx_core::playback::PlaybackMediaFacts,
+        probe_json: String,
+        lease: plurx_core::optical::OpticalPlaybackLease,
+        user_name: &str,
+        supersession_user: &str,
+        item_title: &str,
+        session_id: String,
+    ) -> Result<StartInfo, String> {
+        let Some(settings) = self.vod_settings(request.block_budget_secs).await? else {
+            return Err(vod_refusal_error(
+                "vod_disabled",
+                "VOD session creation is disabled on this server",
+            ));
+        };
+        facts.audio_offset_ms = if facts.audio_streams.is_empty() {
+            0
+        } else {
+            request.audio_offset_ms.clamp(-15_000, 15_000)
+        };
+        let encoding = self
+            .prepare_optical_vod_encoding(
+                &request,
+                &lease.source,
+                &facts,
+                &lease.input,
+                &probe_json,
+            )
+            .await?;
+        self.reap_superseded_before(None, supersession_user, &request.playback_id)
+            .await?;
+        let target_height = encoding.options.target_height;
+        let encoder = encoding.plan.encoder().label();
+        let start = self
+            .vod
+            .try_create_optical(
+                crate::vodserve::OpticalVodRecipeRequest {
+                    playback_id: &request.playback_id,
+                    start_seconds: request.start_seconds,
+                    audio_index: request.audio_index,
+                    encoding,
+                },
+                facts,
+                probe_json,
+                lease,
+                &settings,
+                crate::vodserve::VodAttribution {
+                    user_name,
+                    item_title,
+                    supersession_user,
+                },
+                session_id,
+            )
+            .await?;
+        Ok(StartInfo {
+            playlist_url: format!("/api/v1/hls/{}/index.m3u8", start.session_id),
+            session_id: start.session_id,
+            duration_ms: Some(start.duration_ms),
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            target_height,
+            kind: SessionKind::Transcode {
+                height: target_height,
+            },
+            encoder,
+            grade: OutputGrade::Sdr,
+            vod: true,
+            control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+        })
+    }
+
     /// Freeze an executable encoded recipe before any rendition is named.
     /// Copy remains index-driven; selecting burn pixels requires an encoder
     /// even when the incoming request otherwise asks for source quality.
@@ -19177,7 +19476,7 @@ impl TranscodeManager {
                 "this session must be reopened as a new VOD handle after owner takeover",
             ));
         }
-        let Some(settings) = self.vod_settings(req).await? else {
+        let Some(settings) = self.vod_settings(req.block_budget_secs).await? else {
             return Err(vod_refusal_error(
                 "vod_disabled",
                 "VOD session creation is disabled on this server",
@@ -19295,7 +19594,7 @@ impl TranscodeManager {
     /// it through the removed live presentation.
     async fn vod_settings(
         &self,
-        req: &SessionRequest,
+        requested_block_budget_secs: Option<f64>,
     ) -> Result<Option<crate::vodserve::VodSettings>, String> {
         let read = |key: &'static str| {
             let store = Arc::clone(&self.store);
@@ -19349,8 +19648,7 @@ impl TranscodeManager {
                 .unwrap_or(DEFAULT_BLOCK_BUDGET_SECS),
             None => DEFAULT_BLOCK_BUDGET_SECS,
         };
-        let block_secs = req
-            .block_budget_secs
+        let block_secs = requested_block_budget_secs
             .filter(|s| s.is_finite() && *s > 0.0)
             .map(|s| s.min(server_cap))
             .unwrap_or(server_cap);
@@ -19475,7 +19773,7 @@ impl TranscodeManager {
         let MediaResponseOwnerKind::Vod(owner) = &owner.0 else {
             return None;
         };
-        Some(self.vod.response_owner_file(owner))
+        self.vod.response_owner_file(owner)
     }
 
     /// Live (un-tombstoned) VOD session ids, for operator surfaces.
@@ -19524,7 +19822,7 @@ impl TranscodeManager {
             if req.presentation != Presentation::Vod {
                 return false;
             }
-            let Ok(Some(settings)) = self.vod_settings(&req).await else {
+            let Ok(Some(settings)) = self.vod_settings(req.block_budget_secs).await else {
                 return false;
             };
             let Ok(Some(mut file)) = self.store.get_file(req.file_id).await else {
@@ -19870,6 +20168,15 @@ impl TranscodeManager {
             vod: session.cached,
             control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
         })
+    }
+
+    pub(crate) async fn recover_optical_vod(&self, session_id: &str) -> Option<StartInfo> {
+        let recovered = self.recover(session_id).await?;
+        self.vod
+            .session_file_id(session_id)
+            .await
+            .is_none()
+            .then_some(recovered)
     }
 
     /// A numeric setting, or its default when unset or unparseable.
@@ -29978,7 +30285,7 @@ pub(crate) mod tests {
             let req = req.clone();
             async move {
                 manager
-                    .vod_settings(&req)
+                    .vod_settings(req.block_budget_secs)
                     .await
                     .expect("settings read")
                     .expect("VOD presentation is on")

@@ -17,6 +17,7 @@ use plurx_core::optical::{
 use plurx_core::playback::{self, Decision, DeviceCaps, Force};
 use plurx_core::store::{keys, stored_switch};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::error::ApiError;
 use super::extract::{AdminUser, AuthUser};
@@ -38,6 +39,10 @@ pub(crate) fn router() -> Router<AppState> {
         .route(
             "/drives/{drive_id}/titles/{title_id}/decision",
             post(decision),
+        )
+        .route(
+            "/drives/{drive_id}/titles/{title_id}/sessions",
+            post(start_session),
         )
         .route("/drives/{drive_id}/eject", post(eject))
         .route("/discs/{disc_id}/titles/{title_id}", get(title_detail))
@@ -93,7 +98,7 @@ struct TitleDetailDto {
     progress: Option<OpticalProgress>,
 }
 
-#[derive(Deserialize)]
+#[derive(Serialize, Deserialize)]
 struct TitleQuery {
     #[serde(default = "default_angle")]
     angle: u32,
@@ -511,6 +516,25 @@ struct OpticalDecisionResponse {
     decision: Decision,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpticalSessionRequest {
+    expected_disc_id: String,
+    media_generation: String,
+    #[serde(default = "default_angle")]
+    angle: u32,
+    playback_id: String,
+    request_id: String,
+    #[serde(default)]
+    start: f64,
+    height: Option<i64>,
+    audio: Option<i64>,
+    subtitle_burn: Option<i64>,
+    audio_offset_ms: Option<i64>,
+    block_budget_secs: Option<f64>,
+    caps: DeviceCaps,
+}
+
 async fn decision(
     AuthUser(user): AuthUser,
     State(state): State<AppState>,
@@ -607,6 +631,172 @@ async fn local_decision(
         source,
         decision: plan,
     })
+}
+
+async fn start_session(
+    AuthUser(user): AuthUser,
+    State(state): State<AppState>,
+    Path((drive_id, title_id)): Path<(String, String)>,
+    Json(request): Json<OpticalSessionRequest>,
+) -> Result<Json<super::hls::StartResponse>, ApiError> {
+    authorize_play(&state, user.id).await?;
+    require_enabled(&state).await?;
+    if request.playback_id.is_empty()
+        || request.playback_id.len() > 256
+        || request.request_id.is_empty()
+        || request.request_id.len() > 256
+        || !request.start.is_finite()
+        || request.start < 0.0
+        || request.angle == 0
+    {
+        return Err(ApiError::BadRequest(
+            "invalid optical session identity or timeline".to_owned(),
+        ));
+    }
+    if request.caps.v != DeviceCaps::VERSION {
+        return Err(ApiError::typed(
+            StatusCode::BAD_REQUEST,
+            "invalid_capabilities",
+            format!(
+                "capabilities document version {} is not supported",
+                request.caps.v
+            ),
+        ));
+    }
+    let drive_id =
+        match drive_target(&state, &drive_id).await? {
+            DriveTarget::Local(drive_id) => drive_id,
+            DriveTarget::Remote { .. } => return Err(ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "optical_owner_unavailable",
+                "optical session start must currently reach the advertised drive owner directly",
+            )),
+        };
+    let snapshot = state
+        .optical
+        .manager()
+        .snapshot(&drive_id)
+        .ok_or(ApiError::NotFound("drive"))?;
+    validate_ready_insertion(
+        &snapshot.state,
+        &request.media_generation,
+        &request.expected_disc_id,
+    )?;
+    let title = state
+        .store
+        .optical_title(&request.expected_disc_id, &title_id)
+        .await?
+        .ok_or(ApiError::NotFound("title"))?;
+    if request.angle > title.angles {
+        return Err(ApiError::BadRequest(
+            "angle is not available for this title".to_owned(),
+        ));
+    }
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let mut request_hash = Sha256::new();
+    request_hash.update(user.id.to_le_bytes());
+    request_hash.update(
+        serde_json::to_vec(&request).map_err(|error| ApiError::Internal(error.to_string()))?,
+    );
+    let request_digest = hex::encode(request_hash.finalize());
+    let claim = state
+        .optical
+        .claim_playback_title_request(
+            &drive_id,
+            &request.media_generation,
+            &request.expected_disc_id,
+            &title,
+            request.angle,
+            &session_id,
+            &request.request_id,
+            &request_digest,
+        )
+        .map_err(service_error)?;
+    let source_height = title.facts.height;
+    if let plurx_core::optical::OpticalTitleClaim::Replay { session_id } = claim {
+        let info = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(info) = state.transcode.recover_optical_vod(&session_id).await {
+                    return info;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .map_err(|_| {
+            ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "optical_drive_busy",
+                "the matching optical session is still preparing",
+            )
+        })?;
+        return Ok(Json(optical_start_response(info, source_height)));
+    }
+    let plurx_core::optical::OpticalTitleClaim::Claimed(lease) = claim else {
+        unreachable!("replay returned above")
+    };
+    let requested_height = request
+        .height
+        .unwrap_or_else(|| source_height.unwrap_or(1080));
+    if requested_height < 2 {
+        return Err(ApiError::BadRequest(
+            "height must be at least two".to_owned(),
+        ));
+    }
+    let supersession_user = serde_json::json!(["user_id", user.id]).to_string();
+    let item_title = state
+        .store
+        .optical_disc(&request.expected_disc_id)
+        .await?
+        .and_then(|disc| disc.display_title.or(disc.volume_label))
+        .unwrap_or_else(|| title.title_id.clone());
+    let info = state
+        .transcode
+        .start_optical_vod(
+            crate::transcode::OpticalSessionRequest {
+                playback_id: request.playback_id,
+                start_seconds: request.start,
+                target_height: requested_height,
+                audio_index: request.audio.filter(|index| *index >= 0),
+                subtitle_burn: request.subtitle_burn.filter(|index| *index >= 0),
+                audio_offset_ms: request.audio_offset_ms.unwrap_or(0),
+                block_budget_secs: request
+                    .block_budget_secs
+                    .filter(|seconds| seconds.is_finite() && *seconds > 0.0),
+            },
+            title.facts,
+            title.probe_json,
+            lease,
+            &user.username,
+            &supersession_user,
+            &item_title,
+            session_id,
+        )
+        .await
+        .map_err(optical_start_error)?;
+    Ok(Json(optical_start_response(info, source_height)))
+}
+
+fn optical_start_response(
+    info: crate::transcode::StartInfo,
+    source_height: Option<i64>,
+) -> super::hls::StartResponse {
+    super::hls::StartResponse {
+        session_id: info.session_id,
+        playlist_url: info.playlist_url,
+        duration_ms: info.duration_ms,
+        start_seconds: info.start_seconds,
+        media_origin_ms: Some((info.media_origin_seconds * 1000.0).round() as i64),
+        height: info.target_height,
+        encoder: info.encoder.to_owned(),
+        vod: info.vod,
+        ladder: crate::transcode::advertised_ladder(source_height, info.target_height),
+        prior_kbps: None,
+        delivered_dynamic_range: Some("sdr".to_owned()),
+        delivered_dolby_vision_profile: None,
+        control: None,
+        plan_notes: vec!["managed optical source: encoded VOD".to_owned()],
+    }
 }
 
 fn validate_ready_insertion(
@@ -945,11 +1135,39 @@ fn optical_conflict(code: &'static str, message: &'static str) -> ApiError {
     ApiError::typed(StatusCode::CONFLICT, code, message)
 }
 
+fn optical_start_error(error: String) -> ApiError {
+    if let Some((code, message)) = crate::transcode::vod_refusal(&error) {
+        let (status, code) = match code {
+            "optical_request_conflict" => (StatusCode::CONFLICT, "optical_request_conflict"),
+            "vod_audio_track_missing" | "vod_subtitle_track_missing" | "vod_invalid_height" => {
+                (StatusCode::BAD_REQUEST, "optical_selection_invalid")
+            }
+            "vod_source_unsupported"
+            | "vod_video_geometry_unknown"
+            | "vod_frame_cadence_unknown" => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "optical_format_unsupported",
+            ),
+            _ => (StatusCode::SERVICE_UNAVAILABLE, "optical_read_failed"),
+        };
+        return ApiError::typed(status, code, message.to_owned());
+    }
+    ApiError::typed(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "optical_read_failed",
+        error,
+    )
+}
+
 fn lifecycle_error(error: OpticalLifecycleError) -> ApiError {
     match error {
         OpticalLifecycleError::Busy => {
             optical_conflict("optical_drive_busy", "the optical drive is in use")
         }
+        OpticalLifecycleError::RequestConflict => optical_conflict(
+            "optical_request_conflict",
+            "the optical request id was reused with a different payload",
+        ),
         OpticalLifecycleError::StaleGeneration | OpticalLifecycleError::StaleDisc => {
             optical_conflict(
                 "optical_media_changed",

@@ -508,7 +508,7 @@ async fn encoded_vod_held_capacity_keeps_cached_gets_open_and_rechecks_seek_afte
             "held-admission",
             None,
             Recipe {
-                file,
+                source: RecipeSource::File(file),
                 audio_index: None,
                 aac: true,
                 video: CopyVideoOptions::new(false, false),

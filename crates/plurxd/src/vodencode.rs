@@ -3,6 +3,8 @@
 use std::sync::{Arc, Mutex};
 
 use plurx_core::domain::MediaFile;
+use plurx_core::optical::{PlaybackSourceRef, ResolvedInput};
+use plurx_core::playback::PlaybackMediaFacts;
 use plurx_core::segplan::SourceIdentity;
 use plurx_core::transcode::{
     vod_pipe_args, Pacing, ResolvedTranscode, TranscodeExecution, TranscodeOptions, VodFrameGrid,
@@ -178,6 +180,27 @@ impl Encoding {
         vod_pipe_args(&self.plan, &execution, self.grid, duration_seconds)
     }
 
+    /// Build an encoded VOD generation for a managed source without creating
+    /// a fictitious catalog file. The frozen recipe already owns its typed
+    /// input; playback facts influenced semantic planning, not argv lowering.
+    pub fn managed_args(
+        &self,
+        input: &ResolvedInput,
+        start_seconds: f64,
+        duration_seconds: f64,
+    ) -> Vec<String> {
+        let mut options = self.options.clone();
+        options.start_seconds = start_seconds;
+        let execution = TranscodeExecution::from_resolved_input(
+            input.clone(),
+            &options,
+            Pacing::unpaced(),
+            ".",
+        )
+        .expect("frozen managed VOD execution remains valid");
+        vod_pipe_args(&self.plan, &execution, self.grid, duration_seconds)
+    }
+
     pub fn identity(&self, file: &MediaFile, duration_seconds: f64) -> SourceIdentity {
         let mut hash = Sha256::new();
         hash.update(b"immutable-vod-encoded-v1\0");
@@ -205,6 +228,72 @@ impl Encoding {
             file.mtime,
             hex::encode(hash.finalize()),
         )
+    }
+
+    /// Identity for a managed optical title. Paths are intentionally removed
+    /// before argv is hashed: owner configuration may remount the same
+    /// insertion elsewhere, while the path-free source reference and typed
+    /// locator remain the durable cache namespace.
+    pub fn managed_identity(
+        &self,
+        source: &PlaybackSourceRef,
+        facts: &PlaybackMediaFacts,
+        input: &ResolvedInput,
+        probe_json: &str,
+        duration_seconds: f64,
+    ) -> SourceIdentity {
+        let mut hash = Sha256::new();
+        hash.update(b"immutable-vod-managed-v1\0");
+        let source = serde_json::to_vec(source).expect("validated playback source serializes");
+        hash.update((source.len() as u64).to_le_bytes());
+        hash.update(source);
+        hash.update(self.source_object_version.as_bytes());
+        hash.update(self.ffmpeg_build.as_bytes());
+        hash.update(self.executable.digest.as_bytes());
+        hash.update(self.engine.digest.as_bytes());
+        hash.update(self.plan.plan_digest().as_bytes());
+        let redacted = match input {
+            ResolvedInput::File { .. } => {
+                panic!("managed VOD encoding cannot carry a regular file input")
+            }
+            ResolvedInput::Dvd {
+                title_number,
+                angle,
+                ..
+            } => ResolvedInput::Dvd {
+                path: "<optical>".into(),
+                title_number: *title_number,
+                angle: *angle,
+            },
+            ResolvedInput::Bluray {
+                playlist_number,
+                angle,
+                ..
+            } => ResolvedInput::Bluray {
+                path: "<optical>".into(),
+                playlist_number: *playlist_number,
+                angle: *angle,
+            },
+        };
+        let mut options = self.options.clone();
+        options.start_seconds = 0.0;
+        let execution =
+            TranscodeExecution::from_resolved_input(redacted, &options, Pacing::unpaced(), ".")
+                .expect("redacted managed input remains structurally valid");
+        for argument in vod_pipe_args(&self.plan, &execution, self.grid, duration_seconds) {
+            hash.update((argument.len() as u64).to_le_bytes());
+            hash.update(argument.as_bytes());
+        }
+        hash.update(facts.audio_offset_ms.to_le_bytes());
+        hash.update(Sha256::digest(probe_json.as_bytes()));
+        if let Some(burn) = &self.options.subtitle_burn {
+            hash.update(burn.subtitle_index.to_le_bytes());
+            hash.update([u8::from(burn.bitmap)]);
+        }
+        if let Some(digest) = &self.subtitle_digest {
+            hash.update(digest.as_bytes());
+        }
+        SourceIdentity::new(0, 0, hex::encode(hash.finalize()))
     }
 }
 

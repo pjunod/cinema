@@ -733,6 +733,18 @@ impl<'a> Workload<'a> {
         }
     }
 
+    pub fn of_playback_facts(
+        facts: &'a plurx_core::playback::PlaybackMediaFacts,
+        target_height: i64,
+    ) -> Workload<'a> {
+        Workload {
+            source_height: facts.height.unwrap_or(0),
+            codec: facts.video_codec.as_deref().unwrap_or("?"),
+            hdr: facts.hdr.as_deref(),
+            target_height,
+        }
+    }
+
     /// The bucket this session's speed is remembered under, on `encoder`.
     ///
     /// Two things are deliberately in the key.

@@ -47,6 +47,8 @@ pub enum OpticalLifecycleError {
     Empty,
     #[error("optical drive is already in use")]
     Busy,
+    #[error("optical request id was reused with a different payload")]
+    RequestConflict,
     #[error("optical drive is not ready")]
     NotReady,
     #[error("the selected optical disc is no longer present")]
@@ -66,6 +68,13 @@ struct ActiveReader {
     lease_id: u64,
     generation: String,
     kind: ReaderKind,
+    request_id: Option<String>,
+    request_digest: Option<String>,
+}
+
+pub enum OpticalPlaybackClaim {
+    Claimed(OpticalReadPermit),
+    Replay { session_id: String },
 }
 
 #[derive(Debug, Clone)]
@@ -193,6 +202,8 @@ impl OpticalDriveManager {
             drive_id,
             &generation,
             ReaderKind::Inspection,
+            None,
+            None,
         )
     }
 
@@ -204,14 +215,56 @@ impl OpticalDriveManager {
         title_id: &str,
         session_id: &str,
     ) -> Result<OpticalReadPermit, OpticalLifecycleError> {
-        if title_id.is_empty() || session_id.is_empty() {
+        match self.claim_playback_request(
+            drive_id,
+            expected_generation,
+            expected_disc_id,
+            title_id,
+            session_id,
+            session_id,
+            session_id,
+        )? {
+            OpticalPlaybackClaim::Claimed(permit) => Ok(permit),
+            OpticalPlaybackClaim::Replay { .. } => Err(OpticalLifecycleError::Busy),
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn claim_playback_request(
+        &self,
+        drive_id: &str,
+        expected_generation: &str,
+        expected_disc_id: &str,
+        title_id: &str,
+        session_id: &str,
+        request_id: &str,
+        request_digest: &str,
+    ) -> Result<OpticalPlaybackClaim, OpticalLifecycleError> {
+        if title_id.is_empty()
+            || session_id.is_empty()
+            || request_id.is_empty()
+            || request_digest.is_empty()
+        {
             return Err(OpticalLifecycleError::InvalidIdentity);
         }
         let mut drives = self.drives();
         let slot = drives
             .get_mut(drive_id)
             .ok_or(OpticalLifecycleError::UnknownDrive)?;
-        if slot.active.is_some() {
+        if let Some(active) = slot.active.as_ref() {
+            if active.kind == ReaderKind::Playback
+                && active.generation == expected_generation
+                && active.request_id.as_deref() == Some(request_id)
+            {
+                if active.request_digest.as_deref() != Some(request_digest) {
+                    return Err(OpticalLifecycleError::RequestConflict);
+                }
+                let session_id = match &slot.state {
+                    OpticalDriveState::Busy { session_id, .. } => session_id.clone(),
+                    _ => return Err(OpticalLifecycleError::Busy),
+                };
+                return Ok(OpticalPlaybackClaim::Replay { session_id });
+            }
             return Err(OpticalLifecycleError::Busy);
         }
         let (generation, disc_id) = match &slot.state {
@@ -237,6 +290,8 @@ impl OpticalDriveManager {
             drive_id,
             &generation,
             ReaderKind::Playback,
+            Some(request_id.to_owned()),
+            Some(request_digest.to_owned()),
         )?;
         slot.state = OpticalDriveState::Busy {
             media_generation: generation,
@@ -244,7 +299,7 @@ impl OpticalDriveManager {
             title_id: title_id.to_owned(),
             session_id: session_id.to_owned(),
         };
-        Ok(permit)
+        Ok(OpticalPlaybackClaim::Claimed(permit))
     }
 
     fn claim_reader(
@@ -253,6 +308,8 @@ impl OpticalDriveManager {
         drive_id: &str,
         generation: &str,
         kind: ReaderKind,
+        request_id: Option<String>,
+        request_digest: Option<String>,
     ) -> Result<OpticalReadPermit, OpticalLifecycleError> {
         if slot.active.is_some() {
             return Err(OpticalLifecycleError::Busy);
@@ -263,6 +320,8 @@ impl OpticalDriveManager {
             lease_id,
             generation: generation.to_owned(),
             kind,
+            request_id,
+            request_digest,
         });
         Ok(OpticalReadPermit {
             inner: Arc::clone(inner),
@@ -374,6 +433,20 @@ pub struct OpticalReadPermit {
 impl OpticalReadPermit {
     pub fn media_generation(&self) -> &str {
         &self.generation
+    }
+
+    /// Whether this exact reader epoch is still the manager's active owner.
+    /// Removal, swap, disable, or a newer reservation makes this false even
+    /// while an already-open OS handle is still unwinding.
+    pub fn is_current(&self) -> bool {
+        let drives = self
+            .inner
+            .drives
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        drives
+            .get(&self.drive_id)
+            .is_some_and(|slot| active_matches(slot, self.lease_id, &self.generation, self.kind))
     }
 
     pub fn playback_source(

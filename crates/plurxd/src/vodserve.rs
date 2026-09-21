@@ -360,7 +360,7 @@ pub(crate) struct ResponseOwner {
     /// cleanup has finished.
     rendition: Option<Arc<Rendition>>,
     rendition_key: String,
-    file: Arc<MediaFile>,
+    source: Arc<RecipeSource>,
     /// Terminal snapshot at resolution. Status publication compares this
     /// exact value so a live error cannot be admitted after tombstoning and a
     /// tombstone from one incarnation cannot describe its replacement.
@@ -375,6 +375,15 @@ impl std::fmt::Debug for ResponseOwner {
             .field("rendition_key", &self.rendition_key)
             .field("tombstone", &self.tombstone)
             .finish_non_exhaustive()
+    }
+}
+
+impl ResponseOwner {
+    fn file_opt(&self) -> Option<&MediaFile> {
+        match self.source.as_ref() {
+            RecipeSource::File(file) => Some(file),
+            RecipeSource::ManagedOptical { .. } => None,
+        }
     }
 }
 
@@ -405,7 +414,8 @@ impl<T> VodPublication<T> {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct VodSessionInfo {
     pub id: String,
-    pub file_id: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<i64>,
     pub target_height: i64,
     pub encoder: &'static str,
     pub playlist_shape: &'static str,
@@ -527,6 +537,16 @@ pub struct VodStart {
 pub(crate) struct VodRecipeRequest<'a> {
     pub request: &'a SessionRequest,
     pub encoding: Option<Arc<crate::vodencode::Encoding>>,
+}
+
+/// Source-aware request used only after the drive owner has atomically
+/// claimed an optical title. It intentionally has no file or item identity;
+/// the path-free source reference and held reader lease are the authority.
+pub(crate) struct OpticalVodRecipeRequest<'a> {
+    pub playback_id: &'a str,
+    pub start_seconds: f64,
+    pub audio_index: Option<i64>,
+    pub encoding: Arc<crate::vodencode::Encoding>,
 }
 
 impl<'a> From<&'a SessionRequest> for VodRecipeRequest<'a> {
@@ -656,9 +676,67 @@ pub struct SegmentReady {
 
 /// The copy recipe one rendition serves, minus `start_seconds` — exactly the
 /// cache's key discipline (plan §2.4).
+#[derive(Clone)]
+enum RecipeSource {
+    File(MediaFile),
+    ManagedOptical {
+        source: plurx_core::optical::PlaybackSourceRef,
+        facts: plurx_core::playback::PlaybackMediaFacts,
+        input: plurx_core::optical::ResolvedInput,
+        probe_json: String,
+        lease: Weak<plurx_core::optical::OpticalPlaybackLease>,
+    },
+}
+
+impl std::fmt::Debug for RecipeSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::File(file) => formatter
+                .debug_struct("File")
+                .field("file_id", &file.id)
+                .finish(),
+            Self::ManagedOptical { source, facts, .. } => formatter
+                .debug_struct("ManagedOptical")
+                .field("source", source)
+                .field("duration_ms", &facts.duration_ms)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+impl RecipeSource {
+    fn is_available(&self) -> bool {
+        match self {
+            Self::File(_) => true,
+            Self::ManagedOptical { lease, .. } => {
+                lease.upgrade().is_some_and(|lease| lease.is_current())
+            }
+        }
+    }
+
+    fn encoded_identity(
+        &self,
+        encoding: &crate::vodencode::Encoding,
+        duration_seconds: f64,
+    ) -> SourceIdentity {
+        match self {
+            Self::File(file) => encoding.identity(file, duration_seconds),
+            Self::ManagedOptical {
+                source,
+                facts,
+                input,
+                probe_json,
+                ..
+            } => encoding.managed_identity(source, facts, input, probe_json, duration_seconds),
+        }
+    }
+}
+
+/// One rendition source. File callers retain their exact historical contract;
+/// managed optical callers carry only typed input and path-free media facts.
 #[derive(Debug, Clone)]
 struct Recipe {
-    file: MediaFile,
+    source: RecipeSource,
     audio_index: Option<i64>,
     aac: bool,
     video: CopyVideoOptions,
@@ -671,6 +749,34 @@ struct Recipe {
     cluster_cache_key: Option<String>,
     /// A frozen encoded strategy; None is the indexed compressed-copy path.
     encoding: Option<Arc<crate::vodencode::Encoding>>,
+}
+
+impl Recipe {
+    fn file_opt(&self) -> Option<&MediaFile> {
+        match &self.source {
+            RecipeSource::File(file) => Some(file),
+            RecipeSource::ManagedOptical { .. } => None,
+        }
+    }
+
+    fn file(&self) -> &MediaFile {
+        self.file_opt()
+            .expect("a managed optical recipe has no catalog file")
+    }
+
+    fn duration_ms(&self) -> Option<i64> {
+        match &self.source {
+            RecipeSource::File(file) => file.duration_ms,
+            RecipeSource::ManagedOptical { facts, .. } => facts.duration_ms,
+        }
+    }
+
+    fn audio_streams(&self) -> &[plurx_core::domain::AudioStream] {
+        match &self.source {
+            RecipeSource::File(file) => &file.audio_streams,
+            RecipeSource::ManagedOptical { facts, .. } => &facts.audio_streams,
+        }
+    }
 }
 
 /// One attached reader, in plan indexes.
@@ -1729,7 +1835,12 @@ struct Session {
     /// producer graph until the next maintenance tick.
     rendition: Option<Arc<Rendition>>,
     rendition_key: String,
-    file: Arc<MediaFile>,
+    source: Arc<RecipeSource>,
+    /// Exact physical-reader capability for a managed optical session. The
+    /// recipe/rendition deliberately does not own it: dormant cache entries
+    /// must never keep a drive busy. Terminal cleanup clears this only after
+    /// the exact reader has detached and its producer has settled.
+    optical_lease: Option<Arc<plurx_core::optical::OpticalPlaybackLease>>,
     playback_id: String,
     user_name: String,
     item_title: String,
@@ -1786,6 +1897,13 @@ struct Session {
 }
 
 impl Session {
+    fn file_opt(&self) -> Option<&MediaFile> {
+        match self.source.as_ref() {
+            RecipeSource::File(file) => Some(file),
+            RecipeSource::ManagedOptical { .. } => None,
+        }
+    }
+
     /// Move any staged M6 successor to aborting, because this session is over.
     ///
     /// Called wherever a tombstone is written, under the same registry lock
@@ -1817,7 +1935,7 @@ impl Session {
             incarnation: Arc::clone(&self.incarnation),
             rendition: self.rendition.as_ref().map(Arc::clone),
             rendition_key: self.rendition_key.clone(),
-            file: Arc::clone(&self.file),
+            source: Arc::clone(&self.source),
             tombstone: self.tombstone,
         }
     }
@@ -2258,7 +2376,7 @@ impl VodServe {
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
             recipe: Recipe {
-                file: file.clone(),
+                source: RecipeSource::File(file.clone()),
                 audio_index: None,
                 aac: true,
                 video: CopyVideoOptions::new(false, false),
@@ -2317,7 +2435,8 @@ impl VodServe {
             Session {
                 rendition: Some(Arc::clone(&rendition)),
                 rendition_key: rendition.key.clone(),
-                file: Arc::new(file.clone()),
+                source: Arc::new(rendition.recipe.source.clone()),
+                optical_lease: None,
                 playback_id: "http-vod-test".to_owned(),
                 user_name: "test".to_owned(),
                 item_title: "HTTP VOD fixture".to_owned(),
@@ -2728,6 +2847,126 @@ impl VodServe {
         }
     }
 
+    /// Attach an encoded VOD session to an already claimed physical title.
+    /// The lease moves into the exact session incarnation only after its
+    /// reader and registry entry commit together. Every earlier error drops
+    /// it and returns the drive to ready.
+    pub(crate) async fn try_create_optical(
+        &self,
+        request: OpticalVodRecipeRequest<'_>,
+        facts: plurx_core::playback::PlaybackMediaFacts,
+        probe_json: String,
+        lease: plurx_core::optical::OpticalPlaybackLease,
+        settings: &VodSettings,
+        attribution: VodAttribution<'_>,
+        session_id: String,
+    ) -> Result<VodStart, String> {
+        self.shared.pool.set_global_cap(settings.blocked_get_cap);
+        let duration_ms = facts
+            .duration_ms
+            .filter(|duration| *duration > 0)
+            .ok_or_else(|| {
+                crate::transcode::vod_refusal_error(
+                    "vod_source_unsupported",
+                    "the optical title has no probed duration, so no immutable plan can be built",
+                )
+            })?;
+        let lease = Arc::new(lease);
+        let source = lease.source.clone();
+        let recipe_source = RecipeSource::ManagedOptical {
+            source: source.clone(),
+            facts,
+            input: lease.input.clone(),
+            probe_json,
+            lease: Arc::downgrade(&lease),
+        };
+        let identity =
+            recipe_source.encoded_identity(&request.encoding, duration_ms as f64 / 1_000.0);
+        let target_height = request.encoding.options.target_height;
+        let recipe = Recipe {
+            source: recipe_source,
+            audio_index: request.audio_index,
+            aac: true,
+            video: CopyVideoOptions::new(false, false),
+            source_object_version: Some(request.encoding.source_object_version.clone()),
+            cluster_cache_key: None,
+            encoding: Some(request.encoding),
+        };
+        let key = rendition_key(&recipe, &identity);
+        let attachment = self
+            .shared
+            .attach_rendition(&key, &identity, None, recipe, duration_ms, settings)
+            .await?
+            .ok_or_else(|| {
+                crate::transcode::vod_refusal_error(
+                    "vod_source_unsupported",
+                    "the optical title produced an empty VOD plan",
+                )
+            })?;
+        let rendition = Arc::clone(&attachment.rendition);
+        let start_entry = entry_containing(&rendition.plan, request.start_seconds);
+        let lifecycle = self.shared.session_lifecycle(&session_id);
+        let _lifecycle = lifecycle.lock().await;
+        let mut sessions = self.shared.sessions.lock().await;
+        if sessions.contains_key(&session_id) {
+            return Err(crate::transcode::vod_refusal_error(
+                "optical_request_conflict",
+                "the optical session identity is already attached",
+            ));
+        }
+        let mut readers = rendition.readers.lock().await;
+        readers.insert(session_id.clone(), Reader::new(start_entry));
+        *rendition.dormant_since.lock().expect("dormant lock") = None;
+        sessions.insert(
+            session_id.clone(),
+            Session {
+                rendition: Some(Arc::clone(&rendition)),
+                rendition_key: rendition.key.clone(),
+                source: Arc::new(rendition.recipe.source.clone()),
+                optical_lease: Some(lease),
+                playback_id: request.playback_id.to_owned(),
+                user_name: attribution.user_name.to_owned(),
+                item_title: attribution.item_title.to_owned(),
+                started_unix: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+                    .unwrap_or(0),
+                target_height,
+                kind: SessionKind::Transcode {
+                    height: target_height,
+                },
+                supersession_user: attribution.supersession_user.to_owned(),
+                block_budget: settings.block_budget,
+                lifecycle: Arc::clone(&lifecycle),
+                incarnation: Arc::new(()),
+                last_touch: StdMutex::new(Instant::now()),
+                delivery: Arc::new(crate::meter::Meter::new()),
+                control: StdMutex::new(crate::playback_control::ControlState::default()),
+                marker_destinations: Vec::new(),
+                last_control_snapshot: None,
+                control_end: None,
+                control_end_snapshot: None,
+                terminal_cleanup: None,
+                tombstone: None,
+            },
+        );
+        drop(readers);
+        drop(sessions);
+        drop(_lifecycle);
+        drop(attachment);
+        rendition.kick();
+        tracing::info!(
+            session = %session_log_id(&session_id),
+            rendition = %rendition.key,
+            source = ?source,
+            "optical VOD session attached (start entry {start_entry})"
+        );
+        Ok(VodStart {
+            session_id,
+            duration_ms: plan_duration_ms(&rendition.plan),
+        })
+    }
+
     pub(crate) async fn owns_or_preparing(&self, session_id: &str) -> bool {
         if self
             .shared
@@ -2825,8 +3064,11 @@ impl VodServe {
             preserve_dolby_vision,
             convert_dolby_vision,
         );
+        let recipe_source = RecipeSource::File(file.clone());
         let identity = match prepared.encoding.as_ref() {
-            Some(encoding) => encoding.identity(file, duration_ms as f64 / 1_000.0),
+            Some(encoding) => {
+                recipe_source.encoded_identity(encoding, duration_ms as f64 / 1_000.0)
+            }
             None => crate::fragindex::identity_for(file, video),
         };
         let cluster_cache_enabled = prepared.encoding.is_none()
@@ -2940,7 +3182,7 @@ impl VodServe {
             ));
         }
         let recipe = Recipe {
-            file: file.clone(),
+            source: recipe_source,
             audio_index: req.audio_index,
             aac,
             video,
@@ -2987,7 +3229,8 @@ impl VodServe {
         let replacement = Session {
             rendition: Some(Arc::clone(&rendition)),
             rendition_key: rendition.key.clone(),
-            file: Arc::new(rendition.recipe.file.clone()),
+            source: Arc::new(rendition.recipe.source.clone()),
+            optical_lease: None,
             playback_id: req.playback_id.clone(),
             user_name: attribution.user_name.to_owned(),
             item_title: attribution.item_title.to_owned(),
@@ -3171,14 +3414,15 @@ impl VodServe {
             .filter(|(_, session)| session.tombstone.is_none())
             .filter_map(|(id, session)| {
                 session.live_rendition()?;
+                let file = session.file_opt()?;
                 Some(VodDeliveryInfo {
                     id: id.clone(),
                     method: match &session.kind {
                         SessionKind::Copy { .. } => crate::delivery::Method::HlsCopy,
                         SessionKind::Transcode { .. } => crate::delivery::Method::Transcode,
                     },
-                    file_id: session.file.id,
-                    item_id: session.file.item_id,
+                    file_id: file.id,
+                    item_id: file.item_id,
                     item_title: session.item_title.clone(),
                     user_name: session.user_name.clone(),
                     target_height: session.target_height,
@@ -3235,7 +3479,8 @@ impl VodServe {
             sessions
                 .iter()
                 .filter(|(_, session)| {
-                    session.file.id == file_id && session.supersession_user == user_scope
+                    session.file_opt().is_some_and(|file| file.id == file_id)
+                        && session.supersession_user == user_scope
                 })
                 .map(|(session_id, session)| {
                     (
@@ -3354,10 +3599,12 @@ impl VodServe {
                 .get(session_id)
                 .map(|reader| Arc::clone(&reader.marker_prewarm))
         });
-        let marker_identity = (session.file.id, session.kind);
+        let marker_identity = session.file_opt().map(|file| (file.id, session.kind));
         drop(readers);
         drop(sessions);
-        if let (Some(index), Some(ledger)) = (segment_index, marker_ledger) {
+        if let (Some(index), Some(ledger), Some(marker_identity)) =
+            (segment_index, marker_ledger, marker_identity)
+        {
             let manifest = owner_rendition.manifest.lock().await;
             let publications = owner_rendition
                 .publication_versions
@@ -3401,8 +3648,8 @@ impl VodServe {
     /// Frozen source facts carried by this exact VOD response owner. HTTP may
     /// prepare a representation from them before final owner admission without
     /// consulting whichever attachment currently reuses the public id.
-    pub(crate) fn response_owner_file(&self, owner: &ResponseOwner) -> MediaFile {
-        owner.file.as_ref().clone()
+    pub(crate) fn response_owner_file(&self, owner: &ResponseOwner) -> Option<MediaFile> {
+        owner.file_opt().cloned()
     }
 
     /// Admit a typed VOD status against the exact live-or-terminal snapshot
@@ -3513,7 +3760,7 @@ impl VodServe {
         session_id: String,
         cleanup: Arc<TerminalCleanup>,
         rendition: Arc<Rendition>,
-        file_id: i64,
+        file_id: Option<i64>,
         height: i64,
         kind: SessionKind,
         cause: Terminal,
@@ -3536,14 +3783,16 @@ impl VodServe {
             rendition.detach_reader(&shared.pool, &session_id).await;
             rendition.kick();
             let serve = VodServe { shared };
-            serve.emit_lifecycle(
-                &session_id,
-                file_id,
-                height,
-                kind,
-                "session_end",
-                Some(terminal_reason(cause)),
-            );
+            if let Some(file_id) = file_id {
+                serve.emit_lifecycle(
+                    &session_id,
+                    file_id,
+                    height,
+                    kind,
+                    "session_end",
+                    Some(terminal_reason(cause)),
+                );
+            }
             tracing::info!(
                 session = %session_log_id(&session_id),
                 rendition = %rendition.key,
@@ -3570,6 +3819,7 @@ impl VodServe {
                     .is_some_and(|current| Arc::ptr_eq(current, &rendition));
                 if session.tombstone.is_some() && exact_cleanup && exact_rendition {
                     session.rendition = None;
+                    session.optical_lease = None;
                 }
             }
             drop(sessions);
@@ -3633,7 +3883,7 @@ impl VodServe {
                         let work = (
                             session_id.to_owned(),
                             rendition,
-                            session.file.id,
+                            session.file_opt().map(|file| file.id),
                             session.target_height,
                             session.kind,
                             terminal_cause,
@@ -3799,7 +4049,7 @@ impl VodServe {
                 id,
                 cleanup,
                 rendition,
-                session.file.id,
+                session.file_opt().map(|file| file.id),
                 session.target_height,
                 session.kind,
             ));
@@ -4091,7 +4341,7 @@ impl VodServe {
         Some(VodPublication {
             result: Ok(VodSessionInfo {
                 id: session_id.to_owned(),
-                file_id: rendition.recipe.file.id,
+                file_id: rendition.recipe.file_opt().map(|file| file.id),
                 target_height,
                 encoder: "vod",
                 playlist_shape: "vod",
@@ -4297,7 +4547,7 @@ impl VodServe {
                 terminal_commit: Option<Box<crate::playback_control::TerminalCommitReceipt>>,
                 cleanup: Arc<TerminalCleanup>,
                 rendition: Arc<Rendition>,
-                file_id: i64,
+                file_id: Option<i64>,
                 height: i64,
                 kind: SessionKind,
             },
@@ -4454,14 +4704,16 @@ impl VodServe {
                     result,
                     cleanup,
                     rendition,
-                    file_id: session.file.id,
+                    file_id: session.file_opt().map(|file| file.id),
                     height: session.target_height,
                     kind: session.kind,
                 })
             } else {
                 let marker_prewarm = (disposition
                     == crate::playback_control::ControlDisposition::Accepted)
-                    .then(|| MarkerPrewarmControl {
+                    .then(|| session.file_opt())
+                    .flatten()
+                    .map(|file| MarkerPrewarmControl {
                         rendition: session
                             .live_rendition()
                             .map(Arc::clone)
@@ -4469,7 +4721,7 @@ impl VodServe {
                         snapshot: control.snapshot.clone(),
                         destinations: session.marker_destinations.clone(),
                         sequence: control.sequence,
-                        file_id: session.file.id,
+                        file_id: file.id,
                         kind: session.kind,
                     });
                 if disposition == crate::playback_control::ControlDisposition::Accepted {
@@ -4633,10 +4885,11 @@ impl VodServe {
         if session.tombstone.is_some() {
             return None;
         }
+        let file = session.file_opt()?;
         Some(ReopenFacts {
             supersession_user: session.supersession_user.clone(),
             playback_id: session.playback_id.clone(),
-            file_id: session.file.id,
+            file_id: file.id,
         })
     }
 
@@ -4649,7 +4902,7 @@ impl VodServe {
             return None;
         }
         session.live_rendition()?;
-        Some(session.file.id)
+        session.file_opt().map(|file| file.id)
     }
 
     /// Exact copy-recipe facts for native HLS wrappers. Lookup alone does not
@@ -4662,7 +4915,7 @@ impl VodServe {
             _ => return None,
         };
         Some(VodHlsFacts {
-            file: rendition.recipe.file.clone(),
+            file: rendition.recipe.file_opt()?.clone(),
             audio_index: rendition.recipe.audio_index,
             aac: rendition.recipe.aac,
             preserve_dolby_vision: rendition.recipe.video.preserves_dolby_vision(),
@@ -5687,6 +5940,18 @@ impl Shared {
         recipe: &Recipe,
         duration_ms: i64,
     ) -> Result<SegmentPlan, String> {
+        if matches!(recipe.source, RecipeSource::ManagedOptical { .. }) {
+            let encoding = recipe
+                .encoding
+                .as_ref()
+                .expect("managed optical playback always uses an encoded plan");
+            return Ok(encoding.grid.plan(
+                duration_ms,
+                (encoding.options.video_bitrate_kbps + encoding.options.audio_bitrate_kbps)
+                    .saturating_mul(1000)
+                    .into(),
+            ));
+        }
         if let Some(plan) = self
             .store
             .rendition_plan(key, identity)
@@ -5714,7 +5979,7 @@ impl Shared {
         }
         let stored = self
             .store
-            .put_rendition_plan(key, recipe.file.id, &plan, identity)
+            .put_rendition_plan(key, recipe.file().id, &plan, identity)
             .await
             .map_err(|error| format!("storing the rendition plan: {error}"))?;
         if stored {
@@ -5746,13 +6011,24 @@ impl Shared {
         plan: SegmentPlan,
         settings: &VodSettings,
     ) -> Result<Arc<Rendition>, String> {
-        let source = crate::fragment_index_cluster::open_source_fence(
-            &recipe.file,
-            recipe.source_object_version.as_deref(),
-        )
-        .await?;
+        let source = match recipe.file_opt() {
+            Some(file) => Some(
+                crate::fragment_index_cluster::open_source_fence(
+                    file,
+                    recipe.source_object_version.as_deref(),
+                )
+                .await?,
+            ),
+            None => None,
+        };
         let dir = RenditionDir::new(self.base.join(key));
         let mut existed = tokio::fs::metadata(dir.path()).await.is_ok();
+        if source.is_none() && existed {
+            tokio::fs::remove_dir_all(dir.path())
+                .await
+                .map_err(|error| format!("removing a managed-source rendition: {error}"))?;
+            existed = false;
+        }
         let encoded_process = recipe
             .encoding
             .as_ref()
@@ -5830,7 +6106,7 @@ impl Shared {
                         // verify against the stored digests.
                         match regenerate_init_head(
                             &recipe,
-                            &source,
+                            source.as_ref().expect("file rendition source fence"),
                             &identity,
                             &self.head_regeneration_slots,
                         )
@@ -5925,7 +6201,7 @@ impl Shared {
             key: key.to_string(),
             dir,
             recipe,
-            source: Some(source),
+            source,
             playlist: plan.playlist().into_bytes(),
             plan,
             timescale,
@@ -6166,11 +6442,12 @@ impl Shared {
 fn spawn_driver(shared: Arc<Shared>, rendition: Arc<Rendition>) {
     tokio::spawn(async move {
         loop {
-            if rendition
-                .recipe
-                .encoding
-                .as_ref()
-                .is_some_and(|encoding| encoding.is_waiting())
+            if matches!(rendition.recipe.source, RecipeSource::ManagedOptical { .. })
+                || rendition
+                    .recipe
+                    .encoding
+                    .as_ref()
+                    .is_some_and(|encoding| encoding.is_waiting())
             {
                 // One owned driver, not one retry task per GET. Pool releases
                 // outside VOD cannot notify this registry, so queued foreground
@@ -6260,6 +6537,20 @@ async fn driver_pass(shared: &Arc<Shared>, rendition: &Arc<Rendition>) {
             if let Some(encoding) = &rendition.recipe.encoding {
                 encoding.cancel_wait();
             }
+            return;
+        }
+        if !rendition.recipe.source.is_available() {
+            if rendition.failure().is_none() {
+                record_failure(
+                    shared,
+                    rendition,
+                    crate::playback_control::ProducerDecisionReason::SourceChanged,
+                    "the optical insertion or reader lease is no longer current".to_owned(),
+                );
+            }
+            rendition.gen_epoch.fetch_add(1, Relaxed);
+            clear_marker_prewarm_dispatch(rendition);
+            retire_failed_rendition(rendition).await;
             return;
         }
         if rendition.failure().is_some() {
@@ -6878,20 +7169,30 @@ fn recipe_program(recipe: &Recipe) -> std::path::PathBuf {
 
 fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bool) -> Vec<String> {
     if let Some(encoding) = &recipe.encoding {
-        let mut file = recipe.file.clone();
-        if attested {
-            file.path = "/dev/fd/3".into();
-        }
         // Plan duration is rounded to a complete output frame, just like the
         // terminal -t. Neither audio padding nor the source's final VFR gap
         // may turn a short final entry into an unplanned audio-only tail.
-        let plan = encoding.grid.plan(file.duration_ms.unwrap_or(0), 0);
+        let plan = encoding.grid.plan(recipe.duration_ms().unwrap_or(0), 0);
         let end = plan
             .entries
             .last()
             .map_or(0, |entry| entry.start_ticks + entry.duration_ticks);
-        let mut args = encoding.args(&file, start_seconds, end as f64 / f64::from(plan.timescale));
-        if attested && !file.audio_streams.is_empty() {
+        let mut args = match recipe.file_opt() {
+            Some(file) => {
+                let mut file = file.clone();
+                if attested {
+                    file.path = "/dev/fd/3".into();
+                }
+                encoding.args(&file, start_seconds, end as f64 / f64::from(plan.timescale))
+            }
+            None => {
+                let RecipeSource::ManagedOptical { input, .. } = &recipe.source else {
+                    unreachable!("a non-file recipe is a managed optical source")
+                };
+                encoding.managed_args(input, start_seconds, end as f64 / f64::from(plan.timescale))
+            }
+        };
+        if attested && !recipe.audio_streams().is_empty() {
             let mut inputs = 0;
             for index in 0..args.len().saturating_sub(1) {
                 if args[index] == "-i" {
@@ -6905,8 +7206,11 @@ fn recipe_pipe_args(recipe: &Recipe, start_seconds: f64, attested: bool) -> Vec<
         }
         args
     } else {
+        let file = recipe
+            .file_opt()
+            .expect("managed optical playback does not use the copy path");
         let mut args = copy_pipe_args_with_dolby_vision(
-            &recipe.file,
+            file,
             start_seconds,
             recipe.audio_index,
             recipe.aac,
@@ -6924,9 +7228,9 @@ async fn reopen_encoded_audio(
     source: Option<&crate::fragment_index_cluster::SourceFence>,
     recipe: &Recipe,
 ) -> Result<Option<crate::fragment_index_cluster::SourceFence>, String> {
-    if recipe.encoding.is_some() && !recipe.file.audio_streams.is_empty() {
-        if let Some(source) = source {
-            return source.reopen(&recipe.file).await.map(Some);
+    if recipe.encoding.is_some() && !recipe.audio_streams().is_empty() {
+        if let (Some(source), Some(file)) = (source, recipe.file_opt()) {
+            return source.reopen(file).await.map(Some);
         }
     }
     Ok(None)
@@ -7542,7 +7846,20 @@ fn shipped_policy(timescale: u32) -> CutPolicy {
 /// key discipline, plan §2.4), hashed into a directory-safe hex name.
 fn rendition_key(recipe: &Recipe, identity: &SourceIdentity) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(recipe.file.id.to_le_bytes());
+    match &recipe.source {
+        RecipeSource::File(file) => {
+            hasher.update(b"file-v1\0");
+            hasher.update(file.id.to_le_bytes());
+            hasher.update(file.audio_offset_ms.to_le_bytes());
+        }
+        RecipeSource::ManagedOptical { source, facts, .. } => {
+            hasher.update(b"managed-optical-v1\0");
+            let source = serde_json::to_vec(source).expect("validated playback source serializes");
+            hasher.update((source.len() as u64).to_le_bytes());
+            hasher.update(source);
+            hasher.update(facts.audio_offset_ms.to_le_bytes());
+        }
+    }
     hasher.update(identity.size.to_le_bytes());
     hasher.update(identity.mtime_ms.to_le_bytes());
     hasher.update(identity.argv_fingerprint.as_bytes());
@@ -7552,7 +7869,6 @@ fn rendition_key(recipe: &Recipe, identity: &SourceIdentity) -> String {
         u8::from(recipe.video.preserves_dolby_vision()),
         u8::from(recipe.video.promotes_parameter_sets()),
     ]);
-    hasher.update(recipe.file.audio_offset_ms.to_le_bytes());
     match recipe.cluster_cache_key.as_deref() {
         Some(cache_key) => {
             hasher.update(b"cluster-v2\0");
@@ -7603,11 +7919,10 @@ fn audio_rate(recipe: &Recipe) -> u32 {
     if recipe.aac {
         let channels = match recipe.audio_index {
             Some(index) => recipe
-                .file
-                .audio_streams
+                .audio_streams()
                 .iter()
                 .find(|stream| stream.index == index),
-            None => recipe.file.audio_streams.first(),
+            None => recipe.audio_streams().first(),
         }
         .and_then(|stream| stream.channels);
         if channels == Some(6) {
@@ -8693,13 +9008,14 @@ mod tests {
     ) {
         rendition.attach_reader(session_id, 0).await;
         let rendition_key = rendition.key.clone();
-        let file = Arc::new(rendition.recipe.file.clone());
+        let source = Arc::new(rendition.recipe.source.clone());
         serve.shared.sessions.lock().await.insert(
             session_id.to_owned(),
             Session {
                 rendition: Some(rendition),
                 rendition_key,
-                file,
+                source,
+                optical_lease: None,
                 playback_id: "vod-control".into(),
                 user_name: "paul".into(),
                 item_title: "Fixture".into(),
@@ -8740,13 +9056,14 @@ mod tests {
         cleanup: Arc<TerminalCleanup>,
     ) {
         let rendition_key = rendition.key.clone();
-        let file = Arc::new(rendition.recipe.file.clone());
+        let source = Arc::new(rendition.recipe.source.clone());
         serve.shared.sessions.lock().await.insert(
             session_id.to_owned(),
             Session {
                 rendition: None,
                 rendition_key,
-                file,
+                source,
+                optical_lease: None,
                 playback_id: "vod-terminal".into(),
                 user_name: "paul".into(),
                 item_title: "Fixture".into(),
@@ -8817,7 +9134,7 @@ mod tests {
             key: "synthetic-rendition".to_string(),
             dir,
             recipe: Recipe {
-                file: media_file_at(PathBuf::from("unused.mkv"), ms),
+                source: RecipeSource::File(media_file_at(PathBuf::from("unused.mkv"), ms)),
                 audio_index: None,
                 aac: true,
                 video: CopyVideoOptions::new(false, false),
@@ -8867,7 +9184,7 @@ mod tests {
 
         let base = crate::test_tempdir().expect("base");
         let rendition = synthetic_rendition(base.path()).await;
-        let file = &rendition.recipe.file;
+        let file = &rendition.recipe.file();
         let duration_ms = file.duration_ms.expect("synthetic duration");
         assert!(
             duration_ms > 400_000,
@@ -10046,7 +10363,7 @@ mod tests {
         }
         assert!(
             !serve
-                .consume_marker_prewarm_placeholder(1, rendition.recipe.file.id, "remux")
+                .consume_marker_prewarm_placeholder(1, rendition.recipe.file().id, "remux")
                 .await,
             "method filtering cannot hide another same-file VOD candidate"
         );
@@ -10059,7 +10376,7 @@ mod tests {
 
         assert!(
             !serve
-                .consume_marker_prewarm_placeholder(1, rendition.recipe.file.id, "transcode",)
+                .consume_marker_prewarm_placeholder(1, rendition.recipe.file().id, "transcode",)
                 .await,
             "a transcode beacon cannot consume a copy/remux ledger"
         );
@@ -10070,7 +10387,7 @@ mod tests {
         }
         assert!(
             !serve
-                .consume_marker_prewarm_placeholder(1, rendition.recipe.file.id, "remux")
+                .consume_marker_prewarm_placeholder(1, rendition.recipe.file().id, "remux")
                 .await,
             "a remux beacon cannot consume a transcode ledger"
         );
@@ -10085,13 +10402,13 @@ mod tests {
 
         assert!(
             serve
-                .consume_marker_prewarm_placeholder(1, rendition.recipe.file.id, "remux")
+                .consume_marker_prewarm_placeholder(1, rendition.recipe.file().id, "remux")
                 .await,
             "an early auto-skip beacon binds the unique approach request without a session id"
         );
         assert!(
             !serve
-                .consume_marker_prewarm_placeholder(1, rendition.recipe.file.id, "direct_play")
+                .consume_marker_prewarm_placeholder(1, rendition.recipe.file().id, "direct_play")
                 .await,
             "direct play never consumes its client-owned miss"
         );
@@ -10581,7 +10898,7 @@ mod tests {
         let duration_ms = index_video_ms(&index);
         let identity = SourceIdentity::new(1, 1, "fingerprint");
         let recipe = Recipe {
-            file: media_file_at(source_path, duration_ms),
+            source: RecipeSource::File(media_file_at(source_path, duration_ms)),
             audio_index: None,
             aac: true,
             video: CopyVideoOptions::new(false, false),
@@ -12621,7 +12938,8 @@ mod tests {
             Session {
                 rendition: Some(Arc::clone(&rendition)),
                 rendition_key: rendition.key.clone(),
-                file: Arc::new(rendition.recipe.file.clone()),
+                source: Arc::new(rendition.recipe.source.clone()),
+                optical_lease: None,
                 playback_id: "play-a".into(),
                 user_name: "paul".into(),
                 item_title: "Fixture".into(),
@@ -12646,7 +12964,7 @@ mod tests {
 
         let status = serve.status("sess-a").await.expect("live VOD status");
         assert_eq!(status.id, "sess-a");
-        assert_eq!(status.file_id, 1);
+        assert_eq!(status.file_id, Some(1));
         assert_eq!(status.encoder, "vod");
         assert_eq!(status.playlist_shape, "vod");
         assert_eq!(status.producer_state, "waiting");
@@ -12739,7 +13057,8 @@ mod tests {
             Session {
                 rendition: Some(Arc::clone(&rendition)),
                 rendition_key: rendition.key.clone(),
-                file: Arc::new(rendition.recipe.file.clone()),
+                source: Arc::new(rendition.recipe.source.clone()),
+                optical_lease: None,
                 playback_id: "play-a".into(),
                 user_name: "paul".into(),
                 item_title: "Fixture".into(),
@@ -12835,7 +13154,8 @@ mod tests {
             Session {
                 rendition: Some(Arc::clone(&rendition)),
                 rendition_key: rendition.key.clone(),
-                file: Arc::new(rendition.recipe.file.clone()),
+                source: Arc::new(rendition.recipe.source.clone()),
+                optical_lease: None,
                 playback_id: "play-a".into(),
                 user_name: "paul".into(),
                 item_title: "Fixture".into(),
@@ -12874,13 +13194,14 @@ mod tests {
 
         let replacement_touch = Instant::now() - Duration::from_secs(5);
         let replacement_key = rendition.key.clone();
-        let replacement_file = Arc::new(rendition.recipe.file.clone());
+        let replacement_source = Arc::new(rendition.recipe.source.clone());
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
                 rendition: Some(rendition),
                 rendition_key: replacement_key,
-                file: replacement_file,
+                source: replacement_source,
+                optical_lease: None,
                 playback_id: "play-b".into(),
                 user_name: "paul".into(),
                 item_title: "Fixture".into(),
@@ -14289,13 +14610,14 @@ mod tests {
         rendition.attach_reader("sess-a", 0).await;
         let touched = Instant::now() - Duration::from_secs(5);
         let rendition_key = rendition.key.clone();
-        let file = Arc::new(rendition.recipe.file.clone());
+        let source = Arc::new(rendition.recipe.source.clone());
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
                 rendition: Some(rendition),
                 rendition_key,
-                file,
+                source,
+                optical_lease: None,
                 playback_id: "play-a".into(),
                 user_name: "paul".into(),
                 item_title: "Fixture".into(),
@@ -14430,7 +14752,7 @@ mod tests {
     fn the_plan_derives_video_from_the_index_and_audio_from_the_container() {
         let index = synthetic_index(24);
         let recipe = Recipe {
-            file: media_file_at(PathBuf::from("unused.mkv"), 0),
+            source: RecipeSource::File(media_file_at(PathBuf::from("unused.mkv"), 0)),
             audio_index: None,
             aac: true,
             video: CopyVideoOptions::new(false, false),
